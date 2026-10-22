@@ -46,7 +46,8 @@ PANIC_VA = 0xFFFFFFF00BF69B04      # _panic
 VINFO_VA = 0xFFFFFFF00C0A2970      # _vinfo
 PANIC_CAVE_END = 0xFFFFFFF00B9D0FF0
 CAVE_SIZE = 0x60
-CAVES = {1: 0xFFFFFFF00B9D0500, 2: 0xFFFFFFF00B9D0560, 3: 0xFFFFFFF00B9D05C0, 4: 0xFFFFFFF00B9D0620}
+CAVES = {1: 0xFFFFFFF00B9D0500, 2: 0xFFFFFFF00B9D0560, 3: 0xFFFFFFF00B9D05C0, 4: 0xFFFFFFF00B9D0620,
+         5: 0xFFFFFFF00B9D0680}
 TIMEBASE = 19200000
 
 PAINT = """
@@ -93,6 +94,19 @@ _start:
 2:
   wfe
   b 2b
+""" + ".ltorg\n",
+    5: """.text
+.global _start
+_start:
+  movz w0, #0x0009
+  movk w0, #0x8400, lsl #16
+  mov x1, xzr
+  mov x2, xzr
+  mov x3, xzr
+  smc #0
+1:
+  wfe
+  b 1b
 """ + ".ltorg\n",
     4: """.text
 .global _start
@@ -357,6 +371,8 @@ def main():
     parser.add_argument('--reset-before', action='store_true', help='reset at the call site before invoking SYMBOL (requires --reset-after)')
     parser.add_argument('--panic-screen', action='store_true', help='draw panic() messages on the screen')
     parser.add_argument('--no-reset', action='store_true', help='no reset probe at all')
+    parser.add_argument('--reset-at', metavar='SYMBOL',
+                        help='terminal reset at the first instruction of SYMBOL')
     parser.add_argument('--occurrence', type=int, default=1, help='which call to SYMBOL (1 = first)')
     parser.add_argument('--in', dest='function', default='_arm_init', help='function that makes the call (default _arm_init)')
     args = parser.parse_args()
@@ -380,7 +396,15 @@ def main():
     # (site, cave stage, symbols the cave is linked with)
     sites = [(ENTRY_VA, 1, {'target': START_FIRST_CPU}),
              (MMU_ENABLE_VA, 2, {'target': MMU_ENABLE_VA + 4})]
-    if args.no_reset:
+    if args.reset_at:
+        by_name = {name: va for va, name in kernel_symbols(args.kernel).items()}
+        symbol = args.reset_at if args.reset_at in by_name else '_' + args.reset_at.lstrip('_')
+        if symbol not in by_name:
+            raise SystemExit(f'No symbol {args.reset_at} in the kernel')
+        entry_va = by_name[symbol]
+        sites.append((entry_va, 5, {}))
+        description = f'terminal reset at the first instruction of {symbol} ({entry_va:#x})'
+    elif args.no_reset:
         description = 'no reset probe'
     elif args.reset_after:
         symbols = kernel_symbols(args.kernel)
