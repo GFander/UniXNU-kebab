@@ -101,6 +101,8 @@ cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
 ipad_identity = true             # the prelinked kernelcache is an iPad7,1 one
 chip_id = "0x8250"
 unique_chip_id = "required"      # supplied at build time, never stored here
-# dram_size is measured on the device; the value below is the 12 GiB SKU and is
-# replaced once the firmware reports the real size.
-dram_size = "0x300000000"
+# Conservative: 8 GiB. The kebab SKUs ship 8 or 12 GiB and reporting less RAM
+# than the device has is safe, while over-reporting maps nonexistent memory.
+# The firmware now prints the measured value ([XNU-HW] dram_size=...) on screen;
+# this entry is replaced with it after the next boot.
+dram_size = "0x200000000"
