@@ -41,12 +41,25 @@ windows = [
 [kernel]
 defconfig = "kebab_defconfig"
 archives = [
-  "scripts/build-corecrypto-14.py",
-  "scripts/build-corecrypto-14.py --namespace",
-  "scripts/build-arm-driver.py ArmDTPlatform",
-  "scripts/build-arm-driver.py ArmCpu",
-  "scripts/build-libpthread-kernel.py",
-  "scripts/build-native-legacy-display.py",
+  "build-corecrypto-14.py",
+  "build-corecrypto-14.py --namespace",
+  "build-arm-driver.py ArmDTPlatform",
+  "build-arm-driver.py ArmCpu",
+  "build-arm-driver.py NativeAES",
+  "build-native-aes-bindings.py",
+  "build-arm-driver.py NativeUfs",
+  "build-arm-driver.py NativeVirtioBlock",
+  "build-arm-driver.py NativeRamBlock",
+  "build-native-virtio-bindings.py --component NativeRamBlock --directory build/native-ram-block",
+  "build-native-virtio-bindings.py --component NativeVirtioBlock",
+  "build-mockfs-fixture.py",
+  "build-sheng-platform-power.py",
+  "build-boot-progress.py",
+  "build-libpthread-kernel.py",
+  "build-arm-driver.py NativeAdreno",
+  "build-native-adreno-kits.py",
+  "build-native-adreno-accelerator.py",
+  "build-native-legacy-display.py",
 ]
 
 # Values below match the donor kernelcache pinned above, so they are carried
