@@ -98,8 +98,10 @@ packages = [
 [payload.adt]
 tool = "scripts/make-kebab-adt.py"
 cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
-ipad_identity = false            # declare a phone identity so the userland would
-                                 # pick the phone idiom, not the tablet one.
+ipad_identity = false            # iPad-class identity (tablet idiom)
+iphone_identity = true          # iPhone X identity: phone idiom, iPhone10,3 / D22AP.
+                                 # Only /product, /buttons and the root model change;
+                                 # the hardware nodes stay SM8250-specific.
                                  # The donor kernelcache is still the iPad7,1 ABI.
 chip_id = "0x8250"
 unique_chip_id = "required"      # supplied at build time, never stored here

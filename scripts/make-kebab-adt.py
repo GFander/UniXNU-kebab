@@ -88,6 +88,9 @@ def main():
     parser.add_argument('--unique-chip-id', type=lambda value: int(value, 16), default=None,
                         help='/chosen/unique-chip-id (8 bytes) and --chip-id (4 bytes) seed XNU IOPlatformUUID')
     parser.add_argument('--chip-id', type=lambda value: int(value, 16), default=None)
+    parser.add_argument('--iphone-identity', action='store_true',
+                        help='/product and /buttons describe an iPhone-class device: phone idiom, '
+                             'iPhone X (iPhone10,3 / D22AP) identity strings')
     parser.add_argument('--ipad-identity', action='store_true',
                         help='/product and /buttons describe an iPad-class device without a Home button; '
                              'the prelinked kernelcache is an iPad7,1 one, so the identity matches it')
@@ -133,8 +136,8 @@ def main():
             for index, reg in enumerate(cpu_regs)]
 
     tree = node('device-tree', [
-        ('model', b'iPad7,1\0' if args.ipad_identity else b'OnePlus 8T\0'),
-        *([('target-type', b'J120\0')] if args.ipad_identity else []),
+        ('model', b'iPhone10,3\0' if args.iphone_identity else (b'iPad7,1\0' if args.ipad_identity else b'OnePlus 8T\0')),
+        *([('target-type', b'D22AP\0')] if args.iphone_identity else ([('target-type', b'J120\0')] if args.ipad_identity else [])),
         # The compiled board DT's own root strings.
         ('compatible', b'oneplus,kebab\0qcom,sm8250\0qcom,kona\0'),
         ('#address-cells', struct.pack('<I', 2)),
@@ -174,17 +177,28 @@ def main():
         node('options', []),
         *([node('buttons', [('compatible', b'buttons\0'), ('device_type', b'buttons\0'),
                             ('button-names', b'hold\0voldown\0volup\0'),
-                            ('home-button-type', struct.pack('<I', 2))])] if args.ipad_identity else []),
-        node('product', [('product-name', b'iPad Pro (12.9-inch) (2nd generation)\0' if args.ipad_identity
-                          else b'OnePlus 8T\0'),
-                         ('model', b'oneplus,kebab\0'),
-                         *([('product-description', b'iPad Pro (12.9-inch) (2nd generation)\0'),
-                            ('artwork-device-idiom', b'pad\0'),
-                            ('artwork-device-subtype', struct.pack('<I', 2732)),
-                            ('artwork-scale-factor', struct.pack('<I', 2)),
-                            ('artwork-display-gamut', b'P3\0'),
-                            ('compatible-device-fallback', b'iPad6,7\0'),
-                            ('thin-bezel', struct.pack('<I', 1))] if args.ipad_identity else [])]),
+                            ('home-button-type', struct.pack('<I', 2))])] if args.ipad_identity
+                           else ([node('buttons', [('compatible', b'buttons\0'), ('device_type', b'buttons\0'),
+                                                   ('button-names', b'hold\0voldown\0volup\0')])]
+                                 if args.iphone_identity else [])),
+        node('product',
+             [('product-name', b'iPhone X\0' if args.iphone_identity
+                               else (b'iPad Pro (12.9-inch) (2nd generation)\0' if args.ipad_identity else b'OnePlus 8T\0')),
+              ('model', b'oneplus,kebab\0')] +
+             ([('product-description', b'iPhone X\0'),
+               ('artwork-device-idiom', b'phone\0'),
+               ('artwork-device-subtype', struct.pack('<I', 626)),
+               ('artwork-scale-factor', struct.pack('<I', 3)),
+               ('artwork-display-gamut', b'P3\0'),
+               ('compatible-device-fallback', b'iPhone10,3\0'),
+               ('thin-bezel', struct.pack('<I', 1))] if args.iphone_identity else
+              ([('product-description', b'iPad Pro (12.9-inch) (2nd generation)\0'),
+                ('artwork-device-idiom', b'pad\0'),
+                ('artwork-device-subtype', struct.pack('<I', 2732)),
+                ('artwork-scale-factor', struct.pack('<I', 2)),
+                ('artwork-display-gamut', b'P3\0'),
+                ('compatible-device-fallback', b'iPad6,7\0'),
+                ('thin-bezel', struct.pack('<I', 1))] if args.ipad_identity else []))),
         node('arm-io', [('device_type', b'arm-io\0'),
                         ('#address-cells', struct.pack('<I', 2)),
                         ('#size-cells', struct.pack('<I', 2)),
