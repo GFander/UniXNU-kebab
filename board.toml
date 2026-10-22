@@ -113,7 +113,7 @@ title = "kebab first boot: source 4K XNU to console"
 # over-reporting maps nonexistent memory. The firmware prints the measured value
 # as "[XNU-HW] dram_size=..." and this entry is replaced with it after a boot.
 dram_size = "0x200000000"
-panic_screen = true
+panic_screen = false           # needs Font.h from the UEFI tree; enabled later
 kernel_args = [
   "-v",
   "serial=3",
