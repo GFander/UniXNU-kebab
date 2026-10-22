@@ -101,8 +101,21 @@ cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
 ipad_identity = true             # the prelinked kernelcache is an iPad7,1 one
 chip_id = "0x8250"
 unique_chip_id = "required"      # supplied at build time, never stored here
-# Conservative: 8 GiB. The kebab SKUs ship 8 or 12 GiB and reporting less RAM
-# than the device has is safe, while over-reporting maps nonexistent memory.
-# The firmware now prints the measured value ([XNU-HW] dram_size=...) on screen;
-# this entry is replaced with it after the next boot.
+
+# The payload volume DarwinBoot reads: the kernel, its device tree and the
+# optional trust cache and Data seed. The loader is part of the firmware volume.
+[payload]
+volume = "KEBABESP"
+size_mib = 64
+loader = "firmware"
+title = "kebab first boot: source 4K XNU to console"
+# Conservative 8 GiB. kebab ships 8 or 12 GiB; under-reporting is safe while
+# over-reporting maps nonexistent memory. The firmware prints the measured value
+# as "[XNU-HW] dram_size=..." and this entry is replaced with it after a boot.
 dram_size = "0x200000000"
+panic_screen = true
+kernel_args = [
+  "-v",
+  "serial=3",
+  "debug=0x14e",
+]
