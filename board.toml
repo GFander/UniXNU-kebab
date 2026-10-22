@@ -8,7 +8,7 @@
 name = "kebab"
 soc = "SM8250"
 description = "OnePlus 8T"
-kit = "kebab"
+kit = "sheng"        # builders hardcode kits/sheng; package/ is mapped there
 
 # Donor IPSW: identical to the sheng port.  The kernel is built from Apple's XNU
 # source and prelinked against this kernelcache, so the donor only has to match
