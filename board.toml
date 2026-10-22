@@ -46,6 +46,7 @@ archives = [
   "scripts/build-arm-driver.py ArmDTPlatform",
   "scripts/build-arm-driver.py ArmCpu",
   "scripts/build-libpthread-kernel.py",
+  "scripts/build-native-legacy-display.py",
 ]
 
 # Values below match the donor kernelcache pinned above, so they are carried
