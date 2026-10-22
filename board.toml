@@ -91,3 +91,16 @@ packages = [
   "{uefi}/Silicium-ACPI/Platforms/OnePlus",
   "{uefi}/Silicium-ACPI/Silicon/Qualcomm",
 ]
+
+# Apple device tree for the kebab board. The hardware values come from this
+# device's own firmware: MADT (GICv3 0x17A00000 / 0x17A60000), MemoryMapLib
+# (DRAM base 0x80000000), and the UFS host controller measured at 0x01D84000.
+[payload.adt]
+tool = "scripts/make-kebab-adt.py"
+cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
+ipad_identity = true             # the prelinked kernelcache is an iPad7,1 one
+chip_id = "0x8250"
+unique_chip_id = "required"      # supplied at build time, never stored here
+# dram_size is measured on the device; the value below is the 12 GiB SKU and is
+# replaced once the firmware reports the real size.
+dram_size = "0x300000000"
