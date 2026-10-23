@@ -41,6 +41,7 @@ windows = [
 defconfig = "kebab_defconfig"
 # Route A builds a standalone 16 KiB kernel.
 script = "scripts/build-xnu-16k-kebab.sh"
+machine_config = "KEBAB"
 archives = [
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
