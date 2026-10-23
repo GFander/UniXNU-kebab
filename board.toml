@@ -118,9 +118,9 @@ title = "kebab first boot: source 4K XNU to console"
 # against the physical map on the next boot.
 dram_size = "0x300000000"
 panic_screen = false           # needs Font.h from the UEFI tree; enabled later
-# The kernel now carries the kebab early framebuffer console, so the terminal
-# reset probe is no longer needed: the marks print instead of resetting.
-# reset_at = "_arm_init"
+# Terminal PSCI reset at the first instruction of this kernel function: tells
+# us whether execution reaches high-VA arm_init at all, with no console.
+reset_at = "_arm_init"
 kernel_args = [
   "-v",
   "serial=3",
