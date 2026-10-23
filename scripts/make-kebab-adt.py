@@ -22,6 +22,8 @@ from pathlib import Path
 import argparse
 import os
 import struct
+import base64
+import json
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +53,36 @@ def node(name, properties=(), children=()):
         result += struct.pack('<32sI', key.encode(), len(data))
         result += data + bytes(-len(data) % 4)
     return result + b''.join(children)
+
+
+def load_product_node(path):
+    """The real D22AP /product node, converted from `ipsw dtree` output.
+
+    syscfg placeholders and AAPL,phandle were filtered when the JSON was
+    generated; values carry their ADT type so this only encodes them.
+    """
+    import base64 as _b64
+
+    def enc(prop):
+        kind, value = prop['t'], prop['v']
+        if kind == 'str':
+            return value.encode() + b'\0'
+        if kind == 'u32':
+            return struct.pack('<I', value)
+        if kind == 'u64':
+            return struct.pack('<Q', value)
+        if kind == 'data':
+            return _b64.b64decode(value)
+        raise SystemExit(f'unknown product property type {kind!r}')
+
+    def build(entry):
+        return node(entry['name'],
+                    [(prop['k'], enc(prop)) for prop in entry['props']],
+                    [build(child) for child in entry.get('children', [])])
+
+    data = json.loads(Path(path).read_text())
+    return ([(prop['k'], enc(prop)) for prop in data['props']],
+            [build(child) for child in data.get('children', [])])
 
 
 def empty_nvram_proxy():
@@ -106,6 +138,9 @@ def main():
                         help='/chosen/memory-map RAMDisk placeholder for a scratch Data seed')
     parser.add_argument('--trust-cache', action='store_true',
                         help='Zeroed TrustCache sidecar handoff placeholder')
+    parser.add_argument('--product-file', type=Path,
+                        default=Path(__file__).resolve().parents[1] / 'configs/d22ap-product.json',
+                        help='real D22AP /product node as JSON (from ipsw dtree)')
     args = parser.parse_args()
 
     if (args.unique_chip_id is None) != (args.chip_id is None):
@@ -134,6 +169,19 @@ def main():
                                    ('compatible', cpu_compatible(reg)),
                                    ('timebase-frequency', struct.pack('<I', args.timebase))])
             for index, reg in enumerate(cpu_regs)]
+
+    if args.iphone_identity and args.product_file and args.product_file.is_file():
+
+        _pp, _pc = load_product_node(args.product_file)
+
+        product_node = node('product', _pp + [('model', b'oneplus,kebab\0')], _pc)
+
+    else:
+
+        product_node = node('product', [('product-name', b'OnePlus 8T\0'),
+
+                                            ('model', b'oneplus,kebab\0')])
+
 
     tree = node('device-tree', [
         ('model', b'iPhone10,3\0' if args.iphone_identity else (b'iPad7,1\0' if args.ipad_identity else b'OnePlus 8T\0')),
@@ -181,24 +229,7 @@ def main():
                            else ([node('buttons', [('compatible', b'buttons\0'), ('device_type', b'buttons\0'),
                                                    ('button-names', b'hold\0voldown\0volup\0')])]
                                  if args.iphone_identity else [])),
-        node('product',
-             [('product-name', b'iPhone X\0' if args.iphone_identity
-                               else (b'iPad Pro (12.9-inch) (2nd generation)\0' if args.ipad_identity else b'OnePlus 8T\0')),
-              ('model', b'oneplus,kebab\0')] +
-             ([('product-description', b'iPhone X\0'),
-               ('artwork-device-idiom', b'phone\0'),
-               ('artwork-device-subtype', struct.pack('<I', 626)),
-               ('artwork-scale-factor', struct.pack('<I', 3)),
-               ('artwork-display-gamut', b'P3\0'),
-               ('compatible-device-fallback', b'iPhone10,3\0'),
-               ('thin-bezel', struct.pack('<I', 1))] if args.iphone_identity else
-              ([('product-description', b'iPad Pro (12.9-inch) (2nd generation)\0'),
-                ('artwork-device-idiom', b'pad\0'),
-                ('artwork-device-subtype', struct.pack('<I', 2732)),
-                ('artwork-scale-factor', struct.pack('<I', 2)),
-                ('artwork-display-gamut', b'P3\0'),
-                ('compatible-device-fallback', b'iPad6,7\0'),
-                ('thin-bezel', struct.pack('<I', 1))] if args.ipad_identity else []))),
+        product_node,
         node('arm-io', [('device_type', b'arm-io\0'),
                         ('#address-cells', struct.pack('<I', 2)),
                         ('#size-cells', struct.pack('<I', 2)),
