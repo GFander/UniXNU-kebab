@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Compile the generic platform expert against the actual source-kernel ABI."""
 import argparse
+
+def _xnu_obj_dir_name(root=None):
+    """Name of this tree's kernel object directory, whatever machine config it used."""
+    base = Path(root or ROOT) / 'build/xnu/ios-obj'
+    found = sorted(base.glob('DEVELOPMENT_ARM64_*'))
+    return found[0].name if found else 'DEVELOPMENT_ARM64_BCM2837'
+
+
 import json
 from pathlib import Path
 import struct
@@ -23,7 +31,7 @@ if (args.verified_root or args.negative_verified_block) and args.component != 'N
 if args.negative_verified_block and not args.verified_root:
     parser.error('The isolated input fault requires verified block mode')
 component = args.component
-recipe = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
+recipe = ROOT / 'build/xnu/ios-obj/' + _xnu_obj_dir_name() + '/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
 record = json.loads(recipe.read_text().strip().rstrip(','))
 source = ROOT / 'drivers' / ('NativeMobileDisplay' if component in ('NativeLegacyDisplay','NativeGOPPresenter') else 'NativeMetal' if component in ('NativeOfflineGPU','NativeOfflineAccelerator','NativeIOGPUProviderProbe') else component) / {'NativeAdreno':'NativeAdrenoService.cpp'}.get(component, component + '.cpp')
 out = ROOT / 'build' / {'ArmVirtPlatform': 'armvirt-platform', 'ArmDTPlatform': 'armdt-platform', 'ArmCpu': 'armcpu', 'NativeAES': 'native-aes',

@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Bind an owned concrete backend to the unchanged original Legacy lifecycle."""
 import hashlib
+
+def _xnu_obj_dir_name(root=None):
+    """Name of this tree's kernel object directory, whatever machine config it used."""
+    base = Path(root or ROOT) / 'build/xnu/ios-obj'
+    found = sorted(base.glob('DEVELOPMENT_ARM64_*'))
+    return found[0].name if found else 'DEVELOPMENT_ARM64_BCM2837'
+
+
 import json
 from pathlib import Path
 import struct
@@ -166,7 +174,7 @@ run([llvm/'llvm-objcopy','--remove-section=__DATA,__mod_init_func','--globalize-
 def code(data,info):
     sec=next(s for g in info['segments'] for s in g['sections'] if s['name']=='__text');return data[sec['fileoff']:sec['fileoff']+sec['size']]
 require(code(raw,image)==code(late.read_bytes(),macho(late.read_bytes())),'Only owned initializer section registration changes')
-r=json.loads((ROOT/'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
+r=json.loads((ROOT/'build/xnu/ios-obj/' + _xnu_obj_dir_name() + '/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
 cmd=[];args=r['arguments'];i=0;source=ROOT/'kits/sheng/LegacyDisplayProbe.cpp'
 while i<len(args):
     value=args[i]
@@ -188,7 +196,7 @@ keystore_cmd=[str(keystore_source) if str(arg)==str(source) else str(keystore_ob
 run(keystore_cmd,cwd=r['directory'])
 process_source=ROOT/'kits/sheng/BootProcessProbe.c'
 process_obj=OUT/'BootProcessProbe.o'
-pr=json.loads((ROOT/'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT/startup.o.json').read_text().strip().rstrip(','))
+pr=json.loads((ROOT/'build/xnu/ios-obj/' + _xnu_obj_dir_name() + '/osfmk/DEVELOPMENT/startup.o.json').read_text().strip().rstrip(','))
 process_cmd=[];pa=pr['arguments'];j=0
 while j<len(pa):
     value=pa[j]
