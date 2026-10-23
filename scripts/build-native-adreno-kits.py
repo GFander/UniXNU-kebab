@@ -2,17 +2,17 @@
 """Add the GMU kit and firmware planner objects to the NativeAdreno archive."""
 import json, subprocess, sys
 
-def _xnu_obj_dir_name(root=None):
-    """Name of this tree's kernel object directory, whatever machine config it used."""
+def _xnu_obj_dir(root=None):
+    """Object directory of this tree's kernel pass, whatever machine config it used."""
     base = Path(root or ROOT) / 'build/xnu/ios-obj'
     found = sorted(base.glob('DEVELOPMENT_ARM64_*'))
-    return found[0].name if found else 'DEVELOPMENT_ARM64_BCM2837'
+    return found[0] if found else base / 'DEVELOPMENT_ARM64_BCM2837'
 
 
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
-c_recipe = json.loads((ROOT / 'build/xnu/ios-obj/' + _xnu_obj_dir_name() + '/bsd/DEVELOPMENT/bsd_init.o.json').read_text().strip().rstrip(','))
-cxx_recipe = json.loads((ROOT / 'build/xnu/ios-obj/' + _xnu_obj_dir_name() + '/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
+c_recipe = json.loads((_xnu_obj_dir() / 'bsd/DEVELOPMENT/bsd_init.o.json').read_text().strip().rstrip(','))
+cxx_recipe = json.loads((_xnu_obj_dir() / 'iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
 out = ROOT / 'build/native-adreno'
 out.mkdir(parents=True, exist_ok=True)
 sources = [ROOT / 'kits/sheng' / name for name in
