@@ -120,7 +120,7 @@ dram_size = "0x300000000"
 panic_screen = false           # needs Font.h from the UEFI tree; enabled later
 # Terminal PSCI reset at the first instruction of this kernel function: tells
 # us whether execution reaches high-VA arm_init at all, with no console.
-reset_at = "_arm_init"
+# reset_at = "_arm_init"  # the console marks instead
 kernel_args = [
   "-v",
   "serial=3",
