@@ -87,8 +87,8 @@
 +	if (index > 15) {
 +		return;
 +	}
-+	/* 0-7 on the left of the punch-hole, 8-15 on the right. */
-+	unsigned int x0 = (index < 8) ? (40 + index * 40) : (420 + (index - 8) * 40);
++	/* One row of squares to the left of the punch-hole. */
++	unsigned int x0 = 40 + ((index & 7) * 40);
 +	for (unsigned int y = 8; y < 32; y++) {
 +		for (unsigned int x = x0; x < x0 + 28; x++) {
 +			EARLY_FB[y * EARLY_STRIDE + x] = 0xffffffffu;

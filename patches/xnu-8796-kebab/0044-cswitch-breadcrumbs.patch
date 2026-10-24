@@ -45,53 +45,26 @@
  .macro	cswitch_epilogue
  #if __has_feature(ptrauth_calls)
  	retaa
-@@ -269,11 +307,71 @@
+@@ -269,11 +307,44 @@
  	.globl	EXT(machine_load_context)
  
  LEXT(machine_load_context)
 +#if defined(KEBAB)
-+	mov		x19, x0
-+	mov		x0, #3					/* D: machine_load_context entered */
-+	bl		EXT(kebab_early_breadcrumb)
-+	mov		x0, x19
-+#endif
-+#if defined(KEBAB)
 +	/* Inline copy of set_thread_registers with a marker after each step, so the
 +	 * first-context hand-off can be traced without touching the shared macro. */
 +	msr		TPIDR_EL1, x0
-+	KEBAB_MARK 0
 +	ldr		x1, [x0, ACT_CPUDATAP]
-+	KEBAB_MARK 0
 +	str		x0, [x1, CPU_ACTIVE_THREAD]
-+	KEBAB_MARK 0
 +	ldrsh	x2, [x1, CPU_NUMBER_GS]
 +	msr		TPIDR_EL0, x2
-+	KEBAB_MARK 0
 +	ldr		x1, [x0, TH_CTH_SELF]
 +	msr		TPIDRRO_EL0, x1
-+	KEBAB_MARK 0
 +	ldr		x1, [x0, TH_THREAD_ID]
 +	msr		CONTEXTIDR_EL1, x1
-+	KEBAB_MARK 0
 +#else
  	set_thread_registers 	x0, x1, x2
 +#endif
  	ldr		x1, [x0, TH_KSTACKPTR]				// Get top of kernel stack
-+#if defined(KEBAB)
-+	/* Stackless marker: set_thread_registers and the stack load both worked. */
-+	adrp	x9, EXT(early_fb)@page
-+	add		x9, x9, EXT(early_fb)@pageoff
-+	ldr		x9, [x9]
-+	movz	x12, #(466560 & 0xffff)
-+	movk	x12, #(466560 >> 16), lsl #16
-+	add		x9, x9, x12
-+	mov		x10, #-1
-+	mov		x11, #16
-+90:	str		w10, [x9], #4
-+	subs	x11, x11, #1
-+	b.ne	90b
-+	dsb		sy
-+#endif
 +#if defined(KEBAB)
 +	/*
 +	 * Bring-up experiment: restore only SP and LR. If the thread then starts,
