@@ -39,10 +39,13 @@
  
  	load_context_kprintf("processor_up\n");
  
-@@ -955,6 +962,7 @@
+@@ -955,6 +962,10 @@
  	__asan_handle_no_return();
  #endif /* KASAN_TBI */
  
++	kprintf("load_context: thread=%p cpudatap=%p kstack=%lx kstackptr=%lx cont=%p\n",
++	    thread, thread->machine.CpuDatap, thread->kernel_stack,
++	    thread->machine.kstackptr, thread->continuation);
 +	kebab_early_breadcrumb(2);      /* C: about to load the machine context */
  	machine_load_context(thread);
  	/*NOTREACHED*/
