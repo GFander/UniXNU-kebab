@@ -1,6 +1,6 @@
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -463,6 +463,85 @@
+@@ -463,6 +463,73 @@
   *  arg8 - scratch
   *  arg9 - scratch
   */
@@ -35,7 +35,7 @@
 + */
 +.macro KEBAB_KVA_PROBE
 +#if defined(KEBAB)
-+	/* x=100: V=P block, proves we reached this point (row 2280). */
++	/* x=100: V=P block — we reached the hand-off point. */
 +	MOV64	x9, (0x9c000000 + 2280 * 4320 + 100 * 4)
 +	mov	w10, #-1
 +	mov	x12, #24
@@ -49,26 +49,14 @@
 +	b.ne	93b
 +	dsb	sy
 +
-+	/* x=200: the same block drawn through the KVA alias of the framebuffer. */
-+	MOV64	x9, 0x9c000000
-+	add	x9, x9, x22
-+	sub	x9, x9, x23
-+	MOV64	x14, (2280 * 4320 + 200 * 4)
-+	add	x9, x9, x14
-+	mov	w10, #-1
-+	mov	x12, #24
-+93:	mov	x11, #60
-+92:	str	w10, [x9], #4
-+	subs	x11, x11, #1
-+	b.ne	92b
-+	mov	x13, #(4320 - 240)
-+	add	x9, x9, x13
-+	subs	x12, x12, #1
-+	b.ne	93b
-+	dsb	sy
++	/* Touch the stack: SP is a KVA, so this only works if TTBR1 is usable. */
++	sub	sp, sp, #16
++	str	xzr, [sp]
++	ldr	xzr, [sp]
++	add	sp, sp, #16
 +
-+	/* x=300: V=P block again, proves the KVA store did not fault. */
-+	MOV64	x9, (0x9c000000 + 2280 * 4320 + 300 * 4)
++	/* x=200: the stack round-trip survived, so KVA works. */
++	MOV64	x9, (0x9c000000 + 2280 * 4320 + 200 * 4)
 +	mov	w10, #-1
 +	mov	x12, #24
 +93:	mov	x11, #60
@@ -86,7 +74,7 @@
  .macro create_bootstrap_mapping
  	/* calculate entries left in this page */
  	and	$5, $0, #(ARM_TT_L2_INDEX_MASK)
-@@ -515,7 +594,7 @@
+@@ -515,7 +582,7 @@
  
  #if defined(KEBAB)
  	/* Stage 0: white 64x32 band, no stack or page tables needed. */
@@ -95,7 +83,7 @@
  	mov		w1, #-1
  	mov		x2, #32
  	mov		x4, #4320
-@@ -899,6 +978,8 @@
+@@ -899,6 +966,8 @@
  	mov	lr, x21
  #endif
  
