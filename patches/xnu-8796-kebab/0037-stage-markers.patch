@@ -168,7 +168,23 @@
  	mov		w1, #-1
  	mov		x2, #32
  	mov		x4, #4320
-@@ -899,8 +1044,30 @@
+@@ -882,9 +1027,12 @@
+ 	// If x21 != 0, we're doing a warm reset, so we need to trampoline to the kernel pmap.
+ 	cbnz	x21, Ltrampoline
+ 
+-	// Set KVA of boot args as first arg
+-	add		x0, x20, x22
+-	sub		x0, x0, x23
++	/*
++	 * kebab: hand arm_init the boot args at their identity address. The KVA
++	 * alias of the boot-args page is not reliable yet, and a KVA pointer here
++	 * made every field of boot_args read back as zero.
++	 */
++	mov		x0, x20
+ 
+ #if KASAN
+ 	mov	x20, x0
+@@ -899,8 +1047,30 @@
  	mov	lr, x21
  #endif
  
