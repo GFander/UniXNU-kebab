@@ -83,12 +83,37 @@
  	mov		w1, #-1
  	mov		x2, #32
  	mov		x4, #4320
-@@ -899,6 +966,8 @@
+@@ -899,8 +966,31 @@
  	mov	lr, x21
  #endif
  
+-	// Return to arm_init()
+-	ret
 +	KEBAB_KVA_PROBE
 +
- 	// Return to arm_init()
- 	ret
++	/*
++	 * kebab: jump to arm_init through an explicitly computed KVA instead of
++	 * ret, and paint a block first so we can tell a bad branch target from a
++	 * failure inside arm_init itself.
++	 */
++	MOV64	x9, (0x9c000000 + 2280 * 4320 + 300 * 4)
++	mov	w10, #-1
++	mov	x12, #24
++91:	mov	x11, #60
++90:	str	w10, [x9], #4
++	subs	x11, x11, #1
++	b.ne	90b
++	mov	x13, #(4320 - 240)
++	add	x9, x9, x13
++	subs	x12, x12, #1
++	b.ne	91b
++	dsb	sy
++
++	adrp	x9, EXT(arm_init)@page
++	add	x9, x9, EXT(arm_init)@pageoff
++	add	x9, x9, x22
++	sub	x9, x9, x23
++	br	x9
  
+ Ltrampoline:
+ 	// Load VA of the trampoline
