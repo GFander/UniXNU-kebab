@@ -131,7 +131,7 @@
  	mov		w1, #-1
  	mov		x2, #32
  	mov		x4, #4320
-@@ -899,8 +1007,31 @@
+@@ -899,8 +1007,30 @@
  	mov	lr, x21
  #endif
  
@@ -157,10 +157,9 @@
 +	b.ne	91b
 +	dsb	sy
 +
++	/* Enter the stub at its identity (V=P) address: no KVA conversion. */
 +	adrp	x9, EXT(kebab_kva_stub)@page
 +	add	x9, x9, EXT(kebab_kva_stub)@pageoff
-+	add	x9, x9, x22
-+	sub	x9, x9, x23
 +	br	x9
  
  Ltrampoline:
