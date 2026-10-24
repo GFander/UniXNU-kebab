@@ -234,11 +234,12 @@ def main():
                         ('#address-cells', struct.pack('<I', 2)),
                         ('#size-cells', struct.pack('<I', 2)),
                         ('ranges', struct.pack('<QQQ', 0, ARMIO_BASE, ARMIO_SIZE))],
-             [node('intc', [('compatible', b'arm,gic-v3\0'),
+             [node('gic', [('compatible', b'arm,gic-v3\0'),
                             ('reg', struct.pack('<4Q',
                                                 GIC_DIST - ARMIO_BASE, GIC_DIST_SIZE,
                                                 GIC_REDIST - ARMIO_BASE, GIC_REDIST_SIZE)),
-                            ('redistributor-stride', struct.pack('<Q', GIC_REDIST_STRIDE))]),
+                            ('redistributor-stride', struct.pack('<I', GIC_REDIST_STRIDE)),
+                            ('virtual-timer-intid', struct.pack('<I', 27))]),
               # UFS (0x01D84000) lies far below the arm-io window, so a child reg
               # offset would be negative. The node exists only for class matching;
               # the driver takes its physical windows from board constants.
