@@ -1,104 +1,22 @@
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -497,6 +497,40 @@
- 2:
- .endmacro
- 
-+
-+/*
-+ * kebab bring-up: a minimal exception vector. If anything faults after this is
-+ * installed, the handler paints a red block at row 2300 and spins, which tells
-+ * us the fault happened instead of silently hanging.
-+ */
-+	.align 2
-+LEXT(kebab_fault_handler)
-+	/* Same shape as the entry band (64x32), 80 rows above it, in red. */
-+	MOV64	x9, (0x9c000000 + 2200 * 4320)
-+	mov	w10, #0x000000ff
-+	mov	x12, #32
-+	mov	x4, #4320
-+Lkebab_fault_row:
-+	mov	x3, #64
-+	mov	x5, x9
-+Lkebab_fault_pixel:
-+	str	w10, [x5], #4
-+	subs	x3, x3, #1
-+	b.ne	Lkebab_fault_pixel
+@@ -505,8 +505,17 @@
+  */
+ 	.align 2
+ LEXT(kebab_fault_handler)
+-	/* Same shape as the entry band (64x32), 80 rows above it, in red. */
+-	MOV64	x9, (0x9c000000 + 2200 * 4320)
++	/*
++	 * Same shape as the entry band, in red. Read the framebuffer address from
++	 * the console variable: once arm_vm_init drops TTBR0 the identity mapping of
++	 * 0x9C000000 is gone, and painting through it would fault again.
++	 */
++	adrp	x9, EXT(early_fb)@page
++	add	x9, x9, EXT(early_fb)@pageoff
++	ldr	x9, [x9]
++	mov	x4, #(2200 * 4320 & 0xffff)
++	movk	x4, #(2200 * 4320 >> 16), lsl #16
 +	add	x9, x9, x4
-+	subs	x12, x12, #1
-+	b.ne	Lkebab_fault_row
-+	dsb	sy
-+82:	wfi
-+	b	82b
-+
-+	.align 11
-+LEXT(kebab_vectors)
-+	.rept 16
-+	b	EXT(kebab_fault_handler)
-+	.space 0x7c
-+	.endr
-+
- /*
-  * _start_first_cpu
-  * Cold boot init routine.  Called from __start
-@@ -513,24 +547,6 @@
- 	mov		x20, x0
- 	mov		x21, #0
- 
--#if defined(KEBAB)
--	/* Stage 0: white 64x32 band, no stack or page tables needed. */
--	MOV64	x0, (0x9c000000 + 2380 * 4320)
--	mov		w1, #-1
--	mov		x2, #32
--	mov		x4, #4320
--Lkebab_mark_row:
--	mov		x3, #64
--	mov		x5, x0
--Lkebab_mark_pixel:
--	str		w1, [x5], #4
--	subs	x3, x3, #1
--	b.ne	Lkebab_mark_pixel
--	add		x0, x0, x4
--	subs	x2, x2, #1
--	b.ne	Lkebab_mark_row
--	dsb		sy
--#endif
- 
- 	// Set low reset vector before attempting any loads
- 	adrp	x0, EXT(LowExceptionVectorBase)@page
-@@ -837,6 +853,20 @@
- 	MSR_SCTLR_EL1_X0
- 	isb		sy
- 
-+	/* kebab: white 60x24 block at row 2280, x=200 - the MMU is on. */
-+	MOV64	x9, (0x9c000000 + 2280 * 4320 + 200 * 4)
-+	mov	w10, #-1
-+	mov	x12, #24
-+79:	mov	x11, #60
-+78:	str	w10, [x9], #4
-+	subs	x11, x11, #1
-+	b.ne	78b
-+	mov	x13, #(4320 - 240)
-+	add	x9, x9, x13
-+	subs	x12, x12, #1
-+	b.ne	79b
-+	dsb	sy
-+
- #if !VMAPPLE && !defined(KEBAB)
- 	MOV64   x1, SCTLR_EL1_DEFAULT
- 	cmp		x0, x1
-@@ -899,6 +929,14 @@
- 	mov	lr, x21
- #endif
- 
-+	/* Install our fault vector before the KVA hand-off. */
-+	adrp	x9, EXT(kebab_vectors)@page
-+	add	x9, x9, EXT(kebab_vectors)@pageoff
-+	add	x9, x9, x22
-+	sub	x9, x9, x23
-+	msr	vbar_el1, x9
-+	isb
-+
- 	// Return to arm_init()
- 	ret
- 
+ 	mov	w10, #0x000000ff
+ 	mov	x12, #32
+ 	mov	x4, #4320
