@@ -1,14 +1,15 @@
 --- a/osfmk/arm64/cswitch.s
 +++ b/osfmk/arm64/cswitch.s
-@@ -157,6 +157,32 @@
+@@ -157,6 +157,38 @@
   *
   * Returns to the address reloaded into LR, authenticating if needed.
   */
 +
 +#if defined(KEBAB)
 +/*
-+ * Stackless bring-up marker. Each call bumps a counter and paints a white run
-+ * further right, so counting the runs says how many macro steps ran in total.
++ * Stackless bring-up marker. Each call bumps a counter and paints a square a
++ * little further right along the top row, clear of the camera punch-hole, so
++ * counting the squares says how many macro steps ran in total.
 + */
 +.macro KEBAB_MARK row
 +	adrp	x9, EXT(kebab_mark_counter)@page
@@ -17,15 +18,20 @@
 +	add		x11, x10, #1
 +	str		x11, [x9]
 +	and		x10, x10, #15
-+	mov		x11, #60
++	mov		x11, #40
 +	madd	x10, x10, x11, xzr
-+	MOV64	x9, (0x9c000000 + 44 * 4320 + 40 * 4)
++	MOV64	x9, (0x9c000000 + 8 * 4320 + 420 * 4)
 +	add		x9, x9, x10, lsl #2
-+	mov		x10, #-1
-+	mov		x11, #16
-+91:	str		w10, [x9], #4
++	mov		x12, #24
++92:	mov		x11, #28
++93:	mov		x10, #-1
++	str		w10, [x9], #4
 +	subs	x11, x11, #1
-+	b.ne	91b
++	b.ne	93b
++	mov		x10, #(4320 - 112)
++	add		x9, x9, x10
++	subs	x12, x12, #1
++	b.ne	92b
 +	dsb		sy
 +.endm
 +#endif
@@ -33,7 +39,7 @@
  .macro	cswitch_epilogue
  #if __has_feature(ptrauth_calls)
  	retaa
-@@ -176,14 +202,26 @@
+@@ -176,14 +208,26 @@
   */
  .macro	set_thread_registers
  	msr		TPIDR_EL1, $0						// Write new thread pointer to TPIDR_EL1
@@ -60,7 +66,7 @@
  
  #if DEBUG || DEVELOPMENT
  	ldr		$1, [$0, TH_THREAD_ID]				// Save the bottom 32-bits of the thread ID into
-@@ -269,11 +307,35 @@
+@@ -269,11 +313,35 @@
  	.globl	EXT(machine_load_context)
  
  LEXT(machine_load_context)
