@@ -1,6 +1,6 @@
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
-@@ -347,8 +347,35 @@
+@@ -347,8 +347,34 @@
  	DTEntry chosen = NULL;
  	unsigned int dt_entry_size = 0;
  
@@ -24,7 +24,6 @@
 +
  	kebab_early_mark(1, "arm_init entered (MMU on)");
  
-+	kebab_early_putc('\n'); kebab_early_putc('\n'); kebab_early_putc('\n');
 +	kebab_early_putc('V'); kebab_early_putc('A'); kebab_early_putc('=');
 +	kebab_early_hex(args->virtBase);
 +	kebab_early_putc(' '); kebab_early_putc('P'); kebab_early_putc('A'); kebab_early_putc('=');
