@@ -1,6 +1,50 @@
 --- a/osfmk/arm64/kebab_early.c
 +++ b/osfmk/arm64/kebab_early.c
-@@ -95,16 +95,9 @@
+@@ -34,6 +34,30 @@
+ static unsigned int early_row = 4, early_col;   /* first rows sit under the camera punch-hole */
+ static unsigned int early_started, early_disabled, early_panicking;
+ 
++/*
++ * Scroll the text area up by one cell so the newest line is always at the
++ * bottom. Without this the row counter wrapped and new output could appear
++ * above older output, which made boot logs read in the wrong order.
++ */
++static void
++kebab_early_scroll(void)
++{
++	unsigned int cell = EARLY_CELL_H * EARLY_STRIDE;
++	unsigned int top = 4 * EARLY_CELL_H * EARLY_STRIDE;
++	unsigned int end = (EARLY_ROWS - 1) * EARLY_CELL_H * EARLY_STRIDE;
++
++	for (unsigned int i = top; i < end; i++) {
++		EARLY_FB[i] = EARLY_FB[i + cell];
++	}
++	for (unsigned int y = (EARLY_ROWS - 1) * EARLY_CELL_H; y < EARLY_ROWS * EARLY_CELL_H; y++) {
++		volatile uint32_t *line = EARLY_FB + y * EARLY_STRIDE;
++		for (unsigned int x = 0; x < EARLY_WIDTH; x++) {
++			line[x] = 0xff000000u;
++		}
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
+ static void
+ kebab_early_clear_row(void)
+ {
+@@ -61,7 +85,11 @@
+ 	}
+ 	if (c == '\n' || early_col == EARLY_COLS) {
+ 		early_col = 0;
+-		early_row = (early_row + 1) % EARLY_ROWS;
++		early_row++;
++		if (early_row >= EARLY_ROWS) {
++			kebab_early_scroll();
++			early_row = EARLY_ROWS - 1;
++		}
+ 		kebab_early_clear_row();
+ 		if (c == '\n') {
+ 			return;
+@@ -95,16 +123,9 @@
  void
  kebab_early_mark(unsigned int stage, const char *label)
  {
@@ -18,7 +62,7 @@
  	kebab_early_string("KEBAB EARLY ");
  	if (stage >= 10) {
  		kebab_early_putc((char)('0' + stage / 10));
-@@ -116,6 +109,26 @@
+@@ -116,6 +137,26 @@
  }
  
  
