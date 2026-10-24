@@ -1,11 +1,12 @@
 --- a/osfmk/arm64/kebab_early.h
 +++ b/osfmk/arm64/kebab_early.h
-@@ -11,6 +11,8 @@
+@@ -11,6 +11,9 @@
  void kebab_early_putc(char c);
  void kebab_early_panic(const char *fmt, va_list *args);
  void kebab_early_relocate(uint64_t base);
 +void kebab_early_hex(uint64_t value);
 +void kebab_early_breadcrumb(unsigned int index);
++void kebab_early_fault_report(uint64_t esr, uint64_t elr, uint64_t far, uint64_t spsr);
  void kebab_early_disable(void);
  #else
  static inline void kebab_early_mark(unsigned int stage, const char *label)

@@ -1,6 +1,6 @@
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -497,6 +497,49 @@
+@@ -497,6 +497,56 @@
  2:
  .endmacro
  
@@ -12,6 +12,13 @@
 + */
 +	.align 2
 +LEXT(kebab_fault_handler)
++	/* Report the syndrome first: the console path is lock free. */
++	mrs	x0, esr_el1
++	mrs	x1, elr_el1
++	mrs	x2, far_el1
++	mrs	x3, spsr_el1
++	bl	EXT(kebab_early_fault_report)
++
 +	/*
 +	 * Same shape as the entry band, in red. Read the framebuffer address from
 +	 * the console variable: once arm_vm_init drops TTBR0 the identity mapping of
@@ -50,7 +57,7 @@
  /*
   * _start_first_cpu
   * Cold boot init routine.  Called from __start
-@@ -513,24 +556,6 @@
+@@ -513,24 +563,6 @@
  	mov		x20, x0
  	mov		x21, #0
  
@@ -75,7 +82,7 @@
  
  	// Set low reset vector before attempting any loads
  	adrp	x0, EXT(LowExceptionVectorBase)@page
-@@ -837,6 +862,20 @@
+@@ -837,6 +869,20 @@
  	MSR_SCTLR_EL1_X0
  	isb		sy
  
@@ -96,7 +103,7 @@
  #if !VMAPPLE && !defined(KEBAB)
  	MOV64   x1, SCTLR_EL1_DEFAULT
  	cmp		x0, x1
-@@ -899,6 +938,14 @@
+@@ -899,6 +945,14 @@
  	mov	lr, x21
  #endif
  

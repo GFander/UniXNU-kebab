@@ -71,7 +71,7 @@
  	kebab_early_string("KEBAB EARLY ");
  	if (stage >= 10) {
  		kebab_early_putc((char)('0' + stage / 10));
-@@ -115,6 +132,40 @@
+@@ -115,6 +132,60 @@
  	kebab_early_putc('\n');
  }
  
@@ -81,6 +81,26 @@
 + * kebab bring-up breadcrumbs: a fixed white square per checkpoint, drawn at the
 + * top of the panel where the text console never writes. No locks, no logging.
 + */
++
++/*
++ * Called from the assembly exception vector with the captured syndrome. Uses the
++ * lock-free console only, so it works when everything else is broken.
++ */
++void
++kebab_early_fault_report(uint64_t esr, uint64_t elr, uint64_t far, uint64_t spsr)
++{
++	kebab_early_string("\nKEBAB FAULT\n");
++	kebab_early_string("ESR=");
++	kebab_early_hex(esr);
++	kebab_early_string("\nELR=");
++	kebab_early_hex(elr);
++	kebab_early_string("\nFAR=");
++	kebab_early_hex(far);
++	kebab_early_string("\nSPSR=");
++	kebab_early_hex(spsr);
++	kebab_early_putc('\n');
++}
++
 +void
 +kebab_early_breadcrumb(unsigned int index)
 +{
