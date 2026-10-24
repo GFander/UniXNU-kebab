@@ -1,6 +1,6 @@
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
-@@ -347,8 +347,34 @@
+@@ -347,8 +347,27 @@
  	DTEntry chosen = NULL;
  	unsigned int dt_entry_size = 0;
  
@@ -24,60 +24,20 @@
 +
  	kebab_early_mark(1, "arm_init entered (MMU on)");
  
-+	kebab_early_putc('V'); kebab_early_putc('A'); kebab_early_putc('=');
-+	kebab_early_hex(args->virtBase);
-+	kebab_early_putc(' '); kebab_early_putc('P'); kebab_early_putc('A'); kebab_early_putc('=');
-+	kebab_early_hex(args->physBase);
-+	kebab_early_putc(' '); kebab_early_putc('S'); kebab_early_putc('Z'); kebab_early_putc('=');
-+	kebab_early_hex(args->memSize);
-+	kebab_early_putc('\n');
 +
  	arm_setup_pre_sign();
  
  	arm_slide_rebase_and_sign_image();
-@@ -364,8 +390,25 @@
+@@ -364,6 +383,8 @@
  	BootCpuData.jop_key = ml_default_jop_pid();
  #endif /* defined(HAS_APPLE_PAC) */
  
-+	for (const char *p = "DT="; *p; p++) { kebab_early_putc(*p); }
-+	kebab_early_hex((uint64_t)(uintptr_t)args->deviceTreeP);
-+	for (const char *p = " LEN="; *p; p++) { kebab_early_putc(*p); }
-+	kebab_early_hex(args->deviceTreeLength);
-+	kebab_early_putc('\n');
 +
-+	for (const char *p = "SOC="; *p; p++) { kebab_early_putc(*p); }
-+	kebab_early_hex(pe_arm_get_soc_base_phys());
-+	kebab_early_putc('\n');
 +
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
  	kebab_early_mark(2, "PE_init_platform done");
-+	{
-+		for (const char *p = "TB="; *p; p++) { kebab_early_putc(*p); }
-+		kebab_early_hex(gPEClockFrequencyInfo.timebase_frequency_hz);
-+		for (const char *p = " CPU="; *p; p++) { kebab_early_putc(*p); }
-+		kebab_early_hex(ml_get_cpu_count());
-+		kebab_early_putc('\n');
-+	}
  
- #if __arm64__
- 	configure_timer_apple_regs();
-@@ -428,6 +471,15 @@
- 
- 	ml_parse_cpu_topology();
- 	kebab_early_mark(3, "ml_parse_cpu_topology done");
-+	{
-+		for (const char *q = "AFTER-Topology SOC="; *q; q++) { kebab_early_putc(*q); }
-+		kebab_early_hex(pe_arm_get_soc_base_phys());
-+		for (const char *q = " CPU="; *q; q++) { kebab_early_putc(*q); }
-+		kebab_early_hex(ml_get_cpu_count());
-+		for (const char *q = " TB="; *q; q++) { kebab_early_putc(*q); }
-+		kebab_early_hex(gPEClockFrequencyInfo.timebase_frequency_hz);
-+		kebab_early_putc('\n');
-+	}
- 
- 
- 	master_cpu = ml_get_boot_cpu_number();
-@@ -585,9 +637,11 @@
+@@ -585,9 +606,11 @@
  		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
  	}
  	PE_create_console();
@@ -89,7 +49,7 @@
  
  #if __arm64__
  #if DEBUG
-@@ -598,6 +652,7 @@
+@@ -598,6 +621,7 @@
  	cpu_machine_idle_init(TRUE);
  
  	PE_init_platform(TRUE, &BootCpuData);
@@ -97,7 +57,7 @@
  
  #if __arm64__
  	extern bool cpu_config_correct;
-@@ -614,6 +669,7 @@
+@@ -614,6 +638,7 @@
  #endif
  
  	cpu_timebase_init(TRUE);
@@ -105,7 +65,7 @@
  
  #if KPERF
  	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
-@@ -622,6 +678,7 @@
+@@ -622,6 +647,7 @@
  
  	PE_init_cpu();
  	fiq_context_init(TRUE);
@@ -113,7 +73,7 @@
  
  
  #if HIBERNATION
-@@ -650,6 +707,7 @@
+@@ -650,6 +676,7 @@
  
  	gDramBase = *dram_base;
  	gDramSize = *dram_size;

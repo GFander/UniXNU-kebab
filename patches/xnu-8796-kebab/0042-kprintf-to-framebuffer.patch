@@ -1,0 +1,23 @@
+--- a/osfmk/kern/printf.c
++++ b/osfmk/kern/printf.c
+@@ -856,12 +856,20 @@
+ #endif
+ }
+ 
++#if defined(KEBAB)
++/* The phone exposes no UART, so mirror every console character to the panel. */
++extern void kebab_early_putc(char c);
++#endif
++
+ void
+ cons_putc_locked(char c)
+ {
+ 	if (!disableConsoleOutput) {
+ 		console_write_char(c);
+ 	}
++#if defined(KEBAB)
++	kebab_early_putc(c);
++#endif
+ }
+ 
+ __printflike(1, 0)
