@@ -28,6 +28,41 @@ The bootstrap KVA map is *not* the problem: walking it from C gives
 `TCR_EL1 = 0x226511a511` (T0SZ = T1SZ = 17, TG1 = 16 KiB) is consistent with
 that; `TTBR1 = 0xc0170000`.
 
+
+## Root cause of the KVA hang (found 2026-10-25 02:20)
+
+The bootstrap page tables map the kernel with **32 MiB L2 blocks** (16 KiB
+granule). A block descriptor can only carry the *block base* physical address:
+the low 25 bits of the translated address always come from the **virtual**
+address. So the mapping is only correct when
+
+```
+(virtBase & 0x01ffffff) == (physBase & 0x01ffffff)
+```
+
+With the macOS link address and DarwinBoot's load address that was violated:
+
+```
+virtBase 0xFFFFFE0007004000 & 0x01ffffff = 0x01004000
+physBase 0xC0004000         & 0x01ffffff = 0x00004000   -> 16 MiB apart
+```
+
+The KVA alias therefore resolved to `0xC0000000 + 0x01004000 = 0xC1004000`,
+i.e. 16 MiB past the kernel image: valid, executable, and full of something
+that is not the kernel. That is why the `ret` produced neither the expected
+code nor an exception, and why the fault vector (mapped through the same
+broken alias) never painted anything.
+
+Fix: link the kernel at `0xfffffe0006004000` (patch
+`0041-link-address-block-aligned.patch`), whose low 25 bits match the physical
+load address. DarwinBoot reads `virtBase` from the Mach-O, so the boot
+arguments follow automatically.
+
+Note this only holds while the loader places the kernel at `0xC0004000`. A
+loader change, or a different window, reintroduces the mismatch. The durable
+alternative is to map the bootstrap region with 16 KiB L3 pages instead of
+32 MiB blocks.
+
 ## Next diagnostics, in order
 
 1. **Verify the vector install**: read `vbar_el1` back right after `msr` and
