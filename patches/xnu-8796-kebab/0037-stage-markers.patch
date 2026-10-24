@@ -74,7 +74,7 @@
  .macro create_bootstrap_mapping
  	/* calculate entries left in this page */
  	and	$5, $0, #(ARM_TT_L2_INDEX_MASK)
-@@ -497,6 +564,86 @@
+@@ -497,6 +564,84 @@
  2:
  .endmacro
  
@@ -151,17 +151,15 @@
 +	b.ne	83b
 +	dsb	sy
 +
-+	/* Enter the real C routine through its KVA. */
++	/* kebab: run arm_init at its identity address for now. */
 +	adrp	x9, EXT(arm_init)@page
 +	add	x9, x9, EXT(arm_init)@pageoff
-+	add	x9, x9, x22
-+	sub	x9, x9, x23
 +	br	x9
 +
  /*
   * _start_first_cpu
   * Cold boot init routine.  Called from __start
-@@ -515,7 +662,7 @@
+@@ -515,7 +660,7 @@
  
  #if defined(KEBAB)
  	/* Stage 0: white 64x32 band, no stack or page tables needed. */
@@ -170,7 +168,7 @@
  	mov		w1, #-1
  	mov		x2, #32
  	mov		x4, #4320
-@@ -899,8 +1046,30 @@
+@@ -899,8 +1044,30 @@
  	mov	lr, x21
  #endif
  
