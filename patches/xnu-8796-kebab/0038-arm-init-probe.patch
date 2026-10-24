@@ -35,7 +35,7 @@
  	arm_setup_pre_sign();
  
  	arm_slide_rebase_and_sign_image();
-@@ -364,8 +390,55 @@
+@@ -364,8 +390,83 @@
  	BootCpuData.jop_key = ml_default_jop_pid();
  #endif /* defined(HAS_APPLE_PAC) */
  
@@ -76,6 +76,34 @@
 +		kebab_early_hex(ttbr0);
 +		for (const char *p = " SCTLR="; *p; p++) { kebab_early_putc(*p); }
 +		kebab_early_hex(sctlr);
++		kebab_early_putc('\n');
++	}
++
++	{
++		/* Walk the bootstrap tables for the kernel VA and report what we find. */
++		uint64_t ttbr1;
++		__asm__ volatile("mrs %0, ttbr1_el1" : "=r"(ttbr1));
++		uint64_t l1_base = ttbr1 & 0x0000ffffffffc000ULL;
++		uint64_t kva = (uint64_t)(uintptr_t)args->virtBase;
++		uint64_t l1_idx = (kva >> 36) & 0x7ff;
++		uint64_t *l1 = (uint64_t *)(uintptr_t)l1_base;
++		uint64_t l1e = l1[l1_idx];
++		uint64_t l2_base = l1e & 0x0000ffffffffc000ULL;
++		uint64_t l2_idx = (kva >> 25) & 0x7ff;
++		uint64_t *l2 = (uint64_t *)(uintptr_t)l2_base;
++		uint64_t l2e = l2[l2_idx];
++
++		for (const char *p = "WALK L1IDX="; *p; p++) { kebab_early_putc(*p); }
++		kebab_early_hex(l1_idx);
++		for (const char *p = " L1E="; *p; p++) { kebab_early_putc(*p); }
++		kebab_early_hex(l1e);
++		kebab_early_putc('\n');
++		for (const char *p = "WALK L2IDX="; *p; p++) { kebab_early_putc(*p); }
++		kebab_early_hex(l2_idx);
++		for (const char *p = " L2E="; *p; p++) { kebab_early_putc(*p); }
++		kebab_early_hex(l2e);
++		for (const char *p = " ->PA="; *p; p++) { kebab_early_putc(*p); }
++		kebab_early_hex(l2e & 0x0000ffffffe00000ULL);
 +		kebab_early_putc('\n');
 +	}
 +
