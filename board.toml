@@ -105,4 +105,9 @@ kernel_args = [
   "-v",
   "serial=3",
   "debug=0x14e",
+  # The SMP port is in the kernel, but the first boot stays on the boot CPU:
+  # secondary bring-up depends on PSCI and the GIC redistributors agreeing
+  # with the ADT, which is easier to prove one CPU at a time.
+  "cpus=1",
+  "keepsyms=1",
 ]
