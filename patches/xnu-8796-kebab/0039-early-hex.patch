@@ -1,6 +1,16 @@
 --- a/osfmk/arm64/kebab_early.c
 +++ b/osfmk/arm64/kebab_early.c
-@@ -31,9 +31,28 @@
+@@ -17,7 +17,8 @@
+  * The reference port used 0xB8000000, which is a different phone.
+  */
+ #define KEBAB_EARLY_FB 0x9c000000u
+-static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)KEBAB_EARLY_FB;
++/* Global so assembly breadcrumbs can reach the live framebuffer address. */
++volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)KEBAB_EARLY_FB;
+ #define EARLY_FB early_fb
+ #define EARLY_WIDTH 1080u
+ #define EARLY_HEIGHT 2400u
+@@ -31,9 +32,28 @@
  extern unsigned char iso_font[256 * 16];
  
  /* Initialized data must remain writable until disable, including panics. */
@@ -30,7 +40,7 @@
  static void
  kebab_early_clear_row(void)
  {
-@@ -61,7 +80,11 @@
+@@ -61,7 +81,11 @@
  	}
  	if (c == '\n' || early_col == EARLY_COLS) {
  		early_col = 0;
@@ -43,7 +53,7 @@
  		kebab_early_clear_row();
  		if (c == '\n') {
  			return;
-@@ -95,16 +118,9 @@
+@@ -95,16 +119,9 @@
  void
  kebab_early_mark(unsigned int stage, const char *label)
  {
@@ -61,7 +71,7 @@
  	kebab_early_string("KEBAB EARLY ");
  	if (stage >= 10) {
  		kebab_early_putc((char)('0' + stage / 10));
-@@ -115,6 +131,39 @@
+@@ -115,6 +132,39 @@
  	kebab_early_putc('\n');
  }
  
