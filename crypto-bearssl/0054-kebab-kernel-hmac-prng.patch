@@ -1,0 +1,160 @@
+KEBAB: register the built-in HMAC-SHA256 DRBG at EARLY_BOOT/FIRST and enable entropy collection
+
+diff --git a/osfmk/prng/entropy.c b/osfmk/prng/entropy.c
+--- a/osfmk/prng/entropy.c
++++ b/osfmk/prng/entropy.c
+@@ -488,9 +488,11 @@
+ 	// The first call to this function comes while the corecrypto kext
+ 	// is being loaded. We require SHA256 to accumulate entropy
+ 	// samples.
++#if !defined(KEBAB)
+ 	if (__improbable(!crypto_init)) {
+ 		return sample_count;
+ 	}
++#endif
+ 
+ 	// There is only one consumer (the kernel PRNG), but they could
+ 	// try to consume entropy from different threads. We simply fail
+diff --git a/osfmk/prng/prng_random.c b/osfmk/prng/prng_random.c
+--- a/osfmk/prng/prng_random.c
++++ b/osfmk/prng/prng_random.c
+@@ -145,6 +145,139 @@
+ 		     .strictFIPS = 0,
+ 	     }};
+ 
++#if defined(KEBAB)
++/*
++ * The corecrypto kext normally installs the kernel PRNG. KEBAB has no such
++ * kext: use the built-in HMAC-SHA256 DRBG, just as early_random does. A
++ * single mutex serializes generation and reseeding across all CPUs. This
++ * favors a small, auditable bring-up implementation over per-CPU scaling.
++ * This registers only the PRNG, not the unrelated g_crypto_funcs table.
++ */
++#include <kern/startup.h>
++
++static LCK_GRP_DECLARE(kebab_prng_group, "kebab-prng");
++static LCK_MTX_DECLARE(kebab_prng_lock, &kebab_prng_group);
++static struct cckprng_ctx kebab_prng_ctx;
++static const struct ccdrbg_nisthmac_custom kebab_prng_custom = {
++	.di = &ccsha256_ltc_di,
++	.strictFIPS = 0,
++};
++static cckprng_getentropy kebab_getentropy;
++static void *kebab_getentropy_arg;
++static unsigned kebab_max_ngens;
++static bool kebab_generators[MAX_CPUS];
++
++static struct ccdrbg_state *
++kebab_prng_state(struct cckprng_ctx *ctx)
++{
++	return (struct ccdrbg_state *)ctx->drbg_state;
++}
++
++static void
++kebab_prng_check(int status)
++{
++	if (status != CCDRBG_STATUS_OK) {
++		panic("KEBAB HMAC DRBG error %d", status);
++	}
++}
++
++static void
++kebab_prng_init_with_getentropy(struct cckprng_ctx *ctx, unsigned max_ngens,
++    size_t seed_nbytes, const void *seed, size_t nonce_nbytes, const void *nonce,
++    cckprng_getentropy getentropy, void *getentropy_arg)
++{
++	assert(max_ngens > 0 && max_ngens <= MAX_CPUS);
++	ccdrbg_factory_nisthmac(&ctx->drbg_info, &kebab_prng_custom);
++	assert(ctx->drbg_info.size <= sizeof(ctx->drbg_state));
++	const char ps[] = "xnu kebab kernel random";
++	kebab_prng_check(ccdrbg_init(&ctx->drbg_info, kebab_prng_state(ctx),
++	    seed_nbytes, seed, nonce_nbytes, nonce, sizeof(ps) - 1, ps));
++	kebab_getentropy = getentropy;
++	kebab_getentropy_arg = getentropy_arg;
++	kebab_max_ngens = max_ngens;
++}
++
++static void
++kebab_prng_init(struct cckprng_ctx *ctx, size_t seed_nbytes, const void *seed,
++    size_t nonce_nbytes, const void *nonce, cckprng_getentropy getentropy,
++    void *getentropy_arg)
++{
++	kebab_prng_init_with_getentropy(ctx, MAX_CPUS, seed_nbytes, seed,
++	    nonce_nbytes, nonce, getentropy, getentropy_arg);
++}
++
++static void
++kebab_prng_initgen(__unused struct cckprng_ctx *ctx, unsigned gen_idx)
++{
++	lck_mtx_lock(&kebab_prng_lock);
++	assert(gen_idx < kebab_max_ngens);
++	assert(!kebab_generators[gen_idx]);
++	kebab_generators[gen_idx] = true;
++	lck_mtx_unlock(&kebab_prng_lock);
++}
++
++static void
++kebab_prng_reseed(struct cckprng_ctx *ctx, size_t nbytes, const void *seed)
++{
++	lck_mtx_lock(&kebab_prng_lock);
++	kebab_prng_check(ccdrbg_reseed(&ctx->drbg_info, kebab_prng_state(ctx),
++	    nbytes, seed, 0, NULL));
++	lck_mtx_unlock(&kebab_prng_lock);
++}
++
++static void
++kebab_prng_refresh(struct cckprng_ctx *ctx)
++{
++	/* The entropy callback also uses try-lock; refresh must not wait. */
++	if (!lck_mtx_try_lock(&kebab_prng_lock)) {
++		return;
++	}
++	uint8_t entropy[CCKPRNG_ENTROPY_SIZE];
++	size_t nbytes = sizeof(entropy);
++	int32_t nsamples = kebab_getentropy(&nbytes, entropy, kebab_getentropy_arg);
++	if (nsamples < 0) {
++		panic("KEBAB PRNG entropy health test failed");
++	}
++	if (nsamples >= 256) {
++		assert(nbytes >= SEED_SIZE && nbytes <= sizeof(entropy));
++		kebab_prng_check(ccdrbg_reseed(&ctx->drbg_info, kebab_prng_state(ctx),
++		    nbytes, entropy, 0, NULL));
++	}
++	cc_clear(sizeof(entropy), entropy);
++	lck_mtx_unlock(&kebab_prng_lock);
++}
++
++static void
++kebab_prng_generate(struct cckprng_ctx *ctx, unsigned gen_idx,
++    size_t nbytes, void *out)
++{
++	assert(nbytes <= CCKPRNG_GENERATE_MAX_NBYTES);
++	lck_mtx_lock(&kebab_prng_lock);
++	assert(gen_idx < kebab_max_ngens && kebab_generators[gen_idx]);
++	kebab_prng_check(ccdrbg_generate(&ctx->drbg_info, kebab_prng_state(ctx),
++	    nbytes, out, 0, NULL));
++	lck_mtx_unlock(&kebab_prng_lock);
++}
++
++__startup_func
++static void
++kebab_prng_startup(void)
++{
++	/* Ensure the boot seed exists before registration erases the early DRBG. */
++	(void)early_random();
++	const struct cckprng_funcs funcs = {
++		.init = kebab_prng_init,
++		.initgen = kebab_prng_initgen,
++		.reseed = kebab_prng_reseed,
++		.refresh = kebab_prng_refresh,
++		.generate = kebab_prng_generate,
++		.init_with_getentropy = kebab_prng_init_with_getentropy,
++	};
++	register_and_init_prng(&kebab_prng_ctx, &funcs);
++}
++STARTUP(EARLY_BOOT, STARTUP_RANK_FIRST, kebab_prng_startup);
++#endif /* KEBAB */
++
+ static void read_erandom(void * buf, size_t nbytes);
+ 
+ /*
