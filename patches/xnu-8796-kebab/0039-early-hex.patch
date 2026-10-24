@@ -1,0 +1,22 @@
+--- a/osfmk/arm64/kebab_early.c
++++ b/osfmk/arm64/kebab_early.c
+@@ -115,6 +115,19 @@
+ 	kebab_early_putc('\n');
+ }
+ 
++
++void
++kebab_early_hex(uint64_t value)
++{
++	static const char digits[] = "0123456789abcdef";
++
++	kebab_early_putc('0');
++	kebab_early_putc('x');
++	for (int shift = 60; shift >= 0; shift -= 4) {
++		kebab_early_putc(digits[(value >> shift) & 0xf]);
++	}
++}
++
+ void
+ kebab_early_panic(const char *fmt, va_list *args)
+ {
