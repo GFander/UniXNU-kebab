@@ -35,7 +35,7 @@
  	arm_setup_pre_sign();
  
  	arm_slide_rebase_and_sign_image();
-@@ -364,8 +390,25 @@
+@@ -364,8 +390,37 @@
  	BootCpuData.jop_key = ml_default_jop_pid();
  #endif /* defined(HAS_APPLE_PAC) */
  
@@ -48,6 +48,18 @@
 +	for (const char *p = "SOC="; *p; p++) { kebab_early_putc(*p); }
 +	kebab_early_hex(pe_arm_get_soc_base_phys());
 +	kebab_early_putc('\n');
++
++	/*
++	 * kebab: DarwinBoot stores the device tree pointer as a kernel virtual
++	 * address (Kernel.Base + tree PA - kernel PA). While we still run at the
++	 * identity address, rebase it to the physical address, otherwise
++	 * SecureDTInit() reads unmapped memory and every lookup comes back empty.
++	 */
++	if (((uintptr_t)args->deviceTreeP >= (uintptr_t)args->virtBase) &&
++	    ((uintptr_t)args->deviceTreeP < (uintptr_t)args->virtBase + (uintptr_t)args->memSize)) {
++		args->deviceTreeP = (void *)((uintptr_t)args->deviceTreeP -
++		    (uintptr_t)args->virtBase + (uintptr_t)args->physBase);
++	}
 +
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
  	kebab_early_mark(2, "PE_init_platform done");
