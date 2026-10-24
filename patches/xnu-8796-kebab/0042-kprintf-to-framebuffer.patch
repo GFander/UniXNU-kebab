@@ -31,15 +31,3 @@
  	},
  };
  
-@@ -598,6 +616,11 @@
-  *
-  * @param c The character to print.
-  */
-+#if defined(KEBAB)
-+/* The phone exposes no UART; mirror every console character to the panel. */
-+extern void kebab_early_putc(char c);
-+#endif
-+
- void
- console_write_char(char c)
- {
