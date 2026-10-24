@@ -61,3 +61,47 @@
  
  #if __arm64__
  	configure_timer_apple_regs();
+@@ -585,9 +628,11 @@
+ 		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
+ 	}
+ 	PE_create_console();
++	kebab_early_mark(21, "PE_create_console done");
+ 
+ 	/* setup console output */
+ 	PE_init_printf(FALSE);
++	kebab_early_mark(22, "PE_init_printf done");
+ 
+ #if __arm64__
+ #if DEBUG
+@@ -598,6 +643,7 @@
+ 	cpu_machine_idle_init(TRUE);
+ 
+ 	PE_init_platform(TRUE, &BootCpuData);
++	kebab_early_mark(23, "PE_init_platform(vm) done");
+ 
+ #if __arm64__
+ 	extern bool cpu_config_correct;
+@@ -614,6 +660,7 @@
+ #endif
+ 
+ 	cpu_timebase_init(TRUE);
++	kebab_early_mark(24, "cpu_timebase_init done");
+ 
+ #if KPERF
+ 	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
+@@ -622,6 +669,7 @@
+ 
+ 	PE_init_cpu();
+ 	fiq_context_init(TRUE);
++	kebab_early_mark(25, "fiq_context_init done");
+ 
+ 
+ #if HIBERNATION
+@@ -650,6 +698,7 @@
+ 
+ 	gDramBase = *dram_base;
+ 	gDramSize = *dram_size;
++	kebab_early_mark(26, "dram range from DT ok");
+ 
+ 	/*
+ 	 * Initialize the stack protector for all future calls
