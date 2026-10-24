@@ -1,5 +1,23 @@
 --- a/osfmk/arm64/cswitch.s
 +++ b/osfmk/arm64/cswitch.s
+@@ -69,7 +69,7 @@
+ 	strb	w$1, [$0, SS64_KERNEL_SSBS]
+ 1:
+ #endif // HAS_ARM_FEAT_SSBS2
+-#if __ARM_ARCH_8_4__
++#if __ARM_ARCH_8_4__ && !defined(KEBAB)
+ 	mrs		x$1, DIT
+ 	lsr     x$1, x$1, #0 + PSR64_DIT_SHIFT
+ 	strb	w$1, [$0, SS64_KERNEL_DIT]
+@@ -131,7 +131,7 @@
+ 	msr		SSBS, x$1
+ 1:
+ #endif // HAS_ARM_FEAT_SSBS2
+-#if __ARM_ARCH_8_4__
++#if __ARM_ARCH_8_4__ && !defined(KEBAB)
+ 	ldrb	w$1, [$0, SS64_KERNEL_DIT]
+ 	lsl     x$1, x$1, #0 + PSR64_DIT_SHIFT
+ 	msr		DIT, x$1
 @@ -157,6 +157,44 @@
   *
   * Returns to the address reloaded into LR, authenticating if needed.
