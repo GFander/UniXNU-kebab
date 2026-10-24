@@ -50,7 +50,28 @@
  	mov		w1, #-1
  	mov		x2, #32
  	mov		x4, #4320
-@@ -899,6 +933,14 @@
+@@ -837,6 +871,20 @@
+ 	MSR_SCTLR_EL1_X0
+ 	isb		sy
+ 
++	/* kebab: white 60x24 block at row 2280, x=200 - the MMU is on. */
++	MOV64	x9, (0x9c000000 + 2280 * 4320 + 200 * 4)
++	mov	w10, #-1
++	mov	x12, #24
++79:	mov	x11, #60
++78:	str	w10, [x9], #4
++	subs	x11, x11, #1
++	b.ne	78b
++	mov	x13, #(4320 - 240)
++	add	x9, x9, x13
++	subs	x12, x12, #1
++	b.ne	79b
++	dsb	sy
++
+ #if !VMAPPLE && !defined(KEBAB)
+ 	MOV64   x1, SCTLR_EL1_DEFAULT
+ 	cmp		x0, x1
+@@ -899,6 +947,14 @@
  	mov	lr, x21
  #endif
  
