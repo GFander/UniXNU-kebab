@@ -1,0 +1,49 @@
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -216,6 +216,8 @@
+ 
+ extern int serverperfmode;
+ 
++extern void kebab_early_breadcrumb(unsigned int index);
++
+ TUNABLE(startup_debug_t, startup_debug, "startup_debug", 0);
+ 
+ static inline void
+@@ -575,6 +577,7 @@
+ 	thread_deallocate(thread);
+ 
+ 	kernel_bootstrap_log("load_context - done");
++	kebab_early_breadcrumb(0);      /* A: about to call load_context */
+ 	load_context(thread);
+ 	/*NOTREACHED*/
+ }
+@@ -592,10 +595,13 @@
+ static void
+ kernel_bootstrap_thread(void)
+ {
++	kebab_early_breadcrumb(5);      /* F: thread entry */
+ 	processor_t processor = current_processor();
++	kebab_early_breadcrumb(6);      /* G: current_processor() returned */
+ 
+ #if (DEVELOPMENT || DEBUG)
+ 	platform_stall_panic_or_spin(PLATFORM_STALL_XNU_LOCATION_KERNEL_BOOTSTRAP);
++	kebab_early_breadcrumb(7);      /* H: no platform stall */
+ #endif
+ 
+ 	kernel_bootstrap_thread_log("idle_thread_create");
+@@ -898,6 +904,7 @@
+ 
+ 	load_context_kprintf("machine_set_current_thread\n");
+ 	machine_set_current_thread(thread);
++	kebab_early_breadcrumb(1);      /* B: current thread installed */
+ 
+ 	load_context_kprintf("processor_up\n");
+ 
+@@ -955,6 +962,7 @@
+ 	__asan_handle_no_return();
+ #endif /* KASAN_TBI */
+ 
++	kebab_early_breadcrumb(2);      /* C: about to load the machine context */
+ 	machine_load_context(thread);
+ 	/*NOTREACHED*/
+ }

@@ -1,14 +1,5 @@
 --- a/osfmk/arm64/kebab_early.c
 +++ b/osfmk/arm64/kebab_early.c
-@@ -31,7 +31,7 @@
- extern unsigned char iso_font[256 * 16];
- 
- /* Initialized data must remain writable until disable, including panics. */
--static unsigned int early_row, early_col;
-+static unsigned int early_row = 4, early_col;   /* first rows sit under the camera punch-hole */
- static unsigned int early_started, early_disabled, early_panicking;
- 
- static void
 @@ -95,16 +95,9 @@
  void
  kebab_early_mark(unsigned int stage, const char *label)
@@ -27,23 +18,30 @@
  	kebab_early_string("KEBAB EARLY ");
  	if (stage >= 10) {
  		kebab_early_putc((char)('0' + stage / 10));
-@@ -115,6 +108,19 @@
- 	kebab_early_putc('\n');
+@@ -116,6 +109,26 @@
  }
  
+ 
 +
++/*
++ * kebab bring-up breadcrumbs: a fixed white square per checkpoint, drawn at the
++ * top of the panel where the text console never writes. No locks, no logging.
++ */
 +void
-+kebab_early_hex(uint64_t value)
++kebab_early_breadcrumb(unsigned int index)
 +{
-+	static const char digits[] = "0123456789abcdef";
-+
-+	kebab_early_putc('0');
-+	kebab_early_putc('x');
-+	for (int shift = 60; shift >= 0; shift -= 4) {
-+		kebab_early_putc(digits[(value >> shift) & 0xf]);
++	if (index > 15) {
++		return;
 +	}
++	unsigned int x0 = 40 + index * 40;
++	for (unsigned int y = 8; y < 32; y++) {
++		for (unsigned int x = x0; x < x0 + 28; x++) {
++			EARLY_FB[y * EARLY_STRIDE + x] = 0xffffffffu;
++		}
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
 +}
 +
  void
- kebab_early_panic(const char *fmt, va_list *args)
+ kebab_early_hex(uint64_t value)
  {

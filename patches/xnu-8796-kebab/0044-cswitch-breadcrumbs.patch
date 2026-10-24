@@ -1,0 +1,28 @@
+--- a/osfmk/arm64/cswitch.s
++++ b/osfmk/arm64/cswitch.s
+@@ -269,11 +269,25 @@
+ 	.globl	EXT(machine_load_context)
+ 
+ LEXT(machine_load_context)
++#if defined(KEBAB)
++	mov		x19, x0
++	mov		x0, #3					/* D: machine_load_context entered */
++	bl		EXT(kebab_early_breadcrumb)
++	mov		x0, x19
++#endif
+ 	set_thread_registers 	x0, x1, x2
+ 	ldr		x1, [x0, TH_KSTACKPTR]				// Get top of kernel stack
+ 	load_general_registers 	x1, 2
+ 	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
+ 	mov		x0, #0								// Clear argument to thread_continue
++#if defined(KEBAB)
++	mov		x19, x0
++	mov		x20, x30
++	mov		x0, #4					/* E: about to branch into the new thread */
++	bl		EXT(kebab_early_breadcrumb)
++	mov		x0, x19
++	mov		x30, x20
++#endif
+ 	cswitch_epilogue
+ 
+ /*
