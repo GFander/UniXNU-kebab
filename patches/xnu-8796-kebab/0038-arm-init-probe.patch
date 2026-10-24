@@ -35,7 +35,7 @@
  	arm_setup_pre_sign();
  
  	arm_slide_rebase_and_sign_image();
-@@ -364,8 +390,37 @@
+@@ -364,8 +390,55 @@
  	BootCpuData.jop_key = ml_default_jop_pid();
  #endif /* defined(HAS_APPLE_PAC) */
  
@@ -59,6 +59,24 @@
 +	    ((uintptr_t)args->deviceTreeP < (uintptr_t)args->virtBase + (uintptr_t)args->memSize)) {
 +		args->deviceTreeP = (void *)((uintptr_t)args->deviceTreeP -
 +		    (uintptr_t)args->virtBase + (uintptr_t)args->physBase);
++	}
++
++	{
++		uint64_t tcr, ttbr0, ttbr1, sctlr;
++		__asm__ volatile("mrs %0, tcr_el1" : "=r"(tcr));
++		__asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
++		__asm__ volatile("mrs %0, ttbr1_el1" : "=r"(ttbr1));
++		__asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
++		for (const char *p = "TCR="; *p; p++) { kebab_early_putc(*p); }
++		kebab_early_hex(tcr);
++		for (const char *p = " TTBR1="; *p; p++) { kebab_early_putc(*p); }
++		kebab_early_hex(ttbr1);
++		kebab_early_putc('\n');
++		for (const char *p = "TTBR0="; *p; p++) { kebab_early_putc(*p); }
++		kebab_early_hex(ttbr0);
++		for (const char *p = " SCTLR="; *p; p++) { kebab_early_putc(*p); }
++		kebab_early_hex(sctlr);
++		kebab_early_putc('\n');
 +	}
 +
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
