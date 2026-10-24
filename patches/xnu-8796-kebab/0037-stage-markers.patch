@@ -74,7 +74,7 @@
  .macro create_bootstrap_mapping
  	/* calculate entries left in this page */
  	and	$5, $0, #(ARM_TT_L2_INDEX_MASK)
-@@ -497,6 +564,47 @@
+@@ -497,6 +564,86 @@
  2:
  .endmacro
  
@@ -112,7 +112,46 @@
 +	b.ne	87b
 +	dsb	sy
 +
-+	/* Enter the real C routine. */
++	/*
++	 * Compare the same instruction word at the identity address and at the
++	 * kernel virtual alias: x=600 when they match, x=700 when the KVA read
++	 * happened at all.
++	 */
++	adrp	x14, EXT(kebab_kva_stub)@page
++	add	x14, x14, EXT(kebab_kva_stub)@pageoff
++	ldr	w15, [x14]
++	add	x16, x14, x22
++	sub	x16, x16, x23
++	ldr	w17, [x16]
++	cmp	w15, w17
++	b.ne	1f
++	MOV64	x9, (0x9c000000 + 2280 * 4320 + 600 * 4)
++	mov	w10, #-1
++	mov	x12, #24
++85:	mov	x11, #60
++84:	str	w10, [x9], #4
++	subs	x11, x11, #1
++	b.ne	84b
++	mov	x13, #(4320 - 240)
++	add	x9, x9, x13
++	subs	x12, x12, #1
++	b.ne	85b
++	dsb	sy
++1:
++	MOV64	x9, (0x9c000000 + 2280 * 4320 + 700 * 4)
++	mov	w10, #-1
++	mov	x12, #24
++83:	mov	x11, #60
++82:	str	w10, [x9], #4
++	subs	x11, x11, #1
++	b.ne	82b
++	mov	x13, #(4320 - 240)
++	add	x9, x9, x13
++	subs	x12, x12, #1
++	b.ne	83b
++	dsb	sy
++
++	/* Enter the real C routine through its KVA. */
 +	adrp	x9, EXT(arm_init)@page
 +	add	x9, x9, EXT(arm_init)@pageoff
 +	add	x9, x9, x22
@@ -122,7 +161,7 @@
  /*
   * _start_first_cpu
   * Cold boot init routine.  Called from __start
-@@ -515,7 +623,7 @@
+@@ -515,7 +662,7 @@
  
  #if defined(KEBAB)
  	/* Stage 0: white 64x32 band, no stack or page tables needed. */
@@ -131,7 +170,7 @@
  	mov		w1, #-1
  	mov		x2, #32
  	mov		x4, #4320
-@@ -899,8 +1007,30 @@
+@@ -899,8 +1046,30 @@
  	mov	lr, x21
  #endif
  
