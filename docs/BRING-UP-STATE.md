@@ -142,6 +142,36 @@ the open-source tree calls (Apple's kext does that). The negroni project solved
 this by replacing the `corecrypto_*` wrappers with self-contained BearSSL
 implementations; those patches are being ported to 8796.
 
+
+### Crypto blocker resolution (in progress)
+
+`libkern/crypto/corecrypto_sha1.c` was rewritten to call the **linked**
+corecrypto functions (`ccsha1_di()`, `ccdigest_init/update/final`) instead of
+the kext dispatch table `g_crypto_funcs`, which nothing initialises on this
+platform. `ccsha1_di`, `ccdigest_init` and `ccdigest_update` are present in the
+kernel image (they come from `libcc_kext`), so no third-party code is needed.
+
+Not yet solved: `ccmd5_di`, `ccsha384_di`, `ccsha512_di` are **not** linked.
+If a later boot stage needs MD5 or SHA-384/512, those wrappers need real
+implementations. The negroni project solved the whole family by vendoring
+BearSSL; a prepared patch set for that exists at
+`D:\LOS\HiOS\work\kebab-crypto-patches\` (0050..0056) if it becomes necessary.
+
+## Flashing checklist
+
+```
+fastboot flash boot_b XNU-<n>.img
+fastboot reboot
+```
+
+Diagnostics that have proven useful, all reachable through the panel console:
+
+* `KEBAB EARLY n: <label>` marks from `arm_init` and the bootstrap thread.
+* `KEBAB FAULT` with `ESR/ELR/FAR/SPSR` from the custom exception vector. ELR is
+  the faulting instruction; resolve it with
+  `llvm-objdump -d --arch-name=arm64 --start-address=<ELR-0x40> kernel.macho`.
+* White squares at the top of the panel from `kebab_early_breadcrumb()`.
+
 ## Next diagnostics, in order
 
 1. **Verify the vector install**: read `vbar_el1` back right after `msr` and
