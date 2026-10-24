@@ -1,6 +1,6 @@
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -463,6 +463,28 @@
+@@ -463,6 +463,29 @@
   *  arg8 - scratch
   *  arg9 - scratch
   */
@@ -19,7 +19,8 @@
 +98:	str	w10, [x9], #4
 +	subs	x11, x11, #1
 +	b.ne	98b
-+	add	x9, x9, #(4320 - 64)
++	mov	x13, #(4320 - 64)
++	add	x9, x9, x13
 +	subs	x12, x12, #1
 +	b.ne	99b
 +	dsb	sy
@@ -29,7 +30,7 @@
  .macro create_bootstrap_mapping
  	/* calculate entries left in this page */
  	and	$5, $0, #(ARM_TT_L2_INDEX_MASK)
-@@ -671,6 +693,7 @@
+@@ -671,6 +694,7 @@
  	 * x5 - total number of L2 entries to allocate
  	 */
  	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
@@ -37,7 +38,7 @@
  	/* create_bootstrap_mapping(vbase, pbase, num_ents, L1 table, freeptr) */
  	create_bootstrap_mapping x0,  x4,  x5, x1, x2, x6, x10, x11, x12, x13
  
-@@ -697,6 +720,7 @@
+@@ -697,6 +721,7 @@
  
  	/* Ensure TTEs are visible */
  	dsb		ish
@@ -45,7 +46,7 @@
  
  
  	b		common_start
-@@ -836,6 +860,7 @@
+@@ -836,6 +861,7 @@
  	MOV64   x0, SCTLR_EL1_DEFAULT
  	MSR_SCTLR_EL1_X0
  	isb		sy
@@ -53,7 +54,7 @@
  
  #if !VMAPPLE && !defined(KEBAB)
  	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -899,6 +924,8 @@
+@@ -899,6 +925,8 @@
  	mov	lr, x21
  #endif
  
