@@ -1,6 +1,6 @@
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
-@@ -347,6 +347,15 @@
+@@ -347,6 +347,25 @@
  	DTEntry chosen = NULL;
  	unsigned int dt_entry_size = 0;
  
@@ -9,9 +9,19 @@
 +	 * proves the ret from start.s landed in C code. No globals, no console
 +	 * state, no stack beyond the prologue.
 +	 */
-+	*(volatile uint32_t *)(0x9c000000u + 2292u * 4320u) = 0xffffffffu;
-+	*(volatile uint32_t *)(0x9c000000u + 2292u * 4320u + 0x40u) = 0xffffffffu;
-+	*(volatile uint32_t *)(0x9c000000u + 2292u * 4320u + 0x80u) = 0xffffffffu;
++	/*
++	 * Three 60x24 blocks at row 2353, x = 0, 100, 200 — same size as the
++	 * start.s stage marks, 50 rows below them.
++	 */
++	for (unsigned int probe_blk = 0; probe_blk < 3; probe_blk++) {
++		volatile uint32_t *probe_fb = (volatile uint32_t *)(0x9c000000u +
++		    2353u * 4320u + probe_blk * 400u);
++		for (unsigned int probe_y = 0; probe_y < 24; probe_y++) {
++			for (unsigned int probe_x = 0; probe_x < 60; probe_x++) {
++				probe_fb[probe_y * 1080u + probe_x] = 0xffffffffu;
++			}
++		}
++	}
 +
  	kebab_early_mark(1, "arm_init entered (MMU on)");
  
