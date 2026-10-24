@@ -39,7 +39,7 @@
  .macro	cswitch_epilogue
  #if __has_feature(ptrauth_calls)
  	retaa
-@@ -269,11 +301,55 @@
+@@ -269,11 +301,66 @@
  	.globl	EXT(machine_load_context)
  
  LEXT(machine_load_context)
@@ -81,7 +81,18 @@
 +	b.ne	90b
 +	dsb		sy
 +#endif
++#if defined(KEBAB)
++	/*
++	 * Bring-up experiment: restore only SP and LR. If the thread then starts,
++	 * the fault is somewhere inside load_general_registers (FP/FPCR or the
++	 * NEON loads).
++	 */
++	ldr		x2, [x1, SS64_KERNEL_SP]
++	ldr		x30, [x1, SS64_KERNEL_LR]
++	mov		sp, x2
++#else
  	load_general_registers 	x1, 2
++#endif
  	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
  	mov		x0, #0								// Clear argument to thread_continue
 +#if defined(KEBAB)
