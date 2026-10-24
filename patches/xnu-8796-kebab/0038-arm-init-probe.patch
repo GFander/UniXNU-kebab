@@ -35,3 +35,23 @@
  	arm_setup_pre_sign();
  
  	arm_slide_rebase_and_sign_image();
+@@ -364,8 +390,19 @@
+ 	BootCpuData.jop_key = ml_default_jop_pid();
+ #endif /* defined(HAS_APPLE_PAC) */
+ 
++	for (const char *p = "SOC="; *p; p++) { kebab_early_putc(*p); }
++	kebab_early_hex(pe_arm_get_soc_base_phys());
++	kebab_early_putc('\n');
++
+ 	PE_init_platform(FALSE, args); /* Get platform expert set up */
+ 	kebab_early_mark(2, "PE_init_platform done");
++	{
++		for (const char *p = "TB="; *p; p++) { kebab_early_putc(*p); }
++		kebab_early_hex(gPEClockFrequencyInfo.timebase_frequency_hz);
++		for (const char *p = " CPU="; *p; p++) { kebab_early_putc(*p); }
++		kebab_early_hex(ml_get_cpu_count());
++		kebab_early_putc('\n');
++	}
+ 
+ #if __arm64__
+ 	configure_timer_apple_regs();
