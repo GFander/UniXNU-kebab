@@ -61,7 +61,23 @@
  
  #if __arm64__
  	configure_timer_apple_regs();
-@@ -585,9 +628,11 @@
+@@ -428,6 +471,15 @@
+ 
+ 	ml_parse_cpu_topology();
+ 	kebab_early_mark(3, "ml_parse_cpu_topology done");
++	{
++		for (const char *q = "AFTER-Topology SOC="; *q; q++) { kebab_early_putc(*q); }
++		kebab_early_hex(pe_arm_get_soc_base_phys());
++		for (const char *q = " CPU="; *q; q++) { kebab_early_putc(*q); }
++		kebab_early_hex(ml_get_cpu_count());
++		for (const char *q = " TB="; *q; q++) { kebab_early_putc(*q); }
++		kebab_early_hex(gPEClockFrequencyInfo.timebase_frequency_hz);
++		kebab_early_putc('\n');
++	}
+ 
+ 
+ 	master_cpu = ml_get_boot_cpu_number();
+@@ -585,9 +637,11 @@
  		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
  	}
  	PE_create_console();
@@ -73,7 +89,7 @@
  
  #if __arm64__
  #if DEBUG
-@@ -598,6 +643,7 @@
+@@ -598,6 +652,7 @@
  	cpu_machine_idle_init(TRUE);
  
  	PE_init_platform(TRUE, &BootCpuData);
@@ -81,7 +97,7 @@
  
  #if __arm64__
  	extern bool cpu_config_correct;
-@@ -614,6 +660,7 @@
+@@ -614,6 +669,7 @@
  #endif
  
  	cpu_timebase_init(TRUE);
@@ -89,7 +105,7 @@
  
  #if KPERF
  	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
-@@ -622,6 +669,7 @@
+@@ -622,6 +678,7 @@
  
  	PE_init_cpu();
  	fiq_context_init(TRUE);
@@ -97,7 +113,7 @@
  
  
  #if HIBERNATION
-@@ -650,6 +698,7 @@
+@@ -650,6 +707,7 @@
  
  	gDramBase = *dram_base;
  	gDramSize = *dram_size;
