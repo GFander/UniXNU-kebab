@@ -35,10 +35,16 @@
  	arm_setup_pre_sign();
  
  	arm_slide_rebase_and_sign_image();
-@@ -364,8 +390,19 @@
+@@ -364,8 +390,25 @@
  	BootCpuData.jop_key = ml_default_jop_pid();
  #endif /* defined(HAS_APPLE_PAC) */
  
++	for (const char *p = "DT="; *p; p++) { kebab_early_putc(*p); }
++	kebab_early_hex((uint64_t)(uintptr_t)args->deviceTreeP);
++	for (const char *p = " LEN="; *p; p++) { kebab_early_putc(*p); }
++	kebab_early_hex(args->deviceTreeLength);
++	kebab_early_putc('\n');
++
 +	for (const char *p = "SOC="; *p; p++) { kebab_early_putc(*p); }
 +	kebab_early_hex(pe_arm_get_soc_base_phys());
 +	kebab_early_putc('\n');
