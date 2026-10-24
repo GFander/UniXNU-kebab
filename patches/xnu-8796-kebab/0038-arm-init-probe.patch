@@ -9,9 +9,9 @@
 +	 * proves the ret from start.s landed in C code. No globals, no console
 +	 * state, no stack beyond the prologue.
 +	 */
-+	*(volatile uint32_t *)(0x9c000000u + 2392u * 4320u) = 0xffffffffu;
-+	*(volatile uint32_t *)(0x9c000000u + 2392u * 4320u + 0x40u) = 0xffffffffu;
-+	*(volatile uint32_t *)(0x9c000000u + 2392u * 4320u + 0x80u) = 0xffffffffu;
++	*(volatile uint32_t *)(0x9c000000u + 2292u * 4320u) = 0xffffffffu;
++	*(volatile uint32_t *)(0x9c000000u + 2292u * 4320u + 0x40u) = 0xffffffffu;
++	*(volatile uint32_t *)(0x9c000000u + 2292u * 4320u + 0x80u) = 0xffffffffu;
 +
  	kebab_early_mark(1, "arm_init entered (MMU on)");
  

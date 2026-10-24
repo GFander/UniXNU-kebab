@@ -1,96 +1,20 @@
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -463,6 +463,30 @@
-  *  arg8 - scratch
-  *  arg9 - scratch
-  */
-+
-+/*
-+ * kebab bring-up post code: one 16x16 white square per completed stage on row
-+ * 2380 of the panel, at x = 200, 272, 344, 416. Together with the wide band at
-+ * x = 0 the squares tell us how far start.s got when the kernel hangs.
-+ */
-+.macro KEBAB_STAGE_MARK stage
-+#if defined(KEBAB)
-+	/* Stage N draws a 60x24 block at x = 100 + N*100 on row 2380. */
-+	MOV64	x9, (0x9c000000 + 2380 * 4320 + 100 * 4 + (\stage) * 400)
-+	mov	w10, #-1
-+	mov	x12, #24
-+97:	mov	x11, #60
-+96:	str	w10, [x9], #4
-+	subs	x11, x11, #1
-+	b.ne	96b
-+	mov	x13, #(4320 - 240)
-+	add	x9, x9, x13
-+	subs	x12, x12, #1
-+	b.ne	97b
-+	dsb	sy
-+#endif
-+.endm
-+
- .macro create_bootstrap_mapping
- 	/* calculate entries left in this page */
- 	and	$5, $0, #(ARM_TT_L2_INDEX_MASK)
-@@ -671,6 +695,7 @@
- 	 * x5 - total number of L2 entries to allocate
- 	 */
- 	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
-+	KEBAB_STAGE_MARK 1
- 	/* create_bootstrap_mapping(vbase, pbase, num_ents, L1 table, freeptr) */
- 	create_bootstrap_mapping x0,  x4,  x5, x1, x2, x6, x10, x11, x12, x13
+@@ -472,7 +472,7 @@
+ .macro KEBAB_STAGE_MARK stage
+ #if defined(KEBAB)
+ 	/* Stage N draws a 60x24 block at x = 100 + N*100 on row 2380. */
+-	MOV64	x9, (0x9c000000 + 2380 * 4320 + 100 * 4 + (\stage) * 400)
++	MOV64	x9, (0x9c000000 + 2280 * 4320 + 100 * 4 + (\stage) * 400)
+ 	mov	w10, #-1
+ 	mov	x12, #24
+ 97:	mov	x11, #60
+@@ -539,7 +539,7 @@
  
-@@ -697,6 +722,7 @@
- 
- 	/* Ensure TTEs are visible */
- 	dsb		ish
-+	KEBAB_STAGE_MARK 2
- 
- 
- 	b		common_start
-@@ -836,6 +862,7 @@
- 	MOV64   x0, SCTLR_EL1_DEFAULT
- 	MSR_SCTLR_EL1_X0
- 	isb		sy
-+	KEBAB_STAGE_MARK 3
- 
- #if !VMAPPLE && !defined(KEBAB)
- 	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -854,6 +881,7 @@
- 	mov		x0, #(CPACR_FPEN_ENABLE)
- 	msr		CPACR_EL1, x0
- #endif
-+	KEBAB_STAGE_MARK 4
- 
- 	// Clear thread pointer
- 	msr		TPIDR_EL1, xzr						// Set thread register
-@@ -865,11 +893,13 @@
- 	msr		MDSCR_EL1, x12
- 	// Initialization common to all non-virtual Apple targets
- #endif  // APPLE_ARM64_ARCH_FAMILY
-+	KEBAB_STAGE_MARK 5
- 
- 	// Read MIDR before start of per-SoC tunables
- 	mrs x12, MIDR_EL1
- 
- 	APPLY_TUNABLES x12, x13, x14
-+	KEBAB_STAGE_MARK 6
- 
- 
- #if HAS_CLUSTER
-@@ -885,6 +915,7 @@
- 	// Set KVA of boot args as first arg
- 	add		x0, x20, x22
- 	sub		x0, x0, x23
-+	KEBAB_STAGE_MARK 7
- 
- #if KASAN
- 	mov	x20, x0
-@@ -899,6 +930,8 @@
- 	mov	lr, x21
- #endif
- 
-+	KEBAB_STAGE_MARK 8
-+
- 	// Return to arm_init()
- 	ret
- 
+ #if defined(KEBAB)
+ 	/* Stage 0: white 64x32 band, no stack or page tables needed. */
+-	MOV64	x0, (0x9c000000 + 2380 * 4320)
++	MOV64	x0, (0x9c000000 + 2280 * 4320)
+ 	mov		w1, #-1
+ 	mov		x2, #32
+ 	mov		x4, #4320
