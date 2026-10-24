@@ -63,6 +63,40 @@ loader change, or a different window, reintroduces the mismatch. The durable
 alternative is to map the bootstrap region with 16 KiB L3 pages instead of
 32 MiB blocks.
 
+
+## Where the boot stops (2026-10-25 04:45)
+
+Everything up to `kernel_bootstrap()` works, including the framebuffer console
+(installed as the `cons_ops[VC_CONS_OPS].putc` backend) and the following
+startup phases:
+
+```
+pmap_startup / vm_page_bootstrap (15278 free pages)
+zone_init (all zones), IOKit IOND, ATM, OSLog, Firehose, Telemetry,
+Scheduler, BNRK, IPC_PTHREAD_PRIORITY
+kernel_bootstrap: ... kernel_thread_create, load_context - done
+```
+
+The last startup entries to print are `BNRK subsystem is initialized` and
+`IPC_PTHREAD_PRIORITY subsystem is initialized`; after that the machine sits
+still. No `kernel_bootstrap_thread: ...` message is ever printed even though
+`startup_debug=1` enables those, which points at the very beginning of
+`kernel_bootstrap_thread()` (`current_processor()`, i.e. TPIDR_EL1 carrying
+`cpu_data` after the context switch).
+
+Fixed earlier in the same session:
+
+* the bootstrap KVA map resolved 16 MiB past the kernel because 32 MiB L2
+  blocks take their low 25 bits from the VA; the kernel now links at
+  `0xfffffe0006004000` so the low bits match the load address `0xC0004000`;
+* the ADT gained the nodes `pe_arm_map_interrupt_controller()` and the panic-log
+  path look for (`interrupt-controller = "master"` on the GIC node, a
+  `device_type = "timer"` node, a top-level `pram` node and
+  `/chosen/embedded-panic-log-size`), so `gPicBase`/`gTimerBase` are mapped and
+  `gPanicBase` is no longer NULL;
+* `-enable_kprintf_spam` opens the DEVELOPMENT `disable_kprintf_output` gate and
+  `startup_debug=1` traces the bootstrap phases.
+
 ## Next diagnostics, in order
 
 1. **Verify the vector install**: read `vbar_el1` back right after `msr` and
