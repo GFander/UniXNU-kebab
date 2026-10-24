@@ -1,0 +1,53 @@
+--- a/libkern/crypto/corecrypto_sha1.c
++++ b/libkern/crypto/corecrypto_sha1.c
+@@ -2,6 +2,7 @@
+ #include <libkern/crypto/sha1.h>
+ #include <kern/debug.h>
+ #include <corecrypto/ccdigest.h>
++#include <corecrypto/ccsha1.h>
+ 
+ 
+ static uint64_t
+@@ -37,13 +38,18 @@
+ 	memcpy(ccdigest_state_ccn(di, di_ctx), sha1_ctx->h.b8, di->state_size);
+ }
+ 
++/*
++ * kebab: there is no crypto kext on this platform, so g_crypto_funcs stays
++ * NULL. Use the corecrypto implementation that is linked into the kernel
++ * directly instead of going through the kext dispatch table.
++ */
+ void
+ SHA1Init(SHA1_CTX *ctx)
+ {
+-	const struct ccdigest_info *di = g_crypto_funcs->ccsha1_di;
++	const struct ccdigest_info *di = ccsha1_di();
+ 	ccdigest_di_decl(di, di_ctx);
+ 
+-	g_crypto_funcs->ccdigest_init_fn(di, di_ctx);
++	ccdigest_init(di, di_ctx);
+ 
+ 	DiToSHA1(di, di_ctx, ctx);
+ }
+@@ -51,18 +57,18 @@
+ void
+ SHA1Update(SHA1_CTX *ctx, const void *data, size_t len)
+ {
+-	const struct ccdigest_info *di = g_crypto_funcs->ccsha1_di;
++	const struct ccdigest_info *di = ccsha1_di();
+ 	ccdigest_di_decl(di, di_ctx);
+ 
+ 	SHA1ToDi(di, ctx, di_ctx);
+-	g_crypto_funcs->ccdigest_update_fn(di, di_ctx, len, data);
++	ccdigest_update(di, di_ctx, len, data);
+ 	DiToSHA1(di, di_ctx, ctx);
+ }
+ 
+ void
+ SHA1Final(void *digest, SHA1_CTX *ctx)
+ {
+-	const struct ccdigest_info *di = g_crypto_funcs->ccsha1_di;
++	const struct ccdigest_info *di = ccsha1_di();
+ 	ccdigest_di_decl(di, di_ctx);
+ 
+ 	SHA1ToDi(di, ctx, di_ctx);
