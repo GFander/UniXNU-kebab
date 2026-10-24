@@ -1,0 +1,11 @@
+--- a/osfmk/arm64/kpc.c
++++ b/osfmk/arm64/kpc.c
+@@ -17,6 +17,8 @@
+ void
+ kpc_arch_init(void)
+ {
++	/* No hardware counters on this SoC: let the sysctl path report it. */
++	kpc_supported = false;
+ }
+ 
+ uint32_t

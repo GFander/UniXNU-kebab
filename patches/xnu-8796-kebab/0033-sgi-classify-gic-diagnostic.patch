@@ -1,0 +1,26 @@
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1992,7 +1992,7 @@
+ 		rtclock_intr(TRUE);
+ 		INTERRUPT_MASKED_DEBUG_END();
+ 		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
+-	} else if (intid < 16) {
++	} else if (intid == KEBAB_IPI_SGI) {
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_IPI);
+ 		/* Ack before handling so an IPI raised meanwhile is not lost */
+ 		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -197,6 +197,12 @@
+ 		gicr_write32(GICR_IPRIORITYR0 + i, 0xA0A0A0A0);
+ 	}
+ 	gicr_write32(GICR_ISENABLER0, (1U << kebab_vtimer_intid) | (1U << KEBAB_IPI_SGI));
++	/*
++	 * Read back: if the enable did not stick, firmware still owns these
++	 * sources and no amount of EL1 programming will deliver them.
++	 */
++	kprintf("KEBAB GIC: isenabler0=0x%08x igroupr0=0x%08x\n",
++	    (unsigned)gicr_read32(GICR_ISENABLER0), (unsigned)gicr_read32(GICR_IGROUPR0));
+ #else
+ 	// Configure timers and legacy FIQ to be group 0
+ 	gicr_write32(GICR_IGROUPR0, 0x81FFFFFF);
