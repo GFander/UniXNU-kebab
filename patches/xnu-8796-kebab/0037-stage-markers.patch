@@ -1,6 +1,60 @@
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -880,6 +880,7 @@
+@@ -463,6 +463,29 @@
+  *  arg8 - scratch
+  *  arg9 - scratch
+  */
++
++/*
++ * kebab bring-up post code: one 16x16 white square per completed stage on row
++ * 2380 of the panel, at x = 200, 272, 344, 416. Together with the wide band at
++ * x = 0 the squares tell us how far start.s got when the kernel hangs.
++ */
++.macro KEBAB_STAGE_MARK xoff
++#if defined(KEBAB)
++	MOV64	x9, (0x9c000000 + 2380 * 4320 + (\xoff))
++	mov	w10, #-1
++	mov	x12, #16
++99:	mov	x11, #16
++98:	str	w10, [x9], #4
++	subs	x11, x11, #1
++	b.ne	98b
++	mov	x13, #(4320 - 64)
++	add	x9, x9, x13
++	subs	x12, x12, #1
++	b.ne	99b
++	dsb	sy
++#endif
++.endm
++
+ .macro create_bootstrap_mapping
+ 	/* calculate entries left in this page */
+ 	and	$5, $0, #(ARM_TT_L2_INDEX_MASK)
+@@ -671,6 +694,7 @@
+ 	 * x5 - total number of L2 entries to allocate
+ 	 */
+ 	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
++	KEBAB_STAGE_MARK 200
+ 	/* create_bootstrap_mapping(vbase, pbase, num_ents, L1 table, freeptr) */
+ 	create_bootstrap_mapping x0,  x4,  x5, x1, x2, x6, x10, x11, x12, x13
+ 
+@@ -697,6 +721,7 @@
+ 
+ 	/* Ensure TTEs are visible */
+ 	dsb		ish
++	KEBAB_STAGE_MARK 272
+ 
+ 
+ 	b		common_start
+@@ -836,6 +861,7 @@
+ 	MOV64   x0, SCTLR_EL1_DEFAULT
+ 	MSR_SCTLR_EL1_X0
+ 	isb		sy
++	KEBAB_STAGE_MARK 344
+ 
+ #if !VMAPPLE && !defined(KEBAB)
+ 	MOV64   x1, SCTLR_EL1_DEFAULT
+@@ -854,6 +880,7 @@
  	mov		x0, #(CPACR_FPEN_ENABLE)
  	msr		CPACR_EL1, x0
  #endif
@@ -8,7 +62,7 @@
  
  	// Clear thread pointer
  	msr		TPIDR_EL1, xzr						// Set thread register
-@@ -891,11 +892,13 @@
+@@ -865,11 +892,13 @@
  	msr		MDSCR_EL1, x12
  	// Initialization common to all non-virtual Apple targets
  #endif  // APPLE_ARM64_ARCH_FAMILY
@@ -22,7 +76,7 @@
  
  
  #if HAS_CLUSTER
-@@ -911,6 +914,7 @@
+@@ -885,6 +914,7 @@
  	// Set KVA of boot args as first arg
  	add		x0, x20, x22
  	sub		x0, x0, x23
@@ -30,3 +84,12 @@
  
  #if KASAN
  	mov	x20, x0
+@@ -899,6 +929,8 @@
+ 	mov	lr, x21
+ #endif
+ 
++	KEBAB_STAGE_MARK 416
++
+ 	// Return to arm_init()
+ 	ret
+ 
