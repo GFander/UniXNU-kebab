@@ -74,7 +74,7 @@
  .macro create_bootstrap_mapping
  	/* calculate entries left in this page */
  	and	$5, $0, #(ARM_TT_L2_INDEX_MASK)
-@@ -497,6 +564,84 @@
+@@ -497,6 +564,82 @@
  2:
  .endmacro
  
@@ -151,15 +151,13 @@
 +	b.ne	83b
 +	dsb	sy
 +
-+	/* kebab: run arm_init at its identity address for now. */
-+	adrp	x9, EXT(arm_init)@page
-+	add	x9, x9, EXT(arm_init)@pageoff
-+	br	x9
++	// Return to arm_init()
++	ret
 +
  /*
   * _start_first_cpu
   * Cold boot init routine.  Called from __start
-@@ -515,7 +660,7 @@
+@@ -515,7 +658,7 @@
  
  #if defined(KEBAB)
  	/* Stage 0: white 64x32 band, no stack or page tables needed. */
@@ -168,23 +166,7 @@
  	mov		w1, #-1
  	mov		x2, #32
  	mov		x4, #4320
-@@ -882,9 +1027,12 @@
- 	// If x21 != 0, we're doing a warm reset, so we need to trampoline to the kernel pmap.
- 	cbnz	x21, Ltrampoline
- 
--	// Set KVA of boot args as first arg
--	add		x0, x20, x22
--	sub		x0, x0, x23
-+	/*
-+	 * kebab: hand arm_init the boot args at their identity address. The KVA
-+	 * alias of the boot-args page is not reliable yet, and a KVA pointer here
-+	 * made every field of boot_args read back as zero.
-+	 */
-+	mov		x0, x20
- 
- #if KASAN
- 	mov	x20, x0
-@@ -899,8 +1047,30 @@
+@@ -899,8 +1042,30 @@
  	mov	lr, x21
  #endif
  

@@ -35,7 +35,7 @@
  	arm_setup_pre_sign();
  
  	arm_slide_rebase_and_sign_image();
-@@ -364,8 +390,83 @@
+@@ -364,8 +390,25 @@
  	BootCpuData.jop_key = ml_default_jop_pid();
  #endif /* defined(HAS_APPLE_PAC) */
  
@@ -48,64 +48,6 @@
 +	for (const char *p = "SOC="; *p; p++) { kebab_early_putc(*p); }
 +	kebab_early_hex(pe_arm_get_soc_base_phys());
 +	kebab_early_putc('\n');
-+
-+	/*
-+	 * kebab: DarwinBoot stores the device tree pointer as a kernel virtual
-+	 * address (Kernel.Base + tree PA - kernel PA). While we still run at the
-+	 * identity address, rebase it to the physical address, otherwise
-+	 * SecureDTInit() reads unmapped memory and every lookup comes back empty.
-+	 */
-+	if (((uintptr_t)args->deviceTreeP >= (uintptr_t)args->virtBase) &&
-+	    ((uintptr_t)args->deviceTreeP < (uintptr_t)args->virtBase + (uintptr_t)args->memSize)) {
-+		args->deviceTreeP = (void *)((uintptr_t)args->deviceTreeP -
-+		    (uintptr_t)args->virtBase + (uintptr_t)args->physBase);
-+	}
-+
-+	{
-+		uint64_t tcr, ttbr0, ttbr1, sctlr;
-+		__asm__ volatile("mrs %0, tcr_el1" : "=r"(tcr));
-+		__asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
-+		__asm__ volatile("mrs %0, ttbr1_el1" : "=r"(ttbr1));
-+		__asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
-+		for (const char *p = "TCR="; *p; p++) { kebab_early_putc(*p); }
-+		kebab_early_hex(tcr);
-+		for (const char *p = " TTBR1="; *p; p++) { kebab_early_putc(*p); }
-+		kebab_early_hex(ttbr1);
-+		kebab_early_putc('\n');
-+		for (const char *p = "TTBR0="; *p; p++) { kebab_early_putc(*p); }
-+		kebab_early_hex(ttbr0);
-+		for (const char *p = " SCTLR="; *p; p++) { kebab_early_putc(*p); }
-+		kebab_early_hex(sctlr);
-+		kebab_early_putc('\n');
-+	}
-+
-+	{
-+		/* Walk the bootstrap tables for the kernel VA and report what we find. */
-+		uint64_t ttbr1;
-+		__asm__ volatile("mrs %0, ttbr1_el1" : "=r"(ttbr1));
-+		uint64_t l1_base = ttbr1 & 0x0000ffffffffc000ULL;
-+		uint64_t kva = (uint64_t)(uintptr_t)args->virtBase;
-+		uint64_t l1_idx = (kva >> 36) & 0x7ff;
-+		uint64_t *l1 = (uint64_t *)(uintptr_t)l1_base;
-+		uint64_t l1e = l1[l1_idx];
-+		uint64_t l2_base = l1e & 0x0000ffffffffc000ULL;
-+		uint64_t l2_idx = (kva >> 25) & 0x7ff;
-+		uint64_t *l2 = (uint64_t *)(uintptr_t)l2_base;
-+		uint64_t l2e = l2[l2_idx];
-+
-+		for (const char *p = "WALK L1IDX="; *p; p++) { kebab_early_putc(*p); }
-+		kebab_early_hex(l1_idx);
-+		for (const char *p = " L1E="; *p; p++) { kebab_early_putc(*p); }
-+		kebab_early_hex(l1e);
-+		kebab_early_putc('\n');
-+		for (const char *p = "WALK L2IDX="; *p; p++) { kebab_early_putc(*p); }
-+		kebab_early_hex(l2_idx);
-+		for (const char *p = " L2E="; *p; p++) { kebab_early_putc(*p); }
-+		kebab_early_hex(l2e);
-+		for (const char *p = " ->PA="; *p; p++) { kebab_early_putc(*p); }
-+		kebab_early_hex(l2e & 0x0000ffffffe00000ULL);
-+		kebab_early_putc('\n');
-+	}
 +
  	PE_init_platform(FALSE, args); /* Get platform expert set up */
  	kebab_early_mark(2, "PE_init_platform done");
