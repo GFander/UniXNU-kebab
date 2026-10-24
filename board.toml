@@ -14,18 +14,17 @@ kit = "sheng"        # builders hardcode kits/sheng; package/ is mapped there
 # source and prelinked against this kernelcache, so the donor only has to match
 # the XNU version and prelink ABI - it is not a device we emulate.
 [ipsw]
-url = "https://updates.cdn-apple.com/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw"
-product = "iPad7,1"
-version = "17.7.11"
-build = "21H461"
-device_class = "j120ap"
-chip_id = 0x8011
-board_id = 12
+url = "https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw"
+product = "iPhone10,3"
+version = "16.7.16"
+build = "20H392"
+device_class = "d22ap"
+chip_id = 0x8015
+board_id = 6
 fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache"]
 
-[ipsw.sha256]
-"044-76040-038.dmg" = "3f99b859c9728379110b66657c7b15285bcb1925ad8b5726542e2cdcf8b1028d"
-"044-76034-038.dmg" = "b4908cde41d23e6bc05e6af51a2c9eeb00cf0f863a6a18b1600c96a3fd70414f"
+# Pins are optional; the components of this IPSW are pinned by the
+# BuildManifest digest at fetch time.
 
 # GPT entry "userdata" on LU0 of this device (measured from UEFI):
 #   first=313312, last=0x3A847FF, logical block size 4096
@@ -40,6 +39,9 @@ windows = [
 
 [kernel]
 defconfig = "kebab_defconfig"
+# Route A builds a standalone 16 KiB kernel.
+script = "scripts/build-xnu-16k-kebab.sh"
+machine_config = "KEBAB"
 archives = [
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
@@ -51,30 +53,8 @@ archives = [
 
 # Values below match the donor kernelcache pinned above, so they are carried
 # over from the sheng port unchanged.  Re-check them if the IPSW ever changes.
-[kernel.prelink]
-tool = "kits/NativePrelink/emit_prelink.py"
-kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
-kernelcache_sha256 = "f18b4df865405f2a287b84977d7aca745e056d656d9fc9df1662970ce2969de7"
-slide = "-0x1000000"
-early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffff005ab4ae0"
-roots = [
-  "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
-  "com.apple.driver.AppleARMPlatform",
-  "com.apple.driver.AppleARMWatchdogTimer",
-  "com.apple.driver.AppleEffaceableStorage",
-  "com.apple.driver.AppleMobileFileIntegrity",
-  "com.apple.driver.ApplePMGR",
-  "com.apple.driver.IODARTFamily",
-  "com.apple.filesystems.apfs",
-  "com.apple.iokit.IOCryptoAcceleratorFamily",
-  "com.apple.iokit.IOStorageFamily",
-  "com.apple.kec.Libm",
-  "com.apple.kec.corecrypto",
-  "com.apple.security.AppleImage4",
-]
+# Route A (standalone 16 KiB kernel): no prelink, so no [kernel.prelink].
 
-# Firmware built from our own Mu-Silicium tree (used by `unixnu build firmware`
-# and by the boot image step; not needed for `unixnu build kernel`).
 [firmware]
 config = "kebab"
 dsc = "Platforms/OnePlus/kebabPkg/kebab.dsc"
@@ -125,4 +105,9 @@ kernel_args = [
   "-v",
   "serial=3",
   "debug=0x14e",
+  # The SMP port is in the kernel, but the first boot stays on the boot CPU:
+  # secondary bring-up depends on PSCI and the GIC redistributors agreeing
+  # with the ADT, which is easier to prove one CPU at a time.
+  "cpus=1",
+  "keepsyms=1",
 ]

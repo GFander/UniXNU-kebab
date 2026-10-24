@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Build the opt-in board diagnostic against this source kernel's actual ABI."""
 import hashlib
+
+def _xnu_obj_dir(root=None):
+    """Object directory of this tree's kernel pass, whatever machine config it used."""
+    base = Path(root or ROOT) / 'build/xnu/ios-obj'
+    found = sorted(base.glob('DEVELOPMENT_ARM64_*'))
+    return found[0] if found else base / 'DEVELOPMENT_ARM64_BCM2837'
+
+
 import json
 from pathlib import Path
 import subprocess
@@ -8,7 +16,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'build/boot-progress'
 OUT.mkdir(parents=True, exist_ok=True)
-record = json.loads((ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT/startup.o.json').read_text().strip().rstrip(','))
+record = json.loads((_xnu_obj_dir() / 'osfmk/DEVELOPMENT/startup.o.json').read_text().strip().rstrip(','))
 source = ROOT / 'kits/sheng/BootProgress.c'
 obj = OUT / 'BootProgress.o'
 command = []
@@ -40,7 +48,7 @@ fault_command = [str(fault_source) if arg == str(source) else str(fault_obj) if 
 subprocess.run(fault_command, cwd=record['directory'], check=True, timeout=90)
 policy_source = ROOT / 'kits/sheng/BootWatchdogPolicy.c'
 policy_obj = OUT / 'BootWatchdogPolicy.o'
-policy_record = json.loads((ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/kern_exec.o.json').read_text().strip().rstrip(','))
+policy_record = json.loads((_xnu_obj_dir() / 'bsd/DEVELOPMENT/kern_exec.o.json').read_text().strip().rstrip(','))
 policy_command = []
 policy_args = policy_record['arguments']
 j = 0

@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """Add the GMU kit and firmware planner objects to the NativeAdreno archive."""
 import json, subprocess, sys
+
+def _xnu_obj_dir(root=None):
+    """Object directory of this tree's kernel pass, whatever machine config it used."""
+    base = Path(root or ROOT) / 'build/xnu/ios-obj'
+    found = sorted(base.glob('DEVELOPMENT_ARM64_*'))
+    return found[0] if found else base / 'DEVELOPMENT_ARM64_BCM2837'
+
+
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
-c_recipe = json.loads((ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o.json').read_text().strip().rstrip(','))
-cxx_recipe = json.loads((ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
+c_recipe = json.loads((_xnu_obj_dir() / 'bsd/DEVELOPMENT/bsd_init.o.json').read_text().strip().rstrip(','))
+cxx_recipe = json.loads((_xnu_obj_dir() / 'iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
 out = ROOT / 'build/native-adreno'
 out.mkdir(parents=True, exist_ok=True)
 sources = [ROOT / 'kits/sheng' / name for name in
@@ -41,8 +49,7 @@ for source in sources:
                 '-I', str(ROOT / 'build/sheng-gmu'), '-I', str(ROOT / 'kits/AdrenoPM4'), '-I', str(ROOT / 'kits/ArmSmmu4K'), '-I', str(ROOT / '.cache/xnu-work/osfmk'),
                 '-I', str(ROOT / 'drivers/NativeAdreno'), '-Wall', '-Wextra', '-Werror',
                 '-Wno-unused-parameter', '-Wno-incompatible-sysroot', '-Wno-c99-designator',
-                '-Wno-reorder-init-list', '-Wno-deprecated-enum-enum-conversion',
-                '-Wno-unnecessary-virtual-specifier']
+                '-Wno-reorder-init-list', '-Wno-deprecated-enum-enum-conversion']
     result = subprocess.run(command, cwd=recipe['directory'], capture_output=True, text=True)
     if result.returncode:
         sys.exit(str(source) + ':\n' + result.stderr[-2500:])

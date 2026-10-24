@@ -1,0 +1,21 @@
+--- a/osfmk/arm64/kebab_early.c
++++ b/osfmk/arm64/kebab_early.c
+@@ -11,10 +11,16 @@
+ #include <stdint.h>
+ #include <kern/misc_protos.h>
+ 
+-static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0xb8000000;   /* Mu GOP framebuffer ("Display Reserved") */
++/*
++ * kebab: Mu GOP hands over the framebuffer at 0x9C000000 (DarwinBoot
++ * reports video base=0x9C000000, 1080x2400, 4320 bytes per row).
++ * The reference port used 0xB8000000, which is a different phone.
++ */
++#define KEBAB_EARLY_FB 0x9c000000u
++static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)KEBAB_EARLY_FB;
+ #define EARLY_FB early_fb
+ #define EARLY_WIDTH 1080u
+-#define EARLY_HEIGHT 2412u
++#define EARLY_HEIGHT 2400u
+ #define EARLY_STRIDE (4320u / 4)
+ #define EARLY_SCALE 2u
+ #define EARLY_CELL_W (8u * EARLY_SCALE)

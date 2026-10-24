@@ -1,0 +1,63 @@
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -347,8 +347,34 @@
+ 	DTEntry chosen = NULL;
+ 	unsigned int dt_entry_size = 0;
+ 
++	/*
++	 * Bring-up probe before anything else: a raw write to the framebuffer
++	 * proves the ret from start.s landed in C code. No globals, no console
++	 * state, no stack beyond the prologue.
++	 */
++	/*
++	 * Three 60x24 blocks at row 2280, x = 400, 500, 600: arm_init was entered.
++	 */
++	for (unsigned int probe_blk = 0; probe_blk < 3; probe_blk++) {
++		volatile uint32_t *probe_fb = (volatile uint32_t *)(0x9c000000u +
++		    2280u * 4320u + (400u + probe_blk * 100u) * 4u);
++		for (unsigned int probe_y = 0; probe_y < 24; probe_y++) {
++			for (unsigned int probe_x = 0; probe_x < 60; probe_x++) {
++				probe_fb[probe_y * 1080u + probe_x] = 0xffffffffu;
++			}
++		}
++	}
++
+ 	kebab_early_mark(1, "arm_init entered (MMU on)");
+ 
++	kebab_early_putc('V'); kebab_early_putc('A'); kebab_early_putc('=');
++	kebab_early_hex(args->virtBase);
++	kebab_early_putc(' '); kebab_early_putc('P'); kebab_early_putc('A'); kebab_early_putc('=');
++	kebab_early_hex(args->physBase);
++	kebab_early_putc(' '); kebab_early_putc('S'); kebab_early_putc('Z'); kebab_early_putc('=');
++	kebab_early_hex(args->memSize);
++	kebab_early_putc('\n');
++
+ 	arm_setup_pre_sign();
+ 
+ 	arm_slide_rebase_and_sign_image();
+@@ -364,8 +390,25 @@
+ 	BootCpuData.jop_key = ml_default_jop_pid();
+ #endif /* defined(HAS_APPLE_PAC) */
+ 
++	for (const char *p = "DT="; *p; p++) { kebab_early_putc(*p); }
++	kebab_early_hex((uint64_t)(uintptr_t)args->deviceTreeP);
++	for (const char *p = " LEN="; *p; p++) { kebab_early_putc(*p); }
++	kebab_early_hex(args->deviceTreeLength);
++	kebab_early_putc('\n');
++
++	for (const char *p = "SOC="; *p; p++) { kebab_early_putc(*p); }
++	kebab_early_hex(pe_arm_get_soc_base_phys());
++	kebab_early_putc('\n');
++
+ 	PE_init_platform(FALSE, args); /* Get platform expert set up */
+ 	kebab_early_mark(2, "PE_init_platform done");
++	{
++		for (const char *p = "TB="; *p; p++) { kebab_early_putc(*p); }
++		kebab_early_hex(gPEClockFrequencyInfo.timebase_frequency_hz);
++		for (const char *p = " CPU="; *p; p++) { kebab_early_putc(*p); }
++		kebab_early_hex(ml_get_cpu_count());
++		kebab_early_putc('\n');
++	}
+ 
+ #if __arm64__
+ 	configure_timer_apple_regs();

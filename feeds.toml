@@ -1,0 +1,14 @@
+# Device override of the UniXNU feed pins: this board builds the iOS 16 kernel
+# (xnu-8796) standalone, not the 17.x line the default pins describe.
+
+[[source]]
+name = "xnu"
+kind = "refer"
+git = "https://github.com/apple-oss-distributions/xnu.git"
+ref = "xnu-8796.141.3"
+commit = "1b191cb58250d0705d8a51287127505aa4bc0789"
+# Darwin 22.x is the macOS 13 / iOS 16 generation.
+darwin = "22.6.0"
+version = "8796.141.3"
+driverkit_tag = "xnu-8796.121.2"
+trustcache_tag = "xnu-8796.101.5"
