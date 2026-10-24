@@ -1,6 +1,54 @@
 --- a/osfmk/arm64/cswitch.s
 +++ b/osfmk/arm64/cswitch.s
-@@ -269,11 +269,35 @@
+@@ -157,6 +157,20 @@
+  *
+  * Returns to the address reloaded into LR, authenticating if needed.
+  */
++
++#if defined(KEBAB)
++/* Stackless bring-up marker: a 16 pixel white run at (40, row). */
++.macro KEBAB_MARK row
++	MOV64	x9, (0x9c000000 + \row * 4320 + 40 * 4)
++	mov		x10, #-1
++	mov		x11, #16
++91:	str		w10, [x9], #4
++	subs	x11, x11, #1
++	b.ne	91b
++	dsb		sy
++.endm
++#endif
++
+ .macro	cswitch_epilogue
+ #if __has_feature(ptrauth_calls)
+ 	retaa
+@@ -176,14 +190,26 @@
+  */
+ .macro	set_thread_registers
+ 	msr		TPIDR_EL1, $0						// Write new thread pointer to TPIDR_EL1
++#if defined(KEBAB)
++	KEBAB_MARK 44
++#endif
+ 	ldr		$1, [$0, ACT_CPUDATAP]
++#if defined(KEBAB)
++	KEBAB_MARK 60
++#endif
+ 	str		$0, [$1, CPU_ACTIVE_THREAD]
++#if defined(KEBAB)
++	KEBAB_MARK 76
++#endif
+ 
+ 	ldrsh	$2, [$1, CPU_NUMBER_GS]
+ 	msr		TPIDR_EL0, $2
+ 
+ 	ldr		$1, [$0, TH_CTH_SELF]				// Get cthread pointer
+ 	msr		TPIDRRO_EL0, $1
++#if defined(KEBAB)
++	KEBAB_MARK 92
++#endif
+ 
+ #if DEBUG || DEVELOPMENT
+ 	ldr		$1, [$0, TH_THREAD_ID]				// Save the bottom 32-bits of the thread ID into
+@@ -269,11 +295,35 @@
  	.globl	EXT(machine_load_context)
  
  LEXT(machine_load_context)
@@ -14,7 +62,7 @@
  	ldr		x1, [x0, TH_KSTACKPTR]				// Get top of kernel stack
 +#if defined(KEBAB)
 +	/* Stackless marker: set_thread_registers and the stack load both worked. */
-+	MOV64	x9, (0x9c000000 + 44 * 4320)
++	MOV64	x9, (0x9c000000 + 108 * 4320)
 +	mov		x10, #-1
 +	mov		x11, #16
 +90:	str		w10, [x9], #4
