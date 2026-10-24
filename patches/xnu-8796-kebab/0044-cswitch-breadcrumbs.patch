@@ -1,6 +1,6 @@
 --- a/osfmk/arm64/cswitch.s
 +++ b/osfmk/arm64/cswitch.s
-@@ -269,11 +269,25 @@
+@@ -269,11 +269,35 @@
  	.globl	EXT(machine_load_context)
  
  LEXT(machine_load_context)
@@ -12,6 +12,16 @@
 +#endif
  	set_thread_registers 	x0, x1, x2
  	ldr		x1, [x0, TH_KSTACKPTR]				// Get top of kernel stack
++#if defined(KEBAB)
++	/* Stackless marker: set_thread_registers and the stack load both worked. */
++	MOV64	x9, (0x9c000000 + 44 * 4320)
++	mov		x10, #-1
++	mov		x11, #16
++90:	str		w10, [x9], #4
++	subs	x11, x11, #1
++	b.ne	90b
++	dsb		sy
++#endif
  	load_general_registers 	x1, 2
  	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
  	mov		x0, #0								// Clear argument to thread_continue

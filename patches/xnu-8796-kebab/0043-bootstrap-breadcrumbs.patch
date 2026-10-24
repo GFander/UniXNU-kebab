@@ -39,10 +39,22 @@
  
  	load_context_kprintf("processor_up\n");
  
-@@ -955,6 +962,10 @@
+@@ -955,6 +962,22 @@
  	__asan_handle_no_return();
  #endif /* KASAN_TBI */
  
++	{
++		uint64_t cpacr, curel, vbar, spsel, sfpcr;
++		__asm__ volatile("mrs %0, cpacr_el1" : "=r"(cpacr));
++		__asm__ volatile("mrs %0, CurrentEL" : "=r"(curel));
++		__asm__ volatile("mrs %0, vbar_el1" : "=r"(vbar));
++		__asm__ volatile("mrs %0, SPSel" : "=r"(spsel));
++		/* Read the saved FPCR from memory: touching the FPCR register itself is
++		 * the very thing that may be trapping. */
++		sfpcr = *(uint32_t *)(uintptr_t)(thread->machine.kstackptr + 0xb0);
++		kprintf("load_context: CPACR=%lx CurrentEL=%lx SPSel=%lx VBAR=%lx savedFPCR=%lx\n",
++		    cpacr, curel >> 2, spsel, vbar, sfpcr);
++	}
 +	kprintf("load_context: thread=%p cpudatap=%p kstack=%lx kstackptr=%lx cont=%p\n",
 +	    thread, thread->machine.CpuDatap, thread->kernel_stack,
 +	    thread->machine.kstackptr, thread->continuation);
