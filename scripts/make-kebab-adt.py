@@ -35,6 +35,8 @@ GIC_DIST = 0x17A00000
 GIC_DIST_SIZE = 0x10000
 GIC_REDIST = 0x17A60000
 GIC_REDIST_SIZE = 0x100000
+PANIC_LOG_BASE = 0xC8000000   # 128 MiB into the 256 MiB window; far from the kernel image
+PANIC_LOG_SIZE = 0xB4000
 GIC_REDIST_STRIDE = 0x20000      # 8 cores x 0x20000 == the 0x100000 range
 TIMEBASE = 19200000
 UFS_HC = 0x01D84000
@@ -208,6 +210,7 @@ def main():
                           if (args.data_ramdisk or args.packed_data_ramdisk) else []),
                         *([('darwinboot-memory-size', struct.pack('<Q', args.owned_memory_size))]
                           if args.owned_memory_size else []),
+                        ('embedded-panic-log-size', struct.pack('<I', PANIC_LOG_SIZE)),
                         ('dram-base', struct.pack('<Q', DRAM_BASE)),
                         ('dram-size', struct.pack('<Q', args.dram_size)),
                         ('crypto-hash-method', b'sha2-384\0'),
@@ -221,6 +224,8 @@ def main():
                                   if (args.data_ramdisk or args.packed_data_ramdisk) else []) +
                                  ([('TrustCache', bytes(16))] if args.trust_cache else [])),
               node('manifest-properties')]),
+        # Panic log lives at the far end of the window the loader hands over.
+        node('pram', [('reg', struct.pack('<QQ', PANIC_LOG_BASE, PANIC_LOG_SIZE))]),
         node('cpus', children=cpus),
         *([node('psci', [('compatible', b'arm,psci-1.0\0'),
                          ('method', args.psci_method.encode() + b'\0')])] if len(cpus) > 1 else []),
@@ -238,11 +243,18 @@ def main():
                         ('#size-cells', struct.pack('<I', 2)),
                         ('ranges', struct.pack('<QQQ', 0, ARMIO_BASE, ARMIO_SIZE))],
              [node('gic', [('compatible', b'arm,gic-v3\0'),
+                            # XNU finds the PIC with SecureDTFindEntry("interrupt-controller", "master").
+                            ('interrupt-controller', b'master\0'),
                             ('reg', struct.pack('<4Q',
                                                 GIC_DIST - ARMIO_BASE, GIC_DIST_SIZE,
                                                 GIC_REDIST - ARMIO_BASE, GIC_REDIST_SIZE)),
                             ('redistributor-stride', struct.pack('<I', GIC_REDIST_STRIDE)),
                             ('virtual-timer-intid', struct.pack('<I', 27))]),
+              # pe_arm_map_interrupt_controller() also insists on a timer node; the
+              # arm64 generic timer lives in system registers, so the window only
+              # has to be a mapped device range.
+              node('timer', [('device_type', b'timer\0'),
+                             ('reg', struct.pack('<QQ', GIC_DIST - ARMIO_BASE, 0x1000))]),
               # UFS (0x01D84000) lies far below the arm-io window, so a child reg
               # offset would be negative. The node exists only for class matching;
               # the driver takes its physical windows from board constants.
