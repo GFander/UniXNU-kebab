@@ -1,0 +1,17 @@
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -330,8 +330,13 @@
+ # Use ARM_LARGE_MEMORY config for all MacOSX targets.
+ ifneq ($(filter $(PLATFORM),MacOSX),)
+ LARGE_MEMORY_DEFINE=-DARM_LARGE_MEMORY=1
+-ARM64_PLKSEG_ADDR  =0xfffffe0004004000
+-ARM64_LINK_ADDR    =0xfffffe0007004000
++# kebab: the bootstrap page tables map the kernel with 32 MiB L2 blocks, so the
++# low 25 bits of the link address must equal the low 25 bits of the physical
++# load address (0xC0004000 -> 0x4000 here). 0xfffffe0007004000 has bit 24 set
++# and made the KVA alias resolve 16 MiB past the kernel image.
++ARM64_PLKSEG_ADDR  =0xfffffe0003004000
++ARM64_LINK_ADDR    =0xfffffe0006004000
+ endif
+ 
+ 
