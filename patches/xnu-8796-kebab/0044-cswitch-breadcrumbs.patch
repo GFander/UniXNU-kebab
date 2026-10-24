@@ -1,6 +1,6 @@
 --- a/osfmk/arm64/cswitch.s
 +++ b/osfmk/arm64/cswitch.s
-@@ -157,6 +157,38 @@
+@@ -157,6 +157,40 @@
   *
   * Returns to the address reloaded into LR, authenticating if needed.
   */
@@ -20,7 +20,9 @@
 +	and		x10, x10, #15
 +	mov		x11, #40
 +	madd	x10, x10, x11, xzr
-+	MOV64	x9, (0x9c000000 + 8 * 4320 + 420 * 4)
++	/* MOV64 in this file expands to movk only, so build the address here. */
++	movz	x9, #0x8d90
++	movk	x9, #0x9c00, lsl #16
 +	add		x9, x9, x10, lsl #2
 +	mov		x12, #24
 +92:	mov		x11, #28
@@ -39,7 +41,7 @@
  .macro	cswitch_epilogue
  #if __has_feature(ptrauth_calls)
  	retaa
-@@ -269,11 +301,66 @@
+@@ -269,11 +303,67 @@
  	.globl	EXT(machine_load_context)
  
  LEXT(machine_load_context)
@@ -73,7 +75,8 @@
  	ldr		x1, [x0, TH_KSTACKPTR]				// Get top of kernel stack
 +#if defined(KEBAB)
 +	/* Stackless marker: set_thread_registers and the stack load both worked. */
-+	MOV64	x9, (0x9c000000 + 108 * 4320)
++	movz	x9, #0x1e80
++	movk	x9, #0x9c07, lsl #16
 +	mov		x10, #-1
 +	mov		x11, #16
 +90:	str		w10, [x9], #4
