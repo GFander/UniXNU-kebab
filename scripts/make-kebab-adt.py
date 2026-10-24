@@ -233,9 +233,7 @@ def main():
                                                    ('button-names', b'hold\0voldown\0volup\0')])]
                                  if args.iphone_identity else [])),
         product_node,
-        # XNU finds this node with SecureDTFindEntry("name", "arm-io"): the
-        # property matters, the node name alone does not.
-        node('arm-io', [('name', b'arm-io\0'), ('device_type', b'arm-io\0'),
+        node('arm-io', [('device_type', b'arm-io\0'),
                         ('#address-cells', struct.pack('<I', 2)),
                         ('#size-cells', struct.pack('<I', 2)),
                         ('ranges', struct.pack('<QQQ', 0, ARMIO_BASE, ARMIO_SIZE))],
