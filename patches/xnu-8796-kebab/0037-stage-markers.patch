@@ -1,6 +1,6 @@
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -497,6 +497,36 @@
+@@ -497,6 +497,40 @@
  2:
  .endmacro
  
@@ -12,17 +12,21 @@
 + */
 +	.align 2
 +LEXT(kebab_fault_handler)
-+	MOV64	x9, (0x9c000000 + 2300 * 4320)
++	/* Same shape as the entry band (64x32), 80 rows above it, in red. */
++	MOV64	x9, (0x9c000000 + 2200 * 4320)
 +	mov	w10, #0x000000ff
-+	mov	x12, #24
-+81:	mov	x11, #60
-+80:	str	w10, [x9], #4
-+	subs	x11, x11, #1
-+	b.ne	80b
-+	mov	x13, #(4320 - 240)
-+	add	x9, x9, x13
++	mov	x12, #32
++	mov	x4, #4320
++Lkebab_fault_row:
++	mov	x3, #64
++	mov	x5, x9
++Lkebab_fault_pixel:
++	str	w10, [x5], #4
++	subs	x3, x3, #1
++	b.ne	Lkebab_fault_pixel
++	add	x9, x9, x4
 +	subs	x12, x12, #1
-+	b.ne	81b
++	b.ne	Lkebab_fault_row
 +	dsb	sy
 +82:	wfi
 +	b	82b
@@ -37,7 +41,7 @@
  /*
   * _start_first_cpu
   * Cold boot init routine.  Called from __start
-@@ -515,7 +545,7 @@
+@@ -515,7 +549,7 @@
  
  #if defined(KEBAB)
  	/* Stage 0: white 64x32 band, no stack or page tables needed. */
@@ -46,7 +50,7 @@
  	mov		w1, #-1
  	mov		x2, #32
  	mov		x4, #4320
-@@ -899,6 +929,14 @@
+@@ -899,6 +933,14 @@
  	mov	lr, x21
  #endif
  
