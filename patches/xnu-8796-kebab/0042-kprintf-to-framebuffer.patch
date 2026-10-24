@@ -14,8 +14,8 @@
  {
 +#if defined(KEBAB)
 +	/*
-+	 * There is no UART on this phone, and the generic path would block on the
-+	 * absent hardware, so the panel is the console.
++	 * No UART exists on this phone and no console ops are registered, so the
++	 * generic path would call through a null putc. The panel is the console.
 +	 */
 +	kebab_early_putc(c);
 +#else
