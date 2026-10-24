@@ -81,3 +81,11 @@
  
  	/*
  	 * Initialize the stack protector for all future calls
+@@ -663,6 +690,7 @@
+ 	 * against string vulnerabilities
+ 	 */
+ 	__stack_chk_guard &= ~(0xFFULL << 8);
++	kebab_early_mark(27, "calling machine_startup");
+ 	machine_startup(args);
+ }
+ 

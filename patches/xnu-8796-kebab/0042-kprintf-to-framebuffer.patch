@@ -1,23 +1,21 @@
---- a/osfmk/kern/printf.c
-+++ b/osfmk/kern/printf.c
-@@ -856,12 +856,20 @@
- #endif
- }
- 
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -598,10 +598,18 @@
+  *
+  * @param c The character to print.
+  */
 +#if defined(KEBAB)
-+/* The phone exposes no UART, so mirror every console character to the panel. */
++/* The phone exposes no UART; mirror every console character to the panel. */
 +extern void kebab_early_putc(char c);
 +#endif
 +
  void
- cons_putc_locked(char c)
+ console_write_char(char c)
  {
- 	if (!disableConsoleOutput) {
- 		console_write_char(c);
- 	}
+ 	console_write(&c, 1);
 +#if defined(KEBAB)
 +	kebab_early_putc(c);
 +#endif
  }
  
- __printflike(1, 0)
+ /**
