@@ -167,7 +167,10 @@ def main():
                                    ('reg', struct.pack('<I', reg)),
                                    ('device_type', b'cpu\0'),
                                    ('compatible', cpu_compatible(reg)),
-                                   ('timebase-frequency', struct.pack('<I', args.timebase))])
+                                   ('timebase-frequency', struct.pack('<I', args.timebase)),
+                                   # XNU divides by this; an absent property leaves
+                                   # bus_clock_rate_hz at 0 and breaks the clock ratios.
+                                   ('bus-frequency', struct.pack('<I', args.timebase))])
             for index, reg in enumerate(cpu_regs)]
 
     if args.iphone_identity and args.product_file and args.product_file.is_file():
