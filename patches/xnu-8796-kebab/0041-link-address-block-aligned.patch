@@ -1,17 +1,77 @@
 --- a/makedefs/MakeInc.def
 +++ b/makedefs/MakeInc.def
-@@ -330,8 +330,13 @@
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -29,7 +29,7 @@ SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
+ else ifneq ($(findstring _host,$(RC_ProjectName)),)
+ SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
+ else
+-SUPPORTED_ARM64_MACHINE_CONFIGS = BCM2837 T6000 T8101 T8103 VMAPPLE
++SUPPORTED_ARM64_MACHINE_CONFIGS = BCM2837 KEBAB T6000 T8101 T8103 VMAPPLE
+ 
+ endif
+ 
+@@ -61,6 +61,7 @@ MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103                  -mcpu=ap
+ MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000 		-mcpu=apple-a14
+ MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=armv8.5a
+ MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837
++MACHINE_FLAGS_ARM64_KEBAB = -DARM64_BOARD_CONFIG_KEBAB -D__ARM_16K_PG__ -DKEBAB
+ 
+ 
+ #
+@@ -259,8 +260,11 @@ ifeq ($(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG),)
+ # Without embdedded device map, use a default arch string
+ export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := $(shell echo $(CURRENT_ARCH_CONFIG) | tr A-Z a-z)
+ ifneq ($(filter arm64,$(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG)),)
++# kebab's Cortex-A77/A55 have no pointer authentication: stay plain arm64.
++ifneq ($(CURRENT_MACHINE_CONFIG),KEBAB)
+ export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := arm64e
+ endif
++endif
+ 
+ endif
+ 
+@@ -306,7 +310,6 @@ CFLAGS_GEN = $(DEBUG_CFLAGS) -nostdinc \
+ 	-fno-builtin \
+ 	-fno-common \
+ 	-ftrivial-auto-var-init=zero \
+-	-enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang \
+ 	-fsigned-bitfields \
+ 	-fmerge-all-constants \
+ 	-fno-c++-static-destructors \
+@@ -330,8 +333,12 @@ ARM64_LINK_ADDR    =0xfffffff007004000
  # Use ARM_LARGE_MEMORY config for all MacOSX targets.
  ifneq ($(filter $(PLATFORM),MacOSX),)
  LARGE_MEMORY_DEFINE=-DARM_LARGE_MEMORY=1
 -ARM64_PLKSEG_ADDR  =0xfffffe0004004000
 -ARM64_LINK_ADDR    =0xfffffe0007004000
-+# kebab: the bootstrap page tables map the kernel with 32 MiB L2 blocks, so the
-+# low 25 bits of the link address must equal the low 25 bits of the physical
-+# load address (0xC0004000 -> 0x4000 here). 0xfffffe0007004000 has bit 24 set
-+# and made the KVA alias resolve 16 MiB past the kernel image.
++# kebab: the bootstrap tables map the kernel with 32 MiB L2 blocks, so the low
++# 25 bits of the link address must equal the low 25 bits of the physical load
++# address (0xC0004000 -> 0x4000). 0xfffffe0007004000 has bit 24 set, which made
++# the KVA alias resolve 16 MiB past the kernel image.
 +ARM64_PLKSEG_ADDR  =0xfffffe0003004000
 +ARM64_LINK_ADDR    =0xfffffe0006004000
  endif
  
+ 
+@@ -642,7 +649,8 @@ LDFLAGS_KERNEL_GEN = \
+ 	-Wl,-headerpad,152
+ 
+ # LDFLAGS_KERNEL_SDK	= -L$(SDKROOT)/usr/local/lib/kernel -lfirehose_kernel
+-LDFLAGS_KERNEL_SDK	= -L$(SDKROOT)/usr/local/lib/kernel -L$(SDKROOT)/usr/local/lib/kernel/platform
++export KERNEL_SDKROOT ?= $(SDKROOT)
++LDFLAGS_KERNEL_SDK	= -L$(KERNEL_SDKROOT)/usr/local/lib/kernel -L$(KERNEL_SDKROOT)/usr/local/lib/kernel/platform
+ 
+ LDFLAGS_KERNEL_RELEASE	=
+ LDFLAGS_KERNEL_DEVELOPMENT =
+@@ -884,8 +892,8 @@ INCFLAGS_IMPORT	= $(patsubst %, -I$(OBJROOT)/EXPORT_HDRS/%, $(COMPONENT_IMPORT_L
+ INCFLAGS_EXTERN	= -I$(SRCROOT)/EXTERNAL_HEADERS
+ INCFLAGS_GEN	= -I$(SRCROOT)/$(COMPONENT) -I$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)
+ INCFLAGS_LOCAL	= -I.
+-INCFLAGS_SDK	= -I$(SDKROOT)/usr/local/include/kernel
+-INCFLAGS_PLATFORM = -I$(SDKROOT)/$(KPINCDIR)/platform
++INCFLAGS_SDK	= -I$(KERNEL_SDKROOT)/usr/local/include/kernel -I$(KERNEL_SDKROOT)/usr/local/include
++INCFLAGS_PLATFORM = -I$(KERNEL_SDKROOT)/$(KPINCDIR)/platform
+ 
+ INCFLAGS	= $(INCFLAGS_LOCAL) $(INCFLAGS_GEN) $(INCFLAGS_IMPORT) $(INCFLAGS_EXTERN) $(INCFLAGS_MAKEFILE) $(INCFLAGS_SDK) $(INCFLAGS_PLATFORM)
  
