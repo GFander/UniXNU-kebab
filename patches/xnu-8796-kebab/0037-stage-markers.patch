@@ -1,6 +1,6 @@
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -463,6 +463,56 @@
+@@ -463,6 +463,85 @@
   *  arg8 - scratch
   *  arg9 - scratch
   */
@@ -35,21 +35,50 @@
 + */
 +.macro KEBAB_KVA_PROBE
 +#if defined(KEBAB)
-+	MOV64	x9, 0x9c000000
-+	add	x9, x9, x22
-+	sub	x9, x9, x23
-+	MOV64	x14, (2353 * 4320 + 300 * 4)
-+	add	x9, x9, x14
++	/* x=100: V=P block, proves we reached this point (row 2280). */
++	MOV64	x9, (0x9c000000 + 2280 * 4320 + 100 * 4)
 +	mov	w10, #-1
 +	mov	x12, #24
-+95:	mov	x11, #60
-+94:	str	w10, [x9], #4
++93:	mov	x11, #60
++92:	str	w10, [x9], #4
 +	subs	x11, x11, #1
-+	b.ne	94b
++	b.ne	92b
 +	mov	x13, #(4320 - 240)
 +	add	x9, x9, x13
 +	subs	x12, x12, #1
-+	b.ne	95b
++	b.ne	93b
++	dsb	sy
++
++	/* x=200: the same block drawn through the KVA alias of the framebuffer. */
++	MOV64	x9, 0x9c000000
++	add	x9, x9, x22
++	sub	x9, x9, x23
++	MOV64	x14, (2280 * 4320 + 200 * 4)
++	add	x9, x9, x14
++	mov	w10, #-1
++	mov	x12, #24
++93:	mov	x11, #60
++92:	str	w10, [x9], #4
++	subs	x11, x11, #1
++	b.ne	92b
++	mov	x13, #(4320 - 240)
++	add	x9, x9, x13
++	subs	x12, x12, #1
++	b.ne	93b
++	dsb	sy
++
++	/* x=300: V=P block again, proves the KVA store did not fault. */
++	MOV64	x9, (0x9c000000 + 2280 * 4320 + 300 * 4)
++	mov	w10, #-1
++	mov	x12, #24
++93:	mov	x11, #60
++92:	str	w10, [x9], #4
++	subs	x11, x11, #1
++	b.ne	92b
++	mov	x13, #(4320 - 240)
++	add	x9, x9, x13
++	subs	x12, x12, #1
++	b.ne	93b
 +	dsb	sy
 +#endif
 +.endm
@@ -57,7 +86,7 @@
  .macro create_bootstrap_mapping
  	/* calculate entries left in this page */
  	and	$5, $0, #(ARM_TT_L2_INDEX_MASK)
-@@ -515,7 +565,7 @@
+@@ -515,7 +594,7 @@
  
  #if defined(KEBAB)
  	/* Stage 0: white 64x32 band, no stack or page tables needed. */
@@ -66,65 +95,10 @@
  	mov		w1, #-1
  	mov		x2, #32
  	mov		x4, #4320
-@@ -671,6 +721,7 @@
- 	 * x5 - total number of L2 entries to allocate
- 	 */
- 	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
-+	KEBAB_STAGE_MARK 1
- 	/* create_bootstrap_mapping(vbase, pbase, num_ents, L1 table, freeptr) */
- 	create_bootstrap_mapping x0,  x4,  x5, x1, x2, x6, x10, x11, x12, x13
- 
-@@ -697,6 +748,7 @@
- 
- 	/* Ensure TTEs are visible */
- 	dsb		ish
-+	KEBAB_STAGE_MARK 2
- 
- 
- 	b		common_start
-@@ -836,6 +888,7 @@
- 	MOV64   x0, SCTLR_EL1_DEFAULT
- 	MSR_SCTLR_EL1_X0
- 	isb		sy
-+	KEBAB_STAGE_MARK 3
- 
- #if !VMAPPLE && !defined(KEBAB)
- 	MOV64   x1, SCTLR_EL1_DEFAULT
-@@ -854,6 +907,7 @@
- 	mov		x0, #(CPACR_FPEN_ENABLE)
- 	msr		CPACR_EL1, x0
- #endif
-+	KEBAB_STAGE_MARK 4
- 
- 	// Clear thread pointer
- 	msr		TPIDR_EL1, xzr						// Set thread register
-@@ -865,11 +919,13 @@
- 	msr		MDSCR_EL1, x12
- 	// Initialization common to all non-virtual Apple targets
- #endif  // APPLE_ARM64_ARCH_FAMILY
-+	KEBAB_STAGE_MARK 5
- 
- 	// Read MIDR before start of per-SoC tunables
- 	mrs x12, MIDR_EL1
- 
- 	APPLY_TUNABLES x12, x13, x14
-+	KEBAB_STAGE_MARK 6
- 
- 
- #if HAS_CLUSTER
-@@ -885,6 +941,7 @@
- 	// Set KVA of boot args as first arg
- 	add		x0, x20, x22
- 	sub		x0, x0, x23
-+	KEBAB_STAGE_MARK 7
- 
- #if KASAN
- 	mov	x20, x0
-@@ -899,6 +956,9 @@
+@@ -899,6 +978,8 @@
  	mov	lr, x21
  #endif
  
-+	KEBAB_STAGE_MARK 8
 +	KEBAB_KVA_PROBE
 +
  	// Return to arm_init()
