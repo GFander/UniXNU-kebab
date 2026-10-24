@@ -1,6 +1,6 @@
 --- a/osfmk/console/serial_console.c
 +++ b/osfmk/console/serial_console.c
-@@ -598,10 +598,18 @@
+@@ -598,10 +598,23 @@
   *
   * @param c The character to print.
   */
@@ -12,9 +12,14 @@
  void
  console_write_char(char c)
  {
- 	console_write(&c, 1);
 +#if defined(KEBAB)
++	/*
++	 * There is no UART on this phone, and the generic path would block on the
++	 * absent hardware, so the panel is the console.
++	 */
 +	kebab_early_putc(c);
++#else
+ 	console_write(&c, 1);
 +#endif
  }
  
