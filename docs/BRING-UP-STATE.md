@@ -97,6 +97,51 @@ Fixed earlier in the same session:
 * `-enable_kprintf_spam` opens the DEVELOPMENT `disable_kprintf_output` gate and
   `startup_debug=1` traces the bootstrap phases.
 
+
+## Boot progress (2026-10-25 07:45)
+
+The kernel now runs a long way into `kernel_bootstrap_thread`. Verified on hardware:
+
+```
+start_first_cpu -> arm_init -> PE_init_platform -> ml_parse_cpu_topology
+arm_vm_init (real pmap, bootstrap TTBR0 dropped) -> pmap_bootstrap
+machine_startup -> kernel_bootstrap -> load_context (first thread switch works)
+kernel_bootstrap_thread:
+    idle_thread_create, sched_startup, thread_daemon_init, thread_call,
+    thread_bind, mapping_adjust, clock_service_create,
+    kdp_init, bootprofile_init, sysctl phase
+```
+
+Two hard bugs were found and fixed on the way:
+
+* **The bootstrap KVA map resolved 16 MiB past the kernel** because the 32 MiB
+  L2 blocks take their low 25 bits from the virtual address. Fixed by linking
+  at `0xfffffe0006004000` so the low bits match the load address `0xC0004000`.
+* **The first context switch executed an ARMv8.4 instruction (`mrs x, DIT`)**.
+  The SM8250 cores are ARMv8.2, so that traps as an undefined instruction.
+  Fixed by forcing `__ARM_ARCH_8_4__` to 0 for KEBAB and guarding the DIT
+  blocks in `cswitch.s`.
+
+Also worth remembering: **the bring-up probes themselves were a source of false
+faults.** The C console follows the relocated framebuffer pointer, but the first
+inline assembly markers hard-coded `0x9C000000`, which is unmapped once
+`arm_vm_init` drops TTBR0 — those markers faulted and made the kernel look stuck
+in `load_context`. Any new inline probe must read `early_fb` at run time.
+
+## Current blocker
+
+A data abort in `_SHA1Init`, `FAR = 0x28`:
+
+```
+libkern/crypto/corecrypto_sha1.c:43
+    const struct ccdigest_info *di = g_crypto_funcs->ccsha1_di;
+```
+
+`g_crypto_funcs` is only set by `register_crypto_functions()`, which nothing in
+the open-source tree calls (Apple's kext does that). The negroni project solved
+this by replacing the `corecrypto_*` wrappers with self-contained BearSSL
+implementations; those patches are being ported to 8796.
+
 ## Next diagnostics, in order
 
 1. **Verify the vector install**: read `vbar_el1` back right after `msr` and
