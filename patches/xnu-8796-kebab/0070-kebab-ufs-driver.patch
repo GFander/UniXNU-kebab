@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_ufs.c b/bsd/dev/kebab_ufs.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_ufs.c
-@@ -0,0 +1,848 @@
+@@ -0,0 +1,921 @@
 +/*
 + * KEBAB internal UFS root device (read-only).
 + *
@@ -28,6 +28,8 @@ new file mode 100644
 +#if defined(KEBAB)
 +#include <sys/param.h>
 +#include <sys/systm.h>
++
++extern void kebab_early_putc(char c);
 +#include <sys/buf.h>
 +#include <sys/conf.h>
 +#include <sys/disk.h>
@@ -114,6 +116,7 @@ new file mode 100644
 +	uint64_t first_block, nblocks;          /* partition, in 4 KiB device blocks */
 +	uint32_t secsize;                       /* logical sector size for the BSD layer */
 +	int bmajor, cmajor;
++	int conmajor;
 +	dev_t bdev;
 +	bool ready;
 +	bool writable;                         /* boot-arg ufsrw=1 */
@@ -684,6 +687,61 @@ new file mode 100644
 +	.d_type     = D_DISK,
 +};
 +
++/*
++ * /dev/kebabcon - a write-only console for userland.
++ *
++ * The kernel log already reaches the panel through cons_ops, but userland has
++ * no tty on this port: /dev/console resolves through cnopen -> cndev ->
++ * km_tty[0] -> kmopen, and that path does not complete here yet. Rather than
++ * fight the tty layer for a bring-up test, expose the framebuffer console as a
++ * plain character device: whatever a process writes is drawn directly.
++ */
++static int
++kebabcon_open(__unused dev_t dev, __unused int flags, __unused int devtype,
++    __unused struct proc *p)
++{
++	return 0;
++}
++
++static int
++kebabcon_close(__unused dev_t dev, __unused int flags, __unused int mode,
++    __unused struct proc *p)
++{
++	return 0;
++}
++
++static int
++kebabcon_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	char buf[64];
++
++	while (uio_resid(uio) > 0) {
++		size_t want = MIN(sizeof(buf), (size_t)uio_resid(uio));
++		int error = uiomove(buf, (int)want, uio);
++		if (error) {
++			return error;
++		}
++		for (size_t i = 0; i < want; i++) {
++			kebab_early_putc(buf[i]);
++		}
++	}
++	return 0;
++}
++
++static const struct cdevsw kebabcon_cdevsw = {
++	.d_open   = kebabcon_open,
++	.d_close  = kebabcon_close,
++	.d_read   = eno_rdwrt,
++	.d_write  = kebabcon_write,
++	.d_ioctl  = eno_ioctl,
++	.d_stop   = eno_stop,
++	.d_reset  = eno_reset,
++	.d_select = eno_select,
++	.d_mmap   = eno_mmap,
++	.d_strategy = eno_strat,
++	.d_type   = D_TTY,
++};
++
 +static const struct cdevsw kebab_ufs_cdevsw = {
 +	.d_open       = kebab_ufs_open,
 +	.d_close      = kebab_ufs_close,
@@ -815,6 +873,21 @@ new file mode 100644
 +	su.bdev = makedev(su.bmajor, 0);
 +	void *block_node = devfs_make_node(su.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0440, "ufsroot0");
 +	void *char_node = devfs_make_node(makedev(su.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0440, "rufsroot0");
++
++	/*
++	 * The write-only console, so userland has somewhere to print before the
++	 * tty layer works.
++	 */
++	su.conmajor = cdevsw_add(-1, &kebabcon_cdevsw);
++	if (su.conmajor >= 0) {
++		void *con_node = devfs_make_node(makedev(su.conmajor, 0), DEVFS_CHAR,
++		    UID_ROOT, GID_WHEEL, 0666, "kebabcon");
++		if (con_node == NULL) {
++			cdevsw_remove(su.conmajor, &kebabcon_cdevsw);
++			su.conmajor = -1;
++		}
++	}
++	printf("KEBAB UFS: /dev/kebabcon %s\n", su.conmajor >= 0 ? "ready" : "unavailable");
 +	if (!block_node || !char_node) {
 +		if (block_node) {
 +			devfs_remove(block_node);
