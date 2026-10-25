@@ -87,24 +87,22 @@
  	proc_unlock(p);
  
  	/*
-@@ -1607,7 +1626,10 @@
- 	 * than current task, thus swap_task_map is used instead of
+@@ -1608,6 +1627,10 @@
  	 * vm_map_switch.
  	 */
--	old_map = swap_task_map(task, thread, map);
-+	old_map = swap_task_map(task, thread, map);#if defined(KEBAB)
+ 	old_map = swap_task_map(task, thread, map);
++#if defined(KEBAB)
 +	printf("KEBAB: exec P3 swap map\n");
 +#endif
 +
  #if MACH_ASSERT
  	/*
  	 * Reset the pmap's process info to prevent ledger checks
-@@ -1617,9 +1639,15 @@
- 	vm_map_pmap_set_process(old_map, -1, "<old_map>");
+@@ -1618,8 +1641,15 @@
  #endif /* MACH_ASSERT */
  	vm_map_deallocate(old_map);
--	old_map = NULL;
-+	old_map = NULL;#if defined(KEBAB)
+ 	old_map = NULL;
++#if defined(KEBAB)
 +	printf("KEBAB: exec P4 old map freed\n");
 +#endif
 +
@@ -116,7 +114,7 @@
  	if (lret != KERN_SUCCESS) {
  		KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
  		    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_ACTV_THREADSTATE, 0, 0);
-@@ -6879,10 +6907,20 @@
+@@ -6879,10 +6909,20 @@
  	mach_vm_offset_t scratch_addr = 0;
  	mach_vm_size_t map_page_size = vm_map_page_size(map);
  
