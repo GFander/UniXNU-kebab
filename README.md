@@ -101,7 +101,9 @@ ABL → boot_b 上的镜像 → Mu-Silicium UEFI → UniXNU 菜单
 | **`KebabPlatformExpert` 匹配成功，IOKit 开始建 nub** | ✅ |
 | `kperf_init_early`（`ml_set_max_cpus` 死锁已修）| ✅ |
 | **`bsd_init()` 进入 BSD 层** | ✅ |
-| `pthread_init()`（需要 libpthread 提供者）| ⛔ 当前阻塞点 |
+| `pthread_init()`（内置 libpthread-514.100.2）| ✅ |
+| **UFS 驱动：找到 `userdata` 分区（229043 MiB），发布 `ufsroot0`** | ✅ |
+| 挂载根文件系统 | ⛔ 当前阻塞点（内核里没有任何文件系统）|
 | 根卷挂载（`ufsroot0`，UFS 驱动已就位）| ⬜ 待 pthread 之后验证 |
 
 ### 已修复的关键问题
@@ -121,10 +123,12 @@ ABL → boot_b 上的镜像 → Mu-Silicium UEFI → UniXNU 菜单
 7. **缺少平台驱动** —— IOKit 找不到匹配 `oneplus,kebab` 的 `IOPlatformExpert`，
    兜底的 `IOPanicPlatform` 直接 panic。已加 `KebabPlatformExpert`
    （`0060-kebab-platform-expert.patch`）。
-9. **`ml_wait_max_cpus()` 永久睡眠** —— Apple 由 CPU 启动路径调用
+9. **没有文件系统** —— 开源树只带 `devfs`/`nullfs`/`mockfs`。HFS 需要 vendored 进内核，
+   并且要阻止 `mockfs` 抢走根设备（它的 `vfc_mountroot` 会接受任何设备）。
+10. **`ml_wait_max_cpus()` 永久睡眠** —— Apple 由 CPU 启动路径调用
    `ml_set_max_cpus()`，我们没有那条路径，`kperf_init_early()` 的第一句就永远
    等下去。改在引导线程里发布 `max_cpus`（`0062`）。
-10. **探针会骗人** —— 早期内联汇编探针硬编码恒等映射地址，pmap 切换后自己崩掉，
+11. **探针会骗人** —— 早期内联汇编探针硬编码恒等映射地址，pmap 切换后自己崩掉，
     看起来像内核卡死。现在有原生 panic + 栈回溯，探针已全部移除。
 8. **AMFI / Image4 缺失** —— trust cache 初始化改为降级为空运行时而不是 panic
    （`0059-kebab-trustcache.patch`）。
@@ -134,15 +138,17 @@ ABL → boot_b 上的镜像 → Mu-Silicium UEFI → UniXNU 菜单
 
 ### 当前阻塞
 
-内核自身初始化完成后进入 `bsd_init()`，现在停在 **`pthread_init()`**：
+块设备层已经打通：`bsd_init` 走到 `vfs_mountroot()`，我们的 UFS 驱动：
 
 ```
-panic: pthread kernel extension not loaded (function table is NULL). @pthread_shims.c:318
+ufs "userdata" on LUN 0, first block 0x2c7420, 229043 MiB, read-only
 ```
 
-XNU 的 pthread shim 需要一个"pthread kext"注册函数表，我们没有 kext。参考移植
-的做法是把 Apple 的 **libpthread-514.100.2**（与 xnu-8796.141.3 配套的版本）
-直接编进内核，正在移植中。
+它读到了 UFSHCI 寄存器、发了轮询 SCSI 命令、解析了 GPT、用 READ CAPACITY 拿到容量。
+（同时也证明了 SMMU 没有阻断内核的 DMA 缓冲区。）
+
+失败点是 **`ENODEV`** —— 开源 xnu 树里**没有任何文件系统**（HFS/APFS 在 Apple 那边
+都是 kext）。所以下一步是把 Apple 开源的 **HFS** 编进内核，做法与参考移植一致。
 
 ### 存储：UFS 根卷驱动已就位
 
