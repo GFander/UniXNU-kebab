@@ -1,3 +1,11 @@
+TEMPORARY bring-up probes. Drop this patch once the port boots.
+
+  sys_generic.c   write() entry
+  kern_descrip.c  open() path
+  kern_exec.c     load_init_program and the exec stage markers P1-P9
+  systemcalls.c   syscall number and the first argument
+  vfs_syscalls.c  open1() entry
+
 --- a/bsd/kern/sys_generic.c
 +++ b/bsd/kern/sys_generic.c
 @@ -701,6 +701,11 @@
@@ -223,21 +231,3 @@
  	proc_t p = vfs_context_proc(ctx);
  	uthread_t uu = get_bsdthread_info(vfs_context_thread(ctx));
  	struct fileproc *fp;
---- a/osfmk/console/serial_console.c
-+++ b/osfmk/console/serial_console.c
-@@ -289,9 +289,15 @@
- {
- 	extern int disableConsoleOutput;
- 
-+#if !defined(KEBAB)
-+	/*
-+	 * stock code drops console output while the graphics console is paused;
-+	 * on this port the panel is the only console, so keep it always on.
-+	 */
- 	if (disableConsoleOutput) {
- 		return;
- 	}
-+#endif
- 
- 	assert(c != NULL);
- 

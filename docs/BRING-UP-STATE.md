@@ -73,13 +73,57 @@ vfs_mountroot → UFS 驱动找到 userdata（229043 MiB）并发布 ufsroot0
 异常并停机，看起来像内核卡死。**任何内联探针都必须从 `early_fb` 读取运行时
 地址**，且探针本身要先验证不会崩。
 
-## 六、待办
+## 六、阶段 6 与阶段 7（2026-10-26 完成）
 
-见 `README.md` 第 3 节。近期顺序：
+官方七阶段中的 1-6 全部通过，阶段 7 的核心门槛也已跨过。
 
-1. 验证 trust cache 降级（构建 #117）。
-2. AMFI / Image4 最小占位实现。
-3. IOKit 平台驱动匹配（显示 / UART / USB）。
-4. 中断链路端到端验证（GIC + 虚拟定时器）。
-5. 多核（PSCI + GIC 重分发器）。
-6. 扩大内核可用内存窗口（当前仅 256 MiB）。
+### 存储与根卷（阶段 6）
+
+| 日志 | 含义 |
+| --- | --- |
+| `KEBAB UFS: "userdata" on LUN 0 ...` | 复用 UEFI 协商好的 UFS 链路 |
+| `BSD root: ufsroot0, major 1, minor 0` | `bdevsw` 驱动发布分区 |
+| `hfs: mounted KebabRoot on device b(1, 0)` | 内置 HFS 挂上真实块设备 |
+| `KEBAB: root volume is not sealed (error 25); continuing` | 无 SSV 链路，降级放行 |
+| `devfs_kernel_mount` 无报错 | 根卷里必须有 `/dev` 目录，否则 ENOENT |
+
+### 首个用户进程（阶段 7）
+
+`/sbin/launchd` 是一个手工构建的静态 arm64 Mach-O（见 `rootfs/launchd` 与
+`scripts/make-init.py`）。exec 全流程的探针 `P1`-`P9` 全部通过，最后看到
+`KEBAB: syscall enter` —— 内核已把控制权交给用户态，用户代码发出了第一个系统调用。
+
+### 这一段踩过的坑
+
+1. **`__PAGEZERO` 必须覆盖低 4 GiB。** arm64 的 `load_machfile()` 要求
+   `vm_map_has_hard_pagezero(map, 0x100000000)` 成立。用 `-pagezero_size` 缩小它
+   反而会让 exec 返回 `LOAD_BADMACHO`。ld64 的默认布局就是对的。
+2. **AMFI 是 exec 的必经之路。** `IOTaskHasEntitlement()` 无条件解引用 `amfi`
+   接口指针，没有 AMFI kext 时会在 `+0x1b0` 处数据异常。`0088` 注册一个"什么都不
+   授予"的内置实现后通过。
+3. **`printf` 会被图形控制台暂停吞掉。** `_cnputs()` 在
+   `disableConsoleOutput` 为真时直接返回，而 `kprintf` 走另一条路径。于是
+   `load_init_program` 的加载提示和我们所有 `printf` 探针全部消失，看起来像卡死。
+   `0090` 修掉了这一点——**这是本次最长的一次误导**。
+4. **PID 1 没有继承任何文件描述符。** 真正的 `launchd` 自己打开
+   `/dev/console`；测试程序必须先 `open()`，否则 `write(1, ...)` 返回 `EBADF`
+   并静默空转。
+5. **失败必须留证据。** 早先的测试 init 在 `open` 失败后原地空转，把 errno 完全
+   丢掉。现在改为逐级降级后 `exit(0)`，让内核 panic 把原因打出来。
+
+## 七、待办
+
+近期顺序：
+
+1. 让 `/sbin/launchd` 真正打印到控制台（`open("/dev/console")` 的返回值待确认）。
+2. AMFI / Image4 最小占位继续扩展（entitlement 查询目前一律返回失败）。
+3. 根卷换成大小写敏感的 HFSX + 日志，或保持"脏卷直接读写"的策略。
+4. IOKit 平台驱动匹配（显示 / UART / USB）。
+5. 中断链路端到端验证（GIC + 虚拟定时器）。
+6. 多核（PSCI + GIC 重分发器）。
+7. 扩大内核可用内存窗口（当前仅 256 MiB）。
+
+## 八、临时调试补丁
+
+`patches/xnu-8796-kebab/0091-kebab-debug-probes.patch` 是**纯脚手架**：它只加
+`printf`，不改变任何行为。移植进入稳定期后应当直接删除该补丁，其余补丁不受影响。
