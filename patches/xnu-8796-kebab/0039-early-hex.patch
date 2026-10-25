@@ -37,20 +37,25 @@
  static void
  kebab_early_clear_row(void)
  {
-@@ -61,7 +78,11 @@
+@@ -61,7 +78,16 @@
  	}
  	if (c == '\n' || early_col == EARLY_COLS) {
  		early_col = 0;
 -		early_row = (early_row + 1) % EARLY_ROWS;
 +		early_row++;
 +		if (early_row >= EARLY_ROWS) {
-+			kebab_early_clear_screen();
-+			early_row = 4;
++			if (early_panicking) {
++				/* Never wipe a panic report: stop at the last row. */
++				early_row = EARLY_ROWS - 1;
++			} else {
++				kebab_early_clear_screen();
++				early_row = 4;
++			}
 +		}
  		kebab_early_clear_row();
  		if (c == '\n') {
  			return;
-@@ -95,16 +116,9 @@
+@@ -95,16 +121,9 @@
  void
  kebab_early_mark(unsigned int stage, const char *label)
  {
@@ -68,7 +73,7 @@
  	kebab_early_string("KEBAB EARLY ");
  	if (stage >= 10) {
  		kebab_early_putc((char)('0' + stage / 10));
-@@ -115,6 +129,27 @@
+@@ -115,6 +134,27 @@
  	kebab_early_putc('\n');
  }
  
@@ -96,3 +101,17 @@
  void
  kebab_early_panic(const char *fmt, va_list *args)
  {
+@@ -122,7 +162,12 @@
+ 		return;
+ 	}
+ 	early_panicking = 1;
+-	kebab_early_string("\nKEBAB EARLY PANIC: ");
++	/* Start the panic at the top of the panel and stop clearing, so the first
++	 * lines of the report (which say what went wrong) stay readable. */
++	kebab_early_clear_screen();
++	early_row = 4;
++	early_col = 0;
++	kebab_early_string("KEBAB EARLY PANIC: ");
+ 	va_list copy;
+ 	va_copy(copy, *args);
+ 	_doprnt(fmt, &copy, kebab_early_putc, 16);
