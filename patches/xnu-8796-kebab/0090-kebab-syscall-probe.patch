@@ -203,7 +203,7 @@
 +#if defined(KEBAB)
 +	if (kebab_syscount++ < 12) {
 +		printf("KEBAB: syscall %d arg0 0x%llx\n", (int)code,
-+		    (unsigned long long)arm_get_saved_state_x0(state));
++		    (unsigned long long)saved_state64(state)->x[0]);
 +	}
 +#endif
 +
