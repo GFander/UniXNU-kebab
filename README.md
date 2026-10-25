@@ -99,7 +99,10 @@ ABL → boot_b 上的镜像 → Mu-Silicium UEFI → UniXNU 菜单
 | `OSKextRemoveKextBootstrap` / `machine_lockdown` / `kernel_do_post` | ✅ |
 | **`PE_lockdown_iokit`（内核自身初始化收尾）** | ✅ |
 | **`KebabPlatformExpert` 匹配成功，IOKit 开始建 nub** | ✅ |
-| `bsd_init()`（BSD 子系统初始化 → 挂载根文件系统）| ⛔ 当前阻塞点 |
+| `kperf_init_early`（`ml_set_max_cpus` 死锁已修）| ✅ |
+| **`bsd_init()` 进入 BSD 层** | ✅ |
+| `pthread_init()`（需要 libpthread 提供者）| ⛔ 当前阻塞点 |
+| 根卷挂载（`ufsroot0`，UFS 驱动已就位）| ⬜ 待 pthread 之后验证 |
 
 ### 已修复的关键问题
 
@@ -118,6 +121,11 @@ ABL → boot_b 上的镜像 → Mu-Silicium UEFI → UniXNU 菜单
 7. **缺少平台驱动** —— IOKit 找不到匹配 `oneplus,kebab` 的 `IOPlatformExpert`，
    兜底的 `IOPanicPlatform` 直接 panic。已加 `KebabPlatformExpert`
    （`0060-kebab-platform-expert.patch`）。
+9. **`ml_wait_max_cpus()` 永久睡眠** —— Apple 由 CPU 启动路径调用
+   `ml_set_max_cpus()`，我们没有那条路径，`kperf_init_early()` 的第一句就永远
+   等下去。改在引导线程里发布 `max_cpus`（`0062`）。
+10. **探针会骗人** —— 早期内联汇编探针硬编码恒等映射地址，pmap 切换后自己崩掉，
+    看起来像内核卡死。现在有原生 panic + 栈回溯，探针已全部移除。
 8. **AMFI / Image4 缺失** —— trust cache 初始化改为降级为空运行时而不是 panic
    （`0059-kebab-trustcache.patch`）。
 
@@ -126,11 +134,22 @@ ABL → boot_b 上的镜像 → Mu-Silicium UEFI → UniXNU 菜单
 
 ### 当前阻塞
 
-内核自身的初始化已经全部走完，现在停在 **`bsd_init()`** —— 从这里开始是 BSD 层：
-挂载根文件系统、加载 kext、启动第一个用户态进程。
+内核自身初始化完成后进入 `bsd_init()`，现在停在 **`pthread_init()`**：
 
-`vfs_mountroot()` 没有可用的根设备时会一直重试或挂住；下一步是让设备树里的
-ramdisk / 根设备被正确识别，或者接受一个最小 root（例如预先灌入的 Data 卷）。
+```
+panic: pthread kernel extension not loaded (function table is NULL). @pthread_shims.c:318
+```
+
+XNU 的 pthread shim 需要一个"pthread kext"注册函数表，我们没有 kext。参考移植
+的做法是把 Apple 的 **libpthread-514.100.2**（与 xnu-8796.141.3 配套的版本）
+直接编进内核，正在移植中。
+
+### 存储：UFS 根卷驱动已就位
+
+`bsd/dev/kebab_ufs.c`（`0070`–`0072` 补丁）：复用固件留下的 UFS 主控状态，
+轮询式发 SCSI 命令，按名字找到 GPT 分区并以 `ufsroot0` 暴露，供
+`rd=ufsroot0` 挂根。**只读**。全部 DMA 走一块连续内存，并用 `dc civac`/`dc ivac`
+手工维护缓存（8796 没有 `invalidate_dcache64`）。
 
 ---
 
@@ -161,7 +180,12 @@ ramdisk / 根设备被正确识别，或者接受一个最小 root（例如预�
 2. 把 panic 日志写入 `pram`，重启后可回读。
 3. 菜单交互（音量键选择）与超时策略。
 
-### 块驱动与根卷（当前阶段）
+### 内核服务（当前阶段）
+
+1. **libpthread 内置化** —— 把 `libpthread-514.100.2` 编进内核，填满
+   `pthread_functions` 表，让 `pthread_init()` 与线程创建可用。
+
+### 块驱动与根卷
 
 **设计决定：不使用 RAMDisk。** 内核必须从真实块设备挂载根卷，而不是从内存镜像。
 loader 里也不保留 `RAMDisk` 映射项。

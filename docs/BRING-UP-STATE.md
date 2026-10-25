@@ -30,7 +30,10 @@ trust_cache_init（缺 AMFI/Image4 时降级）
 OSKextRemoveKextBootstrap / machine_lockdown / kernel_do_post
 PE_lockdown_iokit（内核自身初始化收尾）
 KebabPlatformExpert 匹配成功，IOKit 开始建 nub
-bsd_init() ← 当前阻塞（挂载根文件系统）
+kperf_init_early（ml_set_max_cpus 死锁已修）
+bsd_init() 进入 BSD 层
+pthread_init() ← 当前阻塞（缺 libpthread 提供者）
+ufsroot0 驱动就位（待 pthread 之后验证挂载）
 ```
 
 ## 三、已修复的问题（按发现顺序）
