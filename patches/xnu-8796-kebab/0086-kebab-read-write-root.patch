@@ -1,0 +1,78 @@
+--- a/bsd/vfs/vfs_subr.c
++++ b/bsd/vfs/vfs_subr.c
+@@ -1266,6 +1266,20 @@
+ 
+ 		mp = vfs_rootmountalloc_internal(vfsp, "root_device");
+ 		mp->mnt_devvp = rootvp;
++#if defined(KEBAB)
++		/*
++		 * There is no separate data volume on this port: /private/var lives on
++		 * the root, so boot-arg rootrw=1 mounts it read-write from the start.
++		 * Without the boot-arg the root stays read-only.
++		 */
++		{
++			uint32_t rootrw = 0;
++			if (PE_parse_boot_argn("rootrw", &rootrw, sizeof(rootrw)) && rootrw) {
++				mp->mnt_flag &= ~MNT_RDONLY;
++			}
++		}
++#endif
++
+ 
+ 		if (vfsp->vfc_mountroot) {
+ 			error = (*vfsp->vfc_mountroot)(mp, rootvp, ctx);
+--- a/bsd/kebab_hfs/core/hfs_vfsops.c
++++ b/bsd/kebab_hfs/core/hfs_vfsops.c
+@@ -175,12 +175,6 @@
+ int
+ hfs_mount(struct mount *mp, vnode_t devvp, user_addr_t data, vfs_context_t context)
+ {
+-#if defined(KEBAB)
+-	/* The built-in provider supports read-only mounts and updates only. */
+-	if (!vfs_isrdonly(mp) || vfs_iswriteupgrade(mp)) {
+-		return EROFS;
+-	}
+-#endif
+ 
+ #if HFS_LEAK_DEBUG
+ 
+@@ -1099,12 +1093,6 @@
+ hfs_mountfs(struct vnode *devvp, struct mount *mp, struct hfs_mount_args *args,
+             int journal_replay_only, vfs_context_t context)
+ {
+-#if defined(KEBAB)
+-	/* Explicit replay requires writes even when no filesystem is mounted. */
+-	if (journal_replay_only) {
+-		return EROFS;
+-	}
+-#endif
+ 	struct proc *p = vfs_context_proc(context);
+ 	int retval = E_NONE;
+ 	struct hfsmount	*hfsmp = NULL;
+--- a/bsd/kebab_hfs/core/hfs_vfsutils.c
++++ b/bsd/kebab_hfs/core/hfs_vfsutils.c
+@@ -202,10 +202,21 @@
+ 	/* don't mount a writable volume if its dirty, it must be cleaned by fsck_hfs */
+ 	if ((hfsmp->hfs_flags & HFS_READ_ONLY) == 0 && hfsmp->jnl == NULL &&
+ 	    (SWAP_BE32(vhp->attributes) & kHFSVolumeUnmountedMask) == 0) {
+-		if (HFS_MOUNT_DEBUG) {
+-			printf("hfs_mounthfsplus: cannot mount dirty non-journaled volumes\n");
++#if defined(KEBAB)
++		/*
++		 * Nothing unmounts this root cleanly yet, and there is no fsck_hfs
++		 * before mountroot, so a dirty non-journaled root is taken as is.
++		 */
++		if (vfs_flags(hfsmp->hfs_mp) & MNT_ROOTFS) {
++			printf("KEBAB HFS: mounting dirty non-journaled root read-write\n");
++		} else
++#endif
++		{
++			if (HFS_MOUNT_DEBUG) {
++				printf("hfs_mounthfsplus: cannot mount dirty non-journaled volumes\n");
++			}
++			return (EINVAL);
+ 		}
+-		return (EINVAL);
+ 	}
+ 
+ 	/* Make sure we can live with the physical block size. */
