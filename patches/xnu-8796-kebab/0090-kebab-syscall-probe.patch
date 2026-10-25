@@ -175,6 +175,24 @@
  
  #if DEBUG || DEVELOPMENT
  	/* Check for boot-arg suffix first */
+--- a/bsd/dev/arm/systemcalls.c
++++ b/bsd/dev/arm/systemcalls.c
+@@ -92,6 +92,15 @@
+ 	thread_t thread_act,
+ 	struct proc * proc)
+ {
++#if defined(KEBAB)
++	{
++		extern int kebab_syscount;
++		if (kebab_syscount++ < 24) {
++			printf("KEBAB: syscall enter\n");
++		}
++	}
++#endif
++
+ 	const struct sysent  *callp;
+ 	int             error;
+ 	unsigned short  code, syscode;
 --- a/osfmk/console/serial_console.c
 +++ b/osfmk/console/serial_console.c
 @@ -289,9 +289,15 @@
