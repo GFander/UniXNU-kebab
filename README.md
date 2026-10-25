@@ -94,7 +94,12 @@ ABL → boot_b 上的镜像 → Mu-Silicium UEFI → UniXNU 菜单
 | **`PE_init_iokit`**：IONVRAM 解析、"name" not a kext | ✅ |
 | `early_boot`（phase 16）、内核 PRNG 注册 | ✅ |
 | **XNU panic + stackshot + 栈回溯** | ✅ 完全可用 |
-| `trust_cache_runtime_init` | ⛔ 当前阻塞点 |
+| `trust_cache_init`（缺 AMFI/Image4 时降级）| ✅ |
+| `mac_policy_initmach` / `vnguard_policy_init` / `dtrace_early_init` | ✅ |
+| `OSKextRemoveKextBootstrap` / `machine_lockdown` / `kernel_do_post` | ✅ |
+| **`PE_lockdown_iokit`（内核自身初始化收尾）** | ✅ |
+| **`KebabPlatformExpert` 匹配成功，IOKit 开始建 nub** | ✅ |
+| `bsd_init()`（BSD 子系统初始化 → 挂载根文件系统）| ⛔ 当前阻塞点 |
 
 ### 已修复的关键问题
 
@@ -110,21 +115,22 @@ ABL → boot_b 上的镜像 → Mu-Silicium UEFI → UniXNU 菜单
    都直接打屏。
 6. **异常向量** —— 早期自建向量表会吞掉中断，现已交还 XNU 的
    `ExceptionVectorsBase`，IRQ/FIQ 正常处理。
+7. **缺少平台驱动** —— IOKit 找不到匹配 `oneplus,kebab` 的 `IOPlatformExpert`，
+   兜底的 `IOPanicPlatform` 直接 panic。已加 `KebabPlatformExpert`
+   （`0060-kebab-platform-expert.patch`）。
+8. **AMFI / Image4 缺失** —— trust cache 初始化改为降级为空运行时而不是 panic
+   （`0059-kebab-trustcache.patch`）。
 
 > 教训：探针本身也会骗人。早期把内联汇编探针硬编码到恒等映射地址，而
 > `arm_vm_init` 之后该映射已关闭，探针自己崩溃、伪装成内核卡死。
 
 ### 当前阻塞
 
-`trust_cache_runtime_init()` 因为 **AMFI / Image4 接口不存在**而 panic：
+内核自身的初始化已经全部走完，现在停在 **`bsd_init()`** —— 从这里开始是 BSD 层：
+挂载根文件系统、加载 kext、启动第一个用户态进程。
 
-```c
-if (amfi == NULL) panic("amfi interface not available");
-```
-
-参考移植（negroni）的处理方式是在缺失时把 trust cache 运行时置空、相关接口返回
-`KERN_NOT_SUPPORTED`，而不是 panic。该改动已在 `0059-kebab-trustcache.patch` 中
-启用，等待下一次构建验证。
+`vfs_mountroot()` 没有可用的根设备时会一直重试或挂住；下一步是让设备树里的
+ramdisk / 根设备被正确识别，或者接受一个最小 root（例如预先灌入的 Data 卷）。
 
 ---
 
@@ -155,11 +161,14 @@ if (amfi == NULL) panic("amfi interface not available");
 2. 把 panic 日志写入 `pram`，重启后可回读。
 3. 菜单交互（音量键选择）与超时策略。
 
-### 用户态
+### BSD / 用户态
 
-1. 内核 kext 从设备树加载（`/chosen/memory-map` 里的 booter kext）。
-2. 启动 `launchd` → 加载 iOS 16.7.16 的 `/System/Library` 组件。
-3. 用 iPhone X（`D22AP`）的身份通过 AMFI/锁屏相关校验。
+1. **根文件系统**：让 `vfs_mountroot()` 拿到可用 root（ramdisk 或 Data 卷）。
+2. **kext 加载**：设备树 `/chosen/memory-map` 里的 booter kext 目前是空的，
+   后续需要把 AMFI 等内核扩展塞进载荷。
+3. **AMFI / Image4 最小实现**：代码签名与 entitlements 校验需要能通过。
+4. 启动 `launchd` → 加载 iOS 16.7.16 的 `/System/Library` 组件。
+5. 用 iPhone X（`D22AP`）的身份完成平台相关校验。
 
 ---
 

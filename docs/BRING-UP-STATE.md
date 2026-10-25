@@ -25,8 +25,12 @@ kernel_bootstrap_thread:
 kdp_init / coredump / bootprofile_init / sysctl（phase 15）
 PE_init_iokit（IONVRAM 解析）
 early_boot（phase 16）+ 内核 PRNG 注册
-XNU panic + stackshot + 栈回溯可用
-trust_cache_runtime_init ← 当前阻塞（缺 AMFI/Image4）
+mac_policy_initmach / vnguard_policy_init / dtrace_early_init
+trust_cache_init（缺 AMFI/Image4 时降级）
+OSKextRemoveKextBootstrap / machine_lockdown / kernel_do_post
+PE_lockdown_iokit（内核自身初始化收尾）
+KebabPlatformExpert 匹配成功，IOKit 开始建 nub
+bsd_init() ← 当前阻塞（挂载根文件系统）
 ```
 
 ## 三、已修复的问题（按发现顺序）
