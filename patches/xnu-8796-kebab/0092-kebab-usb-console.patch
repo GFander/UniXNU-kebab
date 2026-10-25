@@ -1,0 +1,53 @@
+Wire the kebab USB console in: start it during bsd_init and tee console
+output into its ring, so a host connected over USB sees the kernel log live.
+
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -105,6 +105,7 @@
+ 
+ bsd/dev/memdev.c			standard
+ bsd/dev/kebab_ufs.c			standard
++bsd/dev/kebab_usb.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -809,6 +809,11 @@
+ 	bsd_init_kprintf("calling sysctl_mib_init\n");
+ 	sysctl_mib_init();
+ 
++#if defined(KEBAB)
++	/* Device-mode USB, so the console can also go to /dev/ttyACM0. */
++	extern void kebab_usb_start(void);
++	kebab_usb_start();
++#endif
+ 	bsd_init_kprintf("calling bsd_autoconf\n");
+ 	bsd_autoconf();
+ 
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -289,9 +289,23 @@
+ {
+ 	extern int disableConsoleOutput;
+ 
++#if !defined(KEBAB)
++	/*
++	 * stock code drops console output while the graphics console is paused;
++	 * on this port the panel is the only console, so keep it always on.
++	 */
++#if !defined(KEBAB)
+ 	if (disableConsoleOutput) {
+ 		return;
+ 	}
++#endif
++#if defined(KEBAB)
++	{
++		extern void kebab_usb_log(const char *buf, size_t len);
++		kebab_usb_log(c, (size_t)size);
++	}
++#endif
++#endif
+ 
+ 	assert(c != NULL);
+ 
