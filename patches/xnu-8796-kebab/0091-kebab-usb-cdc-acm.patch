@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,663 @@
+@@ -0,0 +1,666 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -25,12 +25,15 @@ new file mode 100644
 +#include <kern/locks.h>
 +#include <kern/thread.h>
 +#include <machine/machine_routines.h>
++#include <os/atomic_private.h>
 +#include <pexpert/pexpert.h>
 +#include <sys/systm.h>
 +#include <vm/pmap.h>
 +#include <vm/vm_kern.h>
 +
 +extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern uint64_t ptoa_64(ppnum_t pa);
 +
 +/* ---------------------------------------------------------------- registers */
 +
