@@ -84737,3 +84737,11 @@ new file mode 100644
 +	return KERN_NOT_SUPPORTED;
 +}
 +#endif /* KEBAB */
+diff --git a/bsd/kebab_hfs/TargetConditionals.h b/bsd/kebab_hfs/TargetConditionals.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/kebab_hfs/TargetConditionals.h
+@@ -0,0 +1,3 @@
++#pragma once
++/* Clang supplies TARGET_OS_* for the selected Apple target. */
++#define TARGET_CPU_ARM64 1
