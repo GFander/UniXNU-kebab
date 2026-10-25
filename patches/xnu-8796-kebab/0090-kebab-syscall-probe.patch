@@ -53,3 +53,21 @@
  
  #if DEBUG || DEVELOPMENT
  	/* Check for boot-arg suffix first */
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -289,9 +289,15 @@
+ {
+ 	extern int disableConsoleOutput;
+ 
++#if !defined(KEBAB)
++	/*
++	 * stock code drops console output while the graphics console is paused;
++	 * on this port the panel is the only console, so keep it always on.
++	 */
+ 	if (disableConsoleOutput) {
+ 		return;
+ 	}
++#endif
+ 
+ 	assert(c != NULL);
+ 
