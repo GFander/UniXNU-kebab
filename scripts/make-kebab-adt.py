@@ -223,7 +223,7 @@ def main():
                           if args.root_match_volume_uuid else []),
                         ('amfi-only-platform-code', struct.pack('<I', 1)),
                         *empty_nvram_proxy()],
-             [node('memory-map', named=False, properties=([("PackedRAMDisk" if args.packed_data_ramdisk else "RAMDisk", bytes(16))]
+             [node('memory-map', ([("PackedRAMDisk" if args.packed_data_ramdisk else "RAMDisk", bytes(16))]
                                   if (args.data_ramdisk or args.packed_data_ramdisk) else []) +
                                  ([('TrustCache', bytes(16))] if args.trust_cache else [])),
               node('manifest-properties')]),
