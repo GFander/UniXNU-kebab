@@ -101,15 +101,14 @@
  void
  kebab_early_panic(const char *fmt, va_list *args)
  {
-@@ -122,7 +162,12 @@
+@@ -122,7 +162,11 @@
  		return;
  	}
  	early_panicking = 1;
 -	kebab_early_string("\nKEBAB EARLY PANIC: ");
-+	/* Start the panic at the top of the panel and stop clearing, so the first
-+	 * lines of the report (which say what went wrong) stay readable. */
-+	kebab_early_clear_screen();
-+	early_row = 4;
++	/* Do not wipe the panel: the lines printed just before the panic are
++	 * usually the ones that explain it. The report itself stops at the last
++	 * row instead of scrolling. */
 +	early_col = 0;
 +	kebab_early_string("KEBAB EARLY PANIC: ");
  	va_list copy;

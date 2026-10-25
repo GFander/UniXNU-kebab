@@ -48,8 +48,8 @@
 +		 * Retrying in a tight loop only buries the first attempt's output,
 +		 * which is the diagnostic we actually need. Stop here instead.
 +		 */
-+		panic("KEBAB: cannot mount root, errno = %d, rootdevice \"%s\"",
-+		    err, rootdevice);
++		panic("KEBAB: cannot mount root, errno = %d, rootdevice \"%s\", args \"%s\"",
++		    err, rootdevice, PE_boot_args());
 +#endif
  	}
  
