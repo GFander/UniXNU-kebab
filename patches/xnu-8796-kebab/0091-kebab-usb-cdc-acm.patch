@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,668 @@
+@@ -0,0 +1,666 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -31,11 +31,9 @@ new file mode 100644
 +#include <vm/pmap.h>
 +#include <vm/vm_kern.h>
 +
-+extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
-+/* ppnum_t is unsigned int in this kernel; spelled out so the declaration
-+ * does not depend on vm_types.h being pulled in first. */
-+extern unsigned int pmap_find_phys(pmap_t pmap, addr64_t va);
-+extern uint64_t ptoa_64(unsigned int pa);
++/* ptoa_64 is a macro in mach/vm_param.h, ml_io_map is declared in
++ * arm/machine_routines.h and pmap_find_phys in vm/pmap.h; the includes
++ * above are enough. */
 +
 +/* ---------------------------------------------------------------- registers */
 +
