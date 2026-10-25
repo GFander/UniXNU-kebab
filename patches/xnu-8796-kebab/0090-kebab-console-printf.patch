@@ -1,9 +1,10 @@
 Kebab keeps console output alive when the graphics console is paused.
 
-printf goes through _cnputs, which returns early once initialize_screen() pauses
-the graphics console. On this port the panel is the only console, so every
-printf - including load_init_program's load attempts - was silently dropped
-while kprintf kept working, which made real progress look like a hang.
+printf goes through _cnputs and tty single characters go through kmputc; both
+return early once initialize_screen() pauses the graphics console. On this port
+the panel is the only console, so every such message - including
+load_init_program's load attempts - was silently dropped while kprintf kept
+working. That made real progress look like a hang.
 
 --- a/osfmk/console/serial_console.c
 +++ b/osfmk/console/serial_console.c
@@ -23,3 +24,18 @@ while kprintf kept working, which made real progress look like a hang.
  
  	assert(c != NULL);
  
+--- a/bsd/dev/arm/km.c
++++ b/bsd/dev/arm/km.c
+@@ -255,7 +255,12 @@
+ int
+ kmputc(__unused dev_t dev, char c)
+ {
++#if defined(KEBAB)
++	/* Same rule as _cnputs: on this port the panel is the only console. */
++	if (initialized) {
++#else
+ 	if (!disableConsoleOutput && initialized) {
++#endif
+ 		/* OCRNL */
+ 		if (c == '\n') {
+ 			console_write_char('\r');
