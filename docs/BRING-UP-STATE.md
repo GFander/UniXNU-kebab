@@ -1,192 +1,77 @@
-# kebab bring-up state (2026-10-25 02:00)
+# kebab 移植状态记录
 
-## What works
+本文件按时间顺序记录关键结论；面向读者的总览见仓库根目录的 `README.md`。
 
-* 16 KiB xnu-8796 kernel builds with `blacktop/darwin-xnu-build` on macOS 14 and
-  links; the payload volume assembles.
-* The whole UEFI chain runs: ABL -> boot_b image -> Mu-Silicium -> UniXNU menu
-  -> DarwinBoot -> ExitBootServices -> kernel (x0 = boot_args PA).
-* `start.s` runs through: bootstrap page tables, framebuffer mapping, MMU
-  enable (verified by a panel marker right after `msr sctlr_el1`).
-* The kernel entered at its **identity** address reaches C code and completes
-  `arm_init`, `PE_init_platform`, `ml_parse_cpu_topology`, `cpu_bootstrap` and
-  `kernel_startup_bootstrap`, with the real device tree (ADT length 0x31c8)
-  and a correct 19.2 MHz timebase.
-
-## What blocks
-
-`start.s` computes `lr` as the **kernel virtual address** of `arm_init` and
-returns to it (`ret`). Execution never reaches `arm_init`'s first statement:
-
-* a 60x24 probe at the top of `arm_init` never paints;
-* a large red fault marker driven by a custom `vbar_el1` never paints either,
-  so either no exception is taken or the vector itself is wrong.
-
-The bootstrap KVA map is *not* the problem: walking it from C gives
-`L1[0x7e0] = 0xc0178003 -> L2[0x003] = 0xc0000601`, i.e. kernel VA
-`0xfffffe0007004000` maps to PA `0xc0004000`, exactly where the kernel sits.
-`TCR_EL1 = 0x226511a511` (T0SZ = T1SZ = 17, TG1 = 16 KiB) is consistent with
-that; `TTBR1 = 0xc0170000`.
-
-
-## Root cause of the KVA hang (found 2026-10-25 02:20)
-
-The bootstrap page tables map the kernel with **32 MiB L2 blocks** (16 KiB
-granule). A block descriptor can only carry the *block base* physical address:
-the low 25 bits of the translated address always come from the **virtual**
-address. So the mapping is only correct when
+## 一、引导路径（已验证）
 
 ```
-(virtBase & 0x01ffffff) == (physBase & 0x01ffffff)
+ABL → boot_b 镜像 → Mu-Silicium UEFI → UniXNU 菜单 → DarwinBoot
+    → ExitBootServices → 内核 _start（x0 = boot_args 物理地址）
 ```
 
-With the macOS link address and DarwinBoot's load address that was violated:
+刷机必须写 `boot_b`：固件固定从该槽位读取载荷卷（偏移 `0x800000`）。
+
+## 二、内核进度
+
+已验证到达（真机日志）：
 
 ```
-virtBase 0xFFFFFE0007004000 & 0x01ffffff = 0x01004000
-physBase 0xC0004000         & 0x01ffffff = 0x00004000   -> 16 MiB apart
-```
-
-The KVA alias therefore resolved to `0xC0000000 + 0x01004000 = 0xC1004000`,
-i.e. 16 MiB past the kernel image: valid, executable, and full of something
-that is not the kernel. That is why the `ret` produced neither the expected
-code nor an exception, and why the fault vector (mapped through the same
-broken alias) never painted anything.
-
-Fix: link the kernel at `0xfffffe0006004000` (patch
-`0041-link-address-block-aligned.patch`), whose low 25 bits match the physical
-load address. DarwinBoot reads `virtBase` from the Mach-O, so the boot
-arguments follow automatically.
-
-Note this only holds while the loader places the kernel at `0xC0004000`. A
-loader change, or a different window, reintroduces the mismatch. The durable
-alternative is to map the bootstrap region with 16 KiB L3 pages instead of
-32 MiB blocks.
-
-
-## Where the boot stops (2026-10-25 04:45)
-
-Everything up to `kernel_bootstrap()` works, including the framebuffer console
-(installed as the `cons_ops[VC_CONS_OPS].putc` backend) and the following
-startup phases:
-
-```
-pmap_startup / vm_page_bootstrap (15278 free pages)
-zone_init (all zones), IOKit IOND, ATM, OSLog, Firehose, Telemetry,
-Scheduler, BNRK, IPC_PTHREAD_PRIORITY
-kernel_bootstrap: ... kernel_thread_create, load_context - done
-```
-
-The last startup entries to print are `BNRK subsystem is initialized` and
-`IPC_PTHREAD_PRIORITY subsystem is initialized`; after that the machine sits
-still. No `kernel_bootstrap_thread: ...` message is ever printed even though
-`startup_debug=1` enables those, which points at the very beginning of
-`kernel_bootstrap_thread()` (`current_processor()`, i.e. TPIDR_EL1 carrying
-`cpu_data` after the context switch).
-
-Fixed earlier in the same session:
-
-* the bootstrap KVA map resolved 16 MiB past the kernel because 32 MiB L2
-  blocks take their low 25 bits from the VA; the kernel now links at
-  `0xfffffe0006004000` so the low bits match the load address `0xC0004000`;
-* the ADT gained the nodes `pe_arm_map_interrupt_controller()` and the panic-log
-  path look for (`interrupt-controller = "master"` on the GIC node, a
-  `device_type = "timer"` node, a top-level `pram` node and
-  `/chosen/embedded-panic-log-size`), so `gPicBase`/`gTimerBase` are mapped and
-  `gPanicBase` is no longer NULL;
-* `-enable_kprintf_spam` opens the DEVELOPMENT `disable_kprintf_output` gate and
-  `startup_debug=1` traces the bootstrap phases.
-
-
-## Boot progress (2026-10-25 07:45)
-
-The kernel now runs a long way into `kernel_bootstrap_thread`. Verified on hardware:
-
-```
-start_first_cpu -> arm_init -> PE_init_platform -> ml_parse_cpu_topology
-arm_vm_init (real pmap, bootstrap TTBR0 dropped) -> pmap_bootstrap
-machine_startup -> kernel_bootstrap -> load_context (first thread switch works)
+start_first_cpu → arm_init → PE_init_platform → ml_parse_cpu_topology
+arm_vm_init（正式 pmap，bootstrap TTBR0 已关闭）→ pmap_bootstrap
+machine_startup → kernel_bootstrap → load_context（首次线程切换成功）
 kernel_bootstrap_thread:
-    idle_thread_create, sched_startup, thread_daemon_init, thread_call,
-    thread_bind, mapping_adjust, clock_service_create,
-    kdp_init, bootprofile_init, sysctl phase
+    idle_thread_create / sched_startup / thread_daemon_init / thread_call /
+    thread_bind / mapping_adjust / clock_service_create
+kdp_init / coredump / bootprofile_init / sysctl（phase 15）
+PE_init_iokit（IONVRAM 解析）
+early_boot（phase 16）+ 内核 PRNG 注册
+XNU panic + stackshot + 栈回溯可用
+trust_cache_runtime_init ← 当前阻塞（缺 AMFI/Image4）
 ```
 
-Two hard bugs were found and fixed on the way:
+## 三、已修复的问题（按发现顺序）
 
-* **The bootstrap KVA map resolved 16 MiB past the kernel** because the 32 MiB
-  L2 blocks take their low 25 bits from the virtual address. Fixed by linking
-  at `0xfffffe0006004000` so the low bits match the load address `0xC0004000`.
-* **The first context switch executed an ARMv8.4 instruction (`mrs x, DIT`)**.
-  The SM8250 cores are ARMv8.2, so that traps as an undefined instruction.
-  Fixed by forcing `__ARM_ARCH_8_4__` to 0 for KEBAB and guarding the DIT
-  blocks in `cswitch.s`.
+1. **帧缓冲地址** `0xB8000000` → `0x9C000000`（start.s、控制台、映射三处统一）。
+2. **设备树指针** DarwinBoot 给的是内核虚拟地址；早期在恒等地址运行时需要换算。
+3. **`wfe_timeout` 除零 panic** —— 时基为 0 的连锁反应，根因是设备树没解析成功。
+4. **ADT 缺 `name` 属性重复** —— 生成器 `node()` 已自动加 `name`，重复会被
+   DarwinBoot 判为 `COMPROMISED_DATA` 而拒绝启动。
+5. **KVA 映射偏移 16 MiB** —— 16 KiB 粒度下 32 MiB 块的低 25 位来自虚拟地址，
+   链接地址必须与物理加载地址低位一致；内核链接地址改为 `0xfffffe0006004000`。
+6. **ARMv8.4 `mrs x, DIT`** —— SM8250 是 ARMv8.2，该指令未定义；第一次上下文
+   切换因此崩溃。对 KEBAB 关闭 `__ARM_ARCH_8_4__`。
+7. **crypto 表为 NULL** —— 没有 Apple 的 crypto kext；改用 BearSSL 摘要实现 +
+   树内 HMAC-SHA256 DRBG + SplitMix64（kmem 分配器）。
+8. **ADT 缺节点** —— `interrupt-controller = "master"`、`timer`、`pram`、
+   `/chosen/embedded-panic-log-size`，补齐后 `ml_init_timebase` 才执行。
+9. **异常向量被覆盖** —— 自建向量表会吞掉 IRQ；已交还 XNU 的
+   `ExceptionVectorsBase`。
+10. **trust cache 依赖 AMFI** —— 缺 kext 时降级为空运行时而不是 panic
+    （参考 negroni 移植的做法）。
 
-Also worth remembering: **the bring-up probes themselves were a source of false
-faults.** The C console follows the relocated framebuffer pointer, but the first
-inline assembly markers hard-coded `0x9C000000`, which is unmapped once
-`arm_vm_init` drops TTBR0 — those markers faulted and made the kernel look stuck
-in `load_context`. Any new inline probe must read `early_fb` at run time.
+## 四、调试手段
 
-## Current blocker
+* **面板控制台**：`kprintf` 直接镜像到帧缓冲；手机没有可用串口。
+* **`KEBAB EARLY n: <label>`**：`arm_init` 与引导线程的关键阶段标记。
+* **XNU panic**：原生 panic + stackshot + 栈回溯；`lr` 地址可用
+  `llvm-objdump -d --arch-name=arm64 --start-address=<lr-0x40>` 对照内核符号解析。
+* **启动阶段跟踪**：`startup_debug=1` 会打印每个注册项（已对 KEBAB 过滤掉逐条
+  输出，只保留 `reached phase N`）。
 
-A data abort in `_SHA1Init`, `FAR = 0x28`:
+## 五、探针的教训
 
-```
-libkern/crypto/corecrypto_sha1.c:43
-    const struct ccdigest_info *di = g_crypto_funcs->ccsha1_di;
-```
+早期用内联汇编在固定像素位置画"面包屑"，但硬编码了恒等映射地址
+`0x9C000000`；`arm_vm_init` 关闭 TTBR0 后该地址不再映射，探针自身触发数据
+异常并停机，看起来像内核卡死。**任何内联探针都必须从 `early_fb` 读取运行时
+地址**，且探针本身要先验证不会崩。
 
-`g_crypto_funcs` is only set by `register_crypto_functions()`, which nothing in
-the open-source tree calls (Apple's kext does that). The negroni project solved
-this by replacing the `corecrypto_*` wrappers with self-contained BearSSL
-implementations; those patches are being ported to 8796.
+## 六、待办
 
+见 `README.md` 第 3 节。近期顺序：
 
-### Crypto blocker resolution (in progress)
-
-`libkern/crypto/corecrypto_sha1.c` was rewritten to call the **linked**
-corecrypto functions (`ccsha1_di()`, `ccdigest_init/update/final`) instead of
-the kext dispatch table `g_crypto_funcs`, which nothing initialises on this
-platform. `ccsha1_di`, `ccdigest_init` and `ccdigest_update` are present in the
-kernel image (they come from `libcc_kext`), so no third-party code is needed.
-
-Not yet solved: `ccmd5_di`, `ccsha384_di`, `ccsha512_di` are **not** linked.
-If a later boot stage needs MD5 or SHA-384/512, those wrappers need real
-implementations. The negroni project solved the whole family by vendoring
-BearSSL; a prepared patch set for that exists at
-`D:\LOS\HiOS\work\kebab-crypto-patches\` (0050..0056) if it becomes necessary.
-
-## Flashing checklist
-
-```
-fastboot flash boot_b XNU-<n>.img
-fastboot reboot
-```
-
-Diagnostics that have proven useful, all reachable through the panel console:
-
-* `KEBAB EARLY n: <label>` marks from `arm_init` and the bootstrap thread.
-* `KEBAB FAULT` with `ESR/ELR/FAR/SPSR` from the custom exception vector. ELR is
-  the faulting instruction; resolve it with
-  `llvm-objdump -d --arch-name=arm64 --start-address=<ELR-0x40> kernel.macho`.
-* White squares at the top of the panel from `kebab_early_breadcrumb()`.
-
-## Next diagnostics, in order
-
-1. **Verify the vector install**: read `vbar_el1` back right after `msr` and
-   compare with the computed address; if the `adrp`+KVA conversion is wrong the
-   "no fault" conclusion is worthless.
-2. **Branch to a `b .` loop** placed in the same 4 KiB page as the `ret` and
-   converted with the same `+x22-x23`, to prove that *any* KVA branch works.
-3. If the branch mechanism works but `arm_init` does not run, compare the
-   `LC_UNIXTHREAD` entry (`_start`) against the symbol used for `lr`; the
-   identity run proves the C entry itself is fine.
-4. Fall back plan: link the kernel at the **iOS** address
-   (`0xfffffff007004000`) instead of the macOS one, so every address in the
-   bootstrap path is inside the range the port was written for, then repeat.
-
-## Flashing
-
-`fastboot flash boot_b <image>`; the UniXNU firmware reads the payload from
-`boot_b` regardless of the active slot.
+1. 验证 trust cache 降级（构建 #117）。
+2. AMFI / Image4 最小占位实现。
+3. IOKit 平台驱动匹配（显示 / UART / USB）。
+4. 中断链路端到端验证（GIC + 虚拟定时器）。
+5. 多核（PSCI + GIC 重分发器）。
+6. 扩大内核可用内存窗口（当前仅 256 MiB）。
