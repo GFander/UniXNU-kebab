@@ -1,15 +1,6 @@
 --- a/osfmk/kern/startup.c
 +++ b/osfmk/kern/startup.c
-@@ -216,6 +216,8 @@
- 
- extern int serverperfmode;
- 
-+extern void kebab_early_breadcrumb(unsigned int index);
-+
- TUNABLE(startup_debug_t, startup_debug, "startup_debug", 0);
- 
- static inline void
-@@ -400,11 +402,15 @@
+@@ -402,11 +402,15 @@
  	assert(startup_phase < upto);
  
  	while (cur < startup_entries_end && cur->subsystem <= upto) {
@@ -25,25 +16,3 @@
  		startup_phase = cur->subsystem - 1;
  		kernel_startup_log(cur->subsystem);
  		cur->func(cur->arg);
-@@ -955,6 +961,21 @@
- 	__asan_handle_no_return();
- #endif /* KASAN_TBI */
- 
-+	{
-+		uint64_t cpacr, curel, vbar, spsel, sfpcr;
-+		__asm__ volatile("mrs %0, cpacr_el1" : "=r"(cpacr));
-+		__asm__ volatile("mrs %0, CurrentEL" : "=r"(curel));
-+		__asm__ volatile("mrs %0, vbar_el1" : "=r"(vbar));
-+		__asm__ volatile("mrs %0, SPSel" : "=r"(spsel));
-+		/* Read the saved FPCR from memory: touching the FPCR register itself is
-+		 * the very thing that may be trapping. */
-+		sfpcr = *(uint32_t *)(uintptr_t)(thread->machine.kstackptr + 0xb0);
-+		kprintf("load_context: CPACR=%lx CurrentEL=%lx SPSel=%lx VBAR=%lx savedFPCR=%lx\n",
-+		    cpacr, curel >> 2, spsel, vbar, sfpcr);
-+	}
-+	kprintf("load_context: thread=%p cpudatap=%p kstack=%lx kstackptr=%lx cont=%p\n",
-+	    thread, thread->machine.CpuDatap, thread->kernel_stack,
-+	    thread->machine.kstackptr, thread->continuation);
- 	machine_load_context(thread);
- 	/*NOTREACHED*/
- }

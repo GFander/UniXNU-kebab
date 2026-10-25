@@ -1,0 +1,719 @@
+libkern: use self-contained BearSSL SHA-1; preserve SHA1_CTX and hardware-hook exports
+
+diff --git a/libkern/conf/Makefile.template b/libkern/conf/Makefile.template
+--- a/libkern/conf/Makefile.template
++++ b/libkern/conf/Makefile.template
+@@ -18,6 +18,21 @@
+ #
+ CFLAGS+= -include meta_features.h -DLIBKERN_KERNEL_PRIVATE -DOSALLOCDEBUG=1
+ SFLAGS+= -include meta_features.h
++
++# Portable crypto must not use FP/SIMD registers in the ARM64 kernel.
++ifeq ($(CURRENT_ARCH_CONFIG),ARM64)
++corecrypto_aes.o_CFLAGS_ADD += -mgeneral-regs-only
++corecrypto_md5.o_CFLAGS_ADD += -mgeneral-regs-only
++corecrypto_sha1.o_CFLAGS_ADD += -mgeneral-regs-only
++corecrypto_sha2.o_CFLAGS_ADD += -mgeneral-regs-only
++kebab_dec32be.o_CFLAGS_ADD += -mgeneral-regs-only
++kebab_enc32be.o_CFLAGS_ADD += -mgeneral-regs-only
++kebab_sha1.o_CFLAGS_ADD += -mgeneral-regs-only
++endif
++# BearSSL uses typed vtable casts; newer Clang diagnoses those casts.
++kebab_dec32be.o_CWARNFLAGS_ADD += -Wno-cast-function-type-strict
++kebab_enc32be.o_CWARNFLAGS_ADD += -Wno-cast-function-type-strict
++kebab_sha1.o_CWARNFLAGS_ADD += -Wno-cast-function-type-strict
+ 
+ # Runtime support functions don't interact well with LTO (9294679)
+ stack_protector.o_CFLAGS_ADD += $(CFLAGS_NOLTO_FLAG)
+diff --git a/libkern/conf/files b/libkern/conf/files
+--- a/libkern/conf/files
++++ b/libkern/conf/files
+@@ -93,6 +93,9 @@
+ 
+ libkern/crypto/register_crypto.c		optional crypto
+ libkern/crypto/corecrypto_sha2.c		standard
++libkern/crypto/kebab_sha1.c	optional crypto
++libkern/crypto/kebab_dec32be.c	optional crypto
++libkern/crypto/kebab_enc32be.c	optional crypto
+ libkern/crypto/corecrypto_sha1.c		optional crypto
+ libkern/crypto/corecrypto_md5.c			optional crypto
+ libkern/crypto/corecrypto_des.c			optional crypto
+diff --git a/libkern/crypto/corecrypto_sha1.c b/libkern/crypto/corecrypto_sha1.c
+--- a/libkern/crypto/corecrypto_sha1.c
++++ b/libkern/crypto/corecrypto_sha1.c
+@@ -1,9 +1,9 @@
+-#include <libkern/crypto/crypto_internal.h>
+ #include <libkern/crypto/sha1.h>
++#include "kebab_bearssl.h"
++
+ #include <kern/debug.h>
+-#include <corecrypto/ccdigest.h>
+ 
+-
++/* Keep the 8796 legacy state layout and byte-count convention. */
+ static uint64_t
+ getCount(SHA1_CTX *ctx)
+ {
+@@ -16,57 +16,49 @@
+ 	ctx->c.b64[0] = count;
+ }
+ 
+-/* Copy a ccdigest ctx into a legacy SHA1 context */
+ static void
+-DiToSHA1(const struct ccdigest_info *di, struct ccdigest_ctx *di_ctx, SHA1_CTX *sha1_ctx)
++SHA1ToBr(SHA1_CTX *sha1_ctx, kebab_br_sha1_context *kebab_br_ctx)
+ {
+-	setCount(sha1_ctx, ccdigest_nbits(di, di_ctx) / 8 + ccdigest_num(di, di_ctx));
+-	memcpy(sha1_ctx->m.b8, ccdigest_data(di, di_ctx), di->block_size);
+-	memcpy(sha1_ctx->h.b8, ccdigest_state_ccn(di, di_ctx), di->state_size);
++	kebab_br_sha1_init(kebab_br_ctx);
++	memcpy(kebab_br_ctx->val, sha1_ctx->h.b32, sizeof(kebab_br_ctx->val));
++	kebab_br_ctx->count = getCount(sha1_ctx);
++	memcpy(kebab_br_ctx->buf, sha1_ctx->m.b8, sizeof(kebab_br_ctx->buf));
+ }
+ 
+-/* Copy a legacy SHA1 context into a ccdigest ctx  */
+ static void
+-SHA1ToDi(const struct ccdigest_info *di, SHA1_CTX *sha1_ctx, struct ccdigest_ctx *di_ctx)
++BrToSHA1(const kebab_br_sha1_context *kebab_br_ctx, SHA1_CTX *sha1_ctx)
+ {
+-	uint64_t count = getCount(sha1_ctx);
+-
+-	ccdigest_num(di, di_ctx) = (unsigned)(count % di->block_size);
+-	ccdigest_nbits(di, di_ctx) = (count - ccdigest_num(di, di_ctx)) * 8;
+-	memcpy(ccdigest_data(di, di_ctx), sha1_ctx->m.b8, di->block_size);
+-	memcpy(ccdigest_state_ccn(di, di_ctx), sha1_ctx->h.b8, di->state_size);
++	memcpy(sha1_ctx->h.b32, kebab_br_ctx->val, sizeof(sha1_ctx->h.b32));
++	setCount(sha1_ctx, kebab_br_ctx->count);
++	memcpy(sha1_ctx->m.b8, kebab_br_ctx->buf, sizeof(sha1_ctx->m.b8));
+ }
+ 
+ void
+ SHA1Init(SHA1_CTX *ctx)
+ {
+-	const struct ccdigest_info *di = g_crypto_funcs->ccsha1_di;
+-	ccdigest_di_decl(di, di_ctx);
++	kebab_br_sha1_context kebab_br_ctx = { 0 };
+ 
+-	g_crypto_funcs->ccdigest_init_fn(di, di_ctx);
+-
+-	DiToSHA1(di, di_ctx, ctx);
++	kebab_br_sha1_init(&kebab_br_ctx);
++	BrToSHA1(&kebab_br_ctx, ctx);
+ }
+ 
+ void
+ SHA1Update(SHA1_CTX *ctx, const void *data, size_t len)
+ {
+-	const struct ccdigest_info *di = g_crypto_funcs->ccsha1_di;
+-	ccdigest_di_decl(di, di_ctx);
++	kebab_br_sha1_context kebab_br_ctx = { 0 };
+ 
+-	SHA1ToDi(di, ctx, di_ctx);
+-	g_crypto_funcs->ccdigest_update_fn(di, di_ctx, len, data);
+-	DiToSHA1(di, di_ctx, ctx);
++	SHA1ToBr(ctx, &kebab_br_ctx);
++	kebab_br_sha1_update(&kebab_br_ctx, data, len);
++	BrToSHA1(&kebab_br_ctx, ctx);
+ }
+ 
+ void
+ SHA1Final(void *digest, SHA1_CTX *ctx)
+ {
+-	const struct ccdigest_info *di = g_crypto_funcs->ccsha1_di;
+-	ccdigest_di_decl(di, di_ctx);
++	kebab_br_sha1_context kebab_br_ctx = { 0 };
+ 
+-	SHA1ToDi(di, ctx, di_ctx);
+-	ccdigest_final(di, di_ctx, digest);
++	SHA1ToBr(ctx, &kebab_br_ctx);
++	kebab_br_sha1_out(&kebab_br_ctx, digest);
+ }
+ 
+ /* This is not publicised in header, but exported in libkern.exports */
+diff --git a/libkern/crypto/kebab_bearssl.h b/libkern/crypto/kebab_bearssl.h
+new file mode 100644
+--- /dev/null
++++ b/libkern/crypto/kebab_bearssl.h
+@@ -0,0 +1,299 @@
++/*
++ * Copyright (c) 2016 Thomas Pornin <pornin@bolet.org>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining
++ * a copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sublicense, and/or sell copies of the Software, and to
++ * permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be
++ * included in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++
++/* BearSSL 0.6 primitive-only subset. No TLS, X.509, heap or libc dependency.
++ * kebab_br_* identifiers are prefixed to avoid collisions with kexts/other imports.
++ * The original algorithm bodies are unchanged; endian accesses are portable.
++ */
++#ifndef KEBAB_BEARSSL_H
++#define KEBAB_BEARSSL_H
++#include <stddef.h>
++#include <stdint.h>
++#include <libkern/libkern.h>
++
++typedef struct kebab_br_hash_class_ kebab_br_hash_class;
++struct kebab_br_hash_class_ {
++
++	size_t context_size;
++
++	uint32_t desc;
++
++	void (*init)(const kebab_br_hash_class **ctx);
++
++	void (*update)(const kebab_br_hash_class **ctx, const void *data, size_t len);
++
++	void (*out)(const kebab_br_hash_class *const *ctx, void *dst);
++
++	uint64_t (*state)(const kebab_br_hash_class *const *ctx, void *dst);
++
++	void (*set_state)(const kebab_br_hash_class **ctx,
++		const void *stb, uint64_t count);
++};
++
++#ifndef BR_DOXYGEN_IGNORE
++#define BR_HASHDESC_ID(id)           ((uint32_t)(id) << BR_HASHDESC_ID_OFF)
++#define BR_HASHDESC_ID_OFF           0
++#define BR_HASHDESC_ID_MASK          0xFF
++
++#define BR_HASHDESC_OUT(size)        ((uint32_t)(size) << BR_HASHDESC_OUT_OFF)
++#define BR_HASHDESC_OUT_OFF          8
++#define BR_HASHDESC_OUT_MASK         0x7F
++
++#define BR_HASHDESC_STATE(size)      ((uint32_t)(size) << BR_HASHDESC_STATE_OFF)
++#define BR_HASHDESC_STATE_OFF        15
++#define BR_HASHDESC_STATE_MASK       0xFF
++
++#define BR_HASHDESC_LBLEN(ls)        ((uint32_t)(ls) << BR_HASHDESC_LBLEN_OFF)
++#define BR_HASHDESC_LBLEN_OFF        23
++#define BR_HASHDESC_LBLEN_MASK       0x0F
++
++#define BR_HASHDESC_MD_PADDING       ((uint32_t)1 << 28)
++#define BR_HASHDESC_MD_PADDING_128   ((uint32_t)1 << 29)
++#define BR_HASHDESC_MD_PADDING_BE    ((uint32_t)1 << 30)
++#endif
++
++
++#define kebab_br_md5_ID     1
++
++#define kebab_br_md5_SIZE   16
++
++extern const kebab_br_hash_class kebab_br_md5_vtable;
++
++typedef struct {
++
++	const kebab_br_hash_class *vtable;
++#ifndef BR_DOXYGEN_IGNORE
++	unsigned char buf[64];
++	uint64_t count;
++	uint32_t val[4];
++#endif
++} kebab_br_md5_context;
++
++void kebab_br_md5_init(kebab_br_md5_context *ctx);
++
++void kebab_br_md5_update(kebab_br_md5_context *ctx, const void *data, size_t len);
++
++void kebab_br_md5_out(const kebab_br_md5_context *ctx, void *out);
++
++uint64_t kebab_br_md5_state(const kebab_br_md5_context *ctx, void *out);
++
++void kebab_br_md5_set_state(kebab_br_md5_context *ctx, const void *stb, uint64_t count);
++
++#define kebab_br_sha1_ID     2
++
++#define kebab_br_sha1_SIZE   20
++
++extern const kebab_br_hash_class kebab_br_sha1_vtable;
++
++typedef struct {
++
++	const kebab_br_hash_class *vtable;
++#ifndef BR_DOXYGEN_IGNORE
++	unsigned char buf[64];
++	uint64_t count;
++	uint32_t val[5];
++#endif
++} kebab_br_sha1_context;
++
++void kebab_br_sha1_init(kebab_br_sha1_context *ctx);
++
++void kebab_br_sha1_update(kebab_br_sha1_context *ctx, const void *data, size_t len);
++
++void kebab_br_sha1_out(const kebab_br_sha1_context *ctx, void *out);
++
++uint64_t kebab_br_sha1_state(const kebab_br_sha1_context *ctx, void *out);
++
++void kebab_br_sha1_set_state(kebab_br_sha1_context *ctx, const void *stb, uint64_t count);
++
++
++#define kebab_br_sha384_ID     5
++
++#define kebab_br_sha384_SIZE   48
++
++extern const kebab_br_hash_class kebab_br_sha384_vtable;
++
++typedef struct {
++
++	const kebab_br_hash_class *vtable;
++#ifndef BR_DOXYGEN_IGNORE
++	unsigned char buf[128];
++	uint64_t count;
++	uint64_t val[8];
++#endif
++} kebab_br_sha384_context;
++
++void kebab_br_sha384_init(kebab_br_sha384_context *ctx);
++
++void kebab_br_sha384_update(kebab_br_sha384_context *ctx, const void *data, size_t len);
++
++void kebab_br_sha384_out(const kebab_br_sha384_context *ctx, void *out);
++
++uint64_t kebab_br_sha384_state(const kebab_br_sha384_context *ctx, void *out);
++
++void kebab_br_sha384_set_state(kebab_br_sha384_context *ctx,
++	const void *stb, uint64_t count);
++
++#define kebab_br_sha512_ID     6
++
++#define kebab_br_sha512_SIZE   64
++
++extern const kebab_br_hash_class kebab_br_sha512_vtable;
++
++#ifdef BR_DOXYGEN_IGNORE
++
++typedef struct {
++
++	const kebab_br_hash_class *vtable;
++} kebab_br_sha512_context;
++#else
++typedef kebab_br_sha384_context kebab_br_sha512_context;
++#endif
++
++void kebab_br_sha512_init(kebab_br_sha512_context *ctx);
++
++#ifdef BR_DOXYGEN_IGNORE
++
++void kebab_br_sha512_update(kebab_br_sha512_context *ctx, const void *data, size_t len);
++#else
++#define kebab_br_sha512_update   kebab_br_sha384_update
++#endif
++
++void kebab_br_sha512_out(const kebab_br_sha512_context *ctx, void *out);
++
++#ifdef BR_DOXYGEN_IGNORE
++
++uint64_t kebab_br_sha512_state(const kebab_br_sha512_context *ctx, void *out);
++#else
++#define kebab_br_sha512_state   kebab_br_sha384_state
++#endif
++
++#ifdef BR_DOXYGEN_IGNORE
++
++void kebab_br_sha512_set_state(kebab_br_sha512_context *ctx,
++	const void *stb, uint64_t count);
++#else
++#define kebab_br_sha512_set_state   kebab_br_sha384_set_state
++#endif
++
++
++static inline void
++kebab_br_enc32le(void *dst, uint32_t x)
++{
++	unsigned char *buf;
++
++	buf = dst;
++	buf[0] = (unsigned char)x;
++	buf[1] = (unsigned char)(x >> 8);
++	buf[2] = (unsigned char)(x >> 16);
++	buf[3] = (unsigned char)(x >> 24);
++
++}
++
++static inline uint32_t
++kebab_br_dec32le(const void *src)
++{
++	const unsigned char *buf;
++
++	buf = src;
++	return (uint32_t)buf[0]
++		| ((uint32_t)buf[1] << 8)
++		| ((uint32_t)buf[2] << 16)
++		| ((uint32_t)buf[3] << 24);
++
++}
++
++static inline void
++kebab_br_enc32be(void *dst, uint32_t x)
++{
++	unsigned char *buf;
++
++	buf = dst;
++	buf[0] = (unsigned char)(x >> 24);
++	buf[1] = (unsigned char)(x >> 16);
++	buf[2] = (unsigned char)(x >> 8);
++	buf[3] = (unsigned char)x;
++
++}
++
++static inline uint32_t
++kebab_br_dec32be(const void *src)
++{
++	const unsigned char *buf;
++
++	buf = src;
++	return ((uint32_t)buf[0] << 24)
++		| ((uint32_t)buf[1] << 16)
++		| ((uint32_t)buf[2] << 8)
++		| (uint32_t)buf[3];
++
++}
++
++static inline void
++kebab_br_enc64le(void *dst, uint64_t x)
++{
++	unsigned char *buf;
++
++	buf = dst;
++	kebab_br_enc32le(buf, (uint32_t)x);
++	kebab_br_enc32le(buf + 4, (uint32_t)(x >> 32));
++
++}
++
++static inline void
++kebab_br_enc64be(void *dst, uint64_t x)
++{
++	unsigned char *buf;
++
++	buf = dst;
++	kebab_br_enc32be(buf, (uint32_t)(x >> 32));
++	kebab_br_enc32be(buf + 4, (uint32_t)x);
++
++}
++
++static inline uint64_t
++kebab_br_dec64be(const void *src)
++{
++	const unsigned char *buf;
++
++	buf = src;
++	return ((uint64_t)kebab_br_dec32be(buf) << 32)
++		| (uint64_t)kebab_br_dec32be(buf + 4);
++
++}
++
++void kebab_br_range_dec32be(uint32_t *v, size_t num, const void *src);
++void kebab_br_range_enc32be(void *dst, const uint32_t *v, size_t num);
++
++void kebab_br_range_dec32le(uint32_t *v, size_t num, const void *src);
++void kebab_br_range_enc32le(void *dst, const uint32_t *v, size_t num);
++
++void kebab_br_range_dec64be(uint64_t *v, size_t num, const void *src);
++void kebab_br_range_enc64be(void *dst, const uint64_t *v, size_t num);
++
++extern const uint32_t kebab_br_sha1_IV[5];
++extern const uint32_t kebab_br_md5_IV[4];
++void kebab_br_sha1_round(const unsigned char *buf, uint32_t *val);
++void kebab_br_md5_round(const unsigned char *buf, uint32_t *val);
++#endif /* KEBAB_BEARSSL_H */
+diff --git a/libkern/crypto/kebab_dec32be.c b/libkern/crypto/kebab_dec32be.c
+new file mode 100644
+--- /dev/null
++++ b/libkern/crypto/kebab_dec32be.c
+@@ -0,0 +1,38 @@
++/*
++ * Copyright (c) 2016 Thomas Pornin <pornin@bolet.org>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining
++ * a copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sublicense, and/or sell copies of the Software, and to
++ * permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be
++ * included in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#include "kebab_bearssl.h"
++
++/* see inner.h */
++void
++kebab_br_range_dec32be(uint32_t *v, size_t num, const void *src)
++{
++	const unsigned char *buf;
++
++	buf = src;
++	while (num -- > 0) {
++		*v ++ = kebab_br_dec32be(buf);
++		buf += 4;
++	}
++}
+diff --git a/libkern/crypto/kebab_enc32be.c b/libkern/crypto/kebab_enc32be.c
+new file mode 100644
+--- /dev/null
++++ b/libkern/crypto/kebab_enc32be.c
+@@ -0,0 +1,38 @@
++/*
++ * Copyright (c) 2016 Thomas Pornin <pornin@bolet.org>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining
++ * a copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sublicense, and/or sell copies of the Software, and to
++ * permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be
++ * included in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#include "kebab_bearssl.h"
++
++/* see inner.h */
++void
++kebab_br_range_enc32be(void *dst, const uint32_t *v, size_t num)
++{
++	unsigned char *buf;
++
++	buf = dst;
++	while (num -- > 0) {
++		kebab_br_enc32be(buf, *v ++);
++		buf += 4;
++	}
++}
+diff --git a/libkern/crypto/kebab_sha1.c b/libkern/crypto/kebab_sha1.c
+new file mode 100644
+--- /dev/null
++++ b/libkern/crypto/kebab_sha1.c
+@@ -0,0 +1,191 @@
++/*
++ * Copyright (c) 2016 Thomas Pornin <pornin@bolet.org>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining
++ * a copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sublicense, and/or sell copies of the Software, and to
++ * permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be
++ * included in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#include "kebab_bearssl.h"
++
++#define F(B, C, D)     ((((C) ^ (D)) & (B)) ^ (D))
++#define G(B, C, D)     ((B) ^ (C) ^ (D))
++#define H(B, C, D)     (((D) & (C)) | (((D) | (C)) & (B)))
++#define I(B, C, D)     G(B, C, D)
++
++#define ROTL(x, n)    (((x) << (n)) | ((x) >> (32 - (n))))
++
++#define K1     ((uint32_t)0x5A827999)
++#define K2     ((uint32_t)0x6ED9EBA1)
++#define K3     ((uint32_t)0x8F1BBCDC)
++#define K4     ((uint32_t)0xCA62C1D6)
++
++/* see inner.h */
++const uint32_t kebab_br_sha1_IV[5] = {
++	0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0
++};
++
++/* see inner.h */
++void
++kebab_br_sha1_round(const unsigned char *buf, uint32_t *val)
++{
++	uint32_t m[80];
++	uint32_t a, b, c, d, e;
++	int i;
++
++	a = val[0];
++	b = val[1];
++	c = val[2];
++	d = val[3];
++	e = val[4];
++	kebab_br_range_dec32be(m, 16, buf);
++	for (i = 16; i < 80; i ++) {
++		uint32_t x = m[i - 3] ^ m[i - 8] ^ m[i - 14] ^ m[i - 16];
++		m[i] = ROTL(x, 1);
++	}
++
++	for (i = 0; i < 20; i += 5) {
++		e += ROTL(a, 5) + F(b, c, d) + K1 + m[i + 0]; b = ROTL(b, 30);
++		d += ROTL(e, 5) + F(a, b, c) + K1 + m[i + 1]; a = ROTL(a, 30);
++		c += ROTL(d, 5) + F(e, a, b) + K1 + m[i + 2]; e = ROTL(e, 30);
++		b += ROTL(c, 5) + F(d, e, a) + K1 + m[i + 3]; d = ROTL(d, 30);
++		a += ROTL(b, 5) + F(c, d, e) + K1 + m[i + 4]; c = ROTL(c, 30);
++	}
++	for (i = 20; i < 40; i += 5) {
++		e += ROTL(a, 5) + G(b, c, d) + K2 + m[i + 0]; b = ROTL(b, 30);
++		d += ROTL(e, 5) + G(a, b, c) + K2 + m[i + 1]; a = ROTL(a, 30);
++		c += ROTL(d, 5) + G(e, a, b) + K2 + m[i + 2]; e = ROTL(e, 30);
++		b += ROTL(c, 5) + G(d, e, a) + K2 + m[i + 3]; d = ROTL(d, 30);
++		a += ROTL(b, 5) + G(c, d, e) + K2 + m[i + 4]; c = ROTL(c, 30);
++	}
++	for (i = 40; i < 60; i += 5) {
++		e += ROTL(a, 5) + H(b, c, d) + K3 + m[i + 0]; b = ROTL(b, 30);
++		d += ROTL(e, 5) + H(a, b, c) + K3 + m[i + 1]; a = ROTL(a, 30);
++		c += ROTL(d, 5) + H(e, a, b) + K3 + m[i + 2]; e = ROTL(e, 30);
++		b += ROTL(c, 5) + H(d, e, a) + K3 + m[i + 3]; d = ROTL(d, 30);
++		a += ROTL(b, 5) + H(c, d, e) + K3 + m[i + 4]; c = ROTL(c, 30);
++	}
++	for (i = 60; i < 80; i += 5) {
++		e += ROTL(a, 5) + I(b, c, d) + K4 + m[i + 0]; b = ROTL(b, 30);
++		d += ROTL(e, 5) + I(a, b, c) + K4 + m[i + 1]; a = ROTL(a, 30);
++		c += ROTL(d, 5) + I(e, a, b) + K4 + m[i + 2]; e = ROTL(e, 30);
++		b += ROTL(c, 5) + I(d, e, a) + K4 + m[i + 3]; d = ROTL(d, 30);
++		a += ROTL(b, 5) + I(c, d, e) + K4 + m[i + 4]; c = ROTL(c, 30);
++	}
++
++	val[0] += a;
++	val[1] += b;
++	val[2] += c;
++	val[3] += d;
++	val[4] += e;
++}
++
++/* see bearssl.h */
++void
++kebab_br_sha1_init(kebab_br_sha1_context *cc)
++{
++	cc->vtable = &kebab_br_sha1_vtable;
++	memcpy(cc->val, kebab_br_sha1_IV, sizeof cc->val);
++	cc->count = 0;
++}
++
++/* see bearssl.h */
++void
++kebab_br_sha1_update(kebab_br_sha1_context *cc, const void *data, size_t len)
++{
++	const unsigned char *buf;
++	size_t ptr;
++
++	buf = data;
++	ptr = (size_t)cc->count & 63;
++	while (len > 0) {
++		size_t clen;
++
++		clen = 64 - ptr;
++		if (clen > len) {
++			clen = len;
++		}
++		memcpy(cc->buf + ptr, buf, clen);
++		ptr += clen;
++		buf += clen;
++		len -= clen;
++		cc->count += (uint64_t)clen;
++		if (ptr == 64) {
++			kebab_br_sha1_round(cc->buf, cc->val);
++			ptr = 0;
++		}
++	}
++}
++
++/* see bearssl.h */
++void
++kebab_br_sha1_out(const kebab_br_sha1_context *cc, void *dst)
++{
++	unsigned char buf[64];
++	uint32_t val[5];
++	size_t ptr;
++
++	ptr = (size_t)cc->count & 63;
++	memcpy(buf, cc->buf, ptr);
++	memcpy(val, cc->val, sizeof val);
++	buf[ptr ++] = 0x80;
++	if (ptr > 56) {
++		memset(buf + ptr, 0, 64 - ptr);
++		kebab_br_sha1_round(buf, val);
++		memset(buf, 0, 56);
++	} else {
++		memset(buf + ptr, 0, 56 - ptr);
++	}
++	kebab_br_enc64be(buf + 56, cc->count << 3);
++	kebab_br_sha1_round(buf, val);
++	kebab_br_range_enc32be(dst, val, 5);
++}
++
++/* see bearssl.h */
++uint64_t
++kebab_br_sha1_state(const kebab_br_sha1_context *cc, void *dst)
++{
++	kebab_br_range_enc32be(dst, cc->val, 5);
++	return cc->count;
++}
++
++/* see bearssl.h */
++void
++kebab_br_sha1_set_state(kebab_br_sha1_context *cc, const void *stb, uint64_t count)
++{
++	kebab_br_range_dec32be(cc->val, 5, stb);
++	cc->count = count;
++}
++
++/* see bearssl.h */
++const kebab_br_hash_class kebab_br_sha1_vtable = {
++	sizeof(kebab_br_sha1_context),
++	BR_HASHDESC_ID(kebab_br_sha1_ID)
++		| BR_HASHDESC_OUT(20)
++		| BR_HASHDESC_STATE(20)
++		| BR_HASHDESC_LBLEN(6)
++		| BR_HASHDESC_MD_PADDING
++		| BR_HASHDESC_MD_PADDING_BE,
++	(void (*)(const kebab_br_hash_class **))&kebab_br_sha1_init,
++	(void (*)(const kebab_br_hash_class **, const void *, size_t))&kebab_br_sha1_update,
++	(void (*)(const kebab_br_hash_class *const *, void *))&kebab_br_sha1_out,
++	(uint64_t (*)(const kebab_br_hash_class *const *, void *))&kebab_br_sha1_state,
++	(void (*)(const kebab_br_hash_class **, const void *, uint64_t))
++		&kebab_br_sha1_set_state
++};

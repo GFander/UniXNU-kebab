@@ -1,0 +1,20 @@
+--- a/osfmk/prng/prng_random.c
++++ b/osfmk/prng/prng_random.c
+@@ -145,7 +145,7 @@
+ 		     .strictFIPS = 0,
+ 	     }};
+ 
+-#if defined(NEGRONI)
++#if defined(NEGRONI) || defined(KEBAB)
+ /*
+  * The corecrypto kext normally installs the kernel PRNG. NEGRONI has no such
+  * kext: use the built-in HMAC-SHA256 DRBG, just as early_random does. A
+@@ -473,7 +473,7 @@
+ write_random(void * buffer, u_int numbytes)
+ {
+ 	uint8_t seed[SHA256_DIGEST_LENGTH];
+-#if defined(NEGRONI)
++#if defined(NEGRONI) || defined(KEBAB)
+ 	/* Hash without depending on the absent corecrypto kext's dispatch table. */
+ 	const struct ccdigest_info *di = &ccsha256_ltc_di;
+ 	ccdigest_di_decl(di, ctx);
