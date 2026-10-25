@@ -427,3 +427,25 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  	user_access_disable();
  	return result;
  }
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1600,11 +1600,19 @@
+ 			/*
+ 			 *  We have to "fault" the page in.
+ 			 */
++#if defined(KEBAB)
++			printf("KEBAB: kfault addr 0x%llx code 0x%x recover %d free %d\n",
++			    (unsigned long long)fault_addr, (unsigned)fault_code, (int)recover,
++			    vm_page_free_count);
++#endif
+ 			result = vm_fault(map, fault_addr, fault_type,
+ 			    /* change_wiring */ FALSE, VM_KERN_MEMORY_NONE, interruptible,
+ 			    /* caller_pmap */ NULL, /* caller_pmap_addr */ 0);
+ 		}
+ 
++#if defined(KEBAB)
++		printf("KEBAB: kfault result %d free %d\n", result, vm_page_free_count);
++#endif
+ 		if (result == KERN_SUCCESS) {
+ 			return;
+ 		}
