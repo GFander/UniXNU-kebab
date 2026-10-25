@@ -114,7 +114,47 @@
  	if (lret != KERN_SUCCESS) {
  		KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
  		    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_ACTV_THREADSTATE, 0, 0);
-@@ -6879,10 +6909,20 @@
+@@ -1662,6 +1692,9 @@
+ 
+ 		goto badtoolate;
+ 	}
++#if defined(KEBAB)
++	printf("KEBAB: exec P6 stack created\n");
++#endif
+ 
+ 	/*
+ 	 * The load result will have already been munged by AMFI to include the
+@@ -1703,6 +1736,9 @@
+ 	    load_result.lr_sdk);
+ 
+ 	error = exec_add_apple_strings(imgp, &load_result); /* copies out main thread port */
++#if defined(KEBAB)
++	printf("KEBAB: exec P7 apple strings -> %d\n", error);
++#endif
+ 
+ 	if (error) {
+ 		KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
+@@ -1718,6 +1754,9 @@
+ 
+ 	/* Switch to target task's map to copy out strings */
+ 	old_map = vm_map_switch(get_task_map(task));
++#if defined(KEBAB)
++	printf("KEBAB: exec P8 map switched\n");
++#endif
+ 
+ 	if (load_result.unixproc) {
+ 		user_addr_t     ap;
+@@ -1743,6 +1782,9 @@
+ 		}
+ 		/* Set the stack */
+ 		thread_setuserstack(thread, ap);
++#if defined(KEBAB)
++		printf("KEBAB: exec P9 stack set\n");
++#endif
+ 	}
+ 
+ 	if (load_result.dynlinker || load_result.is_rosetta) {
+@@ -6879,10 +6921,20 @@
  	mach_vm_offset_t scratch_addr = 0;
  	mach_vm_size_t map_page_size = vm_map_page_size(map);
  
