@@ -124,5 +124,8 @@ kernel_args = [
   # this port has no separate data volume.
   "ufsrw=1",
   "rootrw=1",
+  # Device-mode USB CDC-ACM console: the kernel log is also streamed to the
+  # host as /dev/ttyACM0. Off without this argument.
+  "kebabusb=1",
   "keepsyms=1",
 ]
