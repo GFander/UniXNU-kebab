@@ -390,3 +390,54 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  	if ((cnp->cn_flags & CN_NBMOUNTLOOK) != 0) {
  		vbusyflags = LK_NOWAIT;
  	}
+--- a/osfmk/arm64/copyio.c
++++ b/osfmk/arm64/copyio.c
+@@ -39,6 +39,16 @@
+ #undef copyin
+ #undef copyout
+ 
++#if defined(KEBAB)
++/*
++ * PAN is architectural from ARMv8.1 and SM8250 implements it, but this macro is
++ * only defined by Apple's own SoC headers (H13.h, VMAPPLE.h). Without it
++ * user_access_enable() compiles to nothing, so _bcopyin/_bcopyout store to user
++ * memory with PAN still set and every copy takes a permission fault.
++ */
++#define __ARM_PAN_AVAILABLE__ 1
++#endif /* KEBAB */
++
+ extern int _bcopyin(const char *src, char *dst, vm_size_t len);
+ extern int _bcopyinstr(const char *src, char *dst, vm_size_t max, vm_size_t *actual);
+ extern int _bcopyout(const char *src, char *dst, vm_size_t len);
+@@ -241,6 +251,9 @@
+ {
+ 	int result = copy_validate(user_addr, (uintptr_t)kernel_addr, 4,
+ 	    COPYIO_IN | COPYIO_ATOMIC);
++#if defined(KEBAB)
++	printf("KEBAB: copyout validated %d\n", result);
++#endif
+ 	if (__improbable(result)) {
+ 		return result;
+ 	}
+@@ -334,6 +347,11 @@
+ int
+ copyout(const void *kernel_addr, user_addr_t user_addr, vm_size_t nbytes)
+ {
++#if defined(KEBAB)
++	printf("KEBAB: copyout enter addr 0x%llx len %llu\n",
++	    (unsigned long long)user_addr, (unsigned long long)nbytes);
++#endif
++
+ 	int result;
+ 
+ 	if (nbytes == 0) {
+@@ -350,6 +368,9 @@
+ 	}
+ 	user_access_enable();
+ 	result = _bcopyout(kernel_addr, (char *)user_addr, nbytes);
++#if defined(KEBAB)
++	printf("KEBAB: copyout copied %d\n", result);
++#endif
+ 	user_access_disable();
+ 	return result;
+ }

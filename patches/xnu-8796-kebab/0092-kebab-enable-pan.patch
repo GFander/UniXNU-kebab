@@ -1,0 +1,34 @@
+Enable PAN for kebab: user memory access has been broken all along without it.
+
+user_access_enable() only clears PAN when __ARM_PAN_AVAILABLE__ is defined,
+and that macro is only set by Apple's own SoC headers. On this port the
+function compiled to nothing, so the copy routines stored to user memory
+with PAN still set and every copy faulted. SM8250 is ARMv8.2 and has PAN.
+
+--- a/osfmk/arm64/copyio.c
++++ b/osfmk/arm64/copyio.c
+@@ -39,6 +39,16 @@
+ #undef copyin
+ #undef copyout
+ 
++#if defined(KEBAB)
++/*
++ * PAN is architectural from ARMv8.1 and SM8250 implements it, but this macro is
++ * only defined by Apple's own SoC headers (H13.h, VMAPPLE.h). Without it
++ * user_access_enable() compiles to nothing, so _bcopyin/_bcopyout store to user
++ * memory with PAN still set and every copy takes a permission fault.
++ */
++#define __ARM_PAN_AVAILABLE__ 1
++#endif /* KEBAB */
++
+ extern int _bcopyin(const char *src, char *dst, vm_size_t len);
+ extern int _bcopyinstr(const char *src, char *dst, vm_size_t max, vm_size_t *actual);
+ extern int _bcopyout(const char *src, char *dst, vm_size_t len);
+@@ -334,6 +344,7 @@
+ int
+ copyout(const void *kernel_addr, user_addr_t user_addr, vm_size_t nbytes)
+ {
++
+ 	int result;
+ 
+ 	if (nbytes == 0) {
