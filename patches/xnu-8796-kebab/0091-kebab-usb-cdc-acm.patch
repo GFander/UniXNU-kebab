@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,663 @@
+@@ -0,0 +1,667 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -32,6 +32,10 @@ new file mode 100644
 +#include <vm/vm_kern.h>
 +
 +#include <arm/machine_routines.h>   /* ml_io_map */
++
++/* Declared in arm/machine_routines.h, but behind a guard this build does
++ * not satisfy; the negroni port spells it out for the same reason. */
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +
 +/* ---------------------------------------------------------------- registers */
 +
