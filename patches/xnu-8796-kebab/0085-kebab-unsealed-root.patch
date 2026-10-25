@@ -1,0 +1,23 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -956,9 +956,20 @@
+ 		if (require_rootauth) {
+ 			/* enforce sealedness */
+ 			int autherr = VNOP_IOCTL(rootvnode, FSIOC_KERNEL_ROOTAUTH, NULL, 0, vfs_context_kernel());
++#if defined(KEBAB)
++			/*
++			 * There is no chain of trust to extend here: the kernel boots
++			 * unsigned, Image4 and AMFI are absent, and the HFS root cannot be
++			 * a sealed volume. Report the result and carry on unsealed.
++			 */
++			if (autherr) {
++				printf("KEBAB: root volume is not sealed (error %d); continuing\n", autherr);
++			}
++#else
+ 			if (autherr) {
+ 				panic("rootvp not authenticated after mounting");
+ 			}
++#endif
+ 		}
+ 	}
+ 
