@@ -161,14 +161,29 @@ ramdisk / 根设备被正确识别，或者接受一个最小 root（例如预�
 2. 把 panic 日志写入 `pram`，重启后可回读。
 3. 菜单交互（音量键选择）与超时策略。
 
-### BSD / 用户态
+### 块驱动与根卷（当前阶段）
 
-1. **根文件系统**：让 `vfs_mountroot()` 拿到可用 root（ramdisk 或 Data 卷）。
+**设计决定：不使用 RAMDisk。** 内核必须从真实块设备挂载根卷，而不是从内存镜像。
+loader 里也不保留 `RAMDisk` 映射项。
+
+1. **内核块驱动（下一步的重点）** —— 在 IOKit 里实现 UFS：
+   * 控制器初始化：QMP PHY、时钟、电源域（需要内核侧的时钟/RPMh 支持）；
+   * UIC 命令、描述符读取、传输请求队列；
+   * 对外发布 `IOBlockStorageDevice` → `IOMedia`；
+   * GPT 解析后应出现 `OS` / `SystemOS` 分区。
+2. **根卷匹配**：`/chosen/root-matching` 的 UUID 要指向 `userdata` 里的系统卷，
+   让 `vfs_mountroot()` 能选到它。
+3. `launchd` 从该卷启动。
+
+参考材料：Mu-Silicium 的 `UfsDxe`（UEFI 侧）里有完整的寄存器序列、PHY 与
+UIC 配置，可以作为写内核驱动时的对照；但它本身是 UEFI 代码，不能直接搬进内核。
+
+### 用户态
 2. **kext 加载**：设备树 `/chosen/memory-map` 里的 booter kext 目前是空的，
    后续需要把 AMFI 等内核扩展塞进载荷。
-3. **AMFI / Image4 最小实现**：代码签名与 entitlements 校验需要能通过。
-4. 启动 `launchd` → 加载 iOS 16.7.16 的 `/System/Library` 组件。
-5. 用 iPhone X（`D22AP`）的身份完成平台相关校验。
+4. **AMFI / Image4 最小实现**：代码签名与 entitlements 校验需要能通过。
+5. 启动 `launchd` → 加载 iOS 16.7.16 的 `/System/Library` 组件。
+6. 用 iPhone X（`D22AP`）的身份完成平台相关校验。
 
 ---
 

@@ -136,10 +136,6 @@ def main():
                         help='/psci method used by the secondary-CPU start (the board firmware uses smc)')
     parser.add_argument('--timebase', type=lambda value: int(value, 0), default=TIMEBASE,
                         help='CNTFRQ value in Hz; override with the value read from the device')
-    parser.add_argument('--packed-data-ramdisk', action='store_true',
-                        help='Hand off validated DBRDISK1 bytes to the native sparse block driver')
-    parser.add_argument('--data-ramdisk', action='store_true',
-                        help='/chosen/memory-map RAMDisk placeholder for a scratch Data seed')
     parser.add_argument('--trust-cache', action='store_true',
                         help='Zeroed TrustCache sidecar handoff placeholder')
     parser.add_argument('--product-file', type=Path,
@@ -208,8 +204,6 @@ def main():
                            ('certificate-security-mode', struct.pack('<I', 1)),
                            ('effective-security-mode-sep', struct.pack('<I', 1))]
                           if args.ipad_identity else []),
-                        *([('ephemeral-storage', struct.pack('<I', 1))]
-                          if (args.data_ramdisk or args.packed_data_ramdisk) else []),
                         *([('darwinboot-memory-size', struct.pack('<Q', args.owned_memory_size))]
                           if args.owned_memory_size else []),
                         ('embedded-panic-log-size', struct.pack('<I', PANIC_LOG_SIZE)),
@@ -223,9 +217,9 @@ def main():
                           if args.root_match_volume_uuid else []),
                         ('amfi-only-platform-code', struct.pack('<I', 1)),
                         *empty_nvram_proxy()],
-             [node('memory-map', ([("PackedRAMDisk" if args.packed_data_ramdisk else "RAMDisk", bytes(16))]
-                                  if (args.data_ramdisk or args.packed_data_ramdisk) else []) +
-                                 ([('TrustCache', bytes(16))] if args.trust_cache else [])),
+             # No RAMDisk entry: kebab roots on the real block device, not on a
+             # memory image, so nothing here should advertise one.
+             [node('memory-map', ([('TrustCache', bytes(16))] if args.trust_cache else [])),
               node('manifest-properties')]),
         # Panic log lives at the far end of the window the loader hands over.
         node('pram', [('reg', struct.pack('<QQ', PANIC_LOG_BASE, PANIC_LOG_SIZE))]),
