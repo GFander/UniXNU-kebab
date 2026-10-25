@@ -28,3 +28,21 @@
  	pthread_init();
  	/* POSIX Shm and Sem */
  	bsd_init_kprintf("calling pshm_cache_init\n");
+@@ -884,7 +897,16 @@
+ 			/*NOTREACHED*/
+ 		}
+ #endif
+-		printf("cannot mount root, errno = %d\n", err);
++		printf("cannot mount root, errno = %d, rootdevice \"%s\"\n",
++		    err, rootdevice);
++#if defined(KEBAB)
++		/*
++		 * Retrying in a tight loop only buries the first attempt's output,
++		 * which is the diagnostic we actually need. Stop here instead.
++		 */
++		panic("KEBAB: cannot mount root, errno = %d, rootdevice \"%s\"",
++		    err, rootdevice);
++#endif
+ 	}
+ 
+ 	IOSecureBSDRoot(rootdevice);
