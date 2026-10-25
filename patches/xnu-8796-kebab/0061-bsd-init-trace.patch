@@ -36,21 +36,22 @@
  	pthread_init();
  	/* POSIX Shm and Sem */
  	bsd_init_kprintf("calling pshm_cache_init\n");
-@@ -884,7 +898,16 @@
- 			/*NOTREACHED*/
+@@ -870,6 +884,18 @@
+ 		if (0 == (err = vfs_mountroot())) {
+ 			break;
  		}
- #endif
--		printf("cannot mount root, errno = %d\n", err);
-+		printf("cannot mount root, errno = %d, rootdevice \"%s\"\n",
-+		    err, rootdevice);
 +#if defined(KEBAB)
 +		/*
-+		 * Retrying in a tight loop only buries the first attempt's output,
-+		 * which is the diagnostic we actually need. Stop here instead.
++		 * Report before anything clears rootdevice, and carry the storage
++		 * driver's own verdict: the console is wiped by the panic, so this
++		 * string is the only surviving record of the probe.
 +		 */
-+		panic("KEBAB: cannot mount root, errno = %d, rootdevice \"%s\", args \"%s\"",
-+		    err, rootdevice, PE_boot_args());
++		{
++			extern const char *kebab_ufs_status_string(void);
++			panic("KEBAB: cannot mount root, errno = %d, rootdevice \"%s\", ufs %s, args \"%s\"",
++			    err, rootdevice, kebab_ufs_status_string(), PE_boot_args());
++		}
 +#endif
- 	}
- 
- 	IOSecureBSDRoot(rootdevice);
+ 		rootdevice[0] = '\0';
+ #if CONFIG_NETBOOT
+ 		if (netboot) {
