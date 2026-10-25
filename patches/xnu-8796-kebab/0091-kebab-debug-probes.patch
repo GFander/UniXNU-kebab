@@ -258,17 +258,23 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  	struct vnode *vp;
  	struct vnode *dvp;
  	vfs_context_t ctx = ndp->ni_cnd.cn_context;
-@@ -442,6 +446,9 @@
- 		}
+@@ -563,9 +567,15 @@
  
- continue_create_lookup:
+ 		/* Do a lookup, possibly going directly to filesystem for compound operation */
+ 		do {
 +#if defined(KEBAB)
-+		printf("KEBAB: vn_open_auth namei next\n");
++			printf("KEBAB: vn_open_auth lookup next\n");
 +#endif
- 		if ((error = namei(ndp))) {
- 			goto out;
- 		}
-@@ -654,6 +661,9 @@
+ 			if ((error = namei(ndp))) {
+ 				goto out;
+ 			}
++#if defined(KEBAB)
++			printf("KEBAB: vn_open_auth lookup done (vp %p)\n", (void *)ndp->ni_vp);
++#endif
+ 			vp = ndp->ni_vp;
+ 			dvp = ndp->ni_dvp;
+ 
+@@ -654,6 +664,9 @@
  			}
  		}
  
