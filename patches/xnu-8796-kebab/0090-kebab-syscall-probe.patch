@@ -32,7 +32,42 @@
  
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -6879,10 +6879,20 @@
+@@ -962,6 +962,10 @@
+ get_teamid_for_shared_region(struct image_params *imgp)
+ {
+ 	assert(imgp->ip_vp != NULL);
++#if defined(KEBAB)
++	printf("KEBAB: namei ok, vnode %p size %lld\n",
++	    (void *)imgp->ip_vp, (long long)imgp->ip_vp->v_size);
++#endif
+ 
+ 	const char *ret = csvnode_get_teamid(imgp->ip_vp, imgp->ip_arch_offset);
+ 	if (ret) {
+@@ -1160,6 +1164,9 @@
+ static int
+ exec_mach_imgact(struct image_params *imgp)
+ {
++#if defined(KEBAB)
++	printf("KEBAB: exec_mach_imgact enter\n");
++#endif
+ 	struct mach_header *mach_header = (struct mach_header *)imgp->ip_vdata;
+ 	proc_t                  p = vfs_context_proc(imgp->ip_vfs_context);
+ 	int                     error = 0;
+@@ -1314,7 +1321,13 @@
+ 	/*
+ 	 * Actually load the image file we previously decided to load.
+ 	 */
++#if defined(KEBAB)
++	printf("KEBAB: calling load_machfile\n");
++#endif
+ 	lret = load_machfile(imgp, mach_header, thread, &map, &load_result);
++#if defined(KEBAB)
++	printf("KEBAB: load_machfile -> %d\n", (int)lret);
++#endif
+ 	if (lret != LOAD_SUCCESS) {
+ 		error = load_return_to_errno(lret);
+ 
+@@ -6879,10 +6892,20 @@
  	mach_vm_offset_t scratch_addr = 0;
  	mach_vm_size_t map_page_size = vm_map_page_size(map);
  
