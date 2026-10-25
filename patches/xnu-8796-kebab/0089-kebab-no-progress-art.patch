@@ -1,0 +1,19 @@
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -2437,6 +2437,16 @@
+ {
+ 	uint64_t    abstime;
+ 
++#if defined(KEBAB)
++	/*
++	 * The panel is the only console on this port, and the progress art is
++	 * drawn into the same framebuffer: it would paint over the kernel log
++	 * and over anything userland writes to its console. Leave vc_progress
++	 * NULL so every progress path returns early.
++	 */
++	return;
++#endif
++
+ 	if ((!clut) || (!desc) || (!data1x)) {
+ 		return;
+ 	}
