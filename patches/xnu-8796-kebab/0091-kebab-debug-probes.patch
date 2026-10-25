@@ -284,3 +284,34 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  		error = VNOP_OPEN(vp, fmode, ctx);
  		if (error) {
  			/*
+--- a/bsd/vfs/vfs_lookup.c
++++ b/bsd/vfs/vfs_lookup.c
+@@ -1089,6 +1089,7 @@
+ int
+ lookup(struct nameidata *ndp)
+ {
++
+ 	char    *cp;            /* pointer into pathname argument */
+ 	vnode_t         tdp;            /* saved dp */
+ 	vnode_t         dp;             /* the directory we are searching */
+@@ -1119,6 +1120,20 @@
+ 	dp = ndp->ni_startdir;
+ 	ndp->ni_startdir = NULLVP;
+ 
++#if defined(KEBAB)
++	{
++		char kname[32] = "?";
++		size_t klen;
++		if (cnp->cn_nameptr != NULL) {
++			for (klen = 0; klen < sizeof(kname) - 1 && klen < cnp->cn_namelen; klen++) {
++				kname[klen] = cnp->cn_nameptr[klen];
++			}
++			kname[klen] = 0;
++		}
++		printf("KEBAB: lookup \"%s\" in vp %p\n", kname, (void *)dp);
++	}
++#endif
++
+ 	if ((cnp->cn_flags & CN_NBMOUNTLOOK) != 0) {
+ 		vbusyflags = LK_NOWAIT;
+ 	}
