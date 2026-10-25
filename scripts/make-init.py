@@ -30,7 +30,9 @@ LC_SEGMENT_64 = 0x19
 LC_UNIXTHREAD = 0x5
 ARM_THREAD_STATE64 = 6
 
-VMADDR = 0x100000000
+# Must stay below 4 GiB: on arm64 the kernel's Mach-O loader rejects any
+# executable segment whose vmaddr + vmsize + slide exceeds UINT32_MAX.
+VMADDR = 0x10000
 DATA_OFF_PLACEHOLDER = 0x4000
 PAGE = 0x4000          # the machine runs a 16 KiB-page kernel
 TEXT_OFF = 0x1000

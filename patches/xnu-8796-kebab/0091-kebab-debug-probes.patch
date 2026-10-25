@@ -1,0 +1,24 @@
+TEMPORARY bring-up probes. Drop this patch once the port boots.
+
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -4558,6 +4558,9 @@
+ 	AUDIT_ARG(fflags, oflags);
+ 	AUDIT_ARG(mode, vap->va_mode);
+ 
++#if defined(KEBAB)
++	printf("KEBAB: open1 falloc next\n");
++#endif
+ 	if ((error = falloc_withinit(p, &fp, &indx, ctx, fp_init, initarg)) != 0) {
+ 		return error;
+ 	}
+@@ -4587,6 +4590,9 @@
+ 		}
+ 	}
+ 
++#if defined(KEBAB)
++	printf("KEBAB: open1 vn_open_auth next\n");
++#endif
+ 	if ((error = vn_open_auth(ndp, &flags, vap, authvp))) {
+ 		if (authvp != NULLVP) {
+ 			vnode_put(authvp);
