@@ -136,3 +136,17 @@ D. 稳定性
    OS/SystemOS/AppOS 三个 APFS 卷合成一个 case-sensitive journaled HFS+，
    再打上跳过 Setup、种子激活、去 baseband、关 watchdog 等 bring-up 改动。
    阶段 B 直接参考，不用重新发明。
+
+   本机已经有**创建** HFS+ 卷的能力：`scripts/build-newfs-hfs.sh` 从 Debian 的
+   hfsprogs 源码编译出 `newfs_hfs` / `fsck_hfs`（Debian 版就是 Apple
+   `diskdev_cmds` 的 Linux 移植），装到 `~/.local/share/kebab-tools/`，不需要 root：
+
+   ```sh
+   scripts/build-newfs-hfs.sh
+   dd if=/dev/zero of=root.img bs=1M count=64 status=none
+   ~/.local/share/kebab-tools/newfs_hfs -v KebabRoot -J root.img
+   ```
+
+   局限：它只能**造卷**，不能往卷里放文件（那需要挂载，要 root 或 macOS）。
+   所以带内容的根镜像仍然在 CI 的 macOS runner 上生成 —— 见
+   `docs/FIRMWARE.md` 里那条待应用的 workflow 补丁。
