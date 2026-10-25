@@ -14,15 +14,17 @@
  }
 --- a/bsd/kern/kern_descrip.c
 +++ b/bsd/kern/kern_descrip.c
-@@ -2718,6 +2718,13 @@
+@@ -2718,6 +2718,15 @@
  	    fopen.o_pathname, has_entitlement ? &context : vfs_context_current());
  	nd->ni_dvp = vp;
  
 +#if defined(KEBAB)
 +	{
++		/* Bring-up probe: the first thing PID 1 does is open its console. */
 +		char kpath[64] = "?";
-+		(void)copyinstr(uap->path, kpath, sizeof(kpath), NULL);
-+		printf("KEBAB: open \"%s\" pid=%d\n", kpath, proc_pid(p));
++		(void)copyinstr(fopen.o_pathname, kpath, sizeof(kpath), NULL);
++		printf("KEBAB: open \"%s\" flags=0x%x pid=%d\n",
++		    kpath, fopen.o_flags, proc_pid(p));
 +	}
 +#endif
  	error = open1(has_entitlement ? &context : vfs_context_current(),
