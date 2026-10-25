@@ -11,21 +11,13 @@
  extern dev_t mdevadd(int devid, uint64_t base, unsigned int size, int phys);
  extern dev_t mdevlookup(int devid);
  extern void mdevremoveall(void);
-@@ -766,6 +770,30 @@
+@@ -766,6 +770,22 @@
  		}
  	}
  
 +#if defined(KEBAB)
 +	/* This BSD disk does not publish an IOMedia; rd= overrides root-matching. */
-+	if (strcmp(rdBootVar, "ufsroot0") != 0) {
-+		/*
-+		 * The boot arguments are the first thing to check when the root
-+		 * device is not the one asked for, so say what arrived.
-+		 */
-+		panic("KEBAB: IOFindBSDRoot got rd=\"%s\" (want ufsroot0), args \"%s\"",
-+		    rdBootVar, PE_boot_args());
-+	}
-+	{
++	if (strcmp(rdBootVar, "ufsroot0") == 0) {
 +		OSSafeReleaseNULL(matching);
 +		int ufs_error = kebab_ufs_rootdev(root);
 +		if (ufs_error) {
