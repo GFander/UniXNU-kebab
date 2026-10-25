@@ -1,0 +1,197 @@
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -38,6 +38,14 @@
+  */
+ 
+ #include <sys/param.h>
++
++#if defined(KEBAB)
++/* Which load_machfile() check rejected the image; the panic clears the screen. */
++char kebab_loader_trace[48] = "none";
++#define KEBAB_TRACE() (snprintf(kebab_loader_trace, sizeof(kebab_loader_trace), "L%d", __LINE__))
++#else
++#define KEBAB_TRACE() do { } while (0)
++#endif
+ #include <sys/vnode_internal.h>
+ #include <sys/uio.h>
+ #include <sys/namei.h>
+@@ -1032,7 +1040,7 @@
+ 		 * needed by the dynamic loader to read the mach headers, etc.
+ 		 */
+ 		if ((pass == 3) && (found_header_segment == FALSE)) {
+-			ret = LOAD_BADMACHO;
++			KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 			break;
+ 		}
+ 
+@@ -1048,7 +1056,7 @@
+ 		while (ncmds--) {
+ 			/* ensure enough space for a minimal load command */
+ 			if (offset + sizeof(struct load_command) > cmds_size) {
+-				ret = LOAD_BADMACHO;
++				KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 				break;
+ 			}
+ 
+@@ -1069,7 +1077,7 @@
+ 			if (os_add_overflow(offset, lcp->cmdsize, &offset) ||
+ 			    lcp->cmdsize < sizeof(struct load_command) ||
+ 			    offset > cmds_size) {
+-				ret = LOAD_BADMACHO;
++				KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 				break;
+ 			}
+ 
+@@ -1084,7 +1092,7 @@
+ 			case LC_SEGMENT: {
+ 				struct segment_command *scp = (struct segment_command *) lcp;
+ 				if (scp->cmdsize < sizeof(*scp)) {
+-					ret = LOAD_BADMACHO;
++					KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 					break;
+ 				}
+ 				if (pass == 0) {
+@@ -1102,21 +1110,21 @@
+ 					if (scp->initprot == 0 && scp->maxprot == 0 && scp->vmaddr == 0) {
+ 						/* PAGEZERO */
+ 						if (os_add3_overflow(scp->vmaddr, scp->vmsize, slide, &pagezero_end) || pagezero_end > UINT32_MAX) {
+-							ret = LOAD_BADMACHO;
++							KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 							break;
+ 						}
+ 					}
+ 					if (scp->initprot & VM_PROT_EXECUTE) {
+ 						/* TEXT */
+ 						if (os_add3_overflow(scp->vmaddr, scp->vmsize, slide, &executable_end) || executable_end > UINT32_MAX) {
+-							ret = LOAD_BADMACHO;
++							KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 							break;
+ 						}
+ 					}
+ 					if (scp->initprot & VM_PROT_WRITE) {
+ 						/* DATA */
+ 						if (os_add_overflow(scp->vmaddr, slide, &writable_start) || writable_start > UINT32_MAX) {
+-							ret = LOAD_BADMACHO;
++							KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 							break;
+ 						}
+ 					}
+@@ -1137,7 +1145,7 @@
+ 					 * Having an LC_SEGMENT command for the
+ 					 * wrong ABI is invalid <rdar://problem/11021230>
+ 					 */
+-					ret = LOAD_BADMACHO;
++					KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 					break;
+ 				}
+ 
+@@ -1156,7 +1164,7 @@
+ 					 * protection. */
+ 					if (found_header_segment ||
+ 					    ((scp->initprot & (VM_PROT_READ | VM_PROT_EXECUTE)) != (VM_PROT_READ | VM_PROT_EXECUTE))) {
+-						ret = LOAD_BADMACHO;
++						KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 						break;
+ 					}
+ 					found_header_segment = TRUE;
+@@ -1167,7 +1175,7 @@
+ 			case LC_SEGMENT_64: {
+ 				struct segment_command_64 *scp64 = (struct segment_command_64 *) lcp;
+ 				if (scp64->cmdsize < sizeof(*scp64)) {
+-					ret = LOAD_BADMACHO;
++					KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 					break;
+ 				}
+ 				if (pass == 0) {
+@@ -1191,7 +1199,7 @@
+ 					 * Having an LC_SEGMENT_64 command for the
+ 					 * wrong ABI is invalid <rdar://problem/11021230>
+ 					 */
+-					ret = LOAD_BADMACHO;
++					KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 					break;
+ 				}
+ 
+@@ -1211,7 +1219,7 @@
+ 					 * protection. */
+ 					if (found_header_segment ||
+ 					    ((scp64->initprot & (VM_PROT_READ | VM_PROT_EXECUTE)) != (VM_PROT_READ | VM_PROT_EXECUTE))) {
+-						ret = LOAD_BADMACHO;
++						KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 						break;
+ 					}
+ 					found_header_segment = TRUE;
+@@ -1419,11 +1427,11 @@
+ 				}
+ 				struct build_version_command* bvc = (struct build_version_command*)lcp;
+ 				if (bvc->cmdsize < sizeof(*bvc)) {
+-					ret = LOAD_BADMACHO;
++					KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 					break;
+ 				}
+ 				if (found_version_cmd == TRUE) {
+-					ret = LOAD_BADMACHO;
++					KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 					break;
+ 				}
+ 				result->ip_platform = bvc->platform;
+@@ -2849,7 +2857,7 @@
+ 
+ 		if (os_add_and_mul_overflow(size, 2, sizeof(uint32_t), &thread_size) ||
+ 		    os_sub_overflow(total_size, thread_size, &total_size)) {
+-			ret = LOAD_BADMACHO;
++			KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 			goto bad;
+ 		}
+ 
+@@ -3421,7 +3429,7 @@
+ 		    (blob->csb_base_offset != macho_offset) ||
+ 		    ((blob->csb_flags & CS_VALID) == 0)) {
+ 			/* the blob has changed for this vnode: fail ! */
+-			ret = LOAD_BADMACHO;
++			KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 			const char* fatal_failure_desc = "embedded signature doesn't match attached signature";
+ 			const size_t fatal_failure_desc_len = strlen(fatal_failure_desc) + 1;
+ 
+@@ -3471,13 +3479,13 @@
+ 	}
+ 
+ 	if (lcp->cmdsize != sizeof(struct linkedit_data_command)) {
+-		ret = LOAD_BADMACHO;
++		KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 		goto out;
+ 	}
+ 
+ 	sum = 0;
+ 	if (os_add_overflow(lcp->dataoff, lcp->datasize, &sum) || sum > macho_size) {
+-		ret = LOAD_BADMACHO;
++		KEBAB_TRACE(); ret = LOAD_BADMACHO;
+ 		goto out;
+ 	}
+ 
+--- a/bsd/kern/kern_sig.c
++++ b/bsd/kern/kern_sig.c
+@@ -2066,11 +2066,23 @@
+ 			    ((proc_getcsflags(p) & CS_KILLED) ? "(CS_KILLED)" : ""));
+ 		} else {
+ 			launchd_exit_reason_desc = exit_reason_get_string_desc(signal_reason);
++#if defined(KEBAB)
++			{
++				extern char kebab_loader_trace[48];
++				panic_plain("unexpected SIGKILL of %s %s with reason -- namespace %d code 0x%llx description %." LAUNCHD_PANIC_REASON_STRING_MAXLEN "s (exec %s)",
++				    (p->p_name[0] != '\0' ? p->p_name : "initproc"),
++				    ((proc_getcsflags(p) & CS_KILLED) ? "(CS_KILLED)" : ""),
++				    signal_reason->osr_namespace, signal_reason->osr_code,
++				    launchd_exit_reason_desc ? launchd_exit_reason_desc : "none",
++				    kebab_loader_trace);
++			}
++#else
+ 			panic_plain("unexpected SIGKILL of %s %s with reason -- namespace %d code 0x%llx description %." LAUNCHD_PANIC_REASON_STRING_MAXLEN "s",
+ 			    (p->p_name[0] != '\0' ? p->p_name : "initproc"),
+ 			    ((proc_getcsflags(p) & CS_KILLED) ? "(CS_KILLED)" : ""),
+ 			    signal_reason->osr_namespace, signal_reason->osr_code,
+ 			    launchd_exit_reason_desc ? launchd_exit_reason_desc : "none");
++#endif
+ 		}
+ 	}
+ 
