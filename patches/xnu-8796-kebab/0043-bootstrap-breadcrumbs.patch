@@ -1,15 +1,14 @@
 --- a/osfmk/kern/startup.c
 +++ b/osfmk/kern/startup.c
-@@ -216,6 +216,8 @@
+@@ -216,6 +216,7 @@
  
  extern int serverperfmode;
  
-+extern void kebab_early_breadcrumb(unsigned int index);
 +
  TUNABLE(startup_debug_t, startup_debug, "startup_debug", 0);
  
  static inline void
-@@ -955,6 +957,21 @@
+@@ -959,6 +960,21 @@
  	__asan_handle_no_return();
  #endif /* KASAN_TBI */
  

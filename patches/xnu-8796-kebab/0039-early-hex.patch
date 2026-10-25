@@ -10,14 +10,11 @@
  #define EARLY_FB early_fb
  #define EARLY_WIDTH 1080u
  #define EARLY_HEIGHT 2400u
-@@ -31,9 +32,28 @@
+@@ -31,9 +32,25 @@
  extern unsigned char iso_font[256 * 16];
  
  /* Initialized data must remain writable until disable, including panics. */
 -static unsigned int early_row, early_col;
-+/* Incremented by every assembly bring-up marker. */
-+uint64_t kebab_mark_counter;
-+
 +static unsigned int early_row = 4, early_col;   /* first rows sit under the camera punch-hole */
  static unsigned int early_started, early_disabled, early_panicking;
  
@@ -40,7 +37,7 @@
  static void
  kebab_early_clear_row(void)
  {
-@@ -61,7 +81,11 @@
+@@ -61,7 +78,11 @@
  	}
  	if (c == '\n' || early_col == EARLY_COLS) {
  		early_col = 0;
@@ -53,7 +50,7 @@
  		kebab_early_clear_row();
  		if (c == '\n') {
  			return;
-@@ -95,16 +119,9 @@
+@@ -95,16 +116,9 @@
  void
  kebab_early_mark(unsigned int stage, const char *label)
  {
@@ -71,7 +68,7 @@
  	kebab_early_string("KEBAB EARLY ");
  	if (stage >= 10) {
  		kebab_early_putc((char)('0' + stage / 10));
-@@ -115,6 +132,60 @@
+@@ -115,6 +129,27 @@
  	kebab_early_putc('\n');
  }
  
@@ -82,40 +79,7 @@
 + * top of the panel where the text console never writes. No locks, no logging.
 + */
 +
-+/*
-+ * Called from the assembly exception vector with the captured syndrome. Uses the
-+ * lock-free console only, so it works when everything else is broken.
-+ */
-+void
-+kebab_early_fault_report(uint64_t esr, uint64_t elr, uint64_t far, uint64_t spsr)
-+{
-+	kebab_early_string("\nKEBAB FAULT\n");
-+	kebab_early_string("ESR=");
-+	kebab_early_hex(esr);
-+	kebab_early_string("\nELR=");
-+	kebab_early_hex(elr);
-+	kebab_early_string("\nFAR=");
-+	kebab_early_hex(far);
-+	kebab_early_string("\nSPSR=");
-+	kebab_early_hex(spsr);
-+	kebab_early_putc('\n');
-+}
 +
-+void
-+kebab_early_breadcrumb(unsigned int index)
-+{
-+	if (index > 15) {
-+		return;
-+	}
-+	/* One row of squares to the left of the punch-hole. */
-+	unsigned int x0 = 40 + ((index & 7) * 40);
-+	for (unsigned int y = 8; y < 32; y++) {
-+		for (unsigned int x = x0; x < x0 + 28; x++) {
-+			EARLY_FB[y * EARLY_STRIDE + x] = 0xffffffffu;
-+		}
-+	}
-+	__asm__ volatile("dsb sy" ::: "memory");
-+}
 +
 +void
 +kebab_early_hex(uint64_t value)

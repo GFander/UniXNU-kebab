@@ -18,52 +18,16 @@
  	ldrb	w$1, [$0, SS64_KERNEL_DIT]
  	lsl     x$1, x$1, #0 + PSR64_DIT_SHIFT
  	msr		DIT, x$1
-@@ -157,6 +157,44 @@
+@@ -157,6 +157,8 @@
   *
   * Returns to the address reloaded into LR, authenticating if needed.
   */
 +
-+#if defined(KEBAB)
-+/*
-+ * Stackless bring-up marker. Each call bumps a counter and paints a square a
-+ * little further right along the top row, clear of the camera punch-hole, so
-+ * counting the squares says how many macro steps ran in total.
-+ */
-+.macro KEBAB_MARK row
-+	adrp	x9, EXT(kebab_mark_counter)@page
-+	add		x9, x9, EXT(kebab_mark_counter)@pageoff
-+	ldr		x10, [x9]
-+	add		x11, x10, #1
-+	str		x11, [x9]
-+	and		x10, x10, #15
-+	mov		x11, #40
-+	madd	x10, x10, x11, xzr
-+	/* The identity mapping of the panel is gone after arm_vm_init, so take the
-+	 * live framebuffer address from the console's own pointer. */
-+	adrp	x9, EXT(early_fb)@page
-+	add		x9, x9, EXT(early_fb)@pageoff
-+	ldr		x9, [x9]
-+	mov		x11, #(8 * 4320 + 420 * 4)
-+	add		x9, x9, x11
-+	add		x9, x9, x10, lsl #2
-+	mov		x12, #24
-+92:	mov		x11, #28
-+93:	mov		x10, #-1
-+	str		w10, [x9], #4
-+	subs	x11, x11, #1
-+	b.ne	93b
-+	mov		x10, #(4320 - 112)
-+	add		x9, x9, x10
-+	subs	x12, x12, #1
-+	b.ne	92b
-+	dsb		sy
-+.endm
-+#endif
 +
  .macro	cswitch_epilogue
  #if __has_feature(ptrauth_calls)
  	retaa
-@@ -269,11 +307,44 @@
+@@ -269,11 +271,44 @@
  	.globl	EXT(machine_load_context)
  
  LEXT(machine_load_context)
