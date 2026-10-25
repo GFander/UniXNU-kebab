@@ -15,6 +15,7 @@ drivers/KebabCPU/            子模块 -> GFander/KebabCPU（PSCI / 多核）
 drivers/KebabEarlyConsole/   子模块 -> GFander/KebabEarlyConsole（面板控制台）
 crypto-bearssl/              备用密码学补丁集（当前未启用，见文末）
 docs/BRING-UP-STATE.md       详细的移植状态记录
+docs/FIRMWARE.md             固件的构建、镜像布局与重新打包
 ```
 
 克隆时加 `--recurse-submodules`。
