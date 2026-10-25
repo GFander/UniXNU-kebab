@@ -177,16 +177,24 @@
  	/* Check for boot-arg suffix first */
 --- a/bsd/dev/arm/systemcalls.c
 +++ b/bsd/dev/arm/systemcalls.c
-@@ -92,6 +92,15 @@
+@@ -22,6 +22,10 @@
+ #include <sys/proc_internal.h>
+ #include <sys/syscall.h>
+ #include <sys/systm.h>
++
++#if defined(KEBAB)
++int kebab_syscount = 0;
++#endif
+ #include <sys/user.h>
+ #include <sys/errno.h>
+ #include <sys/kdebug.h>
+@@ -92,6 +96,12 @@
  	thread_t thread_act,
  	struct proc * proc)
  {
 +#if defined(KEBAB)
-+	{
-+		extern int kebab_syscount;
-+		if (kebab_syscount++ < 24) {
-+			printf("KEBAB: syscall enter\n");
-+		}
++	if (kebab_syscount++ < 24) {
++		printf("KEBAB: syscall enter\n");
 +	}
 +#endif
 +
