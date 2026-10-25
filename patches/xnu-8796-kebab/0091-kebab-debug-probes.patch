@@ -177,6 +177,29 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  
  #if DEBUG || DEVELOPMENT
  	/* Check for boot-arg suffix first */
+--- a/bsd/kern/kern_time.c
++++ b/bsd/kern/kern_time.c
+@@ -119,6 +119,10 @@
+ 	struct gettimeofday_args *uap,
+ 	__unused int32_t *retval)
+ {
++#if defined(KEBAB)
++	printf("KEBAB: gto enter\n");
++#endif
++
+ 	int error = 0;
+ 	struct timezone ltz; /* local copy */
+ 	clock_sec_t secs;
+@@ -136,6 +140,9 @@
+ 			user_atv.tv_sec = (uint32_t)secs;
+ 			user_atv.tv_usec = usecs;
+ 			error = copyout(&user_atv, uap->tp, sizeof(user_atv));
++#if defined(KEBAB)
++			printf("KEBAB: gto copied %d\n", error);
++#endif
+ 		} else {
+ 			struct user32_timeval user_atv = {};
+ 			user_atv.tv_sec = (uint32_t)secs;
 --- a/bsd/dev/arm/systemcalls.c
 +++ b/bsd/dev/arm/systemcalls.c
 @@ -22,6 +22,10 @@
@@ -212,6 +235,16 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  #define unix_syscall_kprintf(x...)      /* kprintf("unix_syscall: " x) */
  
  	if (kdebug_enable && !code_is_kdebug_trace(code)) {
+@@ -204,6 +216,9 @@
+ 	assertf(prior == NULL, "thread_set_allocation_name(\"%s\") not cleared", kern_allocation_get_name(prior));
+ #endif /* DEBUG || DEVELOPMENT */
+ 
++#if defined(KEBAB)
++	printf("KEBAB: syscall leaving %d\n", error);
++#endif
+ 	arm_prepare_syscall_return(callp, state, uthread, error);
+ 
+ 	uthread->uu_flag &= ~UT_NOTCANCELPT;
 --- a/bsd/vfs/vfs_syscalls.c
 +++ b/bsd/vfs/vfs_syscalls.c
 @@ -4526,6 +4526,10 @@
