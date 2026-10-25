@@ -30,3 +30,26 @@
  	error = open1(has_entitlement ? &context : vfs_context_current(),
  	    nd, fopen.o_flags, va, NULL, NULL, retval, AUTH_OPEN_NOAUTHFD);
  
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6879,10 +6879,20 @@
+ 	mach_vm_offset_t scratch_addr = 0;
+ 	mach_vm_size_t map_page_size = vm_map_page_size(map);
+ 
++#if defined(KEBAB)
++	printf("KEBAB: load_init_program enter (map %p, page 0x%llx)\n",
++	    (void *)map, (unsigned long long)map_page_size);
++#endif
+ 	(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
++#if defined(KEBAB)
++	printf("KEBAB: scratch allocated at 0x%llx\n", (unsigned long long)scratch_addr);
++#endif
+ #if CONFIG_MEMORYSTATUS
+ 	(void) memorystatus_init_at_boot_snapshot();
+ #endif /* CONFIG_MEMORYSTATUS */
++#if defined(KEBAB)
++	printf("KEBAB: boot snapshot recorded\n");
++#endif
+ 
+ #if DEBUG || DEVELOPMENT
+ 	/* Check for boot-arg suffix first */
