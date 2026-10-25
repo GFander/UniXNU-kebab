@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,666 @@
+@@ -0,0 +1,668 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -31,9 +31,11 @@ new file mode 100644
 +#include <vm/pmap.h>
 +#include <vm/vm_kern.h>
 +
-+extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
 +extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
-+extern uint64_t ptoa_64(ppnum_t pa);
++/* ppnum_t is unsigned int in this kernel; spelled out so the declaration
++ * does not depend on vm_types.h being pulled in first. */
++extern unsigned int pmap_find_phys(pmap_t pmap, addr64_t va);
++extern uint64_t ptoa_64(unsigned int pa);
 +
 +/* ---------------------------------------------------------------- registers */
 +
@@ -587,11 +589,11 @@ new file mode 100644
 +		printf("KEBAB USB: cannot map the controller\n");
 +		return;
 +	}
-+	if (kmem_alloc(kernel_map, &ud.dma, UD_SIZE) != KERN_SUCCESS) {
++	if (kmem_alloc(kernel_map, &ud.dma, UD_SIZE, KMA_NONE, VM_KERN_MEMORY_NONE) != KERN_SUCCESS) {
 +		printf("KEBAB USB: no DMA memory\n");
 +		return;
 +	}
-+	ppnum_t pn = pmap_find_phys(kernel_pmap, ud.dma);
++	unsigned int pn = pmap_find_phys(kernel_pmap, ud.dma);
 +	if (pn == 0) {
 +		printf("KEBAB USB: DMA page has no physical backing\n");
 +		return;
