@@ -1,0 +1,132 @@
+# 路线图：从当前状态到 iOS 16 用户态
+
+本文件把 [dipa-studio/ios-sweet](https://github.com/dipa-studio/ios-sweet)（SM7150，红米
+Note 10 Pro，已跑到 iOS 16.7.16 桌面）的 81 个内核补丁逐条映射到 kebab 的现状，
+用来回答两个问题：**我们缺什么**，以及**下一步该做什么**。
+
+状态标记：✅ 已有 · 🔄 进行中 · ⬜ 未开始 · ➖ 不适用/不需要
+
+---
+
+## 一、当前定位
+
+ios-sweet 用 **HFS+ 承载完整的 iPhone X 16.7.16 用户态**（launchd → backboardd →
+SpringBoard → 桌面），APFS 只用在**主机侧**（`apfs-fuse` 读 IPSW 里的 OS/SystemOS/AppOS
+卷，合成一个 HFS+ 镜像）。**手机上从不跑 APFS。**
+
+因此本项目的路线同样以 HFS+ 为终点，APFS 不在关键路径上。
+
+我们在阶段 6 的门口：块设备已通（UFS → `ufsroot0`，229043 MiB），缺文件系统。
+
+---
+
+## 二、逐条映射
+
+### 阶段 A：让内核挂载并执行（当前）
+
+| ios-sweet | 内容 | kebab |
+| --- | --- | --- |
+| 0001–0002 | 新 clang 兼容、`UIO_STACKBUF` 回移 | ✅ 构建已通过 |
+| 0004–0009 | machine config、非 PAC、缺失头文件桩 | ✅ |
+| 0010–0012 | 早期帧缓冲控制台、physmap 对齐、TTBR0 之后保留控制台 | ✅ |
+| 0013–0014 | 无 corecrypto 的 PRNG、内核 HMAC | ✅ |
+| 0015 | trust cache 降级 | ✅ 补丁 `0059` |
+| 0016 | 设备树平台专家 | ✅ 补丁 `0060` |
+| 0019 | 内置 libpthread | ✅ 补丁 `0073` |
+| **0026** | **内置 Apple HFS（hfs-627.100.6）** | 🔄 移植中 |
+| 0028 | UFS 根设备（`rd=ufsroot0`） | ✅ 补丁 `0070`–`0072` |
+| 0029 | 未密封根卷（跳过 SSV 校验） | ⬜ 挂真实 iOS 根时需要 |
+| 0021/0022/0024 | mockfs + RAMDisk 根 | ➖ 设计上不用 RAMDisk |
+
+### 阶段 B：让真实 iOS 用户态开始跑
+
+| ios-sweet | 内容 | kebab |
+| --- | --- | --- |
+| 0025 | 内置 AMFI（无 entitlements） | ⬜ **关键** |
+| 0035 | AMFI entitlements / 平台二进制 | ⬜ |
+| 0036 | AMFI `cs_signed` | ⬜ |
+| 0037 | bindfs | ⬜ |
+| 0038 | AppleKeyStore 桩 | ⬜ **关键** |
+| 0039 | 默认关闭 coredump | ⬜ 低 |
+| 0040/0045 | IOWatchdog 关闭 | ⬜ **关键**（否则慢启动被杀）|
+| 0041 | HFS 链接备注 | ⬜ 低 |
+| 0020/0027/0032/0033 | BearSSL AES-CBC / MD5 / SHA-1 / SHA-384-512 | 🔄 SHA-1 已内置；其余补丁已备好未启用 |
+
+### 阶段 C：输出与输入（GUI 与交互）
+
+| ios-sweet | 内容 | kebab |
+| --- | --- | --- |
+| 0046 | IOSurface + IOMobileFramebuffer（`AppleCLCD`）| ⬜ **GUI 的前提** |
+| 0056 | 面板拷贝限流 | ⬜ 依赖 0046 |
+| 0058 | HID event services | ⬜ **输入的前提** |
+| 0059 | iPhone X 身份（`hw.product` / `hw.target`）| ✅ ADT 已是 D22AP |
+| 0060 | 按键（SPMI）+ 触摸（GENI I²C）| ⬜ |
+| 0061 | 呈现为 1125×2436 | ⬜ 依赖 0046 |
+| 0062 | 触摸/电源/电池 | ⬜ |
+| 0063 | Goodix GT9896 协议 | ➖ 面板不同，需自研 |
+| 0064 | `PRIV_WORK_INTERVAL`（UIKit CoreAnimation）| ⬜ |
+| 0068 | 已映射 surface 的查找语义 | ⬜ 依赖 0046 |
+| 0079 | 显示电源管理 | ⬜ |
+
+### 阶段 D：稳定性与通道
+
+| ios-sweet | 内容 | kebab |
+| --- | --- | --- |
+| 0030/0031 | UFS 写入 + 可写根 | ⬜ 当前只读 |
+| 0034 | 4 GiB 以上 DMA | ⬜ 视需要 |
+| 0017 | 设备树虚拟定时器中断 | 🔄 GIC/定时器已配，中断链路未端到端验证 |
+| 0018 | 启动 CPU 驱动 | 🔄 `drivers/KebabCPU` 已有，多核未验证 |
+| 0065/0078 | SMP（PSCI，6→8 核）| ⬜ 当前 `cpus=1` |
+| 0042–0044 | 执行日志 / 崩溃日志 | ⬜ 诊断用 |
+| 0047 | 持久控制台日志环（userdata 末尾 4 MiB）| ⬜ 极高价值，见下 |
+| 0048–0054 | /dev/null tee、IOKit trace、sandbox、堆采样 | ⬜ 诊断用 |
+| 0066/0067 | 故障区域信息、控制台静音 | ⬜ |
+| 0069/0070/0071 | UFS 加速、pid hibernate、触摸边缘 | ⬜ |
+| 0072–0077, 0081 | USB 设备模式 / ECM / 实时日志 | ⬜ 可选 |
+
+---
+
+## 三、与参考实现的已知差异（不能直接照搬）
+
+| 项目 | ios-sweet (SM7150) | kebab (SM8250) |
+| --- | --- | --- |
+| 启动方式 | `fastboot boot` 一个自研 shim，不刷写 | 刷 `boot_b`：Mu-Silicium UEFI + 载荷 |
+| 控制台 | 内核直接画框架缓冲 | 同，但经 UEFI GOP 的 framebuffer |
+| 触摸 | Goodix GT9896 | 面板不同，需另行适配 |
+| 显示 | `AppleCLCD` + KernelIOSurface | 同方向，但需按 SM8250 的 DSI/DPU 写 |
+| CPU | 6×A55（A76 未用）| `cpus=1`，多核待做 |
+| 根镜像来源 | IPSW → `apfs-fuse` → HFS+ | 同（可复用其 `mkiosroot.sh`）|
+
+---
+
+## 四、建议的推进顺序
+
+```
+A. HFS 内置（进行中）
+   └─ 最小 HFS+ 根镜像 + 静态 init → 验证 exec          ← 阶段 6/7 打通
+B. 真实 iOS 根
+   ├─ 0029 未密封根卷
+   ├─ 0025 AMFI 内置 + 0038 AppleKeyStore 桩 + 0040 看门狗
+   └─ IPSW → HFS+（复用 mkiosroot.sh 思路）→ launchd
+C. 显示与输入
+   ├─ 0046 IOSurface + IOMobileFramebuffer
+   └─ 0058 HID + 0060/0062 触摸与按键
+D. 稳定性
+   ├─ 0047 持久日志环（摆脱拍照）
+   └─ 0065 SMP
+```
+
+**每完成一步，都以"屏幕上出现新的东西"为验收** —— 这是本项目一贯的推进方式。
+
+---
+
+## 五、值得优先偷师的两件事
+
+1. **持久日志环**（他们的 0047）：内核把控制台写进 `userdata` 末尾 4 MiB 的环形
+   缓冲，panic 后进 recovery 用脚本拉出来。**同代硬件验证可行**，能彻底解决
+   "只能拍照、长回溯被截断"的问题。排期在阶段 D，但它对调试效率的收益
+   可能值得提前。
+2. **根镜像构建链**（`tools/mkiosroot.sh` + `sweet-root-tweaks.py`）：把 IPSW 的
+   OS/SystemOS/AppOS 三个 APFS 卷合成一个 case-sensitive journaled HFS+，
+   再打上跳过 Setup、种子激活、去 baseband、关 watchdog 等 bring-up 改动。
+   阶段 B 直接参考，不用重新发明。
