@@ -1,0 +1,19 @@
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -784,6 +784,16 @@
+ 	vm_set_restrictions(machine_info.max_cpus);
+ 
+ 
++#if defined(KEBAB)
++	/*
++	 * On Apple hardware the CPU bring-up path publishes max_cpus; nothing does
++	 * that on this port, and ml_wait_max_cpus() (first thing kperf does) would
++	 * sleep forever. The bootstrap thread exists by now, so the lock in
++	 * ml_set_max_cpus() has a current thread.
++	 */
++	ml_set_max_cpus(machine_info.max_cpus);
++#endif
++
+ #if KPERF
+ 	kperf_init_early();
+ #endif

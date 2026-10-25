@@ -1,0 +1,46 @@
+libkern: route SHA256_* to the SHA-256 implementation already linked into osfmk
+
+diff --git a/libkern/crypto/corecrypto_sha2.c b/libkern/crypto/corecrypto_sha2.c
+--- a/libkern/crypto/corecrypto_sha2.c
++++ b/libkern/crypto/corecrypto_sha2.c
+@@ -34,34 +34,35 @@
+ 
+ #if defined(CRYPTO_SHA2)
+ 
++/* Same built-in SHA-256 provider as early_random(); no kext dispatch. */
+ void
+ SHA256_Init(SHA256_CTX *ctx)
+ {
+ 	const struct ccdigest_info *di;
+-	di = g_crypto_funcs->ccsha256_di;
++	di = &ccsha256_ltc_di;
+ 
+ 	/* Make sure the context size for the digest info fits in the one we have */
+ 	if (ccdigest_di_size(di) > sizeof(SHA256_CTX)) {
+ 		panic("%s: inconsistent size for SHA256 context", __FUNCTION__);
+ 	}
+ 
+-	g_crypto_funcs->ccdigest_init_fn(di, ctx->ctx);
++	ccdigest_init(di, ctx->ctx);
+ }
+ 
+ void
+ SHA256_Update(SHA256_CTX *ctx, const void *data, size_t len)
+ {
+ 	const struct ccdigest_info *di;
+-	di = g_crypto_funcs->ccsha256_di;
++	di = &ccsha256_ltc_di;
+ 
+-	g_crypto_funcs->ccdigest_update_fn(di, ctx->ctx, len, data);
++	ccdigest_update(di, ctx->ctx, len, data);
+ }
+ 
+ void
+ SHA256_Final(void *digest, SHA256_CTX *ctx)
+ {
+ 	const struct ccdigest_info *di;
+-	di = g_crypto_funcs->ccsha256_di;
++	di = &ccsha256_ltc_di;
+ 
+ 	ccdigest_final(di, ctx->ctx, digest);
+ }

@@ -1,0 +1,33 @@
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -119,12 +119,30 @@
+ #define allow_printf_from_interrupts_disabled_context false
+ #endif
+ 
++#if defined(KEBAB)
++/*
++ * The phone has no UART and the video console is never enabled, so route the
++ * console backend straight at the early framebuffer renderer.
++ */
++extern void kebab_early_putc(char c);
++
++static void
++kebab_console_putc(char c, __unused bool poll)
++{
++	kebab_early_putc(c);
++}
++#endif
++
+ SECURITY_READ_ONLY_EARLY(struct console_ops) cons_ops[] = {
+ 	{
+ 		.putc = serial_putc_options, .getc = _serial_getc,
+ 	},
+ 	{
++#if defined(KEBAB)
++		.putc = kebab_console_putc, .getc = _vcgetc,
++#else
+ 		.putc = vcputc_options, .getc = _vcgetc,
++#endif
+ 	},
+ };
+ 

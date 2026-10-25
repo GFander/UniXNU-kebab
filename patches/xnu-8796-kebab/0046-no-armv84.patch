@@ -1,0 +1,20 @@
+--- a/pexpert/pexpert/arm64/KEBAB.h
++++ b/pexpert/pexpert/arm64/KEBAB.h
+@@ -21,6 +21,17 @@
+ #define ARM_ARCH_TIMER
+ 
+ #define __ARM_ARCH__              8
++
++/*
++ * The SM8250 cores (Cortex-A77/A55) implement ARMv8.2, not ARMv8.4. The
++ * toolchain predefines __ARM_ARCH_8_4__, which pulls ARMv8.4-only instructions
++ * such as "mrs x, DIT" into the context switch; executing those traps as an
++ * undefined instruction.
++ */
++#ifdef __ARM_ARCH_8_4__
++#undef __ARM_ARCH_8_4__
++#endif
++#define __ARM_ARCH_8_4__          0
+ #define __ARM_VMSA__              8
+ #define __ARM_VFP__               4
+ #define __ARM_COHERENT_CACHE__    1

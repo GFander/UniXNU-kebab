@@ -1,0 +1,18 @@
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -402,11 +402,15 @@
+ 	assert(startup_phase < upto);
+ 
+ 	while (cur < startup_entries_end && cur->subsystem <= upto) {
++#if !defined(KEBAB)
++		/* One line per registered entry floods the panel; the phase names
++		 * printed by kernel_startup_log() are enough. */
+ 		if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
+ 		    startup_phase >= STARTUP_SUB_KPRINTF) {
+ 			kprintf("%s[%d, rank %d]: %p(%p)\n", __func__,
+ 			    cur->subsystem, cur->rank, cur->func, cur->arg);
+ 		}
++#endif
+ 		startup_phase = cur->subsystem - 1;
+ 		kernel_startup_log(cur->subsystem);
+ 		cur->func(cur->arg);

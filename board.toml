@@ -103,11 +103,22 @@ panic_screen = false           # needs Font.h from the UEFI tree; enabled later
 # reset_at = "_arm_init"  # the console marks instead
 kernel_args = [
   "-v",
+  # DEVELOPMENT builds only enable kprintf output with this flag; without it the
+  # kernel prints nothing even once the console backend works.
+  "-enable_kprintf_spam",
+  # Makes kernel_bootstrap() print every subsystem it enters, which is how we
+  # find the step a bring-up kernel stops at.
+  "startup_debug=1",
   "serial=3",
   "debug=0x14e",
   # The SMP port is in the kernel, but the first boot stays on the boot CPU:
   # secondary bring-up depends on PSCI and the GIC redistributors agreeing
   # with the ADT, which is easier to prove one CPU at a time.
   "cpus=1",
+  # Root the kernel on the userdata GPT partition of the internal UFS. The
+  # driver reuses the host state UEFI leaves behind; there is no RAMDisk by
+  # design.
+  "rd=ufsroot0",
+  "ufsroot=userdata",
   "keepsyms=1",
 ]

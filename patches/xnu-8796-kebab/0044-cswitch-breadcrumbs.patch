@@ -1,0 +1,64 @@
+--- a/osfmk/arm64/cswitch.s
++++ b/osfmk/arm64/cswitch.s
+@@ -69,7 +69,7 @@
+ 	strb	w$1, [$0, SS64_KERNEL_SSBS]
+ 1:
+ #endif // HAS_ARM_FEAT_SSBS2
+-#if __ARM_ARCH_8_4__
++#if __ARM_ARCH_8_4__ && !defined(KEBAB)
+ 	mrs		x$1, DIT
+ 	lsr     x$1, x$1, #0 + PSR64_DIT_SHIFT
+ 	strb	w$1, [$0, SS64_KERNEL_DIT]
+@@ -131,7 +131,7 @@
+ 	msr		SSBS, x$1
+ 1:
+ #endif // HAS_ARM_FEAT_SSBS2
+-#if __ARM_ARCH_8_4__
++#if __ARM_ARCH_8_4__ && !defined(KEBAB)
+ 	ldrb	w$1, [$0, SS64_KERNEL_DIT]
+ 	lsl     x$1, x$1, #0 + PSR64_DIT_SHIFT
+ 	msr		DIT, x$1
+@@ -157,6 +157,8 @@
+  *
+  * Returns to the address reloaded into LR, authenticating if needed.
+  */
++
++
+ .macro	cswitch_epilogue
+ #if __has_feature(ptrauth_calls)
+ 	retaa
+@@ -269,9 +271,34 @@
+ 	.globl	EXT(machine_load_context)
+ 
+ LEXT(machine_load_context)
++#if defined(KEBAB)
++	/* Inline copy of set_thread_registers with a marker after each step, so the
++	 * first-context hand-off can be traced without touching the shared macro. */
++	msr		TPIDR_EL1, x0
++	ldr		x1, [x0, ACT_CPUDATAP]
++	str		x0, [x1, CPU_ACTIVE_THREAD]
++	ldrsh	x2, [x1, CPU_NUMBER_GS]
++	msr		TPIDR_EL0, x2
++	ldr		x1, [x0, TH_CTH_SELF]
++	msr		TPIDRRO_EL0, x1
++	ldr		x1, [x0, TH_THREAD_ID]
++	msr		CONTEXTIDR_EL1, x1
++#else
+ 	set_thread_registers 	x0, x1, x2
++#endif
+ 	ldr		x1, [x0, TH_KSTACKPTR]				// Get top of kernel stack
++#if defined(KEBAB)
++	/*
++	 * Bring-up experiment: restore only SP and LR. If the thread then starts,
++	 * the fault is somewhere inside load_general_registers (FP/FPCR or the
++	 * NEON loads).
++	 */
++	ldr		x2, [x1, SS64_KERNEL_SP]
++	ldr		x30, [x1, SS64_KERNEL_LR]
++	mov		sp, x2
++#else
+ 	load_general_registers 	x1, 2
++#endif
+ 	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
+ 	mov		x0, #0								// Clear argument to thread_continue
+ 	cswitch_epilogue

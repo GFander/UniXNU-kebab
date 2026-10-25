@@ -1,0 +1,47 @@
+--- a/osfmk/prng/entropy.c
++++ b/osfmk/prng/entropy.c
+@@ -40,7 +40,7 @@
+ #include <machine/machine_routines.h>
+ #include <libkern/section_keywords.h>
+ #include <sys/cdefs.h>
+-#if defined(NEGRONI)
++#if defined(NEGRONI) || defined(KEBAB)
+ #include <corecrypto/ccdigest.h>
+ #include <corecrypto/ccsha2.h>
+ #endif
+@@ -97,7 +97,7 @@
+ 	// State for a SHA256 computation. This is used to accumulate
+ 	// entropy samples from across all CPUs. It is finalized when
+ 	// entropy is provided to the consumer of this module.
+-#if defined(NEGRONI)
++#if defined(NEGRONI) || defined(KEBAB)
+ 	ccdigest_ctx_decl(CCSHA256_STATE_SIZE, CCSHA256_BLOCK_SIZE, sha256_ctx);
+ #else
+ 	SHA256_CTX sha256_ctx;
+@@ -482,7 +482,7 @@
+ static void
+ entropy_hash_init(void)
+ {
+-#if defined(NEGRONI)
++#if defined(NEGRONI) || defined(KEBAB)
+ 	ccdigest_init(&ccsha256_ltc_di, entropy_data.sha256_ctx);
+ #else
+ 	SHA256_Init(&entropy_data.sha256_ctx);
+@@ -492,7 +492,7 @@
+ static void
+ entropy_hash_update(const void *data, size_t nbytes)
+ {
+-#if defined(NEGRONI)
++#if defined(NEGRONI) || defined(KEBAB)
+ 	ccdigest_update(&ccsha256_ltc_di, entropy_data.sha256_ctx, nbytes, data);
+ #else
+ 	SHA256_Update(&entropy_data.sha256_ctx, data, nbytes);
+@@ -502,7 +502,7 @@
+ static void
+ entropy_hash_final(void *out)
+ {
+-#if defined(NEGRONI)
++#if defined(NEGRONI) || defined(KEBAB)
+ 	ccdigest_final(&ccsha256_ltc_di, entropy_data.sha256_ctx, out);
+ 	ccdigest_ctx_clear(CCSHA256_STATE_SIZE, CCSHA256_BLOCK_SIZE, entropy_data.sha256_ctx);
+ #else

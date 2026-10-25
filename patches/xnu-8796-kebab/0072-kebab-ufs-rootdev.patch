@@ -1,0 +1,37 @@
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -60,6 +60,10 @@
+ #define ROOTDEVICETIMEOUT       60
+ #endif
+ 
++#if defined(KEBAB)
++extern int kebab_ufs_rootdev(dev_t *dev);
++#endif
++
+ extern dev_t mdevadd(int devid, uint64_t base, unsigned int size, int phys);
+ extern dev_t mdevlookup(int devid);
+ extern void mdevremoveall(void);
+@@ -765,6 +769,22 @@
+ 			regEntry->release();                                                            /* Toss the entry */
+ 		}
+ 	}
++
++#if defined(KEBAB)
++	/* This BSD disk does not publish an IOMedia; rd= overrides root-matching. */
++	if (strcmp(rdBootVar, "ufsroot0") == 0) {
++		OSSafeReleaseNULL(matching);
++		int ufs_error = kebab_ufs_rootdev(root);
++		if (ufs_error) {
++			panic("IOFindBSDRoot: KEBAB UFS root %s unavailable: %d", rdBootVar, ufs_error);
++		}
++		strlcpy(rootName, rdBootVar, rootNameSize);
++		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
++		*oflags = 0;
++		service = NULL;
++		goto iofrootx;
++	}
++#endif
+ 
+ //
+ //	Now check if we are trying to root on a memory device

@@ -1,6 +1,16 @@
 --- a/osfmk/arm64/kebab_early.c
 +++ b/osfmk/arm64/kebab_early.c
-@@ -31,7 +31,7 @@
+@@ -17,7 +17,8 @@
+  * The reference port used 0xB8000000, which is a different phone.
+  */
+ #define KEBAB_EARLY_FB 0x9c000000u
+-static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)KEBAB_EARLY_FB;
++/* Global so assembly breadcrumbs can reach the live framebuffer address. */
++volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)KEBAB_EARLY_FB;
+ #define EARLY_FB early_fb
+ #define EARLY_WIDTH 1080u
+ #define EARLY_HEIGHT 2400u
+@@ -31,9 +32,25 @@
  extern unsigned char iso_font[256 * 16];
  
  /* Initialized data must remain writable until disable, including panics. */
@@ -8,11 +18,73 @@
 +static unsigned int early_row = 4, early_col;   /* first rows sit under the camera punch-hole */
  static unsigned int early_started, early_disabled, early_panicking;
  
++/*
++ * When the text area fills up, wipe it and start again at the top. Copying the
++ * whole area up one row was far too slow on write-combined memory.
++ */
++static void
++kebab_early_clear_screen(void)
++{
++	for (unsigned int y = 4 * EARLY_CELL_H; y < EARLY_ROWS * EARLY_CELL_H; y++) {
++		volatile uint32_t *line = EARLY_FB + y * EARLY_STRIDE;
++		for (unsigned int x = 0; x < EARLY_WIDTH; x++) {
++			line[x] = 0xff000000u;
++		}
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
  static void
-@@ -115,6 +115,19 @@
+ kebab_early_clear_row(void)
+ {
+@@ -61,7 +78,16 @@
+ 	}
+ 	if (c == '\n' || early_col == EARLY_COLS) {
+ 		early_col = 0;
+-		early_row = (early_row + 1) % EARLY_ROWS;
++		early_row++;
++		if (early_row >= EARLY_ROWS) {
++			if (early_panicking) {
++				/* Never wipe a panic report: stop at the last row. */
++				early_row = EARLY_ROWS - 1;
++			} else {
++				kebab_early_clear_screen();
++				early_row = 4;
++			}
++		}
+ 		kebab_early_clear_row();
+ 		if (c == '\n') {
+ 			return;
+@@ -95,16 +121,9 @@
+ void
+ kebab_early_mark(unsigned int stage, const char *label)
+ {
+-	if (early_disabled || stage > 20) {
++	if (early_disabled || stage > 99) {
+ 		return;
+ 	}
+-	uint32_t color = 0xff00ff00u | ((stage & 7u) * 32u << 16);
+-	for (unsigned int y = EARLY_HEIGHT - 32; y < EARLY_HEIGHT; y++) {
+-		for (unsigned int x = stage * 48; x < (stage + 1) * 48; x++) {
+-			EARLY_FB[y * EARLY_STRIDE + x] = color;
+-		}
+-	}
+-	__asm__ volatile("dsb sy" ::: "memory");
+ 	kebab_early_string("KEBAB EARLY ");
+ 	if (stage >= 10) {
+ 		kebab_early_putc((char)('0' + stage / 10));
+@@ -115,6 +134,27 @@
  	kebab_early_putc('\n');
  }
  
++
++
++/*
++ * kebab bring-up breadcrumbs: a fixed white square per checkpoint, drawn at the
++ * top of the panel where the text console never writes. No locks, no logging.
++ */
++
++
 +
 +void
 +kebab_early_hex(uint64_t value)
@@ -29,3 +101,17 @@
  void
  kebab_early_panic(const char *fmt, va_list *args)
  {
+@@ -122,7 +162,12 @@
+ 		return;
+ 	}
+ 	early_panicking = 1;
+-	kebab_early_string("\nKEBAB EARLY PANIC: ");
++	/* Start the panic at the top of the panel and stop clearing, so the first
++	 * lines of the report (which say what went wrong) stay readable. */
++	kebab_early_clear_screen();
++	early_row = 4;
++	early_col = 0;
++	kebab_early_string("KEBAB EARLY PANIC: ");
+ 	va_list copy;
+ 	va_copy(copy, *args);
+ 	_doprnt(fmt, &copy, kebab_early_putc, 16);
