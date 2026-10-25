@@ -1,15 +1,19 @@
---- a/osfmk/arm/arm_init.c
-+++ b/osfmk/arm/arm_init.c
-@@ -449,6 +449,12 @@
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -784,6 +784,16 @@
+ 	vm_set_restrictions(machine_info.max_cpus);
  
- 	ml_parse_cpu_topology();
- 	kebab_early_mark(3, "ml_parse_cpu_topology done");
+ 
++#if defined(KEBAB)
 +	/*
-+	 * Nothing else ever calls ml_set_max_cpus() on this platform: on Apple
-+	 * hardware the CPU bring-up path does. Without it ml_wait_max_cpus()
-+	 * sleeps forever, which is where kperf_init_early() hangs.
++	 * On Apple hardware the CPU bring-up path publishes max_cpus; nothing does
++	 * that on this port, and ml_wait_max_cpus() (first thing kperf does) would
++	 * sleep forever. The bootstrap thread exists by now, so the lock in
++	 * ml_set_max_cpus() has a current thread.
 +	 */
 +	ml_set_max_cpus(machine_info.max_cpus);
- 
- 
- 	master_cpu = ml_get_boot_cpu_number();
++#endif
++
+ #if KPERF
+ 	kperf_init_early();
+ #endif
