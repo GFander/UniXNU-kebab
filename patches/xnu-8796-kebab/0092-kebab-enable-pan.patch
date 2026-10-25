@@ -1,8 +1,0 @@
-Enable PAN on this port: user memory access has been broken without it.
-
-user_access_enable() clears PAN only when __ARM_PAN_AVAILABLE__ is defined,
-and that macro is set by Apple's own SoC headers alone. Here the function
-compiled to nothing, so the copy routines stored to user memory with PAN
-still set and every copy took a permission fault. SM8250 is ARMv8.2 and
-implements PAN, so simply say so.
-
