@@ -413,14 +413,22 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  
  	int result;
  
-@@ -365,7 +372,13 @@
+@@ -365,7 +372,21 @@
  		return result;
  	}
  	user_access_enable();
 +#if defined(KEBAB)
 +	printf("KEBAB: copyout about to store\n");
 +#endif
++
++#if defined(KEBAB)
++	extern void kebab_early_putc(char c);
++	kebab_early_putc('A');
++#endif
  	result = _bcopyout(kernel_addr, (char *)user_addr, nbytes);
++#if defined(KEBAB)
++	kebab_early_putc('B');
++#endif
 +#if defined(KEBAB)
 +	printf("KEBAB: copyout copied %d\n", result);
 +#endif
