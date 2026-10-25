@@ -1,0 +1,30 @@
+--- a/bsd/kern/sys_generic.c
++++ b/bsd/kern/sys_generic.c
+@@ -701,6 +701,11 @@
+ int
+ write_nocancel(struct proc *p, struct write_nocancel_args *uap, user_ssize_t *retval)
+ {
++#if defined(KEBAB)
++	/* Bring-up probe: is userland reaching the console at all? */
++	printf("KEBAB: write fd=%d n=%llu pid=%d\n", uap->fd,
++	    (unsigned long long)uap->nbyte, proc_pid(p));
++#endif
+ 	return write_internal(p, uap->fd, uap->cbuf, uap->nbyte, (off_t)-1, 0,
+ 	           NULL, retval);
+ }
+--- a/bsd/kern/kern_descrip.c
++++ b/bsd/kern/kern_descrip.c
+@@ -2718,6 +2718,13 @@
+ 	    fopen.o_pathname, has_entitlement ? &context : vfs_context_current());
+ 	nd->ni_dvp = vp;
+ 
++#if defined(KEBAB)
++	{
++		char kpath[64] = "?";
++		(void)copyinstr(uap->path, kpath, sizeof(kpath), NULL);
++		printf("KEBAB: open \"%s\" pid=%d\n", kpath, proc_pid(p));
++	}
++#endif
+ 	error = open1(has_entitlement ? &context : vfs_context_current(),
+ 	    nd, fopen.o_flags, va, NULL, NULL, retval, AUTH_OPEN_NOAUTHFD);
+ 
