@@ -392,7 +392,15 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  	}
 --- a/osfmk/arm64/copyio.c
 +++ b/osfmk/arm64/copyio.c
-@@ -258,6 +258,9 @@
+@@ -39,6 +39,7 @@
+ #undef copyin
+ #undef copyout
+ 
++
+ extern int _bcopyin(const char *src, char *dst, vm_size_t len);
+ extern int _bcopyinstr(const char *src, char *dst, vm_size_t max, vm_size_t *actual);
+ extern int _bcopyout(const char *src, char *dst, vm_size_t len);
+@@ -241,6 +242,9 @@
  {
  	int result = copy_validate(user_addr, (uintptr_t)kernel_addr, 4,
  	    COPYIO_IN | COPYIO_ATOMIC);
@@ -402,7 +410,7 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  	if (__improbable(result)) {
  		return result;
  	}
-@@ -351,6 +354,10 @@
+@@ -334,6 +338,11 @@
  int
  copyout(const void *kernel_addr, user_addr_t user_addr, vm_size_t nbytes)
  {
@@ -410,31 +418,34 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
 +	printf("KEBAB: copyout enter addr 0x%llx len %llu\n",
 +	    (unsigned long long)user_addr, (unsigned long long)nbytes);
 +#endif
- 
++
  	int result;
  
-@@ -367,7 +374,21 @@
+ 	if (nbytes == 0) {
+@@ -348,9 +357,23 @@
+ 	if (__improbable(result)) {
  		return result;
  	}
++	/*
++	 * Nothing but the copy itself may run with PAN off: prints can block or
++	 * schedule, and a nested copyio there would nest the PAN state.
++	 */
++#if defined(KEBAB)
++	{
++		extern void kebab_early_putc(char c);
++		kebab_early_putc('A');
++	}
++#endif
  	user_access_enable();
-+#if defined(KEBAB)
-+	printf("KEBAB: copyout about to store\n");
-+#endif
-+
-+#if defined(KEBAB)
-+	extern void kebab_early_putc(char c);
-+	kebab_early_putc('A');
-+#endif
  	result = _bcopyout(kernel_addr, (char *)user_addr, nbytes);
+ 	user_access_disable();
 +#if defined(KEBAB)
 +	kebab_early_putc('B');
-+#endif
-+#if defined(KEBAB)
 +	printf("KEBAB: copyout copied %d\n", result);
 +#endif
- 	user_access_disable();
  	return result;
  }
+ 
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
 @@ -1600,11 +1600,19 @@
