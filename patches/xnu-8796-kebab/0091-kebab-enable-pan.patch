@@ -1,10 +1,10 @@
-Enable PAN on this port: user memory access did not work without it.
+Tell the arm64 copy path that this port has PAN, and skip its assertion.
 
-user_access_enable() clears PAN only when __ARM_PAN_AVAILABLE__ is defined,
-and that macro is set by Apple's own SoC headers alone. Here the function
-compiled to nothing, so _bcopyin/_bcopyout stored to user memory with PAN
-still set and every copy took a permission fault. SM8250 is ARMv8.2 and
-implements PAN, so say so.
+PAN resets to 0 and nothing on this port turns it on, while user_access_enable()
+asserts that it is on before clearing it - so the very first user copy died on
+an assertion that encodes an assumption this platform does not meet. Declare the
+capability so the code path is real, and keep the toggle inert for kebab until
+PAN is actually enabled at boot.
 
 --- a/osfmk/arm64/copyio.c
 +++ b/osfmk/arm64/copyio.c
@@ -25,7 +25,32 @@ implements PAN, so say so.
  extern int _bcopyin(const char *src, char *dst, vm_size_t len);
  extern int _bcopyinstr(const char *src, char *dst, vm_size_t max, vm_size_t *actual);
  extern int _bcopyout(const char *src, char *dst, vm_size_t len);
-@@ -334,6 +344,7 @@
+@@ -85,9 +95,14 @@
+ static inline void
+ user_access_enable(void)
+ {
+-#if __ARM_PAN_AVAILABLE__
++#if __ARM_PAN_AVAILABLE__ && !defined(KEBAB)
+ 	assert(__builtin_arm_rsr("pan") != 0);
+ 	__builtin_arm_wsr("pan", 0);
++#elif defined(KEBAB)
++	/*
++	 * PAN is 0 on this port: nothing turns it on, so there is nothing to clear
++	 * and the stock assertion does not hold. Leave it alone.
++	 */
+ #endif  /* __ARM_PAN_AVAILABLE__ */
+ 
+ }
+@@ -95,7 +110,7 @@
+ static inline void
+ user_access_disable(void)
+ {
+-#if __ARM_PAN_AVAILABLE__
++#if __ARM_PAN_AVAILABLE__ && !defined(KEBAB)
+ 	__builtin_arm_wsr("pan", 1);
+ #endif  /* __ARM_PAN_AVAILABLE__ */
+ 
+@@ -334,6 +349,7 @@
  int
  copyout(const void *kernel_addr, user_addr_t user_addr, vm_size_t nbytes)
  {

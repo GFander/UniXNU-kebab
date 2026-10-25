@@ -392,7 +392,7 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  	}
 --- a/osfmk/arm64/copyio.c
 +++ b/osfmk/arm64/copyio.c
-@@ -251,6 +251,9 @@
+@@ -256,6 +256,9 @@
  {
  	int result = copy_validate(user_addr, (uintptr_t)kernel_addr, 4,
  	    COPYIO_IN | COPYIO_ATOMIC);
@@ -402,7 +402,7 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  	if (__improbable(result)) {
  		return result;
  	}
-@@ -344,6 +347,10 @@
+@@ -349,6 +352,10 @@
  int
  copyout(const void *kernel_addr, user_addr_t user_addr, vm_size_t nbytes)
  {
@@ -413,9 +413,13 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  
  	int result;
  
-@@ -361,6 +368,9 @@
+@@ -365,7 +372,13 @@
+ 		return result;
  	}
  	user_access_enable();
++#if defined(KEBAB)
++	printf("KEBAB: copyout about to store\n");
++#endif
  	result = _bcopyout(kernel_addr, (char *)user_addr, nbytes);
 +#if defined(KEBAB)
 +	printf("KEBAB: copyout copied %d\n", result);
