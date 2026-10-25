@@ -48,8 +48,10 @@ LITTLE = range(0x000, 0x400, 0x100)
 BIG = range(0x400, 0x800, 0x100)
 
 
-def node(name, properties=(), children=()):
-    properties = [('name', name.encode() + b'\0'), *properties]
+def node(name, properties=(), children=(), named=True):
+    # XNU's kext loader walks /chosen/memory-map and warns about every key
+    # that is not a booter kext, so that node must not carry a name property.
+    properties = ([('name', name.encode() + b'\0')] if named else []) + list(properties)
     result = struct.pack('<II', len(properties), len(children))
     for key, data in properties:
         result += struct.pack('<32sI', key.encode(), len(data))
@@ -213,6 +215,7 @@ def main():
                         ('embedded-panic-log-size', struct.pack('<I', PANIC_LOG_SIZE)),
                         ('dram-base', struct.pack('<Q', DRAM_BASE)),
                         ('dram-size', struct.pack('<Q', args.dram_size)),
+                        ('firmware-version', b'kebab-uefi-1.0\0'),
                         ('crypto-hash-method', b'sha2-384\0'),
                         *([('root-matching', ('<dict><key>IOProviderClass</key><string>IOMedia</string>'
                                               '<key>IOPropertyMatch</key><dict><key>UUID</key><string>' +
@@ -220,7 +223,7 @@ def main():
                           if args.root_match_volume_uuid else []),
                         ('amfi-only-platform-code', struct.pack('<I', 1)),
                         *empty_nvram_proxy()],
-             [node('memory-map', ([("PackedRAMDisk" if args.packed_data_ramdisk else "RAMDisk", bytes(16))]
+             [node('memory-map', named=False, properties=([("PackedRAMDisk" if args.packed_data_ramdisk else "RAMDisk", bytes(16))]
                                   if (args.data_ramdisk or args.packed_data_ramdisk) else []) +
                                  ([('TrustCache', bytes(16))] if args.trust_cache else [])),
               node('manifest-properties')]),

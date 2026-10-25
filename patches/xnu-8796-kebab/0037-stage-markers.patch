@@ -1,63 +1,15 @@
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
-@@ -497,6 +497,56 @@
+@@ -497,6 +497,8 @@
  2:
  .endmacro
  
 +
-+/*
-+ * kebab bring-up: a minimal exception vector. If anything faults after this is
-+ * installed, the handler paints a red block at row 2300 and spins, which tells
-+ * us the fault happened instead of silently hanging.
-+ */
-+	.align 2
-+LEXT(kebab_fault_handler)
-+	/* Report the syndrome first: the console path is lock free. */
-+	mrs	x0, esr_el1
-+	mrs	x1, elr_el1
-+	mrs	x2, far_el1
-+	mrs	x3, spsr_el1
-+	bl	EXT(kebab_early_fault_report)
-+
-+	/*
-+	 * Same shape as the entry band, in red. Read the framebuffer address from
-+	 * the console variable: once arm_vm_init drops TTBR0 the identity mapping of
-+	 * 0x9C000000 is gone, and painting through it would fault again.
-+	 */
-+	adrp	x9, EXT(early_fb)@page
-+	add	x9, x9, EXT(early_fb)@pageoff
-+	ldr	x9, [x9]
-+	mov	x4, #(2200 * 4320 & 0xffff)
-+	movk	x4, #(2200 * 4320 >> 16), lsl #16
-+	add	x9, x9, x4
-+	mov	w10, #0x000000ff
-+	mov	x12, #32
-+	mov	x4, #4320
-+Lkebab_fault_row:
-+	mov	x3, #64
-+	mov	x5, x9
-+Lkebab_fault_pixel:
-+	str	w10, [x5], #4
-+	subs	x3, x3, #1
-+	b.ne	Lkebab_fault_pixel
-+	add	x9, x9, x4
-+	subs	x12, x12, #1
-+	b.ne	Lkebab_fault_row
-+	dsb	sy
-+82:	wfi
-+	b	82b
-+
-+	.align 11
-+LEXT(kebab_vectors)
-+	.rept 16
-+	b	EXT(kebab_fault_handler)
-+	.space 0x7c
-+	.endr
 +
  /*
   * _start_first_cpu
   * Cold boot init routine.  Called from __start
-@@ -513,24 +563,6 @@
+@@ -513,24 +515,6 @@
  	mov		x20, x0
  	mov		x21, #0
  
@@ -82,7 +34,7 @@
  
  	// Set low reset vector before attempting any loads
  	adrp	x0, EXT(LowExceptionVectorBase)@page
-@@ -837,6 +869,20 @@
+@@ -837,6 +821,20 @@
  	MSR_SCTLR_EL1_X0
  	isb		sy
  
@@ -103,18 +55,3 @@
  #if !VMAPPLE && !defined(KEBAB)
  	MOV64   x1, SCTLR_EL1_DEFAULT
  	cmp		x0, x1
-@@ -899,6 +945,14 @@
- 	mov	lr, x21
- #endif
- 
-+	/* Install our fault vector before the KVA hand-off. */
-+	adrp	x9, EXT(kebab_vectors)@page
-+	add	x9, x9, EXT(kebab_vectors)@pageoff
-+	add	x9, x9, x22
-+	sub	x9, x9, x23
-+	msr	vbar_el1, x9
-+	isb
-+
- 	// Return to arm_init()
- 	ret
- 
