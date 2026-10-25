@@ -115,5 +115,10 @@ kernel_args = [
   # secondary bring-up depends on PSCI and the GIC redistributors agreeing
   # with the ADT, which is easier to prove one CPU at a time.
   "cpus=1",
+  # Root the kernel on the userdata GPT partition of the internal UFS. The
+  # driver reuses the host state UEFI leaves behind; there is no RAMDisk by
+  # design.
+  "rd=ufsroot0",
+  "ufsroot=userdata",
   "keepsyms=1",
 ]

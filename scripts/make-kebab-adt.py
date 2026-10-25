@@ -35,6 +35,8 @@ GIC_DIST = 0x17A00000
 GIC_DIST_SIZE = 0x10000
 GIC_REDIST = 0x17A60000
 GIC_REDIST_SIZE = 0x100000
+UFS_BASE = 0x01D84000          # UFS host controller (UFSHCI)
+UFS_SIZE = 0x30000
 PANIC_LOG_BASE = 0xC8000000   # 128 MiB into the 256 MiB window; far from the kernel image
 PANIC_LOG_SIZE = 0xB4000
 GIC_REDIST_STRIDE = 0x20000      # 8 cores x 0x20000 == the 0x100000 range
@@ -223,6 +225,10 @@ def main():
               node('manifest-properties')]),
         # Panic log lives at the far end of the window the loader hands over.
         node('pram', [('reg', struct.pack('<QQ', PANIC_LOG_BASE, PANIC_LOG_SIZE))]),
+        # UFS host controller. It sits far below the arm-io window, so it gets an
+        # absolute reg at the root and the driver looks it up by path.
+        node('kebab-ufs', [('compatible', b'qcom,sm8250-ufshc\0qcom,kona-ufshc\0'),
+                           ('reg', struct.pack('<QQ', UFS_BASE, UFS_SIZE))]),
         node('cpus', children=cpus),
         *([node('psci', [('compatible', b'arm,psci-1.0\0'),
                          ('method', args.psci_method.encode() + b'\0')])] if len(cpus) > 1 else []),
