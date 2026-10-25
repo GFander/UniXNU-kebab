@@ -138,6 +138,19 @@ ABL → boot_b 上的镜像 → Mu-Silicium UEFI → UniXNU 菜单
 > 教训：探针本身也会骗人。早期把内联汇编探针硬编码到恒等映射地址，而
 > `arm_vm_init` 之后该映射已关闭，探针自己崩溃、伪装成内核卡死。
 
+### 阶段 6 与阶段 7（已通过）
+
+存储、根卷与首个用户进程全部打通，详细日志与踩坑记录见
+`docs/BRING-UP-STATE.md` 第六节。结论：
+
+| 里程碑 | 证据 |
+| --- | --- |
+| UFS 分区发布 | `BSD root: ufsroot0, major 1, minor 0` |
+| HFS+ 挂载 | `hfs: mounted KebabRoot on device b(1, 0)` |
+| 根卷认证降级 | `KEBAB: root volume is not sealed (error 25); continuing` |
+| PID 1 exec 全流程 | `KEBAB: exec P1` … `P9` |
+| 用户态执行 | `KEBAB: syscall enter` |
+
 ### 当前阻塞
 
 块设备层已经打通：`bsd_init` 走到 `vfs_mountroot()`，我们的 UFS 驱动：
