@@ -106,8 +106,8 @@
  	}
  	early_panicking = 1;
 -	kebab_early_string("\nKEBAB EARLY PANIC: ");
-+	/* Start the panic at the top of the panel and stop clearing, so the first
-+	 * lines of the report (which say what went wrong) stay readable. */
++	/* Start the panic at the top of the panel: the report is long and has to
++	 * be readable in full. Anything worth keeping goes into the message. */
 +	kebab_early_clear_screen();
 +	early_row = 4;
 +	early_col = 0;

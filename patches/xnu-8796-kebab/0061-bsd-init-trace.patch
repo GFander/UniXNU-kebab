@@ -14,3 +14,44 @@
  
  #if DEBUG_BSDINIT
  #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
+@@ -498,6 +504,7 @@
+ #define bsd_init_kprintf(x, ...)
+ #endif
+ 
++	printf("KEBAB BSD: boot-args = \"%s\"\n", PE_boot_args());
+ 	throttle_init();
+ 
+ 	printf(copyright);
+@@ -728,6 +735,13 @@
+ 	bsd_init_kprintf("calling aio_init\n");
+ 	aio_init();
+ 
++#if defined(KEBAB)
++	/* Register the built-in libpthread provider before the shims are used. */
++	{
++		extern void kebab_pthread_bringup(void);
++		kebab_pthread_bringup();
++	}
++#endif
+ 	pthread_init();
+ 	/* POSIX Shm and Sem */
+ 	bsd_init_kprintf("calling pshm_cache_init\n");
+@@ -870,6 +884,18 @@
+ 		if (0 == (err = vfs_mountroot())) {
+ 			break;
+ 		}
++#if defined(KEBAB)
++		/*
++		 * Report before anything clears rootdevice, and carry the storage
++		 * driver's own verdict: the console is wiped by the panic, so this
++		 * string is the only surviving record of the probe.
++		 */
++		{
++			extern const char *kebab_ufs_status_string(void);
++			panic("KEBAB: cannot mount root, errno = %d, rootdevice \"%s\", ufs %s, args \"%s\"",
++			    err, rootdevice, kebab_ufs_status_string(), PE_boot_args());
++		}
++#endif
+ 		rootdevice[0] = '\0';
+ #if CONFIG_NETBOOT
+ 		if (netboot) {

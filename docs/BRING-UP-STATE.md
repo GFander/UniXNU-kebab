@@ -32,8 +32,9 @@ PE_lockdown_iokit（内核自身初始化收尾）
 KebabPlatformExpert 匹配成功，IOKit 开始建 nub
 kperf_init_early（ml_set_max_cpus 死锁已修）
 bsd_init() 进入 BSD 层
-pthread_init() ← 当前阻塞（缺 libpthread 提供者）
-ufsroot0 驱动就位（待 pthread 之后验证挂载）
+pthread_init（内置 libpthread-514.100.2 已注册）
+vfs_mountroot → UFS 驱动找到 userdata（229043 MiB）并发布 ufsroot0
+文件系统 ← 当前阻塞（ENODEV：内核里没有 HFS/APFS）
 ```
 
 ## 三、已修复的问题（按发现顺序）
