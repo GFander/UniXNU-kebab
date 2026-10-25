@@ -1,12 +1,16 @@
-diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -691,6 +691,12 @@
+@@ -697,6 +697,17 @@
  	bsd_init_kprintf("calling vfsinit\n");
  	vfsinit();
  
-+#if defined(KEBAB) && KEBAB_HFS
-+	/* Built-in HFS must be registered before vfs_mountroot probes devices. */
++#if defined(KEBAB)
++	/*
++	 * Built-in HFS must be registered before vfs_mountroot() walks vfsconf.
++	 * Guarded on KEBAB alone: if the filesystem ever stops being compiled in,
++	 * that must fail at link time rather than silently leave no root
++	 * filesystem registered.
++	 */
 +	extern void kebab_hfs_register(void);
 +	kebab_hfs_register();
 +#endif
