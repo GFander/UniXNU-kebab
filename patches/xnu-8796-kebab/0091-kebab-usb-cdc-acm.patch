@@ -2,22 +2,25 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,667 @@
+@@ -0,0 +1,811 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
 + * The bootloader leaves the Synopsys DWC3 powered, clocked, in device mode and
-+ * halted, with the PHY set up, so only the device controller is restarted: soft
-+ * reset, an event buffer in our memory, endpoint 0, run. Events are polled from
-+ * a kernel thread - no interrupt - like the UFS driver on this port. DMA is not
-+ * cache coherent, so buffers are cleaned and invalidated around every transfer.
++ * halted, with the PHY configured, so only the device controller is restarted:
++ * reset, event buffer, endpoint 0, then run with device-event enables. Events
++ * are polled from a kernel thread - no interrupt - like the UFS driver. DMA is
++ * not cache coherent, so buffers are handed over with explicit cache
++ * maintenance.
 + *
-+ * The class is CDC-ACM so the host just sees /dev/ttyACM0: kernel log text is
++ * The class is CDC-ACM so the host just sees a serial port: kernel log text is
 + * streamed out of the bulk IN endpoint, and anything the host writes to the
 + * bulk OUT endpoint is echoed to the kernel console.
 + *
-+ * Off unless boot-arg kebabusb=1 is given, so a broken controller cannot affect
-+ * a normal boot.
++ * Physical endpoint numbering follows DWC3: ep = 2 * usb_number + direction,
++ * even is OUT, odd is IN. Endpoint 0 is physical 0 (OUT) and 1 (IN).
++ *
++ * Off unless boot-arg kebabusb=1 is given.
 + */
 +#if defined(KEBAB)
 +
@@ -31,15 +34,16 @@ new file mode 100644
 +#include <vm/pmap.h>
 +#include <vm/vm_kern.h>
 +
-+#include <arm/machine_routines.h>   /* ml_io_map */
++#include <arm/machine_routines.h>
 +
-+/* Declared in arm/machine_routines.h, but behind a guard this build does
-+ * not satisfy; the negroni port spells it out for the same reason. */
++/* Declared in arm/machine_routines.h, behind a guard this build does not
++ * satisfy; the negroni port spells it out for the same reason. */
 +extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +
 +/* ---------------------------------------------------------------- registers */
 +
 +#define GCTL            0xc110
++#define GEVTEN          0xc114
 +#define GEVNTADRLO      0xc400
 +#define GEVNTADRHI      0xc404
 +#define GEVNTSIZ        0xc408
@@ -58,6 +62,14 @@ new file mode 100644
 +#define DCTL_CSFTRST    (1u << 30)
 +#define DSTS_DEVCTRLHLT (1u << 22)
 +
++/* DCFG: bits 2:0 device speed (0 = high speed), bits 9:3 device address */
++#define DCFG_SPEED_MASK (0x7u << 0)
++#define DCFG_ADDR_MASK  (0x7fu << 3)
++#define DCFG_ADDR(a)    (((uint32_t)(a) << 3) & DCFG_ADDR_MASK)
++
++/* DEVTEN: disconnect, connect done, reset */
++#define DEVTEN_DEVICE   0x7u
++
 +#define DEPCMD_SETEPCONFIG       1
 +#define DEPCMD_SETTRANSFRESOURCE 2
 +#define DEPCMD_SETSTALL          4
@@ -66,82 +78,94 @@ new file mode 100644
 +#define DEPCMD_DEPSTARTCFG       9
 +#define DEPCMD_CMDACT            (1u << 10)
 +
++/* SetEndpointConfig parameters: type in 2:1, packet size in 13:3, FIFO in 21:17;
++ * transfer-complete in 8, transfer-not-ready in 10, endpoint number in 29:26 and
++ * direction in 25 of the second parameter. */
++#define DEPCFG_PARAM0(type, maxpkt, fifo) \
++	(((uint32_t)(type) << 1) | ((uint32_t)(maxpkt) << 3) | ((uint32_t)(fifo) << 17))
++#define DEPCFG_PARAM1(ep) \
++	((1u << 8) | (1u << 10) | (((uint32_t)(ep)) << 25))
++
 +#define TRB_HWO         (1u << 0)
 +#define TRB_LST         (1u << 1)
 +#define TRB_ISP_IMI     (1u << 10)
 +#define TRB_IOC         (1u << 11)
++#define TRBCTL_NORMAL   (1u << 4)
 +#define TRBCTL_SETUP    (2u << 4)
 +#define TRBCTL_STATUS2  (3u << 4)
 +#define TRBCTL_STATUS3  (4u << 4)
 +#define TRBCTL_DATA     (5u << 4)
 +
-+/* endpoint types, in the DEPCFG parameter */
-+#define EP_TYPE_CONTROL   0
-+#define EP_TYPE_BULK      2
-+#define EP_TYPE_INTR      3
++#define EP_TYPE_CONTROL 0
++#define EP_TYPE_BULK    2
++#define EP_TYPE_INTR    3
 +
-+/* Port facts (kebab device tree): DWC3 at 0x0A600000, USB2 PHY just below. */
++/* Port facts: DWC3 at 0x0A600000, Qualcomm QSCRATCH above it. */
 +#define DWC3_PA        0x0a600000
 +#define DWC3_SIZE      0x0000d000
-+#define QUSB2_PA       0x088e2000
-+#define QUSB2_SIZE     0x00000400
-+#define QSCRATCH_OFF   0x0c100
-+#define QSCRATCH_HS_PHY_CTRL 0x14
-+#define QSCRATCH_SS_PHY_CTRL 0x18
++#define QSCRATCH_PA    0x0a6f8800
++#define QSCRATCH_HS    0x10    /* HS_PHY_CTRL */
++#define QSCRATCH_SS    0x30    /* SS_PHY_CTRL */
 +#define UTMI_OTG_VBUS_VALID  (1u << 20)
 +#define SW_SESSVLD_SEL       (1u << 28)
-+#define LANE0_PWR_PRESENT    (1u << 2)
++#define LANE0_PWR_PRESENT    (1u << 24)
 +
 +/* ------------------------------------------------------------- DMA layout */
 +
-+/* One page is physically contiguous, which is all the controller needs. */
++/*
++ * One 4 KiB page is physically contiguous, which is all the controller needs.
++ * Every object the controller writes on its own gets its own cache line, so a
++ * clean of one never writes back stale bytes over another.
++ */
 +#define UD_SIZE        4096
-+#define UD_EVT         0x0000
++#define UD_EVT         0x0000      /* 1 KiB event buffer */
 +#define UD_EVT_SIZE    1024
 +#define UD_TRB_OUT     0x0400
-+#define UD_TRB_IN      0x0410
-+#define UD_TRB_NOTIFY  0x0420
-+#define UD_TRB_BULKIN  0x0430
-+#define UD_TRB_BULKOUT 0x0440
-+#define UD_SETUP       0x0480
-+#define UD_DATA        0x0500      /* EP0 data stage, 512 bytes */
-+#define UD_NOTIFY      0x0700      /* CDC notification, 8 bytes */
-+#define UD_BULKIN      0x0800      /* 512 bytes */
-+#define UD_BULKOUT     0x0a00      /* 512 bytes */
++#define UD_TRB_IN      0x0440
++#define UD_TRB_NOTIFY  0x0480
++#define UD_TRB_BULKIN  0x04c0
++#define UD_TRB_BULKOUT 0x0500
++#define UD_SETUP       0x0580
++#define UD_DATA        0x0600      /* ep0 data stage, 512 bytes */
++#define UD_NOTIFY      0x0800
++#define UD_BULKIN      0x0900      /* 512 bytes */
++#define UD_BULKOUT     0x0b00      /* 512 bytes */
 +
-+/* endpoint numbers as the controller sees them */
++/* physical endpoints: ep = 2 * usb_number + direction */
 +#define EP0_OUT        0
 +#define EP0_IN         1
-+#define EP_NOTIFY      2
-+#define EP_BULK_OUT    3
-+#define EP_BULK_IN     4
++#define EP_NOTIFY      5           /* usb 2, IN  -> descriptor 0x82 */
++#define EP_BULK_OUT    2           /* usb 1, OUT -> descriptor 0x01 */
++#define EP_BULK_IN     3           /* usb 1, IN  -> descriptor 0x81 */
 +#define EP_MASK        ((1u << EP0_OUT) | (1u << EP0_IN) | (1u << EP_NOTIFY) | \
 +    (1u << EP_BULK_OUT) | (1u << EP_BULK_IN))
 +
-+/* ------------------------------------------------------------------ state */
++/* --------------------------------------------------------------- state */
 +
 +#define LOG_RING_SIZE  16384
 +
 +static struct {
 +	vm_offset_t dwc;
++	vm_offset_t qs;
 +	vm_offset_t dma;
 +	uint64_t    dma_pa;
 +	uint32_t    evt_pos;
 +	uint32_t    events;
-+	int         state;          /* EP0 state machine */
-+	int         sleep_chan;
++	int         state;
 +	bool        data_in;
 +	bool        configured;
 +	bool        running;
++	bool        bulk_in_busy;
 +	uint32_t    tx_bytes;
-+	/* log ring, filled by kebab_usb_log() from any context */
++	lck_grp_t  *lock_grp;
 +	lck_mtx_t  *lock;
 +	uint32_t    log_head;
 +	uint32_t    log_tail;
++	uint32_t    log_busy;
 +	char        log_ring[LOG_RING_SIZE];
 +} ud;
 +
-+enum { EP0_SETUP, EP0_DATA, EP0_WAIT_STATUS2, EP0_WAIT_STATUS3, EP0_STATUS };
++enum { EP0_SETUP, EP0_DATA, EP0_STATUS };
 +
 +/* --------------------------------------------------------------- helpers */
 +
@@ -160,18 +184,36 @@ new file mode 100644
 +	return v;
 +}
 +
-+/* clean (to device) or invalidate (from device) the lines of one DMA buffer */
-+static void
-+ud_sync(uint32_t off, uint32_t len)
++static inline vm_size_t
++ud_cache_line(void)
 +{
 +	uint64_t ctr;
 +	__asm__ volatile ("mrs %0, ctr_el0" : "=r"(ctr));
-+	vm_size_t line = (vm_size_t)4 << ((ctr >> 16) & 0xf);
-+	vm_offset_t start = ud.dma + off;
-+	vm_offset_t end = start + len;
++	return (vm_size_t)4 << ((ctr >> 16) & 0xf);
++}
++
++/* hand memory to the device: clean + invalidate */
++static void
++ud_to_dev(uint32_t off, uint32_t len)
++{
 +	__asm__ volatile ("dsb sy" ::: "memory");
-+	for (vm_offset_t va = start & ~(line - 1); va < end; va += line) {
++	vm_size_t line = ud_cache_line();
++	for (vm_offset_t va = (ud.dma + off) & ~(line - 1);
++	    va < ud.dma + off + len; va += line) {
 +		__asm__ volatile ("dc civac, %0" :: "r"(va) : "memory");
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++/* take memory back from the device: invalidate */
++static void
++ud_from_dev(uint32_t off, uint32_t len)
++{
++	__asm__ volatile ("dsb sy" ::: "memory");
++	vm_size_t line = ud_cache_line();
++	for (vm_offset_t va = (ud.dma + off) & ~(line - 1);
++	    va < ud.dma + off + len; va += line) {
++		__asm__ volatile ("dc ivac, %0" :: "r"(va) : "memory");
 +	}
 +	__asm__ volatile ("dsb sy" ::: "memory");
 +}
@@ -205,8 +247,8 @@ new file mode 100644
 +	return -1;
 +}
 +
-+/* submit one TRB for physical endpoint ep */
-+static void
++/* submit one TRB; returns the endpoint command result */
++static int
 +ud_start(uint32_t trb_off, unsigned ep, uint32_t buf_off, uint32_t len, uint32_t ctl)
 +{
 +	volatile uint32_t *t = (volatile uint32_t *)(ud.dma + trb_off);
@@ -216,9 +258,12 @@ new file mode 100644
 +	t[1] = (uint32_t)(bpa >> 32);
 +	t[2] = len;
 +	t[3] = ctl | TRB_HWO | TRB_LST | TRB_ISP_IMI | TRB_IOC;
-+	ud_sync(trb_off, 16);
++	ud_to_dev(trb_off, 16);
++	if (len && (ctl == TRBCTL_DATA || ctl == TRBCTL_NORMAL)) {
++		ud_to_dev(buf_off, len);
++	}
 +	uint64_t tpa = ud.dma_pa + trb_off;
-+	ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)(tpa >> 32), (uint32_t)tpa, 0);
++	return ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)(tpa >> 32), (uint32_t)tpa, 0);
 +}
 +
 +static void
@@ -229,10 +274,12 @@ new file mode 100644
 +}
 +
 +static void
-+ud_stall(void)
++ud_ep_stall(unsigned ep)
 +{
-+	ud_epcmd(EP0_OUT, DEPCMD_SETSTALL, 0, 0, 0);
-+	ud_start_setup();
++	ud_epcmd(ep, DEPCMD_SETSTALL, 0, 0, 0);
++	if (ep == EP0_OUT) {
++		ud_start_setup();
++	}
 +}
 +
 +/* ----------------------------------------------------------- descriptors */
@@ -244,30 +291,31 @@ new file mode 100644
 +};
 +
 +/*
-+ * One configuration, two interfaces: CDC control (interrupt IN notification)
-+ * and CDC data (bulk OUT + bulk IN). 67 bytes total.
++ * One configuration, two interfaces, 67 bytes:
++ *   CDC control: interrupt IN 0x82 (physical 5)
++ *   CDC data:    bulk OUT 0x01 (physical 2), bulk IN 0x81 (physical 3)
 + */
 +static const uint8_t ud_cfg_desc[] = {
-+	/* configuration */
++	/* configuration: 2 interfaces, 500 mA, bus powered */
 +	9, 2, 67, 0, 2, 1, 0, 0x80, 250,
 +	/* interface 0: CDC control */
 +	9, 4, 0, 0, 1, 0x02, 0x02, 0x01, 0,
-+	/* header functional descriptor */
++	/* header functional: CDC 1.10 */
 +	5, 0x24, 0x00, 0x10, 0x01,
-+	/* call management */
++	/* call management: no data class interface, no device call mgmt */
 +	5, 0x24, 0x01, 0x00, 0x01,
-+	/* abstract control management */
++	/* abstract control management: line coding + control line state */
 +	4, 0x24, 0x02, 0x02,
 +	/* union: control interface 0, data interface 1 */
 +	5, 0x24, 0x06, 0x00, 0x01,
-+	/* notification endpoint, interrupt IN, 8 bytes */
-+	7, 5, 0x80 | EP_NOTIFY, 0x03, 8, 0, 16,
++	/* notification endpoint: interrupt IN, 8 bytes, 32 ms at high speed */
++	7, 5, 0x82, 0x03, 8, 0, 9,
 +	/* interface 1: CDC data */
 +	9, 4, 1, 0, 2, 0x0a, 0x00, 0x00, 0,
 +	/* bulk OUT */
-+	7, 5, EP_BULK_OUT, 0x02, 0x00, 0x02, 0,
++	7, 5, 0x01, 0x02, 0x00, 0x02, 0,
 +	/* bulk IN */
-+	7, 5, 0x80 | EP_BULK_IN, 0x02, 0x00, 0x02, 0,
++	7, 5, 0x81, 0x02, 0x00, 0x02, 0,
 +};
 +
 +static const char *const ud_strings[] = {
@@ -298,10 +346,13 @@ new file mode 100644
 +/* --------------------------------------------------------- endpoint setup */
 +
 +static int
-+ud_ep_config(unsigned ep, uint32_t type, uint32_t maxpkt, bool in)
++ud_ep_config(unsigned ep, uint32_t type, uint32_t maxpkt)
 +{
-+	uint32_t p0 = (ep << 1) | (maxpkt << 3);
-+	uint32_t p1 = (1u << 8) | (1u << 10) | (type << 1) | (in ? (1u << 25) : 0);
++	bool in = (ep & 1) != 0;
++	uint32_t fifo = in ? (ep >> 1) : 0;
++	uint32_t p0 = DEPCFG_PARAM0(type, maxpkt, fifo);
++	uint32_t p1 = DEPCFG_PARAM1(ep);
++
 +	if (ud_epcmd(ep, DEPCMD_SETEPCONFIG, p0, p1, 0)) {
 +		return -1;
 +	}
@@ -314,70 +365,88 @@ new file mode 100644
 +	if (ud.configured) {
 +		return;
 +	}
-+	if (ud_ep_config(EP_NOTIFY, EP_TYPE_INTR, 8, true) ||
-+	    ud_ep_config(EP_BULK_OUT, EP_TYPE_BULK, 512, false) ||
-+	    ud_ep_config(EP_BULK_IN, EP_TYPE_BULK, 512, true)) {
++	/* reset non-control resource allocation, keeping endpoint 0 */
++	ud_epcmd(EP0_OUT, DEPCMD_DEPSTARTCFG, 0, 0, 0);
++
++	if (ud_ep_config(EP_NOTIFY, EP_TYPE_INTR, 8) ||
++	    ud_ep_config(EP_BULK_OUT, EP_TYPE_BULK, 512) ||
++	    ud_ep_config(EP_BULK_IN, EP_TYPE_BULK, 512)) {
 +		printf("KEBAB USB: endpoint configuration failed\n");
 +		return;
 +	}
 +	dwc_wr(DALEPENA, dwc_rd(DALEPENA) | EP_MASK);
 +	ud.configured = true;
-+	printf("KEBAB USB: configured, endpoints notify=%u bulk_out=%u bulk_in=%u\n",
++	printf("KEBAB USB: configured, notify=%u bulk_out=%u bulk_in=%u\n",
 +	    EP_NOTIFY, EP_BULK_OUT, EP_BULK_IN);
-+	/* arm the first host->device transfer */
-+	ud_start(UD_TRB_BULKOUT, EP_BULK_OUT, UD_BULKOUT, 512, 0);
++	ud_to_dev(UD_BULKOUT, 512);
++	ud_start(UD_TRB_BULKOUT, EP_BULK_OUT, UD_BULKOUT, 512, TRBCTL_NORMAL);
 +}
 +
 +/* ------------------------------------------------------------- log ring */
 +
++/*
++ * The console hook can run from interrupt context, where taking a mutex would
++ * assert. This is a bounded, non-blocking handoff: whoever cannot take the flag
++ * drops its bytes instead of waiting.
++ */
 +void
 +kebab_usb_log(const char *buf, size_t len)
 +{
-+	/*
-+	 * This is called from the console path, which the USB thread itself uses
-+	 * for its progress prints. Taking the ring lock recursively would deadlock,
-+	 * so a second entry while one is in progress is simply dropped.
-+	 */
-+	static uint32_t in_log;
 +	uint32_t expected = 0;
 +
-+	if (!ud.running || ud.lock == NULL) {
++	if (!ud.running) {
 +		return;
 +	}
-+	if (os_atomic_cmpxchg(&in_log, expected, 1u, relaxed) == false) {
++	if (!os_atomic_cmpxchg(&ud.log_busy, expected, 1u, acquire)) {
 +		return;
 +	}
-+	lck_mtx_lock(ud.lock);
 +	for (size_t i = 0; i < len; i++) {
 +		uint32_t next = (ud.log_head + 1) % LOG_RING_SIZE;
 +		if (next == ud.log_tail) {
-+			break;                  /* drop when the host is not reading */
++			break;
 +		}
 +		ud.log_ring[ud.log_head] = buf[i];
 +		ud.log_head = next;
 +	}
-+	lck_mtx_unlock(ud.lock);
-+	os_atomic_store(&in_log, 0u, relaxed);
++	os_atomic_store(&ud.log_busy, 0u, release);
 +}
 +
 +static uint32_t
 +ud_log_take(char *out, uint32_t max)
 +{
 +	uint32_t n = 0;
++	uint32_t expected = 0;
 +
-+	if (ud.lock == NULL) {
++	if (!os_atomic_cmpxchg(&ud.log_busy, expected, 1u, acquire)) {
 +		return 0;
 +	}
-+	lck_mtx_lock(ud.lock);
 +	while (n < max && ud.log_tail != ud.log_head) {
 +		out[n++] = ud.log_ring[ud.log_tail];
 +		ud.log_tail = (ud.log_tail + 1) % LOG_RING_SIZE;
 +	}
-+	lck_mtx_unlock(ud.lock);
++	os_atomic_store(&ud.log_busy, 0u, release);
 +	return n;
 +}
 +
 +/* ------------------------------------------------------- control requests */
++
++/*
++ * A request with no data stage acknowledges with a two-stage status (IN). When a
++ * data stage happened, the status goes the other way: STATUS3 after an IN data
++ * stage means OUT, STATUS2 after an OUT data stage means IN.
++ */
++static void
++ud_status_stage(bool had_data_stage)
++{
++	ud.state = EP0_STATUS;
++	if (!had_data_stage) {
++		ud_start(UD_TRB_IN, EP0_IN, UD_DATA, 0, TRBCTL_STATUS2);
++	} else if (ud.data_in) {
++		ud_start(UD_TRB_OUT, EP0_OUT, UD_DATA, 0, TRBCTL_STATUS3);
++	} else {
++		ud_start(UD_TRB_IN, EP0_IN, UD_DATA, 0, TRBCTL_STATUS2);
++	}
++}
 +
 +static void
 +ud_setup(void)
@@ -388,59 +457,104 @@ new file mode 100644
 +	uint16_t value = (uint16_t)(st[2] | (st[3] << 8));
 +	uint16_t length = (uint16_t)(st[6] | (st[7] << 8));
 +	uint32_t n = 0;
-+	bool ok = true;
++	bool ok = true, had_data_stage = false;
 +
 +	ud.data_in = (type & 0x80) != 0;
-+	if ((type & 0x60) == 0x20) {            /* class request */
-+		/* CDC SET_LINE_CODING etc: acknowledge and ignore */
-+		if (req == 0x20 && !ud.data_in) {
-+			length = 0;
-+		} else {
-+			ok = false;
-+		}
-+	} else if ((type & 0x60) != 0) {        /* vendor: not supported */
-+		ok = false;
-+	} else if (req == 6) {                  /* GET_DESCRIPTOR */
-+		switch (value >> 8) {
-+		case 1:
-+			memcpy(data, ud_dev_desc, sizeof(ud_dev_desc));
-+			n = sizeof(ud_dev_desc);
++
++	if ((type & 0x60) == 0x20) {                    /* class */
++		switch (req) {
++		case 0x20:                              /* SET_LINE_CODING, 7 bytes OUT */
++			ok = (length == 7);
++			had_data_stage = ok;
 +			break;
-+		case 2:
-+			memcpy(data, ud_cfg_desc, sizeof(ud_cfg_desc));
-+			n = sizeof(ud_cfg_desc);
++		case 0x21:                              /* GET_LINE_CODING, 7 bytes IN */
++			memset(data, 0, 7);
++			data[0] = 0x80; data[1] = 0x25; data[2] = 0;   /* 9600 baud */
++			n = 7;
 +			break;
-+		case 3:
-+			n = ud_string(value & 0xff, data);
++		case 0x22:                              /* SET_CONTROL_LINE_STATE */
 +			break;
 +		default:
 +			ok = false;
 +			break;
 +		}
-+	} else if (req == 9) {                  /* SET_CONFIGURATION */
-+		ud_configure();
-+	} else if (req == 11) {                 /* SET_INTERFACE: no-op */
-+	} else if (req == 5 || req == 7 || req == 8) {  /* SET/CLEAR addr/feature */
-+	} else {
++	} else if ((type & 0x60) != 0) {                /* vendor */
 +		ok = false;
++	} else {
++		switch (req) {
++		case 5:                                 /* SET_ADDRESS */
++			if (value > 127) {
++				ok = false;
++			} else {
++				dwc_wr(DCFG, (dwc_rd(DCFG) & ~DCFG_ADDR_MASK) | DCFG_ADDR(value));
++			}
++			break;
++		case 6:                                 /* GET_DESCRIPTOR */
++			switch (value >> 8) {
++			case 1:
++				memcpy(data, ud_dev_desc, sizeof(ud_dev_desc));
++				n = sizeof(ud_dev_desc);
++				break;
++			case 2:
++				memcpy(data, ud_cfg_desc, sizeof(ud_cfg_desc));
++				n = sizeof(ud_cfg_desc);
++				break;
++			case 3:
++				n = ud_string(value & 0xff, data);
++				if (n == 0) {
++					ok = false;
++				}
++				break;
++			default:
++				ok = false;
++				break;
++			}
++			break;
++		case 8:                                 /* GET_CONFIGURATION */
++			data[0] = ud.configured ? 1 : 0;
++			n = 1;
++			break;
++		case 9:                                 /* SET_CONFIGURATION */
++			if (value == 1) {
++				ud_configure();
++			} else if (value != 0) {
++				ok = false;
++			}
++			break;
++		case 10:                                /* GET_INTERFACE */
++			data[0] = 0;
++			n = 1;
++			break;
++		case 11:                                /* SET_INTERFACE */
++			if (value > 1) {
++				ok = false;
++			}
++			break;
++		case 0:                                 /* GET_STATUS */
++			data[0] = 0; data[1] = 0;
++			n = 2;
++			break;
++		case 1:                                 /* CLEAR_FEATURE */
++		case 3:                                 /* SET_FEATURE */
++			break;
++		default:
++			ok = false;
++			break;
++		}
 +	}
 +
 +	if (!ok) {
-+		printf("KEBAB USB: unsupported request %02x/%02x\n", type, req);
-+		ud_stall();
++		printf("KEBAB USB: unsupported request %02x/%02x len %u\n", type, req, length);
++		ud_ep_stall(EP0_OUT);
 +		return;
 +	}
 +	if (ud.data_in && n > 0) {
 +		uint32_t chunk = (length < n) ? length : n;
 +		ud.state = EP0_DATA;
 +		ud_start(UD_TRB_IN, EP0_IN, UD_DATA, chunk, TRBCTL_DATA);
-+	} else if (!ud.data_in && length > 0) {
-+		/* no out-of-band data stages are used by these requests */
-+		ud_stall();
-+	} else {
-+		ud.state = EP0_STATUS;
-+		ud_start(UD_TRB_IN, EP0_IN, UD_DATA, 0, TRBCTL_STATUS3);
++		return;
 +	}
++	ud_status_stage(had_data_stage);
 +}
 +
 +/* ---------------------------------------------------------------- events */
@@ -448,19 +562,34 @@ new file mode 100644
 +static void
 +ud_bulk_out_done(void)
 +{
++	volatile uint32_t *t = (volatile uint32_t *)(ud.dma + UD_TRB_BULKOUT);
 +	char *buf = (char *)(ud.dma + UD_BULKOUT);
-+	ud_sync(UD_BULKOUT, 512);
-+	buf[511] = 0;
-+	if (buf[0] != 0) {
-+		printf("KEBAB USB: host said %s\n", buf);
++
++	ud_from_dev(UD_TRB_BULKOUT, 16);
++	uint32_t left = t[2] & 0x00ffffff;
++	uint32_t received = (left < 512) ? 512 - left : 0;
++	ud_from_dev(UD_BULKOUT, 512);
++	if (received > 0) {
++		char tmp[64];
++		uint32_t show = (received < sizeof(tmp) - 1) ? received : sizeof(tmp) - 1;
++		memcpy(tmp, buf, show);
++		tmp[show] = 0;
++		printf("KEBAB USB: host said %s\n", tmp);
 +	}
-+	ud_start(UD_TRB_BULKOUT, EP_BULK_OUT, UD_BULKOUT, 512, 0);
++	t[3] = 0;
++	ud_to_dev(UD_TRB_BULKOUT, 16);
++	ud_to_dev(UD_BULKOUT, 512);
++	ud_start(UD_TRB_BULKOUT, EP_BULK_OUT, UD_BULKOUT, 512, TRBCTL_NORMAL);
 +}
 +
 +static void
 +ud_bulk_in_done(void)
 +{
-+	/* the transfer completed; a new one is armed by the pump */
++	volatile uint32_t *t = (volatile uint32_t *)(ud.dma + UD_TRB_BULKIN);
++	ud_from_dev(UD_TRB_BULKIN, 16);
++	t[3] = 0;                        /* clear HWO so a new transfer can start */
++	ud_to_dev(UD_TRB_BULKIN, 16);
++	ud.bulk_in_busy = false;
 +}
 +
 +static void
@@ -468,20 +597,29 @@ new file mode 100644
 +{
 +	if (ev & 1) {                           /* device event */
 +		uint32_t type = (ev >> 8) & 0xf;
-+		if (type == 1) {
-+			dwc_wr(DCFG, dwc_rd(DCFG) & ~(0x7fu << 3));
++		if (type == 1) {                /* reset */
++			dwc_wr(DCFG, dwc_rd(DCFG) & ~DCFG_ADDR_MASK);
++			dwc_wr(DALEPENA, (1u << EP0_OUT) | (1u << EP0_IN));
 +			ud.configured = false;
++			ud.bulk_in_busy = false;
 +			printf("KEBAB USB: bus reset\n");
-+		} else if (type == 2) {
++			ud_start_setup();
++		} else if (type == 2) {         /* connect done */
 +			uint32_t speed = dwc_rd(DSTS) & 7;
-+			/* EP0 packet size becomes 64 once the host sets the speed */
-+			ud_epcmd(EP0_OUT, DEPCMD_SETEPCONFIG, (0u << 1) | (64u << 3) | (2u << 30),
-+			    (1u << 8) | (1u << 10) | (0u << 25), 0);
-+			ud_epcmd(EP0_IN, DEPCMD_SETEPCONFIG, (1u << 1) | (64u << 3) | (2u << 30),
-+			    (1u << 8) | (1u << 10) | (1u << 25), 0);
-+			printf("KEBAB USB: connected, speed %u\n", speed);
-+		} else if (type == 0) {
++			uint32_t maxpkt = 64;
++			char desc[24];
++			desc[0] = 18;               /* keep the descriptor in step */
++			desc[7] = (char)maxpkt;
++			ud_epcmd(EP0_OUT, DEPCMD_SETEPCONFIG,
++			    DEPCFG_PARAM0(EP_TYPE_CONTROL, maxpkt, 0) | (2u << 30),
++			    DEPCFG_PARAM1(EP0_OUT), 0);
++			ud_epcmd(EP0_IN, DEPCMD_SETEPCONFIG,
++			    DEPCFG_PARAM0(EP_TYPE_CONTROL, maxpkt, 0) | (2u << 30),
++			    DEPCFG_PARAM1(EP0_IN), 0);
++			printf("KEBAB USB: connected, speed %u, ep0 packet %u\n", speed, maxpkt);
++		} else if (type == 0) {         /* disconnect */
 +			ud.configured = false;
++			ud.bulk_in_busy = false;
 +			printf("KEBAB USB: disconnect\n");
 +		}
 +		return;
@@ -489,7 +627,6 @@ new file mode 100644
 +
 +	unsigned ep = (ev >> 1) & 0x1f;
 +	unsigned type = (ev >> 6) & 0xf;
-+	unsigned status = (ev >> 12) & 0xf;
 +
 +	if (ep == EP_BULK_OUT && type == 1) {
 +		if (ud.configured) {
@@ -508,25 +645,15 @@ new file mode 100644
 +	if (type == 1) {                        /* XferComplete */
 +		switch (ud.state) {
 +		case EP0_SETUP:
-+			ud_sync(UD_SETUP, 8);
++			ud_from_dev(UD_SETUP, 8);
 +			ud_setup();
 +			break;
 +		case EP0_DATA:
-+			ud.state = EP0_WAIT_STATUS3;
++			ud_status_stage(true);
 +			break;
 +		case EP0_STATUS:
 +			ud_start_setup();
 +			break;
-+		default:
-+			break;
-+		}
-+		return;
-+	}
-+	if (type == 3 && status == 2) {          /* XferNotReady, status phase */
-+		if (ud.state == EP0_WAIT_STATUS2 || ud.state == EP0_WAIT_STATUS3) {
-+			uint32_t ctl = (ud.state == EP0_WAIT_STATUS3) ? TRBCTL_STATUS3 : TRBCTL_STATUS2;
-+			ud.state = EP0_STATUS;
-+			ud_start(UD_TRB_IN, EP0_IN, UD_DATA, 0, ctl);
 +		}
 +	}
 +}
@@ -536,20 +663,19 @@ new file mode 100644
 +static void
 +ud_pump_log(void)
 +{
-+	static bool in_flight;
 +	uint32_t n;
 +
-+	if (!ud.configured || in_flight) {
++	if (!ud.configured || ud.bulk_in_busy) {
 +		return;
 +	}
 +	n = ud_log_take((char *)(ud.dma + UD_BULKIN), 512);
 +	if (n == 0) {
 +		return;
 +	}
-+	ud_sync(UD_BULKIN, n);
-+	in_flight = true;
-+	ud_start(UD_TRB_BULKIN, EP_BULK_IN, UD_BULKIN, n, 0);
-+	ud.tx_bytes += n;
++	if (ud_start(UD_TRB_BULKIN, EP_BULK_IN, UD_BULKIN, n, TRBCTL_NORMAL) == 0) {
++		ud.bulk_in_busy = true;
++		ud.tx_bytes += n;
++	}
 +}
 +
 +static void
@@ -558,7 +684,7 @@ new file mode 100644
 +	for (;;) {
 +		uint32_t count = dwc_rd(GEVNTCOUNT) & 0xffff;
 +		if (count) {
-+			ud_sync(UD_EVT, UD_EVT_SIZE);
++			ud_from_dev(UD_EVT, UD_EVT_SIZE);
 +			for (uint32_t done = 0; done < count; done += 4) {
 +				uint32_t ev = *(volatile uint32_t *)(ud.dma + UD_EVT + ud.evt_pos);
 +				ud.evt_pos = (ud.evt_pos + 4) % UD_EVT_SIZE;
@@ -580,6 +706,7 @@ new file mode 100644
 +kebab_usb_start(void)
 +{
 +	uint32_t enabled = 0;
++	thread_t thread;
 +
 +	if (!PE_parse_boot_argn("kebabusb", &enabled, sizeof(enabled)) || enabled == 0) {
 +		return;
@@ -589,6 +716,7 @@ new file mode 100644
 +		printf("KEBAB USB: cannot map the controller\n");
 +		return;
 +	}
++	ud.qs = ml_io_map(QSCRATCH_PA, 0x100);
 +	if (kmem_alloc(kernel_map, &ud.dma, UD_SIZE, KMA_NONE, VM_KERN_MEMORY_NONE) != KERN_SUCCESS) {
 +		printf("KEBAB USB: no DMA memory\n");
 +		return;
@@ -599,74 +727,90 @@ new file mode 100644
 +		return;
 +	}
 +	bzero((void *)ud.dma, UD_SIZE);
-+	ud.lock = lck_mtx_alloc_init(0, 0);
++	/* hand the whole arena to the device once, before anything else uses it */
++	ud_to_dev(0, UD_SIZE);
++
++	ud.lock_grp = lck_grp_alloc_init("kebabusb", LCK_GRP_ATTR_NULL);
++	if (ud.lock_grp == NULL) {
++		printf("KEBAB USB: no lock group\n");
++		return;
++	}
++	ud.lock = lck_mtx_alloc_init(ud.lock_grp, LCK_ATTR_NULL);
 +	if (ud.lock == NULL) {
 +		printf("KEBAB USB: no lock\n");
 +		return;
 +	}
 +
-+	/* soft reset the device controller; the PHY stays as the loader left it */
++	dwc_wr(DEVTEN, DEVTEN_DEVICE);
 +	dwc_wr(DCTL, DCTL_CSFTRST);
 +	int i;
 +	for (i = 0; i < 500 && (dwc_rd(DCTL) & DCTL_CSFTRST); i++) {
 +		delay(1000);
 +	}
-+	printf("KEBAB USB: reset %s after %d ms, GCTL 0x%08x DCFG 0x%08x GHWPARAMS0 0x%08x\n",
++	printf("KEBAB USB: reset %s after %d ms, GCTL 0x%08x DCFG 0x%08x GSNPSID 0x%08x\n",
 +	    (dwc_rd(DCTL) & DCTL_CSFTRST) ? "STUCK" : "done", i,
-+	    dwc_rd(GCTL), dwc_rd(DCFG), dwc_rd(0xc140));
++	    dwc_rd(GCTL), dwc_rd(DCFG), dwc_rd(0xc120));
 +	if (dwc_rd(DCTL) & DCTL_CSFTRST) {
 +		return;
 +	}
 +
++	/* high speed, address 0 */
++	dwc_wr(DCFG, dwc_rd(DCFG) & ~(DCFG_SPEED_MASK | DCFG_ADDR_MASK));
++	dwc_wr(DEVTEN, DEVTEN_DEVICE);
++
 +	dwc_wr(GEVNTADRLO, (uint32_t)(ud.dma_pa + UD_EVT));
 +	dwc_wr(GEVNTADRHI, (uint32_t)((ud.dma_pa + UD_EVT) >> 32));
-+	dwc_wr(GEVNTSIZ, (1u << 31) | UD_EVT_SIZE);      /* bit 31: interrupt masked */
++	dwc_wr(GEVNTSIZ, (1u << 31) | UD_EVT_SIZE);      /* bit 31 masks the interrupt */
 +	dwc_wr(GEVNTCOUNT, dwc_rd(GEVNTCOUNT) & 0xffff);
 +	ud.evt_pos = 0;
 +	printf("KEBAB USB: event buffer at 0x%llx\n", (unsigned long long)(ud.dma_pa + UD_EVT));
 +
-+	if (ud_epcmd(EP0_OUT, DEPCMD_DEPSTARTCFG, 0, 0, 0) ||
-+	    ud_epcmd(EP0_OUT, DEPCMD_SETEPCONFIG, (0u << 1) | (512u << 3),
-+	    (1u << 8) | (1u << 10) | (0u << 25), 0) ||
++	if (ud_epcmd(EP0_OUT, DEPCMD_SETEPCONFIG, DEPCFG_PARAM0(EP_TYPE_CONTROL, 512, 0),
++	    DEPCFG_PARAM1(EP0_OUT), 0) ||
 +	    ud_epcmd(EP0_OUT, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0) ||
-+	    ud_epcmd(EP0_IN, DEPCMD_SETEPCONFIG, (1u << 1) | (512u << 3),
-+	    (1u << 8) | (1u << 10) | (1u << 25), 0) ||
++	    ud_epcmd(EP0_IN, DEPCMD_SETEPCONFIG, DEPCFG_PARAM0(EP_TYPE_CONTROL, 512, 0),
++	    DEPCFG_PARAM1(EP0_IN), 0) ||
 +	    ud_epcmd(EP0_IN, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
 +		printf("KEBAB USB: endpoint 0 setup failed\n");
 +		return;
 +	}
 +	dwc_wr(DALEPENA, (1u << EP0_OUT) | (1u << EP0_IN));
++	ud_start_setup();
 +
 +	/* tell the controller VBUS is present; the board does not wire OTG here */
-+	vm_offset_t qs = ml_io_map(DWC3_PA + QSCRATCH_OFF, 0x100);
-+	if (qs != 0) {
-+		uint32_t hs = *(volatile uint32_t *)(qs + QSCRATCH_HS_PHY_CTRL);
-+		uint32_t ss = *(volatile uint32_t *)(qs + QSCRATCH_SS_PHY_CTRL);
-+		*(volatile uint32_t *)(qs + QSCRATCH_HS_PHY_CTRL) =
++	if (ud.qs != 0) {
++		uint32_t hs = *(volatile uint32_t *)(ud.qs + QSCRATCH_HS);
++		uint32_t ss = *(volatile uint32_t *)(ud.qs + QSCRATCH_SS);
++		*(volatile uint32_t *)(ud.qs + QSCRATCH_HS) =
 +		    hs | UTMI_OTG_VBUS_VALID | SW_SESSVLD_SEL;
-+		*(volatile uint32_t *)(qs + QSCRATCH_SS_PHY_CTRL) = ss | LANE0_PWR_PRESENT;
++		*(volatile uint32_t *)(ud.qs + QSCRATCH_SS) = ss | LANE0_PWR_PRESENT;
 +		__asm__ volatile ("dsb sy" ::: "memory");
-+		printf("KEBAB USB: VBUS override, HS_PHY_CTRL 0x%08x\n",
-+		    *(volatile uint32_t *)(qs + QSCRATCH_HS_PHY_CTRL));
++		printf("KEBAB USB: VBUS override, HS 0x%08x -> 0x%08x, SS 0x%08x -> 0x%08x\n",
++		    hs, *(volatile uint32_t *)(ud.qs + QSCRATCH_HS),
++		    ss, *(volatile uint32_t *)(ud.qs + QSCRATCH_SS));
++	} else {
++		printf("KEBAB USB: QSCRATCH not mapped, no VBUS override\n");
 +	}
 +
 +	dwc_wr(DCTL, dwc_rd(DCTL) | DCTL_RUN_STOP);
 +	for (i = 0; i < 500 && (dwc_rd(DSTS) & DSTS_DEVCTRLHLT); i++) {
 +		delay(1000);
 +	}
++	if (dwc_rd(DSTS) & DSTS_DEVCTRLHLT) {
++		printf("KEBAB USB: controller did not start (DSTS 0x%08x)\n", dwc_rd(DSTS));
++		return;
++	}
 +	printf("KEBAB USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n",
 +	    dwc_rd(DSTS), i, (unsigned long long)ud.dma_pa);
 +
-+	ud.running = true;
-+	ud_start_setup();
-+
-+	thread_t thread;
-+	if (kernel_thread_start((thread_continue_t)ud_thread, NULL, &thread) == KERN_SUCCESS) {
-+		thread_deallocate(thread);
-+		printf("KEBAB USB: event thread started, waiting for the host\n");
-+	} else {
-+		printf("KEBAB USB: no thread\n");
++	if (kernel_thread_start((thread_continue_t)ud_thread, NULL, &thread) != KERN_SUCCESS) {
++		printf("KEBAB USB: no event thread, halting\n");
++		dwc_wr(DCTL, dwc_rd(DCTL) & ~DCTL_RUN_STOP);
++		return;
 +	}
++	thread_deallocate(thread);
++	ud.running = true;
++	printf("KEBAB USB: event thread started, waiting for the host\n");
 +}
 +
 +#endif /* KEBAB */
