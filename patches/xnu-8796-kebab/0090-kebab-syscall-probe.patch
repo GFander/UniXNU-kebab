@@ -67,7 +67,56 @@
  	if (lret != LOAD_SUCCESS) {
  		error = load_return_to_errno(lret);
  
-@@ -6879,10 +6892,20 @@
+@@ -1364,6 +1377,9 @@
+ 
+ 	proc_lock(p);
+ 	p->p_cputype = imgp->ip_origcputype;
++#if defined(KEBAB)
++	printf("KEBAB: exec P1 post-load\n");
++#endif
+ 	p->p_cpusubtype = imgp->ip_origcpusubtype;
+ 	proc_setplatformdata(p, load_result.ip_platform, load_result.lr_min_sdk, load_result.lr_sdk);
+ 	exec_setup_tpro(imgp, &load_result);
+@@ -1378,6 +1394,9 @@
+ 		assert(!vm_map_is_alien(map));
+ 	}
+ #endif /* XNU_TARGET_OS_OSX */
++#if defined(KEBAB)
++	printf("KEBAB: exec P2 proc unlock\n");
++#endif
+ 	proc_unlock(p);
+ 
+ 	/*
+@@ -1607,7 +1626,10 @@
+ 	 * than current task, thus swap_task_map is used instead of
+ 	 * vm_map_switch.
+ 	 */
+-	old_map = swap_task_map(task, thread, map);
++	old_map = swap_task_map(task, thread, map);#if defined(KEBAB)
++	printf("KEBAB: exec P3 swap map\n");
++#endif
++
+ #if MACH_ASSERT
+ 	/*
+ 	 * Reset the pmap's process info to prevent ledger checks
+@@ -1617,9 +1639,15 @@
+ 	vm_map_pmap_set_process(old_map, -1, "<old_map>");
+ #endif /* MACH_ASSERT */
+ 	vm_map_deallocate(old_map);
+-	old_map = NULL;
++	old_map = NULL;#if defined(KEBAB)
++	printf("KEBAB: exec P4 old map freed\n");
++#endif
++
+ 
+ 	lret = activate_exec_state(task, p, thread, &load_result);
++#if defined(KEBAB)
++	printf("KEBAB: exec P5 exec state active\n");
++#endif
+ 	if (lret != KERN_SUCCESS) {
+ 		KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
+ 		    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_ACTV_THREADSTATE, 0, 0);
+@@ -6879,10 +6907,20 @@
  	mach_vm_offset_t scratch_addr = 0;
  	mach_vm_size_t map_page_size = vm_map_page_size(map);
  
