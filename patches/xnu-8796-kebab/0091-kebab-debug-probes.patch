@@ -286,7 +286,38 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  			/*
 --- a/bsd/vfs/vfs_lookup.c
 +++ b/bsd/vfs/vfs_lookup.c
-@@ -1089,6 +1089,7 @@
+@@ -165,6 +165,10 @@
+ int
+ namei(struct nameidata *ndp)
+ {
++#if defined(KEBAB)
++	printf("KEBAB: namei enter\n");
++#endif
++
+ 	struct vnode *dp;       /* the directory we are searching */
+ 	struct vnode *usedvp = ndp->ni_dvp;  /* store pointer to vp in case we must loop due to
+ 	                                      *                                          heavy vnode pressure */
+@@ -267,6 +271,9 @@
+ 		goto error_out;
+ 	}
+ 	assert(bytes_copied <= MAXPATHLEN);
++#if defined(KEBAB)
++	printf("KEBAB: namei copied \"%s\"\n", cnp->cn_pnbuf);
++#endif
+ 	ndp->ni_pathlen = (u_int)bytes_copied;
+ 	bytes_copied = 0;
+ 
+@@ -461,6 +468,9 @@
+ 		ndp->ni_startdir = dp;
+ 		dp = NULLVP;
+ 
++#if defined(KEBAB)
++		printf("KEBAB: namei lookup next\n");
++#endif
+ 		if ((error = lookup(ndp))) {
+ 			goto error_out;
+ 		}
+@@ -1089,6 +1099,7 @@
  int
  lookup(struct nameidata *ndp)
  {
@@ -294,7 +325,7 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  	char    *cp;            /* pointer into pathname argument */
  	vnode_t         tdp;            /* saved dp */
  	vnode_t         dp;             /* the directory we are searching */
-@@ -1119,6 +1120,20 @@
+@@ -1119,6 +1130,20 @@
  	dp = ndp->ni_startdir;
  	ndp->ni_startdir = NULLVP;
  
