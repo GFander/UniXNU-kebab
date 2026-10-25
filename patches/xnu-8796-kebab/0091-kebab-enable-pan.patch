@@ -1,10 +1,11 @@
-Tell the arm64 copy path that this port has PAN, and skip its assertion.
+Declare and use PAN on this port.
 
-PAN resets to 0 and nothing on this port turns it on, while user_access_enable()
-asserts that it is on before clearing it - so the very first user copy died on
-an assertion that encodes an assumption this platform does not meet. Declare the
-capability so the code path is real, and keep the toggle inert for kebab until
-PAN is actually enabled at boot.
+__ARM_PAN_AVAILABLE__ is only defined by Apple's own SoC headers, so
+user_access_enable() compiled to nothing here. With SCTLR_EL1.SPAN=0 the CPU
+sets PAN automatically on every exception entry, so each syscall reached the
+copy routines with PAN already set and every user store faulted. Declare the
+capability, drop the assertion that assumes PAN is already set (it is not, for
+kernel-thread context), and keep the real msr toggles.
 
 --- a/osfmk/arm64/copyio.c
 +++ b/osfmk/arm64/copyio.c
@@ -25,32 +26,22 @@ PAN is actually enabled at boot.
  extern int _bcopyin(const char *src, char *dst, vm_size_t len);
  extern int _bcopyinstr(const char *src, char *dst, vm_size_t max, vm_size_t *actual);
  extern int _bcopyout(const char *src, char *dst, vm_size_t len);
-@@ -85,9 +95,14 @@
- static inline void
+@@ -86,7 +96,14 @@
  user_access_enable(void)
  {
--#if __ARM_PAN_AVAILABLE__
-+#if __ARM_PAN_AVAILABLE__ && !defined(KEBAB)
+ #if __ARM_PAN_AVAILABLE__
++#if !defined(KEBAB)
  	assert(__builtin_arm_rsr("pan") != 0);
- 	__builtin_arm_wsr("pan", 0);
-+#elif defined(KEBAB)
++#endif
 +	/*
-+	 * PAN is 0 on this port: nothing turns it on, so there is nothing to clear
-+	 * and the stock assertion does not hold. Leave it alone.
++	 * PAN must be cleared for real: with SCTLR_EL1.SPAN=0 the hardware sets PAN
++	 * on every exception entry, so a syscall arrives with PAN already set and the
++	 * copy would fault without this.
 +	 */
+ 	__builtin_arm_wsr("pan", 0);
  #endif  /* __ARM_PAN_AVAILABLE__ */
  
- }
-@@ -95,7 +110,7 @@
- static inline void
- user_access_disable(void)
- {
--#if __ARM_PAN_AVAILABLE__
-+#if __ARM_PAN_AVAILABLE__ && !defined(KEBAB)
- 	__builtin_arm_wsr("pan", 1);
- #endif  /* __ARM_PAN_AVAILABLE__ */
- 
-@@ -334,6 +349,7 @@
+@@ -334,6 +351,7 @@
  int
  copyout(const void *kernel_addr, user_addr_t user_addr, vm_size_t nbytes)
  {

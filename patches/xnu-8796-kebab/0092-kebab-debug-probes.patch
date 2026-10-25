@@ -392,7 +392,7 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  	}
 --- a/osfmk/arm64/copyio.c
 +++ b/osfmk/arm64/copyio.c
-@@ -256,6 +256,9 @@
+@@ -258,6 +258,9 @@
  {
  	int result = copy_validate(user_addr, (uintptr_t)kernel_addr, 4,
  	    COPYIO_IN | COPYIO_ATOMIC);
@@ -402,7 +402,7 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  	if (__improbable(result)) {
  		return result;
  	}
-@@ -349,6 +352,10 @@
+@@ -351,6 +354,10 @@
  int
  copyout(const void *kernel_addr, user_addr_t user_addr, vm_size_t nbytes)
  {
@@ -413,7 +413,7 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  
  	int result;
  
-@@ -365,7 +372,21 @@
+@@ -367,7 +374,21 @@
  		return result;
  	}
  	user_access_enable();
