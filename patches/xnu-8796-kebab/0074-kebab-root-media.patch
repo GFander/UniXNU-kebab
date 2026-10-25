@@ -1,0 +1,21 @@
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -5179,7 +5179,18 @@
+ 	bool unhide;
+ 
+ 	ioblockstoragedriverClass = OSMetaClass::getMetaClassWithName(gIOBlockStorageDriverKey);
++#if defined(KEBAB)
++	/*
++	 * IOBlockStorageDriver lives in Apple's IOStorageFamily kext, which this
++	 * port does not have. There is no IOMedia tree to publish either, so the
++	 * only sane answer is to do nothing rather than assert.
++	 */
++	if (ioblockstoragedriverClass == NULL) {
++		return;
++	}
++#else
+ 	assert(ioblockstoragedriverClass);
++#endif
+ 
+ 	while (root) {
+ 		if (root->metaCast(ioblockstoragedriverClass)) {
