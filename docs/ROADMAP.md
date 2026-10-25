@@ -78,7 +78,7 @@ SpringBoard → 桌面），APFS 只用在**主机侧**（`apfs-fuse` 读 IPSW �
 | 0018 | 启动 CPU 驱动 | 🔄 `drivers/KebabCPU` 已有，多核未验证 |
 | 0065/0078 | SMP（PSCI，6→8 核）| ⬜ 当前 `cpus=1` |
 | 0042–0044 | 执行日志 / 崩溃日志 | ⬜ 诊断用 |
-| 0047 | 持久控制台日志环（userdata 末尾 4 MiB）| ⬜ 极高价值，见下 |
+| 0047 | 持久控制台日志环（userdata 末尾 4 MiB）| ⬜ 依赖 UFS 写入（0030），见第五节 |
 | 0048–0054 | /dev/null tee、IOKit trace、sandbox、堆采样 | ⬜ 诊断用 |
 | 0066/0067 | 故障区域信息、控制台静音 | ⬜ |
 | 0069/0070/0071 | UFS 加速、pid hibernate、触摸边缘 | ⬜ |
@@ -123,9 +123,15 @@ D. 稳定性
 ## 五、值得优先偷师的两件事
 
 1. **持久日志环**（他们的 0047）：内核把控制台写进 `userdata` 末尾 4 MiB 的环形
-   缓冲，panic 后进 recovery 用脚本拉出来。**同代硬件验证可行**，能彻底解决
-   "只能拍照、长回溯被截断"的问题。排期在阶段 D，但它对调试效率的收益
-   可能值得提前。
+   缓冲，panic 后进 recovery 用 `dd` 拉出来。**同代硬件验证可行。**
+
+   **前提是 UFS 可写** —— 他是在 `0030-sweet-ufs-writes` 之后才做这一块的。所以
+   顺序固定为：UFS 写入（含缓存一致性、flush、写入边界）→ 日志环。
+
+   曾考虑过更省事的替代方案：XNU 本来就把 panic log 写进 `pram`（我们的 ADT 已配
+   `pram` 节点与 `embedded-panic-log-size`），只需 DarwinBoot 开机时读出来打印。
+   但那条路仍然要靠看屏幕，且断电即失；而当前用**慢动作录像逐帧截取**已经够用，
+   因此不做，等 UFS 可写后直接上日志环。
 2. **根镜像构建链**（`tools/mkiosroot.sh` + `sweet-root-tweaks.py`）：把 IPSW 的
    OS/SystemOS/AppOS 三个 APFS 卷合成一个 case-sensitive journaled HFS+，
    再打上跳过 Setup、种子激活、去 baseband、关 watchdog 等 bring-up 改动。
