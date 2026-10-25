@@ -32,7 +32,6 @@ docs/BRING-UP-STATE.md       详细的移植状态记录
 | --- | --- |
 | 设备包（`kebab.dsc` / `kebab.fdf` / `kebab.dec` / `DeviceBuild.py`）| ✅ |
 | UFS 初始化不再致命，能正常进入 BDS | ✅ |
-| `UsbInitDxe` 在 DXE APRIORI 中提权 | ✅ |
 | 启动诊断（协议探测、USBCFG 候选）| ✅ |
 | 只读 RAM FAT 卷（BlockIo producer）| ✅ |
 | 把预编译的 `UniXNU.efi` / `UniXNUDxe.efi` / `DarwinBoot.efi` 打进 FV | ✅ |
@@ -40,6 +39,21 @@ docs/BRING-UP-STATE.md       详细的移植状态记录
 | 配置卷 `\EFI\UniXNU\unixnu.toml`（菜单、Restart / Power off）| ✅ |
 | `Reboot to bootloader` 菜单项，misc 分区靠解析 GPT 定位 | ✅ |
 | 图形输出（GOP）：`0x9C000000`，1080×2400，行距 4320 字节，32 bpp | ✅ |
+| USB（主机 / 设备 / USB-C）| ⚠️ 仅排入 APRIORI，未打通 |
+
+### ⚠️ USB 尚未适配完成
+
+USB 相关组件只是被**排进了 DXE APRIORI**，真机上还没有打通任何一条路径：
+
+| 组件 | 现状 |
+| --- | --- |
+| `UsbfnDwc3Dxe` / `UsbDeviceDxe` / `UsbConfigDxe`（设备模式）| 仅排入 APRIORI，未验证 |
+| `UsbBusDxe` / `UsbKbDxe` / `UsbMassStorageDxe`（主机模式）| 仅排入 APRIORI，未验证 |
+| `UsbPwrCtrlDxe`、QMP PHY、Type-C 角色切换与充电 | 未适配 |
+
+也就是说：**设备模式（fastboot / CDC-ACM 之类）、主机模式（U 盘、键盘）、
+USB-C 角色切换三条路都还不通**。目前固件与内核的所有输出都依赖屏幕，没有
+任何 USB 侧的输入/输出通道。
 
 ### 已知行为与限制
 
@@ -131,7 +145,13 @@ if (amfi == NULL) panic("amfi interface not available");
 
 ### 固件（Mu-Silicium）
 
-1. 载荷卷**按活动槽位自动探测**（当前写死 `boot_b`）。
+1. **USB 栈适配**（当前最大的固件缺口）：
+   * 设备模式：`UsbfnDwc3Dxe` → `UsbDeviceDxe` → `UsbConfigDxe`，目标是
+     fastboot / CDC-ACM 之类可用的下载与调试通道；
+   * 主机模式：`UsbBusDxe` + `UsbKbDxe` / `UsbMassStorageDxe`，目标是键盘与
+     U 盘枚举；
+   * USB-C：`UsbPwrCtrlDxe`、QMP PHY、角色切换与充电。
+2. 载荷卷**按活动槽位自动探测**（当前写死 `boot_b`）。
 2. 把 panic 日志写入 `pram`，重启后可回读。
 3. 菜单交互（音量键选择）与超时策略。
 
