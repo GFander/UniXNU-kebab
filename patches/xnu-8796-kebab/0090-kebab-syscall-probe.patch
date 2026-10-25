@@ -188,19 +188,41 @@
  #include <sys/user.h>
  #include <sys/errno.h>
  #include <sys/kdebug.h>
-@@ -92,6 +96,12 @@
+@@ -92,6 +96,7 @@
  	thread_t thread_act,
  	struct proc * proc)
  {
-+#if defined(KEBAB)
-+	if (kebab_syscount++ < 24) {
-+		printf("KEBAB: syscall enter\n");
-+	}
-+#endif
 +
  	const struct sysent  *callp;
  	int             error;
  	unsigned short  code, syscode;
+@@ -102,6 +107,13 @@
+ 
+ 	code = arm_get_syscall_number(state);
+ 
++#if defined(KEBAB)
++	if (kebab_syscount++ < 12) {
++		printf("KEBAB: syscall %d arg0 0x%llx\n", (int)code,
++		    (unsigned long long)arm_get_saved_state_x0(state));
++	}
++#endif
++
+ #define unix_syscall_kprintf(x...)      /* kprintf("unix_syscall: " x) */
+ 
+ 	if (kdebug_enable && !code_is_kdebug_trace(code)) {
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -4526,6 +4526,10 @@
+ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
+     struct vnode_attr *vap, fp_initfn_t fp_init, void *initarg, int32_t *retval, int authfd)
+ {
++#if defined(KEBAB)
++	printf("KEBAB: open1 enter\n");
++#endif
++
+ 	proc_t p = vfs_context_proc(ctx);
+ 	uthread_t uu = get_bsdthread_info(vfs_context_thread(ctx));
+ 	struct fileproc *fp;
 --- a/osfmk/console/serial_console.c
 +++ b/osfmk/console/serial_console.c
 @@ -289,9 +289,15 @@
