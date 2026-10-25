@@ -190,7 +190,18 @@ TEMPORARY bring-up probes. Drop this patch once the port boots: it only prints.
  	int error = 0;
  	struct timezone ltz; /* local copy */
  	clock_sec_t secs;
-@@ -136,6 +140,9 @@
+@@ -128,6 +132,10 @@
+ 	if (uap->tp || uap->mach_absolute_time) {
+ 		clock_gettimeofday_and_absolute_time(&secs, &usecs, &mach_time);
+ 	}
++#if defined(KEBAB)
++		printf("KEBAB: gto clock done\n");
++#endif
++
+ 
+ 	if (uap->tp) {
+ 		/* Casting secs through a uint32_t to match arm64 commpage */
+@@ -136,6 +144,9 @@
  			user_atv.tv_sec = (uint32_t)secs;
  			user_atv.tv_usec = usecs;
  			error = copyout(&user_atv, uap->tp, sizeof(user_atv));
