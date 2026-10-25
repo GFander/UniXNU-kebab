@@ -14,3 +14,17 @@
  
  #if DEBUG_BSDINIT
  #define bsd_init_kprintf(x, ...) kprintf("bsd_init: " x, ## __VA_ARGS__)
+@@ -728,6 +734,13 @@
+ 	bsd_init_kprintf("calling aio_init\n");
+ 	aio_init();
+ 
++#if defined(KEBAB)
++	/* Register the built-in libpthread provider before the shims are used. */
++	{
++		extern void kebab_pthread_bringup(void);
++		kebab_pthread_bringup();
++	}
++#endif
+ 	pthread_init();
+ 	/* POSIX Shm and Sem */
+ 	bsd_init_kprintf("calling pshm_cache_init\n");

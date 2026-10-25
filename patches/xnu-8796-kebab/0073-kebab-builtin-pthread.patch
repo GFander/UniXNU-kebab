@@ -51,7 +51,7 @@ diff --git a/bsd/pthread/kebab_pthread_compat.h b/bsd/pthread/kebab_pthread_comp
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_pthread_compat.h
-+@@ -0,0 +1,51 @@
+@@ -0,0 +1,51 @@
 +/*
 + * Compile the matching libpthread provider with its kext view of BSD headers.
 + * It owns its full ksyn_waitq_element layout; the kernel's opaque counterpart
@@ -107,7 +107,7 @@ diff --git a/bsd/pthread/kebab_pthread_init.c b/bsd/pthread/kebab_pthread_init.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_pthread_init.c
-+@@ -0,0 +1,26 @@
+@@ -0,0 +1,44 @@
 +/* Built-in provider: Apple libpthread-514.100.2, paired with xnu-8796.141.3. */
 +#if defined(KEBAB)
 +#include "kebab_pthread_compat.h"
@@ -122,15 +122,33 @@ new file mode 100644
 +#include <kern/startup.h>
 +#include <pexpert/pexpert.h>
 +
-+__startup_func
-+static void
-+kebab_pthread_register(void)
++/*
++ * Reachable from bsd_init() as well as from the startup table, so the linker
++ * cannot drop this translation unit: a provider nothing references is dead
++ * weight, and the first cut of this file ended up absent from the image.
++ */
++void
++kebab_pthread_bringup(void)
 +{
++    static boolean_t done = FALSE;
++
++    if (done) {
++        return;
++    }
++    done = TRUE;
++
 +    kern_return_t kr = kebab_pthread_start(NULL, NULL);
 +    if (kr != KERN_SUCCESS || kebab_pthread_kern == NULL) {
 +        panic("KEBAB: pthread provider registration failed: %d", kr);
 +    }
 +    kprintf("KEBAB pthread: libpthread-514.100.2 registered\n");
++}
++
++__startup_func
++static void
++kebab_pthread_register(void)
++{
++    kebab_pthread_bringup();
 +}
 +STARTUP(EARLY_BOOT, STARTUP_RANK_SECOND, kebab_pthread_register);
 +#endif /* KEBAB */
@@ -138,7 +156,7 @@ diff --git a/bsd/pthread/kebab_pthread_support.c b/bsd/pthread/kebab_pthread_sup
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_pthread_support.c
-+@@ -0,0 +1,7 @@
+@@ -0,0 +1,7 @@
 +/* Built-in provider: Apple libpthread-514.100.2, paired with xnu-8796.141.3. */
 +#if defined(KEBAB)
 +#include "kebab_pthread_compat.h"
@@ -150,7 +168,7 @@ diff --git a/bsd/pthread/kebab_pthread_synch.c b/bsd/pthread/kebab_pthread_synch
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_pthread_synch.c
-+@@ -0,0 +1,5 @@
+@@ -0,0 +1,5 @@
 +/* Built-in provider: Apple libpthread-514.100.2, paired with xnu-8796.141.3. */
 +#if defined(KEBAB)
 +#include "kebab_pthread_compat.h"
@@ -160,7 +178,7 @@ diff --git a/bsd/pthread/kebab_libpthread/include/pthread/qos.h b/bsd/pthread/ke
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_libpthread/include/pthread/qos.h
-+@@ -0,0 +1,304 @@
+@@ -0,0 +1,304 @@
 +/*
 + * Copyright (c) 2013-2014 Apple Inc. All rights reserved.
 + *
@@ -469,7 +487,7 @@ diff --git a/bsd/pthread/kebab_libpthread/include/sys/_pthread/_pthread_attr_t.h
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_libpthread/include/sys/_pthread/_pthread_attr_t.h
-+@@ -0,0 +1,32 @@
+@@ -0,0 +1,32 @@
 +/*
 + * Copyright (c) 2003-2012 Apple Inc. All rights reserved.
 + *
@@ -506,7 +524,7 @@ diff --git a/bsd/pthread/kebab_libpthread/include/sys/_pthread/_pthread_t.h b/bs
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_libpthread/include/sys/_pthread/_pthread_t.h
-+@@ -0,0 +1,32 @@
+@@ -0,0 +1,32 @@
 +/*
 + * Copyright (c) 2003-2012 Apple Inc. All rights reserved.
 + *
@@ -543,7 +561,7 @@ diff --git a/bsd/pthread/kebab_libpthread/include/sys/_pthread/_pthread_types.h 
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_libpthread/include/sys/_pthread/_pthread_types.h
-+@@ -0,0 +1,120 @@
+@@ -0,0 +1,120 @@
 +/*
 + * Copyright (c) 2003-2013 Apple Inc. All rights reserved.
 + *
@@ -668,7 +686,7 @@ diff --git a/bsd/pthread/kebab_libpthread/include/sys/qos.h b/bsd/pthread/kebab_
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_libpthread/include/sys/qos.h
-+@@ -0,0 +1,200 @@
+@@ -0,0 +1,200 @@
 +/*
 + * Copyright (c) 2013-2014 Apple Inc. All rights reserved.
 + *
@@ -873,7 +891,7 @@ diff --git a/bsd/pthread/kebab_libpthread/kern/kern_init.c b/bsd/pthread/kebab_l
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_libpthread/kern/kern_init.c
-+@@ -0,0 +1,65 @@
+@@ -0,0 +1,65 @@
 +//
 +//  pthread.c
 +//  pthread
@@ -943,7 +961,7 @@ diff --git a/bsd/pthread/kebab_libpthread/kern/kern_internal.h b/bsd/pthread/keb
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_libpthread/kern/kern_internal.h
-+@@ -0,0 +1,234 @@
+@@ -0,0 +1,234 @@
 +/*
 + * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
 + *
@@ -1182,7 +1200,7 @@ diff --git a/bsd/pthread/kebab_libpthread/kern/kern_support.c b/bsd/pthread/keba
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_libpthread/kern/kern_support.c
-+@@ -0,0 +1,1050 @@
+@@ -0,0 +1,1050 @@
 +/*
 + * Copyright (c) 2000-2017 Apple Inc. All rights reserved.
 + *
@@ -2237,7 +2255,7 @@ diff --git a/bsd/pthread/kebab_libpthread/kern/kern_synch.c b/bsd/pthread/kebab_
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_libpthread/kern/kern_synch.c
-+@@ -0,0 +1,2852 @@
+@@ -0,0 +1,2852 @@
 +/*
 + * Copyright (c) 2000-2012 Apple Inc. All rights reserved.
 + *
@@ -5094,7 +5112,7 @@ diff --git a/bsd/pthread/kebab_libpthread/kern/kern_trace.h b/bsd/pthread/kebab_
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_libpthread/kern/kern_trace.h
-+@@ -0,0 +1,144 @@
+@@ -0,0 +1,144 @@
 +/*
 + * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
 + *
@@ -5243,7 +5261,7 @@ diff --git a/bsd/pthread/kebab_libpthread/kern/synch_internal.h b/bsd/pthread/ke
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_libpthread/kern/synch_internal.h
-+@@ -0,0 +1,173 @@
+@@ -0,0 +1,173 @@
 +/*
 + * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
 + *
@@ -5421,7 +5439,7 @@ diff --git a/bsd/pthread/kebab_libpthread/private/pthread/qos.h b/bsd/pthread/ke
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_libpthread/private/pthread/qos.h
-+@@ -0,0 +1,39 @@
+@@ -0,0 +1,39 @@
 +/*
 + * Copyright (c) 2014 Apple Inc. All rights reserved.
 + *
@@ -5465,7 +5483,7 @@ diff --git a/bsd/pthread/kebab_libpthread/private/pthread/qos_private.h b/bsd/pt
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_libpthread/private/pthread/qos_private.h
-+@@ -0,0 +1,256 @@
+@@ -0,0 +1,256 @@
 +/*
 + * Copyright (c) 2013-2014 Apple Inc. All rights reserved.
 + *
@@ -5726,7 +5744,7 @@ diff --git a/bsd/pthread/kebab_libpthread/private/sys/qos_private.h b/bsd/pthrea
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_libpthread/private/sys/qos_private.h
-+@@ -0,0 +1,40 @@
+@@ -0,0 +1,40 @@
 +/*
 + * Copyright (c) 2014 Apple Inc. All rights reserved.
 + *
@@ -5771,7 +5789,7 @@ diff --git a/bsd/pthread/kebab_libpthread/UPSTREAM.sha256 b/bsd/pthread/kebab_li
 new file mode 100644
 --- /dev/null
 +++ b/bsd/pthread/kebab_libpthread/UPSTREAM.sha256
-+@@ -0,0 +1,14 @@
+@@ -0,0 +1,14 @@
 +bfcfcf23501c328f5aa7f3bb39c0c8167730ab111393063c5b5fb4bd72d074f2  include/pthread/qos.h
 +987973d4e4f0c84a929fb1288755637453d88bf1410b778f81b2550ea4ad211c  include/sys/_pthread/_pthread_attr_t.h
 +7bcef3e2436e7a96bf0201e99bad5a11e6d495dbac85b10207441c05d7fb461e  include/sys/_pthread/_pthread_t.h
