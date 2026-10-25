@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,665 @@
+@@ -0,0 +1,664 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -32,7 +32,7 @@ new file mode 100644
 +#include <vm/vm_kern.h>
 +
 +#include <arm/machine_routines.h>   /* ml_io_map */
-+#include <arm/pmap/pmap.h>          /* pmap_find_phys */
++#include <arm/pmap.h>                 /* kvtophys */
 +
 +/* ---------------------------------------------------------------- registers */
 +
@@ -590,12 +590,11 @@ new file mode 100644
 +		printf("KEBAB USB: no DMA memory\n");
 +		return;
 +	}
-+	unsigned int pn = pmap_find_phys(kernel_pmap, ud.dma);
-+	if (pn == 0) {
++	ud.dma_pa = (uint64_t)kvtophys(ud.dma);
++	if (ud.dma_pa == 0) {
 +		printf("KEBAB USB: DMA page has no physical backing\n");
 +		return;
 +	}
-+	ud.dma_pa = ptoa_64(pn);
 +	bzero((void *)ud.dma, UD_SIZE);
 +	ud.lock = lck_mtx_alloc_init(0, 0);
 +	if (ud.lock == NULL) {
