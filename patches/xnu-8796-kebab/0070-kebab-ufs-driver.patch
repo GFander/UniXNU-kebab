@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_ufs.c b/bsd/dev/kebab_ufs.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_ufs.c
-@@ -0,0 +1,789 @@
+@@ -0,0 +1,848 @@
 +/*
 + * KEBAB internal UFS root device (read-only).
 + *
@@ -15,6 +15,9 @@ new file mode 100644
 + * ufsroot=, default "userdata") and exposes it as the BSD disk ufsroot0
 + * (rufsroot0), with 512-byte logical sectors over the device's 4 KiB blocks.
 + * Root on it with rd=ufsroot0.
++ *
++ * Read-only unless boot-arg ufsrw=1: every write is bounds-checked against
++ * the partition immediately before it is issued.
 + *
 + * All DMA goes through one physically contiguous allocation (descriptors and
 + * a 1 MiB bounce buffer); the host is not cache coherent, so caches are
@@ -113,20 +116,11 @@ new file mode 100644
 +	int bmajor, cmajor;
 +	dev_t bdev;
 +	bool ready;
++	bool writable;                         /* boot-arg ufsrw=1 */
 +	bool failed;                           /* DMA storage is never reused after transport failure */
 +	bool init_attempted;
 +	int init_error;
 +} su;
-+
-+/* Human-readable outcome, so a later panic can report it after the console
-+ * has been cleared. */
-+static char kebab_ufs_status[160] = "not probed";
-+
-+const char *
-+kebab_ufs_status_string(void)
-+{
-+	return kebab_ufs_status;
-+}
 +
 +static LCK_GRP_DECLARE(kebab_ufs_grp, "kebab_ufs");
 +static LCK_MTX_DECLARE(kebab_ufs_lock, &kebab_ufs_grp);
@@ -201,12 +195,45 @@ new file mode 100644
 +	ufs_wr(REG_UTRLRSR, 0);
 +}
 +
++/* Defined below; the write path needs it before its definition. */
++static int ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write);
++
++/*
++ * WRITE(10) of count device blocks from the bounce buffer to lba. The range is
++ * checked against the partition again here: this is the only path that puts
++ * data on the device.
++ */
++static int
++ufs_write_blocks(uint64_t lba, uint32_t count)
++{
++	if (!su.writable || !su.nblocks || count == 0 ||
++	    count > BOUNCE_SIZE / UFS_BLOCK ||
++	    lba < su.first_block || lba - su.first_block >= su.nblocks ||
++	    count > su.nblocks - (lba - su.first_block) || lba + count - 1 > UINT32_MAX) {
++		printf("KEBAB UFS: refusing write of %u blocks at 0x%llx\n", count, lba);
++		return EPERM;
++	}
++	uint8_t cdb[10] = {
++		0x2a, 0,
++		(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
++		0, (uint8_t)(count >> 8), (uint8_t)count, 0
++	};
++	return ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, true);
++}
++
++static int
++ufs_sync_cache(void)
++{
++	static const uint8_t cdb[10] = { 0x35 };        /* SYNCHRONIZE CACHE(10), whole LUN */
++	return ufs_scsi(cdb, sizeof(cdb), 0, false);
++}
++
 +/*
 + * One SCSI command in slot 0, data (if any) to/from the bounce buffer.
 + * Read direction only. Returns 0 or an errno.
 + */
 +static int
-+ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len)
++ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
 +{
 +	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL);
 +	struct ucd *ucd = (struct ucd *)(su.dma + DMA_UCD);
@@ -227,7 +254,7 @@ new file mode 100644
 +	bzero(ucd, sizeof(*ucd));
 +
 +	ucd->cmd[0] = 0x01;                     /* COMMAND UPIU */
-+	ucd->cmd[1] = len ? 0x40 : 0x00;        /* R: data in */
++	ucd->cmd[1] = len ? (write ? 0x20 : 0x40) : 0x00;   /* W: out, R: in */
 +	ucd->cmd[2] = su.lun;
 +	ucd->cmd[3] = 0;                        /* task tag == transfer slot */
 +	ucd->cmd[12] = (uint8_t)(len >> 24);
@@ -236,7 +263,8 @@ new file mode 100644
 +	ucd->cmd[15] = (uint8_t)len;
 +	memcpy(&ucd->cmd[16], cdb, cdb_len);
 +
-+	utrd->dw0 = (1u << 28) | ((len ? 2u : 0u) << 25) | (1u << 24);
++	/* DD: 1 = memory to device, 2 = device to memory. */
++	utrd->dw0 = (1u << 28) | ((len ? (write ? 1u : 2u) : 0u) << 25) | (1u << 24);
 +	utrd->dw2 = 0x0f;                       /* OCS invalid until updated */
 +	utrd->ucdba = (uint32_t)ucd_pa;
 +	utrd->ucdbau = (uint32_t)(ucd_pa >> 32);
@@ -323,7 +351,7 @@ new file mode 100644
 +ufs_read_capacity(void)
 +{
 +	static const uint8_t cdb[10] = { 0x25 }; /* READ CAPACITY(10) */
-+	int error = ufs_scsi(cdb, sizeof(cdb), 8);
++	int error = ufs_scsi(cdb, sizeof(cdb), 8, false);
 +	if (error) {
 +		return error;
 +	}
@@ -350,7 +378,7 @@ new file mode 100644
 +		(uint8_t)(lba >> 24), (uint8_t)(lba >> 16), (uint8_t)(lba >> 8), (uint8_t)lba,
 +		0, (uint8_t)(count >> 8), (uint8_t)count, 0
 +	};
-+	return ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK);
++	return ufs_scsi(cdb, sizeof(cdb), count * UFS_BLOCK, false);
 +}
 +
 +static int
@@ -469,7 +497,7 @@ new file mode 100644
 +	if (minor(dev) != 0 || !su.ready) {
 +		return ENXIO;
 +	}
-+	return (flags & FWRITE) ? EROFS : 0;
++	return ((flags & FWRITE) && !su.writable) ? EROFS : 0;
 +}
 +
 +static int
@@ -493,7 +521,8 @@ new file mode 100644
 +		error = ENXIO;
 +		goto done;
 +	}
-+	if (!(buf_flags(bp) & B_READ)) {
++	bool rd = (buf_flags(bp) & B_READ) != 0;
++	if (!rd && !su.writable) {
 +		error = EROFS;
 +		goto done;
 +	}
@@ -520,11 +549,22 @@ new file mode 100644
 +		uint32_t skip = (uint32_t)(pos % UFS_BLOCK);
 +		uint32_t want = MIN(count - done, BOUNCE_SIZE - skip);
 +		uint32_t blocks = (skip + want + UFS_BLOCK - 1) / UFS_BLOCK;
-+		error = ufs_read_blocks(su.first_block + lba, blocks);
-+		if (error) {
-+			break;
++		void *bounce = (void *)(su.dma + DMA_BOUNCE);
++		if (rd) {
++			error = ufs_read_blocks(su.first_block + lba, blocks);
++			if (!error) {
++				memcpy(vaddr + done, (const char *)bounce + skip, want);
++			}
++		} else {
++			/* Partial device blocks at either end: read, merge, write back. */
++			if (skip || (want % UFS_BLOCK)) {
++				error = ufs_read_blocks(su.first_block + lba, blocks);
++			}
++			if (!error) {
++				memcpy((char *)bounce + skip, vaddr + done, want);
++				error = ufs_write_blocks(su.first_block + lba, blocks);
++			}
 +		}
-+		memcpy(vaddr + done, (const void *)(su.dma + DMA_BOUNCE + skip), want);
 +		done += want;
 +		buf_setresid(bp, count - done);
 +	}
@@ -568,13 +608,23 @@ new file mode 100644
 +		o = su.nblocks * UFS_BLOCK / su.secsize;
 +		goto out64;
 +	case DKIOCISWRITABLE:
-+		f = 0;
++		f = su.writable;
 +		goto out32;
++	case DKIOCSYNCHRONIZE:
++	case DKIOCSYNCHRONIZECACHE: {
++		if (!su.writable) {
++			return 0;
++		}
++		lck_mtx_lock(&kebab_ufs_lock);
++		int error = ufs_sync_cache();
++		lck_mtx_unlock(&kebab_ufs_lock);
++		return error;
++	}
 +	case DKIOCGETMAXBLOCKCOUNTREAD:
 +		o = BOUNCE_SIZE / su.secsize;
 +		goto out64;
 +	case DKIOCGETMAXBLOCKCOUNTWRITE:
-+		o = 0;
++		o = su.writable ? BOUNCE_SIZE / su.secsize : 0;
 +		goto out64;
 +	case DKIOCGETMAXSEGMENTCOUNTREAD:
 +	case DKIOCGETMAXSEGMENTCOUNTWRITE:
@@ -616,9 +666,12 @@ new file mode 100644
 +}
 +
 +static int
-+kebab_ufs_write(__unused dev_t dev, __unused struct uio *uio, __unused int ioflag)
++kebab_ufs_write(dev_t dev, struct uio *uio, __unused int ioflag)
 +{
-+	return EROFS;
++	if (!su.writable) {
++		return EROFS;
++	}
++	return physio(kebab_ufs_strategy, NULL, dev, B_WRITE, minphys, uio, (int)su.secsize);
 +}
 +
 +static const struct bdevsw kebab_ufs_bdevsw = {
@@ -720,12 +773,21 @@ new file mode 100644
 +	su.lun = 0;
 +	su.secsize = DEV_BSIZE;
 +
++	/*
++	 * Writes stay off unless asked for: the bring-up path only reads, and a
++	 * stray write would destroy the volume this kernel is running from.
++	 */
++	uint32_t ufsrw = 0;
++	if (PE_parse_boot_argn("ufsrw", &ufsrw, sizeof(ufsrw)) && ufsrw) {
++		su.writable = true;
++	}
++
 +	error = ufs_take_over_host();
 +	if (!error) {
 +		static const uint8_t tur[6] = { 0x00 };
 +		/* The first command after the bootloader may report a unit attention. */
 +		for (int i = 0; i < 3; i++) {
-+			error = ufs_scsi(tur, sizeof(tur), 0);
++			error = ufs_scsi(tur, sizeof(tur), 0, false);
 +			if (error != EAGAIN) {
 +				break;
 +			}
@@ -766,9 +828,6 @@ new file mode 100644
 +	}
 +	su.ready = true;
 +	printf("KEBAB UFS: \"%s\" on LUN %u: first block 0x%llx, %llu MiB, read-only\n",
-+	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20);
-+	snprintf(kebab_ufs_status, sizeof(kebab_ufs_status),
-+	    "\"%s\" on LUN %u, first block 0x%llx, %llu MiB, read-only",
 +	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20);
 +	return 0;
 +}

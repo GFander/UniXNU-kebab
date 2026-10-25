@@ -1,0 +1,69 @@
+--- a/bsd/kebab_hfs/kebab_hfs_iokit.c
++++ b/bsd/kebab_hfs/kebab_hfs_iokit.c
+@@ -41,6 +41,9 @@
+ void kebab_hfs_register(void);
+ 
+ static vfstable_t kebab_hfs_vfs_handle;
++
++/* Diagnostic surface: what the registration actually did. */
++int kebab_hfs_fsadd_result = -1;
+ static struct vfsops kebab_hfs_vfsops;
+ 
+ void
+@@ -82,6 +85,7 @@
+ 	};
+ 
+ 	int ret = vfs_fsadd(&vfe, &kebab_hfs_vfs_handle);
++	kebab_hfs_fsadd_result = ret;
+ 	if (ret) {
+ 		panic("KEBAB HFS: vfs_fsadd failed: %d", ret);
+ 	}
+--- a/bsd/vfs/vfs_subr.c
++++ b/bsd/vfs/vfs_subr.c
+@@ -1204,6 +1204,15 @@
+  * trying those that have mountroot routines, and try them until one
+  * works or we have tried them all.
+  */
++#if defined(KEBAB)
++/*
++ * Which filesystems vfs_mountroot() actually tried, and what each returned.
++ * The panic that follows clears the console, so this string is the only
++ * surviving record.
++ */
++char kebab_mountroot_trace[192];
++#endif
++
+ extern int (*mountroot)(void);
+ 
+ int
+@@ -1264,6 +1273,14 @@
+ 			error = VFS_MOUNT(mp, rootvp, 0, ctx);
+ 		}
+ 
++#if defined(KEBAB)
++		{
++			size_t used = strlen(kebab_mountroot_trace);
++			snprintf(kebab_mountroot_trace + used,
++			    sizeof(kebab_mountroot_trace) - used, "%s=%d ",
++			    vfsp->vfc_name, error);
++		}
++#endif
+ 		if (!error) {
+ 			if (bdevvp_rootvp != rootvp) {
+ 				/*
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -898,7 +898,12 @@
+ 		/*
+ 		 * Retrying in a tight loop only buries the first attempt, so stop.
+ 		 */
+-		panic("KEBAB: cannot mount root, errno = %d", err);
++		{
++			extern int kebab_hfs_fsadd_result;
++			extern char kebab_mountroot_trace[192];
++			panic("KEBAB: cannot mount root, errno = %d, hfs_reg=%d, tried[%s]",
++			    err, kebab_hfs_fsadd_result, kebab_mountroot_trace);
++		}
+ #endif
+ 		rootdevice[0] = '\0';
+ #if CONFIG_NETBOOT

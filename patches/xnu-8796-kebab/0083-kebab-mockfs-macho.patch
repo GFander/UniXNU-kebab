@@ -1,0 +1,75 @@
+diff --git a/bsd/miscfs/mockfs/mockfs_vfsops.c b/bsd/miscfs/mockfs/mockfs_vfsops.c
+--- a/bsd/miscfs/mockfs/mockfs_vfsops.c
++++ b/bsd/miscfs/mockfs/mockfs_vfsops.c
+@@ -38,6 +38,11 @@
+ #include <sys/malloc.h>
+ #include <sys/mount_internal.h>
+ #include <sys/vnode_internal.h>
++#if defined(KEBAB)
++#include <sys/buf.h>
++#include <mach-o/loader.h>
++#include <mach-o/fat.h>
++#endif
+ 
+ static LCK_GRP_DECLARE(mockfs_mtx_grp, "mockfs-mutex");
+ 
+@@ -61,6 +66,40 @@
+  *
+  * Returns 0 on success, or an error.
+  */
++#if defined(KEBAB)
++/* Leave filesystem volumes to the next mountroot candidate. */
++static int
++mockfs_check_macho(vnode_t rvp)
++{
++	buf_t bp = NULL;
++	uint32_t magic = 0;
++	int error;
++
++	error = (int)buf_meta_bread(rvp, 0, DEV_BSIZE, NOCRED, &bp);
++	if (!error) {
++		memcpy(&magic, (const void *)buf_dataptr(bp), sizeof(magic));
++		switch (magic) {
++		case MH_MAGIC:
++		case MH_CIGAM:
++		case MH_MAGIC_64:
++		case MH_CIGAM_64:
++		case FAT_MAGIC:
++		case FAT_CIGAM:
++			break;
++		default:
++			error = EINVAL;
++			break;
++		}
++	}
++	if (bp) {
++		/* Do not leave a DEV_BSIZE block cached for the next filesystem's reads. */
++		buf_markinvalid(bp);
++		buf_brelse(bp);
++	}
++	return error;
++}
++#endif
++
+ int
+ mockfs_mountroot(mount_t mp, vnode_t rvp, __unused vfs_context_t ctx)
+ {
+@@ -71,10 +110,18 @@
+ 	mockfs_mount_t mockfs_mount_data = NULL;
+ 	dk_memdev_info_t memdev_info;
+ 
++#if defined(KEBAB)
++	if ((rvalue = mockfs_check_macho(rvp)) != 0) {
++		return rvalue;
++	}
++#endif
++
++#if !defined(KEBAB)
+ 	/*
+ 	 * TODO: Validate that the device at least LOOKS like a mach-o (has a sane header); this would prevent us
+ 	 *   from causing EBADMACHO panics further along the boot path.
+ 	 */
++#endif
+ 
+ 	/*
+ 	 * There are no M_MOCKFS* definitions at the moment, just use M_TEMP.

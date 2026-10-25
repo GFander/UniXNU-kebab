@@ -120,5 +120,9 @@ kernel_args = [
   # design.
   "rd=ufsroot0",
   "ufsroot=userdata",
+  # Writes stay off without ufsrw=1; rootrw=1 mounts the root read-write, since
+  # this port has no separate data volume.
+  "ufsrw=1",
+  "rootrw=1",
   "keepsyms=1",
 ]
