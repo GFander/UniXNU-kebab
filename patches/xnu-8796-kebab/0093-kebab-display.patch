@@ -12,7 +12,8 @@ Includes the sibling's later fixes: a repeated lookup of a surface this client
 already owns reports it with -1 instead of counting a second reference, and the
 console is muted with a flag rather than switched, because the console switch
 writes a read-only-late variable on arm64. IOCoreSurfaceRoot gets a personality so
-IOSurface.framework can connect.
+IOSurface.framework can connect, and the canvas dimensions are published on the
+platform expert, which is the parent this framework version reads them from.
 
 --- a/iokit/conf/files.arm64
 +++ b/iokit/conf/files.arm64
@@ -1021,7 +1022,7 @@ diff --git a/iokit/Kernel/arm/KebabFramebuffer.cpp b/iokit/Kernel/arm/KebabFrame
 new file mode 100644
 --- /dev/null
 +++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
-@@ -0,0 +1,488 @@
+@@ -0,0 +1,511 @@
 +/*
 + * Built-in IOMobileFramebuffer for KEBAB: the ABL's continuous-splash
 + * framebuffer (1080x2400 a8r8g8b8 in RAM, the panel scans it out by
@@ -1507,6 +1508,29 @@ new file mode 100644
 +		fb->release();
 +		return -1;
 +	}
-+	IOLog("KEBAB FB: started\n");
++	kebab_publish_canvas(provider, (uint32_t)fb->fWidth, (uint32_t)fb->fHeight);
++	IOLog("KEBAB FB: started %ux%u\n", (uint32_t)fb->fWidth, (uint32_t)fb->fHeight);
 +	return 0;
++}
++
++/*
++ * The framework reads canvas-width/canvas-height from the service's parent in the
++ * IOService plane as four-byte data, so put them on the platform expert.
++ */
++static void
++kebab_publish_canvas(IOService *provider, uint32_t width, uint32_t height)
++{
++	if (provider == NULL) {
++		return;
++	}
++	OSData *w = OSData::withBytes(&width, sizeof(width));
++	OSData *h = OSData::withBytes(&height, sizeof(height));
++	if (w != NULL) {
++		provider->setProperty("canvas-width", w);
++		w->release();
++	}
++	if (h != NULL) {
++		provider->setProperty("canvas-height", h);
++		h->release();
++	}
 +}
