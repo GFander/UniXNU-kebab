@@ -1,0 +1,841 @@
+Add an explicit, KEBAB-only code-signing policy for the iOS 16 bring-up.
+
+The port has no AMFI kext and no TrustCache implementation, so nothing in the
+kernel can tell an Apple platform binary from an arbitrary signed file:
+CS_PLATFORM_BINARY is never set (that bit is AMFI's to set), every entitlement
+query is denied, and the shared-cache SIP check rejects the port's root volume
+because its image does not mark the cache files SF_RESTRICTED.  Each of those
+is either a silent denial or a dead code path today, which makes the bring-up
+hard to reason about.
+
+Instead of sprinkling conditionals, add one policy module whose relaxations are
+named bits of the "kebab_cs" boot argument:
+
+  0x1  accept unsigned Mach-O files (already the config default because this
+       kernel has neither SECURE_KERNEL nor CONFIG_ENFORCE_SIGNED_CODE; the
+       switch pins it explicitly)
+  0x2  classify a signed binary as a platform binary when its cdhash is in
+       Apple's static trust cache, which is read from the IPSW component that
+       BuildManifest calls "StaticTrustCache" (Firmware/<OS dmg>.trustcache,
+       IM4P "trst", trust_cache_module v2, 2760 entries for 20H392)
+  0x4  let the built-in AMFI provider answer entitlement queries with success
+       instead of KERN_DENIED
+  0x8  accept a root-owned dyld shared cache on this process' unsealed root
+       volume without requiring SF_RESTRICTED
+
+"kebab_cs=15" is the development preset.  With no boot argument nothing is
+enabled, and the whole file is compiled only for KEBAB.
+
+Deliberately untouched: structural validation of the signature blob, the code
+directory and page hashes, CS_HARD/CS_KILL, CS_REQUIRE_LV/CS_RUNTIME, W^X and
+the exec permission checks.  xnu never verified the CMS signature itself, so
+that is not lost here; what is given up (trust-cache data on a writable root,
+blanket entitlements) is written down in docs/BRING-UP-STATE.md section 12.
+diff --git a/bsd/conf/files b/bsd/conf/files
+index d091e0f..606937a 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -385,6 +385,7 @@ bsd/kern/kern_credential.c		standard
+ bsd/kern/kern_crossarch.c		standard
+ bsd/kern/kern_cs.c			standard
+ bsd/kern/kebab_amfi.c			standard
++bsd/kern/kebab_codesign.c		standard
+ bsd/kern/kern_csr.c			optional config_csr
+ bsd/kern/kern_debug.c			standard
+ bsd/kern/kern_symfile.c			standard
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index 1fa6726..0a37a3e 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -101,6 +101,10 @@
+ #include <sys/dkstat.h>
+ #include <sys/codesign.h>
+ 
++#if defined(KEBAB)
++#include "kebab_codesign.h"
++#endif /* KEBAB */
++
+ #include <kern/startup.h>
+ #include <kern/thread.h>
+ #include <kern/task.h>
+@@ -1147,6 +1151,17 @@ bsdinit_task(void)
+ 
+ 	bsd_init_kprintf("bsd_do_post - done");
+ 
++#if defined(KEBAB)
++	/*
++	 * On a real device the static trust cache is a boot-chain component
++	 * handed over in the device tree.  This port reads Apple's copy from
++	 * the root volume instead.  No-op unless kebab_cs enables trust-cache
++	 * classification; a missing or malformed file is reported and does
++	 * not stop the boot.
++	 */
++	kebab_cs_trustcache_load();
++#endif /* KEBAB */
++
+ 	load_init_program(p);
+ 	lock_trace = 1;
+ }
+diff --git a/bsd/kern/kebab_amfi.c b/bsd/kern/kebab_amfi.c
+index 87ffb03..110ecc6 100644
+--- a/bsd/kern/kebab_amfi.c
++++ b/bsd/kern/kebab_amfi.c
+@@ -7,10 +7,13 @@
+  *
+  * This provider honestly reports that no entitlements exist: code signature
+  * blobs get no OSEntitlements object (csb_entitlements stays NULL, which the
+- * kernel already handles), every entitlement query fails and every copy
+- * returns nothing. Nothing is granted. Code signature and page hash
+- * validation stay with the kernel. Trust caches remain unavailable (no
+- * Image4), so the TrustCache interface is left at version 0.
++ * kernel already handles) and every copy returns nothing.  Queries are
++ * denied unless the kebab_cs boot argument selects
++ * KEBAB_CS_GRANT_ENTITLEMENTS, in which case they all succeed -- there is
++ * no CoreEntitlements parser here, so the provider cannot tell which
++ * entitlement was asked for.  Code signature and page hash validation
++ * stay with the kernel.  Trust caches remain unavailable (no Image4), so
++ * the TrustCache interface is left at version 0.
+  *
+  * Interfaces no kernel path uses on KEBAB (they serve other Apple kexts)
+  * panic with a clear message instead of being NULL.
+@@ -23,6 +26,8 @@
+ #include <sys/proc.h>
+ #include <sys/systm.h>
+ 
++#include "kebab_codesign.h"
++
+ static void
+ kebab_amfi_entitlements_invalidate(__unused void *os_entitlements)
+ {
+@@ -97,28 +102,48 @@ static kern_return_t
+ kebab_amfi_query_boolean(__unused const void *os_entitlements,
+     __unused const char *entitlement_name)
+ {
+-	return KERN_DENIED;
++	/*
++	 * The port has no CoreEntitlements parser, so it cannot tell which
++	 * entitlement was asked for.  kebab_cs decides between "deny
++	 * everything" (stock) and "grant everything" (development).
++	 */
++	return kebab_cs_grants_entitlements() ? KERN_SUCCESS : KERN_DENIED;
+ }
+ 
+ static kern_return_t
+ kebab_amfi_query_boolean_with_proc(__unused const proc_t proc,
+     __unused const char *entitlement_name)
+ {
+-	return KERN_DENIED;
++	/*
++	 * The port has no CoreEntitlements parser, so it cannot tell which
++	 * entitlement was asked for.  kebab_cs decides between "deny
++	 * everything" (stock) and "grant everything" (development).
++	 */
++	return kebab_cs_grants_entitlements() ? KERN_SUCCESS : KERN_DENIED;
+ }
+ 
+ static kern_return_t
+ kebab_amfi_query_string(__unused const void *os_entitlements,
+     __unused const char *entitlement_name, __unused const char *entitlement_value)
+ {
+-	return KERN_DENIED;
++	/*
++	 * The port has no CoreEntitlements parser, so it cannot tell which
++	 * entitlement was asked for.  kebab_cs decides between "deny
++	 * everything" (stock) and "grant everything" (development).
++	 */
++	return kebab_cs_grants_entitlements() ? KERN_SUCCESS : KERN_DENIED;
+ }
+ 
+ static kern_return_t
+ kebab_amfi_query_string_with_proc(__unused const proc_t proc,
+     __unused const char *entitlement_name, __unused const char *entitlement_value)
+ {
+-	return KERN_DENIED;
++	/*
++	 * The port has no CoreEntitlements parser, so it cannot tell which
++	 * entitlement was asked for.  kebab_cs decides between "deny
++	 * everything" (stock) and "grant everything" (development).
++	 */
++	return kebab_cs_grants_entitlements() ? KERN_SUCCESS : KERN_DENIED;
+ }
+ 
+ static kern_return_t
+diff --git a/bsd/kern/kebab_codesign.c b/bsd/kern/kebab_codesign.c
+new file mode 100644
+index 0000000..4704b52
+--- /dev/null
++++ b/bsd/kern/kebab_codesign.c
+@@ -0,0 +1,524 @@
++/*
++ * KEBAB code-signing / AMFI development policy.
++ *
++ * xnu's code-signing machinery is split in two halves.  The kernel validates
++ * the structure of the signature (cs_validate_csblob) and the hash of every
++ * executable page (cs_validate_page), and it enforces the CS_HARD/CS_KILL/
++ * CS_ENFORCEMENT flags that came out of the CodeDirectory.  Everything that
++ * needs to know *who* signed a binary -- the CMS signature, the entitlements
++ * dictionary, and the trust cache lookup that promotes a cdhash to
++ * "platform binary" -- lives in AppleMobileFileIntegrity, a kext that this
++ * port does not have.  Without AMFI:
++ *
++ *   - every MACF hook returns "allow", so cs_flags come straight from the
++ *     CodeDirectory and nothing ever sets CS_PLATFORM_BINARY;
++ *   - csb_entitlements stays NULL, so IOTaskHasEntitlement() and the
++ *     entitlement-based VFS/IOKit checks all deny;
++ *   - the TrustCache KPI has no implementation at all (patch 0059 leaves
++ *     trust_cache_rt NULL), so query_trust_cache() reports "not found" for
++ *     every cdhash and the shared-cache trust-cache shortcut in vm_unix.c is
++ *     unreachable (it also needs a cs_blob on the cache vnode, which only
++ *     AMFI's mmap hook would attach).
++ *
++ * This file is the port's explicit answer to that.  It is compiled only for
++ * KEBAB and does nothing at all unless "kebab_cs" is passed on the boot
++ * command line.  The intent is that every relaxation is a named bit whose
++ * consequences are written down in docs/BRING-UP-STATE.md section 12, not a
++ * side effect of some other patch.
++ *
++ * What is deliberately *not* relaxed here:
++ *   - structural validation of the signature blob;
++ *   - the code directory / page hashes (a modified Apple binary still gets
++ *     killed by CS_HARD/CS_KILL);
++ *   - CS_REQUIRE_LV/CS_RUNTIME flags, W^X, and the exec permission checks.
++ * There is no CMS verification in xnu to begin with, so none is lost here.
++ */
++
++#include <sys/param.h>
++#include <sys/cdefs.h>
++#include <sys/types.h>
++#include <sys/errno.h>
++#include <sys/proc.h>
++#include <sys/vnode.h>
++#include <sys/vnode_internal.h>
++#include <sys/mount.h>
++#include <sys/ubc.h>
++#include <sys/ubc_internal.h>
++#include <sys/uio.h>
++#include <sys/kauth.h>
++#include <sys/codesign.h>
++#include <sys/systm.h>
++
++#include <mach/boolean.h>
++
++#include <kern/kalloc.h>
++#include <kern/startup.h>
++#include <kern/zalloc.h>
++#include <libkern/libkern.h>
++#include <pexpert/pexpert.h>
++
++#include "kebab_codesign.h"
++
++#if defined(KEBAB)
++
++/* Defined in bsd/kern/kern_cs.c; no public declaration exists. */
++extern int cs_process_enforcement_enable;
++
++int kebab_cs_policy = 0;
++
++/*
++ * Apple's static trust cache, as shipped in the IPSW
++ * (Firmware/<OS dmg>.trustcache, BuildManifest name "StaticTrustCache").
++ *
++ * It is an IM4P payload of type "trst" whose content is a
++ * trust_cache_module{0,1,2}: a 24-byte header (version, uuid, entry count)
++ * followed by fixed-size entries, always sorted by cdhash.  Only the first 20
++ * bytes of each entry (the cdhash itself, truncated to SHA-1 length) are used
++ * here; the hash type and flags are reported but not interpreted.
++ */
++#define KEBAB_TC_HEADER_SIZE    24
++#define KEBAB_TC_CDHASH_SIZE    20
++#define KEBAB_TC_MAX_SIZE       (1024 * 1024)
++#define KEBAB_TC_DEFAULT_PATH   \
++	"/System/Library/Caches/com.apple.kernelcaches/static.trustcache"
++
++/*
++ * UUID of the 20H392 (iPhone10,3 / iPhone10,6, iOS 16.7.16) static trust
++ * cache.  A mismatch is not fatal -- the port may be pointed at another
++ * build's cache -- but it is worth a line in the log.
++ */
++static const uint8_t kebab_tc_expected_uuid[16] = {
++	0x9f, 0x36, 0x8a, 0x73, 0xd9, 0x0b, 0x40, 0xce,
++	0x94, 0x3c, 0x82, 0x7e, 0x13, 0xe7, 0x2e, 0xee,
++};
++
++static uint8_t *kebab_tc_data;
++static uint32_t kebab_tc_entries;
++static uint32_t kebab_tc_entry_size;
++static boolean_t kebab_tc_sorted;
++
++static int kebab_shared_cache_logged;
++static int kebab_platform_logged;
++
++/* Cap the "platform binary" chatter; there can be hundreds of dylibs. */
++#define KEBAB_CS_MAX_CLASSIFY_LOGS 64
++
++static void
++kebab_cdhash_string(const uint8_t *cdhash, char out[2 * KEBAB_TC_CDHASH_SIZE + 1])
++{
++	static const char hex[] = "0123456789abcdef";
++	int i;
++
++	for (i = 0; i < KEBAB_TC_CDHASH_SIZE; i++) {
++		out[i * 2] = hex[cdhash[i] >> 4];
++		out[i * 2 + 1] = hex[cdhash[i] & 0xf];
++	}
++	out[2 * KEBAB_TC_CDHASH_SIZE] = '\0';
++}
++
++#pragma mark - policy
++
++__startup_func
++static void
++kebab_cs_policy_init_startup(void)
++{
++	int policy = 0;
++
++	if (!PE_parse_boot_argn("kebab_cs", &policy, sizeof(policy)) || policy <= 0) {
++		return;
++	}
++
++	kebab_cs_policy = policy;
++
++	if (policy & KEBAB_CS_ALLOW_UNSIGNED) {
++		/*
++		 * The KEBAB kernel is built without SECURE_KERNEL and without
++		 * CONFIG_ENFORCE_SIGNED_CODE, so cs_process_enforcement_enable
++		 * already defaults to 0: unsigned Mach-O files are accepted and
++		 * a failed signature load is not fatal to exec.  Say so out
++		 * loud and pin it, rather than depending on the config file.
++		 */
++		cs_process_enforcement_enable = 0;
++	}
++
++	printf("KEBAB CS: policy 0x%x%s%s%s%s\n", policy,
++	    (policy & KEBAB_CS_ALLOW_UNSIGNED) ? " unsigned" : "",
++	    (policy & KEBAB_CS_TRUSTCACHE_PLATFORM) ? " trustcache-platform" : "",
++	    (policy & KEBAB_CS_GRANT_ENTITLEMENTS) ? " entitlements" : "",
++	    (policy & KEBAB_CS_UNSEALED_SHARED_CACHE) ? " unsealed-shared-cache" : "");
++}
++STARTUP(CODESIGNING, STARTUP_RANK_LAST, kebab_cs_policy_init_startup);
++
++int
++kebab_cs_grants_entitlements(void)
++{
++	return (kebab_cs_policy & KEBAB_CS_GRANT_ENTITLEMENTS) != 0;
++}
++
++#pragma mark - static trust cache
++
++/*
++ * Minimal DER walker: "SEQUENCE { IA5String, IA5String, IA5String,
++ * OCTET STRING }".  Only what an IM4P wrapper needs; no recursion.
++ */
++static int
++kebab_der_length(const uint8_t **pp, const uint8_t *end, size_t *out)
++{
++	const uint8_t *p = *pp;
++	size_t length;
++	unsigned int n;
++
++	if (p >= end) {
++		return EINVAL;
++	}
++	if ((*p & 0x80) == 0) {
++		length = *p++;
++	} else {
++		n = *p++ & 0x7f;
++		if (n == 0 || n > 4 || (size_t)(end - p) < n) {
++			return EINVAL;
++		}
++		length = 0;
++		while (n-- != 0) {
++			length = (length << 8) | *p++;
++		}
++	}
++	*pp = p;
++	*out = length;
++	return 0;
++}
++
++static int
++kebab_der_string(const uint8_t **pp, const uint8_t *end,
++    const uint8_t **str, size_t *len)
++{
++	const uint8_t *p = *pp;
++	size_t length;
++
++	if (p >= end || *p++ != 0x16) {         /* IA5String */
++		return EINVAL;
++	}
++	if (kebab_der_length(&p, end, &length) != 0 || length > (size_t)(end - p)) {
++		return EINVAL;
++	}
++	*str = p;
++	*len = length;
++	*pp = p + length;
++	return 0;
++}
++
++static int
++kebab_tc_unwrap_im4p(const uint8_t **data, size_t *size)
++{
++	const uint8_t *p = *data;
++	const uint8_t *end = p + *size;
++	const uint8_t *str;
++	size_t len, seqlen;
++
++	if (p >= end || *p++ != 0x30) {         /* SEQUENCE */
++		return EINVAL;
++	}
++	if (kebab_der_length(&p, end, &seqlen) != 0 || seqlen > (size_t)(end - p)) {
++		return EINVAL;
++	}
++	end = p + seqlen;
++
++	if (kebab_der_string(&p, end, &str, &len) != 0 || len != 4 ||
++	    memcmp(str, "IM4P", 4) != 0) {
++		return EINVAL;
++	}
++	if (kebab_der_string(&p, end, &str, &len) != 0 || len != 4 ||
++	    memcmp(str, "trst", 4) != 0) {
++		return EINVAL;
++	}
++	/* Payload version string ("1"); content is not interpreted. */
++	if (kebab_der_string(&p, end, &str, &len) != 0 || len == 0) {
++		return EINVAL;
++	}
++	if (p >= end || *p++ != 0x04) {         /* OCTET STRING */
++		return EINVAL;
++	}
++	if (kebab_der_length(&p, end, &len) != 0 || len > (size_t)(end - p)) {
++		return EINVAL;
++	}
++
++	*data = p;
++	*size = len;
++	return 0;
++}
++
++static int
++kebab_tc_parse(const uint8_t *data, size_t size)
++{
++	uint32_t tc_version, entries, entry_size;
++	uint32_t hash_types[5] = { 0, 0, 0, 0, 0 };
++	size_t needed, n;
++	boolean_t sorted = TRUE;
++
++	if (size < KEBAB_TC_HEADER_SIZE) {
++		return EINVAL;
++	}
++
++	memcpy(&tc_version, data, sizeof(tc_version));
++	memcpy(&entries, data + 20, sizeof(entries));
++
++	switch (tc_version) {
++	case 0:
++		entry_size = KEBAB_TC_CDHASH_SIZE;          /* no hashType/flags */
++		break;
++	case 1:
++		entry_size = KEBAB_TC_CDHASH_SIZE + 2;
++		break;
++	case 2:
++		entry_size = KEBAB_TC_CDHASH_SIZE + 4;
++		break;
++	default:
++		return EINVAL;
++	}
++
++	if (entries > (size - KEBAB_TC_HEADER_SIZE) / entry_size) {
++		return EINVAL;
++	}
++	needed = KEBAB_TC_HEADER_SIZE + (size_t)entries * entry_size;
++	if (needed > size) {
++		return EINVAL;
++	}
++
++	if (memcmp(data + 4, kebab_tc_expected_uuid, sizeof(kebab_tc_expected_uuid)) != 0) {
++		printf("KEBAB CS: trust cache uuid does not match the 20H392 build; "
++		    "using it anyway\n");
++	}
++
++	for (n = 0; n < entries; n++) {
++		const uint8_t *entry = data + KEBAB_TC_HEADER_SIZE + n * entry_size;
++
++		if (tc_version >= 1) {
++			uint8_t hash_type = entry[KEBAB_TC_CDHASH_SIZE];
++
++			if (hash_type < sizeof(hash_types) / sizeof(hash_types[0])) {
++				hash_types[hash_type]++;
++			}
++		}
++		if (n > 0) {
++			const uint8_t *prev =
++			    data + KEBAB_TC_HEADER_SIZE + (n - 1) * entry_size;
++
++			if (memcmp(prev, entry, KEBAB_TC_CDHASH_SIZE) >= 0) {
++				sorted = FALSE;
++			}
++		}
++	}
++
++	kebab_tc_data = __DECONST(uint8_t *, data);
++	kebab_tc_entries = entries;
++	kebab_tc_entry_size = entry_size;
++	kebab_tc_sorted = sorted;
++
++	printf("KEBAB CS: static trust cache v%u: %u entries (%u bytes), "
++	    "hash types sha1=%u sha256=%u sha256-trunc=%u sha384=%u, %s\n",
++	    tc_version, entries, (unsigned)needed,
++	    hash_types[1], hash_types[2], hash_types[3], hash_types[4],
++	    sorted ? "sorted" : "UNSORTED (linear lookup)");
++
++	return 0;
++}
++
++void
++kebab_cs_trustcache_load(void)
++{
++	char path[128];
++	vnode_t vp = NULLVP;
++	off_t size;
++	uint8_t *buf = NULL;
++	int resid = 0;
++	int error;
++
++	if ((kebab_cs_policy & KEBAB_CS_TRUSTCACHE_PLATFORM) == 0) {
++		return;
++	}
++
++	strlcpy(path, KEBAB_TC_DEFAULT_PATH, sizeof(path));
++	(void)PE_parse_boot_argn("kebab_trustcache", path, sizeof(path));
++	if (path[0] == '\0' || strcmp(path, "0") == 0) {
++		printf("KEBAB CS: static trust cache disabled; platform binaries "
++		    "will not be recognised\n");
++		return;
++	}
++
++	error = vnode_lookup(path, 0, &vp, vfs_context_current());
++	if (error != 0) {
++		printf("KEBAB CS: no static trust cache at %s (error %d); platform "
++		    "binaries will not be recognised\n", path, error);
++		return;
++	}
++	if (vp->v_type != VREG) {
++		printf("KEBAB CS: %s is not a regular file; ignored\n", path);
++		vnode_put(vp);
++		return;
++	}
++	size = ubc_getsize(vp);
++	if (size <= 0 || size > KEBAB_TC_MAX_SIZE) {
++		printf("KEBAB CS: %s has unusable size %lld; ignored\n", path,
++		    (long long)size);
++		vnode_put(vp);
++		return;
++	}
++
++	buf = (uint8_t *)kalloc_data((vm_size_t)size, Z_WAITOK);
++	if (buf == NULL) {
++		printf("KEBAB CS: cannot allocate %lld bytes for %s\n",
++		    (long long)size, path);
++		vnode_put(vp);
++		return;
++	}
++
++	error = vn_rdwr(UIO_READ, vp, (caddr_t)buf, (int)size, 0, UIO_SYSSPACE,
++	    0, kauth_cred_get(), &resid, current_proc());
++	vnode_put(vp);
++	if (error != 0 || resid != 0) {
++		printf("KEBAB CS: reading %s failed (error %d, resid %d)\n", path,
++		    error, resid);
++		goto fail;
++	}
++
++	{
++		const uint8_t *module = buf;
++		size_t module_size = (size_t)size;
++
++		/*
++		 * The IPSW member is an IM4P ("trst") wrapper.  Accept a bare
++		 * module as well, which is what the boot chain hands to
++		 * load_static_trust_cache() on a real device.
++		 */
++		if (module[0] == 0x30 &&
++		    kebab_tc_unwrap_im4p(&module, &module_size) != 0) {
++			module = buf;
++			module_size = (size_t)size;
++		}
++
++		if (kebab_tc_parse(module, module_size) != 0) {
++			printf("KEBAB CS: %s is not a trust cache module; ignored\n", path);
++			goto fail;
++		}
++	}
++
++	printf("KEBAB CS: static trust cache loaded from %s\n", path);
++	return;
++
++fail:
++	if (buf != NULL) {
++		kfree_data(buf, (vm_size_t)size);
++	}
++}
++
++static boolean_t
++kebab_tc_lookup(const uint8_t cdhash[KEBAB_TC_CDHASH_SIZE])
++{
++	uint32_t lo, hi;
++
++	if (kebab_tc_data == NULL || kebab_tc_entries == 0) {
++		return FALSE;
++	}
++
++	if (!kebab_tc_sorted) {
++		uint32_t i;
++
++		for (i = 0; i < kebab_tc_entries; i++) {
++			const uint8_t *entry = kebab_tc_data + KEBAB_TC_HEADER_SIZE +
++			    i * kebab_tc_entry_size;
++
++			if (memcmp(entry, cdhash, KEBAB_TC_CDHASH_SIZE) == 0) {
++				return TRUE;
++			}
++		}
++		return FALSE;
++	}
++
++	lo = 0;
++	hi = kebab_tc_entries;
++	while (lo < hi) {
++		uint32_t mid = lo + (hi - lo) / 2;
++		const uint8_t *entry = kebab_tc_data + KEBAB_TC_HEADER_SIZE +
++		    mid * kebab_tc_entry_size;
++		int cmp = memcmp(cdhash, entry, KEBAB_TC_CDHASH_SIZE);
++
++		if (cmp == 0) {
++			return TRUE;
++		} else if (cmp < 0) {
++			hi = mid;
++		} else {
++			lo = mid + 1;
++		}
++	}
++	return FALSE;
++}
++
++#pragma mark - blob classification
++
++void
++kebab_cs_classify_blob(struct cs_blob *blob)
++{
++	char cdhash_string[2 * KEBAB_TC_CDHASH_SIZE + 1];
++
++	if (blob == NULL || (kebab_cs_policy & KEBAB_CS_TRUSTCACHE_PLATFORM) == 0) {
++		return;
++	}
++	/* AMFI, if it were present, has already made this decision. */
++	if (blob->csb_platform_binary) {
++		return;
++	}
++	if (!kebab_tc_lookup(blob->csb_cdhash)) {
++		return;
++	}
++
++	/*
++	 * Same effect the AMFI MACF hook has for a trust-cached cdhash: the
++	 * CodeDirectory is Apple's, so treat the binary as part of the OS.
++	 * Platform binaries have no team id, which also keeps the shared
++	 * region selection in kern_exec.c on the "platform" path.
++	 */
++	blob->csb_flags |= CS_PLATFORM_BINARY;
++	blob->csb_platform_binary = 1;
++	blob->csb_platform_path = 0;
++	blob->csb_teamid = NULL;
++
++	if (kebab_platform_logged < KEBAB_CS_MAX_CLASSIFY_LOGS) {
++		kebab_cdhash_string(blob->csb_cdhash, cdhash_string);
++		printf("KEBAB CS: cdhash %s is in Apple's static trust cache: "
++		    "platform binary\n", cdhash_string);
++	} else if (kebab_platform_logged == KEBAB_CS_MAX_CLASSIFY_LOGS) {
++		printf("KEBAB CS: further platform binaries are not logged\n");
++	}
++	kebab_platform_logged++;
++}
++
++#pragma mark - shared cache
++
++int
++kebab_cs_shared_cache_allowed(struct vnode *vp, struct vnode *rdir_vp)
++{
++	if ((kebab_cs_policy & KEBAB_CS_UNSEALED_SHARED_CACHE) == 0) {
++		return 0;
++	}
++	if (vp == NULL || rdir_vp == NULL) {
++		return 0;
++	}
++	/*
++	 * Only the process' own root volume.  The caller has already checked
++	 * that the file is owned by uid 0; what it cannot satisfy is
++	 * SF_RESTRICTED: nothing in the root-image build sets that flag, and
++	 * the volume is unsealed and writable, so the flag would not be a
++	 * security boundary here anyway.
++	 */
++	if (vp->v_mount != rdir_vp->v_mount) {
++		return 0;
++	}
++	if (kebab_shared_cache_logged == 0) {
++		kebab_shared_cache_logged = 1;
++		printf("KEBAB CS: shared cache on the unsealed root volume accepted "
++		    "without SF_RESTRICTED\n");
++	}
++	return 1;
++}
++
++#endif /* KEBAB */
+diff --git a/bsd/kern/kebab_codesign.h b/bsd/kern/kebab_codesign.h
+new file mode 100644
+index 0000000..b880a11
+--- /dev/null
++++ b/bsd/kern/kebab_codesign.h
+@@ -0,0 +1,75 @@
++/*
++ * KEBAB code-signing policy.
++ *
++ * This is the port's replacement for the parts of AppleMobileFileIntegrity
++ * (AMFI) and libTrustCache that xnu itself cannot provide.  Everything here is
++ * compiled only for KEBAB and is inert unless the "kebab_cs" boot argument is
++ * passed; a normal xnu build never sees any of it.
++ *
++ * See docs/BRING-UP-STATE.md, section 12, for the traced call path and for
++ * what this policy gives up.
++ */
++#ifndef _KEBAB_CODESIGN_H_
++#define _KEBAB_CODESIGN_H_
++
++#if defined(KEBAB)
++
++#include <sys/cdefs.h>
++#include <sys/types.h>
++
++struct cs_blob;
++struct vnode;
++
++/*
++ * Bits for the "kebab_cs" boot argument.
++ *
++ * KEBAB_CS_ALLOW_UNSIGNED
++ *	Accept Mach-O files that carry no code signature at all.  On this
++ *	configuration process-wide enforcement is already off by default, but
++ *	the switch makes the decision explicit and pins it.
++ *
++ * KEBAB_CS_TRUSTCACHE_PLATFORM
++ *	Classify a code-signed binary as a platform binary when its cdhash is in
++ *	Apple's static trust cache (the "StaticTrustCache" component of the
++ *	IPSW).  Without this, nothing in the kernel can ever set
++ *	CS_PLATFORM_BINARY, because that bit is set by AMFI.
++ *
++ * KEBAB_CS_GRANT_ENTITLEMENTS
++ *	Make the built-in AMFI provider answer entitlement queries with success
++ *	instead of KERN_DENIED.  There is no CoreEntitlements parser here, so
++ *	the kernel cannot tell which entitlement was requested.
++ *
++ * KEBAB_CS_UNSEALED_SHARED_CACHE
++ *	Let a root-owned dyld shared cache on this process' unsealed root
++ *	volume satisfy the SIP check that otherwise requires SF_RESTRICTED
++ *	(the root image does not carry it today; section 12 of
++ *	docs/BRING-UP-STATE.md describes the stricter alternative).
++ */
++#define KEBAB_CS_ALLOW_UNSIGNED                 0x0001
++#define KEBAB_CS_TRUSTCACHE_PLATFORM            0x0002
++#define KEBAB_CS_GRANT_ENTITLEMENTS             0x0004
++#define KEBAB_CS_UNSEALED_SHARED_CACHE          0x0008
++
++/* Everything above; the value to use while bringing the port up. */
++#define KEBAB_CS_DEVELOPMENT_PRESET             0x000f
++
++extern int kebab_cs_policy;
++
++/* bsd_init: load Apple's static trust cache, if the policy asks for it. */
++void kebab_cs_trustcache_load(void);
++
++/* Used by the built-in AMFI provider. */
++int kebab_cs_grants_entitlements(void);
++
++/*
++ * Used by ubc_cs_blob_add(): may mark the blob as an Apple platform binary.
++ * Must be called after the MACF hook, before the team-id is parsed.
++ */
++void kebab_cs_classify_blob(struct cs_blob *blob);
++
++/* Used by shared_region_map_and_slide_setup(): SIP gate for the shared cache. */
++int kebab_cs_shared_cache_allowed(struct vnode *vp, struct vnode *rdir_vp);
++
++#endif /* KEBAB */
++
++#endif /* _KEBAB_CODESIGN_H_ */
+diff --git a/bsd/kern/ubc_subr.c b/bsd/kern/ubc_subr.c
+index 9b553be..a4677e8 100644
+--- a/bsd/kern/ubc_subr.c
++++ b/bsd/kern/ubc_subr.c
+@@ -80,6 +80,10 @@
+ #include <stdatomic.h>
+ #include <libkern/amfi/amfi.h>
+ 
++#if defined(KEBAB)
++#include "kebab_codesign.h"
++#endif /* KEBAB */
++
+ /* XXX These should be in a BSD accessible Mach header, but aren't. */
+ extern kern_return_t memory_object_pages_resident(memory_object_control_t,
+     boolean_t *);
+@@ -4738,6 +4742,17 @@ ubc_cs_blob_add(
+ 	}
+ #endif /* CONFIG_MACF */
+ 
++#if defined(KEBAB)
++	/*
++	 * KEBAB has no AMFI kext, so no trust cache has been consulted for this
++	 * cdhash.  Consult Apple's static trust cache here when the kebab_cs
++	 * policy asks for it.  This is the only place on this port where
++	 * CS_PLATFORM_BINARY can be set, and it has to happen before the team
++	 * id is parsed below (platform binaries do not have one).
++	 */
++	kebab_cs_classify_blob(&tmp_blob);
++#endif /* KEBAB */
++
+ #if CODE_SIGNING_MONITOR
+ 	error = verify_code_signature_monitor(&tmp_blob);
+ 	if (error != 0) {
+diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
+index 05a1725..23bbf81 100644
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -122,6 +122,11 @@
+ #include <sys/csr.h>
+ #endif /* CONFIG_CSR */
+ #include <sys/trust_caches.h>
++
++#if defined(KEBAB)
++/* bsd/kern/kebab_codesign.c */
++extern int kebab_cs_shared_cache_allowed(struct vnode *vp, struct vnode *rdir_vp);
++#endif /* KEBAB */
+ #include <libkern/amfi/amfi.h>
+ #include <IOKit/IOBSD.h>
+ 
+@@ -2509,6 +2514,18 @@ after_root_check:
+ #endif /* XNU_TARGET_OS_OSX && defined(__arm64__) */
+ 
+ #if CONFIG_CSR
++#if defined(KEBAB)
++		/*
++		 * KEBAB: the root volume is unsealed and its image does not set
++		 * SF_RESTRICTED, so the SIP check below would reject every dyld
++		 * shared cache mapping even though the file is root-owned and on
++		 * this process' own root volume.  kebab_cs decides whether that is
++		 * acceptable; it only ever relaxes this one check.
++		 */
++		if (kebab_cs_shared_cache_allowed(srfmp->vp, rdir_vp)) {
++			/* accepted; no SF_RESTRICTED requirement */
++		} else
++#endif /* KEBAB */
+ 		if (csr_check(CSR_ALLOW_UNRESTRICTED_FS) != 0) {
+ 			VATTR_INIT(&va);
+ 			VATTR_WANTED(&va, va_flags);

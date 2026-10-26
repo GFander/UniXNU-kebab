@@ -545,3 +545,307 @@ IOSurface（十进制；0x 前缀是评估稿的写法）：
   确认它是否接受错误；ios-sweet 当年一律返回 success，没有这条数据。
 * 触摸：`0098` 的 S6SY761 仍按 1079×2399 原始坐标上报；显示逻辑尺寸变成
   1125×2436 后，HID 映射要单独核对（不在本次范围，也不改 `kebab_touch.c`）。
+
+## 十二、代码签名与 AMFI 的开发策略
+
+本节记录 P1-3 的实际结论：一个已签名的 Apple 二进制（`/usr/lib/dyld`、`/sbin/launchd`）
+从 `execve` 到第一条指令之间，内核到底检查了什么；哪些检查在本构建里存在、哪些是空的；
+以及为了让它们按"开发移植"的方式通过，加了什么、放弃了什么。
+
+补丁是 `0100-kebab-codesign.patch`，代码在 `bsd/kern/kebab_codesign.c`。全部行为只由
+`kebab_cs` 启动参数控制，**默认（不传该参数）与打补丁前完全一致**，`#if defined(KEBAB)`
+之外不编译任何东西。
+
+### 一、结论先说
+
+1. **签名结构校验和页哈希校验在内核里，而且是可用的。** 真实 Apple 二进制只要没被改动，
+   这两步会自然通过：本内核支持 CodeDirectory 的 4K/16K 页大小，以及 SHA-1、SHA-256、
+   SHA-256-truncated、SHA-384 四种哈希（`ubc_subr.c` 的 `cs_find_md()`；SHA-256 走内核内
+   libtomcrypt，SHA-384 走 BearSSL）。
+2. **CMS 签名人验证从来不在 xnu 里。** 它属于 AMFI/CoreTrust。本移植没有 AMFI，所以
+   "是不是 Apple 签的"在内核里没有答案——只有"cdhash 在不在 Apple 的静态信任缓存里"这个
+   间接答案。本节第五小节给出后者的来源。
+3. **真正挡住真实二进制的不是签名校验，而是两个"身份"问题**：
+   - `CS_PLATFORM_BINARY` 只有 AMFI 会设置，本内核永远是 0；
+   - dyld 映射共享缓存时，`shared_region_map_and_slide_2_np` 的 SIP 检查要求
+     `SF_RESTRICTED`，而本移植的根镜像没有这个标志。
+4. **库校验（library validation）在内核里没有调用点**，`cs_require_lv()` 只有定义，
+   没有使用者；它的执行完全在 AMFI。本构建里这是死代码，不需要"修"。
+5. 所有的放宽都用 `kebab_cs` 的具名位表达，没有改任何共享路径的默认值。
+
+### 二、追出来的调用链
+
+```
+execve
+  exec_mach_imgact (bsd/kern/kern_exec.c)
+    load_machfile / parse_machfile (bsd/kern/mach_loader.c)
+      LC_CODE_SIGNATURE:
+        load_code_signature()
+          ubc_cs_blob_get() / ubc_cs_blob_add()      ← 解析并挂上 cs_blob
+            cs_blob_init_validated()                  ← 结构校验（cs_validate_csblob）
+            reconstitute_code_signature()             ← 本构建未启用
+            mac_vnode_check_signature()               ← MACF 钩子（无策略 → 直接放行）
+            kebab_cs_classify_blob()                  ← 本补丁：平台二进制标记
+            verify_code_signature_monitor()           ← CODE_SIGNING_MONITOR=0，编译掉
+            accelerate_entitlement_queries()          ← 走内置 AMFI 提供者
+            csblob_parse_teamid()
+          memory_object_signed(ui_control, TRUE)      ← 从此该 vnode 的页要做哈希校验
+        初次页校验：cs_validate_range()
+      后续页错误：vm_page_validate_cs() → cs_validate_page()
+  进程属性：proc_csflags / task_set_platform_binary()
+```
+
+共享缓存是另一条路（dyld 起来之后）：
+
+```
+__shared_region_map_and_slide_6 / shared_region_map_and_slide_2_np  (syscall 536)
+  _shared_region_map_and_slide()
+    shared_region_map_and_slide_setup()   ← 全部检查都在这里
+      fd → vnode、必须 VREG、可读
+      mac_file_check_mmap()               ← AMFI 钩子，无策略则空操作
+      trust cache 捷径                   ← 需要 cs_blob；本构建不可达
+      root 拥有（uid 0）
+      CSR：SF_RESTRICTED 要求             ← 本移植的实际阻塞点
+      scdir 目录检查（scdir_enforce=0）
+    vm_shared_region_map_file()           ← 按请求地址映射，不校验缓存内容
+```
+
+### 三、逐项判定
+
+| 检查 | 位置 | 本构建状态 | 对真实 Apple 二进制 | 处理 |
+| --- | --- | --- | --- | --- |
+| 必须有 `LC_CODE_SIGNATURE` | `mach_loader.c`（`!got_code_signatures && cs_process_global_enforcement()`）| `cs_process_enforcement_enable = 0`，不拦 | 有签名，不触发 | 不构成门槛 |
+| SuperBlob / CodeDirectory 结构 | `ubc_subr.c` `cs_validate_csblob()`、`cs_validate_codedirectory()` | 编译进内核，逐项检查 | 应通过 | 保留 |
+| 页大小与哈希类型 | 同上 | 支持 4K/16K、SHA-1/256/256-trunc/384 | 应通过 | 保留 |
+| CMS 签名人验证 | 不在 xnu（AMFI/CoreTrust） | 无 | 不验证 | 无法在离线环境实现 |
+| MACF `mac_vnode_check_signature` | `ubc_subr.c`（`CONFIG_MACF=1`） | 内核里没有任何策略模块，钩子返回 0，`cs_flags` 原样 | 等于空操作 | 不修（本来就没有策略） |
+| 平台二进制 `CS_PLATFORM_BINARY` | AMFI 的 MACF 钩子 | 永远 0 | 0 | **本补丁按信任缓存设置** |
+| entitlements | AMFI `OSEntitlements` | `csb_entitlements` 恒为 NULL；查询走 `kebab_amfi.c` | 全部 DENIED | **由 `kebab_cs` 位决定是否全授予** |
+| `get-task-allow` | 同上；`CS_ALLOWED_MACHO` 不含该位 | 永不置位 | 不置位 | 不合成；`task_for_pid` 仍受原限制 |
+| 库校验 `cs_require_lv()` | `kern_cs.c` | **无调用点** | 不执行 | 说明，不修 |
+| hardened runtime（`CS_HARD`/`CS_KILL`/`CS_RUNTIME`） | 从 CodeDirectory 带入；`cs_invalid_page()` | 保留 | 保留 | 不放松 |
+| 初次页哈希 | `mach_loader.c` → `cs_validate_range()` | 保留；失败在 `CS_HARD/KILL` 下致命 | 应通过 | 保留 |
+| 每次缺页的页哈希 | `vm_fault.c` → `cs_validate_page()` | 保留（`memory_object_signed` 已置位） | 应通过 | 保留 |
+| TrustCache KPI | `kern_trustcache.c` | 补丁 0059 令 `trust_cache_rt = NULL`；`query_trust_cache()` 一律 NOT_FOUND | 不可用 | 不改；用自带的表替代 |
+| 静态信任缓存段 | `arm_vm_init.c` 的 `chosen/memory-map:TrustCache` → `segTRUSTCACHE` | 引导器没有提供该段；AMFI 的 libTrustCache 不在树内，`trust_cache_rt` 无法初始化 | 不可用 | 改为从根卷读文件（第五小节） |
+| 共享缓存 trust cache 捷径 | `vm_unix.c` | 需要缓存 vnode 上已挂 cs_blob；没有 AMFI 就永远为 NULL | 走不到 | 判定为不可达 |
+| 共享缓存 root 拥有 | `vm_unix.c` | 生效 | 根镜像里 uid 0 即可通过 | 保留 |
+| 共享缓存 `SF_RESTRICTED` | `vm_unix.c`（`CONFIG_CSR`） | `csr_config=0`（ADT 无 `/chosen/asmb/lp-sip0`），要求该标志；镜像没设 | **EPERM** | `kebab_cs` 位 0x8 |
+| 共享缓存目录检查 | `vm_unix.c` | `scdir_enforce=0`（内核按 `XNU_TARGET_OS_OSX` + arm64 编译） | 不生效 | 不处理 |
+| 共享缓存内容哈希 | —— | 内核不哈希缓存内容 | —— | 不是签名门禁 |
+
+补充两点事实：
+
+- 本内核按 `XNU_TARGET_OS_OSX` 编译（`-DXNU_TARGET_OS_OSX`），所以共享缓存走的是
+  macOS arm64 的那套检查，不是 iOS 的那套。`scdir_enforce` 在非 x86_64 上默认 0。
+- iPhone X（A11）没有 PAC，目标二进制的 CPU 子类型是 arm64，共享缓存文件名也是
+  `dyld_shared_cache_arm64`。因此 `kern_exec.c` 里针对 arm64e "preview ABI" 的拒绝
+  （`load_result.platform_binary == 0` 时拒绝）在本移植不适用。如果以后换到 A12+ 的
+  设备，这一条会变成平台二进制标记的另一个理由。
+
+### 四、策略：`kebab_cs` 位掩码
+
+`kebab_cs` 在 `STARTUP(CODESIGNING, STARTUP_RANK_LAST)` 里解析，早于任何 exec。
+不传 = 0 = 全部关闭。
+
+| 位 | 名字 | 作用 | 代价 |
+| --- | --- | --- | --- |
+| 0x1 | `KEBAB_CS_ALLOW_UNSIGNED` | 显式把 `cs_process_enforcement_enable` 钉为 0，接受没有签名的 Mach-O | 无（本配置默认就是 0；这一位只是把既成事实写进代码和日志） |
+| 0x2 | `KEBAB_CS_TRUSTCACHE_PLATFORM` | 从根卷读 Apple 静态信任缓存；命中 cdhash 的 blob 被标成平台二进制 | 信任缓存文件在可写根卷上，不是可信来源（见第八小节） |
+| 0x4 | `KEBAB_CS_GRANT_ENTITLEMENTS` | 内置 AMFI 的 entitlement 查询一律返回 `KERN_SUCCESS` | 等于"所有 entitlement 都授予"；内核无法分辨查询的是哪一个 |
+| 0x8 | `KEBAB_CS_UNSEALED_SHARED_CACHE` | 根卷上、root 拥有的共享缓存不再要求 `SF_RESTRICTED` | 放松了共享缓存的 SIP 检查；只影响本进程根卷上的文件 |
+
+开发预设是 `kebab_cs=15`。一个完整的启动参数例子（沿用第 10 节的调试配置）：
+
+```
+debug=0x14e serial=3 kebabusb=1 kebab_cs=15
+```
+
+`kebab_trustcache=<path>` 可以覆盖信任缓存路径；`kebab_trustcache=0` 明确禁用。
+默认路径是 `/System/Library/Caches/com.apple.kernelcaches/static.trustcache`。
+文件不存在时只打印一行 `KEBAB CS: no static trust cache at ...`，不影响启动，
+只是没有平台二进制。
+
+为什么不用现成的全局开关：`amfi_get_out_of_my_way`、`amfi_allow_any_signature`、
+`cs_enforcement_disable` 都只在 `DEVELOPMENT || DEBUG` 下解析，而且对所有平台生效
+（`cs_enforcement_disable` 还要求 `PE_i_can_has_debugger()`）。它们是"降低整条路径"，
+不是"这个移植做了什么"。`kebab_cs` 只影响 KEBAB，且每一位都在日志里回显：
+
+```
+KEBAB CS: policy 0xf unsigned trustcache-platform entitlements unsealed-shared-cache
+```
+
+### 五、静态信任缓存：从 IPSW 到内核
+
+**它不是 `apticket.der`，也不在 `com.apple.kernelcaches` 里。** 这两者分别是
+personalization 的 APTicket 和内核缓存文件，都不含 cdhash 列表。真正的组件是 IPSW 里的
+独立成员，`BuildManifest.plist` 里叫 `StaticTrustCache`：
+
+```
+Firmware/087-86698-044.dmg.trustcache    66,289 字节
+  DER SEQUENCE { IM4P, trst, "1", OCTET STRING }
+  payload = trust_cache_module v2
+    u32 version = 2
+    u8  uuid[16] = 9f368a73d90b40ce943c827e13e72eee
+    u32 numEntries = 2760
+    2760 × 24 字节：cdhash[20] + hashType + flags + constraintCategory + reserved
+    hashType: SHA-256 2758 条，SHA-1 2 条；按 cdhash 升序
+```
+
+提取和校验用 `scripts/extract-ios-trustcache.py`：
+
+```sh
+# 摘要 + 原样写出成员（内核读的就是这个文件，不需要预处理）
+python3 scripts/extract-ios-trustcache.py --ipsw iPhoneX-16.7.16.ipsw --verify \
+    --write ~/ios-userland/static.trustcache
+
+# dyld / launchd 提取出来之后，一条命令验证它们是否在 Apple 的列表里
+python3 scripts/extract-ios-trustcache.py --ipsw iPhoneX-16.7.16.ipsw \
+    --check /path/to/usr/lib/dyld
+```
+
+把写出的文件放进根卷的默认路径，`kebab_cs` 带 0x2 时内核会在 `bsd_init` 里加载它：
+
+```
+bsd_init → bsdinit_task → kebab_cs_trustcache_load() → vnode_lookup + vn_rdwr
+  → kebab_tc_unwrap_im4p()（也接受裸 module）
+  → kebab_tc_parse()：校验 v0/v1/v2、条目数、文件长度、排序
+  → 保留整块 kalloc 内存；cdhash 二分查找
+```
+
+命中时 `ubc_cs_blob_add()` 里把 blob 标成平台二进制（`csb_platform_binary=1`、
+`csb_flags |= CS_PLATFORM_BINARY`、清空 team id），效果与 AMFI 对 trust-cached cdhash
+做的事情一致。日志形如：
+
+```
+KEBAB CS: static trust cache v2: 2760 entries (66264 bytes), hash types sha1=2 sha256=2758 ..., sorted
+KEBAB CS: cdhash <40 hex> is in Apple's static trust cache: platform binary
+```
+
+局限必须说清楚：
+
+- 真机上这个缓存是**引导链**通过 `chosen/memory-map:TrustCache` 交给内核的（
+  `arm_vm_init.c` 记录 `segTRUSTCACHE`）。本移植的引导器没有提供这个段；AMFI 的
+  libTrustCache 也不在 xnu 源码里，所以 `trust_cache_rt` 仍然是 NULL（补丁 0059 的
+  降级行为不变），`query_trust_cache()` 仍然一律 NOT_FOUND。本补丁做的是一张**并行的、
+  只用于平台二进制判定的表**，没有冒充 TrustCache KPI。
+- 表来自根卷上的文件，而根卷可写、未密封。它证明的是"这个 cdhash 在 Apple 为 20H392
+  发布的列表里"，不是"这个文件没有被替换过"。要变成可信来源，需要引导器把该段作为
+  启动链组件传进来（内核侧 `load_static_trust_cache()` 的路径已经存在，缺的是提供者和
+  AMFI 的运行时）。
+
+### 六、共享缓存（44 个文件）
+
+iOS 16 的共享缓存是拆分缓存：`dyld_shared_cache_arm64` 加上 `.01`–`.40`，外加
+`.dylddata`、`.dyldlinkedit`、`.symbols`。内核不解析缓存头，也不知道"这是主缓存还是
+子缓存"；dyld 通过 `shared_region_map_and_slide_2_np` 一次把 N 个文件、M 个映射传进来，
+内核对每个文件独立走一遍 `shared_region_map_and_slide_setup()`。
+
+内核必须做到的事情：
+
+1. 每个 fd 都是可读的普通文件（VREG），进程对根目录的视图与共享区域的根一致；
+2. 每个文件 root 拥有（uid 0）；
+3. 通过 `mac_file_check_mmap`（无 AMFI 时为空）；
+4. 通过 trust cache 捷径或 root 检查二选一。**捷径需要缓存 vnode 上已挂 cs_blob**，
+   而没有 AMFI 就没人给它挂，所以本构建永远走 root 检查；
+5. `CONFIG_CSR` 下要求 `SF_RESTRICTED`（或 `CSR_ALLOW_UNRESTRICTED_FS`，本机 ADT 没配
+   `/chosen/asmb/lp-sip0`，所以是 0）；
+6. `vm_shared_region_map_file()` 按请求地址建立映射。**缓存内容一个字节都不哈希。**
+
+所以：**共享缓存这条路上没有任何"签名"门禁**；实际门禁是 SIP 的 `SF_RESTRICTED`。
+44 个文件每个都要过同样的检查，缺一个 dyld 就映射失败。
+
+严格的做法是在镜像构建时给这 44 个文件设 `SF_RESTRICTED`。HFS+ 的编解码本身支持这一位
+（`hfs_catalog.c`：`adminFlags = ca_flags >> 16`，`SF_RESTRICTED = 0x00080000` 落在
+bit 19），但本移植的根镜像没有设，而且卷可写、未密封，这个位也不构成边界。因此本补丁
+用 `kebab_cs` 的 0x8 位显式放行，条件限定为：策略打开、文件 root 拥有、且与进程的根
+目录在同一个 mount 上。日志只打印一次：
+
+```
+KEBAB CS: shared cache on the unsealed root volume accepted without SF_RESTRICTED
+```
+
+### 七、改了哪些文件
+
+| 文件 | 改动 |
+| --- | --- |
+| `bsd/kern/kebab_codesign.c` | 新增。策略解析、信任缓存加载/解析/查找、blob 分类、共享缓存判定 |
+| `bsd/kern/kebab_codesign.h` | 新增。位定义与四个入口 |
+| `bsd/conf/files` | 注册 `bsd/kern/kebab_codesign.c`（`standard`） |
+| `bsd/kern/ubc_subr.c` | `ubc_cs_blob_add()` 里 MACF 之后、team id 解析之前调用 `kebab_cs_classify_blob()` |
+| `bsd/kern/kebab_amfi.c` | 四个 entitlement 查询函数按 `kebab_cs` 返回 SUCCESS/DENIED；顶部注释同步 |
+| `bsd/kern/bsd_init.c` | `load_init_program()` 之前调用 `kebab_cs_trustcache_load()` |
+| `bsd/vm/vm_unix.c` | `shared_region_map_and_slide_setup()` 的 CSR 检查前加 kebab 判定 |
+
+### 八、让出了什么，保留了什么
+
+**让出：**
+
+- **CMS 真实性**：本来就不在内核验证，这次也没有假装验证。平台二进制的唯一依据是
+  cdhash 在 Apple 的静态信任缓存里；而这个缓存文件放在可写根卷上，能被替换。要恢复这一
+  点需要 Image4 和真正的 libTrustCache，本移植都没有。
+- **entitlement 边界**（0x4）：所有查询一律成功。任何依赖 `IOTaskHasEntitlement()` 的
+  VFS/IOKit 检查（快照、dataless、fsevents、网络等）都变成"通过"。这是刻意的开发策略，
+  不是疏漏；默认不开。
+- **共享缓存的 SIP 检查**（0x8）：只对进程根卷上、root 拥有的文件生效，且卷本身未密封，
+  所以放松的不是一个真实边界。
+- **未签名二进制**（0x1）：本来就是本配置的默认（`cs_process_enforcement_enable = 0`）。
+  这一位只是把它写死并打印出来，避免以后配置变化时行为漂移。
+
+**保留（没有放松）：**
+
+- SuperBlob / CodeDirectory 的结构校验，包括页大小、哈希类型、offset 边界；
+- 初次页与每次缺页的哈希校验。**改动过的 Apple 二进制仍会被 `CS_HARD`/`CS_KILL` 杀掉**；
+- `CS_HARD`、`CS_KILL`、`CS_RESTRICT`、`CS_RUNTIME` 这些从 CodeDirectory 带出来的标志；
+- W^X、可执行映射权限、`exec` 的权限检查；
+- `CS_REQUIRE_LV` 依旧没有内核执行点（AMFI 缺失），也就是说库校验在本移植里始终是关的；
+  这不是本补丁关掉的，而是它从来没有被执行过。
+
+需要特别说明的是"未签名"和"已签名"在页校验上的区别：没有签名 blob 的 vnode 不会被
+`memory_object_signed()` 标记，页校验根本不启动；一旦有 blob，所有页都必须与
+CodeDirectory 对得上。所以 0x1 不会让"签名错误"的二进制混过去——签名错误仍然按
+`CS_HARD/CS_KILL` 处理。
+
+### 九、没有硬件时无法验证的部分
+
+- **目标二进制的 cdhash 是否真的在表里**：`/usr/lib/dyld`（922,912 字节）和
+  `/sbin/launchd`（541,600 字节）目前只从 APFS inode 拿到了大小和权限，文件内容还在
+  提取中（P1-1）。拿到之后用 `extract-ios-trustcache.py --check` 一条命令即可验证；
+  在那之前只能说"机制就位"，不能说"这两个文件已验证"。
+- **启动参数解析和打印时序**：`kebab_cs` 的 STARTUP 函数、`bsd_init` 里的加载、
+  `printf` 在真机控制台上的实际顺序，都没有真机日志。
+- **`vn_rdwr` 在 `bsdinit_task()` 上下文读 66 KB 文件**：按 HFS+ 的 vnode/ubc 实现和
+  `load_init_program()` 的调用位置推断可行，但没有在真机上跑过。
+- **共享缓存映射的实际返回值**：44 个文件是否都在、是否 root 拥有、`vm_shared_region`
+  创建是否成功，只有真机能回答。
+- **平台二进制标记的下游效果**：`task_set_platform_binary()`、共享区域选择、后续
+  IOKit 的 entitlement 查询，都没有消费者级别的验证。
+- **引导器提供 TrustCache 段的路径**（`segTRUSTCACHE`）未验证，因为本移植的引导器
+  不提供。
+
+### 十、复现
+
+```sh
+# 打补丁（在 xnu-8796.141.3 / 1b191cb 的干净树上，按文件名顺序）
+for p in patches/xnu-8796-kebab/*.patch; do git apply "$p"; done   # 80/80
+
+# 构建（构建机，macOS 13.5 + KDK_13.5_22G74）
+export PATH="$HOME/bin:$HOME/Library/Python/3.9/bin:/opt/homebrew/bin:$PATH"
+export MACOS_VERSION=13.5 MACHINE_CONFIG=KEBAB KERNEL_CONFIG=DEVELOPMENT
+export KDKROOT="$HOME/kebab-build/KDKs/KDK_13.5_22G74.kdk"
+rm -f "$HOME/kebab-build/dxb/build/xnu.obj/kernel.development.kebab"   # 否则会跳过构建
+cd "$HOME/kebab-build/dxb" && bash build.sh
+
+# 产物
+build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab
+17,051,216 字节（16.26 MiB），2026-10-27 03:50
+```
+
+- 补丁系列：**80/80** 干净应用（原有 79 个 + `0100-kebab-codesign.patch`）。
+- 新增文件 `kebab_codesign.c` 在 `-Weverything` 下 **0 warning**；`ubc_subr.c`、
+  `bsd_init.c`、`vm_unix.c` 的 warning 都是原有的
+  `-Wdeclaration-after-statement` / `-Wunused-but-set-variable`，行号不在本次新增的
+  代码上；`kebab_amfi.c` 没有 warning。
+- 符号表里有 `kebab_cs_policy`、`kebab_cs_classify_blob`、
+  `kebab_cs_shared_cache_allowed`、`kebab_cs_trustcache_load`、
+  `kebab_cs_grants_entitlements`，以及 `__startup_CODESIGNING_entry_...`。
