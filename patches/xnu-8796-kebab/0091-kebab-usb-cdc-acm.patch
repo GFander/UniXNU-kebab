@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,941 @@
+@@ -0,0 +1,973 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -770,6 +770,37 @@ new file mode 100644
 +	}
 +}
 +
++/*
++ * The USB controller sits behind apps_smmu (stream 0, per kona-usb.dtsi) while
++ * the UFS controller does not, which is why UFS DMA works and the first USB
++ * transfer kills the board. Read the SMMU out before touching anything: whether
++ * it is enabled, what the global bypass says, and whether stream 0 has a
++ * mapping. Read-only on purpose.
++ */
++#define SMMU_PA        0x15000000
++#define SMMU_CR0       0x0000
++#define SMMU_GBPA      0x0004
++#define SMMU_SMR(n)    (0x0800 + 4 * (n))
++#define SMMU_S2CR(n)   (0x8000 + 8 * (n))
++
++static void
++ud_smmu_report(void)
++{
++	vm_offset_t smmu = ml_io_map(SMMU_PA, 0x10000);
++	if (smmu == 0) {
++		printf("KEBAB USB: cannot map the SMMU\n");
++		return;
++	}
++	printf("KEBAB USB: SMMU CR0 0x%08x GBPA 0x%08x\n",
++	    *(volatile uint32_t *)(smmu + SMMU_CR0),
++	    *(volatile uint32_t *)(smmu + SMMU_GBPA));
++	for (unsigned i = 0; i < 4; i++) {
++		printf("KEBAB USB: SMMU SMR%u 0x%08x S2CR%u 0x%08x\n", i,
++		    *(volatile uint32_t *)(smmu + SMMU_SMR(i)), i,
++		    *(volatile uint32_t *)(smmu + SMMU_S2CR(i)));
++	}
++}
++
 +/* ------------------------------------------------------------------ start */
 +
 +void
@@ -889,6 +920,7 @@ new file mode 100644
 +		printf("KEBAB USB: step 4 failed\n");
 +		return;
 +	}
++	ud_smmu_report();
 +	printf("KEBAB USB: step 5 ep0 in resources\n");
 +	if (ud_epcmd(EP0_IN, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
 +		printf("KEBAB USB: step 5 failed\n");
