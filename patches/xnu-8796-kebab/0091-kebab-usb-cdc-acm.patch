@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1026 @@
+@@ -0,0 +1,1028 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -134,6 +134,7 @@ new file mode 100644
 +#define UD_TRB_NOTIFY  0x0480
 +#define UD_TRB_BULKIN  0x04c0
 +#define UD_TRB_BULKOUT 0x0500
++#define UD_TRB_OUT_DATA 0x0540   /* ep0 OUT data stage, own slot */
 +#define UD_SETUP       0x0580
 +#define UD_DATA        0x0600      /* ep0 data stage, 512 bytes */
 +#define UD_NOTIFY      0x0800
@@ -530,7 +531,8 @@ new file mode 100644
 +				break;
 +			}
 +			ud.state = EP0_DATA_OUT;
-+			ud_start(UD_TRB_OUT, EP0_OUT, UD_DATA, 7, TRBCTL_DATA);
++			ud_to_dev(UD_DATA, 7);
++			ud_start(UD_TRB_OUT_DATA, EP0_OUT, UD_DATA, 7, TRBCTL_DATA);
 +			return;
 +		case 0x21:                              /* GET_LINE_CODING, 7 bytes IN */
 +			memset(data, 0, 7);
