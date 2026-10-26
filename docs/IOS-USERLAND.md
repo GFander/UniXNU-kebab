@@ -498,3 +498,183 @@ mtree 的 inode 列。xfield NAME 分别是 `dyld` 和 `launchd`。所以这不�
 ```sh
 python3 scripts/probe-ios-apfs.py --url "$URL" --known
 ```
+
+## 读出文件内容
+
+上一节停在 inode 的 `size`，这一节把它变成磁盘上的字节。新增工具
+`scripts/apfs-get.py`：从根目录 oid 2 开始，按 `j_drec` 记录逐级解析路径，
+再顺着 `j_file_extent_val_t` 读数据流，最后按 decmpfs 解压。
+
+```sh
+python3 scripts/apfs-get.py --url "$URL" \
+    --get /usr/lib/dyld --get /sbin/launchd --out ~/ios-userland/extracted
+```
+
+### 一、extent 实测
+
+extent 记录在 fs-tree 里的 key 是 `(obj_id, type=8)` 加上 8 字节
+`logical_addr`，value 是 `j_file_extent_val_t`：
+
+```text
+key   1e 23 05 00 ff ff ff 8f  00 00 00 00 00 00 00 00
+      ^ obj_id_and_type          ^ logical_addr = 0
+        (obj_id 1152921500312216350, type 8)
+value 00 00 05 00 00 00 00 00  56 de 11 00 00 00 00 00  00 00 00 00 00 00 00 00
+      ^ len_and_flags=0x50000  ^ phys_block_num=0x11de56  ^ crypto_id=0
+```
+
+- `len = len_and_flags & 0x00ffffffffffffff`，单位是字节；`flags =
+  len_and_flags >> 56`。这条 extent 长 **327,680** 字节，flags 为 0。
+- `phys_block_num` 是 APFS 容器块号，字节偏移为 `block * block_size`
+  （block_size = 4096）。
+- 压缩文件的 extent **不在 inode oid 下**，而在 `com.apple.ResourceFork`
+  xattr 指向的数据流 oid 下。dyld 的 xattr 原始 value 是：
+
+```text
+01 00 30 00                          flags=1 (DATA_STREAM), xdata_len=48
+1e 23 05 00 ff ff ff 0f              xattr_obj_id = 1152921500312216350
+0a f8 04 00 00 00 00 00              dstream.size = 325,642
+00 00 05 00 00 00 00 00              dstream.alloced_size = 327,680
+00 00 00 00 00 00 00 00              crypto_id = 0
+8a f6 04 00 00 00 00 00              total_bytes_read = 325,258
+```
+
+所以对压缩文件，extent 的 `length` 是 **分配长度**（327,680），dstream
+的 `size` 才是资源叉的逻辑长度（325,642）；读取时取
+`min(extent.length, dstream.size)`。对未压缩文件，extent 直接挂在 inode 的
+`private_id` 下。
+
+五个文件的 extent 实测（都是单 extent、logical 0）：
+
+| 文件 | 数据流 oid | logical | extent len | paddr | 实际读 |
+| --- | --- | --- | --- | --- | --- |
+| `/usr/lib/dyld` 资源叉 | 1152921500312216350 | 0 | 327,680 | 1,171,030 (0x11de56) | 325,642 |
+| `/sbin/launchd` 资源叉 | 1152921500312216240 | 0 | 208,896 | 1,170,621 | 205,547 |
+| `/usr/bin/fileproviderctl` 资源叉 | 1152921500312216274 | 0 | 90,112 | 1,170,751 | 89,331 |
+| `/usr/bin/zprint` 资源叉 | 1152921500312216304 | 0 | 12,288 | 1,170,990 | 11,486 |
+| `SystemVersion.plist` 本体 | 1152921500312031246 | 0 | 4,096 | 221,049 | 574 |
+
+读取器按 `logical_addr` 排序，遇到 `logical > 已写长度` 的空洞补零，遇到重叠
+extent 从重叠点续读，`crypto_id != 0` 则直接报错而不是输出密文。**本卷
+`APFS_FS_UNENCRYPTED`（卷超级块 flags@264 = 0x1），这五个文件的 crypto_id
+都是 0，所以没有解密步骤。** 这五个文件没有多 extent 或空洞，多 extent/sparse
+代码路径因此没有被这组样本触发，但实现已经在 `read_stream()` 里。
+
+### 二、压缩：两个目标都是 decmpfs type 4（zlib 资源叉）
+
+两个文件的 inode 都有 `bsd_flags = 0x20`（`UF_COMPRESSED`），
+`internal_flags = 0x44000`（含 `INODE_HAS_UNCOMPRESSED_SIZE`）。inode 偏移
+84 的 `uncompressed_size` 就是解压后大小，和 decmpfs 头一致。
+
+dyld 的 `com.apple.decmpfs` 原始 16 字节：
+
+```text
+66 70 6d 63   magic = 0x636d7066 ("cmpf"，小端存储)
+04 00 00 00   compression_type = 4
+20 15 0e 00 00 00 00 00   uncompressed_size = 922,912
+```
+
+**实测 type 4 是“64 KiB 分块的 zlib 资源叉”，不是 LZFSE。** 每个 chunk 的开头
+是 `78 5e`（zlib），`zlib.decompress()` 成功；LZFSE 的 decmpfs 类型是 11/12。
+工具按类型分派：3 = xattr 内 zlib，4 = 资源叉 zlib，7/8 = xattr/资源叉
+LZVN，9/10 = 原始数据，11/12 = LZFSE。LZVN 用 `lzfse` 模块的 C 解码器：
+把裸 LZVN chunk 包成 `bvxn + n_raw + n_payload + payload + bvx$` 的单块
+LZFSE 流再解。本卷这五个文件只命中 type 4 和“未压缩”，7/8 分支没有样本。
+
+type 4 的资源叉布局（dyld，325,642 字节）：
+
+```text
+00 00 01 00   data_offset   = 0x100 (256)
+00 04 f7 d8   map_offset    = 325,592
+00 04 f6 d8   data_length   = 325,336
+00 00 00 32   map_length    = 50
+...
+0x104: 0f 00 00 00             chunk_count = 15 (little-endian)
+0x108: 7c 00 00 00 21 81 00 00  chunk 0: offset=124, length=33,021
+       ...
+0x104 + 124 = 0x180: 78 5e ...  zlib stream
+```
+
+chunk 的 `offset` 相对 `0x104`，不是相对文件头，也不是相对表尾；这是最初把
+zlib 数据读偏 124 字节的原因。dyld 15 个 chunk 解出
+`14 * 65,536 + 5,408 = 922,912`；launchd 9 个 chunk 解出
+`8 * 65,536 + 17,312 = 541,600`。chunk 首字节为 `0xFF` 时表示原样存储
+（跳过该字节），这两个文件没有命中。
+
+### 三、验证
+
+`scripts/apfs-get.py` 写出的文件（`~/ios-userland/extracted/`）：
+
+| 路径 | inode | 字节数 | sha256 | Mach-O |
+| --- | --- | --- | --- | --- |
+| `/usr/lib/dyld` | 1152921500312216349 | 922,912 | `5806834564fe6462ae981d0915d612b1eb2f6f168822b5d278bee56254933757` | 64-bit arm64 **dylinker**，ncmds 18 |
+| `/sbin/launchd` | 1152921500312216239 | 541,600 | `12370e5ee35bf28ae479b6c4b4455f4f4693ab803e37c5eb3032537c18cac61c` | 64-bit arm64 **executable**，ncmds 19 |
+| `/usr/bin/fileproviderctl` | 1152921500312216273 | 259,248 | `9bc96d8ab9c5c9db54594bcdbcbc0d25de20396fdd9212866615aecef9c05251` | executable，ncmds 33 |
+| `/usr/bin/zprint` | 1152921500312216303 | 88,352 | `a140e627295f7b45cfafbdc8c8f008a0db6505736022557dfeb930543cc587df` | executable，ncmds 22 |
+| `SystemVersion.plist` | 1152921500312031246 | 574 | `526de9e26c80f93fae3089725f9e24cf1df55997e828d571db1e0f6480bf1962` | XML plist |
+
+`file(1)` 对前四个的判断：
+
+```text
+usr/lib/dyld:      Mach-O 64-bit arm64 dynamic linker, flags:<NOUNDEFS|DYLDLINK|TWOLEVEL>
+sbin/launchd:      Mach-O 64-bit arm64 executable, flags:<NOUNDEFS|DYLDLINK|TWOLEVEL|PIE>
+usr/bin/fileproviderctl: Mach-O 64-bit arm64 executable, flags:<NOUNDEFS|DYLDLINK|TWOLEVEL|PIE>
+usr/bin/zprint:    Mach-O 64-bit arm64 executable, flags:<NOUNDEFS|DYLDLINK|TWOLEVEL|PIE>
+```
+
+Mach-O 头按 32 字节解析（magic `0xfeedfacf`，cputype `0x0100000c`）：
+
+| 文件 | LC_UUID | LC_BUILD_VERSION | 辨识字符串 |
+| --- | --- | --- | --- |
+| dyld | `a5419919-ee95-5430-8e54-ae6387a9fa9a` | platform 2 (iOS), minos 16.7.0, sdk 16.7.3 | `dyld-1067` |
+| launchd | `07db155c-bcb3-f33d-b62f-3e498b993b8e` | platform 2, minos 16.7.0, sdk 16.7.3 | `/sbin/launchd` |
+| fileproviderctl | `01cd2cd0-3396-023d-aa11-64101405751d` | platform 2, minos 16.7.0, sdk 16.7.3 | `/usr/lib/dyld` |
+| zprint | `d46c14f4-8b08-c431-861d-ec0ec9dcf605` | platform 2, minos 16.7.0, sdk 16.7.3 | `/usr/lib/dyld` |
+
+dyld 的 `dyld-1067` 是二进制内部的版本串；launchd 的 `/sbin/launchd` 是它自己的
+路径/名字。SystemVersion.plist 的内容进一步自证：
+
+```text
+<key>ProductBuildVersion</key><string>20H392</string>
+<key>ProductVersion</key><string>16.7.16</string>
+```
+
+输出大小和 inode 的 `uncompressed_size` 全部逐字节相等（`size_ok=True`）；
+plist 的 inode 偏移 84 为 0，真正大小在 inode 尾部偏移 128 的
+`j_dstream_t`（size=574, alloced=4096），extent 分配 4096 字节，只读 574 字节。
+
+### 四、range 请求成本
+
+单独抽 dyld 的计数（包含 ZIP 目录、DMG koly/XML、APFS 元数据，不只是文件
+数据）：
+
+| 场景 | HTTP GET | 收到字节 | DMG chunk | chunk 压缩字节 |
+| --- | --- | --- | --- | --- |
+| 单 chunk 缓存（旧行为） | 115 | 25,133,339 (24.0 MiB) | 105 | 23.7 MiB |
+| 32 chunk LRU（当前） | 24 | 3,664,368 (3.5 MiB) | 14 | 3.2 MiB |
+| 五个文件一次抽（当前） | 31 | 7,322,711 (7.0 MiB) | 21 | 6.7 MiB |
+
+旧行为不是网络慢，而是缓存抖动：dyld 只访问 16 个不同的 APFS 块，但走了 112
+次 `read_block`；单 chunk 缓存每次都被下一个块顶掉，于是 16 个块反复触发
+105 次 1 MiB 块的下载。给 `DmgReader` 加 32 个解压 chunk 的 LRU 后，字节数
+降到 1/6.9，请求数降到 1/4.8。`extract-ios-userland.py --list` 和
+`--dmg-info` 仍正常，缓存只影响重复读的性能。
+
+### 五、对 P1 根卷的意义
+
+- **单文件路径已经打通**：路径 → drec → inode → extent → decmpfs，五个不同
+  大小的文件都逐字节对上了 inode/decmpfs 的大小。`apfs-get.py --get` 是
+  P1 取 `/usr/lib/dyld`、`/sbin/launchd` 及其依赖的现成入口。
+- **整卷不能按“每个文件重新走一遍路径 + 单 chunk 缓存”硬抽**。OS 卷有
+  1,375,744 个 4 KiB 块（5,635,047,424 字节）、142,313 个文件；单文件 3.5 MiB
+  的元数据开销乘以几十万会回到几百 GiB 级。正确做法是：
+  1. 顺序遍历一次 fs-tree 叶子，按 `(obj_id, type)` 归并 inode/drec/extent，
+     不按路径重复下降；
+  2. 把 32 chunk 的 LRU 扩大或落盘（3,638 个 BLKX run，全放内存约 3.6 GB），
+     顺序读 extent，避免随机 4 KiB 读；
+  3. 按目录流式写文件，跳过大 xattr/稀疏空洞，先只抽 P1 需要的
+     `/usr/lib`、`/sbin`、`/System/Library` 子集。
+- **磁盘预算要算清**：OS DMG 是 4.73 GB（stored），APFS 卷是 5.63 GB，当前
+  `/home/albert` 只剩约 8.4 GB。整卷解压写盘会顶到上限，P1 根卷应分阶段：
+  先解出启动必需的用户态，再按需补库；不要把 4.7 GB 压缩镜像和 5.6 GB
+  解压结果同时留在盘上。

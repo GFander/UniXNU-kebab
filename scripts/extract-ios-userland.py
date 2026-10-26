@@ -43,6 +43,7 @@ import struct
 import sys
 import time
 import urllib.parse
+from collections import OrderedDict
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,6 +75,8 @@ class HttpRangeFile:
         self.retries = retries
         self._conn = None
         self._target = None
+        self.requests = 0
+        self.bytes_fetched = 0
         self._connect()
         self.size = self._probe_size()
         if not self.size:
@@ -115,6 +118,8 @@ class HttpRangeFile:
                 body = resp.read()
                 status = resp.status
                 hdrs = {k.lower(): v for k, v in resp.getheaders()}
+                self.requests += 1
+                self.bytes_fetched += len(body)
             except (http.client.HTTPException, OSError) as exc:
                 self._close()
                 self._connect()
@@ -187,10 +192,15 @@ class LocalRangeFile:
         self._fh = open(self.path, "rb")
         self._fh.seek(0, 2)
         self.size = self._fh.tell()
+        self.requests = 0
+        self.bytes_fetched = 0
 
     def read_at(self, offset, length):
         self._fh.seek(offset)
-        return self._fh.read(length)
+        data = self._fh.read(length)
+        self.requests += 1
+        self.bytes_fetched += len(data)
+        return data
 
     def close(self):
         self._fh.close()
@@ -950,7 +960,7 @@ class DmgReader:
     store it.
     """
 
-    def __init__(self, zipf, entry, koly, tables, codec):
+    def __init__(self, zipf, entry, koly, tables, codec, cache_chunks=32):
         self.zipf = zipf
         self.base = zipf.data_offset(entry) + koly["data_fork_offset"]
         self.codec = codec
@@ -970,8 +980,12 @@ class DmgReader:
                                   r["type"]))
         self.runs.sort(key=lambda r: r[0])
         self._starts = [r[0] for r in self.runs]
-        self._cache_key = None
-        self._cache = b""
+        # A 4 KiB fs-tree node costs one compressed chunk (~1 MiB) to read.
+        # Walkers revisit the same handful of nodes, so keep a small LRU of
+        # decoded chunks; without it one dyld extraction refetched 105 chunks
+        # for 16 distinct APFS blocks.
+        self._cache_chunks = cache_chunks
+        self._cache = OrderedDict()
         if codec == "lzfse" and _lzfse is None:
             raise SourceError(
                 "this DMG carries LZFSE chunks, which need a decoder:\n"
@@ -994,8 +1008,11 @@ class DmgReader:
         return run
 
     def _chunk(self, run):
-        if self._cache_key == run[:2]:
-            return self._cache
+        key = run[:2]
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache.move_to_end(key)
+            return cached
         sector, count, comp_off, comp_len, ctype = run
         want = count * 512
         if comp_len == 0 or ctype in (0x00000000, 0x00000002):
@@ -1023,7 +1040,9 @@ class DmgReader:
         if len(data) != want:
             raise SourceError("chunk at sector %d decoded to %d bytes, "
                               "expected %d" % (sector, len(data), want))
-        self._cache_key, self._cache = run[:2], data
+        self._cache[key] = data
+        while len(self._cache) > self._cache_chunks:
+            self._cache.popitem(last=False)
         return data
 
     def read_at(self, offset, length):
