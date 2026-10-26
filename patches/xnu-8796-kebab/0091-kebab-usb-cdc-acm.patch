@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,903 @@
+@@ -0,0 +1,910 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -864,10 +864,7 @@ new file mode 100644
 +		return;
 +	}
 +	dwc_wr(DALEPENA, (1u << EP0_OUT) | (1u << EP0_IN));
-+	printf("KEBAB USB: step 6 arming setup, first DMA at 0x%llx\n",
-+	    (unsigned long long)(ud.dma_pa + UD_SETUP));
-+	ud_start_setup();
-+	printf("KEBAB USB: step 6 done\n");
++	printf("KEBAB USB: step 6 endpoints enabled\n");
 +
 +	/* tell the controller VBUS is present; the board does not wire OTG here */
 +	if (ud.qs != 0) {
@@ -894,6 +891,16 @@ new file mode 100644
 +	}
 +	printf("KEBAB USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n",
 +	    dwc_rd(DSTS), i, (unsigned long long)ud.dma_pa);
++
++	/*
++	 * Only now, with the controller running, arm the first setup transfer:
++	 * dwc3_gadget_start() also sets RUN_STOP before dwc3_ep0_out_start(), and
++	 * submitting a transfer to a halted controller is not legal.
++	 */
++	printf("KEBAB USB: step 7 arming setup, first DMA at 0x%llx\n",
++	    (unsigned long long)(ud.dma_pa + UD_SETUP));
++	ud_start_setup();
++	printf("KEBAB USB: step 7 done\n");
 +
 +	if (kernel_thread_start((thread_continue_t)ud_thread, NULL, &thread) != KERN_SUCCESS) {
 +		printf("KEBAB USB: no event thread, halting\n");
