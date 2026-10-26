@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1258 @@
+@@ -0,0 +1,1463 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -159,6 +159,7 @@ new file mode 100644
 +/* --------------------------------------------------------------- state */
 +
 +#define LOG_RING_SIZE  16384
++#define EP0_HISTORY_SIZE 32
 +
 +static struct {
 +	vm_offset_t dwc;
@@ -178,6 +179,11 @@ new file mode 100644
 +	bool        want_panic;
 +	uint32_t    panic_owner;
 +	uint32_t    tx_bytes;
++	uint32_t    ep0_progress;  /* packed state, see docs/EP0-PROBE.md */
++	uint32_t    ep0_seq;       /* transitions recorded; low byte packs in */
++	uint32_t    ep0_req;       /* request code of the transfer in flight */
++	volatile uint32_t ep0_history[EP0_HISTORY_SIZE];
++	bool        ep0_probe_printed;
 +	lck_grp_t  *lock_grp;
 +	lck_mtx_t  *lock;
 +	uint32_t    in_head;
@@ -190,6 +196,52 @@ new file mode 100644
 +} ud;
 +
 +enum { EP0_SETUP, EP0_DATA, EP0_DATA_OUT, EP0_STATUS, EP0_WAIT_STATUS };
++
++/* ------------------------------------------------------------- EP0 probe */
++
++/*
++ * One word per transition, packed sequence/phase/request/status (see
++ * docs/EP0-PROBE.md), plus the last 32 of them.  Plain stores only: this is
++ * called from the panic path, where an allocation, a lock or a printf could
++ * deadlock or re-enter the console path being measured.
++ */
++static void
++kebab_usb_ep0_note(uint32_t req, uint32_t phase, uint32_t status)
++{
++	uint32_t seq = ud.ep0_seq + 1;
++	uint32_t word = ((seq & 0xff) << 24) |
++	    ((phase & 0xff) << 16) | ((req & 0xff) << 8) | (status & 0xff);
++
++	ud.ep0_history[seq & (EP0_HISTORY_SIZE - 1)] = word;
++	ud.ep0_progress = word;
++	ud.ep0_seq = seq;
++}
++
++/* bmRequestType/bRequest reduced to the request numbers in the spec. */
++static uint32_t
++kebab_usb_ep0_request(uint8_t type, uint8_t req)
++{
++	if ((type & 0x60) == 0x20) {            /* class */
++		switch (req) {
++		case 0x20: return 5;            /* SET_LINE_CODING */
++		case 0x21: return 6;            /* GET_LINE_CODING */
++		case 0x22: return 7;            /* SET_CONTROL_LINE_STATE */
++		default:   return 255;
++		}
++	}
++	if ((type & 0x60) != 0) {               /* vendor */
++		return 255;
++	}
++	switch (req) {
++	case 5:  return 2;                      /* SET_ADDRESS */
++	case 6:  return 1;                      /* GET_DESCRIPTOR */
++	case 8:  return 3;                      /* GET_CONFIGURATION */
++	case 9:  return 4;                      /* SET_CONFIGURATION */
++	case 0:                                 /* GET_STATUS */
++	case 1:  return 8;                      /* CLEAR_FEATURE */
++	default: return 255;
++	}
++}
 +
 +/* --------------------------------------------------------------- helpers */
 +
@@ -327,6 +379,7 @@ new file mode 100644
 +	ud.configured = false;
 +	ud.bulk_in_busy = false;
 +	ud_start_setup();
++	kebab_usb_ep0_note(0, 17, 0);
 +}
 +
 +static void
@@ -454,6 +507,13 @@ new file mode 100644
 +	ud.configured = true;
 +	printf("KEBAB USB: configured, notify=%u bulk_out=%u bulk_in=%u\n",
 +	    EP_NOTIFY, EP_BULK_OUT, EP_BULK_IN);
++	if (!ud.ep0_probe_printed) {
++		uint32_t v = ud.ep0_progress;
++
++		ud.ep0_probe_printed = true;
++		printf("KEBAB EP0 PROBE: progress 0x%08x seq %u req %u phase %u status %u\n",
++		    v, (v >> 24) & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, v & 0xff);
++	}
 +	ud_to_dev(UD_BULKOUT, 512);
 +	ud_start(UD_TRB_BULKOUT, EP_BULK_OUT, UD_BULKOUT, 512, TRBCTL_NORMAL);
 +}
@@ -600,6 +660,8 @@ new file mode 100644
 +	uint32_t n = 0;
 +	bool ok = true;
 +
++	ud.ep0_req = kebab_usb_ep0_request(type, req);
++	kebab_usb_ep0_note(ud.ep0_req, 1, 0);
 +	ud.data_in = (type & 0x80) != 0;
 +	if (ud.events < 400) {
 +		printf("KEBAB USB: setup %02x/%02x value 0x%04x len %u\n",
@@ -630,7 +692,10 @@ new file mode 100644
 +			 * OUT capacity aligned to the endpoint maximum packet size, which is
 +			 * why submitting a bare seven-byte transfer never completed.
 +			 */
-+			if (ud_start(UD_TRB_OUT_DATA, EP0_OUT, UD_DATA, 64, TRBCTL_DATA)) {
++			int rc = ud_start(UD_TRB_OUT_DATA, EP0_OUT, UD_DATA, 64,
++			    TRBCTL_DATA);
++			kebab_usb_ep0_note(ud.ep0_req, 2, rc ? 2 : 0);
++			if (rc) {
 +				printf("KEBAB USB: SET_LINE_CODING data stage rejected\n");
 +				ud_ep_stall(EP0_OUT);
 +			}
@@ -724,8 +789,11 @@ new file mode 100644
 +	}
 +	if (ud.data_in && n > 0) {
 +		uint32_t chunk = (length < n) ? length : n;
++		int rc;
++
 +		ud.state = EP0_DATA;
-+		ud_start(UD_TRB_IN, EP0_IN, UD_DATA, chunk, TRBCTL_DATA);
++		rc = ud_start(UD_TRB_IN, EP0_IN, UD_DATA, chunk, TRBCTL_DATA);
++		kebab_usb_ep0_note(ud.ep0_req, 2, rc ? 2 : 0);
 +		return;
 +	}
 +	ud_status_stage(false);
@@ -798,6 +866,7 @@ new file mode 100644
 +	if (ev & 1) {                           /* device event */
 +		uint32_t type = (ev >> 8) & 0xf;
 +		if (type == 1) {                /* reset */
++			kebab_usb_ep0_note(0, 16, 0);
 +			dwc_wr(DCFG, dwc_rd(DCFG) & ~DCFG_ADDR_MASK);
 +			printf("KEBAB USB: bus reset, rebuilding EP0\n");
 +			ud_ep0_rebuild();
@@ -848,25 +917,40 @@ new file mode 100644
 +			break;
 +		case EP0_DATA:
 +		case EP0_DATA_OUT:
++			kebab_usb_ep0_note(ud.ep0_req, 3, 0);
 +			ud_status_stage(true);
 +			break;
 +		case EP0_STATUS:
++			kebab_usb_ep0_note(ud.ep0_req, 6, 0);
 +			ud_start_setup();
++			kebab_usb_ep0_note(ud.ep0_req, 7, 0);
 +			break;
 +		default:
 +			break;
 +		}
 +		return;
 +	}
-+	if (type == 3 && status == 2 && ud.state == EP0_WAIT_STATUS) {
++	if (type == 3 && status == 2) {
++		bool ready = (ud.state == EP0_WAIT_STATUS);
++		int rc;
++
++		/*
++		 * Record the arrival even when the state machine is not waiting for it:
++		 * an out-of-order XferNotReady is exactly the failure this has to show.
++		 */
++		kebab_usb_ep0_note(0, 4, ready ? 0 : 5);
++		if (!ready) {
++			return;
++		}
 +		/*
 +		 * The controller is ready for the status stage and its reported endpoint
 +		 * says which direction it wants; STATUS2 is the two-stage status used
 +		 * when the request itself carried no data.
 +		 */
 +		ud.state = EP0_STATUS;
-+		ud_start(ep == EP0_IN ? UD_TRB_IN : UD_TRB_OUT, ep, UD_DATA, 0,
++		rc = ud_start(ep == EP0_IN ? UD_TRB_IN : UD_TRB_OUT, ep, UD_DATA, 0,
 +		    ud.ep0_status3 ? TRBCTL_STATUS3 : TRBCTL_STATUS2);
++		kebab_usb_ep0_note(ud.ep0_req, 5, rc ? 2 : 0);
 +	}
 +}
 +
@@ -1234,6 +1318,106 @@ new file mode 100644
 +	return ud.running && ud.configured;
 +}
 +
++/* ---------------------------------------------------------- EP0 probe I/O */
++
++#define EP0_REPORT_SIZE 2048
++
++static char ep0_report[EP0_REPORT_SIZE];
++
++/* Format the current word and the whole history ring, four entries per line. */
++static uint32_t
++kebab_usb_ep0_format(void)
++{
++	uint32_t v = ud.ep0_progress;
++	uint32_t seq = ud.ep0_seq;
++	uint32_t used;
++	int n;
++
++	n = snprintf(ep0_report, sizeof(ep0_report),
++	    "KEBAB EP0 PROBE: progress 0x%08x seq %u req %u phase %u status %u\n",
++	    v, (v >> 24) & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, v & 0xff);
++	if (n <= 0) {
++		return 0;
++	}
++	used = (uint32_t)n;
++	if (used >= EP0_REPORT_SIZE) {
++		used = EP0_REPORT_SIZE - 1;
++	}
++
++	for (uint32_t i = 0; i < EP0_HISTORY_SIZE; i += 4) {
++		uint32_t slot[4];
++		uint32_t word[4];
++
++		for (uint32_t k = 0; k < 4; k++) {
++			slot[k] = (seq + 1 + i + k) & (EP0_HISTORY_SIZE - 1);
++			word[k] = ud.ep0_history[slot[k]];
++		}
++		n = snprintf(ep0_report + used, EP0_REPORT_SIZE - used,
++		    "KEBAB EP0 PROBE: [%02u]0x%08x [%02u]0x%08x [%02u]0x%08x [%02u]0x%08x\n",
++		    slot[0], word[0], slot[1], word[1], slot[2], word[2],
++		    slot[3], word[3]);
++		if (n <= 0) {
++			break;
++		}
++		if ((uint32_t)n >= (uint32_t)(EP0_REPORT_SIZE - used)) {
++			used = EP0_REPORT_SIZE - 1;
++			break;
++		}
++		used += (uint32_t)n;
++	}
++	return used;
++}
++
++/*
++ * Push the report out on bulk IN directly.  It must not go through
++ * kebab_usb_log(): the log ring is what the probe is watching, and its panic
++ * flush would start a second transfer over the same buffer.
++ */
++static void
++kebab_usb_ep0_probe_send(void)
++{
++	uint32_t len = kebab_usb_ep0_format();
++
++	for (uint32_t off = 0; off < len; off += 511) {
++		uint32_t chunk = len - off;
++		bool done = false;
++
++		if (chunk > 511) {
++			chunk = 511;
++		}
++		memcpy((void *)(ud.dma + UD_BULKIN), ep0_report + off, chunk);
++		ud.bulk_in_busy = false;
++		if (ud_start(UD_TRB_BULKIN, EP_BULK_IN, UD_BULKIN, chunk,
++		    TRBCTL_NORMAL)) {
++			return;
++		}
++		for (int i = 0; i < 300 && !done; i++) {
++			uint32_t count = dwc_rd(GEVNTCOUNT) & 0xfffc;
++
++			if (count && count <= UD_EVT_SIZE) {
++				ud_from_dev(UD_EVT, UD_EVT_SIZE);
++				for (uint32_t k = 0; k < count; k += 4) {
++					uint32_t ev = *(volatile uint32_t *)
++					    (ud.dma + UD_EVT + ud.evt_pos);
++					ud.evt_pos = (ud.evt_pos + 4) % UD_EVT_SIZE;
++					if (((ev >> 1) & 0x1f) == EP_BULK_IN &&
++					    ((ev >> 6) & 0xf) == 1) {
++						done = true;
++					}
++				}
++				dwc_wr(GEVNTCOUNT, count);
++			}
++			if (!done) {
++				delay(100);
++			}
++		}
++		if (!done) {
++			return;
++		}
++		ud.tx_bytes += chunk;
++	}
++}
++
 +
 +/*
 + * Keep the pipe alive after a panic instead of letting the machine halt with a dead
@@ -1244,6 +1428,8 @@ new file mode 100644
 +void
 +kebab_usb_panic_spin(void)
 +{
++	bool probe_sent = false;
++
 +	for (;;) {
 +		uint32_t count = dwc_rd(GEVNTCOUNT) & 0xfffc;
 +
@@ -1256,8 +1442,27 @@ new file mode 100644
 +			}
 +			dwc_wr(GEVNTCOUNT, count);
 +		}
-+		ud.bulk_in_busy = false;
-+		ud_pump_log();
++		if (ud.log_head != ud.log_tail) {
++			ud.bulk_in_busy = false;
++			ud_pump_log();
++		}
++		/*
++		 * Once the ring is empty the readings go out on their own transfer
++		 * rather than through the ring: the ring is on the path being measured,
++		 * and re-entering its panic flush here is the recursion this avoids.
++		 * The single-owner flag keeps a printf from ud_start() from starting a
++		 * second transfer over the buffer while this one is in flight.
++		 */
++		if (!probe_sent && ud.configured && !ud.bulk_in_busy &&
++		    ud.log_head == ud.log_tail) {
++			uint32_t expect = 0;
++
++			if (os_atomic_cmpxchg(&ud.panic_owner, expect, 1u, acquire)) {
++				probe_sent = true;
++				kebab_usb_ep0_probe_send();
++				os_atomic_store(&ud.panic_owner, 0u, release);
++			}
++		}
 +		delay(1000);
 +	}
 +}
