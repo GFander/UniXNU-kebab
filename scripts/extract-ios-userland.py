@@ -212,6 +212,36 @@ def open_source(src, timeout=60, retries=6):
     return LocalRangeFile(src)
 
 
+class LocalDmg:
+    """A DMG that is already on disk, wearing the same interface as RemoteZip.
+
+    `--dmg-info` and `--dmg-probe` only ever ask the archive for a member's
+    data offset and then for byte ranges, so one extracted DMG can be
+    inspected by exactly the same code.  That matters for members the archive
+    stores *deflated*: a deflate stream cannot be seeked into, so their `koly`
+    trailer is out of reach of a range request and the member has to be
+    inflated first.  The SystemOS cryptex is such a member.
+    """
+
+    local = True
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.src = LocalRangeFile(self.path)
+        self.entry = Entry(name=self.path.name, method=0, crc=0,
+                           csize=self.src.size, usize=self.src.size,
+                           header_offset=0)
+
+    def data_offset(self, entry):
+        return 0
+
+    def find(self, name):
+        return self.entry
+
+    def largest_dmg(self):
+        return self.entry
+
+
 # --------------------------------------------------------------------------
 # ZIP, read through the byte source
 # --------------------------------------------------------------------------
@@ -765,11 +795,13 @@ def parse_apfs_volume(blk):
         return None
     fs_index = struct.unpack("<I", blk[36:40])[0]
     num_files, num_dirs = struct.unpack("<QQ", blk[184:200])
+    num_symlinks = struct.unpack("<Q", blk[200:208])[0]
     vol_uuid = blk[240:256].hex()
     name = blk[704:960].split(b"\0")[0].decode("utf-8", "replace")
     name = "".join(c if c.isprintable() else "?" for c in name).strip()
     return {"fs_index": fs_index, "num_files": num_files,
-            "num_dirs": num_dirs, "uuid": vol_uuid, "name": name}
+            "num_dirs": num_dirs, "num_symlinks": num_symlinks,
+            "uuid": vol_uuid, "name": name}
 
 
 def parse_hfsplus(img, base):
@@ -807,6 +839,548 @@ def scan_apfs_volume(reader, base, block_size, limit):
                 return start, vol
         pos = win.find(b"APSB", pos + 1)
     return None, None
+
+
+# --------------------------------------------------------------------------
+# APFS from a bare container
+# --------------------------------------------------------------------------
+APFS_BS = 4096
+APFS_TYPE_INODE = 3
+APFS_TYPE_XATTR = 4
+APFS_TYPE_FILE_EXTENT = 8
+APFS_TYPE_DIR_REC = 9
+APFS_ROOT_DIR = 2
+APFS_OBJ_BTREE_NODE = 0x3
+APFS_OBJ_FSTREE = 0xE          # o_subtype of every fs-tree node
+DECMPFS_MAGIC = 0x636D7066
+CMP_TYPE_RAW_XATTR = 1
+CMP_TYPE_ZLIB_XATTR = 3
+CMP_TYPE_ZLIB_RSRC = 4
+CMP_TYPE_LZVN_XATTR = 7
+CMP_TYPE_LZVN_RSRC = 8
+CMP_TYPE_RAW_XATTR2 = 9
+CMP_TYPE_RAW_RSRC = 10
+CMP_TYPE_LZFSE_XATTR = 11
+CMP_TYPE_LZFSE_RSRC = 12
+CMP_TYPE_LZBITMAP_XATTR = 13
+CMP_TYPE_LZBITMAP_RSRC = 14
+DECMPFS_CHUNK = 65536
+DECMPFS_NAMES = {3: "zlib xattr", 4: "zlib resource fork",
+                 7: "LZVN xattr", 8: "LZVN resource fork",
+                 11: "LZFSE xattr", 12: "LZFSE resource fork",
+                 13: "LZBITMAP xattr", 14: "LZBITMAP resource fork"}
+
+
+# ---- LZBITMAP ('ZBM\x09') ------------------------------------------------
+# A Python port of the decompressor from libzbitmap by Ernesto A. Fernandez
+# (MIT), the same code linux-apfs-rw carries.  Apple's own implementation is
+# closed; this is the reference reverse-engineering.  One ZBM buffer holds
+# several chunks of at most 32 KiB each, so one 64 KiB decmpfs chunk is two.
+ZBM_MAGIC = b"ZBM\x09"
+ZBM_MAX_DECMP_CHUNK = 0x8000
+ZBM_BITMAP_COUNT = 12
+ZBM_BITMAP_BASE = 3
+ZBM_BITMAP_BYTECNT = 17
+ZBM_MAX_PERIOD_BYTECNT = 2
+
+
+def _zbm_u24(buf, i):
+    return buf[i] | (buf[i + 1] << 8) | (buf[i + 2] << 16)
+
+
+class ZbmNibblePtr:
+    __slots__ = ("buf", "pos", "nibble")
+
+    def __init__(self, buf, pos):
+        self.buf = buf
+        self.pos = pos
+        self.nibble = 0
+
+    def read(self, limit):
+        if self.pos >= limit:
+            raise SourceError("LZBITMAP: nibble read past end")
+        if self.nibble == 0:
+            val = self.buf[self.pos] & 0xF
+            self.nibble = 1
+        else:
+            val = (self.buf[self.pos] >> 4) & 0xF
+            self.nibble = 0
+            self.pos += 1
+        return val
+
+    def rewind(self):
+        if self.nibble == 0:
+            self.nibble = 1
+            self.pos -= 1
+        else:
+            self.nibble = 0
+
+
+def _zbm_read_bitmaps(chunk):
+    if len(chunk) < ZBM_BITMAP_BYTECNT:
+        raise SourceError("LZBITMAP: chunk too short for bitmaps")
+    start = len(chunk) - ZBM_BITMAP_BYTECNT
+    state = [0]     # bit position
+
+    def bit():
+        val = (chunk[start + (state[0] >> 3)] >> (state[0] & 7)) & 1
+        state[0] += 1
+        return val
+
+    out = []
+    for _ in range(ZBM_BITMAP_COUNT):
+        bmp = 0
+        for i in range(8):
+            bmp |= bit() << i
+        pbc = 0
+        for i in range(2):
+            pbc |= bit() << i
+        if pbc > ZBM_MAX_PERIOD_BYTECNT:
+            raise SourceError("LZBITMAP: bad period byte count")
+        out.append((bmp, pbc))
+    return out
+
+
+def _zbm_decompress_chunk(chunk, decmp_len, out):
+    if len(chunk) < 15:
+        raise SourceError("LZBITMAP: short compressed chunk")
+    meta1 = _zbm_u24(chunk, 6)
+    meta2 = _zbm_u24(chunk, 9)
+    meta3 = _zbm_u24(chunk, 12)
+    if meta1 >= len(chunk) or meta2 >= len(chunk) or meta3 >= len(chunk):
+        raise SourceError("LZBITMAP: metadata offset out of range")
+    end = len(chunk)
+    data = 15
+    p1, p2 = meta1, meta2
+    nib = ZbmNibblePtr(chunk, meta3)
+    bitmaps = _zbm_read_bitmaps(chunk)
+    prewritten = len(out)
+    period = 8
+    written = 0
+
+    while written < decmp_len:
+        bmp_num = nib.read(end)
+        if decmp_len - written <= 8:
+            repeat = 1
+        else:
+            val = nib.read(end)
+            if val != 0xF:
+                nib.rewind()
+                repeat = 1
+            else:
+                total = 4
+                while val == 0xF:
+                    val = nib.read(end)
+                    total += val
+                    if total > 0xFFFF:
+                        raise SourceError("LZBITMAP: repetition overflow")
+                repeat = total
+        for _ in range(repeat):
+            if bmp_num == 0xF:
+                raise SourceError("LZBITMAP: invalid bitmap number")
+            if bmp_num > ZBM_MAX_PERIOD_BYTECNT:
+                idx = bmp_num - ZBM_BITMAP_BASE
+                if idx >= ZBM_BITMAP_COUNT:
+                    raise SourceError("LZBITMAP: bitmap index out of range")
+                bmp, pbc = bitmaps[idx]
+            else:
+                if p2 >= end:
+                    raise SourceError("LZBITMAP: truncated metadata 2")
+                bmp = chunk[p2]
+                pbc = bmp_num
+                p2 += 1
+            if pbc:
+                if p1 + pbc > end:
+                    raise SourceError("LZBITMAP: truncated metadata 1")
+                period = int.from_bytes(chunk[p1:p1 + pbc], "little")
+                p1 += pbc
+            if period == 0:
+                raise SourceError("LZBITMAP: zero period")
+            for i in range(8):
+                if written == decmp_len:
+                    break
+                if bmp & (1 << i):
+                    if data >= end:
+                        raise SourceError("LZBITMAP: truncated data area")
+                    out.append(chunk[data])
+                    data += 1
+                else:
+                    if prewritten + written < period:
+                        raise SourceError("LZBITMAP: period before stream start")
+                    out.append(out[-period])
+                written += 1
+
+
+def zbm_decompress(src):
+    """Decompress one 'ZBM\\x09' buffer (one decmpfs chunk) to bytes."""
+    if not src.startswith(ZBM_MAGIC):
+        raise SourceError("LZBITMAP: bad magic")
+    pos = 4
+    out = bytearray()
+    while True:
+        if pos + 6 > len(src):
+            raise SourceError("LZBITMAP: truncated chunk header")
+        clen = _zbm_u24(src, pos)
+        dlen = _zbm_u24(src, pos + 3)
+        if clen > len(src) - pos:
+            raise SourceError("LZBITMAP: chunk length past end of buffer")
+        if dlen > ZBM_MAX_DECMP_CHUNK:
+            raise SourceError("LZBITMAP: chunk larger than 32 KiB")
+        chunk = src[pos:pos + clen]
+        if clen == dlen + 6:
+            out += chunk[6:6 + dlen]
+        else:
+            _zbm_decompress_chunk(chunk, dlen, out)
+        pos += clen
+        if dlen == 0:
+            return bytes(out)
+
+
+def lzfse_module():
+    try:
+        import lzfse
+        return lzfse
+    except ImportError:
+        return None
+
+
+def lzvn_decode(data, expected):
+    """Decode one raw LZVN chunk by wrapping it in a one-block LZFSE stream."""
+    mod = lzfse_module()
+    if mod is None:
+        raise SourceError("decmpfs LZVN needs the 'lzfse' Python module")
+    out = mod.decompress(b"bvxn" + struct.pack("<II", expected, len(data))
+                         + data + b"bvx$")
+    if len(out) != expected:
+        raise SourceError("LZVN decoded %d bytes, expected %d"
+                          % (len(out), expected))
+    return out
+
+
+def lzfse_decode(data, expected):
+    mod = lzfse_module()
+    if mod is None:
+        raise SourceError("decmpfs LZFSE needs the 'lzfse' Python module")
+    out = mod.decompress(data)
+    if len(out) != expected:
+        raise SourceError("LZFSE decoded %d bytes, expected %d"
+                          % (len(out), expected))
+    return out
+
+
+def decode_decmpfs_chunk(ctype, blob, expected):
+    """Decode one 64 KiB chunk of a compressed resource fork."""
+    if ctype == CMP_TYPE_ZLIB_RSRC:
+        out = blob[1:] if blob[:1] == b"\xff" else zlib.decompress(blob)
+    elif ctype == CMP_TYPE_LZVN_RSRC:
+        out = blob[1:] if blob[:1] == b"\x06" else lzvn_decode(blob, expected)
+    elif ctype == CMP_TYPE_RAW_RSRC:
+        out = blob[1:] if blob[:1] == b"\xcc" else blob
+    elif ctype == CMP_TYPE_LZFSE_RSRC:
+        out = blob[1:] if blob[:1] == b"\xff" else lzfse_decode(blob, expected)
+    elif ctype == CMP_TYPE_LZBITMAP_RSRC:
+        if blob[:1] == b"\x5a":
+            out = zbm_decompress(blob)
+        elif blob and (blob[0] & 0x0F) == 0x0F:
+            out = blob[1:]
+        else:
+            raise SourceError("LZBITMAP: unknown chunk prefix %r" % blob[:1])
+    else:
+        raise SourceError("unsupported decmpfs resource type %d" % ctype)
+    if len(out) != expected:
+        raise SourceError("decmpfs chunk decoded to %d bytes, expected %d"
+                          % (len(out), expected))
+    return out
+
+
+def decompress_resource(ctype, rsrc, usize):
+    """Decode a decmpfs resource fork (type 4 table, or absolute type 8/10/12)."""
+    if usize == 0:
+        return b""
+    out = bytearray()
+    if ctype == CMP_TYPE_ZLIB_RSRC:
+        if len(rsrc) < 0x108:
+            raise SourceError("short zlib resource fork")
+        if struct.unpack(">I", rsrc[:4])[0] != 0x100:
+            raise SourceError("unexpected zlib resource-fork header size")
+        count = struct.unpack("<I", rsrc[0x104:0x108])[0]
+        if count != (usize + DECMPFS_CHUNK - 1) // DECMPFS_CHUNK:
+            raise SourceError("resource fork has %d chunks, expected %d"
+                              % (count, (usize + DECMPFS_CHUNK - 1)
+                                 // DECMPFS_CHUNK))
+        for i in range(count):
+            off, clen = struct.unpack("<II", rsrc[0x108 + i * 8:
+                                                0x110 + i * 8])
+            blob = rsrc[0x104 + off:0x104 + off + clen]
+            if len(blob) != clen:
+                raise SourceError("short decmpfs chunk %d" % i)
+            out += decode_decmpfs_chunk(
+                ctype, blob, min(DECMPFS_CHUNK, usize - len(out)))
+        return bytes(out)
+
+    count = (usize + DECMPFS_CHUNK - 1) // DECMPFS_CHUNK
+    if len(rsrc) < 4 * (count + 1):
+        raise SourceError("short absolute-offset chunk table")
+    offs = [struct.unpack("<I", rsrc[4 * i:4 * i + 4])[0]
+            for i in range(count + 1)]
+    if offs != sorted(offs):
+        raise SourceError("decmpfs chunk offsets are not ascending")
+    for i in range(count):
+        out += decode_decmpfs_chunk(
+            ctype, rsrc[offs[i]:offs[i + 1]],
+            min(DECMPFS_CHUNK, usize - len(out)))
+    return bytes(out)
+
+
+def parse_inode_val(val):
+    """Decode the fixed part of a j_inode_val_t (92 bytes)."""
+    if len(val) < 92:
+        return None
+    return {
+        "internal_flags": struct.unpack("<Q", val[48:56])[0],
+        "bsd_flags": struct.unpack("<I", val[68:72])[0],
+        "mode": struct.unpack("<H", val[80:82])[0],
+        "size": struct.unpack("<Q", val[84:92])[0],
+    }
+
+
+def inode_dstream_size(val):
+    """Return j_dstream_t.size from an inode's xfields, or None."""
+    if len(val) < 96:
+        return None
+    count, _used = struct.unpack("<HH", val[92:96])
+    pos = 96
+    for _ in range(count):
+        if pos + 4 > len(val):
+            break
+        xt, _xf, xs = struct.unpack("<BBH", val[pos:pos + 4])
+        data = val[pos + 4:pos + 4 + xs]
+        if xt == 8 and len(data) >= 40:      # XFIELD_TYPE_DSTREAM
+            return struct.unpack("<Q", data[:8])[0]
+        pos += 4 + xs
+        if xs % 8:
+            pos += 8 - (xs % 8)
+    # Some inodes carry the name xfield with an extra word, so the fixed walk
+    # can miss the dstream; fall back to the shape test apfs-get.py uses.
+    for pos in range(92, len(val) - 39, 4):
+        size, alloced, crypto, written, read = struct.unpack(
+            "<QQQQQ", val[pos:pos + 40])
+        if not (0 < size <= alloced <= (1 << 40)):
+            continue
+        if alloced % APFS_BS or crypto:
+            continue
+        if alloced != ((size + APFS_BS - 1) // APFS_BS) * APFS_BS:
+            continue
+        if written > alloced or read > alloced:
+            continue
+        return size
+    return None
+
+
+class RawApfsImage:
+    """Path lookup inside a bare APFS container -- no UDIF, no omap.
+
+    A cryptex member is not a disk image in the UDIF sense: inflated, it *is*
+    an APFS container, so block N sits at byte N*4096 and nothing has to be
+    translated.  What is more, every fs-tree node is a physical object whose
+    o_subtype is OBJECT_TYPE_FSTREE (0xe), so the leaves can be found by
+    reading block headers.  The container's omap B-tree -- the structure that
+    blocks the OS DMG reader -- is never needed to reach a path or an extent.
+    """
+
+    def __init__(self, src, size, window=8 << 20):
+        self.src = src
+        self.size = size
+        head = src.read_at(0, APFS_BS)
+        if len(head) < 1024 or head[32:36] != b"NXSB":
+            raise SourceError("no APFS container superblock at offset 0")
+        self.block_size, self.block_count = struct.unpack("<IQ", head[36:48])
+        self.uuid = head[72:88].hex()
+        self.children = {}       # dir id -> {name: child id}
+        self.extents = {}        # file id -> [(logical, phys, length)]
+        self.inodes = {}         # file id -> fixed inode fields + raw value
+        self.xattrs = {}         # file id -> {name: {kind, data/oid+size}}
+        self.leaves = 0
+        self.records = 0
+        self._harvest(window)
+
+    def _harvest(self, window):
+        best_xid = {}
+        bs = self.block_size or APFS_BS
+        for base in range(0, self.size, window):
+            buf = self.src.read_at(base, min(window, self.size - base))
+            for i in range(0, len(buf) - bs + 1, bs):
+                blk = buf[i:i + bs]
+                if (struct.unpack("<I", blk[24:28])[0] & 0xFFFF
+                        != APFS_OBJ_BTREE_NODE):
+                    continue
+                if struct.unpack("<I", blk[28:32])[0] != APFS_OBJ_FSTREE:
+                    continue
+                flags, _level, nkeys = struct.unpack("<HHI", blk[32:40])
+                if not (flags & 0x2) or not (0 < nkeys < 4000) or (flags & 0x4):
+                    continue
+                self.leaves += 1
+                xid = struct.unpack("<Q", blk[16:24])[0]
+                tlen = struct.unpack("<H", blk[42:44])[0]
+                data = blk[56:]
+                # a root node carries a 40-byte btree_info_t footer, so its
+                # value area ends short of the block end (see IOS-USERLAND.md)
+                val_end = bs - 40 if (flags & 0x1) else bs
+                for k in range(nkeys):
+                    koff, klen, voff, vlen = struct.unpack(
+                        "<HHHH", data[k * 8:k * 8 + 8])
+                    key = data[tlen + koff:tlen + koff + klen]
+                    if len(key) < 8 or len(key) < klen:
+                        continue
+                    self.records += 1
+                    j = struct.unpack("<Q", key[:8])[0]
+                    start = val_end - voff
+                    self._record(j >> 60, j & 0x0FFFFFFFFFFFFFFF, key,
+                                 blk[start:start + vlen], xid, best_xid)
+
+    def _record(self, typ, obj, key, val, xid, best_xid):
+        if typ == APFS_TYPE_INODE:
+            ino = parse_inode_val(val)
+            if ino is None:
+                return
+            old = self.inodes.get(obj)
+            if old is not None and old["xid"] > xid:
+                return
+            ino["xid"] = xid
+            ino["val"] = val
+            self.inodes[obj] = ino
+        elif typ == APFS_TYPE_DIR_REC:
+            nlen = struct.unpack("<I", key[8:12])[0] & 0x3FF
+            if nlen < 2 or 12 + nlen > len(key) or len(val) < 8:
+                return
+            name = key[12:12 + nlen - 1]
+            if not all(32 <= c < 127 for c in name) or key[11 + nlen] != 0:
+                return
+            name = name.decode()
+            if best_xid.get((obj, name), -1) > xid:
+                return
+            best_xid[(obj, name)] = xid
+            self.children.setdefault(obj, {})[name] = \
+                struct.unpack("<Q", val[:8])[0]
+        elif typ == APFS_TYPE_FILE_EXTENT:
+            if len(key) < 16 or len(val) < 24:
+                return
+            logical = struct.unpack("<Q", key[8:16])[0]
+            if best_xid.get((obj, logical), -1) > xid:
+                return
+            best_xid[(obj, logical)] = xid
+            laf, pblk, _ = struct.unpack("<QQQ", val[:24])
+            self.extents.setdefault(obj, []).append(
+                (logical, pblk, laf & 0x00FFFFFFFFFFFF))
+        elif typ == APFS_TYPE_XATTR:
+            if len(key) < 10 or len(val) < 4:
+                return
+            nlen = struct.unpack("<H", key[8:10])[0]
+            name = (key[10:10 + nlen].split(b"\0")[0]
+                    .decode("utf-8", "replace"))
+            flags, dlen = struct.unpack("<HH", val[:4])
+            if flags & 1:                       # XATTR_DATA_STREAM
+                if len(val) < 52:
+                    return
+                self.xattrs.setdefault(obj, {})[name] = {
+                    "kind": "stream",
+                    "oid": struct.unpack("<Q", val[4:12])[0],
+                    "size": struct.unpack("<Q", val[12:20])[0]}
+            else:
+                self.xattrs.setdefault(obj, {})[name] = {
+                    "kind": "inline", "data": val[4:4 + dlen]}
+
+    def lookup(self, path):
+        """Return (file id, resolved prefix, missing component)."""
+        cur, trail = APFS_ROOT_DIR, []
+        for part in [p for p in path.split("/") if p]:
+            nxt = self.children.get(cur, {}).get(part)
+            if nxt is None:
+                return None, "/" + "/".join(trail), part
+            trail.append(part)
+            cur = nxt
+        return cur, "/" + "/".join(trail), None
+
+    def is_dir(self, fid):
+        return fid in self.children or (
+            fid in self.inodes and self.inodes[fid]["mode"] & 0xF000 == 0x4000)
+
+    def is_compressed(self, fid):
+        return self.decmpfs_info(fid) is not None
+
+    def decmpfs_info(self, fid):
+        xa = self.xattrs.get(fid, {}).get("com.apple.decmpfs")
+        if xa is None or xa["kind"] != "inline" or len(xa["data"]) < 16:
+            return None
+        magic, ctype, usize = struct.unpack("<IIQ", xa["data"][:16])
+        if magic != DECMPFS_MAGIC:
+            return None
+        return {"type": ctype, "size": usize, "attr": xa["data"][16:]}
+
+    def decompress(self, fid, dec):
+        ctype, usize, attr = dec["type"], dec["size"], dec["attr"]
+        if ctype in (CMP_TYPE_RAW_XATTR, CMP_TYPE_RAW_XATTR2):
+            out = attr
+        elif ctype == CMP_TYPE_ZLIB_XATTR:
+            out = attr[1:] if attr[:1] == b"\xff" else zlib.decompress(attr)
+        elif ctype == CMP_TYPE_LZVN_XATTR:
+            out = attr[1:] if attr[:1] == b"\x06" else lzvn_decode(attr, usize)
+        elif ctype == CMP_TYPE_LZFSE_XATTR:
+            out = attr[1:] if attr[:1] == b"\xff" else lzfse_decode(attr, usize)
+        elif ctype == CMP_TYPE_LZBITMAP_XATTR:
+            out = zbm_decompress(attr)
+        elif ctype in (CMP_TYPE_ZLIB_RSRC, CMP_TYPE_LZVN_RSRC,
+                       CMP_TYPE_RAW_RSRC, CMP_TYPE_LZFSE_RSRC,
+                       CMP_TYPE_LZBITMAP_RSRC):
+            rv = self.xattrs.get(fid, {}).get("com.apple.ResourceFork")
+            if rv is None or rv["kind"] != "stream":
+                raise SourceError("inode %d: decmpfs resource fork is missing"
+                                  % fid)
+            rsrc = self._read_extents(rv["oid"])[:rv["size"]]
+            if len(rsrc) != rv["size"]:
+                raise SourceError("inode %d: resource fork is %d bytes, "
+                                  "expected %d" % (fid, len(rsrc), rv["size"]))
+            out = decompress_resource(ctype, rsrc, usize)
+        else:
+            raise SourceError("inode %d: unsupported decmpfs type %d"
+                              % (fid, ctype))
+        if len(out) != usize:
+            raise SourceError("inode %d: decmpfs decoded %d bytes, expected %d"
+                              % (fid, len(out), usize))
+        return bytes(out)
+
+    def _read_extents(self, fid):
+        out = bytearray()
+        for logical, phys, length in sorted(self.extents.get(fid, [])):
+            if logical > len(out):
+                out += b"\0" * (logical - len(out))     # sparse hole
+            data = self.src.read_at(phys * self.block_size, length)
+            if logical < len(out):
+                data = data[len(out) - logical:]
+            out += data
+        return bytes(out)
+
+    def read_file(self, fid):
+        dec = self.decmpfs_info(fid) if self.is_compressed(fid) else None
+        if dec is not None:
+            return self.decompress(fid, dec)
+        out = bytearray(self._read_extents(fid))
+        size = self.size_of(fid)
+        if len(out) < size:
+            out += b"\0" * (size - len(out))
+        del out[size:]
+        return bytes(out)
+
+    def size_of(self, fid):
+        """Logical size: inode, then its dstream, then extent bytes."""
+        ino = self.inodes.get(fid)
+        if ino:
+            if ino["size"]:
+                return ino["size"]
+            ds = inode_dstream_size(ino["val"])
+            if ds is not None:
+                return ds
+        return sum(e[2] for e in self.extents.get(fid, []))
 
 
 # --------------------------------------------------------------------------
@@ -1061,6 +1635,122 @@ class DmgReader:
         return bytes(out)
 
 
+def cmd_apfs_info(zipf, entry, args, probe=False):
+    """A member with no UDIF trailer: is it a bare APFS container?"""
+    base = zipf.data_offset(entry)
+    head = zipf.src.read_at(base, APFS_BS)
+    if len(head) < 1024 or head[32:36] != b"NXSB":
+        print("  no 'koly' trailer and no 'NXSB' at offset 0: this member is "
+              "neither a UDIF image nor a bare APFS container", file=sys.stderr)
+        return 2
+
+    print("  no UDIF wrapper: the member is a bare APFS container, not a DMG")
+    print("  (so there is no koly trailer, no BLKX table, no GPT and no "
+          "sector count to report)")
+    block_size, block_count = struct.unpack("<IQ", head[36:48])
+    print("  container superblock at offset 0: block size %d, %s blocks "
+          "(%s bytes), uuid %s"
+          % (block_size, human(block_count),
+             human(block_size * block_count), head[72:88].hex()))
+    print("  the payload is block-addressable at %d bytes: block N lives at "
+          "byte N*%d" % (block_size, block_size))
+
+    rel, vol = scan_apfs_volume(zipf.src, base, block_size, 64 << 20)
+    if vol:
+        print("  volume superblock at byte %s: %r, %s files, %s dirs, %s "
+              "symlinks, uuid %s"
+              % (human(rel), vol["name"], human(vol["num_files"]),
+                 human(vol["num_dirs"]), human(vol.get("num_symlinks", 0)),
+                 vol["uuid"]))
+
+    if not probe:
+        return 0
+
+    try:
+        img = RawApfsImage(zipf.src, entry.usize)
+    except SourceError as exc:
+        print("  probe: %s" % exc, file=sys.stderr)
+        return 2
+    print("  fs-tree: %d leaf nodes, %d records, %d directories, %d files "
+          "with extents, %d inodes"
+          % (img.leaves, img.records, len(img.children), len(img.extents),
+             len(img.inodes)))
+
+    rc = 0
+    if args.apfs_ls:
+        fid, prefix, missing = img.lookup(args.apfs_ls)
+        if fid is None:
+            print("  %s: no such directory (stopped at %s, missing %r)"
+                  % (args.apfs_ls, prefix, missing))
+            rc = 1
+        else:
+            kids = img.children.get(fid, {})
+            print()
+            print("  %s/ (%d entries)" % (prefix, len(kids)))
+            for name in sorted(kids):
+                child = kids[name]
+                print("    %-40s %12s" % (name, human(img.size_of(child))))
+
+    for path in args.apfs_find or []:
+        fid, prefix, missing = img.lookup(path)
+        if fid is None:
+            print()
+            print("  %s: ABSENT (resolved %s, no entry %r)"
+                  % (path, prefix, missing))
+            continue
+        exts = sorted(img.extents.get(fid, []))
+        print()
+        print("  %s: PRESENT, inode %d, %d extent(s), %s bytes"
+              % (path, fid, len(exts), human(img.size_of(fid))))
+        dec = img.decmpfs_info(fid) if img.is_compressed(fid) else None
+        if dec:
+            print("    decmpfs type %d (%s), %s bytes uncompressed"
+                  % (dec["type"], DECMPFS_NAMES.get(dec["type"], "?"),
+                     human(dec["size"])))
+        for logical, phys, length in exts[:4]:
+            print("    logical %-12d -> block %-8d %s bytes"
+                  % (logical, phys, human(length)))
+        data = img.read_file(fid)[:32]
+        if data:
+            print("    first bytes: %s  %r" % (data.hex(), data[:16]))
+
+    if args.apfs_get:
+        print()
+        rc = max(rc, cmd_apfs_get(img, args.apfs_get, args.out))
+    return rc
+
+
+def cmd_apfs_get(img, root, outdir):
+    """Extract every file below one directory of a bare APFS container."""
+    fid, prefix, missing = img.lookup(root)
+    if fid is None:
+        print("  %s: no such directory (stopped at %s, missing %r)"
+              % (root, prefix, missing), file=sys.stderr)
+        return 2
+    outdir = Path(outdir).expanduser()
+    rows = []
+
+    def walk(dfid, rel):
+        for name in sorted(img.children.get(dfid, {})):
+            child = img.children[dfid][name]
+            child_rel = rel + name
+            if img.is_dir(child):
+                walk(child, child_rel + "/")
+                continue
+            data = img.read_file(child)
+            dest = outdir.joinpath(*child_rel.split("/"))
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+            rows.append([child_rel, human(len(data)), len(data)])
+
+    walk(fid, "")
+    print("  extracted %d files, %d bytes, from %s/ into %s"
+          % (len(rows), sum(r[2] for r in rows), prefix, outdir))
+    for rel, size, _n in rows:
+        print("    %-48s %10s" % (rel, size))
+    return 0
+
+
 def cmd_dmg_info(zipf, args, probe=False):
     entry = zipf.find(args.dmg_member) if args.dmg_member else zipf.largest_dmg()
     if entry is None:
@@ -1073,15 +1763,18 @@ def cmd_dmg_info(zipf, args, probe=False):
         return 2
 
     start = zipf.data_offset(entry)
-    print("DMG member: %s" % entry.name)
-    print("  stored in the ZIP at offset %s, %s bytes"
-          % (human(start), human(entry.usize)))
+    if getattr(zipf, "local", False):
+        print("DMG file: %s" % entry.name)
+        print("  %s bytes on disk, read in place" % human(entry.usize))
+    else:
+        print("DMG member: %s" % entry.name)
+        print("  stored in the ZIP at offset %s, %s bytes"
+              % (human(start), human(entry.usize)))
 
     koly, endian = parse_koly(
         zipf.src.read_at(start + entry.usize - 512, 512), entry.usize)
     if koly is None:
-        print("  no 'koly' trailer in the last 512 bytes", file=sys.stderr)
-        return 2
+        return cmd_apfs_info(zipf, entry, args, probe=probe)
 
     print("  koly: version %d, header %d, flags 0x%x, variant %d, %s endian"
           % (koly["version"], koly["header_size"], koly["flags"],
@@ -1313,7 +2006,9 @@ def main(argv=None):
                     "range requests.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="The archive is never downloaded whole.")
-    ap.add_argument("source", help="IPSW URL, or a path to a local .ipsw")
+    ap.add_argument("source", nargs="?",
+                    help="IPSW URL, or a path to a local .ipsw; omit when "
+                         "using --dmg-file")
     ap.add_argument("-l", "--list", action="store_true",
                     help="list members and their sizes")
     ap.add_argument("--sort-size", action="store_true",
@@ -1327,9 +2022,21 @@ def main(argv=None):
     ap.add_argument("--dmg-info", action="store_true",
                     help="parse the koly trailer and BLKX table of a DMG member")
     ap.add_argument("--dmg-member", help="which .dmg (default: the largest)")
+    ap.add_argument("--dmg-file",
+                    help="inspect a DMG that is already extracted on disk, "
+                         "instead of one inside the archive (needed for "
+                         "members the ZIP stores deflated)")
     ap.add_argument("--dmg-probe", action="store_true",
                     help="like --dmg-info, then read the partition table and "
                          "the filesystem superblocks out of the DMG")
+    ap.add_argument("--apfs-find", action="append", metavar="PATH",
+                    help="resolve a path inside a bare APFS container and "
+                         "print its inode, extents and first bytes; repeatable")
+    ap.add_argument("--apfs-ls", metavar="DIR",
+                    help="list one directory of a bare APFS container")
+    ap.add_argument("--apfs-get", metavar="DIR",
+                    help="extract every file below DIR of a bare APFS "
+                         "container into the -o/--out directory")
     ap.add_argument("--force", action="store_true",
                     help="re-extract members that already exist")
     ap.add_argument("--no-verify", action="store_true",
@@ -1337,6 +2044,28 @@ def main(argv=None):
     ap.add_argument("--timeout", type=float, default=60.0)
     ap.add_argument("--retries", type=int, default=6)
     args = ap.parse_args(argv)
+
+    if args.dmg_file:
+        if not (args.dmg_info or args.dmg_probe or args.apfs_find
+                or args.apfs_ls or args.apfs_get):
+            print("--dmg-file needs --dmg-info, --dmg-probe, --apfs-find, "
+                  "--apfs-ls or --apfs-get", file=sys.stderr)
+            return 2
+        probe = bool(args.dmg_probe or args.apfs_find or args.apfs_ls
+                     or args.apfs_get)
+        try:
+            dmg = LocalDmg(args.dmg_file)
+        except OSError as exc:
+            print("cannot open %s: %s" % (args.dmg_file, exc), file=sys.stderr)
+            return 2
+        try:
+            print("source: %s (%s bytes)" % (args.dmg_file, human(dmg.src.size)))
+            return cmd_dmg_info(dmg, args, probe=probe)
+        finally:
+            dmg.src.close()
+
+    if not args.source:
+        ap.error("give a source IPSW, or --dmg-file to inspect an extracted DMG")
 
     try:
         src = open_source(args.source, timeout=args.timeout,

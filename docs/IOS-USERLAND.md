@@ -747,3 +747,206 @@ OS 卷那边卡在容器 omap 的虚拟 oid 转换上；cryptex 这边**不需�
 用前者子节点 id 100% 落在范围内，后者只有 47%。
 
 634 个目录全部走完，正好等于卷超级块里的 `apfs_num_directories`，说明遍历是完整的。
+
+## 拆分共享缓存
+
+上一节只到"44 个条目、2,384,232,448 字节"这一步；这一节把缓存真正写成磁盘上的
+文件，并把 dyld 头解出来。`scripts/extract-ios-userland.py` 新增四个开关，外加一个
+自动回退：
+
+- `--dmg-file`：把已经解到磁盘的成员当 DMG 读。deflate 成员不能 range 读，所以
+  这是读 cryptex 的唯一入口；不带 source，也不需要 koly。
+- 没有 koly 时自动改判为裸 APFS 容器，打印 `NXSB`、块大小、块数、卷超级块。
+- `--apfs-ls`：列裸容器里的一个目录（大小取自 inode，不是 extent 之和）。
+- `--apfs-find`：给路径，打印 inode、extent、decmpfs 类型和首字节。
+- `--apfs-get`：按目录抽文件，这次抽的就是这 44 个缓存。
+
+`--list` / `--dmg-info` 等老路径没有动，见第六节。
+
+### 一、44 个文件
+
+公共前缀 `dyld_shared_cache_arm64`，下表省略：
+
+| 文件 | 字节 | 文件 | 字节 |
+| --- | ---: | --- | ---: |
+| `dyld_shared_cache_arm64`（主）| 393,216 | `.01` | 114,638,848 |
+| `.02` | 98,304 | `.03` | 115,769,344 |
+| `.04` | 180,224 | `.05` | 114,540,544 |
+| `.06` | 376,832 | `.07` | 115,408,896 |
+| `.08` | 278,528 | `.09` | 115,752,960 |
+| `.10` | 409,600 | `.11` | 115,818,496 |
+| `.12` | 393,216 | `.13` | 107,970,560 |
+| `.14` | 409,600 | `.15` | 115,097,600 |
+| `.16` | 458,752 | `.17` | 97,419,264 |
+| `.18` | 376,832 | `.19` | 107,610,112 |
+| `.20` | 262,144 | `.21` | 115,130,368 |
+| `.22` | 442,368 | `.23` | 115,015,680 |
+| `.24` | 507,904 | `.25` | 83,607,552 |
+| `.26` | 245,760 | `.27.dylddata` | 187,105,280 |
+| `.28.dyldlinkedit` | 19,922,944 | `.29` | 115,539,968 |
+| `.30` | 507,904 | `.31` | 103,677,952 |
+| `.32` | 573,440 | `.33` | 115,785,728 |
+| `.34` | 638,976 | `.35` | 115,769,344 |
+| `.36` | 491,520 | `.37` | 114,917,376 |
+| `.38` | 573,440 | `.39` | 86,933,504 |
+| `.40` | 557,056 | `.41.dylddata` | 102,547,456 |
+| `.42.dyldlinkedit` | 334,102,528 | `.symbols` | 592,101,376 |
+
+合计 **44 个文件、3,330,359,296 字节**。44 个文件的第 0–15 字节都是
+`dyld_v1   arm64`，`platform` 都是 2（iOS），`formatVersion` 都是 0——44 个都是
+dyld 缓存，没有混进别的东西。SHA-256 在
+`~/ios-userland/cryptex-cache/MANIFEST.txt`（name / bytes / sha256 三列）。
+
+编号里没有独立的 `.27`、`.28`、`.41`、`.42`：这四个号就是两个 `.dylddata` 和
+两个 `.dyldlinkedit`。
+
+### 二、主缓存头
+
+块 4405 处的 `dyld_shared_cache_arm64` 头（文件偏移 0，APFS 首块是容器块 4405）：
+
+| 字段 | 值 |
+| --- | --- |
+| magic | `dyld_v1   arm64`（16 字节）|
+| mappingOffset / mappingCount | 512 / 1（0x180000000 起 0x5c000，r-x）|
+| imagesOffset / imagesCount | 624 / **2,710** |
+| imagesTextOffset / imagesTextCount | 87,344 / 2,710 |
+| uuid | `8f970452c9e33e88b114feb1864bc9e0` |
+| cacheType / cacheSubType | 2（multi-cache）/ 1（production）|
+| platform / formatVersion | **2（iOS）** / 0 |
+| sharedRegionStart | 0x180000000（6,442,450,944）|
+| sharedRegionSize | 0xaade8000（2,866,708,480）|
+| maxSlide | 0x55214000 |
+| subCacheArrayOffset / subCacheArrayCount | 174,064（0x2a7f0）/ **42** |
+| symbolFileUUID | `51ccba451fc23f19aed047050bdf009a`（= `.symbols` 的 uuid）|
+| codeSignatureOffset / Size | 376,832 / 16,384 |
+| dyldInCacheMH | 0x1a4610000 |
+
+两个自洽检查：`624 + 2710 × 32 = 87,344`，正好等于 `imagesTextOffset`（每条
+`dyld_cache_image_info` 32 字节），所以 2,710 不是猜的；`376,832 + 16,384 =
+393,216`，正好是主文件大小。
+
+image 数组可以直接读：第 0 条是 `/usr/lib/libobjc.A.dylib`（0x1800b8000），
+第 1 条是 `MetalPerformanceShadersGraph`，第 2 条是 `/usr/lib/swift/libswiftCore.dylib`。
+`/usr/lib/libSystem.B.dylib` 也在 2,710 条里——**libSystem 不是文件，它从这个
+缓存来**。
+
+### 三、42 个子缓存
+
+`subCacheArray` 每项 56 字节：`uuid[16] + cacheVMOffset u64 + fileSuffix[32]`。
+42 个 UUID 与磁盘上的 42 个文件逐一相同（42/42，0 个不匹配）：
+
+| 项 | 值 |
+| --- | --- |
+| 条目数 | 42 |
+| 第一条 | `.01`，vmOffset 0x5c000，紧接着主缓存的 0x5c000 |
+| 最后一条 | `.42.dyldlinkedit`，vmOffset 0x96fe4000 |
+| 最高 vmOffset + 文件大小 | 0xaae84000（2,867,347,456）|
+| 头里的 sharedRegionSize | 0xaade8000（2,866,708,480）|
+
+最高值比 `sharedRegionSize` 大 0x9c000（638,976 字节）：这个数用的是**文件大小**，
+而文件尾部有一部分不参与映射（代码签名/对齐），所以这个差不是错。
+
+映射形状（读自各子缓存自己的头，不是同一张表）：
+
+| 类型 | 映射数 | prot | 内容 |
+| --- | ---: | --- | --- |
+| 编号分片 `.01`–`.40` | 1 | max 5 / init 5（r-x）| text + rodata |
+| `*.dylddata` | 4 | 头页 r-x；`__DATA_CONST` init r-- / max rw；`__DATA` rw；一条 r-- | 可写数据 |
+| `*.dyldlinkedit` | 2 | 头页 r-x；`__LINKEDIT` r-- | 链接信息 |
+
+以 `.27.dylddata` 为例，四条映射是 0x1d5908000（头页）、0x1d5964000（init r--、
+max rw）、0x1dcd14000（rw）、0x1e4b04000（r--）；第一条正好等于
+`0x180000000 + 0x55908000`（它自己的 vmOffset）。
+
+### 四、总大小对不上：2,384,232,448 是 41 个文件
+
+上一节的 2,384,232,448 是**按 extent 求和**得到的，44 个里有 3 个 extent 数为 0：
+
+| 文件 | 字节 | 资源叉 | decmpfs |
+| --- | ---: | ---: | --- |
+| `.28.dyldlinkedit` | 19,922,944 | 5,852,549 | type 14（LZBITMAP）|
+| `.42.dyldlinkedit` | 334,102,528 | 85,806,300 | type 14 |
+| `.symbols` | 592,101,376 | 129,402,299 | type 14 |
+
+这三个文件的数据不在 inode 的 extent 里，而在 `com.apple.ResourceFork` 的数据流
+oid 下（和 OS 卷里 dyld 的 type 4 是同一个机制），所以只读 extent 的
+`--apfs-ls` 报 0。它们的 inode 带 `INODE_HAS_UNCOMPRESSED_SIZE`，偏移 84 就是
+解压后大小；新读取器按 inode 报大小、按资源叉解压。
+
+加回去：
+
+```text
+2,384,232,448 + 19,922,944 + 334,102,528 + 592,101,376 = 3,330,359,296
+```
+
+**44 个文件的正确总和是 3,330,359,296，不是 2,384,232,448；差额 946,126,848
+全部来自这三个 type 14 文件。** 上一节的 "44 个文件 2,384,232,448" 应理解为
+"41 个有 extent 的文件 2,384,232,448"。
+
+type 14 的块首是 `ZBM\x09`，即 LZBITMAP。Apple 的实现闭源；这里把 libzbitmap
+（Ernesto A. Fernández，MIT，linux-apfs-rw 用的同一份）的解压器移植到了 Python，
+并和 C 参考实现对 24 个 chunk（含 4 个原样存储块、一个不满 64 KiB 的尾块）逐字节
+比对，**0 个不一致**。
+
+### 五、P1 内核要映射什么
+
+- **共享区基址 0x180000000，长度 0xaade8000**（`sharedRegionStart` /
+  `sharedRegionSize`）。这是整个缓存的虚拟地址窗口，不是某个文件的大小。
+- **43 个文件要映射**：主缓存 + 42 个子缓存。每个子缓存的头里有自己的映射表，
+  地址已经是绝对地址（`.01` 是 0x18005c000）；`subCacheArray` 的
+  `cacheVMOffset` 用来校验（`base + vmOffset` 等于第一条映射地址）。按每条的
+  `initProt` 落页，`maxProt` 留给后面的 mprotect。
+- **`.dylddata` / `.dyldlinkedit` 不能省**：编号分片只有 text/rodata；`__DATA`
+  和 `__DATA_CONST` 在两个 `.dylddata` 里，`__LINKEDIT` 在两个
+  `.dyldlinkedit` 里。只映射编号分片，dyld 走到第一个 GOT/objc 访问就会 fault。
+- **`.symbols` 不用映射**：592,101,376 字节，主头的 `symbolFileUUID` 指向它，
+  只给符号化用。userland 运行不需要它，做 P1 启动镜像时可以连盘都不放。
+- 主缓存的第一条映射（0x180000000，0x5c000）装着头部、2,710 条 image 记录和
+  42 条子缓存表，dyld 启动时先读它；子缓存按 vmOffset 接在后面。
+- `/usr/lib/dyld` 本身仍是 OS 卷里那个 922,912 字节的文件，不在这 44 个里。
+
+### 六、复现与成本
+
+```sh
+# 1. 解出 cryptex 成员（deflate，必须整段下，2.74 GB）
+python3 scripts/extract-ios-userland.py "$URL" -o ~/ios-userland/cryptex \
+    -m 087-86593-047.dmg
+
+# 2. 不解压就能看：裸 APFS 容器 + 卷超级块
+python3 scripts/extract-ios-userland.py \
+    --dmg-file ~/ios-userland/cryptex/087-86593-047.dmg --dmg-info
+
+# 3. 列目录 / 看单个文件（decmpfs type 14 会自动解）
+python3 scripts/extract-ios-userland.py \
+    --dmg-file ~/ios-userland/cryptex/087-86593-047.dmg \
+    --apfs-ls /System/Library/Caches/com.apple.dyld
+
+# 4. 抽出 44 个文件
+python3 scripts/extract-ios-userland.py \
+    --dmg-file ~/ios-userland/cryptex/087-86593-047.dmg \
+    --apfs-get /System/Library/Caches/com.apple.dyld \
+    -o ~/ios-userland/cryptex-cache
+```
+
+`--apfs-get` 只在 LZVN/LZFSE 的 decmpfs 类型上需要 `lzfse` 模块；LZBITMAP 是纯
+Python，这次没用到 venv 里的解码器。
+
+成本（这台机器实测）：
+
+| 阶段 | 量 | 时间 |
+| --- | --- | --- |
+| 下载成员 | 1,097,835,401 字节，268 次 GET（成员 csize 1,097,727,251 + 108,150 字节 ZIP 元数据）| 55.5 秒（19.8 MB/s）|
+| deflate 落盘 | 2,743,074,816 字节，CRC32 通过 | 含在上面 |
+| 抽 44 个文件 | 3,330,359,296 字节 | ≈145 秒（03:48:04 → 03:50:29），瓶颈是 Python 版 LZBITMAP（≈7 MB/s）|
+
+老路径回归（同一份脚本、同一个 URL）：`--list` 仍是 83 个成员、0.18 秒、ZIP64；
+`--dmg-info` 仍报 11,006,019 扇区、6 个分区，data fork 4,730,590,018 字节，
+和第四节完全一致。
+
+磁盘：解压前 `/home` 剩 8.2 GB，落盘后剩 5.6 GB；抽出缓存后剩 2.4 GB；删掉
+2,743,074,816 字节的临时镜像后剩 4.9 GB。临时镜像没有留，`--dmg-file` 那一步要
+重跑就得先重下 1.1 GB。
+
+解出来的镜像本身也做了核对：`stat` 恰好 2,743,074,816 字节，偏移 0x20 是
+`NXSB`，0x24 块大小 4096，0x28 块数 669,696，`4096 × 669,696 = 2,743,074,816`
+一字节不差，0x48 UUID `07490cba83ee4f50a4153de222723455`。
