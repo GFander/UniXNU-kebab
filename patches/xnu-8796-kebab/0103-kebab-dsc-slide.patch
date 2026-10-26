@@ -1,0 +1,644 @@
+feat(kebab): apply a slide to the pre-mapped dyld shared cache
+
+The split cache is built for a slide below maxSlide: four mappings (the
+__DATA_CONST and __DATA ranges of the two .dylddata subcaches) carry
+dyld slide-info v2, and every address in the cache files is unslid.  The
+pre-mapped path set VM_PROT_SLIDE nowhere and left srfmp->slide at zero,
+so a dyld that found a non-zero cache base could not have rebased the
+data pages.
+
+Consume dyld_cache_mapping_and_slide_info and cross-check it against each
+subcache's mapping table.  Locate the slide-info blob in the trailing r--
+mapping of the same file, then validate the v2 header, 4 KiB page size,
+page count against the mapping size, table bounds, and the 64-bit delta
+mask before anything is mapped.
+
+Add kebab_dsc_slide=<bytes> (default 0) to force a slide.  Reject a value
+that is not 16 KiB aligned, is not below maxSlide, or pushes a mapping or
+a slide-info blob outside the arm64 shared region.  For a non-zero slide,
+shift every mapping and every sms_slide_start, set VM_PROT_SLIDE on the
+four mappings that carry slide info, and pass the same value in
+srfmp->slide so the lazy pager's sr_slide and the base that
+shared_region_check_np() returns to dyld agree.  Slide 0 keeps the
+previous unslid path.
+
+Extend scripts/check-shared-cache.py with --slide so the host plan and the
+kernel plan can be compared on the real 44 files, with the same alignment,
+maxSlide and shared-region checks.  The real cache has 51 mappings, four
+of them slid, and .27.dylddata mapping 1 is the first to relocate.
+diff --git a/bsd/kern/kebab_dyldcache.c b/bsd/kern/kebab_dyldcache.c
+index 3539582..2e3c51b 100644
+--- a/bsd/kern/kebab_dyldcache.c
++++ b/bsd/kern/kebab_dyldcache.c
+@@ -18,6 +18,15 @@
+  * and protections.  Mapping is done with vm_shared_region_map_file(), the same
+  * primitive dyld reaches through shared_region_map_and_slide_2_np().
+  *
++ * Slide support consumes dyld_cache_mapping_and_slide_info.  Four mappings in
++ * this cache carry slide info (the __DATA_CONST and __DATA mappings of the two
++ * .dylddata subcaches); they are marked VM_PROT_SLIDE and their slide info is
++ * located inside the trailing r-- mapping of the same file.  Every mapping is
++ * shifted by the same slide, srfmp->slide carries that value into
++ * shared_region->sr_slide for the lazy rebase pager, and the resulting base is
++ * what shared_region_check_np() returns to dyld.  "kebab_dsc_slide=<bytes>"
++ * forces a slide; the default is 0, which keeps the unslid mapping path.
++ *
+  * This file is compiled only for KEBAB.  Nothing happens unless "kebab_dsc" is
+  * on the boot command line; "kebab_dsc_map=1" is the second switch that turns
+  * the logged plan into actual mappings.
+@@ -73,6 +82,17 @@
+ #define KEBAB_DSC_SUB_ENTRY_SIZE        56
+ #define KEBAB_DSC_MAPPING_SIZE          32
+ #define KEBAB_DSC_IMAGE_INFO_SIZE       32
++#define KEBAB_DSC_SLIDE_INFO_SIZE       56
++#define KEBAB_DSC_SLIDE_PAGE_SIZE       0x1000
++
++/*
++ * The shared region is fixed at SHARED_REGION_BASE_ARM64 with
++ * SHARED_REGION_SIZE_ARM64 bytes.  The cache's own sharedRegionSize is only
++ * the size of its unslid footprint; maxSlide is the extra room the kernel
++ * reserves above it.  A slid mapping has to stay inside the real region.
++ */
++#define KEBAB_DSC_REGION_BASE           SHARED_REGION_BASE_ARM64
++#define KEBAB_DSC_REGION_END            (SHARED_REGION_BASE_ARM64 + SHARED_REGION_SIZE_ARM64)
+ 
+ /*
+  * dyld_cache_header, from dyld's dyld_cache_format.h.  Only the fields this
+@@ -156,6 +176,39 @@ struct kebab_dsc_mapping_info {
+ 	uint32_t        init_prot;
+ };
+ 
++/*
++ * dyld_cache_mapping_and_slide_info, 56 bytes.  This is the table dyld uses
++ * to tell the kernel where the slide info of a mapping lives.  Note that the
++ * field order is not the same as dyld_cache_mapping_info: the slide fields
++ * sit between fileOffset and the protections.
++ */
++struct kebab_dsc_mapping_slide_info {
++	uint64_t        address;
++	uint64_t        size;
++	uint64_t        file_offset;
++	uint64_t        slide_info_file_offset;
++	uint64_t        slide_info_file_size;
++	uint64_t        flags;
++	uint32_t        max_prot;
++	uint32_t        init_prot;
++};
++
++/*
++ * dyld_cache_slide_info2.  Kept local instead of using the kernel-private
++ * struct vm_shared_region_slide_info_entry_v2 from vm_shared_region.h, which
++ * is not visible to this translation unit.
++ */
++struct kebab_dsc_slide_info_v2 {
++	uint32_t        version;
++	uint32_t        page_size;
++	uint32_t        page_starts_offset;
++	uint32_t        page_starts_count;
++	uint32_t        page_extras_offset;
++	uint32_t        page_extras_count;
++	uint64_t        delta_mask;
++	uint64_t        value_add;
++};
++
+ struct kebab_dsc_subcache_entry {
+ 	uint8_t         uuid[16];
+ 	uint64_t        vm_offset;
+@@ -177,6 +230,9 @@ static_assert(offsetof(struct kebab_dsc_header, symbol_file_uuid) == 400, "symbo
+ static_assert(offsetof(struct kebab_dsc_header, images_offset) == 448, "imagesOffset");
+ static_assert(offsetof(struct kebab_dsc_header, images_count) == 452, "imagesCount");
+ static_assert(sizeof(struct kebab_dsc_mapping_info) == KEBAB_DSC_MAPPING_SIZE, "mapping info size");
++static_assert(sizeof(struct kebab_dsc_mapping_slide_info) == KEBAB_DSC_SLIDE_INFO_SIZE,
++    "mapping and slide info size");
++static_assert(sizeof(struct kebab_dsc_slide_info_v2) == 40, "slide info v2 header size");
+ static_assert(sizeof(struct kebab_dsc_subcache_entry) == KEBAB_DSC_SUB_ENTRY_SIZE, "subcache entry size");
+ 
+ struct kebab_dsc_candidate {
+@@ -192,6 +248,9 @@ struct kebab_dsc_file {
+ 	uint64_t        file_size;
+ 	uint32_t        mapping_count;
+ 	struct shared_file_mapping_slide_np mappings[KEBAB_DSC_MAX_MAPPINGS];
++	/* from dyld_cache_mapping_and_slide_info, indexed like mappings[] */
++	uint64_t        slide_info_offset[KEBAB_DSC_MAX_MAPPINGS];
++	uint64_t        slide_info_size[KEBAB_DSC_MAX_MAPPINGS];
+ };
+ 
+ struct kebab_dsc_plan {
+@@ -201,11 +260,13 @@ struct kebab_dsc_plan {
+ 	uint32_t        dylddata_count;
+ 	uint32_t        dyldlinkedit_count;
+ 	uint32_t        total_mappings;
++	uint32_t        slide_mappings;
+ 	uint64_t        region_start;
+ 	uint64_t        region_size;
+ 	uint64_t        max_slide;
+ 	uint64_t        total_mapped;
+ 	uint64_t        highest_end;
++	uint64_t        slide;
+ 	uint8_t         main_uuid[16];
+ 	uint8_t         symbol_uuid[16];
+ 	boolean_t       symbols_present;
+@@ -219,6 +280,8 @@ static char kebab_dsc_dir[KEBAB_DSC_PATH_MAX];
+ static boolean_t kebab_dsc_enabled;
+ static boolean_t kebab_dsc_map_enabled;
+ static boolean_t kebab_dsc_map_attempted;
++static boolean_t kebab_dsc_slide_requested;
++static uint64_t kebab_dsc_slide_arg;
+ 
+ #pragma mark - small helpers
+ 
+@@ -637,13 +700,115 @@ kebab_dsc_validate_header(const struct kebab_dsc_header *h, uint64_t file_size,
+ 	return 0;
+ }
+ 
++/*
++ * The kernel's slide pager supports dyld slide-info versions 1 through 4
++ * (vm_shared_region_slide_page()).  The iOS 16 split cache uses version 2
++ * with 4 KiB pages, so that is what this module validates and logs before it
++ * lets the mapping proceed.  A cache with another version is rejected here
++ * instead of failing later inside vm_shared_region_slide().
++ */
++static int
++kebab_dsc_validate_slide_info(vnode_t vp, const char *name, uint32_t index,
++    uint64_t offset, uint64_t size, uint64_t mapping_size)
++{
++	struct kebab_dsc_slide_info_v2 si;
++	uint64_t required;
++	uint64_t starts_end;
++	uint64_t extras_end;
++	uint32_t slide_version = 0;
++	int error;
++
++	if (size < sizeof(slide_version)) {
++		printf("KEBAB DSC: %s: mapping %u slide info 0x%llx+0x%llx is "
++		    "shorter than a version field\n", name, index,
++		    (unsigned long long)offset, (unsigned long long)size);
++		return EINVAL;
++	}
++	error = kebab_dsc_read_at(vp, &slide_version, sizeof(slide_version), offset);
++	if (error != 0) {
++		printf("KEBAB DSC: %s: mapping %u reading slide info version failed "
++		    "(error %d)\n", name, index, error);
++		return error;
++	}
++	if (slide_version != 2) {
++		printf("KEBAB DSC: %s: mapping %u slide info version %u is not "
++		    "supported by this parser (the cache uses v2)\n",
++		    name, index, slide_version);
++		return EINVAL;
++	}
++	if (size < sizeof(si)) {
++		printf("KEBAB DSC: %s: mapping %u slide info v2 is 0x%llx bytes, "
++		    "shorter than the 0x%lx-byte header\n", name, index,
++		    (unsigned long long)size, (unsigned long)sizeof(si));
++		return EINVAL;
++	}
++	error = kebab_dsc_read_at(vp, &si, sizeof(si), offset);
++	if (error != 0) {
++		printf("KEBAB DSC: %s: mapping %u reading slide info failed "
++		    "(error %d)\n", name, index, error);
++		return error;
++	}
++	if (si.page_size != KEBAB_DSC_SLIDE_PAGE_SIZE) {
++		printf("KEBAB DSC: %s: mapping %u slide info page_size 0x%x, "
++		    "want 0x%x (PAGE_SIZE_FOR_SR_SLIDE)\n", name, index,
++		    si.page_size, KEBAB_DSC_SLIDE_PAGE_SIZE);
++		return EINVAL;
++	}
++	if (si.page_starts_count == 0 ||
++	    (uint64_t)si.page_starts_count * si.page_size != mapping_size) {
++		printf("KEBAB DSC: %s: mapping %u slide info has %u pages of 0x%x "
++		    "bytes, but the mapping is 0x%llx bytes\n", name, index,
++		    si.page_starts_count, si.page_size,
++		    (unsigned long long)mapping_size);
++		return EINVAL;
++	}
++	if (si.delta_mask == 0 || (si.delta_mask & 0x3) != 0 ||
++	    (si.delta_mask >> 32) == 0) {
++		printf("KEBAB DSC: %s: mapping %u slide info delta_mask 0x%llx "
++		    "is not a usable 64-bit delta mask\n", name, index,
++		    (unsigned long long)si.delta_mask);
++		return EINVAL;
++	}
++	required = sizeof(si) +
++	    ((uint64_t)si.page_starts_count + si.page_extras_count) * 2;
++	if (required < sizeof(si) || required > size) {
++		printf("KEBAB DSC: %s: mapping %u slide info needs 0x%llx bytes "
++		    "for %u starts and %u extras, only 0x%llx present\n",
++		    name, index, (unsigned long long)required,
++		    si.page_starts_count, si.page_extras_count,
++		    (unsigned long long)size);
++		return EINVAL;
++	}
++	starts_end = (uint64_t)si.page_starts_offset +
++	    (uint64_t)si.page_starts_count * 2;
++	extras_end = (uint64_t)si.page_extras_offset +
++	    (uint64_t)si.page_extras_count * 2;
++	if (si.page_starts_offset < sizeof(si) || starts_end > size ||
++	    (si.page_extras_count != 0 &&
++	    (si.page_extras_offset < sizeof(si) || extras_end > size))) {
++		printf("KEBAB DSC: %s: mapping %u slide info tables at "
++		    "0x%x/0x%x escape 0x%llx bytes\n", name, index,
++		    si.page_starts_offset, si.page_extras_offset,
++		    (unsigned long long)size);
++		return EINVAL;
++	}
++	printf("KEBAB DSC: %s: mapping %u slide info v2 at file 0x%llx+0x%llx: "
++	    "page_size=0x%x pages=%u extras=%u deltaMask=0x%llx valueAdd=0x%llx\n",
++	    name, index, (unsigned long long)offset, (unsigned long long)size,
++	    si.page_size, si.page_starts_count, si.page_extras_count,
++	    (unsigned long long)si.delta_mask, (unsigned long long)si.value_add);
++	return 0;
++}
++
+ static int
+ kebab_dsc_read_mappings(vnode_t vp, const struct kebab_dsc_header *h,
+     uint64_t file_size, const char *name, struct kebab_dsc_plan *plan,
+     struct kebab_dsc_file *file)
+ {
+ 	struct kebab_dsc_mapping_info info[KEBAB_DSC_MAX_MAPPINGS];
+-	uint32_t i;
++	struct kebab_dsc_mapping_slide_info slide_info[KEBAB_DSC_MAX_MAPPINGS];
++	boolean_t have_slide_table = h->mapping_with_slide_count != 0;
++	uint32_t i, j;
+ 	int error;
+ 
+ 	if (h->mapping_count > KEBAB_DSC_MAX_MAPPINGS) {
+@@ -656,6 +821,22 @@ kebab_dsc_read_mappings(vnode_t vp, const struct kebab_dsc_header *h,
+ 		    name, error);
+ 		return error;
+ 	}
++	if (have_slide_table) {
++		if (h->mapping_with_slide_count != h->mapping_count) {
++			printf("KEBAB DSC: %s: mappingWithSlideCount %u != "
++			    "mappingCount %u\n", name,
++			    h->mapping_with_slide_count, h->mapping_count);
++			return EINVAL;
++		}
++		error = kebab_dsc_read_at(vp, slide_info,
++		    h->mapping_with_slide_count * sizeof(slide_info[0]),
++		    h->mapping_with_slide_offset);
++		if (error != 0) {
++			printf("KEBAB DSC: %s: reading mapping-and-slide table "
++			    "failed (error %d)\n", name, error);
++			return error;
++		}
++	}
+ 	for (i = 0; i < h->mapping_count; i++) {
+ 		struct shared_file_mapping_slide_np *m = &file->mappings[i];
+ 		uint64_t end;
+@@ -708,11 +889,198 @@ kebab_dsc_read_mappings(vnode_t vp, const struct kebab_dsc_header *h,
+ 		m->sms_slide_start = 0;
+ 		m->sms_max_prot = info[i].max_prot;
+ 		m->sms_init_prot = info[i].init_prot;
++		file->slide_info_offset[i] = 0;
++		file->slide_info_size[i] = 0;
++
++		if (have_slide_table) {
++			if (slide_info[i].address != info[i].address ||
++			    slide_info[i].size != info[i].size ||
++			    slide_info[i].file_offset != info[i].file_offset ||
++			    slide_info[i].max_prot != info[i].max_prot ||
++			    slide_info[i].init_prot != info[i].init_prot) {
++				printf("KEBAB DSC: %s: mapping-and-slide entry %u "
++				    "does not match the mapping table\n", name, i);
++				return EINVAL;
++			}
++			if (slide_info[i].slide_info_file_size != 0) {
++				uint64_t slide_end =
++				    slide_info[i].slide_info_file_offset +
++				    slide_info[i].slide_info_file_size;
++
++				if (slide_info[i].slide_info_file_offset == 0 ||
++				    slide_end < slide_info[i].slide_info_file_offset ||
++				    slide_end > file_size) {
++					printf("KEBAB DSC: %s: mapping %u slide "
++					    "info [0x%llx, 0x%llx) is outside the "
++					    "0x%llx-byte file\n", name, i,
++					    (unsigned long long)slide_info[i].slide_info_file_offset,
++					    (unsigned long long)slide_end,
++					    (unsigned long long)file_size);
++					return EINVAL;
++				}
++				file->slide_info_offset[i] =
++				    slide_info[i].slide_info_file_offset;
++				file->slide_info_size[i] =
++				    slide_info[i].slide_info_file_size;
++			} else if (slide_info[i].slide_info_file_offset != 0) {
++				printf("KEBAB DSC: %s: mapping %u has slide info "
++				    "offset 0x%llx with size 0\n", name, i,
++				    (unsigned long long)slide_info[i].slide_info_file_offset);
++				return EINVAL;
++			}
++		}
++	}
++
++	/*
++	 * Turn each slide-info file offset into the address the kernel will
++	 * copyin() from.  The blob has to be inside one of this file's mapped
++	 * ranges, otherwise it would not be readable after the mappings are
++	 * established.  The address is unslid here; kebab_dsc_apply_slide()
++	 * shifts it by the same amount as the mappings.
++	 */
++	for (i = 0; i < h->mapping_count; i++) {
++		uint64_t offset = file->slide_info_offset[i];
++		uint64_t size = file->slide_info_size[i];
++		int found = -1;
++
++		if (size == 0) {
++			continue;
++		}
++		for (j = 0; j < h->mapping_count; j++) {
++			uint64_t file_offset = file->mappings[j].sms_file_offset;
++			uint64_t mapping_size = file->mappings[j].sms_size;
++
++			if (file_offset <= offset &&
++			    offset + size <= file_offset + mapping_size) {
++				found = (int)j;
++				break;
++			}
++		}
++		if (found < 0) {
++			printf("KEBAB DSC: %s: mapping %u slide info "
++			    "0x%llx+0x%llx is not covered by any mapped file "
++			    "range\n", name, i, (unsigned long long)offset,
++			    (unsigned long long)size);
++			return EINVAL;
++		}
++		file->mappings[i].sms_slide_start =
++		    file->mappings[found].sms_address +
++		    (offset - file->mappings[found].sms_file_offset);
++		error = kebab_dsc_validate_slide_info(vp, name, i, offset, size,
++		    file->mappings[i].sms_size);
++		if (error != 0) {
++			return error;
++		}
++		plan->slide_mappings++;
+ 	}
+ 	file->mapping_count = h->mapping_count;
+ 	return 0;
+ }
+ 
++/*
++ * Apply one slide value to the whole plan.  This mirrors what
++ * shared_region_map_and_slide_2_np() does before it calls
++ * vm_shared_region_map_file(): every mapping address moves by the slide and
++ * every non-zero sms_slide_start moves with it.  srfmp->slide is what the
++ * kernel records as shared_region->sr_slide (the value the pager adds to
++ * rebased pointers), so the two must be the same number.
++ */
++static int
++kebab_dsc_apply_slide(struct kebab_dsc_plan *plan, uint64_t slide)
++{
++	uint32_t i, j;
++
++	if (slide == 0) {
++		plan->slide = 0;
++		return 0;
++	}
++	if (kebab_dsc_slide_requested && plan->max_slide == 0) {
++		printf("KEBAB DSC: slide 0x%llx requested but the cache maxSlide "
++		    "is 0\n", (unsigned long long)slide);
++		return EINVAL;
++	}
++	if ((slide & (KEBAB_DSC_PAGE_SIZE - 1)) != 0) {
++		printf("KEBAB DSC: slide 0x%llx is not 0x%x-byte aligned\n",
++		    (unsigned long long)slide, KEBAB_DSC_PAGE_SIZE);
++		return EINVAL;
++	}
++	if (plan->max_slide == 0 || slide >= plan->max_slide) {
++		printf("KEBAB DSC: slide 0x%llx is not below maxSlide 0x%llx\n",
++		    (unsigned long long)slide, (unsigned long long)plan->max_slide);
++		return EINVAL;
++	}
++	if (plan->slide_mappings == 0) {
++		printf("KEBAB DSC: slide 0x%llx requested but no mapping carries "
++		    "slide info\n", (unsigned long long)slide);
++		return EINVAL;
++	}
++	if (slide > 0xffffffffULL) {
++		printf("KEBAB DSC: slide 0x%llx does not fit the kernel's 32-bit "
++		    "slide field\n", (unsigned long long)slide);
++		return EINVAL;
++	}
++	if (plan->region_start < KEBAB_DSC_REGION_BASE ||
++	    plan->region_start >= KEBAB_DSC_REGION_END) {
++		printf("KEBAB DSC: cache sharedRegionStart 0x%llx is outside the "
++		    "kernel shared region [0x%llx, 0x%llx)\n",
++		    (unsigned long long)plan->region_start,
++		    (unsigned long long)KEBAB_DSC_REGION_BASE,
++		    (unsigned long long)KEBAB_DSC_REGION_END);
++		return EINVAL;
++	}
++
++	for (i = 0; i < plan->file_count; i++) {
++		struct kebab_dsc_file *f = &plan->files[i];
++
++		for (j = 0; j < f->mapping_count; j++) {
++			struct shared_file_mapping_slide_np *m = &f->mappings[j];
++			uint64_t slid = m->sms_address + slide;
++			uint64_t end = slid + m->sms_size;
++
++			if (slid < m->sms_address || end < slid ||
++			    slid < KEBAB_DSC_REGION_BASE ||
++			    end > KEBAB_DSC_REGION_END) {
++				printf("KEBAB DSC: slide 0x%llx pushes %s mapping %u "
++				    "[0x%llx, 0x%llx) outside [0x%llx, 0x%llx)\n",
++				    (unsigned long long)slide, f->name, j,
++				    (unsigned long long)slid, (unsigned long long)end,
++				    (unsigned long long)KEBAB_DSC_REGION_BASE,
++				    (unsigned long long)KEBAB_DSC_REGION_END);
++				return EINVAL;
++			}
++			if (m->sms_slide_size != 0 &&
++			    (m->sms_slide_start + slide < m->sms_slide_start ||
++			    m->sms_slide_start + slide + m->sms_slide_size > KEBAB_DSC_REGION_END)) {
++				printf("KEBAB DSC: slide 0x%llx pushes %s mapping %u "
++				    "slide info outside the shared region\n",
++				    (unsigned long long)slide, f->name, j);
++				return EINVAL;
++			}
++		}
++	}
++
++	for (i = 0; i < plan->file_count; i++) {
++		struct kebab_dsc_file *f = &plan->files[i];
++
++		for (j = 0; j < f->mapping_count; j++) {
++			struct shared_file_mapping_slide_np *m = &f->mappings[j];
++
++			m->sms_address += slide;
++			if (m->sms_slide_size != 0) {
++				m->sms_slide_start += slide;
++				/*
++				 * This is the flag vm_shared_region_map_file()
++				 * counts to decide which mappings get the lazy
++				 * rebase pager and srfmp->slide.
++				 */
++				m->sms_max_prot |= VM_PROT_SLIDE;
++			}
++		}
++	}
++	plan->slide = slide;
++	return 0;
++}
++
+ #pragma mark - plan
+ 
+ static void
+@@ -726,6 +1094,13 @@ kebab_dsc_log_plan(const struct kebab_dsc_plan *plan)
+ 	    (unsigned long long)plan->region_size,
+ 	    (unsigned long long)(plan->region_start + plan->region_size),
+ 	    (unsigned long long)plan->max_slide);
++	printf("KEBAB DSC: slide 0x%llx (%s); %u mapping(s) carry slide info; "
++	    "shared region [0x%llx, 0x%llx)\n",
++	    (unsigned long long)plan->slide,
++	    kebab_dsc_slide_requested ? "boot arg" : "default",
++	    plan->slide_mappings,
++	    (unsigned long long)KEBAB_DSC_REGION_BASE,
++	    (unsigned long long)KEBAB_DSC_REGION_END);
+ 	printf("KEBAB DSC: resolved %u/%u subcaches by uuid; dylddata=%u dyldlinkedit=%u\n",
+ 	    plan->file_count - 1, plan->subcache_count,
+ 	    plan->dylddata_count, plan->dyldlinkedit_count);
+@@ -741,10 +1116,11 @@ kebab_dsc_log_plan(const struct kebab_dsc_plan *plan)
+ 	    plan->file_count, plan->total_mappings,
+ 	    (unsigned long long)plan->total_mapped,
+ 	    (unsigned long long)plan->total_mapped);
+-	printf("KEBAB DSC: highest mapped end 0x%llx, region slack 0x%llx\n",
++	printf("KEBAB DSC: highest mapped end 0x%llx (unslid 0x%llx), "
++	    "cache extent end 0x%llx\n",
++	    (unsigned long long)(plan->highest_end + plan->slide),
+ 	    (unsigned long long)plan->highest_end,
+-	    (unsigned long long)(plan->region_start + plan->region_size -
+-	    plan->highest_end));
++	    (unsigned long long)(plan->region_start + plan->region_size));
+ 
+ 	for (i = 0; i < plan->file_count; i++) {
+ 		const struct kebab_dsc_file *f = &plan->files[i];
+@@ -772,10 +1148,16 @@ kebab_dsc_log_plan(const struct kebab_dsc_plan *plan)
+ 			max[2] = (m->sms_max_prot & VM_PROT_EXECUTE) ? 'x' : '-';
+ 			max[3] = '\0';
+ 			printf("KEBAB DSC:      map 0x%09llx size=0x%-9llx file=0x%-9llx "
+-			    "init=%s max=%s\n",
++			    "init=%s max=%s",
+ 			    (unsigned long long)m->sms_address,
+ 			    (unsigned long long)m->sms_size,
+ 			    (unsigned long long)m->sms_file_offset, init, max);
++			if (m->sms_slide_size != 0) {
++				printf(" slideInfo=0x%llx+0x%llx",
++				    (unsigned long long)m->sms_slide_start,
++				    (unsigned long long)m->sms_slide_size);
++			}
++			printf("\n");
+ 		}
+ 	}
+ }
+@@ -1047,6 +1429,11 @@ kebab_dsc_build_plan(const char *dir, struct kebab_dsc_plan *plan)
+ 		}
+ 	}
+ 
++	error = kebab_dsc_apply_slide(plan, kebab_dsc_slide_arg);
++	if (error != 0) {
++		goto out;
++	}
++
+ 	error = 0;
+ 
+ out:
+@@ -1135,7 +1522,7 @@ kebab_dsc_map_plan(struct kebab_dsc_plan *plan)
+ 		srm[i].fd = 0;          /* not -1: this is a file-backed mapping */
+ 		srm[i].mappings_count = f->mapping_count;
+ 		srm[i].mappings = f->mappings;
+-		srm[i].slide = 0;
++		srm[i].slide = (uint32_t)plan->slide;
+ 		srm[i].vp = vp;
+ 		srm[i].file_size = (memory_object_size_t)size;
+ 		srm[i].file_control = ubc_getobject(vp, UBC_HOLDOBJECT);
+@@ -1148,9 +1535,10 @@ kebab_dsc_map_plan(struct kebab_dsc_plan *plan)
+ 		}
+ 	}
+ 
+-	printf("KEBAB DSC: map: mapping %u files / %u mappings into shared region "
+-	    "at 0x%llx\n", plan->file_count, plan->total_mappings,
+-	    (unsigned long long)plan->region_start);
++	printf("KEBAB DSC: map: slide 0x%llx; mapping %u files / %u mappings into "
++	    "shared region at 0x%llx\n", (unsigned long long)plan->slide,
++	    plan->file_count, plan->total_mappings,
++	    (unsigned long long)(plan->region_start + plan->slide));
+ 	kr = vm_shared_region_map_file(shared_region, (int)plan->file_count, srm);
+ 	error = (int)kebab_dsc_mapping_errno(kr);
+ 	if (error != 0) {
+@@ -1168,7 +1556,33 @@ kebab_dsc_map_plan(struct kebab_dsc_plan *plan)
+ 	}
+ 	printf("KEBAB DSC: map: mapped 0x%llx bytes at 0x%llx\n",
+ 	    (unsigned long long)plan->total_mapped,
+-	    (unsigned long long)plan->region_start);
++	    (unsigned long long)(plan->region_start + plan->slide));
++
++	/*
++	 * shared_region_check_np() returns the address of the first mapping,
++	 * which is the slid cache base.  Log it next to the requested slide so
++	 * a boot log shows whether the value the pager uses and the value dyld
++	 * will derive agree.
++	 */
++	start = 0;
++	kr = vm_shared_region_start_address(shared_region, &start, NULL);
++	if (kr == KERN_SUCCESS) {
++		if (start != plan->region_start + plan->slide) {
++			printf("KEBAB DSC: map: shared_region_check_np base 0x%llx "
++			    "does not match plan base 0x%llx + slide 0x%llx\n",
++			    (unsigned long long)start,
++			    (unsigned long long)plan->region_start,
++			    (unsigned long long)plan->slide);
++		} else {
++			printf("KEBAB DSC: map: shared_region_check_np base 0x%llx "
++			    "(slide 0x%llx)\n", (unsigned long long)start,
++			    (unsigned long long)(start - plan->region_start));
++		}
++	} else {
++		printf("KEBAB DSC: map: shared_region_check_np base unavailable "
++		    "(0x%x); cache is mapped with slide 0x%llx\n", kr,
++		    (unsigned long long)plan->slide);
++	}
+ 
+ fail:
+ 	for (i = 0; i < plan->file_count; i++) {
+@@ -1189,6 +1603,7 @@ kebab_dsc_boot(void)
+ {
+ 	char arg[KEBAB_DSC_PATH_MAX];
+ 	uint32_t map = 0;
++	uint64_t slide = 0;
+ 	int error;
+ 
+ 	if (!PE_parse_boot_argn("kebab_dsc", arg, sizeof(arg)) || arg[0] == '\0') {
+@@ -1210,10 +1625,17 @@ kebab_dsc_boot(void)
+ 	if (PE_parse_boot_argn("kebab_dsc_map", &map, sizeof(map)) && map != 0) {
+ 		kebab_dsc_map_enabled = TRUE;
+ 	}
++	if (PE_parse_boot_argn("kebab_dsc_slide", &slide, sizeof(slide))) {
++		kebab_dsc_slide_requested = TRUE;
++		kebab_dsc_slide_arg = slide;
++	}
+ 
+ 	kebab_dsc_enabled = TRUE;
+-	printf("KEBAB DSC: enabled for \"%s\"; kebab_dsc_map=%u\n",
+-	    kebab_dsc_dir, kebab_dsc_map_enabled ? 1 : 0);
++	printf("KEBAB DSC: enabled for \"%s\"; kebab_dsc_map=%u "
++	    "kebab_dsc_slide=0x%llx%s\n", kebab_dsc_dir,
++	    kebab_dsc_map_enabled ? 1 : 0,
++	    (unsigned long long)kebab_dsc_slide_arg,
++	    kebab_dsc_slide_requested ? "" : " (default)");
+ 
+ 	kebab_dsc_plan = kalloc_data(sizeof(*kebab_dsc_plan), Z_WAITOK | Z_ZERO);
+ 	if (kebab_dsc_plan == NULL) {
+@@ -1231,7 +1653,9 @@ kebab_dsc_boot(void)
+ 	kebab_dsc_log_plan(kebab_dsc_plan);
+ 
+ 	if (!kebab_dsc_map_enabled) {
+-		printf("KEBAB DSC: dry run: nothing mapped (kebab_dsc_map=0)\n");
++		printf("KEBAB DSC: dry run: plan only (slide 0x%llx), nothing "
++		    "mapped (kebab_dsc_map=0)\n",
++		    (unsigned long long)kebab_dsc_plan->slide);
+ 		return;
+ 	}
+ 

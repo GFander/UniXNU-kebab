@@ -1415,3 +1415,266 @@ log pump 发出。
 * 探针基线行删除后的现场可读性；完整快照仍待一次真实 panic 抓取。
 
 本轮没有运行硬件测试，以上构建和静态/模拟验证不能替代真机结论。
+
+## 十六、共享缓存的 slide
+
+本节给第十四节的预映射计划补上 slide。结论来自源码、host checker 和一次
+`xnu-8796.141.3` 干净索引应用 + 构建机编译；**没有真机启动日志**。第十四节
+记录的 82/82 和内核哈希早于 `0103`，本节记录的是加入 `0103` 之后的 83/83 和
+新哈希。
+
+### 1. 这棵树里的 slide 机制
+
+正常路径是 dyld 调 `shared_region_map_and_slide_2_np()`：
+
+1. `bsd/vm/vm_unix.c:2899` 读入 `shared_files[0].sf_slide` 作为 `maxSlide`，
+   取随机数，然后：
+
+```c
+/* bsd/vm/vm_unix.c:2977-2981 */
+if (max_slide != 0) {
+        read_random(&random_val, sizeof random_val);
+        slide_amount = ((random_val % max_slide) & SLIDE_AMOUNT_MASK);
+} else {
+        slide_amount = 0;
+}
+```
+
+`SLIDE_AMOUNT_MASK` 在非 x86_64 上是 `~SIXTEENK_PAGE_MASK`，所以 slide 是
+16 KiB 对齐、严格小于 `maxSlide` 的值。
+
+2. 同一个系统调用把 slide 加到每个 mapping 的地址和 slide-info 地址上，再
+   进入公共映射函数：
+
+```c
+/* bsd/vm/vm_unix.c:3008-3011 */
+mappings[m].sms_address += slide_amount;
+if (mappings[m].sms_slide_size != 0) {
+        mappings[m].sms_slide_start += slide_amount;
+}
+```
+
+3. `_shared_region_map_and_slide()`（`vm_unix.c:2721`）调用
+   `vm_shared_region_map_file()`（`vm_shared_region.c:1934`）。它的第一部分
+   `vm_shared_region_map_file_setup()`（`vm_shared_region.c:1404`）先处理
+   slide 值：
+
+```c
+/* osfmk/vm/vm_shared_region.c:1503-1511 */
+if (shared_region->sr_slide == 0 && srfmp->slide != 0) {
+        shared_region->sr_slide = srfmp->slide;
+} else if (shared_region->sr_slide != 0 &&
+    srfmp->slide != 0 &&
+    shared_region->sr_slide != srfmp->slide) {
+        /* more than 1 non-zero slide value */
+        kr = KERN_INVALID_ARGUMENT;
+        break;
+}
+```
+
+紧接着（`vm_shared_region.c:1520`）拒绝非 16 KiB 对齐的 slide。随后按已经
+加过 slide 的 `sms_address` 建立所有映射，并用 `sr_first_mapping`
+（`vm_shared_region.c:1816`）记下第一个映射的相对地址。
+
+4. setup 完成后，`vm_shared_region_map_file()` 第二遍只对
+   `sms_max_prot & VM_PROT_SLIDE` 的 mapping 调
+   `vm_shared_region_slide()`（`vm_shared_region.c:2012`），把普通文件映射
+   替换成 lazy rebase pager：
+
+```c
+/* osfmk/vm/vm_shared_region.c:2012-2019 */
+kr = vm_shared_region_slide(shared_region->sr_slide,
+    mappings_to_slide[i]->sms_file_offset,
+    mappings_to_slide[i]->sms_size,
+    mappings_to_slide[i]->sms_slide_start,
+    mappings_to_slide[i]->sms_slide_size,
+    slid_mappings[i],
+    slid_file_controls[i],
+    mappings_to_slide[i]->sms_max_prot);
+```
+
+`vm_shared_region_slide()`（`vm_shared_region.c:3664`）进入
+`vm_shared_region_slide_mapping()`（`vm_shared_region.c:2548`）。后者从
+`sms_slide_start` 这个**用户地址** `copyin()` slide info：
+
+```c
+/* osfmk/vm/vm_shared_region.c:2593 */
+error = copyin(slide_info_addr, slide_info_entry, (size_t)slide_info_size);
+```
+
+然后做 `vm_shared_region_slide_sanity_check()`，用
+`shared_region_pager_setup()`（`vm_shared_region.c:2682`）建立 pager。v2 的
+sanity check 在 `vm_shared_region.c:2790` 要求
+`page_size == PAGE_SIZE_FOR_SR_SLIDE`，这个常量在
+`osfmk/vm/vm_shared_region.h:98` 固定为 **4096**（不是 16 KiB）。
+
+5. 缺页时，pager（`osfmk/vm/vm_shared_region_pager.c:707`）按 4 KiB chunk
+   调 `vm_shared_region_slide_page()`，v2 分支是
+   `vm_shared_region_slide_page_v2()`（`vm_shared_region.c:3095`）：读
+   `page_starts`/`page_extras`，用 `delta_mask`/`value_add` 找链，再把
+   `si->si_slide` 加到重定位后的指针上。`si->si_slide` 就是第 3 步的
+   `sr_slide`。
+
+6. dyld 看到的是 `shared_region_check_np()`（`bsd/vm/vm_unix.c:2091`）。它返回
+   `sr_base_address + sr_first_mapping`（`vm_shared_region.c:1020-1027`）。
+   slide 之后 `sr_first_mapping` 是 main cache 的 slid 地址，所以返回值是
+   `sharedRegionStart + slide`；dyld 用 header 里的
+   `sharedRegionStart` 反推出同一个 slide。`sr_slide`（pager 用）和这个
+   base（dyld 用）必须由同一个数产生，不能只改其中一个。
+
+7. `maxSlide` 占的是真实 shared region 的空间，不是 cache 自己的
+   `sharedRegionSize`。这棵树 arm64 的 region 是
+   `[0x180000000, 0x280000000)`（`SHARED_REGION_BASE_ARM64` +
+   `SHARED_REGION_SIZE_ARM64`，4 GiB）。真实 cache 的
+   `sharedRegionStart + sharedRegionSize = 0x22ade8000`，
+   再加 `maxSlide 0x55214000` 得到 `0x27fffc000`，仍在 region 内，剩
+   `0x4000`。因此校验不能拿 `0x22ade8000` 当上界，否则任何非零 slide 都会
+   被误判为越界。
+
+**机制本身是完整的**：`vm_shared_region_slide()`、v1–v4 的
+`vm_shared_region_slide_page()`、`shared_region_pager_setup()` 都在这个内核
+里编译，没有 `#if` 掉。缺的只是预映射路径没有消费
+`dyld_cache_mapping_and_slide_info`、没有填 `sms_slide_start/size`、没有设
+`VM_PROT_SLIDE`、也没有把 `srfmp->slide` 交进去。本节补的就是这四件事。
+
+### 2. 真实 cache 的 slide 数据
+
+用 `scripts/check-shared-cache.py` 直接读真实的 44 个文件：51 条映射里只有
+**4 条**带 slide info，全部在 `.dylddata` 的 `__DATA_CONST`/`__DATA` 上；
+编号 text 分片和 `.dyldlinkedit` 都没有 slide info。
+
+| 文件 | 映射 | 文件内 slide info | 大小 | v2 页数 |
+| --- | ---: | --- | ---: | ---: |
+| `.27.dylddata` | 1 | `0xb207c08` | `0xa788` | 21,424 |
+| `.27.dylddata` | 2 | `0xb1fc000` | `0xbc08` | 24,048 |
+| `.41.dylddata` | 1 | `0x618ef58` | `0x5350` | 10,644 |
+| `.41.dylddata` | 2 | `0x6188000` | `0x6f58` | 14,232 |
+
+四条都是 `version=2`、`page_size=0x1000`、`page_starts_count = mapping_size /
+4096`、`page_extras_count=0`、`delta_mask=0x00ffff0000000000`、
+`value_add=0`。slide info 都落在同一个文件最后那条 r-- 映射（map 3）的
+文件范围内，所以映射建立后可以按 `map3.address + (slideInfoFileOffset -
+map3.fileOffset)` 读到；这不要求 slide info 和被 slide 的映射是同一条。
+
+### 3. 实现
+
+内核侧（`bsd/kern/kebab_dyldcache.c`）：
+
+* 读 56 字节的 `dyld_cache_mapping_and_slide_info`，要求它的
+  address/size/fileOffset/maxProt/initProt 与 32 字节 mapping 表逐项相等；
+  `slideInfoFileOffset` 和 `slideInfoFileSize` 要么都为 0，要么都非 0。
+* 在每个文件内找覆盖 slide info 的映射，把 `sms_slide_start` 先填成
+  **unslid** 地址；找不到就拒绝，不做“假定它在某处”的映射。
+* 只接受 cache 实际使用的 v2：检查 40 字节头、`page_size==4096`、
+  `page_starts_count * 4096 == mapping size`、表项不越界、`delta_mask` 是
+  可用的 64 位掩码。v1/v3/v4 内核 pager 支持，但本模块不替它们做预校验，
+  遇到会明确拒绝，而不是映射到一半才失败。
+* `kebab_dsc_slide=<bytes>`（默认 0）选择 slide。校验：16 KiB 对齐、
+  `< maxSlide`、slide 映射数不为 0、能放进 32 位 `srfmp->slide`、且平移后
+  每条映射和每个 slide-info blob 都在真实 arm64 region 内。任何一条不满足
+  就拒绝整个计划，不映射。
+* 非零 slide 时，把所有映射地址和所有非零 `sms_slide_start` 加同一个值；
+  对 4 条带 slide info 的映射设 `sms_max_prot |= VM_PROT_SLIDE`；把同一个
+  值写进每个 `srfmp->slide`。slide=0 时完全保持原来的 unslid 路径，不设
+  `VM_PROT_SLIDE`，不建立 pager。
+* 计划日志只打印一次 `slide 0x... (boot arg|default)`；映射成功后额外调
+  `vm_shared_region_start_address()`，把
+  `shared_region_check_np()` 会返回的 base 和
+  `plan->region_start + slide` 对比并打印，便于真机日志核对。
+* 映射日志同时打印 `map: slide 0x...` 和 `mapped ... at 0x...`（slid 地址）。
+
+host 侧（`scripts/check-shared-cache.py`）：
+
+* 新增 `--slide N`（十进制或 `0x...`，默认 0）。
+* 解析同一张 mappingWithSlide 表、做同样的字段交叉检查、找 blob、校验 v2
+  （额外解析 page starts/extras 链，确认没有 `EXTRA` 但 extras 为 0 的页）。
+* 用同样的 16 KiB 对齐、`maxSlide`、4 GiB region 边界检查，把同一组地址和
+  `slideInfo=` 地址打印出来；`--json` 里也带 `slide`、`slideMappings` 和
+  每条映射的 slideInfo。
+* 打印格式与内核逐行对应，方便把 host 输出和 `KEBAB DSC:` 启动日志并排比较。
+
+### 4. host checker 的真实输出（非零 slide）
+
+命令：
+
+```sh
+python3 scripts/check-shared-cache.py --slide 0x1000000 ~/ios-userland/cryptex-cache
+```
+
+关键行（完整输出 100+ 行，这里保留 slide 相关部分）：
+
+```text
+KEBAB DSC: region start=0x180000000 size=0xaade8000 end=0x22ade8000 maxSlide=0x55214000
+KEBAB DSC: slide 0x1000000 (--slide); 4 mapping(s) carry slide info; shared region [0x180000000, 0x280000000)
+KEBAB DSC: dyld_shared_cache_arm64.27.dylddata: mapping 1 slide info v2 at file 0xb207c08+0xa788: page_size=0x1000 pages=21424 extras=0 deltaMask=0xffff0000000000 valueAdd=0x0
+KEBAB DSC: dyld_shared_cache_arm64.27.dylddata: mapping 2 slide info v2 at file 0xb1fc000+0xbc08: page_size=0x1000 pages=24048 extras=0 deltaMask=0xffff0000000000 valueAdd=0x0
+KEBAB DSC: dyld_shared_cache_arm64.41.dylddata: mapping 1 slide info v2 at file 0x618ef58+0x5350: page_size=0x1000 pages=10644 extras=0 deltaMask=0xffff0000000000 valueAdd=0x0
+KEBAB DSC: dyld_shared_cache_arm64.41.dylddata: mapping 2 slide info v2 at file 0x6188000+0x6f58: page_size=0x1000 pages=14232 extras=0 deltaMask=0xffff0000000000 valueAdd=0x0
+KEBAB DSC: highest mapped end 0x22bde4000 (unslid 0x22ade4000), cache extent end 0x22ade8000
+KEBAB DSC: file 27 sub  dyld_shared_cache_arm64.27.dylddata    size=0xb270000   mapped=0xb214000   vmOffset=0x55908000   uuid=07058ec474213a43b25eec4254f216d7
+KEBAB DSC:      map 0x1d6908000 size=0x5c000     file=0x0         init=r-x max=r-x
+KEBAB DSC:      map 0x1d6964000 size=0x53b0000   file=0x5c000     init=r-- max=rw- slideInfo=0x1e5b0fc08+0xa788
+KEBAB DSC:      map 0x1ddd14000 size=0x5df0000   file=0x540c000   init=rw- max=rw- slideInfo=0x1e5b04000+0xbc08
+KEBAB DSC:      map 0x1e5b04000 size=0x18000     file=0xb1fc000   init=r-- max=r--
+KEBAB DSC: dry run: plan only (slide 0x1000000), nothing mapped; the kernel maps nothing unless kebab_dsc_map=1
+```
+
+边界检查也实际跑过：`--slide 0x1000` 报“不是 0x4000 对齐”，
+`--slide 0x55214000` 报“不低于 maxSlide”，`--slide 0x55210000` 通过并给出
+`highest mapped end 0x27fff4000`（仍在 `0x280000000` 内）。
+
+### 5. 应用和构建结果
+
+* 在 `xnu-8796.141.3`（`1b191cb`）的干净索引上按文件名顺序应用 83 个 kebab
+  补丁（LF 副本）：**83 / 83** 成功，无失败；`0103` 应用到 `0102` 创建的
+  `bsd/kern/kebab_dyldcache.c` 后，索引内容与 `verifySc2` 工作树逐字节相同。
+* 构建：`~/kebab-build/build-local.sh` 同一套 `dxb/build.sh`，
+  `MACHINE_CONFIG=KEBAB`、`KERNEL_CONFIG=DEVELOPMENT`、macOS 13.5 +
+  `KDK_13.5_22G74`。
+* 产物：`build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab`，
+  **17,069,536 字节（16.28 MiB）**，Mach-O 64-bit arm64，SHA-256
+  `894d513edb3f5580a9702ae62c9b5c2101dd667696fdc68f71b75820ca4d8b66`。
+* `kebab_dyldcache.c` 本身 **0 条 warning**；全树日志 14,265 条 warning，
+  都是既有文件/头文件的。镜像字符串里能看到
+  `KEBAB DSC: slide 0x%llx ...` 和
+  `KEBAB DSC: map: shared_region_check_np base ...`，确认新代码进了内核。
+
+### 6. 启动参数
+
+| 参数 | 作用 |
+| --- | --- |
+| `kebab_dsc=1` 或 `kebab_dsc=<绝对目录>` | 解析并打印计划（dry-run）|
+| `kebab_dsc_map=1` | 第一次 exec 时真正映射 |
+| `kebab_dsc_slide=<字节>` | 强制 slide，默认 0；支持十进制和 `0x...` |
+
+示例（真机）：
+
+```text
+kebab_dsc=1 kebab_dsc_map=1 kebab_dsc_slide=0x1000000
+```
+
+三个参数都只在有 `kebab_dsc` 时生效。非法 slide（未对齐、达到/超过
+`maxSlide`、没有 slide 映射、越出 region）会让计划直接失败，日志写明原因，
+不会退化成“日志有 slide、实际映射 unslid”。
+
+### 7. 仍未验证的内容
+
+* **真机启动**：没有在 OnePlus 8T 上带 3.3 GB cache 启动过。`copyin()` 的
+  地址现在是 shared region 内的 slide-info 页；映射建立后该页可读，但在
+  `sr_mapping_in_progress` 为真时从 shared region 缺页，是否会与
+  `vm_shared_region_map_file()` 的串行化冲突，只有真机能回答。
+* **pager 的实际重定位**：v2 的 `page_starts`/`delta_mask` 已按真实 blob
+  校验，但 `vm_shared_region_slide_page_v2()` 在 4 KiB chunk 上执行、映射
+  本身按 16 KiB VM 页建立，只有真机 fault 才能确认。
+* **dyld 的视角**：`shared_region_check_np()` 应返回
+  `0x180000000 + slide`，dyld 再从 header 反推 slide；内核日志会打印这个
+  base，但还没有一个用户态程序实际调用过它。
+* **只校验 v2**：内核 pager 支持 v1–v4，本模块只对 v2 做预校验；别的版本
+  会被拒绝，而不是猜着映射。
+* **slide=0 路径**：保持第十四节的 unslid 行为，没有建立 pager；这条路径
+  同样没有真机验证。
+* 第十四节列出的根卷容量、`.symbols` 不映射、dyld 本身仍来自 OS 卷等问题
+  仍然存在；它们与 slide 无关。
+
+本节的所有 slide 结论都来自源码、真实 cache 文件、host checker 和一次成功
+编译，不能替代真机结论。
