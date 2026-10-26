@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,837 @@
+@@ -0,0 +1,861 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -266,6 +266,33 @@ new file mode 100644
 +	}
 +	uint64_t tpa = ud.dma_pa + trb_off;
 +	return ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)(tpa >> 32), (uint32_t)tpa, 0);
++}
++
++/*
++ * A bus reset drops the endpoint configuration, so EP0 has to be rebuilt before
++ * any control transfer can start: start the resource configuration, program both
++ * directions with the packet size for high speed, request transfer resources, and
++ * only then re-arm the setup stage.
++ */
++static void
++ud_ep0_rebuild(void)
++{
++	const uint32_t maxpkt = 64;
++
++	if (ud_epcmd(EP0_OUT, DEPCMD_DEPSTARTCFG, 0, 0, 0) ||
++	    ud_epcmd(EP0_OUT, DEPCMD_SETEPCONFIG,
++	    DEPCFG_PARAM0(EP_TYPE_CONTROL, maxpkt, 0), DEPCFG_PARAM1(EP0_OUT), 0) ||
++	    ud_epcmd(EP0_OUT, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0) ||
++	    ud_epcmd(EP0_IN, DEPCMD_SETEPCONFIG,
++	    DEPCFG_PARAM0(EP_TYPE_CONTROL, maxpkt, 0), DEPCFG_PARAM1(EP0_IN), 0) ||
++	    ud_epcmd(EP0_IN, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
++		printf("KEBAB USB: EP0 rebuild failed\n");
++		return;
++	}
++	dwc_wr(DALEPENA, (1u << EP0_OUT) | (1u << EP0_IN));
++	ud.configured = false;
++	ud.bulk_in_busy = false;
++	ud_start_setup();
 +}
 +
 +static void
@@ -602,11 +629,8 @@ new file mode 100644
 +		uint32_t type = (ev >> 8) & 0xf;
 +		if (type == 1) {                /* reset */
 +			dwc_wr(DCFG, dwc_rd(DCFG) & ~DCFG_ADDR_MASK);
-+			dwc_wr(DALEPENA, (1u << EP0_OUT) | (1u << EP0_IN));
-+			ud.configured = false;
-+			ud.bulk_in_busy = false;
-+			printf("KEBAB USB: bus reset\n");
-+			ud_start_setup();
++			printf("KEBAB USB: bus reset, rebuilding EP0\n");
++			ud_ep0_rebuild();
 +		} else if (type == 2) {         /* connect done */
 +			uint32_t speed = dwc_rd(DSTS) & 7;
 +			uint32_t maxpkt = 64;
