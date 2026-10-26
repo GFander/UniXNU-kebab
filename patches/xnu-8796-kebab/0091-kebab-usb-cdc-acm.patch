@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1008 @@
+@@ -0,0 +1,1009 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -49,6 +49,7 @@ new file mode 100644
 +#define GCTL            0xc110
 +#define GHWPARAMS0      0xc140
 +#define GHWPARAMS7      0xc15c
++#define GUSB2PHYCFG0    0xc200
 +#define GEVTEN          0xc114
 +#define GEVNTADRLO      0xc400
 +#define GEVNTADRHI      0xc404
