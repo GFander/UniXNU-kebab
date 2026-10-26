@@ -157,9 +157,6 @@ def main():
                         ('dram-base', struct.pack('<Q', DRAM_BASE)),
                         ('dram-size', struct.pack('<Q', args.dram_size)),
                         ('crypto-hash-method', b'sha2-384\0'),
-                        # SpringBoard rejects a display mode whose scale is zero.
-                        ('display-scale', struct.pack('<I', 3)),
-                        ('display-scale-factor', struct.pack('<I', 3)),
                         *([('root-matching', ('<dict><key>IOProviderClass</key><string>IOMedia</string>'
                                               '<key>IOPropertyMatch</key><dict><key>UUID</key><string>' +
                                               args.root_match_volume_uuid.upper() + '</string></dict></dict>\0').encode())]
@@ -200,13 +197,7 @@ def main():
               # UFS (0x01D84000) lies far below the arm-io window, so a child reg
               # offset would be negative. The node exists only for class matching;
               # the driver takes its physical windows from board constants.
-              node('ufshc', [('compatible', b'qcom,sm8250-ufshc\0qcom,kona-ufshc\0')]),
-              # IOMobileFramebuffer.framework counts /arm-io children with
-              # device_type "display-subsystem" and gives up when the count is
-              # zero, so the display needs a node even though the driver is
-              # started from the platform expert rather than matched here.
-              node('disp0', [('compatible', b'kebab,display\0'),
-                             ('device_type', b'display-subsystem\0')])]),
+              node('ufshc', [('compatible', b'qcom,sm8250-ufshc\0qcom,kona-ufshc\0')])])),
     ])
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
