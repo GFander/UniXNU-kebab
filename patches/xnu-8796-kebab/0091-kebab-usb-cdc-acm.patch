@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,868 @@
+@@ -0,0 +1,1116 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -36,6 +36,8 @@ new file mode 100644
 +
 +#include <arm/machine_routines.h>
 +
++static void ud_bus_error_report(const char *when);
++
 +/* Declared in arm/machine_routines.h, behind a guard this build does not
 + * satisfy; the negroni port spells it out for the same reason. */
 +extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -45,6 +47,9 @@ new file mode 100644
 +/* ---------------------------------------------------------------- registers */
 +
 +#define GCTL            0xc110
++#define GHWPARAMS0      0xc140
++#define GHWPARAMS7      0xc15c
++#define GUSB2PHYCFG0    0xc200
 +#define GEVTEN          0xc114
 +#define GEVNTADRLO      0xc400
 +#define GEVNTADRHI      0xc404
@@ -68,6 +73,8 @@ new file mode 100644
 +#define DCFG_SPEED_MASK (0x7u << 0)
 +#define DCFG_ADDR_MASK  (0x7fu << 3)
 +#define DCFG_ADDR(a)    (((uint32_t)(a) << 3) & DCFG_ADDR_MASK)
++#define DCFG_NUMP_SHIFT 17
++#define DCFG_NUMP_MASK  (0x1fu << DCFG_NUMP_SHIFT)
 +
 +/* DEVTEN: disconnect, connect done, reset */
 +#define DEVTEN_DEVICE   0x7u
@@ -127,11 +134,15 @@ new file mode 100644
 +#define UD_TRB_NOTIFY  0x0480
 +#define UD_TRB_BULKIN  0x04c0
 +#define UD_TRB_BULKOUT 0x0500
++#define UD_TRB_OUT_DATA 0x0540   /* ep0 OUT data stage, own slot */
 +#define UD_SETUP       0x0580
 +#define UD_DATA        0x0600      /* ep0 data stage, 512 bytes */
 +#define UD_NOTIFY      0x0800
-+#define UD_BULKIN      0x0900      /* 512 bytes */
-+#define UD_BULKOUT     0x0b00      /* 512 bytes */
++/* Bulk buffers must be aligned to the endpoint maximum packet size, which is 512,
++ * so they live at 512-aligned offsets; 0x0b00 is only 64-aligned, which is why the
++ * endpoints worked at 64-byte packets and died at 512. */
++#define UD_BULKIN      0x0c00      /* 512 bytes, 512-aligned */
++#define UD_BULKOUT     0x0e00      /* 512 bytes, 512-aligned */
 +
 +/* physical endpoints: ep = 2 * usb_number + direction */
 +#define EP0_OUT        0
@@ -158,16 +169,21 @@ new file mode 100644
 +	bool        configured;
 +	bool        running;
 +	bool        bulk_in_busy;
++	bool        ep0_status3;
++	bool        console_input;
 +	uint32_t    tx_bytes;
 +	lck_grp_t  *lock_grp;
 +	lck_mtx_t  *lock;
++	uint32_t    in_head;
++	uint32_t    in_tail;
++	char        in_ring[256];
 +	uint32_t    log_head;
 +	uint32_t    log_tail;
 +	uint32_t    log_busy;
 +	char        log_ring[LOG_RING_SIZE];
 +} ud;
 +
-+enum { EP0_SETUP, EP0_DATA, EP0_STATUS, EP0_WAIT_STATUS };
++enum { EP0_SETUP, EP0_DATA, EP0_DATA_OUT, EP0_STATUS, EP0_WAIT_STATUS };
 +
 +/* --------------------------------------------------------------- helpers */
 +
@@ -233,7 +249,7 @@ new file mode 100644
 +	dwc_wr(DEPCMDPAR1(ep), p1);
 +	dwc_wr(DEPCMDPAR2(ep), p2);
 +	dwc_wr(DEPCMD(ep), cmd | DEPCMD_CMDACT);
-+	for (int i = 0; i < 1000; i++) {
++	for (int i = 0; i < 200; i++) {
 +		uint32_t v = dwc_rd(DEPCMD(ep));
 +		if (!(v & DEPCMD_CMDACT)) {
 +			uint32_t status = (v >> 12) & 0xf;
@@ -259,18 +275,21 @@ new file mode 100644
 +	t[0] = (uint32_t)bpa;
 +	t[1] = (uint32_t)(bpa >> 32);
 +	t[2] = len;
-+	t[3] = ctl | TRB_HWO | TRB_LST | TRB_ISP_IMI | TRB_IOC;
-+	ud_to_dev(trb_off, 16);
-+	if (len && (ctl == TRBCTL_DATA || ctl == TRBCTL_NORMAL)) {
++	/* hand the buffer over first, then the TRB that names it */
++	if (len) {
 +		ud_to_dev(buf_off, len);
 +	}
++	t[3] = ctl | TRB_HWO | TRB_LST | TRB_ISP_IMI | TRB_IOC;
++	ud_to_dev(trb_off, 16);
 +	uint64_t tpa = ud.dma_pa + trb_off;
 +	/*
-+	 * DEPCMDPAR0 carries the low 32 bits of the TRB address and DEPCMDPAR1 the
-+	 * high half (Linux dwc3_gadget_ep_cmd splits it exactly this way). Swapping
-+	 * them makes the controller answer every STARTTRANSFER with status 1.
++	 * DEPCMDPAR0 is the HIGH word and DEPCMDPAR1 the LOW word; drivers/usb/dwc3/
++	 * ep0.c sets param0 = upper_32_bits(trb) and param1 = lower_32_bits(trb).
++	 * Getting this backwards makes the controller fetch its TRB from a garbage
++	 * address, which on this board is fatal: the buses error out and the board
++	 * drops into EDL.
 +	 */
-+	return ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)tpa, (uint32_t)(tpa >> 32), 0);
++	return ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)(tpa >> 32), (uint32_t)tpa, 0);
 +}
 +
 +/*
@@ -402,7 +421,8 @@ new file mode 100644
 +		return;
 +	}
 +	/* reset non-control resource allocation, keeping endpoint 0 */
-+	ud_epcmd(EP0_OUT, DEPCMD_DEPSTARTCFG, 0, 0, 0);
++	/* index 2 keeps endpoint 0's allocation; 0 would reset everything */
++	ud_epcmd(EP0_OUT, DEPCMD_DEPSTARTCFG | (2u << 16), 0, 0, 0);
 +
 +	if (ud_ep_config(EP_NOTIFY, EP_TYPE_INTR, 8) ||
 +	    ud_ep_config(EP_BULK_OUT, EP_TYPE_BULK, 512) ||
@@ -428,39 +448,35 @@ new file mode 100644
 +void
 +kebab_usb_log(const char *buf, size_t len)
 +{
-+	uint32_t expected = 0;
-+
 +	if (!ud.running) {
 +		return;
 +	}
-+	if (!os_atomic_cmpxchg(&ud.log_busy, expected, 1u, acquire)) {
-+		return;
-+	}
++	/*
++	 * Single producer, single consumer, so no lock: this runs from the console
++	 * path, which on a single core can be preempted at any instant, and a spin
++	 * on a gate it holds is a livelock.
++	 */
 +	for (size_t i = 0; i < len; i++) {
 +		uint32_t next = (ud.log_head + 1) % LOG_RING_SIZE;
 +		if (next == ud.log_tail) {
 +			break;
 +		}
 +		ud.log_ring[ud.log_head] = buf[i];
++		__asm__ volatile ("dmb ishst" ::: "memory");
 +		ud.log_head = next;
 +	}
-+	os_atomic_store(&ud.log_busy, 0u, release);
 +}
 +
 +static uint32_t
 +ud_log_take(char *out, uint32_t max)
 +{
 +	uint32_t n = 0;
-+	uint32_t expected = 0;
 +
-+	if (!os_atomic_cmpxchg(&ud.log_busy, expected, 1u, acquire)) {
-+		return 0;
-+	}
 +	while (n < max && ud.log_tail != ud.log_head) {
 +		out[n++] = ud.log_ring[ud.log_tail];
++		__asm__ volatile ("dmb ish" ::: "memory");
 +		ud.log_tail = (ud.log_tail + 1) % LOG_RING_SIZE;
 +	}
-+	os_atomic_store(&ud.log_busy, 0u, release);
 +	return n;
 +}
 +
@@ -472,13 +488,18 @@ new file mode 100644
 + * stage means OUT, STATUS2 after an OUT data stage means IN.
 + */
 +static void
-+ud_status_stage(void)
++ud_status_stage(bool had_data_stage)
 +{
 +	/*
 +	 * The controller reports XferNotReady(status=2) when it is ready for the
-+	 * status stage and tells us which direction it wants; submitting before that
-+	 * comes back as status 1 (invalid parameter) and the transfer never ends.
++	 * status stage and names the direction it wants; submitting before that comes
++	 * back as status 1 (invalid parameter) and the transfer never ends.
++	 *
++	 * As in Linux dwc3_ep0, a request that had a data stage is a three-stage
++	 * transfer and its status uses STATUS3; a request without one is two-stage
++	 * and uses STATUS2.
 +	 */
++	ud.ep0_status3 = had_data_stage;
 +	ud.state = EP0_WAIT_STATUS;
 +}
 +
@@ -502,16 +523,44 @@ new file mode 100644
 +	if ((type & 0x60) == 0x20) {                    /* class */
 +		switch (req) {
 +		case 0x20:                              /* SET_LINE_CODING, 7 bytes OUT */
-+			ok = (length == 7);
-+			break;
++			/*
++			 * The host sends seven bytes in an OUT data stage; they have to be
++			 * received before the status stage, or the transfer stalls when the
++			 * port is opened. The contents (baud rate and frame format) are
++			 * irrelevant here: the text stream does not depend on them.
++			 */
++			if (length != 7) {
++				ok = false;
++				break;
++			}
++			/*
++			 * Submit right away, as dwc3_ep0 does: waiting for
++			 * XferNotReady(DATA) hangs forever when the host sends another
++			 * SETUP instead of the data phase (ep0.c:145).
++			 */
++			ud.state = EP0_DATA_OUT;
++			/*
++			 * 64 is the receive capacity, not the expected payload: DWC3 wants
++			 * OUT capacity aligned to the endpoint maximum packet size, which is
++			 * why submitting a bare seven-byte transfer never completed.
++			 */
++			if (ud_start(UD_TRB_OUT_DATA, EP0_OUT, UD_DATA, 64, TRBCTL_DATA)) {
++				printf("KEBAB USB: SET_LINE_CODING data stage rejected\n");
++				ud_ep_stall(EP0_OUT);
++			}
++			return;
 +		case 0x21:                              /* GET_LINE_CODING, 7 bytes IN */
 +			memset(data, 0, 7);
 +			data[0] = 0x80; data[1] = 0x25; data[2] = 0;   /* 9600 baud */
++			data[6] = 8;                              /* 8 data bits */
 +			n = 7;
 +			break;
 +		case 0x22:                              /* SET_CONTROL_LINE_STATE */
 +			break;
 +		default:
++			/* Back to stalling unknown class requests: answering them was added
++			 * to coax usbser and is the prime suspect for the data endpoints
++			 * going dead, so it goes away first. */
 +			ok = false;
 +			break;
 +		}
@@ -591,7 +640,7 @@ new file mode 100644
 +		ud_start(UD_TRB_IN, EP0_IN, UD_DATA, chunk, TRBCTL_DATA);
 +		return;
 +	}
-+	ud_status_stage();
++	ud_status_stage(false);
 +}
 +
 +/* ---------------------------------------------------------------- events */
@@ -606,7 +655,15 @@ new file mode 100644
 +	uint32_t left = t[2] & 0x00ffffff;
 +	uint32_t received = (left < 512) ? 512 - left : 0;
 +	ud_from_dev(UD_BULKOUT, 512);
-+	if (received > 0) {
++	for (uint32_t i = 0; i < received && i < 512; i++) {
++		uint32_t next = (ud.in_head + 1) % sizeof(ud.in_ring);
++		if (next != ud.in_tail) {
++			ud.in_ring[ud.in_head] = buf[i];
++			__asm__ volatile ("dmb ishst" ::: "memory");
++			ud.in_head = next;
++		}
++	}
++	if (received > 0 && !ud.console_input) {
 +		char tmp[64];
 +		uint32_t show = (received < sizeof(tmp) - 1) ? received : sizeof(tmp) - 1;
 +		memcpy(tmp, buf, show);
@@ -684,7 +741,8 @@ new file mode 100644
 +			ud_setup();
 +			break;
 +		case EP0_DATA:
-+			ud_status_stage();
++		case EP0_DATA_OUT:
++			ud_status_stage(true);
 +			break;
 +		case EP0_STATUS:
 +			ud_start_setup();
@@ -702,7 +760,7 @@ new file mode 100644
 +		 */
 +		ud.state = EP0_STATUS;
 +		ud_start(ep == EP0_IN ? UD_TRB_IN : UD_TRB_OUT, ep, UD_DATA, 0,
-+		    TRBCTL_STATUS2);
++		    ud.ep0_status3 ? TRBCTL_STATUS3 : TRBCTL_STATUS2);
 +	}
 +}
 +
@@ -716,13 +774,21 @@ new file mode 100644
 +	if (!ud.configured || ud.bulk_in_busy) {
 +		return;
 +	}
-+	n = ud_log_take((char *)(ud.dma + UD_BULKIN), 512);
++	n = ud_log_take((char *)(ud.dma + UD_BULKIN), 511);   /* short packet ends the read */
++	if (n && ud.tx_bytes == 0) {
++		printf("KEBAB USB: pump start, %u bytes in the ring\n", n);
++	}
 +	if (n == 0) {
 +		return;
 +	}
 +	if (ud_start(UD_TRB_BULKIN, EP_BULK_IN, UD_BULKIN, n, TRBCTL_NORMAL) == 0) {
 +		ud.bulk_in_busy = true;
 +		ud.tx_bytes += n;
++		if (ud.tx_bytes <= 1024) {
++			printf("KEBAB USB: sent %u bytes (total %u)\n", n, ud.tx_bytes);
++		}
++	} else if (ud.tx_bytes == 0) {
++		printf("KEBAB USB: bulk IN rejected, %u bytes waiting\n", n);
 +	}
 +}
 +
@@ -730,13 +796,23 @@ new file mode 100644
 +ud_thread(void *arg __unused, wait_result_t wr __unused)
 +{
 +	for (;;) {
-+		uint32_t count = dwc_rd(GEVNTCOUNT) & 0xffff;
++		uint32_t count = dwc_rd(GEVNTCOUNT) & 0xfffc;
++		if (count > UD_EVT_SIZE) {
++			/* the controller cannot produce more than one buffer's worth */
++			printf("KEBAB USB: event count %u out of range, dropping\n", count);
++			dwc_wr(GEVNTCOUNT, count);
++			count = 0;
++		}
 +		if (count) {
 +			ud_from_dev(UD_EVT, UD_EVT_SIZE);
 +			for (uint32_t done = 0; done < count; done += 4) {
 +				uint32_t ev = *(volatile uint32_t *)(ud.dma + UD_EVT + ud.evt_pos);
 +				ud.evt_pos = (ud.evt_pos + 4) % UD_EVT_SIZE;
-+				if (ud.events++ < 40) {
++				unsigned epe = (ev >> 1) & 0x1f;
++				if (epe < 2) {
++					printf("KEBAB USB: ep0 ev 0x%08x ep=%u type=%u status=%u state=%d\n",
++					    ev, epe, (ev >> 6) & 0xf, (ev >> 12) & 0xf, (int)ud.state);
++				} else if (ud.events++ < 40) {
 +					printf("KEBAB USB: event 0x%08x\n", ev);
 +				}
 +				ud_event(ev);
@@ -745,6 +821,68 @@ new file mode 100644
 +		}
 +		ud_pump_log();
 +		ud_sleep_ms(2);
++	}
++}
++
++/*
++ * The USB controller sits behind apps_smmu (stream 0, per kona-usb.dtsi) while
++ * the UFS controller does not, which is why UFS DMA works and the first USB
++ * transfer kills the board. Read the SMMU out before touching anything: whether
++ * it is enabled, what the global bypass says, and whether stream 0 has a
++ * mapping. Read-only on purpose.
++ */
++#define SMMU_PA        0x15000000
++#define SMMU_CR0       0x0000
++#define SMMU_GBPA      0x0004
++#define SMMU_IDR0      0x0020
++#define SMMU_IDR1      0x0024
++#define SMMU_GFSR      0x0048
++#define SMMU_GFSYNR0   0x0050
++#define SMMU_GFSYNR1   0x0054
++#define SMMU_SMR(n)    (0x0800 + 4 * (n))     /* VALID[31] MASK[30:16] ID[14:0] */
++#define SMMU_S2CR(n)   (0x0c00 + 4 * (n))     /* TYPE[17:16]: 0=trans 1=bypass 2=fault */
++
++/* DWC3 records whether the last failure was a bus error, and where. */
++#define GSTS            0xc118
++#define GBUSERRADDR0    0xc130
++#define GBUSERRADDR1    0xc134
++
++static void
++ud_bus_error_report(const char *when)
++{
++	uint32_t gsts = dwc_rd(GSTS);
++	if (gsts & (1u << 4)) {
++		printf("KEBAB USB: bus error address valid %s: 0x%08x%08x GSTS 0x%08x\n",
++		    when, dwc_rd(GBUSERRADDR1), dwc_rd(GBUSERRADDR0), gsts);
++	} else {
++		printf("KEBAB USB: no bus error %s (GSTS 0x%08x)\n", when, gsts);
++	}
++}
++
++static void
++ud_smmu_report(void)
++{
++	vm_offset_t smmu = ml_io_map(SMMU_PA, 0x10000);
++	if (smmu == 0) {
++		printf("KEBAB USB: cannot map the SMMU\n");
++		return;
++	}
++	uint32_t cr0 = *(volatile uint32_t *)(smmu + SMMU_CR0);
++	uint32_t idr0 = *(volatile uint32_t *)(smmu + SMMU_IDR0);
++	uint32_t idr1 = *(volatile uint32_t *)(smmu + SMMU_IDR1);
++	printf("KEBAB USB: SMMU CR0 0x%08x IDR0 0x%08x IDR1 0x%08x\n", cr0, idr0, idr1);
++	printf("KEBAB USB: SMMU clientpd %u usfcfg %u numsmrg %u\n",
++	    cr0 & 1u, (cr0 >> 10) & 1u, idr0 & 0xffu);
++	/* only the first handful: enough to see whether stream 0 is covered */
++	for (unsigned i = 0; i < 8; i++) {
++		uint32_t smr = *(volatile uint32_t *)(smmu + SMMU_SMR(i));
++		uint32_t s2cr = *(volatile uint32_t *)(smmu + SMMU_S2CR(i));
++		if (smr == 0 && s2cr == 0) {
++			continue;
++		}
++		printf("KEBAB USB: SMMU[%u] SMR 0x%08x (valid %u id 0x%x mask 0x%x) S2CR 0x%08x (type %u)\n",
++		    i, smr, smr >> 31, smr & 0x7fffu, (smr >> 16) & 0x7fffu,
++		    s2cr, (s2cr >> 16) & 3u);
 +	}
 +}
 +
@@ -791,6 +929,13 @@ new file mode 100644
 +		return;
 +	}
 +
++	/*
++	 * The USB2 PHY must not be suspended and LPM must be off before endpoint
++	 * commands; dwc3 clears SUSPHY and ENBLSLPM around HS/FS operation and the
++	 * SM8250 quirk set keeps both clear.
++	 */
++	dwc_wr(GUSB2PHYCFG0, dwc_rd(GUSB2PHYCFG0) & ~((1u << 6) | (1u << 8)));
++
 +	dwc_wr(DEVTEN, DEVTEN_DEVICE);
 +	dwc_wr(DCTL, DCTL_CSFTRST);
 +	int i;
@@ -804,8 +949,36 @@ new file mode 100644
 +		return;
 +	}
 +
-+	/* high speed, address 0 */
++	/* device mode, high speed, address 0 */
++	dwc_wr(GCTL, (dwc_rd(GCTL) & ~(3u << 12)) | (2u << 12));
 +	dwc_wr(DCFG, dwc_rd(DCFG) & ~(DCFG_SPEED_MASK | DCFG_ADDR_MASK));
++
++	/*
++	 * Number of receive packets, as dwc3_gadget_setup_nump() computes it:
++	 * RxFIFO comes from RAM2 depth and the datapath width, and NumP is that
++	 * size in KiB, clamped to 16. With NumP left at the reset value the
++	 * controller has nothing to receive with.
++	 */
++	{
++		uint32_t hw7 = dwc_rd(GHWPARAMS7);
++		uint32_t ram2 = (hw7 >> 16) & 0xffff;
++		uint32_t hw0 = dwc_rd(GHWPARAMS0);
++		uint32_t mdwidth = (hw0 >> 4) & 0x3f;   /* MDWIDTH in GHWPARAMS0[9:4] */
++		uint32_t fifo;
++		uint32_t nump;
++		if (mdwidth == 0) {
++			mdwidth = 32;
++		}
++		fifo = (ram2 * mdwidth / 8);
++		fifo = (fifo > 40) ? (fifo - 40) : 0;
++		nump = fifo / 1024;
++		if (nump > 16) {
++			nump = 16;
++		}
++		dwc_wr(DCFG, (dwc_rd(DCFG) & ~DCFG_NUMP_MASK) | (nump << DCFG_NUMP_SHIFT));
++		printf("KEBAB USB: GHWPARAMS0 0x%08x GHWPARAMS7 0x%08x -> NumP %u\n",
++		    hw0, hw7, nump);
++	}
 +	dwc_wr(DEVTEN, DEVTEN_DEVICE);
 +
 +	dwc_wr(GEVNTADRLO, (uint32_t)(ud.dma_pa + UD_EVT));
@@ -818,21 +991,36 @@ new file mode 100644
 +	/* The controller needs its endpoint resource configuration started once
 +	 * before any endpoint is configured; without it every STARTTRANSFER comes
 +	 * back with status 1 (invalid parameter). */
++	printf("KEBAB USB: step 1 startcfg\n");
 +	if (ud_epcmd(EP0_OUT, DEPCMD_DEPSTARTCFG, 0, 0, 0)) {
 +		printf("KEBAB USB: DEPSTARTCFG failed\n");
 +		return;
 +	}
++	printf("KEBAB USB: step 2 ep0 out cfg\n");
 +	if (ud_epcmd(EP0_OUT, DEPCMD_SETEPCONFIG, DEPCFG_PARAM0(EP_TYPE_CONTROL, 512, 0),
-+	    DEPCFG_PARAM1(EP0_OUT), 0) ||
-+	    ud_epcmd(EP0_OUT, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0) ||
-+	    ud_epcmd(EP0_IN, DEPCMD_SETEPCONFIG, DEPCFG_PARAM0(EP_TYPE_CONTROL, 512, 0),
-+	    DEPCFG_PARAM1(EP0_IN), 0) ||
-+	    ud_epcmd(EP0_IN, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
-+		printf("KEBAB USB: endpoint 0 setup failed\n");
++	    DEPCFG_PARAM1(EP0_OUT), 0)) {
++		printf("KEBAB USB: step 2 failed\n");
++		return;
++	}
++	printf("KEBAB USB: step 3 ep0 out resources\n");
++	if (ud_epcmd(EP0_OUT, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
++		printf("KEBAB USB: step 3 failed\n");
++		return;
++	}
++	printf("KEBAB USB: step 4 ep0 in cfg\n");
++	if (ud_epcmd(EP0_IN, DEPCMD_SETEPCONFIG, DEPCFG_PARAM0(EP_TYPE_CONTROL, 512, 0),
++	    DEPCFG_PARAM1(EP0_IN), 0)) {
++		printf("KEBAB USB: step 4 failed\n");
++		return;
++	}
++	ud_smmu_report();
++	printf("KEBAB USB: step 5 ep0 in resources\n");
++	if (ud_epcmd(EP0_IN, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
++		printf("KEBAB USB: step 5 failed\n");
 +		return;
 +	}
 +	dwc_wr(DALEPENA, (1u << EP0_OUT) | (1u << EP0_IN));
-+	ud_start_setup();
++	printf("KEBAB USB: step 6 endpoints enabled\n");
 +
 +	/* tell the controller VBUS is present; the board does not wire OTG here */
 +	if (ud.qs != 0) {
@@ -860,6 +1048,17 @@ new file mode 100644
 +	printf("KEBAB USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n",
 +	    dwc_rd(DSTS), i, (unsigned long long)ud.dma_pa);
 +
++	/*
++	 * Only now, with the controller running, arm the first setup transfer:
++	 * dwc3_gadget_start() also sets RUN_STOP before dwc3_ep0_out_start(), and
++	 * submitting a transfer to a halted controller is not legal.
++	 */
++	ud_bus_error_report("before setup");
++	printf("KEBAB USB: step 7 arming setup, first DMA at 0x%llx\n",
++	    (unsigned long long)(ud.dma_pa + UD_SETUP));
++	ud_start_setup();
++	printf("KEBAB USB: step 7 done\n");
++
 +	if (kernel_thread_start((thread_continue_t)ud_thread, NULL, &thread) != KERN_SUCCESS) {
 +		printf("KEBAB USB: no event thread, halting\n");
 +		dwc_wr(DCTL, dwc_rd(DCTL) & ~DCTL_RUN_STOP);
@@ -871,3 +1070,52 @@ new file mode 100644
 +}
 +
 +#endif /* KEBAB */
++
++/*
++ * Console input for the kernel debugger. A panic stops the event thread, so this
++ * polls the controller itself instead of waiting for it: it drains whatever events
++ * are pending and returns the next typed byte, or -1 after a short wait.
++ */
++int
++kebab_usb_getc(bool wait)
++{
++	ud.console_input = true;                /* stop echoing keystrokes as log lines */
++
++	for (unsigned tries = 0; tries < (wait ? 4000 : 8); tries++) {
++		uint32_t count = dwc_rd(GEVNTCOUNT) & 0xfffc;
++		if (count && count <= UD_EVT_SIZE) {
++			ud_from_dev(UD_EVT, UD_EVT_SIZE);
++			for (uint32_t done = 0; done < count; done += 4) {
++				uint32_t ev = *(volatile uint32_t *)(ud.dma + UD_EVT + ud.evt_pos);
++				ud.evt_pos = (ud.evt_pos + 4) % UD_EVT_SIZE;
++				ud_event(ev);
++			}
++			dwc_wr(GEVNTCOUNT, count);
++		}
++		/*
++		 * Keep sending the log while we wait: a panic stopped the event thread,
++		 * possibly with a transfer marked in flight, and the panic text is exactly
++		 * what has to get out. Clearing the flag is safe here because this path
++		 * also consumes the completions.
++		 */
++		ud.bulk_in_busy = false;
++		ud_pump_log();
++		if (ud.in_tail != ud.in_head) {
++			int c = (unsigned char)ud.in_ring[ud.in_tail];
++			__asm__ volatile ("dmb ish" ::: "memory");
++			ud.in_tail = (ud.in_tail + 1) % sizeof(ud.in_ring);
++			return c;
++		}
++		if (!wait) {
++			break;
++		}
++		delay(1000);
++	}
++	return -1;
++}
++
++bool
++kebab_usb_console_ready(void)
++{
++	return ud.running && ud.configured;
++}

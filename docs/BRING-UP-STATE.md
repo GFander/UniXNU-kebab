@@ -157,6 +157,48 @@ kebab: userland alive
 - 用户态第一次能写内存后，`write()` 的 `uiomove` 才真正开始工作 —— 之前所有 `open`/`gettimeofday`
   的挂起都是同一个原因
 
+## 六之三、USB CDC-ACM 调试串口（进行中）
+
+目标：把内核日志经 DWC3 设备模式送到主机，主机侧直接是一个串口（Windows 的
+`USB 串行设备 (COMx)`），不再靠拍屏幕。补丁 `0091`（驱动）+ `0092`（接线），
+`kebabusb=1` 才启用。
+
+### 已经确认走通的部分
+
+```
+KEBAB USB: reset done after N ms, GCTL ... GSNPSID ...
+KEBAB USB: event buffer at 0x...
+KEBAB USB: VBUS override, HS ... -> ... , SS ... -> ...
+KEBAB USB: running (DSTS ...), DMA at ...
+KEBAB USB: event thread started, waiting for the host
+KEBAB USB: connected, speed 0, ep0 packet 64     ← 主机检测到设备，高速
+KEBAB USB: configured, notify=5 bulk_out=2 bulk_in=3
+```
+
+主机侧曾经报 **"未知USB设备（设备描述符请求失败）"** —— 与内核日志里
+`ep0 cmd 0x6 status 1` 对应。
+
+### 逐条对照 Linux drivers/usb/dwc3 修掉的协议错误
+
+| 现象 | 根因 | 依据 |
+| --- | --- | --- |
+| 每个 `STARTTRANSFER` 都返回 status 1 | **TRB 地址高低 32 位传反**：`DEPCMDPAR0` 应是低半、`DEPCMDPAR1` 是高半 | `dwc3_gadget_ep_cmd()` 里 `params[0] = lower_32_bits(trb)` |
+| 状态阶段提交即失败 | 必须在 **XferNotReady(status=2)** 之后才提交状态 TRB | `dwc3_ep0_xfer_complete()` |
+| 有数据阶段的传输收不了尾 | 三阶段传输的状态阶段要用 **STATUS3**，两阶段用 **STATUS2** | `dwc3_ep0` 的 `ep0_next_event` |
+| 打开串口时卡住 | `SET_LINE_CODING` 的 7 字节 OUT 数据阶段没有人接收 | `f_acm.c` |
+| 复位后第一个控制传输失败 | 总线复位会丢掉端点配置，必须重建 EP0（DEPSTARTCFG → SETEPCONFIG → SETTRANSFRESOURCE → DALEPENA） | `dwc3_gadget_reset_interrupt()` |
+| 启动即 panic | `kmem_alloc` 用 `VM_KERN_MEMORY_NONE` 做 wired 分配的 tag 会触发 `vm_resident` 断言 | `vfs_cprotect.c` 的写法 |
+| 分配后第一件事就崩 | `lck_mtx_alloc_init(0, 0)` 传空锁组会断言 | `lock_mtx.c` |
+
+### 关键硬件事实（来自 kebab 的设备树）
+
+- DWC3 基址 `0x0A600000`（与参考移植 negroni 的 SM8450 相同）
+- Qualcomm QSCRATCH 在 `0x0A6F8800`，HS_PHY_CTRL 偏移 `0x10`、SS_PHY_CTRL `0x30`；
+  曾经误用 `DWC3+0xC100`，那会打到 GEVTEN/GSTS
+- 触摸是 Samsung **S6SY761**（QUPv3 SE13，I2C 0x48），与 OnePlus 9 的 S6SY792 同族
+- 面板有 4 家供应商（ana6705 / ana6706 / dd305 / samsung_oneplus），
+  所以显示要走"把 GOP 帧缓冲包装成 IOMobileFramebuffer"的路线，而不是逐面板写 DPU
+
 ## 七、待办
 
 近期顺序：
