@@ -1,0 +1,697 @@
+Publish S6SY761 touch reports on /dev/kebab_touch
+
+This kernel has no HID stack to deliver a touch to: IOHIDFamily is a
+separate Apple kext and none of its classes are in this tree (no
+IOHIDSystem, IOHIDEventService, IOHIDEvent or IOHIDDevice sources), there
+is no evdev, and the build has no KXLD so a kext cannot be loaded into it
+either. The only user-readable mechanism that does exist is devfs plus
+cdevsw, which is what this patch uses: decoded reports go into a static
+queue and read(2) on /dev/kebab_touch returns them as 48-byte records. The
+console dump stays the primary channel because userland on this port
+cannot open the node yet.
+
+Coordinates are now converted instead of printed raw. One function maps
+the sensor's 1079x2399 maximum indices onto the 1080x2400 panel one to one
+and adds the logical display's (22,18) presentation origin, so a touch
+lands where backboardd lays it out on the 1125x2436 display. A sample
+above the advertised maximum is clamped to the panel edge and flagged
+rather than extrapolated past the panel.
+
+The queue has one producer (the poll thread) and one consumer (read), a
+mutex for the two, and a fixed array for storage. With nobody reading, the
+oldest record is overwritten and counted, so an absent consumer costs
+history, never memory. A boot-time selftest fills the ring three times
+without a reader, checks that exactly 64 records survive with 128 counted
+drops, drains them in order, and prints the result.
+
+New boot arguments: kebab_touch_dump=1 prints the decoded object list
+behind every touch-down, and kebab_touch_move_ms=N sets the minimum
+interval between move lines (default 200 ms, 0 disables them; down and up
+always print).
+
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -3,8 +3,10 @@
+  *
+  * The panel is 1080x2400; the sensor reports 1079x2399 with a 16x36
+  * transmit/receive grid. Nothing is registered in the IORegistry: this is a
+- * bring-up driver whose only output is the kernel console, it polls instead of
+- * taking an interrupt, and it is off unless boot-arg kebab_touch=1 is given.
++ * bring-up driver that polls instead of taking an interrupt, and it is off
++ * unless boot-arg kebab_touch=1 is given. Decoded reports are readable from
++ * /dev/kebab_touch (see below) as well as printed, but the kernel console
++ * remains the output that is usable today.
+  * It is started from bsd_init() next to the USB console, so the two can be
+  * enabled independently.
+  *
+@@ -63,9 +65,38 @@
+  *      and whether the TLMM mux/pull/drive values taken from the device tree
+  *      are what the chip needs (kebab_touch_pins=0 skips that step).
+  *
++ * TOUCH TO USER SPACE
++ *
++ * There is no HID stack in this kernel. IOHIDFamily is a separate Apple kext
++ * and it is not here (no IOHIDSystem, IOHIDEventService, IOHIDEvent or
++ * IOHIDDevice sources), there is no evdev, and the build has no KXLD so a kext
++ * cannot be loaded either. What does exist is devfs and cdevsw: the decoded
++ * reports go into a fixed-size queue and are readable from /dev/kebab_touch as
++ * 48-byte records. The console dump remains the primary debug channel because
++ * userland on this port cannot yet open the node. See docs/BRING-UP-STATE.md
++ * section 十三 for the inventory and for what reaching IOHIDEvent would take.
++ *
++ * THREE COORDINATE SPACES
++ *
++ *   sensor   what the chip reports: 0..1079 and 0..2399. Those are maximum
++ *            indices, not counts: 1080 x 2400 positions.
++ *   panel    the physical panel, 1080 x 2400 pixels, the same space as the
++ *            boot framebuffer and IOMobileFramebuffer's default surface. The
++ *            sensor covers the panel exactly, so one step is one pixel.
++ *   logical  what userland draws in: 1125 x 2436 at 3x. The display presents
++ *            logical (22,18) at panel (0,0) and clips the margin, so
++ *            logical = panel + (22,18). The 22 leftmost columns, 23 rightmost
++ *            columns and 18 rows at the top and bottom of the logical display
++ *            have no panel under them and cannot be touched.
++ *
++ * kt_transform() is the only place that converts between these three.
++ *
+  * Boot arguments:
+  *   kebab_touch=1          enable this driver (required)
+  *   kebab_touch_raw=1      dump SE registers, TLMM state and raw messages
++ *   kebab_touch_dump=1     print the full per-object decode of every down
++ *   kebab_touch_move_ms=N  minimum interval between move lines (default 200,
++ *                          0 turns move lines off; down and up still print)
+  *   kebab_touch_se=0x..    override the SE13 physical base
+  *   kebab_touch_pins=0     skip the TLMM pin muxing
+  *   kebab_touch_reset=0    skip the reset pulse; =2 drive the opposite polarity
+@@ -74,10 +105,20 @@
+ #if defined(KEBAB)
+ 
+ #include <kern/clock.h>
++#include <kern/locks.h>
+ #include <kern/thread.h>
++#include <libkern/libkern.h>
+ #include <machine/machine_routines.h>
++#include <miscfs/devfs/devfs.h>
+ #include <pexpert/pexpert.h>
++#include <sys/conf.h>
++#include <sys/errno.h>
++#include <sys/fcntl.h>
++#include <sys/param.h>
++#include <sys/proc.h>
+ #include <sys/systm.h>
++#include <sys/uio.h>
++#include <sys/vnode.h>
+ 
+ /* arm/machine_routines.h declares this behind a guard this build does not
+  * satisfy; the kebab UFS and USB drivers spell it out for the same reason. */
+@@ -268,6 +309,49 @@
+ #define KT_OBJECT_BITS          40
+ #define KT_MAX_OBJECTS          10      /* touchpanel,max-num-support */
+ 
++/* --------------------------------------------------------- input plumbing */
++
++/*
++ * The record /dev/kebab_touch returns. This is a kernel ABI: the layout is
++ * fixed and magic lets a reader reject a buffer that was never filled. All
++ * three coordinate pairs are carried so a consumer can check the transform
++ * rather than redo it, and timestamp_ns is nanoseconds since boot (converted
++ * from mach_absolute_time) so userland needs no timebase.
++ */
++#define KT_EVENT_MAGIC          0x4b544556u     /* 'KTEV' */
++#define KT_EVENT_DOWN           1
++#define KT_EVENT_MOVE           2
++#define KT_EVENT_UP             3
++#define KT_EVENT_FLAG_CLAMPED   0x01            /* sample was past the panel */
++
++struct kt_event {
++	uint32_t magic;
++	uint32_t seq;                   /* report number, shared by its events */
++	uint64_t timestamp_ns;
++	int32_t  raw_x, raw_y;          /* sensor space */
++	int32_t  panel_x, panel_y;      /* 0..1079, 0..2399 */
++	int32_t  logical_x, logical_y;  /* 22..1101, 18..2417 */
++	uint16_t pressure;              /* report z, 0..255 */
++	uint8_t  phase;                 /* KT_EVENT_* */
++	uint8_t  slot;                  /* contact index from the report */
++	uint8_t  flags;
++	uint8_t  pad[3];
++};
++_Static_assert(sizeof(struct kt_event) == 48, "kebab touch event layout");
++
++/* 64 records: 3 KiB of BSS, never allocated. */
++#define KT_QUEUE_LEN            64
++
++#define KT_PANEL_W              1080
++#define KT_PANEL_H              2400
++#define KT_LOGICAL_W            1125
++#define KT_LOGICAL_H            2436
++#define KT_LOGICAL_ORIGIN_X     22      /* (1125 - 1080) / 2, truncated */
++#define KT_LOGICAL_ORIGIN_Y     18      /* (2436 - 2400) / 2 */
++#define KT_SENSOR_MAX_X         1079    /* touchpanel,panel-coords */
++#define KT_SENSOR_MAX_Y         2399
++#define KT_SENSOR_LIMIT         0x0fffu /* the report field is 12 bits */
++
+ /* ---------------------------------------------------------------- state */
+ 
+ static struct {
+@@ -278,6 +362,9 @@
+ 	bool        tcm_seen;
+ 	bool        app_mode;
+ 	bool        decode;
++	bool        dump;
++	bool        queue_ok;
++	bool        dev_ready;
+ 	uint32_t    max_x;
+ 	uint32_t    max_y;
+ 	uint32_t    max_objects;
+@@ -285,10 +372,34 @@
+ 	uint32_t    raw_dumps;
+ 	uint32_t    padding;
+ 	uint32_t    unknown;
+-	uint32_t    printed;
+-	bool        finger_down;
++	uint32_t    move_ms;
++	uint32_t    seq;
++	uint16_t    active;             /* bit per contact index, last report */
++	uint32_t    last_x[KT_MAX_OBJECTS];
++	uint32_t    last_y[KT_MAX_OBJECTS];
++	uint64_t    last_move_ns;
++	int         cmajor;
+ } kt;
+ 
++/*
++ * Single-producer/single-consumer ring. The poll thread is the only producer;
++ * read(2) is the consumer. Both take the mutex, which also gives msleep() a
++ * lock to drop while a reader waits. With no consumer the oldest record is
++ * overwritten and counted: the storage is a static array, so an absent reader
++ * costs history but never memory.
++ */
++static struct {
++	struct kt_event ev[KT_QUEUE_LEN];
++	uint32_t head;                  /* next slot to write */
++	uint32_t tail;                  /* next slot to read */
++	uint32_t count;
++	uint32_t opens;
++	uint64_t pushed;
++	uint64_t dropped;
++	lck_grp_t *lock_group;
++	lck_mtx_t *lock;
++} ktq;
++
+ /* --------------------------------------------------------------- helpers */
+ 
+ static inline uint32_t
+@@ -347,6 +458,319 @@
+ 	}
+ }
+ 
++/* ---------------------------------------------------------- input plumbing */
++
++struct kt_point {
++	int32_t panel_x, panel_y;
++	int32_t logical_x, logical_y;
++	bool    clamped;
++};
++
++/*
++ * Convert one sensor sample into panel and logical coordinates. This is the
++ * only place where the three spaces meet.
++ *
++ *   sensor   raw_x/raw_y, the 12-bit fields of the touch report. kt.max_x and
++ *            kt.max_y are the largest values the chip advertises (its app
++ *            info, and the device tree's touchpanel,panel-coords: 1079 and
++ *            2399). They are maximum indices, not counts, so the range is
++ *            0..1079 - 1080 positions - and 0..2399 - 2400 positions.
++ *
++ *   panel    the physical 1080x2400 panel, the same space as the boot
++ *            framebuffer and IOMobileFramebuffer's default surface. Sensor
++ *            1079 is panel 1079, i.e. the sensor covers the panel one to one.
++ *            The scale is written out rather than assumed to be 1 so firmware
++ *            that advertises another range is mapped over the whole panel
++ *            instead of off it.
++ *
++ *   logical  the 1125x2436 display userland draws in. The display presents
++ *            logical (22,18) at panel (0,0), so logical = panel + (22,18).
++ *            This lands panel points in [22,1101] x [18,2417]: the outer
++ *            22/23 columns and 18 rows of the logical display have no panel
++ *            beneath them and are not touchable.
++ *
++ * Edge behaviour is conservative and one-sided. The field cannot be negative;
++ * a value above the advertised maximum (0xfff from a finger that lifted
++ * mid-transfer is the common case) is clamped to the panel edge and flagged,
++ * never extrapolated past the panel.
++ */
++static struct kt_point
++kt_transform(uint32_t raw_x, uint32_t raw_y)
++{
++	struct kt_point p;
++	uint32_t max_x = kt.max_x;
++	uint32_t max_y = kt.max_y;
++
++	if (max_x == 0 || max_x > KT_SENSOR_LIMIT) {
++		max_x = KT_SENSOR_MAX_X;
++	}
++	if (max_y == 0 || max_y > KT_SENSOR_LIMIT) {
++		max_y = KT_SENSOR_MAX_Y;
++	}
++
++	p.clamped = false;
++	if (raw_x > max_x) {
++		raw_x = max_x;
++		p.clamped = true;
++	}
++	if (raw_y > max_y) {
++		raw_y = max_y;
++		p.clamped = true;
++	}
++
++	/* sensor -> panel: round to the nearest pixel of the panel's range. */
++	p.panel_x = (int32_t)(((uint64_t)raw_x * (KT_PANEL_W - 1) +
++	    max_x / 2) / max_x);
++	p.panel_y = (int32_t)(((uint64_t)raw_y * (KT_PANEL_H - 1) +
++	    max_y / 2) / max_y);
++
++	/* panel -> logical: add the presentation origin. */
++	p.logical_x = p.panel_x + KT_LOGICAL_ORIGIN_X;
++	p.logical_y = p.panel_y + KT_LOGICAL_ORIGIN_Y;
++
++	/* Defensive only: with the origin above these cannot fire. */
++	if (p.logical_x >= KT_LOGICAL_W) {
++		p.logical_x = KT_LOGICAL_W - 1;
++		p.clamped = true;
++	}
++	if (p.logical_y >= KT_LOGICAL_H) {
++		p.logical_y = KT_LOGICAL_H - 1;
++		p.clamped = true;
++	}
++	return p;
++}
++
++/* Producer side: drops history rather than wait for a reader; no allocation. */
++static void
++ktq_push(const struct kt_event *ev)
++{
++	lck_mtx_lock(ktq.lock);
++	if (ktq.count == KT_QUEUE_LEN) {
++		/* No reader: overwrite the oldest record and count the loss. */
++		ktq.tail = (ktq.tail + 1) % KT_QUEUE_LEN;
++		ktq.count--;
++		ktq.dropped++;
++	}
++	ktq.ev[ktq.head] = *ev;
++	ktq.head = (ktq.head + 1) % KT_QUEUE_LEN;
++	ktq.count++;
++	ktq.pushed++;
++	wakeup(&ktq);
++	lck_mtx_unlock(ktq.lock);
++}
++
++/* Consumer side; read(2) opens the lock itself because it also sleeps in it. */
++static bool
++ktq_pop(struct kt_event *ev)
++{
++	bool got = false;
++
++	lck_mtx_lock(ktq.lock);
++	if (ktq.count != 0) {
++		*ev = ktq.ev[ktq.tail];
++		ktq.tail = (ktq.tail + 1) % KT_QUEUE_LEN;
++		ktq.count--;
++		got = true;
++	}
++	lck_mtx_unlock(ktq.lock);
++	return got;
++}
++
++/*
++ * Fill the ring three times over with nobody reading, then drain it. Proves
++ * the two properties the interface depends on: the queue never holds more
++ * than KT_QUEUE_LEN records, and an absent consumer loses the oldest records
++ * (counted) while the storage stays a fixed array. Runs before the device
++ * node and the poll thread exist, so it cannot race.
++ */
++static bool
++kt_queue_selftest(void)
++{
++	struct kt_event ev;
++	struct kt_event out;
++	uint32_t i;
++	uint32_t drained = 0;
++	bool ok = true;
++
++	bzero(&ev, sizeof(ev));
++	ev.magic = KT_EVENT_MAGIC;
++	for (i = 0; i < KT_QUEUE_LEN * 3; i++) {
++		ev.seq = i;
++		ktq_push(&ev);
++	}
++	if (ktq.count != KT_QUEUE_LEN ||
++	    ktq.dropped != 2 * (uint64_t)KT_QUEUE_LEN) {
++		ok = false;
++	}
++	for (i = 0; i < KT_QUEUE_LEN; i++) {
++		if (!ktq_pop(&out) || out.seq != 2 * KT_QUEUE_LEN + i) {
++			ok = false;
++			break;
++		}
++		drained++;
++	}
++	if (ktq_pop(&out)) {
++		ok = false;
++	}
++	if (ktq.count != 0) {
++		ok = false;
++	}
++
++	printf("KEBAB TOUCH: queue selftest: %u slots, %u pushed, %llu dropped "
++	    "without a reader, %u drained: %s\n", (unsigned)KT_QUEUE_LEN,
++	    (unsigned)(KT_QUEUE_LEN * 3), (unsigned long long)ktq.dropped,
++	    drained, ok ? "ok" : "FAILED");
++
++	/* Leave the ring empty and the counters clean for real traffic. */
++	ktq.head = 0;
++	ktq.tail = 0;
++	ktq.count = 0;
++	ktq.opens = 0;
++	ktq.pushed = 0;
++	ktq.dropped = 0;
++	return ok;
++}
++
++static struct kt_point
++kt_emit(uint32_t phase, uint8_t slot, uint32_t raw_x, uint32_t raw_y,
++    uint32_t pressure, uint64_t now_ns, uint32_t seq)
++{
++	struct kt_event ev;
++	struct kt_point p = kt_transform(raw_x, raw_y);
++
++	bzero(&ev, sizeof(ev));
++	ev.magic = KT_EVENT_MAGIC;
++	ev.seq = seq;
++	ev.timestamp_ns = now_ns;
++	ev.raw_x = (int32_t)raw_x;
++	ev.raw_y = (int32_t)raw_y;
++	ev.panel_x = p.panel_x;
++	ev.panel_y = p.panel_y;
++	ev.logical_x = p.logical_x;
++	ev.logical_y = p.logical_y;
++	ev.pressure = (uint16_t)pressure;
++	ev.phase = (uint8_t)phase;
++	ev.slot = slot;
++	ev.flags = p.clamped ? KT_EVENT_FLAG_CLAMPED : 0;
++	ktq_push(&ev);
++	return p;
++}
++
++static void
++kt_print_event(const char *what, uint8_t slot, uint32_t raw_x, uint32_t raw_y,
++    uint32_t pressure, const struct kt_point *p)
++{
++	printf("KEBAB TOUCH: %-4s obj %u raw %u %u panel %d %d logical %d %d "
++	    "z %u%s\n", what, (unsigned)slot, raw_x, raw_y, p->panel_x,
++	    p->panel_y, p->logical_x, p->logical_y, pressure,
++	    p->clamped ? " (clamped)" : "");
++}
++
++static int
++kebab_touch_open(__unused dev_t dev, __unused int flags,
++    __unused int devtype, __unused struct proc *p)
++{
++	bool first;
++
++	lck_mtx_lock(ktq.lock);
++	first = (ktq.opens++ == 0);
++	lck_mtx_unlock(ktq.lock);
++	if (first) {
++		printf("KEBAB TOUCH: /dev/kebab_touch opened\n");
++	}
++	return 0;
++}
++
++static int
++kebab_touch_close(__unused dev_t dev, __unused int flags,
++    __unused int mode, __unused struct proc *p)
++{
++	lck_mtx_lock(ktq.lock);
++	if (ktq.opens != 0) {
++		ktq.opens--;
++	}
++	lck_mtx_unlock(ktq.lock);
++	return 0;
++}
++
++/*
++ * read(2) returns whole 48-byte records, oldest first. It blocks until one is
++ * available unless O_NONBLOCK is set. Several readers split the stream; there
++ * is one tail, not one per open.
++ */
++static int
++kebab_touch_read(__unused dev_t dev, struct uio *uio, int ioflag)
++{
++	int error;
++
++	while (uio_resid(uio) >= (int)sizeof(struct kt_event)) {
++		struct kt_event ev;
++
++		lck_mtx_lock(ktq.lock);
++		while (ktq.count == 0) {
++			if (ioflag & IO_NDELAY) {
++				lck_mtx_unlock(ktq.lock);
++				return EAGAIN;
++			}
++			error = msleep(&ktq, ktq.lock, PRIBIO | PCATCH,
++			    "kebabtouch", NULL);
++			if (error != 0) {
++				lck_mtx_unlock(ktq.lock);
++				return error;
++			}
++		}
++		ev = ktq.ev[ktq.tail];
++		ktq.tail = (ktq.tail + 1) % KT_QUEUE_LEN;
++		ktq.count--;
++		lck_mtx_unlock(ktq.lock);
++
++		error = uiomove((const char *)&ev, (int)sizeof(ev), uio);
++		if (error != 0) {
++			return error;
++		}
++	}
++	return 0;
++}
++
++static const struct cdevsw kebab_touch_cdevsw = {
++	.d_open     = kebab_touch_open,
++	.d_close    = kebab_touch_close,
++	.d_read     = kebab_touch_read,
++	.d_write    = eno_rdwrt,
++	.d_ioctl    = eno_ioctl,
++	.d_stop     = eno_stop,
++	.d_reset    = eno_reset,
++	.d_select   = eno_select,
++	.d_mmap     = eno_mmap,
++	.d_strategy = eno_strat,
++	.d_type     = 0,        /* a record stream, not a tty or a disk */
++};
++
++static void
++kt_dev_register(void)
++{
++	void *node;
++
++	kt.cmajor = cdevsw_add(-1, &kebab_touch_cdevsw);
++	if (kt.cmajor < 0) {
++		printf("KEBAB TOUCH: no cdevsw slot for /dev/kebab_touch\n");
++		return;
++	}
++	node = devfs_make_node(makedev(kt.cmajor, 0), DEVFS_CHAR, UID_ROOT,
++	    GID_OPERATOR, 0440, "kebab_touch");
++	if (node == NULL) {
++		printf("KEBAB TOUCH: cdev major %d, but no /dev node\n",
++		    kt.cmajor);
++		cdevsw_remove(kt.cmajor, &kebab_touch_cdevsw);
++		kt.cmajor = -1;
++		return;
++	}
++	kt.dev_ready = true;
++	printf("KEBAB TOUCH: /dev/kebab_touch major %d, %u-byte records, "
++	    "%u slots\n", kt.cmajor, (unsigned)sizeof(struct kt_event),
++	    (unsigned)KT_QUEUE_LEN);
++}
++
+ /* -------------------------------------------------------------- raw dump */
+ 
+ struct kt_reg {
+@@ -921,12 +1345,20 @@
+ static void
+ kt_touch_report(const uint8_t *data, uint32_t len)
+ {
++	struct kt_object {
++		uint32_t index;
++		uint32_t cls;
++		uint32_t x;
++		uint32_t y;
++		uint32_t z;
++	} obj[KT_MAX_OBJECTS];
+ 	uint32_t offset = 0;
+ 	uint32_t object = 0;
+-	bool have_first = false;
+-	uint32_t fx = 0;
+-	uint32_t fy = 0;
+-	uint32_t fz = 0;
++	uint16_t seen = 0;
++	uint64_t now_ns;
++	uint32_t seq;
++	uint32_t i;
++	bool down_seen = false;
+ 
+ 	while (offset + KT_OBJECT_BITS <= len * 8 && object < KT_MAX_OBJECTS) {
+ 		uint32_t obj_index = kt_bits(data, offset, 4);
+@@ -939,33 +1371,72 @@
+ 			printf("KEBAB TOUCH: object %u idx %u class %u x %u y %u "
+ 			    "z %u\n", object, obj_index, obj_class, x, y, z);
+ 		}
+-		if (!have_first && obj_class == 1) {
+-			have_first = true;
+-			fx = x;
+-			fy = y;
+-			fz = z;
+-		}
++		obj[object].index = obj_index;
++		obj[object].cls = obj_class;
++		obj[object].x = x;
++		obj[object].y = y;
++		obj[object].z = z;
+ 		offset += KT_OBJECT_BITS;
+ 		object++;
+ 	}
+ 
+-	if (!have_first) {
+-		if (kt.finger_down) {
+-			kt.finger_down = false;
+-			printf("KEBAB TOUCH: finger up\n");
++	absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
++	seq = ++kt.seq;
++
++	/*
++	 * Publish a down or move for every finger in this report. The active
++	 * mask still describes the previous report, which is what makes the
++	 * down/move decision and the up pass below consistent.
++	 */
++	for (i = 0; i < object; i++) {
++		uint32_t index = obj[i].index;
++		struct kt_point p;
++
++		if (obj[i].cls != 1 || index >= KT_MAX_OBJECTS) {
++			continue;
++		}
++		seen |= (uint16_t)(1u << index);
++		p = kt_emit((kt.active & (1u << index)) ? KT_EVENT_MOVE :
++		    KT_EVENT_DOWN, (uint8_t)index, obj[i].x, obj[i].y,
++		    obj[i].z, now_ns, seq);
++		if (!(kt.active & (1u << index))) {
++			kt_print_event("down", (uint8_t)index, obj[i].x,
++			    obj[i].y, obj[i].z, &p);
++			down_seen = true;
++			kt.last_move_ns = now_ns;
++		} else if (kt.move_ms != 0 && now_ns - kt.last_move_ns >=
++		    (uint64_t)kt.move_ms * 1000000ull) {
++			kt_print_event("move", (uint8_t)index, obj[i].x,
++			    obj[i].y, obj[i].z, &p);
++			kt.last_move_ns = now_ns;
++		}
++		kt.last_x[index] = obj[i].x;
++		kt.last_y[index] = obj[i].y;
++	}
++
++	/* A slot that was active and is missing from this report has lifted. */
++	for (i = 0; i < KT_MAX_OBJECTS; i++) {
++		struct kt_point p;
++
++		if (!(kt.active & (1u << i)) || (seen & (1u << i))) {
++			continue;
++		}
++		p = kt_emit(KT_EVENT_UP, (uint8_t)i, kt.last_x[i],
++		    kt.last_y[i], 0, now_ns, seq);
++		kt_print_event("up", (uint8_t)i, kt.last_x[i], kt.last_y[i],
++		    0, &p);
++	}
++	kt.active = seen;
++
++	/* kebab_touch_dump=1: the decoded report behind a touch-down. */
++	if (kt.dump && down_seen) {
++		printf("KEBAB TOUCH: report seq %u: %u objects\n", seq, object);
++		for (i = 0; i < object; i++) {
++			printf("KEBAB TOUCH:   obj %u idx %u class %u x %u y %u "
++			    "z %u\n", i, obj[i].index, obj[i].cls, obj[i].x,
++			    obj[i].y, obj[i].z);
+ 		}
+-		return;
+-	}
+-	if (!kt.finger_down) {
+-		kt.finger_down = true;
+-		printf("KEBAB TOUCH: finger down\n");
+-	}
+-	/* Bounded rate: at most one line per 40 reports, i.e. per ~200 ms. */
+-	if ((kt.printed++ % 40u) != 0) {
+-		return;
+ 	}
+-	printf("KEBAB TOUCH: touch x %u y %u z %u (sensor max %u x %u)\n",
+-	    fx, fy, fz, kt.max_x, kt.max_y);
+ }
+ 
+ /* Read one queued TCM message, if any. */
+@@ -1074,6 +1545,26 @@
+ 		reset = value;
+ 	}
+ 
++	kt.dump = PE_parse_boot_argn("kebab_touch_dump", &value,
++	    sizeof(value)) && value != 0;
++	kt.move_ms = 200;
++	if (PE_parse_boot_argn("kebab_touch_move_ms", &value, sizeof(value))) {
++		kt.move_ms = value;
++	}
++
++	/*
++	 * The record storage is static; the mutex is not. Allocate it here so
++	 * the queue selftest can exercise the real push/pop path before the
++	 * device node or the poll thread exist.
++	 */
++	ktq.lock_group = lck_grp_alloc_init("kebabtouch", LCK_GRP_ATTR_NULL);
++	ktq.lock = lck_mtx_alloc_init(ktq.lock_group, LCK_ATTR_NULL);
++	if (ktq.lock == NULL) {
++		printf("KEBAB TOUCH: cannot allocate the queue lock\n");
++		return;
++	}
++	kt.queue_ok = kt_queue_selftest();
++
+ 	kt.se = ml_io_map(se_pa, KT_SE13_SIZE);
+ 	if (kt.se == 0) {
+ 		printf("KEBAB TOUCH: cannot map SE13 at 0x%08x\n", se_pa);
+@@ -1143,8 +1634,25 @@
+ 		return;
+ 	}
+ 	thread_deallocate(thread);
+-	printf("KEBAB TOUCH: polling for reports, decode %s\n",
+-	    kt.decode ? "on" : "off");
++
++	/*
++	 * Only publish the node once there is a thread that can fill it. Code
++	 * the other way round would leave a readable device that never blocks
++	 * and never returns a record if thread creation failed.
++	 */
++	if (kt.decode && kt.queue_ok) {
++		kt_dev_register();
++	} else if (!kt.decode) {
++		printf("KEBAB TOUCH: report decode is off; no /dev/kebab_touch "
++		    "because there would be nothing to record\n");
++	} else {
++		printf("KEBAB TOUCH: queue selftest failed; no "
++		    "/dev/kebab_touch\n");
++	}
++
++	printf("KEBAB TOUCH: polling for reports, decode %s, dump %s, move "
++	    "lines every %u ms\n", kt.decode ? "on" : "off",
++	    kt.dump ? "on" : "off", kt.move_ms);
+ }
+ 
+ #endif /* KEBAB */
