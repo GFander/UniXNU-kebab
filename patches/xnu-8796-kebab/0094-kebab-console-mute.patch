@@ -8,10 +8,16 @@ through _cnputc anyway, so one hook covers both without duplicating output.
 
 --- a/osfmk/console/serial_console.c
 +++ b/osfmk/console/serial_console.c
-@@ -125,6 +125,21 @@
-  * console backend straight at the early framebuffer renderer.
-  */
- extern void kebab_early_putc(char c);
+@@ -119,12 +119,45 @@
+ #define allow_printf_from_interrupts_disabled_context false
+ #endif
+ 
++#if defined(KEBAB)
++/*
++ * The phone has no UART and the video console is never enabled, so route the
++ * console backend straight at the early framebuffer renderer.
++ */
++extern void kebab_early_putc(char c);
 +extern int kebab_usb_getc(bool wait);
 +
 +/*
@@ -27,19 +33,28 @@ through _cnputc anyway, so one hook covers both without duplicating output.
 +	}
 +	return _vcgetc(wait);
 +}
- 
- static void
- kebab_console_putc(char c, __unused bool poll)
-@@ -139,7 +154,7 @@
++
++static void
++kebab_console_putc(char c, __unused bool poll)
++{
++	kebab_early_putc(c);
++}
++#endif
++
+ SECURITY_READ_ONLY_EARLY(struct console_ops) cons_ops[] = {
+ 	{
+ 		.putc = serial_putc_options, .getc = _serial_getc,
  	},
  	{
- #if defined(KEBAB)
--		.putc = kebab_console_putc, .getc = _vcgetc,
++#if defined(KEBAB)
 +		.putc = kebab_console_putc, .getc = kebab_console_getc,
- #else
++#else
  		.putc = vcputc_options, .getc = _vcgetc,
- #endif
-@@ -272,6 +287,24 @@
++#endif
+ 	},
+ };
+ 
+@@ -254,6 +287,24 @@
  		_cnputc('\r', poll);
  	}
  
@@ -64,7 +79,7 @@ through _cnputc anyway, so one hook covers both without duplicating output.
  	cons_ops[idx].putc(c, poll);
  }
  
-@@ -289,9 +322,17 @@
+@@ -271,9 +322,17 @@
  {
  	extern int disableConsoleOutput;
  
