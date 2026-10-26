@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,973 @@
+@@ -0,0 +1,990 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -271,11 +271,13 @@ new file mode 100644
 +	}
 +	uint64_t tpa = ud.dma_pa + trb_off;
 +	/*
-+	 * DEPCMDPAR0 carries the low 32 bits of the TRB address and DEPCMDPAR1 the
-+	 * high half (Linux dwc3_gadget_ep_cmd splits it exactly this way). Swapping
-+	 * them makes the controller answer every STARTTRANSFER with status 1.
++	 * DEPCMDPAR0 is the HIGH word and DEPCMDPAR1 the LOW word; drivers/usb/dwc3/
++	 * ep0.c sets param0 = upper_32_bits(trb) and param1 = lower_32_bits(trb).
++	 * Getting this backwards makes the controller fetch its TRB from a garbage
++	 * address, which on this board is fatal: the buses error out and the board
++	 * drops into EDL.
 +	 */
-+	return ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)tpa, (uint32_t)(tpa >> 32), 0);
++	return ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)(tpa >> 32), (uint32_t)tpa, 0);
 +}
 +
 +/*
@@ -780,8 +782,13 @@ new file mode 100644
 +#define SMMU_PA        0x15000000
 +#define SMMU_CR0       0x0000
 +#define SMMU_GBPA      0x0004
-+#define SMMU_SMR(n)    (0x0800 + 4 * (n))
-+#define SMMU_S2CR(n)   (0x8000 + 8 * (n))
++#define SMMU_IDR0      0x0020
++#define SMMU_IDR1      0x0024
++#define SMMU_GFSR      0x0048
++#define SMMU_GFSYNR0   0x0050
++#define SMMU_GFSYNR1   0x0054
++#define SMMU_SMR(n)    (0x0800 + 4 * (n))     /* VALID[31] MASK[30:16] ID[14:0] */
++#define SMMU_S2CR(n)   (0x0c00 + 4 * (n))     /* TYPE[17:16]: 0=trans 1=bypass 2=fault */
 +
 +static void
 +ud_smmu_report(void)
@@ -791,13 +798,22 @@ new file mode 100644
 +		printf("KEBAB USB: cannot map the SMMU\n");
 +		return;
 +	}
-+	printf("KEBAB USB: SMMU CR0 0x%08x GBPA 0x%08x\n",
-+	    *(volatile uint32_t *)(smmu + SMMU_CR0),
-+	    *(volatile uint32_t *)(smmu + SMMU_GBPA));
-+	for (unsigned i = 0; i < 4; i++) {
-+		printf("KEBAB USB: SMMU SMR%u 0x%08x S2CR%u 0x%08x\n", i,
-+		    *(volatile uint32_t *)(smmu + SMMU_SMR(i)), i,
-+		    *(volatile uint32_t *)(smmu + SMMU_S2CR(i)));
++	uint32_t cr0 = *(volatile uint32_t *)(smmu + SMMU_CR0);
++	uint32_t idr0 = *(volatile uint32_t *)(smmu + SMMU_IDR0);
++	uint32_t idr1 = *(volatile uint32_t *)(smmu + SMMU_IDR1);
++	printf("KEBAB USB: SMMU CR0 0x%08x IDR0 0x%08x IDR1 0x%08x\n", cr0, idr0, idr1);
++	printf("KEBAB USB: SMMU clientpd %u usfcfg %u numsmrg %u\n",
++	    cr0 & 1u, (cr0 >> 10) & 1u, idr0 & 0xffu);
++	/* only the first handful: enough to see whether stream 0 is covered */
++	for (unsigned i = 0; i < 8; i++) {
++		uint32_t smr = *(volatile uint32_t *)(smmu + SMMU_SMR(i));
++		uint32_t s2cr = *(volatile uint32_t *)(smmu + SMMU_S2CR(i));
++		if (smr == 0 && s2cr == 0) {
++			continue;
++		}
++		printf("KEBAB USB: SMMU[%u] SMR 0x%08x (valid %u id 0x%x mask 0x%x) S2CR 0x%08x (type %u)\n",
++		    i, smr, smr >> 31, smr & 0x7fffu, (smr >> 16) & 0x7fffu,
++		    s2cr, (s2cr >> 16) & 3u);
 +	}
 +}
 +
@@ -960,6 +976,7 @@ new file mode 100644
 +	 * dwc3_gadget_start() also sets RUN_STOP before dwc3_ep0_out_start(), and
 +	 * submitting a transfer to a halted controller is not legal.
 +	 */
++	ud_bus_error_report("before setup");
 +	printf("KEBAB USB: step 7 arming setup, first DMA at 0x%llx\n",
 +	    (unsigned long long)(ud.dma_pa + UD_SETUP));
 +	ud_start_setup();
