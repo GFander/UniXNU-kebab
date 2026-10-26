@@ -394,15 +394,16 @@ def cell0(groups, default=None):
     return default
 
 
-def extract(path: Path):
+def extract(path: Path, node: str = PANEL_NODE):
+    label = "dsi_" + node[len("qcom,mdss_dsi_"):] if node.startswith("qcom,mdss_dsi_") else node
     raw_text = path.read_text(encoding="utf-8")
     digest = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
     text = strip_comments(raw_text)
 
-    panel_nodes = [n for n in scan_nodes(text) if n[0] == PANEL_NODE]
+    panel_nodes = [n for n in scan_nodes(text) if n[0] == node]
     if len(panel_nodes) != 1:
         raise ExtractError(
-            "expected exactly one %s node, found %d" % (PANEL_NODE, len(panel_nodes))
+            "expected exactly one %s node, found %d" % (node, len(panel_nodes))
         )
     _, pstart, pend, _ = panel_nodes[0]
 
@@ -437,7 +438,7 @@ def extract(path: Path):
     # The panel data is split: the timings live in the panel node, but the PHY
     # timing and topology overrides live in the &dsi_samsung_amb655x_dsc_cmd
     # nodes at the bottom of the file.  Accept blocks under either.
-    panel_ranges = [(s, e) for name, s, e, _ in nodes if name in (PANEL_NODE, PANEL_LABEL)]
+    panel_ranges = [(s, e) for name, s, e, _ in nodes if name in (node, label)]
     timings = {}
     for name, s, e, _ in nodes:
         if name != "qcom,mdss-dsi-display-timings":
@@ -462,7 +463,7 @@ def extract(path: Path):
                     entry["props"][pname] = (classify(text[vs:ve].strip()), text[vs:ve].strip(), pline)
 
     if not timings:
-        raise ExtractError("no timing@N nodes found under %s" % PANEL_NODE)
+        raise ExtractError("no timing@N nodes found under %s" % node)
 
     result_timings = []
     for idx in sorted(timings):
@@ -574,7 +575,7 @@ def extract(path: Path):
         "display_active": False,
     }
     for name, s, e, _ in nodes:
-        if name != PANEL_LABEL:
+        if name != label:
             continue
         for kind, pname, vs, ve, pline in iter_items(text, s, e):
             if kind == "bool":
@@ -627,8 +628,8 @@ def extract(path: Path):
         return cell0(value, default) if isinstance(value, list) else value
 
     panel = {
-        "node": PANEL_NODE,
-        "label": PANEL_LABEL,
+        "node": node,
+        "label": label,
         "name": scalar("qcom,mdss-dsi-panel-name"),
         "manufacture": scalar("qcom,mdss-dsi-panel-manufacture"),
         "version": scalar("qcom,mdss-dsi-panel-version"),
@@ -683,7 +684,7 @@ def extract(path: Path):
             "bytes": SRC_BYTES,
             "sha256": SRC_SHA256,
             "sha256_of_local_copy": digest,
-            "panel_node": PANEL_NODE,
+            "panel_node": node,
         },
         "checksum_definition": (
             "crc32/sha256 over, for each step in order: dtype (u8), wait_ms (u8), "
@@ -735,11 +736,11 @@ def fdt_nodes(path: Path):
     return nodes
 
 
-def cross_check_dtb(path: Path, timings):
+def cross_check_dtb(path: Path, timings, node: str = PANEL_NODE):
     nodes = fdt_nodes(path)
-    wanted = [n for n in nodes if n[0].split("/")[-1] == PANEL_NODE]
+    wanted = [n for n in nodes if n[0].split("/")[-1] == node]
     if not wanted:
-        raise ExtractError("%s has no %s node" % (path, PANEL_NODE))
+        raise ExtractError("%s has no %s node" % (path, node))
     base = wanted[0][0]
 
     def norm(path_str):
@@ -1065,14 +1066,19 @@ def main(argv=None):
     ap.add_argument("--json", type=Path, default=DEFAULT_JSON)
     ap.add_argument("--header", type=Path, default=DEFAULT_HEADER)
     ap.add_argument("--dtb", type=Path, help="stock kebab DTB used to cross-check the on-command blob")
+    ap.add_argument(
+        "--node",
+        default=PANEL_NODE,
+        help="panel node name (default: %(default)s); change it to extract another panel",
+    )
     ap.add_argument("--provenance", action="store_true", help="print every step with its source line")
     ap.add_argument("--check", action="store_true", help="compare with the committed outputs, do not write")
     args = ap.parse_args(argv)
 
     try:
         source = args.source if args.source else fetch_source(args.cache)
-        doc = extract(source)
-        dtb_report = cross_check_dtb(args.dtb, doc["timings"]) if args.dtb else None
+        doc = extract(source, args.node)
+        dtb_report = cross_check_dtb(args.dtb, doc["timings"], args.node) if args.dtb else None
         doc["verification"] = {"dtb_cross_check": dtb_report}
 
         payload = json.dumps(doc, indent=2, ensure_ascii=False) + "\n"

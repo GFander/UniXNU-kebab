@@ -54,8 +54,8 @@ MODULE_PARM_DESC(dsi_display0,
 “面板是哪一块”最直接的证据。
 
 注意：这份 DTB 带的是它那台机器的序列号 `3ed3897b`。若要 100% 确认本机，读一次
-本机 boot-args 里的同一个字符串即可；若本机不是 amb655x，把脚本的 `--source`
-指向对应 dtsi 重新生成，流程不变。
+本机 boot-args 里的同一个字符串即可；若本机不是 amb655x，把脚本的 `--source`、
+`--node`（以及输出文件名）换成对应面板重新生成，流程不变。
 
 ### 2.2 设备树节点属性
 
@@ -353,6 +353,13 @@ python3 scripts/extract-panel-init.py --dtb /path/to/kebab.dtb --check
 
 # 逐步对照源码行
 python3 scripts/extract-panel-init.py --provenance
+
+# 换一块面板（示例：dd305）
+python3 scripts/extract-panel-init.py \
+    --source dsi-panel-samsung_dd305_fhd_dsc.dtsi \
+    --node qcom,mdss_dsi_samsung_dd305_dsc_cmd \
+    --json dd305.json --header dd305.h \
+    --dtb /path/to/kebab.dtb
 ```
 
 字节成本：序列源文件 27,742 字节；为确认编码语义另取了
