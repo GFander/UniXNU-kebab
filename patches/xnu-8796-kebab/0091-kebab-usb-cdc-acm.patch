@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,868 @@
+@@ -0,0 +1,880 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -167,7 +167,7 @@ new file mode 100644
 +	char        log_ring[LOG_RING_SIZE];
 +} ud;
 +
-+enum { EP0_SETUP, EP0_DATA, EP0_STATUS, EP0_WAIT_STATUS };
++enum { EP0_SETUP, EP0_DATA, EP0_DATA_OUT, EP0_STATUS, EP0_WAIT_STATUS };
 +
 +/* --------------------------------------------------------------- helpers */
 +
@@ -502,8 +502,19 @@ new file mode 100644
 +	if ((type & 0x60) == 0x20) {                    /* class */
 +		switch (req) {
 +		case 0x20:                              /* SET_LINE_CODING, 7 bytes OUT */
-+			ok = (length == 7);
-+			break;
++			/*
++			 * The host sends seven bytes in an OUT data stage; they have to be
++			 * received before the status stage, or the transfer stalls when the
++			 * port is opened. The contents (baud rate and frame format) are
++			 * irrelevant here: the text stream does not depend on them.
++			 */
++			if (length != 7) {
++				ok = false;
++				break;
++			}
++			ud.state = EP0_DATA_OUT;
++			ud_start(UD_TRB_OUT, EP0_OUT, UD_DATA, 7, TRBCTL_DATA);
++			return;
 +		case 0x21:                              /* GET_LINE_CODING, 7 bytes IN */
 +			memset(data, 0, 7);
 +			data[0] = 0x80; data[1] = 0x25; data[2] = 0;   /* 9600 baud */
@@ -684,6 +695,7 @@ new file mode 100644
 +			ud_setup();
 +			break;
 +		case EP0_DATA:
++		case EP0_DATA_OUT:
 +			ud_status_stage();
 +			break;
 +		case EP0_STATUS:
