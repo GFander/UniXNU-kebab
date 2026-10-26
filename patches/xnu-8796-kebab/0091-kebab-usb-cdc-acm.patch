@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,811 @@
+@@ -0,0 +1,813 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -717,7 +717,9 @@ new file mode 100644
 +		return;
 +	}
 +	ud.qs = ml_io_map(QSCRATCH_PA, 0x100);
-+	if (kmem_alloc(kernel_map, &ud.dma, UD_SIZE, KMA_NONE, VM_KERN_MEMORY_NONE) != KERN_SUCCESS) {
++	/* wired pages need a real tag: VM_KERN_MEMORY_NONE trips an assertion */
++	if (kmem_alloc(kernel_map, &ud.dma, UD_SIZE, KMA_DATA | KMA_NOFAIL,
++	    VM_KERN_MEMORY_BSD) != KERN_SUCCESS) {
 +		printf("KEBAB USB: no DMA memory\n");
 +		return;
 +	}
