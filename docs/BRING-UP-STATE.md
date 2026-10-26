@@ -1397,8 +1397,8 @@ log pump 发出。
   **82/82** 个 kebab 补丁，无失败。
 * 在构建机 `~/kebab-build/build-local.sh` 上构建成功：
   `build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab`，
-  **17,085,792 字节（16.29 MiB）**，Mach-O 64-bit arm64，SHA-256
-  `086d54a0721811e4875771eea8badd0c26dce826909b7de8c294ee8de828e73e`。
+  **17,069,408 字节（16.28 MiB）**，Mach-O 64-bit arm64，SHA-256
+  `10f6a38db88c09089a3949a7d1fc58d6619820a645a7c59703df414c5239c22d`。
 * `kebab_usb.c` 在本轮构建里有 40 条 warning，全部是
   `-Wdeclaration-after-statement`；live 版本有 17 条 warning，其中 11 条
   是同一类。新增 29 条同类告警，没有新增告警类别；live 的 4 条
