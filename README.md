@@ -9,7 +9,7 @@ iPhone X 的身份启动 iOS 16.7.16 用户态。
 ```
 board.toml                   unixnu 读取的板级描述
 configs/                     defconfig 与 iPhone X 的 /product 子树
-patches/xnu-8796-kebab/      本机内核补丁集（81 个，按文件名顺序应用）
+patches/xnu-8796-kebab/      本机内核补丁集（83 个，按文件名顺序应用）
 scripts/make-kebab-adt.py    设备树（ADT）生成器
 drivers/KebabCPU/            子模块 -> GFander/KebabCPU（PSCI / 多核）
 drivers/KebabEarlyConsole/   子模块 -> GFander/KebabEarlyConsole（面板控制台）
@@ -17,6 +17,12 @@ crypto-bearssl/              备用密码学补丁集（当前未启用，见文
 docs/BRING-UP-STATE.md       详细的移植状态记录
 docs/FIRMWARE.md             固件的构建、镜像布局与重新打包
 docs/ROADMAP.md              对照参考实现的路线图与差距分析
+docs/EP0-PROBE.md            EP0 进度探针的编码与记录点
+docs/EP0-TEST-PLAN.md        panic 后重连的真机测试流程
+docs/IOS-USERLAND.md         从 IPSW 取用户态：提取、APFS、缓存、依赖
+docs/PANEL-DSI.md            面板 AMB655X 的初始化序列与时序
+docs/GPU-ASSESSMENT.md       图形路线的决策与依据
+scripts/verify-all.sh        一条命令验证整棵树
 ```
 
 克隆时加 `--recurse-submodules`。
