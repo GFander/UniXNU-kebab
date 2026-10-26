@@ -1,0 +1,64 @@
+Keep USB alive across a panic instead of halting with a dead controller.
+
+haltRestart is where a panic ends in a halt or restart request. When the panic
+report has been produced, stay in a loop that still services the endpoint, so
+the host can reconnect and later console output keeps arriving.
+
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -6,6 +6,14 @@
+ #include <pexpert/arm64/board_config.h>
+ 
+ #if defined(KEBAB)
++
++class IOService;   /* only needed as the provider pointer type */
++
++/* Started directly from processTopLevel: no /arm-io nub publishes the
++ * display node, and the driver only needs a provider to attach to. */
++class AppleCLCD;
++extern "C" int kebab_display_start(IOService *provider);
++#include <kern/debug.h>
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
+@@ -20,6 +28,7 @@
+ 	const char *excludeList(void) APPLE_KEXT_OVERRIDE;
+ 	bool getTargetName(char *name, int maxLength) APPLE_KEXT_OVERRIDE;
+ 	bool getProductName(char *name, int maxLength) APPLE_KEXT_OVERRIDE;
++	int haltRestart(unsigned int type) APPLE_KEXT_OVERRIDE;
+ };
+ 
+ OSDefineMetaClassAndStructors(KebabPlatformExpert, IODTPlatformExpert);
+@@ -62,6 +71,9 @@
+ 		cpus->release();
+ 	}
+ 	createNubs(this, IODTFindMatchingEntries(root, kIODTExclusive, excludeList()));
++
++	/* Bring the panel up so IOMobileFramebuffer.framework finds it. */
++	kebab_display_start(this);
+ }
+ 
+ bool
+@@ -84,3 +96,22 @@
+ 	return true;
+ }
+ #endif /* KEBAB */
++
++
++/*
++ * A panic ends in a halt or a restart request. Halting leaves the USB controller
++ * orphaned and the host loses the port, so when the panic report has been produced
++ * we stay in a loop that keeps servicing it: the host can reconnect and later
++ * console output still arrives. Any other halt/restart goes to the stock path.
++ */
++int
++KebabPlatformExpert::haltRestart(unsigned int type)
++{
++	extern bool kebab_usb_console_ready(void);
++	extern void kebab_usb_panic_spin(void);
++
++	if (panic_active() && kebab_usb_console_ready()) {
++		kebab_usb_panic_spin();          /* does not return */
++	}
++	return IODTPlatformExpert::haltRestart(type);
++}

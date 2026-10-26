@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1216 @@
+@@ -0,0 +1,1244 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -1218,4 +1218,32 @@ new file mode 100644
 +kebab_usb_console_ready(void)
 +{
 +	return ud.running && ud.configured;
++}
++
++
++/*
++ * Keep the pipe alive after a panic instead of letting the machine halt with a dead
++ * controller. The platform expert calls this from its halt/restart hook: the host
++ * can then reconnect, keep reading later console output, and the device no longer
++ * disappears the moment the panic report ends.
++ */
++void
++kebab_usb_panic_spin(void)
++{
++	for (;;) {
++		uint32_t count = dwc_rd(GEVNTCOUNT) & 0xfffc;
++
++		if (count && count <= UD_EVT_SIZE) {
++			ud_from_dev(UD_EVT, UD_EVT_SIZE);
++			for (uint32_t k = 0; k < count; k += 4) {
++				uint32_t ev = *(volatile uint32_t *)(ud.dma + UD_EVT + ud.evt_pos);
++				ud.evt_pos = (ud.evt_pos + 4) % UD_EVT_SIZE;
++				ud_event(ev);
++			}
++			dwc_wr(GEVNTCOUNT, count);
++		}
++		ud.bulk_in_busy = false;
++		ud_pump_log();
++		delay(1000);
++	}
 +}
