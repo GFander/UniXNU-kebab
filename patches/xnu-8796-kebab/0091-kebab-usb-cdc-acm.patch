@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1046 @@
+@@ -0,0 +1,1054 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -766,12 +766,20 @@ new file mode 100644
 +		return;
 +	}
 +	n = ud_log_take((char *)(ud.dma + UD_BULKIN), 512);
++	if (n && ud.tx_bytes == 0) {
++		printf("KEBAB USB: pump start, %u bytes in the ring\n", n);
++	}
 +	if (n == 0) {
 +		return;
 +	}
 +	if (ud_start(UD_TRB_BULKIN, EP_BULK_IN, UD_BULKIN, n, TRBCTL_NORMAL) == 0) {
 +		ud.bulk_in_busy = true;
 +		ud.tx_bytes += n;
++		if (ud.tx_bytes <= 1024) {
++			printf("KEBAB USB: sent %u bytes (total %u)\n", n, ud.tx_bytes);
++		}
++	} else if (ud.tx_bytes == 0) {
++		printf("KEBAB USB: bulk IN rejected, %u bytes waiting\n", n);
 +	}
 +}
 +
