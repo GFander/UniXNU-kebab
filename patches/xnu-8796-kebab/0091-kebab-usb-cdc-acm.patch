@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,866 @@
+@@ -0,0 +1,868 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -279,6 +279,8 @@ new file mode 100644
 + * directions with the packet size for high speed, request transfer resources, and
 + * only then re-arm the setup stage.
 + */
++static void ud_start_setup(void);
++
 +static void
 +ud_ep0_rebuild(void)
 +{
