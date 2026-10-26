@@ -2,7 +2,7 @@ Hand console output to the USB log ring, and take console input from it.
 
 The tee used to sit inside the #if !defined(KEBAB) block, so it was compiled
 out and the ring stayed empty. With it inside the KEBAB branch the log flows,
-and the debugger's keyboard now comes back over the same pipe: getc polls the
+and the debugger's keyboard comes back over the same pipe: getc polls the
 controller itself and keeps pushing the log while it waits, because a panic
 stops the event thread.
 
@@ -39,11 +39,10 @@ stops the event thread.
  #else
  		.putc = vcputc_options, .getc = _vcgetc,
  #endif
-@@ -289,23 +304,30 @@
+@@ -289,9 +304,30 @@
  {
  	extern int disableConsoleOutput;
  
--#if !defined(KEBAB)
 +#if defined(KEBAB)
 +	/*
 +	 * Two jobs for this port: hand the console bytes to the USB log ring, and
@@ -60,22 +59,14 @@ stops the event thread.
 +		}
 +	}
 +#else
- 	/*
- 	 * stock code drops console output while the graphics console is paused;
- 	 * on this port the panel is the only console, so keep it always on.
- 	 */
--#if !defined(KEBAB)
++	/*
++	 * stock code drops console output while the graphics console is paused;
++	 * on this port the panel is the only console, so keep it always on.
++	 */
  	if (disableConsoleOutput) {
  		return;
  	}
- #endif
--#if defined(KEBAB)
--	{
--		extern void kebab_usb_log(const char *buf, size_t len);
--		kebab_usb_log(c, (size_t)size);
--	}
--#endif
--#endif
++#endif
  
  	assert(c != NULL);
  
