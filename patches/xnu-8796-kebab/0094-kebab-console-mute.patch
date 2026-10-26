@@ -1,10 +1,10 @@
-Hand console output to the USB log ring, and take console input from it.
+Feed the USB log ring from the console's lowest layer, and take console input
+back over the same pipe.
 
-The tee used to sit inside the #if !defined(KEBAB) block, so it was compiled
-out and the ring stayed empty. With it inside the KEBAB branch the log flows,
-and the debugger's keyboard comes back over the same pipe: getc polls the
-controller itself and keeps pushing the log while it waits, because a panic
-stops the event thread.
+The tee hangs off _cnputc rather than _cnputs, because panic reporting takes
+the unbuffered path (paniclog_append_noflush -> consdebug_putc_unbuffered ->
+console_write_unbuffered -> _cnputc) and never reaches _cnputs. _cnputs funnels
+through _cnputc anyway, so one hook covers both without duplicating output.
 
 --- a/osfmk/console/serial_console.c
 +++ b/osfmk/console/serial_console.c
@@ -39,25 +39,37 @@ stops the event thread.
  #else
  		.putc = vcputc_options, .getc = _vcgetc,
  #endif
-@@ -289,9 +304,30 @@
- {
- 	extern int disableConsoleOutput;
+@@ -272,6 +287,24 @@
+ 		_cnputc('\r', poll);
+ 	}
  
 +#if defined(KEBAB)
 +	/*
-+	 * Two jobs for this port: hand the console bytes to the USB log ring, and
-+	 * once the GUI presents, stop drawing over it (a panic draws again).
-+	 * This used to sit inside the #if !defined(KEBAB) below, so the compiler
-+	 * dropped it and the ring stayed empty no matter what the screen showed.
++	 * The tee lives here, not in _cnputs, because panic reporting takes the
++	 * unbuffered path: paniclog_append_noflush -> consdebug_putc_unbuffered ->
++	 * console_write_unbuffered -> _cnputc. Hooking _cnputs alone missed all of it.
++	 * _cnputs also funnels through here, one character at a time, so this covers
++	 * both paths without duplicating anything.
 +	 */
 +	{
 +		extern void kebab_usb_log(const char *buf, size_t len);
 +		extern int kebab_console_muted;
-+		kebab_usb_log(c, (size_t)size);
++		kebab_usb_log(&c, 1);
 +		if (kebab_console_muted && !panic_active()) {
 +			return;
 +		}
 +	}
++#endif
++
+ 	cons_ops[idx].putc(c, poll);
+ }
+ 
+@@ -289,9 +322,17 @@
+ {
+ 	extern int disableConsoleOutput;
+ 
++#if defined(KEBAB)
++	/* The tee now lives in _cnputc, which this loops over. */
 +#else
 +	/*
 +	 * stock code drops console output while the graphics console is paused;

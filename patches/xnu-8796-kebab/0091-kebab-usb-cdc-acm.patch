@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1192 @@
+@@ -0,0 +1,1216 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -175,6 +175,8 @@ new file mode 100644
 +	bool        ep0_status3;
 +	bool        console_input;
 +	bool        panic_hook;
++	bool        want_panic;
++	uint32_t    panic_owner;
 +	uint32_t    tx_bytes;
 +	lck_grp_t  *lock_grp;
 +	lck_mtx_t  *lock;
@@ -258,7 +260,9 @@ new file mode 100644
 +		if (!(v & DEPCMD_CMDACT)) {
 +			uint32_t status = (v >> 12) & 0xf;
 +			if (status) {
-+				printf("KEBAB USB: ep%u cmd 0x%x status %u\n", ep, cmd, status);
++				if (!panic_active()) {
++					printf("KEBAB USB: ep%u cmd 0x%x status %u\n", ep, cmd, status);
++				}
 +				return -1;
 +			}
 +			return 0;
@@ -523,7 +527,17 @@ new file mode 100644
 +	 * out from here instead, which is the very path the panic text travels.
 +	 */
 +	if (panic_active()) {
++		/*
++		 * Single owner, acquired without waiting: a nested console write in the
++		 * middle of a flush - including one caused by a print inside the
++		 * transport - must not start a second transfer over the same buffers.
++		 */
++		uint32_t expect = 0;
++		if (!os_atomic_cmpxchg(&ud.panic_owner, expect, 1u, acquire)) {
++			return;
++		}
 +		ud_flush_from_panic();
++		os_atomic_store(&ud.panic_owner, 0u, release);
 +	}
 +}
 +
@@ -731,7 +745,13 @@ new file mode 100644
 +	if (ud.panic_hook && received >= 6) {
 +		for (uint32_t i = 0; i + 6 <= received; i++) {
 +			if (memcmp(buf + i, "PANIC!", 6) == 0) {
-+				panic("kebab usb console test");
++				/*
++				 * Do not panic inside the event handler: evt_pos has already
++				 * moved past this event while GEVNTCOUNT still counts it, and a
++				 * panic poller would consume from the wrong place. Ask the loop
++				 * to panic once the batch has been acknowledged.
++				 */
++				ud.want_panic = true;
 +			}
 +		}
 +	}
@@ -890,6 +910,10 @@ new file mode 100644
 +				ud_event(ev);
 +			}
 +			dwc_wr(GEVNTCOUNT, count);
++		}
++		if (ud.want_panic) {
++			ud.want_panic = false;
++			panic("kebab usb console test");
 +		}
 +		ud_pump_log();
 +		ud_sleep_ms(2);
