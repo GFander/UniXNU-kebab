@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1009 @@
+@@ -0,0 +1,1026 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -800,6 +800,23 @@ new file mode 100644
 +#define SMMU_GFSYNR1   0x0054
 +#define SMMU_SMR(n)    (0x0800 + 4 * (n))     /* VALID[31] MASK[30:16] ID[14:0] */
 +#define SMMU_S2CR(n)   (0x0c00 + 4 * (n))     /* TYPE[17:16]: 0=trans 1=bypass 2=fault */
++
++/* DWC3 records whether the last failure was a bus error, and where. */
++#define GSTS            0xc118
++#define GBUSERRADDR0    0xc130
++#define GBUSERRADDR1    0xc134
++
++static void
++ud_bus_error_report(const char *when)
++{
++	uint32_t gsts = dwc_rd(GSTS);
++	if (gsts & (1u << 4)) {
++		printf("KEBAB USB: bus error address valid %s: 0x%08x%08x GSTS 0x%08x\n",
++		    when, dwc_rd(GBUSERRADDR1), dwc_rd(GBUSERRADDR0), gsts);
++	} else {
++		printf("KEBAB USB: no bus error %s (GSTS 0x%08x)\n", when, gsts);
++	}
++}
 +
 +static void
 +ud_smmu_report(void)
