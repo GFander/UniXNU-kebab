@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1066 @@
+@@ -0,0 +1,1069 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -138,8 +138,11 @@ new file mode 100644
 +#define UD_SETUP       0x0580
 +#define UD_DATA        0x0600      /* ep0 data stage, 512 bytes */
 +#define UD_NOTIFY      0x0800
-+#define UD_BULKIN      0x0900      /* 512 bytes */
-+#define UD_BULKOUT     0x0b00      /* 512 bytes */
++/* Bulk buffers must be aligned to the endpoint maximum packet size, which is 512,
++ * so they live at 512-aligned offsets; 0x0b00 is only 64-aligned, which is why the
++ * endpoints worked at 64-byte packets and died at 512. */
++#define UD_BULKIN      0x0c00      /* 512 bytes, 512-aligned */
++#define UD_BULKOUT     0x0e00      /* 512 bytes, 512-aligned */
 +
 +/* physical endpoints: ep = 2 * usb_number + direction */
 +#define EP0_OUT        0
@@ -427,8 +430,8 @@ new file mode 100644
 +	ud.configured = true;
 +	printf("KEBAB USB: configured, notify=%u bulk_out=%u bulk_in=%u\n",
 +	    EP_NOTIFY, EP_BULK_OUT, EP_BULK_IN);
-+	ud_to_dev(UD_BULKOUT, 64);
-+	ud_start(UD_TRB_BULKOUT, EP_BULK_OUT, UD_BULKOUT, 64, TRBCTL_NORMAL);
++	ud_to_dev(UD_BULKOUT, 512);
++	ud_start(UD_TRB_BULKOUT, EP_BULK_OUT, UD_BULKOUT, 512, TRBCTL_NORMAL);
 +}
 +
 +/* ------------------------------------------------------------- log ring */
