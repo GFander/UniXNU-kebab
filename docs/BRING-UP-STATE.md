@@ -1303,3 +1303,115 @@ KEBAB DSC:      map 0x216fe4000 size=0x5c000     file=0x0         init=r-x max=r
 KEBAB DSC:      map 0x217040000 size=0x13da4000  file=0x5c000     init=r-- max=r--
 KEBAB DSC: dry run: validated only; the kernel maps nothing unless kebab_dsc_map=1
 ```
+
+## 十五、EP0 重写（外部贡献合入）
+
+本节记录把外部贡献的 EP0/事件重写合入 `bsd/dev/kebab_usb.c` 的结果，对应
+`patches/xnu-8796-kebab/0091-kebab-usb-cdc-acm.patch` 的新版本。
+
+### 1. 合入前的差异清点
+
+外部工作目录给了 `kebab_usb.before.c` 和 `kebab_usb.after.c` 两份快照。先按
+要求做 `diff -u`，结果是：
+
+* `before.c` 与 `ios16` 上 `0091` 解出的驱动逐字节相同：48,516 字节，
+  md5 `0e18412c55d5ad08e2bf9b32c345f3aa`。
+* 因此任务描述里“live 比 snapshot 多出 EP0 探针和 serial KDP”这一条在这棵
+  树上不成立：稿件写作时依据的快照已经包含这两项。没有需要补种的 live
+  功能，`after.c` 本身也已经带有两者。
+* 仍然逐项核对过：13 个 `kebab_usb_*` 外部函数、探针的 9 个既有记录点、
+  `ep0_history[32]`、`ep0_progress`、4 KiB `in_ring`、0xFA 判断和
+  `kdp_serial_panic_reenter()` 调用都在 `after.c` 中存在。
+
+所以合入方式不是把旧实现重新抄一遍，而是：以 `after.c` 为基线，对每个 live
+功能做存在性和调用点核对，只在确实冲突的调用点补注释，说明为什么改走新状态
+机的路径。
+
+### 2. 重写本身改了什么
+
+* **事件与 DMA 归属**：一个 IRQ-masked、非递归的 CPU gate 覆盖 worker、
+  console flush、输入、探针输出和 panic 轮询；每个四字节事件推进一次
+  `evt_pos` 并只确认四字节，新增 `events`/`event_acked`/`event_discarded`
+  和 `takeover_active` 计数。panic 接管继承在途 DMA，不伪造 busy 标志。
+* **EP0 状态机**：SETUP、DATA、WAIT_STATUS、STATUS、ABORT 分开；CDC
+  `SET_LINE_CODING` 先收 7 字节再发 IN 状态，`GET_LINE_CODING` 用存储值
+  并按 wLength 截断，`SET_CONTROL_LINE_STATE` 在状态完成后提交；短 IN 在
+  64 字节边界挂 ZLP，短/畸形 OUT 走 stall；`SETUP_PENDING`、重复 SETUP、
+  未知请求和方向错误都有单独路径。
+* **复位/断开恢复**：先按保存的 resource index 结束活动传输，控制端点不加
+  ForceRM，非控制端点加；等 ENDTRANSFER 的 EPCMDCMPLT 而不是 CMDACT；
+  之后才清 data endpoint stall、用 MODIFY 恢复 EP0。`DEPSTARTCFG(0)` 只
+  留给初始化/核心复位。
+* **可重复配置与 CLEARSTALL**：`SET_CONFIGURATION(0)` 停止并 fence data
+  endpoint，`SET_CONFIGURATION(1)` 每次（包括重复的 1）都重建 resource、
+  清 data stall、恢复 endpoint 后再确认状态；`CLEAR_FEATURE(HALT)` 真正发
+  `DEPCMD_CLEARSTALL` 并在 fence 后重新 arm。
+* **通知端点**：`SERIAL_STATE` 描述符 MPS、端点 MPS 和传输长度统一为 10，
+  内容 `a1 20 00 00 00 00 02 00 03 00`；一次只持有一个通知 resource，
+  变化合并到下一次完成。
+* **运行时打印**：transport-owned 路径不再 `printf`，只保留启动诊断。
+
+### 3. 探针的合入
+
+`after.c` 保留阶段 1–7 和 16–17 的原有编码，并为重写新增的阶段定义了
+8–27：wait-status、abort、stall、END issued、END confirmed、configure、
+halt、disconnect、connect、takeover、fault、control-lines commit、
+line-coding commit、controller fence、deferred SETUP、notification、
+producer takeover。每个新增迁移都有 `kebab_usb_ep0_note()` 调用；探针的
+32 项环和打包格式没有变。
+
+有两处与旧探针文档的路径不同，已在代码注释里写明：
+
+* `kebab_usb_ep0_probe_send()` 不再从 panic 循环直接向 bulk IN 提交，
+  而是把格式化后的报告追加到 log ring；原因是重写后 log pump 是 bulk IN
+  的唯一 owner（`ep[].busy`/`tx_pending`），直接提交会与它竞争。
+  panic 循环下一轮 `ud_poll_locked()` 按顺序把报告发出去，仍然不经过
+  `printf`，也不会递归进 console。
+* live 版本在首次 configure 时用 `ep0_probe_printed` 打一行基线；重写把
+  运行时 `printf` 从 transport 路径删掉了，这一行基线也随之去掉。完整
+  快照仍可从 panic 报告和 KDP 关闭时的 `EP0?` 命令取得。这是有意的取舍，
+  不是遗漏。
+
+### 4. KDP 的合入
+
+`kebab_usb_log_flush()`、`kebab_usb_kdp_start()`、`kebab_usb_kdp_pending()`、
+`kebab_usb_kdp_enabled()` 都保留；`in_ring` 仍是 4096 字节，足够放一帧
+序列化后的 KDP 报文。`kebab_usb_panic_spin()` 在新的轮询之后、释放
+transport gate 之后，仍检查输入环首字节是否为 0xFA，并调用
+`kdp_serial_panic_reenter()`，把重连的调试器交回 KDP。
+
+`kebab_usb_console_ready()` 从 live 的 `running && configured` 改成
+`running && !dead`。这是为了让 panic spin 在设备尚未重新枚举时也能继续
+运行；KDP 的 `pal_serial` 因此可能在配置完成前看到“ready”，此时
+`kebab_usb_log_flush()` 不会发送，字节留在 log ring，等枚举完成后由
+log pump 发出。
+
+### 5. 已验证的内容
+
+* 用 xnu-8796.141.3 头文件在 WSL 里按 arm64 freestanding 方式编译
+  `kebab_usb.c`：0 error，只有 1 条来自 `vm_kern.h` 的既有 warning。
+* 外部稿件自带的 `test_driver.py`（MMIO/cache/CPU 替身，ASan/UBSan）
+  六组测试全部 PASS，覆盖 CDC 方向与提交、短传输、SETUP_PENDING、halt、
+  重复配置、复位顺序、事件记账和接管。
+* 在 `xnu-8796.141.3` 的干净索引 `1b191cb` 上按文件名顺序应用全部
+  **82/82** 个 kebab 补丁，无失败。
+* 在构建机 `~/kebab-build/build-local.sh` 上构建成功：
+  `build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab`，
+  **17,085,792 字节（16.29 MiB）**，Mach-O 64-bit arm64，SHA-256
+  `086d54a0721811e4875771eea8badd0c26dce826909b7de8c294ee8de828e73e`。
+* `kebab_usb.c` 在本轮构建里有 40 条 warning，全部是
+  `-Wdeclaration-after-statement`；live 版本有 17 条 warning，其中 11 条
+  是同一类。新增 29 条同类告警，没有新增告警类别；live 的 4 条
+  `-Wmissing-prototypes`（`kebab_usb_start`/`getc`/`console_ready`/
+  `panic_spin`）和 2 条 `-Wmissing-noreturn`（`ud_thread`/
+  `kebab_usb_panic_spin`）在重写里消失。
+
+### 6. 仍未验证的内容
+
+* 真机上的 close/reopen、panic 后重新枚举和 CDC 控制请求完成状态；
+* DWC3 命令/事件时序、cache 维护和 DMA 一致性；
+* Windows 主机在重开端口时的行为；
+* KDP 重连后 `kdp_serial_panic_reenter()` 的实际会话恢复；
+* 探针基线行删除后的现场可读性；完整快照仍待一次真实 panic 抓取。
+
+本轮没有运行硬件测试，以上构建和静态/模拟验证不能替代真机结论。
