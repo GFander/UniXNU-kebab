@@ -1633,8 +1633,8 @@ KEBAB DSC: dry run: plan only (slide 0x1000000), nothing mapped; the kernel maps
   `KDK_13.5_22G74`。
 * 产物：`build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab`，
   **17,069,536 字节（16.28 MiB）**，Mach-O 64-bit arm64，SHA-256
-  `894d513edb3f5580a9702ae62c9b5c2101dd667696fdc68f71b75820ca4d8b66`。
-* `kebab_dyldcache.c` 本身 **0 条 warning**；全树日志 14,265 条 warning，
+  `d2c4678cb896e39da764c5926f3e6f13a633c0da807fdd9fd225a9628e085eda`。
+* `kebab_dyldcache.c` 本身 **0 条 warning**；全树日志 14,246 条 warning，
   都是既有文件/头文件的。镜像字符串里能看到
   `KEBAB DSC: slide 0x%llx ...` 和
   `KEBAB DSC: map: shared_region_check_np base ...`，确认新代码进了内核。
