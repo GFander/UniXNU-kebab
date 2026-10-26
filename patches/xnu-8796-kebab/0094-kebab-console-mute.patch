@@ -1,0 +1,20 @@
+Let the GUI have the screen: once the framebuffer has presented its first swap,
+console text stops overwriting it. A panic draws again, and the persistent log
+still receives everything.
+
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -302,7 +302,13 @@
+ #if defined(KEBAB)
+ 	{
+ 		extern void kebab_usb_log(const char *buf, size_t len);
++		extern int kebab_console_muted;
+ 		kebab_usb_log(c, (size_t)size);
++		/* Once the GUI presents, console text stops overwriting it; a panic
++		 * draws again, and the persistent log above still gets everything. */
++		if (kebab_console_muted && !panic_active()) {
++			return;
++		}
+ 	}
+ #endif
+ #endif

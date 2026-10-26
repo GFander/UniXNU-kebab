@@ -9,10 +9,9 @@ IOMobileFramebuffer) copies CoreAnimation's swaps into it on the CPU and drives
 vsync from a 60 Hz timer.
 
 Includes the sibling's later fixes: a repeated lookup of a surface this client
-already owns reports it with -1 rather than counting a second reference (which
-made the framework tear down the first client's mapping), and the console is
-muted with a flag instead of switching consoles, because the console switch writes
-a read-only-late variable on arm64. IOCoreSurfaceRoot gets a personality so
+already owns reports it with -1 instead of counting a second reference, and the
+console is muted with a flag rather than switched, because the console switch
+writes a read-only-late variable on arm64. IOCoreSurfaceRoot gets a personality so
 IOSurface.framework can connect.
 
 --- a/iokit/conf/files.arm64
@@ -1022,7 +1021,7 @@ diff --git a/iokit/Kernel/arm/KebabFramebuffer.cpp b/iokit/Kernel/arm/KebabFrame
 new file mode 100644
 --- /dev/null
 +++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
-@@ -0,0 +1,487 @@
+@@ -0,0 +1,488 @@
 +/*
 + * Built-in IOMobileFramebuffer for KEBAB: the ABL's continuous-splash
 + * framebuffer (1080x2400 a8r8g8b8 in RAM, the panel scans it out by
@@ -1056,7 +1055,8 @@ new file mode 100644
 + */
 +#include "KebabSurface.h"
 +
-+extern "C" int kebab_console_muted;   /* osfmk/console/serial_console.c */
++extern "C" int kebab_console_muted;
++int kebab_console_muted;      /* read by the console path */
 +
 +#if defined(KEBAB)
 +#include <IOKit/IOService.h>
