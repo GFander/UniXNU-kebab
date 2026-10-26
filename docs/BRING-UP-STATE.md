@@ -422,3 +422,126 @@ lldb
   POSIX 后端同样只做了语法检查与自测。
 * 如果主机要求 DTR/RTS 才发数据，设备端 CDC 控制请求处理能否满足所有主机
   组合，未验证。
+## 十一、显示栈 ABI 补全
+
+本节记录 `0093-kebab-display.patch` 的选择器补全。范围是内核侧
+`IOMobileFramebuffer` / `IOSurface` 的用户客户端 ABI，不含 DPU、DSI 点屏或触摸。
+结论先行：**代码编译通过、补丁从 `1b191cb` 干净应用，但没有任何一项在真实
+`backboardd` 上验证过**；下表的“现在”一列是内核侧的行为承诺，不是上机结果。
+
+### 选择器缺口（按 0093 源码逐个复核）
+
+* `SwapWait` 是选择器 **6**。它原来落在 `default`，返回 `kIOReturnSuccess`、
+  输出清零，但不等待。
+* IOMFB 原实现只有 3/4/5/6/7/8/18/28/72；`backboardd` 用到而原来没有的是
+  12/15/17/22/27/29/33/50/55/57/68/74/79/83/84。
+* IOSurface 原实现是 0/4/13/34/35 + trap 0–5。评估稿把 `0x22/0x23` 也列为
+  缺失，但 34/35 就是 0x22/0x23，早就实现了；真正缺的是 9（SetValue）、
+  0xa（UpdateNonBulkValueCache）、0xb（RemoveValue）和 0x1b
+  （SetBulkAttachments，十进制 27）。
+* 评估稿把 83（`CopyLayerDisplayedSurface`）列进 `backboardd` 的调用集；
+  ios-sweet 的日志只证明 57/15/22/29/33/79/74/12/6/27/17/84/50 以及首次
+  swap 后的 3/4/5/68/55，**83 没有调用证据**。本移植仍按“返回该层已显示
+  surface 的端口名”实现，并在表里标明。
+
+调用集的证据来自 ios-sweet 在同一份 iPhone X 16.7.16 用户态（20H392）上的
+`SWEET FB: <proc> sel N` 日志（`NOTES.md` L83、L86），不是 kebab 自己的日志。
+
+### 选择器对照表
+
+IOMobileFramebuffer（十进制，与 framework 一致）：
+
+| 选择器 | 以前 | 现在 | 为什么 |
+| --- | --- | --- | --- |
+| 3 GetLayerDefaultSurface | 面板 surface 的端口名 | 不变 | 原本就能工作 |
+| 4 SwapBegin | `++fSwapID`，返回 id | 不变，另记最近入队的 id | SwapWait 需要完成语义 |
+| 5 SwapEnd | 调用线程里同步 memcpy 四个图层 | 只把 0x46c 记录拷进一层队列并返回 | 后端可替换；调用方不被 10.4 MB 拷贝阻塞 |
+| 6 SwapWait | default：success、不等待 | 有界等待；success / timeout / notfound | 区分“完成 / 超时 / 从未入队” |
+| 7 GetID | 0 | 0 | 主显示 id |
+| 8 GetDisplaySize | 1080×2400（物理） | 1125×2436（逻辑） | iPhone X 身份；FBSDisplayMode 的硬门槛 |
+| 12 RequestPowerChange | default | 记录开关；off 清黑一次并停 present，on 重画最后一帧 | 面板自扫描、无背光，这是能兑现的电源语义 |
+| 15 SetDebugFlags | default | 保存并回显；bit0 打开每帧日志 | 调试开关本来就是我们自己的状态 |
+| 17 SetGammaTable | default | `kIOReturnUnsupported` | 没有 DPU/gamma 管线，success 等于谎称已配置 |
+| 18 IsMainDisplay | 1 | 1 | 主显示 |
+| 22 SetDisplayDevice | default | 只接受 0，其他 `kIOReturnBadArgument` | 只有内置面板 |
+| 27 GetGammaTable | default | `kIOReturnUnsupported` | 同上，没有可读的 gamma |
+| 28 GetDotPitch | 395（物理 ppi） | 458（iPhone X） | 与逻辑显示身份一致 |
+| 29 GetDisplayArea | default（全 0 结构） | `{0, 0, 1125, 2436}` | 显示区描述 |
+| 33 EnableDisableVideoPowerSavings | default | 记录开关 | 没有省电模式可切 |
+| 50 SetBrightnessCorrection | default | `kIOReturnUnsupported` | 没有背光/补偿硬件 |
+| 55 SetMatrix | default | `kIOReturnUnsupported` | 没有可应用的矩阵 |
+| 57 GetColorRemapMode | default | 0（无 remap） | 状态查询 |
+| 68 SetParameter | default | `kIOReturnUnsupported` | 参数块语义未知 |
+| 72 Enable/DisableNotifications | 有实现；vsync 载荷 `(count, ts, 0)` | 选择器不变；载荷改为 `(ts, ts, 0)`；参数不足返回 BadArgument | 原载荷把帧计数当成了时间戳 |
+| 74 SupportedFrameInfo | default（全 0） | 1125×2436、3x、60 Hz、sRGB、SDR、rotation 0、BGRA | 显示模式/时序描述；结构布局为本移植定义 |
+| 79 GetBlock | default | `kIOReturnUnsupported` | 没有 block 数据，不能假造 |
+| 83 CopyLayerDisplayedSurface | default | 该层已显示 surface 的端口名；没有则 `kIOReturnNoDevice` | 状态可查（调用证据不足） |
+| 84 SetContrast | default | `kIOReturnUnsupported` | 没有对比度硬件 |
+| 其他 | success、输出清零 | `kIOReturnUnsupported`，记录一次 | 不能让上层以为调用成功 |
+
+IOSurface（十进制；0x 前缀是评估稿的写法）：
+
+| 选择器 | 以前 | 现在 | 为什么 |
+| --- | --- | --- | --- |
+| 0 create | 实现 | 不变（初始化 values 状态） | 原有创建路径 |
+| 4 lookup | 实现 | 不变 | 原有查找路径 |
+| 9 SetValue | default | 合并 `[value, key]` 或 dictionary；`gen=(gen+2)\|1`；写 state+0x20/+0x28；返回 gen | 真实 values，客户端能从 state page 读到 |
+| 10 / 0xa UpdateNonBulkValueCache | default | `{u32, gen, 二进制序列化 dict}`；缓冲区不够时 NoSpace + 需要的大小 | ios-sweet 记录的 0xa ABI |
+| 11 / 0xb RemoveValue | default | 删一个 key（空 key 清空），更新并返回 gen | 真实 values |
+| 13 limits | 实现 | 不变 | 原有 |
+| 27 / 0x1b SetBulkAttachments | default | 按 changed mask 与 valid size 把 15 组字段写进 state+0x30 | backboardd 会调；字段位按 ios-sweet 逆向（NOTES L97） |
+| 34 / 0x22 lookup from port | 实现 | 不变 | 评估稿误列为缺失 |
+| 35 / 0x23 create port | 实现 | 不变 | 同上 |
+| trap 0–5 | 实现 | 不变 | 原有 |
+| 其他 | success、输出清零 | `kIOReturnUnsupported` | 同上 |
+
+### 物理面板与逻辑显示
+
+* 物理：面板和 bootloader 帧缓冲都是 **1080×2400**，`canvas-width/height` 与
+  `GetLayerDefaultSurface` 返回的默认 surface 也保持这个尺寸。
+* 逻辑：`GetDisplaySize` 返回 **1125×2436**，`GetDotPitch` 458（iPhone X），
+  `GetDisplayArea` 与 74 的模式描述也按 1125×2436 / 3x / 60 Hz / sRGB。
+* 呈现时逻辑坐标减去面板原点 `(22, 18)`，只拷 1080×2400 的中心，边缘被裁掉。
+  DPU 后端以后应自己缩放/居中，但用户态 ABI 不变。
+* 不要把它“改回”1080×2400：`FBSDisplayMode` 按 1125×2436 / 3x 校验，
+  ios-sweet 在 `1080x2400/0` 上死在 `-[FBSDisplayMode _initWith...]`
+  （`NOTES.md` L85）。
+
+### SwapEnd 与 SwapWait 的完成语义
+
+* `SwapEnd`（5）只把 0x46c 记录拷进一层队列并返回；`present()` 在 60 Hz vsync
+  定时器里做 CPU 拷贝，然后记 `fCompletedID`、更新时间戳并唤醒等待者。
+* `SwapWait`（6）参数是 `[swap id, timeout, 0]`；timeout 按**毫秒**解释
+  （这个单位没有逆向证据，是本文的约定），上限 1000 ms。返回值：
+  * `kIOReturnSuccess`：该 swap 已上屏（`id <= fCompletedID`）；
+  * `kIOReturnTimeout`：等到超时仍未完成；
+  * `kIOReturnNotFound`：这个 id 从没被 `SwapEnd` 入队（只有 `SwapBegin`）。
+* 后端替换点只有 `AppleCLCD::present()` 和完成点；换成 DPU flip 时 ABI 不变。
+
+### 已验证 / 待验证
+
+已验证（可复现）：
+
+* 79 个补丁按文件名顺序应用到 `xnu-8796.141.3`（`1b191cb`）：**79/79**。
+  （任务书写的是 78；实际有 79 个文件，`0099-kebab-kdp-usb.patch` 在任务书之后加入。）
+* `~/kebab-build/build-local.sh`（`MACHINE_CONFIG=KEBAB`、
+  `KERNEL_CONFIG=DEVELOPMENT`）产出
+  `build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab`，
+  **17,066,704 字节**，SHA-256 `9dfbc0cbbd6e39f6ee0f59931841809c519e6b349f2403527d287316d181d18e`；
+  `KebabSurface.h`、`KebabSurface.cpp`、`KebabFramebuffer.cpp` 编译**无 warning**。
+* 内核字符串里有新日志（`presented as %ux%u`、`display %s` 等），说明改动确实进了镜像。
+
+待验证（必须有真实 `backboardd` / 真机）：
+
+* 选择器 74 的结构布局是本移植自己定义的，不是逆出来的；首次调用会把请求的
+  输出长度写进日志，方便以后按真实布局修正。29 的 `{x, y, w, h}` 同理。
+* 83 的输出类型（端口名还是 surface id）没有调用证据。
+* 9/0xa/0xb 的入参形态（id 在 scalar 还是在结构头）两种都接受了，但真实
+  `IOSurface.framework` 用哪一种没有实测。
+* `SwapWait` 的 timeout 单位按毫秒处理是假设。
+* 12 的 off 语义：面板自扫描、没有背光控制，这里只清黑一次并停止 present；
+  真实 DPU 的关屏行为不同。
+* 返回 `kIOReturnUnsupported` 的 17/27/50/55/68/79/84 需要真实 `backboardd`
+  确认它是否接受错误；ios-sweet 当年一律返回 success，没有这条数据。
+* 触摸：`0098` 的 S6SY761 仍按 1079×2399 原始坐标上报；显示逻辑尺寸变成
+  1125×2436 后，HID 映射要单独核对（不在本次范围，也不改 `kebab_touch.c`）。
