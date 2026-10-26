@@ -35,6 +35,8 @@ GIC_DIST = 0x17A00000
 GIC_DIST_SIZE = 0x10000
 GIC_REDIST = 0x17A60000
 GIC_REDIST_SIZE = 0x100000
+UFS_BASE = 0x01D84000          # UFS host controller (UFSHCI)
+UFS_SIZE = 0x30000
 PANIC_LOG_BASE = 0xC8000000   # 128 MiB into the 256 MiB window; far from the kernel image
 PANIC_LOG_SIZE = 0xB4000
 GIC_REDIST_STRIDE = 0x20000      # 8 cores x 0x20000 == the 0x100000 range
@@ -136,10 +138,6 @@ def main():
                         help='/psci method used by the secondary-CPU start (the board firmware uses smc)')
     parser.add_argument('--timebase', type=lambda value: int(value, 0), default=TIMEBASE,
                         help='CNTFRQ value in Hz; override with the value read from the device')
-    parser.add_argument('--packed-data-ramdisk', action='store_true',
-                        help='Hand off validated DBRDISK1 bytes to the native sparse block driver')
-    parser.add_argument('--data-ramdisk', action='store_true',
-                        help='/chosen/memory-map RAMDisk placeholder for a scratch Data seed')
     parser.add_argument('--trust-cache', action='store_true',
                         help='Zeroed TrustCache sidecar handoff placeholder')
     parser.add_argument('--product-file', type=Path,
@@ -208,8 +206,6 @@ def main():
                            ('certificate-security-mode', struct.pack('<I', 1)),
                            ('effective-security-mode-sep', struct.pack('<I', 1))]
                           if args.ipad_identity else []),
-                        *([('ephemeral-storage', struct.pack('<I', 1))]
-                          if (args.data_ramdisk or args.packed_data_ramdisk) else []),
                         *([('darwinboot-memory-size', struct.pack('<Q', args.owned_memory_size))]
                           if args.owned_memory_size else []),
                         ('embedded-panic-log-size', struct.pack('<I', PANIC_LOG_SIZE)),
@@ -223,12 +219,16 @@ def main():
                           if args.root_match_volume_uuid else []),
                         ('amfi-only-platform-code', struct.pack('<I', 1)),
                         *empty_nvram_proxy()],
-             [node('memory-map', named=False, properties=([("PackedRAMDisk" if args.packed_data_ramdisk else "RAMDisk", bytes(16))]
-                                  if (args.data_ramdisk or args.packed_data_ramdisk) else []) +
-                                 ([('TrustCache', bytes(16))] if args.trust_cache else [])),
+             # No RAMDisk entry: kebab roots on the real block device, not on a
+             # memory image, so nothing here should advertise one.
+             [node('memory-map', ([('TrustCache', bytes(16))] if args.trust_cache else [])),
               node('manifest-properties')]),
         # Panic log lives at the far end of the window the loader hands over.
         node('pram', [('reg', struct.pack('<QQ', PANIC_LOG_BASE, PANIC_LOG_SIZE))]),
+        # UFS host controller. It sits far below the arm-io window, so it gets an
+        # absolute reg at the root and the driver looks it up by path.
+        node('kebab-ufs', [('compatible', b'qcom,sm8250-ufshc\0qcom,kona-ufshc\0'),
+                           ('reg', struct.pack('<QQ', UFS_BASE, UFS_SIZE))]),
         node('cpus', children=cpus),
         *([node('psci', [('compatible', b'arm,psci-1.0\0'),
                          ('method', args.psci_method.encode() + b'\0')])] if len(cpus) > 1 else []),
