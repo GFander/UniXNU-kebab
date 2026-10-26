@@ -246,3 +246,65 @@ KEBAB USB: configured, notify=5 bulk_out=2 bulk_in=3
 * panic 后重新连接：`haltRestart` 钩子生效，泵循环在跑，但主机无法重新配置端口
 * KDP over CDC-ACM 交互式调试器
 * `debug=0x14f` 未能停在调试器，需要运行时探针确认 `panicDebugging` 与 panic options
+
+## 九、触摸驱动（S6SY761）
+
+补丁 `0098-kebab-touch.patch`：新增 `bsd/dev/kebab_touch.c`，并在 `bsd/conf/files`
+与 `bsd/kern/bsd_init.c` 接线。`kebab_touch=1` 才启用；它和 USB 串口在同一个位置
+（`bsd_init` 开头）启动，两者可以单独开关。
+
+### 地址来源（设备自己的固件，不是猜的）
+
+* **SE13 = `0x00A94000`**（长度 `0x4000`）：设备树 `/soc/i2c@a94000`，
+  `reg = <0xa94000 0x4000>`、`compatible = "qcom,i2c-geni"`、`status = "ok"`；
+  子节点 `/soc/i2c@a94000/sec-s6sy761@48` 就是触摸芯片，
+  `reg = <0x48>`、`chip-name = "SY771"`、`touchpanel,tx-rx-num = <0x10 0x24>`、
+  `touchpanel,panel-coords = <0x437 0x95f>`（1079x2399）。这棵树取自本机保留的
+  LineageOS boot 镜像 `kebab-repodtb-losramdisk.img` 里的 DTB，未做改动。
+* **QUPv3_1 包装器 = `0x00AC0000`**（长度 `0x2000`）：上面 i2c 节点的
+  `qcom,wrapper-core` 指向 `/soc/qcom,qupv3_1_geni_se@ac0000`。
+* **TLMM = `0x0F000000`**：`qupv3_se13_i2c_active` 把 `gpio36`/`gpio37` 复用到
+  `qup13`；触摸节点的 `reset-gpio` 是 38、`irq-gpio` 是 39。
+
+### 已经实现
+
+* 映射 QUPv3_1 包装器与 SE13，按 Linux geni 驱动的顺序初始化：清中断、IO 模式、
+  FIFO 模式、打包配置、SCL 计数器（默认 100 kHz，`kebab_touch_hz=400000` 可换）
+* 用 Synaptics TCM 的 identify(0x02) / boot info(0x10) / app info(0x20) 读身份，
+  打印版本、最大坐标、对象数
+* 发一份固定的触摸报告配置（每个活动对象 5 字节：index 4 / class 4 / x 12 /
+  y 12 / z 8 位），内核线程每 5 ms 轮询，解码第一根手指并按约 200 ms 限速打印
+* `kebab_touch_raw=1` 时转储 SE 寄存器、TLMM 引脚状态和原始报文
+
+### 已经验证
+
+* 只能验证到**"能编译"**：`build-local.sh` 产出
+  `build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab`
+  （16 MiB，17,049,296 字节），本文件没有 warning
+* 全部 78 个补丁按文件名顺序应用到 `xnu-8796.141.3`（`1b191cb`）干净通过：**78/78**
+
+### 还没有确认的硬件事实
+
+* **引导链有没有给 QUPv3_1/SE13 开时钟、有没有把 GENI 协议选成 I2C**。驱动只读
+  `GENI_FW_REVISION_RO` 的协议位；读到 0 或 `0xffffffff` 说明没有时钟，这不是软件
+  能绕过的（GCC 分支时钟不在本驱动里）
+* **芯片是不是真的说 TCM**。厂商树里这个节点用的是 Samsung `sec_ts` 驱动，命令集
+  不同；TCM 是本驱动选择去试的那一套，第一次上机要靠原始报文判断
+* 复位极性，以及 mux/pull/驱动强度是否与设备树一致（本驱动按设备树的
+  `qupv3_se13_i2c_active` 写）
+* **中断没有接**：只轮询，`irq-gpio` 39 没有使用
+
+### 用启动参数逐条探测
+
+| 参数 | 作用 |
+| --- | --- |
+| `kebab_touch=1` | 启用驱动（必需）|
+| `kebab_touch_raw=1` | 转储 SE/TLMM 寄存器与原始报文，用来判断协议 |
+| `kebab_touch_se=0x...` | 覆盖 SE 基址 |
+| `kebab_touch_pins=0` | 跳过 TLMM 复用 |
+| `kebab_touch_reset=0` / `=2` | 跳过复位脉冲 / 用相反极性 |
+| `kebab_touch_hz=400000` | 100 kHz 换成 400 kHz |
+
+第一次上机先看两行：`KEBAB TOUCH: wrapper QUP_HW_VER ...` 与
+`KEBAB TOUCH: ... protocol ...`；它们决定后面的输出有没有意义。若芯片没有 TCM
+回应，驱动不会启动轮询线程，而是直接打印提示。

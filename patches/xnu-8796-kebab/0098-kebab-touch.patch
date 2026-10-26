@@ -1,0 +1,1207 @@
+Read the S6SY761 touch controller on QUPv3 SE13 and poll its reports.
+
+The OnePlus 8T wires its touch controller to QUPv3 SE13 as an I2C slave at
+0x48; the device tree in the vendor boot image has /soc/i2c@a94000 there with
+sec-s6sy761@48 underneath, so the SE base comes from the board's own firmware
+instead of a guess. This adds a bring-up driver in the style of the USB and
+UFS ones: bare MMIO through ml_io_map, no IOKit subclassing, a kernel thread
+instead of interrupts, console output only.
+
+It maps the QUPv3_1 wrapper and SE13, programs the GENI core the way the Linux
+geni driver does (IO mode, FIFO mode, packing, SCL counters), reads the chip
+identity with the Synaptics TCM boot/application info commands, asks for a
+known touch report layout and polls for reports. Several hardware facts cannot
+be checked without the phone, so they are boot arguments rather than
+assumptions: kebab_touch_raw=1 dumps raw SE and TLMM registers and raw report
+bytes, and kebab_touch_se=/pins=/reset=/hz= let one run change one assumption
+at a time.
+
+Nothing is registered in the IORegistry yet; HID wiring is a later task.
+
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -106,6 +106,7 @@
+ bsd/dev/memdev.c			standard
+ bsd/dev/kebab_ufs.c			standard
+ bsd/dev/kebab_usb.c			standard
++bsd/dev/kebab_touch.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -504,6 +504,19 @@
+ #endif
+ 
+ #if defined(KEBAB)
++	/*
++	 * The touch controller is on QUPv3 SE13. It is a polled bring-up driver
++	 * with no IORegistry presence, started here so that its output lands on
++	 * the panel console and, once the USB console above is up, on the host
++	 * as well. Off unless boot-arg kebab_touch=1.
++	 */
++	{
++		extern void kebab_touch_start(void);
++		kebab_touch_start();
++	}
++#endif
++
++#if defined(KEBAB)
+ /* Panic reports arrive through the panel console, so the bsd_init trace is
+  * worth its output on this port. */
+ #define DEBUG_BSDINIT 1
+diff --git a/bsd/dev/kebab_touch.c b/bsd/dev/kebab_touch.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/kebab_touch.c
+@@ -0,0 +1,1150 @@
++/*
++ * KEBAB TOUCH: Synaptics S6SY761 on QUPv3 SE13, I2C address 0x48.
++ *
++ * The panel is 1080x2400; the sensor reports 1079x2399 with a 16x36
++ * transmit/receive grid. Nothing is registered in the IORegistry: this is a
++ * bring-up driver whose only output is the kernel console, it polls instead of
++ * taking an interrupt, and it is off unless boot-arg kebab_touch=1 is given.
++ * It is started from bsd_init() next to the USB console, so the two can be
++ * enabled independently.
++ *
++ * WHERE THE ADDRESSES COME FROM (read from this device, not guessed)
++ *
++ *   SE13            0x00a94000, 0x4000 bytes. The board device tree node
++ *                   /soc/i2c@a94000 has reg = <0xa94000 0x4000>,
++ *                   compatible = "qcom,i2c-geni", status = "ok", and its child
++ *                   /soc/i2c@a94000/sec-s6sy761@48 has reg = <0x48>,
++ *                   chip-name = "SY771", touchpanel,tx-rx-num = <0x10 0x24>
++ *                   and touchpanel,panel-coords = <0x437 0x95f> (1079x2399).
++ *                   That tree is the kebab one: it is the unchanged vendor DTB
++ *                   out of the LineageOS boot image kept on the build host,
++ *                   kebab-repodtb-losramdisk.img.
++ *   QUPv3_1 wrapper 0x00ac0000, 0x2000 bytes. The i2c node points at it with
++ *                   qcom,wrapper-core = <phandle>; that phandle resolves to
++ *                   /soc/qcom,qupv3_1_geni_se@ac0000, reg = <0xac0000 0x2000>.
++ *   TLMM            0x00f000000, the qcom,kona-pinctrl node. Its
++ *                   qupv3_se13_i2c_active group muxes "gpio36"/"gpio37" to
++ *                   function "qup13"; the touch node's reset-gpio is pin 38
++ *                   and its irq-gpio pin 39.
++ *
++ * The SE and wrapper bases stay boot-arg overridable anyway (kebab_touch_se=),
++ * because a bring-up driver that cannot be pointed somewhere else is a driver
++ * that has to be recompiled to test a suspicion.
++ *
++ * REGISTER PROGRAMMING
++ *
++ * The GENI/QUP register layout, the I2C sequencer opcodes and the SCL counter
++ * tables are the ones in the Linux sources that drive this exact block:
++ * include/linux/soc/qcom/geni-se.h and drivers/i2c/busses/i2c-qcom-geni.c
++ * (v6.6). The TLMM per-pin layout (0x1000 per pin, mux at bit 2, pull at bit
++ * 0, drive at bit 6, output-enable at bit 9) and the "qup13" function index
++ * (1) are from drivers/pinctrl/qcom/pinctrl-msm.c and pinctrl-sm8250.c.
++ *
++ * The identity commands are the Synaptics TouchComm (TCM) ones implemented by
++ * the synaptics_tcm driver: CMD_IDENTIFY 0x02, CMD_GET_BOOT_INFO 0x10,
++ * CMD_GET_APPLICATION_INFO 0x20, sent as {command, length_lo, length_hi} and
++ * answered with a 4-byte header {0xa5, code, length_lo, length_hi} followed by
++ * the payload.
++ *
++ * WHAT IS NOT CONFIRMED (read this before trusting a silent console)
++ *
++ *   1. The bootloader is assumed to have left QUPv3_1/SE13 clocked and its
++ *      protocol selected for I2C. Linux only *reads* that selection
++ *      (GENI_FW_REVISION_RO bits 15:8) and refuses to drive an SE that is not
++ *      an I2C one, which means the selection is made before the kernel runs.
++ *      If the wrapper hardware version reads 0 or 0xffffffff the block is not
++ *      clocked, and no amount of register poking here helps: the GCC branch
++ *      clocks for QUPv3_1 are not programmed by this driver.
++ *   2. That the part answers TCM at all. The vendor tree drives this node with
++ *      Samsung's sec_ts driver (compatible "sec-s6sy761"), which uses a
++ *      different command set; TCM is what this driver speaks. kebab_touch_raw=1
++ *      dumps the raw response bytes so the first hardware run settles it.
++ *   3. The reset pulse polarity (kebab_touch_reset=2 drives the opposite one)
++ *      and whether the TLMM mux/pull/drive values taken from the device tree
++ *      are what the chip needs (kebab_touch_pins=0 skips that step).
++ *
++ * Boot arguments:
++ *   kebab_touch=1          enable this driver (required)
++ *   kebab_touch_raw=1      dump SE registers, TLMM state and raw messages
++ *   kebab_touch_se=0x..    override the SE13 physical base
++ *   kebab_touch_pins=0     skip the TLMM pin muxing
++ *   kebab_touch_reset=0    skip the reset pulse; =2 drive the opposite polarity
++ *   kebab_touch_hz=400000  I2C bus speed (100000 or 400000)
++ */
++#if defined(KEBAB)
++
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <sys/systm.h>
++
++/* arm/machine_routines.h declares this behind a guard this build does not
++ * satisfy; the kebab UFS and USB drivers spell it out for the same reason. */
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++void kebab_touch_start(void);
++
++/* ----------------------------------------------------------- address facts */
++
++#define KT_SE13_PA_DEFAULT      0x00a94000u
++#define KT_SE13_SIZE            0x00004000u
++#define KT_WRAP_PA_DEFAULT      0x00ac0000u
++#define KT_WRAP_SIZE            0x00002000u
++#define KT_TLMM_PA              0x0f000000u
++#define KT_TLMM_SIZE            0x01000000u
++
++#define KT_I2C_ADDR             0x48    /* sec-s6sy761@48 in the device tree */
++#define KT_PIN_SDA              36      /* qupv3_se13_i2c_active: gpio36 */
++#define KT_PIN_SCL              37      /* qupv3_se13_i2c_active: gpio37 */
++#define KT_PIN_RESET            38      /* reset-gpio */
++#define KT_PIN_IRQ              39      /* irq-gpio, unused: we poll */
++
++/* ------------------------------------------------------- QUP/GENI registers */
++
++#define QUP_HW_VER              0x4     /* wrapper, geni_se_get_qup_hw_version */
++
++#define GENI_FORCE_DEFAULT_REG  0x20
++#define GENI_OUTPUT_CTRL        0x24
++#define GENI_CGC_CTRL           0x28
++#define SE_GENI_STATUS          0x40
++#define GENI_SER_M_CLK_CFG      0x48
++#define GENI_IF_DISABLE_RO      0x64
++#define GENI_FW_REVISION_RO     0x68
++#define SE_GENI_CLK_SEL         0x7c
++#define SE_GENI_BYTE_GRAN       0x254
++#define SE_GENI_DMA_MODE_EN     0x258
++#define SE_GENI_TX_PACKING_CFG0 0x260
++#define SE_GENI_TX_PACKING_CFG1 0x264
++#define SE_GENI_RX_PACKING_CFG0 0x284
++#define SE_GENI_RX_PACKING_CFG1 0x288
++#define SE_GENI_M_CMD0          0x600
++#define SE_GENI_M_CMD_CTRL_REG  0x604
++#define SE_GENI_M_IRQ_STATUS    0x610
++#define SE_GENI_M_IRQ_EN        0x614
++#define SE_GENI_M_IRQ_CLEAR     0x618
++#define SE_GENI_S_CMD0          0x630
++#define SE_GENI_S_IRQ_STATUS    0x640
++#define SE_GENI_S_IRQ_EN        0x644
++#define SE_GENI_S_IRQ_CLEAR     0x648
++#define SE_GENI_TX_FIFO         0x700
++#define SE_GENI_RX_FIFO         0x780
++#define SE_GENI_TX_FIFO_STATUS  0x800
++#define SE_GENI_RX_FIFO_STATUS  0x804
++#define SE_GENI_TX_WATERMARK_REG 0x80c
++#define SE_GENI_RX_WATERMARK_REG 0x810
++#define SE_GENI_RX_RFR_WATERMARK_REG 0x814
++#define SE_GENI_IOS             0x908
++#define SE_GSI_EVENT_EN         0xe18
++#define SE_IRQ_EN               0xe1c
++#define SE_HW_PARAM_0           0xe24
++#define SE_DMA_GENERAL_CFG      0xe30
++
++/* I2C sequencer registers (i2c-qcom-geni.c) */
++#define SE_I2C_TX_TRANS_LEN     0x26c
++#define SE_I2C_RX_TRANS_LEN     0x270
++#define SE_I2C_SCL_COUNTERS     0x278
++
++/* GENI_FW_REVISION_RO: protocol in bits 15:8, GENI_SE_I2C == 3 */
++#define FW_REV_PROTOCOL_MSK     0x0000ff00u
++#define FW_REV_PROTOCOL_SHFT    8
++#define GENI_SE_I2C_PROTO       3
++
++/* GENI_M_CMD0: opcode in bits 31:27, parameters in 26:0 */
++#define M_OPCODE_SHFT           27
++
++/* I2C master opcodes */
++#define I2C_WRITE               0x1
++#define I2C_READ                0x2
++
++/* I2C command parameters: the 7-bit slave address in bits 15:9. */
++#define SLV_ADDR_SHFT           9
++#define SLV_ADDR_MSK            0x0000fe00u
++
++/* Master interrupt status/enable bits (geni-se.h). */
++#define M_CMD_DONE              (1u << 0)
++#define M_CMD_OVERRUN           (1u << 1)
++#define M_ILLEGAL_CMD           (1u << 2)
++#define M_CMD_FAILURE           (1u << 3)
++#define M_CMD_CANCEL            (1u << 4)
++#define M_CMD_ABORT             (1u << 5)
++#define M_GP_IRQ_1_NACK         (1u << 9)
++#define M_RX_FIFO_WATERMARK     (1u << 26)
++#define M_RX_FIFO_LAST          (1u << 27)
++#define M_TX_FIFO_WATERMARK     (1u << 30)
++
++#define M_ERRORS                (M_CMD_OVERRUN | M_ILLEGAL_CMD | \
++	M_CMD_FAILURE | M_CMD_ABORT | M_GP_IRQ_1_NACK)
++
++/* M_COMMON_GENI_M_IRQ_EN: bits 6:1 plus the FIFO access error bits. */
++#define M_IRQ_COMMON            (0x0000007eu | 0x03c00000u | 0x30000000u)
++/* S_COMMON_GENI_S_IRQ_EN, from the same header; the secondary engine is idle
++ * in I2C mode but the register is still programmed by geni_se_init(). */
++#define S_IRQ_COMMON            (0x0000003eu | 0x00003e00u | 0x03000000u)
++/* FIFO mode: command done and the watermarks select_fifo_mode() adds. */
++#define M_IRQ_FIFO              (M_CMD_DONE | M_TX_FIFO_WATERMARK | \
++	M_RX_FIFO_WATERMARK | M_RX_FIFO_LAST)
++
++/* RX_FIFO_STATUS */
++#define RX_FIFO_WC_MSK          0x01ffffffu
++
++/* geni_se_io_init() values. */
++#define DEFAULT_CGC_EN          0x0000007fu
++#define DEFAULT_IO_OUTPUT_CTRL  0x0000007fu
++#define DMA_GENERAL_CFG_VAL     0x0000000fu
++
++/*
++ * Packing configuration produced by geni_se_config_packing(se, 8, 4, true,
++ * true, true): four 4x8 vectors, MSB to LSB, stop bit on the last vector.
++ * cfg0 = 0x07f8fe, cfg1 = 0x0ffefe (computed from the PACKING_* shifts in
++ * qcom-geni-se.c).
++ */
++#define PACK_CFG0               0x0007f8feu
++#define PACK_CFG1               0x000ffefeu
++
++/* SCL timing, from geni_i2c_clk_map[] {rate, div, high, low, cycle}. */
++#define KT_SER_CLK_CFG(div)     ((((uint32_t)(div)) << 4) | 1u)
++#define KT_SCL_COUNTERS(high, low, cycle) \
++	((((uint32_t)(high)) << 20) | (((uint32_t)(low)) << 10) | \
++	(uint32_t)(cycle))
++
++/* ---------------------------------------------------------- TLMM registers */
++
++#define TLMM_REG_SIZE           0x1000u
++#define TLMM_CTL(pin)           (TLMM_REG_SIZE * (pin))
++#define TLMM_IO(pin)            (TLMM_REG_SIZE * (pin) + 0x4u)
++#define TLMM_MUX_MSK            (0xfu << 2)     /* 10 functions per pin */
++#define TLMM_MUX_QUP13          (1u << 2)       /* "qup13" is entry 1 */
++#define TLMM_PULL_MSK           0x3u            /* 0 == bias-disable */
++#define TLMM_DRV_MSK            (0x7u << 6)     /* field 0 == 2 mA */
++#define TLMM_OE                 (1u << 9)
++#define TLMM_OUT                (1u << 1)
++
++/* ------------------------------------------------------------ TCM protocol */
++
++#define TCM_MARKER              0xa5
++#define TCM_HDR_SIZE            4
++#define TCM_PADDING             0x5a
++#define TCM_MODE_APPLICATION    0x01
++
++#define TCM_CMD_IDENTIFY        0x02
++#define TCM_CMD_GET_BOOT_INFO   0x10
++#define TCM_CMD_RUN_APPLICATION 0x14
++#define TCM_CMD_GET_APP_INFO    0x20
++#define TCM_CMD_SET_REPORT_CFG  0x26
++
++#define TCM_REPORT_TOUCH        0x11
++#define TCM_REPORT_STATUS       0x1b
++#define TCM_STATUS_OK           0x01
++
++/* Touch report program codes (enum touch_report_code). */
++#define TCM_TOUCH_END                    0
++#define TCM_TOUCH_FOREACH_ACTIVE_OBJECT  1
++#define TCM_TOUCH_FOREACH_END            3
++#define TCM_TOUCH_OBJECT_N_INDEX         6
++#define TCM_TOUCH_OBJECT_N_CLASSIFICATION 7
++#define TCM_TOUCH_OBJECT_N_X_POSITION    8
++#define TCM_TOUCH_OBJECT_N_Y_POSITION    9
++#define TCM_TOUCH_OBJECT_N_Z             10
++
++/*
++ * The report program this driver asks for. Each active object then occupies
++ * 4 + 4 + 12 + 12 + 8 = 40 bits, five bytes, which is what lets the decoder
++ * below walk the payload five bytes at a time. Asking for the program
++ * explicitly is what makes the decode honest: the firmware default layout is
++ * whatever the last OS left behind and is not documented here.
++ */
++static const uint8_t kt_report_config[] = {
++	TCM_TOUCH_FOREACH_ACTIVE_OBJECT,
++	TCM_TOUCH_OBJECT_N_INDEX, 4,
++	TCM_TOUCH_OBJECT_N_CLASSIFICATION, 4,
++	TCM_TOUCH_OBJECT_N_X_POSITION, 12,
++	TCM_TOUCH_OBJECT_N_Y_POSITION, 12,
++	TCM_TOUCH_OBJECT_N_Z, 8,
++	TCM_TOUCH_FOREACH_END,
++	TCM_TOUCH_END,
++};
++
++#define KT_OBJECT_BITS          40
++#define KT_MAX_OBJECTS          10      /* touchpanel,max-num-support */
++
++/* ---------------------------------------------------------------- state */
++
++static struct {
++	vm_offset_t se;
++	vm_offset_t wrap;
++	vm_offset_t tlmm;
++	bool        raw;
++	bool        tcm_seen;
++	bool        app_mode;
++	bool        decode;
++	uint32_t    max_x;
++	uint32_t    max_y;
++	uint32_t    max_objects;
++	uint32_t    errors;
++	uint32_t    raw_dumps;
++	uint32_t    padding;
++	uint32_t    unknown;
++	uint32_t    printed;
++	bool        finger_down;
++} kt;
++
++/* --------------------------------------------------------------- helpers */
++
++static inline uint32_t
++kt_rd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile ("dsb sy" ::: "memory");
++	return v;
++}
++
++static inline void
++kt_wr(vm_offset_t base, uint32_t off, uint32_t v)
++{
++	*(volatile uint32_t *)(base + off) = v;
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++static inline uint32_t
++kt_se_rd(uint32_t off)
++{
++	return kt_rd(kt.se, off);
++}
++
++static inline void
++kt_se_wr(uint32_t off, uint32_t v)
++{
++	kt_wr(kt.se, off, v);
++}
++
++static void
++kt_sleep_ms(uint32_t ms)
++{
++	delay(ms * 1000);
++}
++
++static void
++kt_hexdump(const char *what, const uint8_t *buf, uint32_t len)
++{
++	static const char hex[] = "0123456789abcdef";
++	char line[3 * 16 + 1];
++	uint32_t i;
++
++	for (i = 0; i < len; i += 16) {
++		uint32_t j;
++		uint32_t n = 0;
++
++		for (j = 0; j < 16 && i + j < len; j++) {
++			uint8_t b = buf[i + j];
++
++			line[n++] = hex[b >> 4];
++			line[n++] = hex[b & 0xf];
++			line[n++] = ' ';
++		}
++		line[n] = '\0';
++		printf("KEBAB TOUCH: %s[%u] %s\n", what, i, line);
++	}
++}
++
++/* -------------------------------------------------------------- raw dump */
++
++struct kt_reg {
++	const char *name;
++	uint32_t    off;
++};
++
++static const struct kt_reg kt_se_regs[] = {
++	{ "GENI_STATUS",          SE_GENI_STATUS },
++	{ "GENI_FW_REVISION_RO",  GENI_FW_REVISION_RO },
++	{ "GENI_IF_DISABLE_RO",   GENI_IF_DISABLE_RO },
++	{ "SER_M_CLK_CFG",        GENI_SER_M_CLK_CFG },
++	{ "SE_GENI_DMA_MODE_EN",  SE_GENI_DMA_MODE_EN },
++	{ "SE_HW_PARAM_0",        SE_HW_PARAM_0 },
++	{ "SE_IRQ_EN",            SE_IRQ_EN },
++	{ "M_CMD0",               SE_GENI_M_CMD0 },
++	{ "M_IRQ_STATUS",         SE_GENI_M_IRQ_STATUS },
++	{ "M_IRQ_EN",             SE_GENI_M_IRQ_EN },
++	{ "S_IRQ_STATUS",         SE_GENI_S_IRQ_STATUS },
++	{ "TX_FIFO_STATUS",       SE_GENI_TX_FIFO_STATUS },
++	{ "RX_FIFO_STATUS",       SE_GENI_RX_FIFO_STATUS },
++	{ "GENI_IOS",             SE_GENI_IOS },
++	{ "I2C_SCL_COUNTERS",     SE_I2C_SCL_COUNTERS },
++};
++
++static void
++kt_dump_regs(const char *when)
++{
++	uint32_t i;
++	uint32_t proto;
++
++	printf("KEBAB TOUCH: SE13 register dump (%s)\n", when);
++	printf("KEBAB TOUCH:   wrapper QUP_HW_VER [0x004] 0x%08x\n",
++	    kt.wrap != 0 ? kt_rd(kt.wrap, QUP_HW_VER) : 0);
++	proto = (kt_se_rd(GENI_FW_REVISION_RO) & FW_REV_PROTOCOL_MSK) >>
++	    FW_REV_PROTOCOL_SHFT;
++	printf("KEBAB TOUCH:   protocol %u (want %u for I2C), GENI_STATUS 0x%08x\n",
++	    proto, GENI_SE_I2C_PROTO, kt_se_rd(SE_GENI_STATUS));
++	for (i = 0; i < sizeof(kt_se_regs) / sizeof(kt_se_regs[0]); i++) {
++		printf("KEBAB TOUCH:   %-20s [0x%03x] 0x%08x\n",
++		    kt_se_regs[i].name, kt_se_regs[i].off,
++		    kt_se_rd(kt_se_regs[i].off));
++	}
++	if (kt.tlmm != 0) {
++		printf("KEBAB TOUCH:   TLMM ctl %u..%u 0x%08x 0x%08x 0x%08x 0x%08x\n",
++		    KT_PIN_SDA, KT_PIN_IRQ,
++		    kt_rd(kt.tlmm, TLMM_CTL(KT_PIN_SDA)),
++		    kt_rd(kt.tlmm, TLMM_CTL(KT_PIN_SCL)),
++		    kt_rd(kt.tlmm, TLMM_CTL(KT_PIN_RESET)),
++		    kt_rd(kt.tlmm, TLMM_CTL(KT_PIN_IRQ)));
++		printf("KEBAB TOUCH:   TLMM io  %u..%u 0x%08x 0x%08x 0x%08x 0x%08x\n",
++		    KT_PIN_SDA, KT_PIN_IRQ,
++		    kt_rd(kt.tlmm, TLMM_IO(KT_PIN_SDA)),
++		    kt_rd(kt.tlmm, TLMM_IO(KT_PIN_SCL)),
++		    kt_rd(kt.tlmm, TLMM_IO(KT_PIN_RESET)),
++		    kt_rd(kt.tlmm, TLMM_IO(KT_PIN_IRQ)));
++	}
++}
++
++/* -------------------------------------------------------- board plumbing */
++
++/*
++ * Mux SDA/SCL to the QUP function. The values are the device tree's
++ * qupv3_se13_i2c_active state: function "qup13", bias-disable, 2 mA.
++ */
++static void
++kt_pins_config(void)
++{
++	uint32_t pin;
++
++	for (pin = KT_PIN_SDA; pin <= KT_PIN_SCL; pin++) {
++		uint32_t old = kt_rd(kt.tlmm, TLMM_CTL(pin));
++		uint32_t val = old;
++
++		val &= ~TLMM_MUX_MSK;
++		val |= TLMM_MUX_QUP13;
++		val &= ~TLMM_PULL_MSK;
++		val &= ~TLMM_DRV_MSK;
++		kt_wr(kt.tlmm, TLMM_CTL(pin), val);
++		printf("KEBAB TOUCH: pin %u mux qup13, ctl 0x%08x -> 0x%08x\n",
++		    pin, old, kt_rd(kt.tlmm, TLMM_CTL(pin)));
++	}
++}
++
++/* Drive RESET as a plain GPIO; level is the electrical level. */
++static void
++kt_reset_level(uint32_t level)
++{
++	uint32_t ctl = kt_rd(kt.tlmm, TLMM_CTL(KT_PIN_RESET));
++	uint32_t io = kt_rd(kt.tlmm, TLMM_IO(KT_PIN_RESET));
++
++	ctl &= ~TLMM_MUX_MSK;           /* mux 0 == plain GPIO */
++	ctl &= ~TLMM_PULL_MSK;
++	ctl &= ~TLMM_DRV_MSK;
++	ctl |= TLMM_OE;
++
++	if (level != 0) {
++		io |= TLMM_OUT;
++	} else {
++		io &= ~TLMM_OUT;
++	}
++	/* value before output enable, so the pin does not glitch */
++	kt_wr(kt.tlmm, TLMM_IO(KT_PIN_RESET), io);
++	kt_wr(kt.tlmm, TLMM_CTL(KT_PIN_RESET), ctl);
++}
++
++/*
++ * Reset pulse. Mode 1 is the active-low arrangement the vendor drivers use
++ * (drive low, release high); mode 2 drives the opposite polarity, for the case
++ * where the first hardware run shows the chip never answering.
++ */
++static void
++kt_reset_pulse(uint32_t mode)
++{
++	uint32_t assert_level = (mode == 2) ? 1u : 0u;
++	uint32_t release_level = (mode == 2) ? 0u : 1u;
++
++	kt_reset_level(assert_level);
++	kt_sleep_ms(20);
++	kt_reset_level(release_level);
++	printf("KEBAB TOUCH: reset pulse (mode %u), ctl 0x%08x io 0x%08x\n",
++	    mode, kt_rd(kt.tlmm, TLMM_CTL(KT_PIN_RESET)),
++	    kt_rd(kt.tlmm, TLMM_IO(KT_PIN_RESET)));
++	kt_sleep_ms(200);
++}
++
++/* ------------------------------------------------------------ SE bring-up */
++
++/*
++ * What geni_se_init() + geni_se_select_mode(FIFO) + geni_se_config_packing()
++ * do, written out without the Linux clock and interconnect layers.
++ */
++static bool
++kt_se_init(uint32_t hz)
++{
++	uint32_t v;
++	uint32_t depth;
++	uint32_t proto;
++
++	kt_se_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
++	kt_se_wr(SE_GENI_S_IRQ_CLEAR, 0xffffffffu);
++	kt_se_wr(SE_GENI_DMA_MODE_EN, kt_se_rd(SE_GENI_DMA_MODE_EN) & ~1u);
++	kt_se_wr(SE_GSI_EVENT_EN, 0);
++
++	/* geni_se_io_init() */
++	kt_se_wr(GENI_CGC_CTRL, kt_se_rd(GENI_CGC_CTRL) | DEFAULT_CGC_EN);
++	kt_se_wr(SE_DMA_GENERAL_CFG,
++	    kt_se_rd(SE_DMA_GENERAL_CFG) | DMA_GENERAL_CFG_VAL);
++	kt_se_wr(GENI_OUTPUT_CTRL, DEFAULT_IO_OUTPUT_CTRL);
++	kt_se_wr(GENI_FORCE_DEFAULT_REG, 1);
++
++	/* geni_se_io_set_mode() */
++	kt_se_wr(SE_IRQ_EN, kt_se_rd(SE_IRQ_EN) | 0xfu);
++	kt_se_wr(SE_GENI_DMA_MODE_EN, kt_se_rd(SE_GENI_DMA_MODE_EN) & ~1u);
++	kt_se_wr(SE_GSI_EVENT_EN, 0);
++
++	/* Watermarks, sized from the SE's own TX FIFO width. */
++	depth = (kt_se_rd(SE_HW_PARAM_0) >> 24) & 0x3fu;
++	if (depth == 0 || depth > 32) {
++		depth = 16;
++	}
++	kt_se_wr(SE_GENI_RX_WATERMARK_REG, depth - 1);
++	kt_se_wr(SE_GENI_RX_RFR_WATERMARK_REG, depth);
++
++	kt_se_wr(SE_GENI_M_IRQ_EN, kt_se_rd(SE_GENI_M_IRQ_EN) | M_IRQ_COMMON);
++	kt_se_wr(SE_GENI_S_IRQ_EN, kt_se_rd(SE_GENI_S_IRQ_EN) | S_IRQ_COMMON);
++	kt_se_wr(SE_GENI_M_IRQ_EN, kt_se_rd(SE_GENI_M_IRQ_EN) | M_IRQ_FIFO);
++
++	/* geni_se_config_packing(8 bits, 4 words, msb first) */
++	kt_se_wr(SE_GENI_TX_PACKING_CFG0, PACK_CFG0);
++	kt_se_wr(SE_GENI_TX_PACKING_CFG1, PACK_CFG1);
++	kt_se_wr(SE_GENI_RX_PACKING_CFG0, PACK_CFG0);
++	kt_se_wr(SE_GENI_RX_PACKING_CFG1, PACK_CFG1);
++	kt_se_wr(SE_GENI_BYTE_GRAN, 0);
++
++	/* qcom_geni_i2c_conf(): internal SE clock, then the SCL timing. */
++	kt_se_wr(SE_GENI_CLK_SEL, 0);
++	if (hz == 400000u) {
++		kt_se_wr(GENI_SER_M_CLK_CFG, KT_SER_CLK_CFG(2));
++		kt_se_wr(SE_I2C_SCL_COUNTERS, KT_SCL_COUNTERS(5, 12, 24));
++	} else {
++		kt_se_wr(GENI_SER_M_CLK_CFG, KT_SER_CLK_CFG(7));
++		kt_se_wr(SE_I2C_SCL_COUNTERS, KT_SCL_COUNTERS(10, 11, 26));
++	}
++
++	v = kt_se_rd(SE_GENI_STATUS);
++	if ((v & 0x1u) != 0) {
++		printf("KEBAB TOUCH: sequencer already active, GENI_STATUS 0x%08x\n",
++		    v);
++	}
++
++	proto = (kt_se_rd(GENI_FW_REVISION_RO) & FW_REV_PROTOCOL_MSK) >>
++	    FW_REV_PROTOCOL_SHFT;
++	if (proto != GENI_SE_I2C_PROTO) {
++		printf("KEBAB TOUCH: SE13 protocol is %u, not %u (I2C): the "
++		    "bootloader did not configure this SE for I2C and this driver "
++		    "does not know how to select it\n", proto, GENI_SE_I2C_PROTO);
++		return false;
++	}
++	return true;
++}
++
++/* ------------------------------------------------------------- I2C master */
++
++static uint32_t
++kt_i2c_param(void)
++{
++	return ((uint32_t)KT_I2C_ADDR << SLV_ADDR_SHFT) & SLV_ADDR_MSK;
++}
++
++static int
++kt_i2c_error(uint32_t status)
++{
++	if ((status & M_GP_IRQ_1_NACK) != 0) {
++		printf("KEBAB TOUCH: no ACK from 0x%02x (M_IRQ_STATUS 0x%08x)\n",
++		    KT_I2C_ADDR, status);
++		return -1;
++	}
++	printf("KEBAB TOUCH: I2C error, M_IRQ_STATUS 0x%08x GENI_STATUS 0x%08x\n",
++	    status, kt_se_rd(SE_GENI_STATUS));
++	return -1;
++}
++
++static int
++kt_i2c_write(const uint8_t *buf, uint32_t len)
++{
++	uint32_t i;
++	uint32_t status = 0;
++	uint32_t words;
++
++	if (len == 0 || len > 64) {
++		return -1;
++	}
++	words = (len + 3) / 4;
++	kt_se_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
++	kt_se_wr(SE_I2C_TX_TRANS_LEN, len);
++	kt_se_wr(SE_GENI_M_CMD0, (I2C_WRITE << M_OPCODE_SHFT) | kt_i2c_param());
++
++	/* The sequencer asks for data by raising the TX watermark. */
++	for (i = 0; i < 100; i++) {
++		status = kt_se_rd(SE_GENI_M_IRQ_STATUS);
++		if ((status & M_ERRORS) != 0) {
++			return kt_i2c_error(status);
++		}
++		if ((status & (M_TX_FIFO_WATERMARK | M_CMD_DONE)) != 0) {
++			break;
++		}
++		delay(100);
++	}
++	if (i == 100) {
++		printf("KEBAB TOUCH: write watermark timeout, status 0x%08x\n",
++		    status);
++		return -1;
++	}
++
++	for (i = 0; i < words; i++) {
++		uint32_t w = 0;
++		uint32_t b;
++
++		for (b = 0; b < 4 && i * 4 + b < len; b++) {
++			w |= (uint32_t)buf[i * 4 + b] << (8 * b);
++		}
++		kt_se_wr(SE_GENI_TX_FIFO, w);
++	}
++	kt_se_wr(SE_GENI_TX_WATERMARK_REG, 0);
++	kt_se_wr(SE_GENI_M_IRQ_CLEAR, status);
++
++	for (i = 0; i < 200; i++) {
++		status = kt_se_rd(SE_GENI_M_IRQ_STATUS);
++		if ((status & M_ERRORS) != 0) {
++			return kt_i2c_error(status);
++		}
++		if ((status & M_CMD_DONE) != 0) {
++			kt_se_wr(SE_GENI_M_IRQ_CLEAR, status);
++			return 0;
++		}
++		delay(100);
++	}
++	printf("KEBAB TOUCH: write did not complete, status 0x%08x\n", status);
++	return -1;
++}
++
++static int
++kt_i2c_read(uint8_t *buf, uint32_t len)
++{
++	uint32_t got = 0;
++	uint32_t i;
++	uint32_t status = 0;
++
++	if (len == 0 || len > 128) {
++		return -1;
++	}
++	kt_se_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
++	kt_se_wr(SE_I2C_RX_TRANS_LEN, len);
++	kt_se_wr(SE_GENI_M_CMD0, (I2C_READ << M_OPCODE_SHFT) | kt_i2c_param());
++
++	for (i = 0; i < 300; i++) {
++		uint32_t count;
++
++		status = kt_se_rd(SE_GENI_M_IRQ_STATUS);
++		if ((status & M_ERRORS) != 0) {
++			return kt_i2c_error(status);
++		}
++		count = kt_se_rd(SE_GENI_RX_FIFO_STATUS) & RX_FIFO_WC_MSK;
++		while (count-- > 0 && got < len) {
++			uint32_t w = kt_se_rd(SE_GENI_RX_FIFO);
++			uint32_t b;
++
++			for (b = 0; b < 4 && got < len; b++) {
++				buf[got++] = (uint8_t)((w >> (8 * b)) & 0xffu);
++			}
++		}
++		if (status != 0) {
++			kt_se_wr(SE_GENI_M_IRQ_CLEAR, status);
++		}
++		if ((status & M_CMD_DONE) != 0) {
++			break;
++		}
++		delay(100);
++	}
++	if (i == 300) {
++		printf("KEBAB TOUCH: read did not complete, status 0x%08x got %u "
++		    "of %u\n", status, got, len);
++		return -1;
++	}
++	if (got != len) {
++		printf("KEBAB TOUCH: short read, %u of %u bytes\n", got, len);
++		return -1;
++	}
++	return 0;
++}
++
++/* -------------------------------------------------------------- TCM layer */
++
++/*
++ * One TCM command: write {command, length_lo, length_hi, payload...}, wait for
++ * a message header, then read its payload. Returns -1 when no valid message
++ * appears. An idle bus returns bytes that are not a message at all.
++ */
++static int
++kt_tcm_command(uint8_t cmd, const uint8_t *payload, uint32_t len,
++    uint8_t *resp, uint32_t resp_size, uint32_t *resp_len, uint8_t *resp_code)
++{
++	uint8_t out[40];
++	uint8_t hdr[TCM_HDR_SIZE];
++	uint32_t i;
++	int err;
++
++	if (len > sizeof(out) - 3) {
++		return -1;
++	}
++	out[0] = cmd;
++	out[1] = (uint8_t)len;
++	out[2] = (uint8_t)(len >> 8);
++	if (len != 0 && payload != NULL) {
++		memcpy(&out[3], payload, len);
++	}
++	err = kt_i2c_write(out, len + 3);
++	if (err != 0) {
++		printf("KEBAB TOUCH: command 0x%02x was not written\n", cmd);
++		return -1;
++	}
++
++	for (i = 0; i < 100; i++) {
++		err = kt_i2c_read(hdr, TCM_HDR_SIZE);
++		if (err == 0 && hdr[0] == TCM_MARKER) {
++			break;
++		}
++		delay(1000);
++	}
++	if (i == 100) {
++		printf("KEBAB TOUCH: command 0x%02x: no TCM response (marker "
++		    "0x%02x)\n", cmd, hdr[0]);
++		if (kt.raw) {
++			kt_hexdump("header", hdr, TCM_HDR_SIZE);
++		}
++		return -1;
++	}
++
++	kt.tcm_seen = true;
++	*resp_code = hdr[1];
++	if (resp_len != NULL) {
++		*resp_len = (uint32_t)hdr[2] | ((uint32_t)hdr[3] << 8);
++	} else {
++		*resp_len = 0;
++	}
++	if (resp_len != NULL && *resp_len > resp_size) {
++		printf("KEBAB TOUCH: command 0x%02x: payload %u does not fit %u, "
++		    "truncating\n", cmd, *resp_len, resp_size);
++		*resp_len = resp_size;
++	}
++	if (resp_len != NULL) {
++		/*
++		 * The message is header, payload and one padding byte: the vendor
++		 * driver reads payload_length + 1 after the header and checks that
++		 * last byte against MESSAGE_PADDING. Leaving it in the stream would
++		 * put 0x5a in front of the next header and desynchronise us.
++		 */
++		uint8_t padded[72];
++
++		if (*resp_len + 1 > sizeof(padded)) {
++			printf("KEBAB TOUCH: command 0x%02x: payload %u too large\n",
++			    cmd, *resp_len);
++			return -1;
++		}
++		err = kt_i2c_read(padded, *resp_len + 1);
++		if (err != 0) {
++			return -1;
++		}
++		if (padded[*resp_len] != TCM_PADDING) {
++			printf("KEBAB TOUCH: command 0x%02x: padding 0x%02x, not "
++			    "0x%02x\n", cmd, (unsigned)padded[*resp_len],
++			    TCM_PADDING);
++		}
++		if (*resp_len != 0 && resp != NULL) {
++			memcpy(resp, padded, *resp_len);
++			if (kt.raw && kt.raw_dumps < 16) {
++				kt.raw_dumps++;
++				kt_hexdump("payload", resp, *resp_len);
++			}
++		}
++	}
++	return 0;
++}
++
++static uint32_t
++kt_le16(const uint8_t *p)
++{
++	return (uint32_t)p[0] | ((uint32_t)p[1] << 8);
++}
++
++static void
++kt_identify(void)
++{
++	uint8_t resp[32];
++	uint32_t len = 0;
++	uint8_t code = 0;
++	char part[17];
++	uint32_t i;
++
++	if (kt_tcm_command(TCM_CMD_IDENTIFY, NULL, 0, resp, sizeof(resp), &len,
++	    &code) != 0) {
++		return;
++	}
++	if (len < 2) {
++		printf("KEBAB TOUCH: identify returned %u bytes, message 0x%02x\n",
++		    len, (unsigned)code);
++		return;
++	}
++	for (i = 0; i < 16 && 2 + i < len; i++) {
++		uint8_t c = resp[2 + i];
++
++		part[i] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
++	}
++	part[i] = '\0';
++	printf("KEBAB TOUCH: identify: version 0x%02x mode 0x%02x\n",
++	    (unsigned)resp[0], (unsigned)resp[1]);
++	printf("KEBAB TOUCH:   part \"%s\" build 0x%02x%02x%02x%02x\n", part,
++	    len > 18 ? (unsigned)resp[18] : 0u,
++	    len > 19 ? (unsigned)resp[19] : 0u,
++	    len > 20 ? (unsigned)resp[20] : 0u,
++	    len > 21 ? (unsigned)resp[21] : 0u);
++	printf("KEBAB TOUCH:   max write size %u bytes\n",
++	    len > 23 ? kt_le16(&resp[22]) : 0u);
++
++	kt.app_mode = (resp[1] == TCM_MODE_APPLICATION);
++}
++
++static void
++kt_boot_info(void)
++{
++	uint8_t resp[40];
++	uint32_t len = 0;
++	uint8_t code = 0;
++
++	if (kt_tcm_command(TCM_CMD_GET_BOOT_INFO, NULL, 0, resp, sizeof(resp),
++	    &len, &code) != 0) {
++		return;
++	}
++	if (len < 2) {
++		printf("KEBAB TOUCH: boot info returned %u bytes, message 0x%02x\n",
++		    len, (unsigned)code);
++		return;
++	}
++	printf("KEBAB TOUCH: boot info: version 0x%02x status 0x%02x asic 0x%04x "
++	    "max write payload %u\n", (unsigned)resp[0], (unsigned)resp[1],
++	    len > 4 ? kt_le16(&resp[2]) : 0u,
++	    len > 9 ? kt_le16(&resp[7]) : 0u);
++}
++
++static void
++kt_app_info(void)
++{
++	uint8_t resp[64];
++	uint32_t len = 0;
++	uint8_t code = 0;
++	uint32_t status;
++
++	if (kt_tcm_command(TCM_CMD_GET_APP_INFO, NULL, 0, resp, sizeof(resp),
++	    &len, &code) != 0) {
++		return;
++	}
++	if (len < 46) {
++		printf("KEBAB TOUCH: app info returned %u bytes, message 0x%02x\n",
++		    len, (unsigned)code);
++		return;
++	}
++	status = kt_le16(&resp[2]);
++	kt.max_x = kt_le16(&resp[32]);
++	kt.max_y = kt_le16(&resp[34]);
++	kt.max_objects = kt_le16(&resp[36]);
++	printf("KEBAB TOUCH: app info: version 0x%04x status 0x%04x\n",
++	    kt_le16(&resp[0]), status);
++	printf("KEBAB TOUCH:   max_x %u max_y %u objects %u buttons %u rows %u "
++	    "cols %u\n", kt.max_x, kt.max_y, kt.max_objects,
++	    kt_le16(&resp[38]), kt_le16(&resp[40]), kt_le16(&resp[42]));
++	if (status != 0) {
++		printf("KEBAB TOUCH: application status 0x%04x is not OK; the chip "
++		    "may still be in its bootloader\n", status);
++	}
++}
++
++/*
++ * Ask the firmware for a known report layout. It answers with a status
++ * message and no payload when it accepts; if it does not, the driver still
++ * polls but does not try to decode object data it cannot interpret.
++ */
++static bool
++kt_set_report_config(void)
++{
++	uint8_t resp[8];
++	uint32_t len = 0;
++	uint8_t code = 0;
++
++	if (kt_tcm_command(TCM_CMD_SET_REPORT_CFG, kt_report_config,
++	    sizeof(kt_report_config), resp, sizeof(resp), &len, &code) != 0) {
++		return false;
++	}
++	if (code != TCM_STATUS_OK) {
++		printf("KEBAB TOUCH: report config answered 0x%02x, reports stay "
++		    "raw\n", (unsigned)code);
++		return false;
++	}
++	printf("KEBAB TOUCH: report config accepted (%u bytes)\n",
++	    (uint32_t)sizeof(kt_report_config));
++	return true;
++}
++
++/* Bit reader matching touch_get_report_data(): LSB first inside a byte. */
++static uint32_t
++kt_bits(const uint8_t *data, uint32_t offset, uint32_t bits)
++{
++	uint32_t out = 0;
++	uint32_t remaining = bits;
++	uint32_t bit_offset = offset & 7u;
++	uint32_t byte = offset >> 3;
++
++	while (remaining != 0) {
++		uint32_t available = 8 - bit_offset;
++		uint32_t take = (available < remaining) ? available : remaining;
++		uint32_t mask = (1u << take) - 1u;
++		uint32_t v = ((uint32_t)data[byte] >> bit_offset) & mask;
++
++		out |= v << (bits - remaining);
++		bit_offset = 0;
++		byte++;
++		remaining -= take;
++	}
++	return out;
++}
++
++static void
++kt_touch_report(const uint8_t *data, uint32_t len)
++{
++	uint32_t offset = 0;
++	uint32_t object = 0;
++	bool have_first = false;
++	uint32_t fx = 0;
++	uint32_t fy = 0;
++	uint32_t fz = 0;
++
++	while (offset + KT_OBJECT_BITS <= len * 8 && object < KT_MAX_OBJECTS) {
++		uint32_t obj_index = kt_bits(data, offset, 4);
++		uint32_t obj_class = kt_bits(data, offset + 4, 4);
++		uint32_t x = kt_bits(data, offset + 8, 12);
++		uint32_t y = kt_bits(data, offset + 20, 12);
++		uint32_t z = kt_bits(data, offset + 32, 8);
++
++		if (kt.raw && kt.raw_dumps < 16) {
++			printf("KEBAB TOUCH: object %u idx %u class %u x %u y %u "
++			    "z %u\n", object, obj_index, obj_class, x, y, z);
++		}
++		if (!have_first && obj_class == 1) {
++			have_first = true;
++			fx = x;
++			fy = y;
++			fz = z;
++		}
++		offset += KT_OBJECT_BITS;
++		object++;
++	}
++
++	if (!have_first) {
++		if (kt.finger_down) {
++			kt.finger_down = false;
++			printf("KEBAB TOUCH: finger up\n");
++		}
++		return;
++	}
++	if (!kt.finger_down) {
++		kt.finger_down = true;
++		printf("KEBAB TOUCH: finger down\n");
++	}
++	/* Bounded rate: at most one line per 40 reports, i.e. per ~200 ms. */
++	if ((kt.printed++ % 40u) != 0) {
++		return;
++	}
++	printf("KEBAB TOUCH: touch x %u y %u z %u (sensor max %u x %u)\n",
++	    fx, fy, fz, kt.max_x, kt.max_y);
++}
++
++/* Read one queued TCM message, if any. */
++static int
++kt_poll_once(void)
++{
++	uint8_t hdr[TCM_HDR_SIZE];
++	uint8_t payload[128 + 1];       /* payload plus the TCM padding byte */
++	uint32_t len;
++	int err;
++
++	err = kt_i2c_read(hdr, TCM_HDR_SIZE);
++	if (err != 0) {
++		return -1;
++	}
++	if (hdr[0] != TCM_MARKER) {
++		return 0;
++	}
++	len = (uint32_t)hdr[2] | ((uint32_t)hdr[3] << 8);
++	if (len + 1 > sizeof(payload)) {
++		printf("KEBAB TOUCH: report length %u out of range\n", len);
++		return -1;
++	}
++	err = kt_i2c_read(payload, len + 1);
++	if (err != 0) {
++		return -1;
++	}
++	if (payload[len] != TCM_PADDING && kt.padding++ < 8) {
++		printf("KEBAB TOUCH: report padding 0x%02x, not 0x%02x\n",
++		    (unsigned)payload[len], TCM_PADDING);
++	}
++	if (kt.raw && kt.raw_dumps < 16) {
++		kt.raw_dumps++;
++		printf("KEBAB TOUCH: message code 0x%02x len %u\n",
++		    (unsigned)hdr[1], len);
++		kt_hexdump("report", payload, len);
++	}
++	if (hdr[1] == TCM_REPORT_TOUCH) {
++		if (kt.decode) {
++			kt_touch_report(payload, len);
++		}
++	} else if (hdr[1] == TCM_REPORT_STATUS) {
++		printf("KEBAB TOUCH: status report, %u bytes\n", len);
++	} else if (hdr[1] > 0x0f && kt.unknown++ < 8) {
++		printf("KEBAB TOUCH: message code 0x%02x len %u\n",
++		    (unsigned)hdr[1], len);
++	}
++	return 1;
++}
++
++/* the polling thread never returns */
++static void kt_thread(void *arg, wait_result_t wr) __dead2;
++
++static void
++kt_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	for (;;) {
++		int n = kt_poll_once();
++
++		if (n < 0) {
++			kt.errors++;
++			if (kt.errors == 1 || (kt.errors % 500u) == 0) {
++				printf("KEBAB TOUCH: %u polling errors\n", kt.errors);
++			}
++			kt_sleep_ms(100);
++		} else {
++			kt_sleep_ms(5);
++		}
++	}
++}
++
++/* ------------------------------------------------------------------ start */
++
++void
++kebab_touch_start(void)
++{
++	uint32_t enabled = 0;
++	uint32_t value = 0;
++	uint32_t se_pa = KT_SE13_PA_DEFAULT;
++	uint32_t hz = 100000;
++	uint32_t pins = 1;
++	uint32_t reset = 1;
++	uint8_t resp[8];
++	uint32_t len = 0;
++	uint8_t code = 0;
++	thread_t thread;
++
++	if (!PE_parse_boot_argn("kebab_touch", &enabled, sizeof(enabled)) ||
++	    enabled == 0) {
++		return;
++	}
++	kt.raw = PE_parse_boot_argn("kebab_touch_raw", &value, sizeof(value)) &&
++	    value != 0;
++	if (PE_parse_boot_argn("kebab_touch_se", &value, sizeof(value)) &&
++	    value >= 0x00100000u) {
++		se_pa = value;
++	}
++	if (PE_parse_boot_argn("kebab_touch_hz", &value, sizeof(value)) &&
++	    value != 0) {
++		hz = value;
++	}
++	if (PE_parse_boot_argn("kebab_touch_pins", &value, sizeof(value))) {
++		pins = value;
++	}
++	if (PE_parse_boot_argn("kebab_touch_reset", &value, sizeof(value))) {
++		reset = value;
++	}
++
++	kt.se = ml_io_map(se_pa, KT_SE13_SIZE);
++	if (kt.se == 0) {
++		printf("KEBAB TOUCH: cannot map SE13 at 0x%08x\n", se_pa);
++		return;
++	}
++	kt.wrap = ml_io_map(KT_WRAP_PA_DEFAULT, KT_WRAP_SIZE);
++	if (pins != 0 || reset != 0 || kt.raw) {
++		kt.tlmm = ml_io_map(KT_TLMM_PA, KT_TLMM_SIZE);
++	}
++
++	printf("KEBAB TOUCH: S6SY761 on QUPv3 SE13 at 0x%08x (I2C 0x%02x, %u Hz)"
++	    ", wrapper 0x%08x\n", se_pa, KT_I2C_ADDR, hz, KT_WRAP_PA_DEFAULT);
++	printf("KEBAB TOUCH: wrapper QUP_HW_VER 0x%08x, SE13 GENI_FW_REVISION_RO "
++	    "0x%08x\n", kt.wrap != 0 ? kt_rd(kt.wrap, QUP_HW_VER) : 0u,
++	    kt_se_rd(GENI_FW_REVISION_RO));
++
++	if (kt.tlmm != 0 && pins != 0) {
++		kt_pins_config();
++	}
++	if (kt.tlmm != 0 && reset != 0) {
++		kt_reset_pulse(reset);
++	}
++	if (kt.raw) {
++		kt_dump_regs("before init");
++	}
++
++	if (!kt_se_init(hz)) {
++		if (kt.raw) {
++			kt_dump_regs("after failed init");
++		}
++		return;
++	}
++	if (kt.raw) {
++		kt_dump_regs("after init");
++	}
++
++	/* Identity first: this is what has to print on the first hardware run. */
++	kt_identify();
++	if (kt.tcm_seen && !kt.app_mode) {
++		printf("KEBAB TOUCH: not in application mode, asking the chip to "
++		    "run its application firmware\n");
++		if (kt_tcm_command(TCM_CMD_RUN_APPLICATION, NULL, 0, resp,
++		    sizeof(resp), &len, &code) == 0) {
++			kt_sleep_ms(100);
++			kt_identify();
++		}
++	}
++	kt_boot_info();
++	kt_app_info();
++	if (kt.max_x == 0 || kt.max_y == 0) {
++		printf("KEBAB TOUCH: no usable app info; the device tree says "
++		    "1079x2399 with a 16x36 grid\n");
++	}
++	if (kt.tcm_seen && kt.app_mode) {
++		kt.decode = kt_set_report_config();
++	}
++	if (!kt.tcm_seen) {
++		printf("KEBAB TOUCH: the controller did not answer TCM; not "
++		    "starting the poll thread. Try kebab_touch_raw=1, and check "
++		    "clocking and pin muxing\n");
++		return;
++	}
++
++	if (kernel_thread_start((thread_continue_t)kt_thread, NULL,
++	    &thread) != KERN_SUCCESS) {
++		printf("KEBAB TOUCH: no polling thread\n");
++		return;
++	}
++	thread_deallocate(thread);
++	printf("KEBAB TOUCH: polling for reports, decode %s\n",
++	    kt.decode ? "on" : "off");
++}
++
++#endif /* KEBAB */
