@@ -361,9 +361,9 @@ new file mode 100644
 +	/* interface 1: CDC data */
 +	9, 4, 1, 0, 2, 0x0a, 0x00, 0x00, 0,
 +	/* bulk OUT */
-+	7, 5, 0x01, 0x02, 0x40, 0x00, 0,
++	7, 5, 0x01, 0x02, 0x00, 0x02, 0,
 +	/* bulk IN */
-+	7, 5, 0x81, 0x02, 0x40, 0x00, 0,
++	7, 5, 0x81, 0x02, 0x00, 0x02, 0,
 +};
 +
 +static const char *const ud_strings[] = {
@@ -418,8 +418,8 @@ new file mode 100644
 +	ud_epcmd(EP0_OUT, DEPCMD_DEPSTARTCFG | (2u << 16), 0, 0, 0);
 +
 +	if (ud_ep_config(EP_NOTIFY, EP_TYPE_INTR, 8) ||
-+	    ud_ep_config(EP_BULK_OUT, EP_TYPE_BULK, 64) ||
-+	    ud_ep_config(EP_BULK_IN, EP_TYPE_BULK, 64)) {
++	    ud_ep_config(EP_BULK_OUT, EP_TYPE_BULK, 512) ||
++	    ud_ep_config(EP_BULK_IN, EP_TYPE_BULK, 512)) {
 +		printf("KEBAB USB: endpoint configuration failed\n");
 +		return;
 +	}
