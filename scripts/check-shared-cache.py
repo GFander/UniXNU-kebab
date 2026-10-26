@@ -328,7 +328,7 @@ def parse_slide_info(path, mapping, label, index):
     size = mapping.slide_info_size
     if size < 4:
         raise CheckError("%s: mapping %u slide info is only %u bytes" % (label, index, size))
-    head = read_range(path, offset, 40, label)
+    head = read_range(path, offset, min(size, 40), label)
     version = u32(head, 0)
     if version != 2:
         raise CheckError("%s: mapping %u slide info version %u is not supported "
