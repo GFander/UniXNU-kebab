@@ -6,7 +6,7 @@ A panic draws again, and the persistent log still receives everything.
 
 --- a/osfmk/console/serial_console.c
 +++ b/osfmk/console/serial_console.c
-@@ -289,23 +289,31 @@
+@@ -289,23 +289,30 @@
  {
  	extern int disableConsoleOutput;
  
@@ -21,7 +21,6 @@ A panic draws again, and the persistent log still receives everything.
 +	{
 +		extern void kebab_usb_log(const char *buf, size_t len);
 +		extern int kebab_console_muted;
-+		extern bool panic_active(void);
 +		kebab_usb_log(c, (size_t)size);
 +		if (kebab_console_muted && !panic_active()) {
 +			return;
