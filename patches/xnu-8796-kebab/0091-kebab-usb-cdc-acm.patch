@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,910 @@
+@@ -0,0 +1,941 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -45,6 +45,8 @@ new file mode 100644
 +/* ---------------------------------------------------------------- registers */
 +
 +#define GCTL            0xc110
++#define GHWPARAMS0      0xc140
++#define GHWPARAMS7      0xc15c
 +#define GEVTEN          0xc114
 +#define GEVNTADRLO      0xc400
 +#define GEVNTADRHI      0xc404
@@ -68,6 +70,8 @@ new file mode 100644
 +#define DCFG_SPEED_MASK (0x7u << 0)
 +#define DCFG_ADDR_MASK  (0x7fu << 3)
 +#define DCFG_ADDR(a)    (((uint32_t)(a) << 3) & DCFG_ADDR_MASK)
++#define DCFG_NUMP_SHIFT 17
++#define DCFG_NUMP_MASK  (0x1fu << DCFG_NUMP_SHIFT)
 +
 +/* DEVTEN: disconnect, connect done, reset */
 +#define DEVTEN_DEVICE   0x7u
@@ -824,6 +828,33 @@ new file mode 100644
 +
 +	/* high speed, address 0 */
 +	dwc_wr(DCFG, dwc_rd(DCFG) & ~(DCFG_SPEED_MASK | DCFG_ADDR_MASK));
++
++	/*
++	 * Number of receive packets, as dwc3_gadget_setup_nump() computes it:
++	 * RxFIFO comes from RAM2 depth and the datapath width, and NumP is that
++	 * size in KiB, clamped to 16. With NumP left at the reset value the
++	 * controller has nothing to receive with.
++	 */
++	{
++		uint32_t hw7 = dwc_rd(GHWPARAMS7);
++		uint32_t ram2 = (hw7 >> 16) & 0xffff;
++		uint32_t hw0 = dwc_rd(GHWPARAMS0);
++		uint32_t mdwidth = (hw0 >> 4) & 0x3f;   /* MDWIDTH in GHWPARAMS0[9:4] */
++		uint32_t fifo;
++		uint32_t nump;
++		if (mdwidth == 0) {
++			mdwidth = 32;
++		}
++		fifo = (ram2 * mdwidth / 8);
++		fifo = (fifo > 40) ? (fifo - 40) : 0;
++		nump = fifo / 1024;
++		if (nump > 16) {
++			nump = 16;
++		}
++		dwc_wr(DCFG, (dwc_rd(DCFG) & ~DCFG_NUMP_MASK) | (nump << DCFG_NUMP_SHIFT));
++		printf("KEBAB USB: GHWPARAMS0 0x%08x GHWPARAMS7 0x%08x -> NumP %u\n",
++		    hw0, hw7, nump);
++	}
 +	dwc_wr(DEVTEN, DEVTEN_DEVICE);
 +
 +	dwc_wr(GEVNTADRLO, (uint32_t)(ud.dma_pa + UD_EVT));
