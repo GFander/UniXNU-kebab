@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1124 @@
+@@ -0,0 +1,1136 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -25,6 +25,7 @@ new file mode 100644
 +#if defined(KEBAB)
 +
 +#include <kern/clock.h>
++#include <kern/debug.h>
 +#include <kern/locks.h>
 +#include <kern/thread.h>
 +#include <machine/machine_routines.h>
@@ -43,6 +44,7 @@ new file mode 100644
 +extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +
 +void kebab_usb_log(const char *buf, size_t len);
++static void ud_pump_log(void);
 +
 +/* ---------------------------------------------------------------- registers */
 +
@@ -464,6 +466,16 @@ new file mode 100644
 +		ud.log_ring[ud.log_head] = buf[i];
 +		__asm__ volatile ("dmb ishst" ::: "memory");
 +		ud.log_head = next;
++	}
++
++	/*
++	 * A panic stops the event thread, and the debugger may never ask for a key,
++	 * so nothing would drain the ring and the panic text would sit there. Push it
++	 * out from here instead, which is the very path the panic text travels.
++	 */
++	if (panic_active()) {
++		ud.bulk_in_busy = false;
++		ud_pump_log();
 +	}
 +}
 +
