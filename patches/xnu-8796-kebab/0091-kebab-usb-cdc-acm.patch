@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1110 @@
+@@ -0,0 +1,1116 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -1076,8 +1076,6 @@ new file mode 100644
 + * polls the controller itself instead of waiting for it: it drains whatever events
 + * are pending and returns the next typed byte, or -1 after a short wait.
 + */
-+static bool ud_console_input_mode;
-+
 +int
 +kebab_usb_getc(bool wait)
 +{
@@ -1094,6 +1092,14 @@ new file mode 100644
 +			}
 +			dwc_wr(GEVNTCOUNT, count);
 +		}
++		/*
++		 * Keep sending the log while we wait: a panic stopped the event thread,
++		 * possibly with a transfer marked in flight, and the panic text is exactly
++		 * what has to get out. Clearing the flag is safe here because this path
++		 * also consumes the completions.
++		 */
++		ud.bulk_in_busy = false;
++		ud_pump_log();
 +		if (ud.in_tail != ud.in_head) {
 +			int c = (unsigned char)ud.in_ring[ud.in_tail];
 +			__asm__ volatile ("dmb ish" ::: "memory");
