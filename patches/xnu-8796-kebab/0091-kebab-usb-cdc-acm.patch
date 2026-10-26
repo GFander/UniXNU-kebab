@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,886 @@
+@@ -0,0 +1,903 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -234,7 +234,7 @@ new file mode 100644
 +	dwc_wr(DEPCMDPAR1(ep), p1);
 +	dwc_wr(DEPCMDPAR2(ep), p2);
 +	dwc_wr(DEPCMD(ep), cmd | DEPCMD_CMDACT);
-+	for (int i = 0; i < 1000; i++) {
++	for (int i = 0; i < 200; i++) {
 +		uint32_t v = dwc_rd(DEPCMD(ep));
 +		if (!(v & DEPCMD_CMDACT)) {
 +			uint32_t status = (v >> 12) & 0xf;
@@ -836,21 +836,38 @@ new file mode 100644
 +	/* The controller needs its endpoint resource configuration started once
 +	 * before any endpoint is configured; without it every STARTTRANSFER comes
 +	 * back with status 1 (invalid parameter). */
++	printf("KEBAB USB: step 1 startcfg\n");
 +	if (ud_epcmd(EP0_OUT, DEPCMD_DEPSTARTCFG, 0, 0, 0)) {
 +		printf("KEBAB USB: DEPSTARTCFG failed\n");
 +		return;
 +	}
++	printf("KEBAB USB: step 2 ep0 out cfg\n");
 +	if (ud_epcmd(EP0_OUT, DEPCMD_SETEPCONFIG, DEPCFG_PARAM0(EP_TYPE_CONTROL, 512, 0),
-+	    DEPCFG_PARAM1(EP0_OUT), 0) ||
-+	    ud_epcmd(EP0_OUT, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0) ||
-+	    ud_epcmd(EP0_IN, DEPCMD_SETEPCONFIG, DEPCFG_PARAM0(EP_TYPE_CONTROL, 512, 0),
-+	    DEPCFG_PARAM1(EP0_IN), 0) ||
-+	    ud_epcmd(EP0_IN, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
-+		printf("KEBAB USB: endpoint 0 setup failed\n");
++	    DEPCFG_PARAM1(EP0_OUT), 0)) {
++		printf("KEBAB USB: step 2 failed\n");
++		return;
++	}
++	printf("KEBAB USB: step 3 ep0 out resources\n");
++	if (ud_epcmd(EP0_OUT, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
++		printf("KEBAB USB: step 3 failed\n");
++		return;
++	}
++	printf("KEBAB USB: step 4 ep0 in cfg\n");
++	if (ud_epcmd(EP0_IN, DEPCMD_SETEPCONFIG, DEPCFG_PARAM0(EP_TYPE_CONTROL, 512, 0),
++	    DEPCFG_PARAM1(EP0_IN), 0)) {
++		printf("KEBAB USB: step 4 failed\n");
++		return;
++	}
++	printf("KEBAB USB: step 5 ep0 in resources\n");
++	if (ud_epcmd(EP0_IN, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
++		printf("KEBAB USB: step 5 failed\n");
 +		return;
 +	}
 +	dwc_wr(DALEPENA, (1u << EP0_OUT) | (1u << EP0_IN));
++	printf("KEBAB USB: step 6 arming setup, first DMA at 0x%llx\n",
++	    (unsigned long long)(ud.dma_pa + UD_SETUP));
 +	ud_start_setup();
++	printf("KEBAB USB: step 6 done\n");
 +
 +	/* tell the controller VBUS is present; the board does not wire OTG here */
 +	if (ud.qs != 0) {
