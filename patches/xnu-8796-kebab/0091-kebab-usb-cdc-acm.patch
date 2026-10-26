@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1054 @@
+@@ -0,0 +1,1063 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -536,8 +536,12 @@ new file mode 100644
 +			 * SETUP instead of the data phase (ep0.c:145).
 +			 */
 +			ud.state = EP0_DATA_OUT;
-+			ud_to_dev(UD_DATA, 7);
-+			if (ud_start(UD_TRB_OUT_DATA, EP0_OUT, UD_DATA, 7, TRBCTL_DATA)) {
++			/*
++			 * 64 is the receive capacity, not the expected payload: DWC3 wants
++			 * OUT capacity aligned to the endpoint maximum packet size, which is
++			 * why submitting a bare seven-byte transfer never completed.
++			 */
++			if (ud_start(UD_TRB_OUT_DATA, EP0_OUT, UD_DATA, 64, TRBCTL_DATA)) {
 +				printf("KEBAB USB: SET_LINE_CODING data stage rejected\n");
 +				ud_ep_stall(EP0_OUT);
 +			}
@@ -545,6 +549,7 @@ new file mode 100644
 +		case 0x21:                              /* GET_LINE_CODING, 7 bytes IN */
 +			memset(data, 0, 7);
 +			data[0] = 0x80; data[1] = 0x25; data[2] = 0;   /* 9600 baud */
++			data[6] = 8;                              /* 8 data bits */
 +			n = 7;
 +			break;
 +		case 0x22:                              /* SET_CONTROL_LINE_STATE */
@@ -765,7 +770,7 @@ new file mode 100644
 +	if (!ud.configured || ud.bulk_in_busy) {
 +		return;
 +	}
-+	n = ud_log_take((char *)(ud.dma + UD_BULKIN), 512);
++	n = ud_log_take((char *)(ud.dma + UD_BULKIN), 511);   /* short packet ends the read */
 +	if (n && ud.tx_bytes == 0) {
 +		printf("KEBAB USB: pump start, %u bytes in the ring\n", n);
 +	}
@@ -799,7 +804,11 @@ new file mode 100644
 +			for (uint32_t done = 0; done < count; done += 4) {
 +				uint32_t ev = *(volatile uint32_t *)(ud.dma + UD_EVT + ud.evt_pos);
 +				ud.evt_pos = (ud.evt_pos + 4) % UD_EVT_SIZE;
-+				if (ud.events++ < 40) {
++				unsigned epe = (ev >> 1) & 0x1f;
++				if (epe < 2) {
++					printf("KEBAB USB: ep0 ev 0x%08x ep=%u type=%u status=%u state=%d\n",
++					    ev, epe, (ev >> 6) & 0xf, (ev >> 12) & 0xf, (int)ud.state);
++				} else if (ud.events++ < 40) {
 +					printf("KEBAB USB: event 0x%08x\n", ev);
 +				}
 +				ud_event(ev);
