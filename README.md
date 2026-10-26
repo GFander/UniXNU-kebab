@@ -9,7 +9,7 @@ iPhone X 的身份启动 iOS 16.7.16 用户态。
 ```
 board.toml                   unixnu 读取的板级描述
 configs/                     defconfig 与 iPhone X 的 /product 子树
-patches/xnu-8796-kebab/      本机内核补丁集（76 个，按文件名顺序应用）
+patches/xnu-8796-kebab/      本机内核补丁集（81 个，按文件名顺序应用）
 scripts/make-kebab-adt.py    设备树（ADT）生成器
 drivers/KebabCPU/            子模块 -> GFander/KebabCPU（PSCI / 多核）
 drivers/KebabEarlyConsole/   子模块 -> GFander/KebabEarlyConsole（面板控制台）
@@ -113,6 +113,8 @@ ABL → boot_b 上的镜像 → Mu-Silicium UEFI → UniXNU 菜单
 | 挂载根文件系统（内置 HFS+，`KebabRoot`，可读写）| ✅ |
 | 加载 `/sbin/launchd`，PID 1 打开 `/dev/kebabcon` | ✅ |
 | **设备模式 USB CDC-ACM 调试串口** | ✅ 见第 3 节 |
+| **serial KDP over CDC-ACM**（LLDB 可连） | ✅ 见第 6 节 |
+| **S6SY761 触摸** + `/dev/kebab_touch` 事件节点 | ✅ 见第 7 节 |
 | **内置 `IOMobileFramebuffer`（AppleCLCD）** | ✅ 见第 4 节 |
 
 ### 已修复的关键问题
@@ -331,3 +333,68 @@ IOSurface 语义，`SwapEnd` 用 CPU 把图层拷进面板内存，vsync 是 60 
 * dxb 编译 `libfirehose_kernel.a` 时写死了 `ARCHS="x86_64 arm64e"`，arm64 内核链不上，要补上 `arm64`。
 * dxb 会把 PATH 净化成只含 Xcode 与系统目录，`python`（macOS 只有 `python3`）需要
   `$HOME/bin` 提供包装脚本，并让 build.sh 保留该目录。
+
+---
+
+## 6. 内核调试（serial KDP over CDC-ACM）
+
+控制台本身就是 KDP 的传输层：`pal_serial_putc_nocr`/`pal_serial_getc` 在
+`kebabkdp=1` 时改走 USB，其余情况仍是 UART。一帧 KDP 约 3 KB，所以 bulk-OUT
+环从 256 字节扩到 4096。
+
+```
+启动           debug=0x14e serial=3 kebabusb=1 kebabkdp=1
+启动即停在 KDP debug=0x14f serial=3 kebabusb=1 kebabkdp=1
+
+主机           python3 scripts/kdp-cdc-bridge.py /dev/ttyACM0 --udp-port 41139
+               lldb -o "kdp-remote 127.0.0.1:41139"
+```
+
+KDP 字节直接注入 USB 环，不经过 `_cnputc`，所以不会打到屏幕上；主机桥只接受
+`0xFA..0xFB` 且 CRC32 正确的帧，中间的日志文本被忽略。
+
+`DB_KDP_GETC_ENA (0x200)` 一律不使用 —— 键盘轮询会把协议字节吃掉。
+
+## 7. 触摸
+
+`S6SY761` over QUPv3 SE13（基址 `0xA94000`，wrapper `0xAC0000`，I2C `0x48`，
+GPIO 36/37 mux 到 qup13，reset 38，irq 39）。地址取自设备自己的 DTB，不是猜的。
+
+坐标要经过三个空间：
+
+```
+传感器  0..1079 × 0..2399
+   ↓  kt_transform()
+面板    1080 × 2400
+   ↓  加上显示呈现原点 (22,18)
+逻辑    1125 × 2436     ← 用户态看到的分辨率
+```
+
+事件写进 64 槽静态环，通过 `/dev/kebab_touch` 供 `read(2)` 读取；队列满时覆盖最旧
+并计数丢弃，没有消费者时只丢历史、不丢内存。开机自检会压 192 条验证这一行为。
+
+**内核里没有 HID 框架**：`iokit/hid` 不存在，配置里 `options NO_KERNEL_HID`，
+而且没有 kxld 所以不能加载 kext。要走 `IOHIDFamily` 得先移植整个子系统 ——
+那是独立的工程，不是补丁。
+
+## 8. 用户态提取（P1 前置）
+
+真实 iOS 16.7.16（20H392）的二进制已经从 IPSW 里取出来了，走 HTTP Range，
+不需要下载 6.17 GB：
+
+```
+/usr/lib/dyld     922,912   dyld-1067
+/sbin/launchd     541,600
+```
+
+iOS 的文件是 `UF_COMPRESSED` + decmpfs **type 4**（64 KiB zlib 分块，存在资源叉里），
+不是 LZFSE。资源叉的 oid 是 inode+1，chunk offset 相对 `0x104`。
+
+根卷需要两块：OS 卷给 `/usr/lib/dyld`，`Cryptex1,SystemOS` 给 44 个分片的共享缓存。
+**libSystem 在任何地方都不是文件**，它由共享缓存提供。
+
+签名侧：IPSW 里有独立的 `087-86698-044.dmg.trustcache`（2,760 条），
+内核在 `bsd_init` 从 `/System/Library/Caches/com.apple.kernelcaches/static.trustcache`
+加载，`kebab_cs` 位掩码控制策略（开发用 `kebab_cs=15`）。
+
+细节见 `docs/IOS-USERLAND.md`。
