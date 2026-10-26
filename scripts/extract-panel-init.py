@@ -1086,11 +1086,26 @@ def main(argv=None):
 
         if args.check:
             ok = True
-            for path, content in ((args.json, payload), (args.header, header)):
+            # The committed JSON may carry a dtb_cross_check block produced by an
+            # earlier --dtb run. That evidence is not reproducible without the DTB,
+            # so comparing it verbatim would always report the file as stale.
+            def comparable(text, is_json):
+                if not is_json:
+                    return text
+                import json as _json
+                try:
+                    doc = _json.loads(text)
+                except ValueError:
+                    return text
+                doc.pop("verification", None)
+                return _json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+
+            for path, content, is_json in ((args.json, payload, True),
+                                           (args.header, header, False)):
                 if not path.exists():
                     print("missing %s" % path)
                     ok = False
-                elif path.read_text(encoding="utf-8") != content:
+                elif comparable(path.read_text(encoding="utf-8"), is_json) != comparable(content, is_json):
                     print("stale %s" % path)
                     ok = False
             print("check: %s" % ("OK" if ok else "FAILED"))
