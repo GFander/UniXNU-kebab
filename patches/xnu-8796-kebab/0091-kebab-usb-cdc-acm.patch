@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1191 @@
+@@ -0,0 +1,1192 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -45,6 +45,7 @@ new file mode 100644
 +
 +void kebab_usb_log(const char *buf, size_t len);
 +static void ud_pump_log(void);
++static uint32_t ud_log_take(char *out, uint32_t max);
 +
 +/* ---------------------------------------------------------------- registers */
 +
