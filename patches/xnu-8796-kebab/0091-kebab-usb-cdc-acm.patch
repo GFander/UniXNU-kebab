@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1244 @@
+@@ -0,0 +1,1258 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -423,11 +423,23 @@ new file mode 100644
 +}
 +
 +static void
++ud_unconfigure(void)
++{
++	ud.configured = false;
++	ud.bulk_in_busy = false;
++	dwc_wr(DALEPENA, dwc_rd(DALEPENA) & ~EP_MASK);
++}
++
++static void
 +ud_configure(void)
 +{
-+	if (ud.configured) {
-+		return;
-+	}
++	/*
++	 * Re-run on every SET_CONFIGURATION(1) rather than returning early when already
++	 * configured: a host that resets the port and configures it again expects the
++	 * endpoints to be rebuilt, and skipping that is why the port could not be
++	 * reopened after a panic.
++	 */
++	ud_unconfigure();
 +	/* reset non-control resource allocation, keeping endpoint 0 */
 +	/* index 2 keeps endpoint 0's allocation; 0 would reset everything */
 +	ud_epcmd(EP0_OUT, DEPCMD_DEPSTARTCFG | (2u << 16), 0, 0, 0);
@@ -677,7 +689,9 @@ new file mode 100644
 +		case 9:                                 /* SET_CONFIGURATION */
 +			if (value == 1) {
 +				ud_configure();
-+			} else if (value != 0) {
++			} else if (value == 0) {
++				ud_unconfigure();
++			} else {
 +				ok = false;
 +			}
 +			break;
