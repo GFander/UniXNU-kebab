@@ -1,20 +1,49 @@
-Let the GUI have the screen: once the framebuffer has presented its first swap,
-console text stops overwriting it. A panic draws again, and the persistent log
-still receives everything.
+Hand console output to the USB log ring, and let the GUI have the screen.
+
+Both used to live inside the #if !defined(KEBAB) block, so the whole tee was
+compiled out and the ring stayed empty: the port opened but no log ever came.
+A panic draws again, and the persistent log still receives everything.
 
 --- a/osfmk/console/serial_console.c
 +++ b/osfmk/console/serial_console.c
-@@ -302,7 +302,13 @@
- #if defined(KEBAB)
- 	{
- 		extern void kebab_usb_log(const char *buf, size_t len);
+@@ -289,23 +289,31 @@
+ {
+ 	extern int disableConsoleOutput;
+ 
+-#if !defined(KEBAB)
++#if defined(KEBAB)
++	/*
++	 * Two jobs for this port: hand the console bytes to the USB log ring, and
++	 * once the GUI presents, stop drawing over it (a panic draws again).
++	 * This used to sit inside the #if !defined(KEBAB) below, so the compiler
++	 * dropped it and the ring stayed empty no matter what the screen showed.
++	 */
++	{
++		extern void kebab_usb_log(const char *buf, size_t len);
 +		extern int kebab_console_muted;
- 		kebab_usb_log(c, (size_t)size);
-+		/* Once the GUI presents, console text stops overwriting it; a panic
-+		 * draws again, and the persistent log above still gets everything. */
++		extern bool panic_active(void);
++		kebab_usb_log(c, (size_t)size);
 +		if (kebab_console_muted && !panic_active()) {
 +			return;
 +		}
++	}
++#else
+ 	/*
+ 	 * stock code drops console output while the graphics console is paused;
+ 	 * on this port the panel is the only console, so keep it always on.
+ 	 */
+-#if !defined(KEBAB)
+ 	if (disableConsoleOutput) {
+ 		return;
  	}
  #endif
- #endif
+-#if defined(KEBAB)
+-	{
+-		extern void kebab_usb_log(const char *buf, size_t len);
+-		kebab_usb_log(c, (size_t)size);
+-	}
+-#endif
+-#endif
+ 
+ 	assert(c != NULL);
+ 
