@@ -1,8 +1,9 @@
 Keep USB alive across a panic instead of halting with a dead controller.
 
-haltRestart is where a panic ends in a halt or restart request. Once the panic
-report has been produced, stay in a loop that still services the endpoint, so
-the host can reconnect and later console output keeps arriving.
+haltRestart is where a panic ends in a halt or restart request, but it also
+carries lifecycle notifications: kPEPanicBegin arrives before the report is
+written, so only the final stop is taken over. Once there, stay in a loop that
+still services the endpoint so the host can reconnect.
 
 --- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
 +++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
@@ -30,7 +31,7 @@ the host can reconnect and later console output keeps arriving.
  };
  
  OSDefineMetaClassAndStructors(KebabPlatformExpert, IODTPlatformExpert);
-@@ -94,3 +100,21 @@
+@@ -94,3 +100,28 @@
  	return true;
  }
  #endif /* KEBAB */
@@ -47,7 +48,14 @@ the host can reconnect and later console output keeps arriving.
 +{
 +
 +
-+	if (panic_active() && kebab_usb_console_ready()) {
++	/*
++	 * haltRestart also carries panic lifecycle notifications, and kPEPanicBegin
++	 * arrives before the report has been written - spinning on that would swallow
++	 * the panic output. Only take over the final stop.
++	 */
++	if (panic_active() && kebab_usb_console_ready() &&
++	    (type == kPEHaltCPU || type == kPERestartCPU ||
++	    type == kPEPanicRestartCPU || type == kPEPanicRestartCPUNoCallouts)) {
 +		kebab_usb_panic_spin();          /* does not return */
 +	}
 +	return IODTPlatformExpert::haltRestart(type);
