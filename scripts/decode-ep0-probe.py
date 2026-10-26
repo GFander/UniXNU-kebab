@@ -371,10 +371,14 @@ def _sequence_summary(transitions: List[Dict[str, object]],
     else:
         summary += "; nothing followed"
 
-    if any(item["phase"]["code"] == 16 for item in tail):
-        outcome = "a bus reset interrupted the transfer"
-    elif any(item["phase"]["code"] == 7 for item in tail):
+    if any(item["phase"]["code"] == 7 for item in tail):
         outcome = "the transfer completed"
+        if any(item["phase"]["code"] == 16 for item in tail):
+            outcome = "the transfer completed; a bus reset followed"
+    elif any(item["phase"]["code"] == 16 for item in tail):
+        outcome = "a bus reset interrupted the transfer"
+    elif any(item["phase"]["code"] == 6 for item in tail):
+        outcome = "the status stage completed, but SETUP was not re-armed"
     elif any(item["phase"]["code"] == 5 and item["status"]["code"] != 0
              for item in tail):
         outcome = "the status stage submit was rejected"
@@ -1580,6 +1584,24 @@ def run_selftest() -> int:
     check("reset without rebuild", "no transitions since the reset",
           verdict["transitions_since_reset"] == 0)
 
+    # 5b. A completed transfer followed by a reset and rebuild.
+    completed_reset = _KernelSim()
+    completed_reset.note(0, 16)
+    completed_reset.note(0, 17)
+    _transfer(completed_reset, 1)
+    completed_reset.note(0, 16)
+    completed_reset.note(0, 17)
+    result = build(completed_reset)
+    report = result["report"]
+    verdict = report["verdict"]
+    check("reset after completion", "last phase is a rebuild",
+          report["last"]["phase"]["code"] == 17)
+    check("reset after completion", "summary says completed, then reset",
+          "completed; a bus reset followed" in report["sequence_summary"],
+          report["sequence_summary"])
+    check("reset after completion", "failure is rebuilt, no setup",
+          verdict["failure"] == "rebuilt, no setup")
+
     # 6. Wrapped sequence counter inside the 32-entry window.
     wrapped = _KernelSim()
     wrapped.note(0, 16)
@@ -1755,12 +1777,16 @@ def run_selftest() -> int:
     status5.note(0, 4)
     status5.note(1, 5)
     result = build(status5)
-    verdict = result["report"]["verdict"]
+    report = result["report"]
+    verdict = report["verdict"]
     check("status stage hanging", "submitted but not completed",
           verdict["status_stage_submitted"] is True and
           verdict["status_stage_completed"] is False)
     check("status stage hanging", "failure names the missing completion",
           verdict["failure"] == "status stage incomplete")
+    check("status stage hanging", "summary says never completed",
+          "never completed" in report["sequence_summary"],
+          report["sequence_summary"])
 
     # 11. Status complete with no SETUP re-arm.
     status6 = _KernelSim()
@@ -1773,11 +1799,15 @@ def run_selftest() -> int:
     status6.note(1, 5)
     status6.note(1, 6)
     result = build(status6)
-    verdict = result["report"]["verdict"]
+    report = result["report"]
+    verdict = report["verdict"]
     check("missing SETUP re-arm", "status completed",
           verdict["status_stage_completed"] is True)
     check("missing SETUP re-arm", "failure names the missing re-arm",
           verdict["failure"] == "setup not rearmed")
+    check("missing SETUP re-arm", "summary says completed but not re-armed",
+          "SETUP was not re-armed" in report["sequence_summary"],
+          report["sequence_summary"])
 
     # 12. CLI and JSON round trip, using a real temporary file.
     json_path = None
