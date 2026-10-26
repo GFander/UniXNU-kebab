@@ -1270,14 +1270,14 @@ python3 scripts/check-shared-cache.py ~/ios-userland/cryptex-cache
 * 82 个 kebab 补丁（原 81 + `0102-kebab-dyld-shared-cache.patch`）按文件名
   顺序应用到 `xnu-8796.141.3`（`1b191cb`）的干净索引：**82/82** 成功
   （`git apply --cached`，无 FAILED）。
-* 构建：`~/kebab-build/build.sh`（`MACHINE_CONFIG=KEBAB`、
+* 构建：`~/kebab-build/build-local.sh`（内部调用 `dxb/build.sh`；`MACHINE_CONFIG=KEBAB`、
   `KERNEL_CONFIG=DEVELOPMENT`，macOS 13.5 + `KDK_13.5_22G74`）。
 * 产物：`build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab`，
   **17,068,976 字节（16.28 MiB）**，Mach-O 64-bit arm64，
-  SHA-256 `86697207f7a4af603d055c9b8f6506a71d635c26206d13ad78a71681de233929`。
+  SHA-256 `147d819986c1e7f7a033a4cc5d02d9c1f30fb44bd6a988cad4da6c5b5c4541b6`。
 * `kebab_dyldcache.c` 本身 **0 warning**（编译日志里
-  `kebab_dyldcache.c:<行>:<列>: warning` 为 0 条）；全树 3,282 条 warning
-  都是既有文件/头文件的，和本次新增文件无关。
+  `kebab_dyldcache.c:<行>:<列>: warning` 为 0 条）；全树其余 warning
+  都是既有文件/头文件的，本次没有新增。
 * 内核字符串里有 `KEBAB DSC: dry run: ...`、`KEBAB DSC: plan ...`、
   `KEBAB DSC: mapping complete; ...` 等，确认代码进了镜像。
 
