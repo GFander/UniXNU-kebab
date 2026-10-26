@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1136 @@
+@@ -0,0 +1,1145 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -173,6 +173,7 @@ new file mode 100644
 +	bool        bulk_in_busy;
 +	bool        ep0_status3;
 +	bool        console_input;
++	bool        panic_hook;
 +	uint32_t    tx_bytes;
 +	lck_grp_t  *lock_grp;
 +	lck_mtx_t  *lock;
@@ -675,8 +676,12 @@ new file mode 100644
 +			ud.in_head = next;
 +		}
 +	}
-+	/* Testing hook: the only way to prove the debugger path works is to enter it. */
-+	if (received >= 6) {
++	/*
++	 * Test hook, off unless boot-arg kebabpanic=1: the only way to prove the
++	 * debugger path works is to enter it, but a stray string in the log must not
++	 * be able to bring the machine down.
++	 */
++	if (ud.panic_hook && received >= 6) {
 +		for (uint32_t i = 0; i + 6 <= received; i++) {
 +			if (memcmp(buf + i, "PANIC!", 6) == 0) {
 +				panic("kebab usb console test");
@@ -916,6 +921,10 @@ new file mode 100644
 +
 +	if (!PE_parse_boot_argn("kebabusb", &enabled, sizeof(enabled)) || enabled == 0) {
 +		return;
++	}
++	{
++		uint32_t hook = 0;
++		ud.panic_hook = PE_parse_boot_argn("kebabpanic", &hook, sizeof(hook)) && hook != 0;
 +	}
 +	ud.dwc = ml_io_map(DWC3_PA, DWC3_SIZE);
 +	if (ud.dwc == 0) {
