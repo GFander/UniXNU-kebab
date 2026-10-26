@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1055 @@
+@@ -0,0 +1,1110 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -170,9 +170,13 @@ new file mode 100644
 +	bool        running;
 +	bool        bulk_in_busy;
 +	bool        ep0_status3;
++	bool        console_input;
 +	uint32_t    tx_bytes;
 +	lck_grp_t  *lock_grp;
 +	lck_mtx_t  *lock;
++	uint32_t    in_head;
++	uint32_t    in_tail;
++	char        in_ring[256];
 +	uint32_t    log_head;
 +	uint32_t    log_tail;
 +	uint32_t    log_busy;
@@ -651,7 +655,15 @@ new file mode 100644
 +	uint32_t left = t[2] & 0x00ffffff;
 +	uint32_t received = (left < 512) ? 512 - left : 0;
 +	ud_from_dev(UD_BULKOUT, 512);
-+	if (received > 0) {
++	for (uint32_t i = 0; i < received && i < 512; i++) {
++		uint32_t next = (ud.in_head + 1) % sizeof(ud.in_ring);
++		if (next != ud.in_tail) {
++			ud.in_ring[ud.in_head] = buf[i];
++			__asm__ volatile ("dmb ishst" ::: "memory");
++			ud.in_head = next;
++		}
++	}
++	if (received > 0 && !ud.console_input) {
 +		char tmp[64];
 +		uint32_t show = (received < sizeof(tmp) - 1) ? received : sizeof(tmp) - 1;
 +		memcpy(tmp, buf, show);
@@ -1058,3 +1070,46 @@ new file mode 100644
 +}
 +
 +#endif /* KEBAB */
++
++/*
++ * Console input for the kernel debugger. A panic stops the event thread, so this
++ * polls the controller itself instead of waiting for it: it drains whatever events
++ * are pending and returns the next typed byte, or -1 after a short wait.
++ */
++static bool ud_console_input_mode;
++
++int
++kebab_usb_getc(bool wait)
++{
++	ud.console_input = true;                /* stop echoing keystrokes as log lines */
++
++	for (unsigned tries = 0; tries < (wait ? 4000 : 8); tries++) {
++		uint32_t count = dwc_rd(GEVNTCOUNT) & 0xfffc;
++		if (count && count <= UD_EVT_SIZE) {
++			ud_from_dev(UD_EVT, UD_EVT_SIZE);
++			for (uint32_t done = 0; done < count; done += 4) {
++				uint32_t ev = *(volatile uint32_t *)(ud.dma + UD_EVT + ud.evt_pos);
++				ud.evt_pos = (ud.evt_pos + 4) % UD_EVT_SIZE;
++				ud_event(ev);
++			}
++			dwc_wr(GEVNTCOUNT, count);
++		}
++		if (ud.in_tail != ud.in_head) {
++			int c = (unsigned char)ud.in_ring[ud.in_tail];
++			__asm__ volatile ("dmb ish" ::: "memory");
++			ud.in_tail = (ud.in_tail + 1) % sizeof(ud.in_ring);
++			return c;
++		}
++		if (!wait) {
++			break;
++		}
++		delay(1000);
++	}
++	return -1;
++}
++
++bool
++kebab_usb_console_ready(void)
++{
++	return ud.running && ud.configured;
++}

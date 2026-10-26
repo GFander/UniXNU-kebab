@@ -1,12 +1,45 @@
-Hand console output to the USB log ring, and let the GUI have the screen.
+Hand console output to the USB log ring, and take console input from it.
 
-Both used to live inside the #if !defined(KEBAB) block, so the whole tee was
-compiled out and the ring stayed empty: the port opened but no log ever came.
-A panic draws again, and the persistent log still receives everything.
+The tee used to sit inside the #if !defined(KEBAB) block, so it was compiled
+out and the ring stayed empty. With it inside the KEBAB branch the log actually
+flows, and the debugger's keyboard now comes back over the same pipe: getc
+polls the controller itself, because a panic stops the event thread.
 
 --- a/osfmk/console/serial_console.c
 +++ b/osfmk/console/serial_console.c
-@@ -289,23 +289,30 @@
+@@ -125,6 +125,22 @@
+  * console backend straight at the early framebuffer renderer.
+  */
+ extern void kebab_early_putc(char c);
++extern int kebab_usb_getc(bool wait);
++
++static void
++/*
++ * The keyboard: the kernel debugger reads through here. USB carries it when the
++ * device is configured, otherwise fall back to the stock path.
++ */
++static int
++kebab_console_getc(bool wait)
++{
++	extern bool kebab_usb_console_ready(void);
++	if (kebab_usb_console_ready()) {
++		return kebab_usb_getc(wait);
++	}
++	return _vcgetc(wait);
++}
+ 
+ static void
+ kebab_console_putc(char c, __unused bool poll)
+@@ -139,7 +155,7 @@
+ 	},
+ 	{
+ #if defined(KEBAB)
+-		.putc = kebab_console_putc, .getc = _vcgetc,
++		.putc = kebab_console_putc, .getc = kebab_console_getc,
+ #else
+ 		.putc = vcputc_options, .getc = _vcgetc,
+ #endif
+@@ -289,23 +305,30 @@
  {
  	extern int disableConsoleOutput;
  
