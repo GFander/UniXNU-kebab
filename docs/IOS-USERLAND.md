@@ -950,3 +950,188 @@ Python，这次没用到 venv 里的解码器。
 解出来的镜像本身也做了核对：`stat` 恰好 2,743,074,816 字节，偏移 0x20 是
 `NXSB`，0x24 块大小 4096，0x28 块数 669,696，`4096 × 669,696 = 2,743,074,816`
 一字节不差，0x48 UUID `07490cba83ee4f50a4153de222723455`。
+
+## 依赖闭包
+
+`launchd` 和 `dyld` 到底能不能解析自己的库？这一节用 `scripts/ios-deps.py` 把两个
+二进制的 `LC_LOAD_DYLIB` / `LC_LOAD_WEAK_DYLIB` / `LC_REEXPORT_DYLIB` /
+`LC_LOAD_UPWARD_DYLIB` 全部取出来，逐条判定它从哪来：
+
+| 判定 | 依据 |
+| --- | --- |
+| **cache** | 路径出现在主缓存 `imagesText` 的 2,710 条镜像路径里 |
+| **volume** | 路径是根卷上的真实文件（308,564 条 mtree 清单） |
+| **NOWHERE** | 两边都没有 —— 加载器会报 "image not found" |
+
+### 一、输入
+
+| 输入 | 怎么来的 | 字节 |
+| --- | --- | ---: |
+| `extracted/sbin/launchd` | `087-86698-044.dmg` → `/sbin/launchd`，inode 1152921500312216239 | 541,600 |
+| `extracted/usr/lib/dyld` | 同一个 DMG → `/usr/lib/dyld`，inode 1152921500312216349 | 922,912 |
+| `cryptex-cache/dyld_shared_cache_arm64` | SystemOS cryptex → `/System/Library/Caches/com.apple.dyld/`，**只取主缓存** | 393,216 |
+| `mtree-paths.txt` | `Firmware/087-86698-044.dmg.mtree` 解出来的清单 | 308,564 条 |
+
+inode 不是抄来的：`apfs-get.py` 从 APFS 里读出 1152921500312216239 /
+1152921500312216349，mtree 清单里 `/sbin/launchd` 和 `/usr/lib/dyld` 记的正是这两个
+数，两边对得上，所以取出来的确实是清单里那两个文件。
+
+**只取了主缓存**：2,710 条镜像路径全在主缓存头部的 `imagesText` 数组里，42 个
+子缓存（2.7 GB）对"名字解析"这一步没有用。这不是省事，是查名字不需要它们。
+
+### 二、主缓存头部（实测）
+
+| 字段 | 值 |
+| --- | --- |
+| magic | `dyld_v1   arm64\0` |
+| 文件大小 | 393,216 字节 |
+| `platform` | 2（iOS） |
+| `formatVersion` | 0 |
+| `mappingCount` | 1（offset 512） |
+| `imagesTextCount` | **2,710**（offset 87,344） |
+| `subCacheArrayCount` | **42**（offset 174,064） |
+| `codeSignatureSize` | 16,384（offset 376,832） |
+| `sharedRegionStart` | `0x180000000` |
+| `sharedRegionSize` | `0xaade8000`（2,733.9 MiB） |
+| `maxSlide` | `0x55214000` |
+
+`imagesText` 的每一项是 32 字节（uuid + loadAddress + textSegmentSize +
+pathFileOffset），2,710 项各自带一条绝对路径。**这 2,710 条全部可解析**，没有一条
+路径落在文件外面。
+
+### 三、`launchd` 的依赖闭包
+
+```
+  dependency                                     kind      resolves from
+  --------------------------------------------------------------------------
+  /usr/lib/libSystem.B.dylib                     load      shared cache @0x1d1c2c000
+  /usr/lib/libobjc.A.dylib                       load      shared cache @0x1800b8000
+
+  closure: 2 dependencies -- 2 from cache, 0 from volume, 0 NOWHERE
+```
+
+两条都从共享缓存来，**没有一条 NOWHERE**。注意这是全部：`launchd` 只有 2 条
+`LC_LOAD_DYLIB`（第 14、15 个 load command），没有 weak、没有 reexport、没有
+`LC_RPATH`。
+
+`libobjc` 单独列出来是对的 —— 它不在 `libSystem` 的 reexport 里，本来就是独立镜像
+（缓存 @0x1800b8000）。
+
+### 四、`dyld` 的依赖闭包
+
+```
+  no LC_LOAD_DYLIB of any kind
+
+  closure: 0 dependencies -- 0 from cache, 0 from volume, 0 NOWHERE
+```
+
+`dyld-1067` **一条 dylib 依赖都没有**。这不是解析失败，是它确实自成一体（18 个
+load command 里只有 `LC_ID_DYLINKER` 和 `LC_UNIXTHREAD`，没有任何
+`LC_LOAD_DYLIB`）。这一条对启动顺序很关键：dyld 可以在共享缓存还没映射的时候
+先跑起来，因为它不需要任何外部镜像。
+
+### 五、缓存清单里的首启依赖
+
+| 库 | 缓存里的路径 | load address | 在 2,710 里 |
+| --- | --- | --- | :---: |
+| libSystem | `/usr/lib/libSystem.B.dylib` | `0x1d1c2c000` | 是 |
+| libobjc | `/usr/lib/libobjc.A.dylib` | `0x1800b8000` | 是 |
+| libdispatch | `/usr/lib/system/libdispatch.dylib` | `0x18db34000` | 是 |
+| libxpc | `/usr/lib/system/libxpc.dylib` | `0x1d1be0000` | 是 |
+| Foundation | `/System/Library/Frameworks/Foundation.framework/Foundation` | `0x181172000` | 是 |
+| CoreFoundation | `/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation` | `0x186de8000` | 是 |
+
+六个全在，但**路径有个坑**：`libdispatch` 和 `libxpc` 在 `/usr/lib/system/`，不在
+`/usr/lib/`。按 `/usr/lib/libxpc.dylib` 去查会得到"哪儿都没有"的假结论 ——
+差的是目录名，不是文件。
+
+镜像分布：`/usr/lib/` 301 个、`/usr/lib/system/` 35 个、
+`System/Library/Frameworks` 244 个、`System/Library/PrivateFrameworks` 1,833 个，
+其余 297 个。
+
+对照根卷：mtree 清单里**以 `.dylib` 结尾的文件只有 21 个**，且
+`/usr/lib/libSystem.B.dylib` 不在其中（只有 `libSystem.B_asan.dylib` 和它的
+`libSystem_asan.dylib` 链接）。也就是说系统库**根本不存在磁盘上的副本**，
+只能从共享缓存来。2,710 : 21 这个比例就是"缓存不是优化，是唯一来源"的量化。
+
+### 六、压缩与签名
+
+| | `launchd` | `dyld` |
+| --- | --- | --- |
+| 大小 | 541,600 | 922,912 |
+| `UF_COMPRESSED` | 是（`bsd_flags=0x20`）| 是（`bsd_flags=0x20`）|
+| decmpfs 类型 | 4 = ZLIB_RSRC | 4 = ZLIB_RSRC |
+| 解压后 | 与声明一致，`ok=True` | 与声明一致，`ok=True` |
+| sha256（解压后）| `12370e5e…cac61c` | `58068345…493757` |
+| `LC_UUID` | `5c15db07-b3bc-3df3-b62f-3e498b993b8e` | `199941a5-95ee-3054-8e54-ae6387a9fa9a` |
+| cputype / subtype | `0x0100000c` / `0x0`（arm64 / ARM64_ALL）| 同左 |
+| `LC_BUILD_VERSION` | platform=2（iOS）minos=16.7.0 sdk=16.7.3 | 同左 |
+| `LC_CODE_SIGNATURE` | 有，25,264 B @516,336 | 有，25,280 B @897,632 |
+| SuperBlob | `0xfade0cc0`，5 个 blob | `0xfade0cc0`，3 个 blob |
+| CMS 签名 | 有（type `0x10000`）| 有（type `0x10000`）|
+| `LC_DYLD_CHAINED_FIXUPS` | 有，13,440 B @475,136 | 有，144 B @589,824 |
+| `LC_DYLD_INFO` | **无** | **无** |
+| `LC_MAIN` | 有，entryoff=`0x169b4` | 无（dylinker）|
+| `LC_ENCRYPTION_INFO_64` | 无 | 无 |
+
+几点直说：
+
+* 两个都是 **chained fixups、没有老的 `LC_DYLD_INFO`**。这是 iOS 16 的正常形态，
+  但意味着内核侧只能按 chained fixups 那条路走，没有旧格式可退。
+* `cpusubtype=0`（ARM64_ALL）对 iPhone X 是对的 —— A11 用 arm64，A12 及以后才是
+  arm64e。拿 arm64e 的缓存来配这台机器反而不对。
+* 签名是**真的 Apple CMS 签名**，不是 ad-hoc。所以运行时要么走静态 trust cache，
+  要么走平台二进制策略，不能靠"随便签一个"糊过去。
+* `UF_COMPRESSED` 只在**从 APFS 直接读**时才需要内核有 decmpfs；我们放进启动卷的
+  是已经解压好的副本，这一项在运行时不会成为障碍。
+
+### 七、结论
+
+**没有任何一条依赖落到 NOWHERE。`launchd` 2/2、`dyld` 0/0。**
+
+这不是"工具把一切都判成 cache"：三个分支都做过对照。把 `--cache` 指向不存在的
+文件，同样两条依赖立刻变成 NOWHERE；换成磁盘上确实存在的 dylib 则判成 volume：
+
+```text
+/usr/lib/libSystem.B.dylib       -> ('cache',   '/usr/lib/libSystem.B.dylib')
+/usr/lib/libobjc.A.dylib         -> ('cache',   '/usr/lib/libobjc.A.dylib')
+/usr/lib/libRPAC.dylib           -> ('volume',  '/usr/lib/libRPAC.dylib')
+/usr/lib/libNope.dylib           -> ('NOWHERE', '/usr/lib/libNope.dylib')
+/sbin/launchd                    -> ('volume',  '/sbin/launchd')
+```
+
+所以"起不来"不是缺库。按运行顺序，第一个会挡住的不是库，是内核：
+
+1. `exec("/sbin/launchd")`：内核要能解析 Mach-O、选出 `/usr/lib/dyld` 当 dylinker，
+   并在 exec 时过掉 codesign/AMFI 的信任判定。签名是真的 CMS 签名，没有 trust
+   cache 或平台策略就在这里失败。
+2. `dyld` 起来：它 0 依赖，自己不需要缓存。
+3. `dyld` 解析 launchd 的第一条依赖 `/usr/lib/libSystem.B.dylib`：**如果内核还没把
+   拆分缓存映射到 `0x180000000`，这里就会报 `Library not loaded`。** 这是第一个
+   会出现的"库错误"，但成因是缓存没映射，不是文件不存在。
+4. 缓存映射好之后，2,710 个镜像都在区间内、两条依赖都在，符号解析应当直接过。
+5. 再往后才是 `launchd` 自己的运行期需求（bootstrap port、HID 等）。
+
+一句话：**缺的不是库，是内核侧的共享缓存映射和 codesign 策略。** 这两件都是已经
+在计划里的工作；依赖闭包这一层没有留下任何缺口。
+
+### 八、复现
+
+```sh
+# 依赖闭包（两个二进制一起）
+python3 scripts/ios-deps.py \
+    --cache ~/ios-userland/cryptex-cache/dyld_shared_cache_arm64 \
+    --mtree ~/ios-userland/mtree-paths.txt \
+    ~/ios-userland/extracted/sbin/launchd \
+    ~/ios-userland/extracted/usr/lib/dyld
+
+# 只读缓存头部
+python3 scripts/ios-deps.py --cache …/dyld_shared_cache_arm64 --cache-info
+
+# 查某个库在不在 2,710 里
+python3 scripts/ios-deps.py --cache …/dyld_shared_cache_arm64 \
+    --list-images system/libxpc
+
+# 机器可读
+python3 scripts/ios-deps.py … --json
+```
