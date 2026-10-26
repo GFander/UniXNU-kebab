@@ -250,3 +250,33 @@ print("after reopen: bus reset %d, connected %d, setup %d, configured %d" % (
     seen["setup"] - before["setup"], seen["configured"] - before["configured"]))
 print("done")
 ```
+
+## 已知的解析缺口
+
+合并后的驱动会打印两种 EP0 行：
+
+```
+KEBAB EP0 PROBE: progress 0x... seq ... req ... phase ... status ...
+KEBAB EP0 STATE: resets=.. disconnects=.. fences=.. events=.. acked=..
+                 discarded=.. cursor=.. takeover=.. tx_complete=..
+                 line=xxxxxxxxxxxxxx controls=..
+```
+
+`scripts/decode-ep0-probe.py` 目前只解析第一种。第二种是重写后加入的计数器快照，
+手工读即可，含义：
+
+| 字段 | 判读 |
+| --- | --- |
+| `resets` | 主机重新打开端口会触发总线复位；重连后应递增 |
+| `disconnects` | 断连事件计数 |
+| `fences` | 用资源索引取消传输并等确认的次数；异常增长说明有传输没收尾 |
+| `events` / `acked` | 控制器写入的事件数与已应答字节；长期不相等说明事件环在泄漏 |
+| `discarded` | 事件数超出范围被丢弃的次数；应为 0 |
+| `cursor` | 软件事件游标位置 |
+| `takeover` | panic 接管是否发生过 |
+| `tx_complete` | bulk IN 完成次数 |
+| `line` | 保存的 line coding，七个字节 |
+| `controls` | 控制线状态（DTR/RTS）|
+
+重连测试的判据：`resets` 增加、`discarded` 保持 0、`events/acked` 同步增长、
+`line` 与主机设置的终端参数一致。
