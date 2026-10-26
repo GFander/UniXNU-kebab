@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1063 @@
+@@ -0,0 +1,1073 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -466,8 +466,18 @@ new file mode 100644
 +	uint32_t n = 0;
 +	uint32_t expected = 0;
 +
-+	if (!os_atomic_cmpxchg(&ud.log_busy, expected, 1u, acquire)) {
-+		return 0;
++	/*
++	 * The console path takes the same gate for every printf, so a single attempt
++	 * here almost always loses and the ring never drains. Wait for it instead:
++	 * the producer only holds it for a short copy.
++	 */
++	for (unsigned tries = 0; tries < 20000; tries++) {
++		if (os_atomic_cmpxchg(&ud.log_busy, expected, 1u, acquire)) {
++			break;
++		}
++	}
++	if (!os_atomic_load(&ud.log_busy, acquire)) {
++		return 0;               /* never got it */
 +	}
 +	while (n < max && ud.log_tail != ud.log_head) {
 +		out[n++] = ud.log_ring[ud.log_tail];
