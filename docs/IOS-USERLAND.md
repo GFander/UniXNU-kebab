@@ -206,3 +206,200 @@ python3 -m venv ~/ios-userland/venv
 
 拿到二进制之后才是 P1 的活：把它们拼成可启动根卷，让 `dyld` 加载共享缓存并跳到
 `launchd` 入口（见 `docs/ROADMAP.md` 的 P1）。
+
+## mtree 清单
+
+这一节解决第七节里"mtree 没解完"的部分；APFS 那条线仍然是第八节第 2 条。
+`Firmware/087-86698-044.dmg.mtree` 现在可以完整解成路径清单，代码在
+`scripts/decode-ios-mtree.py`，输出在 `~/ios-userland/mtree-paths.txt`。
+
+### 一、容器布局（按字节实测）
+
+IPSW 成员本身是 22,031,630 字节（deflate），解压后 22,314,023 字节。头 27 字节是 DER：
+
+| 成员内偏移 | 字节 | 含义 |
+| --- | --- | --- |
+| 0 | `30 84 01 54 7c 21` | SEQUENCE，长 0x01547c21 = 22,314,017；6 + 22,314,017 = 22,314,023，正好到文件尾 |
+| 6 | `16 04 49 4d 34 50` | IA5String `IM4P` |
+| 12 | `16 04 6d 73 79 73` | IA5String `msys` |
+| 18 | `16 01 30` | IA5String `0` |
+| 21 | `04 84 01 54 7c 0c` | OCTET STRING，长 0x01547c0c = 22,313,996 |
+| 27 | `70 62 7a 65` | 载荷开始：`pbze` |
+
+`pbze` 的头只有 12 字节：magic + 一个大端 u64 块大小。
+
+| 成员内偏移 | 字段 | 值 |
+| --- | --- | --- |
+| 27 | magic | `pbze` |
+| 31 | u64be block_size | 4,194,304（4 MiB）|
+| 39 | 第 0 块头 | usize=4,194,304，csize=2,146,326 |
+| 55 | 第 0 块 LZFSE 流 | `62 76 78 32`（`bvx2`）… `62 76 78 24`（`bvx$`）|
+
+块表不是偏移表，而是顺序的 `(uncompressed_size, compressed_size)` 对，每块一个
+自结束的 LZFSE 流：
+
+```
+u64be uncompressed_size
+u64be compressed_size
+compressed_size 字节的 LZFSE 流（bvx2 ... bvx$）
+```
+
+23 个块的压缩字节逐块累加，再加回 12 字节 `pbze` 头、23 × 16 字节块头和 27 字节
+DER 头，正好到文件尾：
+
+| 块 | usize | csize | 块 | usize | csize |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 4,194,304 | 2,146,326 | 12 | 4,194,304 | 226,565 |
+| 1 | 4,194,304 | 2,273,487 | 13 | 4,194,304 | 228,320 |
+| 2 | 4,194,304 | 2,252,542 | 14 | 4,194,304 | 274,473 |
+| 3 | 4,194,304 | 2,285,200 | 15 | 4,194,304 | 166,358 |
+| 4 | 4,194,304 | 2,271,255 | 16 | 4,194,304 | 230,980 |
+| 5 | 4,194,304 | 2,330,498 | 17 | 4,194,304 | 265,126 |
+| 6 | 4,194,304 | 2,324,015 | 18 | 4,194,304 | 265,323 |
+| 7 | 4,194,304 | 2,283,579 | 19 | 4,194,304 | 261,699 |
+| 8 | 4,194,304 | 960,109 | 20 | 4,194,304 | 243,885 |
+| 9 | 4,194,304 | 232,822 | 21 | 4,194,304 | 281,483 |
+| 10 | 4,194,304 | 227,619 | 22 | **726,180** | **52,125** |
+| 11 | 4,194,304 | 229,827 | 合计 | **93,000,868** | **22,313,616** |
+
+`22,313,616 + 12 + 23 × 16 + 27 = 22,314,023`。前 22 块都是整 4 MiB，最后一块
+726,180 字节；每块首 4 字节 `bvx2`、尾 4 字节 `bvx$`，LZFSE 输出长度逐块等于
+usize。`pbze` 后面没有索引区，也没有对齐填充——块头里的 csize 就是下一块的起点。
+
+### 二、Apple Archive
+
+93,000,868 字节解压流不是直接文本，而是一个 Apple Archive（`AA01` 记录）：
+
+```
+"AA01" + u16le header_size + 字段... [+ DATB 指定长度的数据]
+字段 = 3 字节 ASCII 键 + 1 字节类型码：
+  1 = u8, 2 = u16le, 4 = u32le, 8 = u64le,
+  P = u16le 长度 + 字节（路径）,
+  T = 12 字节（u64le 秒 + u32le 纳秒）,
+  B = u32le 长度（数据长度；数据紧跟在 header 后）
+```
+
+三条记录的长度完全闭合：
+
+| # | header 偏移 | header 长 | 路径 | TYP1 | 数据长 |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 0 | 70 | （空，根目录）| 68 `D` | 0 |
+| 1 | 70 | 87 | `digest.db` | 70 `F` | 34,996,224 |
+| 2 | 34,996,381 | 87 | `mtree.txt` | 70 `F` | 58,004,400 |
+
+`70 + 87 + 34,996,224 + 87 + 58,004,400 = 93,000,868`，正好等于解压流长度。
+根记录的字段是 `UID1 0 / GID1 80 / MOD2 0700 / FLG1 0`，`digest.db` 是 0600，
+`mtree.txt` 是 0644。
+
+### 三、路径清单
+
+`mtree.txt` 是 58,004,400 字节、1,265,127 行，开头：
+
+```
+#	   user: root
+#	machine: ggbp-spark-worker-deploy-prod-us-west-2n-7455d846b7-j48px
+#	   tree: /Volumes/SydneyUpdate20H392.D22D221OS
+#	   date: Wed Apr 29 21:10:13 2026
+```
+
+文本是层级式，不是每行一个绝对路径：
+
+```
+# ./usr/lib
+lib             type=dir inode=1152921500312216305 siblingid=0 nxattr=0
+    dyld        xattrsdigest=authapfs.1152921500312216350 \
+                inode=1152921500312216349 siblingid=0 nxattr=2
+...
+# ./usr/lib
+..
+```
+
+`# ./dir` 开一个目录，下一行是目录自身，缩进行是它的非目录子项，最后再一个
+`# ./dir` 加 `..` 关闭；目录各有独立小节，所以每条路径只出现一次。名字里的
+空格用 `\040` 转义（`#` 注释里则是字面空格），解析时要还原。
+
+结果：**308,564 条路径**，0 重复，0 个孤儿父目录：
+
+| 类型 | 数量 |
+| --- | --- |
+| 目录 | 130,751 |
+| 普通文件 | 175,489 |
+| 符号链接 | 2,324 |
+| 设备节点 | 0 |
+
+设备节点是 0：这个卷里没有 `type=block`/`type=char`；`/dev` 是 devfs，不在根卷。
+
+四条验收路径：
+
+| 路径 | 结果 | 类型 | inode | xattrsdigest |
+| --- | --- | --- | --- | --- |
+| `/usr/lib/dyld` | 在 | file | 1152921500312216349 | authapfs.1152921500312216350 |
+| `/sbin/launchd` | 在 | file | 1152921500312216239 | authapfs.1152921500312216240 |
+| `/usr/lib/libSystem.B.dylib` | **不在** | — | — | — |
+| `/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e` | **不在** | — | — | — |
+
+最近匹配：
+
+- `libSystem.B.dylib`：`/usr/lib/libSystem.B_asan.dylib`（file）、
+  `/usr/lib/libSystem_asan.dylib`（link）、`/System/DriverKit/usr/lib/libSystem_debug.dylib`。
+- `dyld_shared_cache_arm64e`：`/System/Library/Caches` 只有 `apticket.der`、
+  `com.apple.factorydata/`、`com.apple.kernelcaches/`；全清单 `dyld_shared_cache`
+  0 命中，`com.apple.dyld` 也是 0。
+
+**尺寸：mtree 不记录。** `grep -c " size="` 和 `grep -c " mode="` 都是 0；
+208 个含 "size" 的行全是文件名（如 `dalSiriFeetSize.cat`）。每条记录只有
+`type`、`inode`、`siblingid`、`nxattr`、`xattrsdigest`（目录另有
+time/btime/ctime/ptime）。所以清单给路径和 inode，不给字节数；大小要从 APFS
+inode 记录读，或从别的清单读。
+
+### 四、哪些是证实的，哪些是推断的
+
+证实的（字节算术或重复解码支持）：
+
+- DER 三层长度闭合到文件尾：6 + 22,314,017 = 22,314,023；OCTET STRING 22,313,996。
+- `pbze` 的 23 个 `(usize, csize)` 加 12 + 23 × 16 字节头，正好 22,313,996；
+  再加 27 字节 DER 头是 22,314,023。
+- 每块 `bvx2`…`bvx$` 自结束，LZFSE 输出长度逐块等于 usize。
+- Apple Archive 三条记录 header + DATB 累加正好 93,000,868。
+- 本地文件解码与 HTTP range 解码输出 SHA-256 相同：
+  `18caef0a13f37831abe0789a055fd68dcbb9f6e7dda268c0f9a4f57e2c228af2`（47,393,198 字节）。
+- mtree 文本 58,004,400 字节；308,564 条路径，0 重复，0 孤儿父目录。
+
+推断的（一致性支持，但没有规范逐条对照）：
+
+- Apple Archive 字段类型码 1/2/4/8/P/T/B 的语义，是从本文件三条记录的字节形状
+  和数值合理性推出来的；`TYP1` 的 68/70 对应 `D`/`F`，与同一路径在 mtree 里的
+  `type=dir`/默认 file 一致。
+- 层级 mtree 的"`# path` 开、`# path` + `..` 关、目录单独成节"规则，是从
+  0 重复、0 孤儿、父子类型一致反推并验证的。
+- `xattrsdigest=authapfs.<id>` 的 `<id>` 是 `digest.db` 的键：同一个 id 出现在
+  `digest.db` 的记录里；但 `digest.db` 的记录布局这次没有继续解。
+
+### 五、对 P1 根卷的意义
+
+- 这个清单是**骨架**，不是可挂载的根卷：没有 mode、没有 size、没有 symlink
+  目标、没有文件内容。搭 P1 根卷时它只能用来定路径、定 inode、定要取哪些文件。
+- 根卷有 308,564 条路径，但只有 175,489 个普通文件；iOS 16 把大量系统内容放在
+  `Cryptex1,SystemOS`（2.7 GB）。清单里没有 `libSystem.B.dylib`，也没有
+  `dyld_shared_cache_arm64e`，正好印证：**只拿 `OS` 这个 DMG 拼根卷，dyld
+  起来时会找不到共享缓存和 libSystem**。
+- `/usr/lib/dyld` 和 `/sbin/launchd` 在 `OS` 卷里，这是好消息：P1 最先需要的两个
+  入口还在。共享缓存和 libSystem 要去 cryptex 里取。
+- 清单的 inode 列可以直接和 APFS fs-tree 的 inode 记录 join：一旦第八节第 2 条
+  的 fs-tree 读通，就能把 308,564 条路径补上 mode/size/内容块号。
+
+### 六、复现
+
+```sh
+# 本地成员（上一节已经取下来的那个）
+~/ios-userland/venv/bin/python scripts/decode-ios-mtree.py \
+    --mtree ~/ios-userland/ipsw/Firmware/087-86698-044.dmg.mtree \
+    --out ~/ios-userland/mtree-paths.txt --stats --check
+
+# 或者直接从 IPSW 用 range 取（只下 22 MB 的成员，2.1 秒）
+~/ios-userland/venv/bin/python scripts/decode-ios-mtree.py --url "$URL" \
+    --out ~/ios-userland/mtree-paths.txt --stats
+```
+
+输出是 TSV：`type  mode  size  inode  xattrsdigest  path`；`mode`/`size` 固定为
+`-`，因为 mtree 没有这两个字段。`--check` 打印四条验收路径和最近匹配。
