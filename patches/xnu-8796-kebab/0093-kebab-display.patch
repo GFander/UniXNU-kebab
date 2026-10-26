@@ -1,27 +1,48 @@
 Add the display stack: a built-in IOSurface and an IOMobileFramebuffer that
 drives the bootloader's framebuffer.
 
-Ported from the OnePlus 9 port, which runs 1080x2400 too. The panel memory is
-published as an IOSurface, CoreAnimation's swaps are copied into it on the CPU,
-and a 60 Hz timer provides vsync. IOMobileFramebuffer.framework finds the
-service and asks its provider for the canvas size.
+Ported from the OnePlus 9 port, which runs the same 1080x2400 panel and is in
+the same situation: the bootloader leaves framebuffer memory in RAM that the
+panel scans out by itself, so no DPU work is needed to get an image. The panel
+memory is published as an IOSurface, CoreAnimation's swaps are copied into it
+on the CPU, and a 60 Hz timer provides vsync. IOMobileFramebuffer.framework
+finds the service and asks its provider for the canvas size.
 
 --- a/iokit/conf/files.arm64
 +++ b/iokit/conf/files.arm64
-@@ -4,4 +4,13 @@
+@@ -4,6 +4,8 @@
  iokit/Kernel/IOPMrootDomain.cpp    					optional iokitcpp
  
  # SMP
 +iokit/Kernel/arm/KebabSurface.cpp                              optional iokitcpp
 +iokit/Kernel/arm/KebabFramebuffer.cpp                          optional iokitcpp
  iokit/Kernel/arm/AppleARMSMP.cpp    					optional iokitcpp
+ 
+ # NEGRONI device-tree platform (empty translation unit on other boards)
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -6,6 +6,11 @@
+ #include <pexpert/arm64/board_config.h>
+ 
+ #if defined(KEBAB)
 +
-+# NEGRONI device-tree platform (empty translation unit on other boards)
-+iokit/Kernel/arm/NegroniPlatformExpert.cpp                         optional iokitcpp
-+iokit/Kernel/arm/KebabCPU.cpp                                      optional iokitcpp
++/* Started directly from processTopLevel: no /arm-io nub publishes the
++ * display node, and the driver only needs a provider to attach to. */
++class AppleCLCD;
++extern "C" int kebab_display_start(IOService *provider);
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
+@@ -62,6 +67,9 @@
+ 		cpus->release();
+ 	}
+ 	createNubs(this, IODTFindMatchingEntries(root, kIODTExclusive, excludeList()));
 +
-+# KEBAB device-tree platform (empty translation unit on other boards)
-+iokit/Kernel/arm/KebabPlatformExpert.cpp	optional iokitcpp
++	/* Bring the panel up so IOMobileFramebuffer.framework finds it. */
++	kebab_display_start(this);
+ }
+ 
+ bool
 diff --git a/iokit/Kernel/arm/KebabSurface.h b/iokit/Kernel/arm/KebabSurface.h
 new file mode 100644
 --- /dev/null
