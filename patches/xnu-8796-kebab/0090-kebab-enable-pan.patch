@@ -1,0 +1,26 @@
+Declare PAN support in the board header, where every translation unit sees it.
+
+This macro was only ever defined by Apple's own SoC headers, so on this port
+user_access_enable() compiled to nothing and arm_init never turned PAN on, while
+SCTLR_EL1.SPAN=0 makes the CPU set PAN itself on every exception entry: each
+syscall therefore reached the copy routines with PAN set and every user store
+faulted. Declaring it here also enables the PAN initialisation in arm_init, the
+context-switch assertion in pcb.c and PSR64_PAN in the kernel CPSR.
+
+--- a/pexpert/pexpert/arm64/KEBAB.h
++++ b/pexpert/pexpert/arm64/KEBAB.h
+@@ -23,6 +23,14 @@
+ #define __ARM_ARCH__              8
+ 
+ /*
++ * SM8250 implements PAN (ARMv8.1+). Declaring it here - not in one .c file - is
++ * what makes arm_init turn PAN on at boot, pcb.c assert it across context
++ * switches, and proc_reg.h put PSR64_PAN in the kernel CPSR. Without that the
++ * kernel runs with PAN off and copyio's user_access_enable() is a no-op.
++ */
++#define __ARM_PAN_AVAILABLE__     1
++
++/*
+  * The SM8250 cores (Cortex-A77/A55) implement ARMv8.2, not ARMv8.4. The
+  * toolchain predefines __ARM_ARCH_8_4__, which pulls ARMv8.4-only instructions
+  * such as "mrs x, DIT" into the context switch; executing those traps as an

@@ -111,6 +111,52 @@ vfs_mountroot → UFS 驱动找到 userdata（229043 MiB）并发布 ufsroot0
 5. **失败必须留证据。** 早先的测试 init 在 `open` 失败后原地空转，把 errno 完全
    丢掉。现在改为逐级降级后 `exit(0)`，让内核 panic 把原因打出来。
 
+## 六之二、用户态输出打通（2026-10-26 03:53）
+
+```
+bsd_init: bsd_do_post - done
+kebab: console open
+kebab: userland alive
+```
+
+阶段 7 的最后一项验收（用户态有可见输出）达成。
+
+### 根因：PAN 从未生效
+
+`__ARM_PAN_AVAILABLE__` 只由 Apple 自家 SoC 头文件（`H13.h`、`VMAPPLE.h`）定义。
+缺了它：
+
+- `osfmk/arm/arm_init.c` 里的 PAN=1 初始化整段不编译
+- `osfmk/arm64/copyio.c::user_access_enable()` 编译成空操作
+- `proc_reg.h` 的 `PSR64_KERNEL_DEFAULT` 里没有 `PSR64_PAN`
+
+而 `SCTLR_EL1.SPAN = 0` 时，**异常进入 EL1 会由硬件把 PAN 置 1**。于是：
+
+1. 每个系统调用进入内核时 PAN 已是 1
+2. `_bcopyout` 用普通 `stp` 写用户地址 → permission fault
+3. `sleh.c::handle_kernel_abort()` → `arm_fast_fault()` 发现 PTE 可写（AF=1、AP 正常）
+   → 返回 `KERN_SUCCESS` → 提前 return → **重试同一条 stp** → 再次 fault
+4. 表现为"系统调用既不返回、也不 panic、也没有缺页日志"
+
+### 修法
+
+在**板级头文件** `pexpert/pexpert/arm64/KEBAB.h` 里声明：
+
+```c
+#define __ARM_PAN_AVAILABLE__     1
+```
+
+一处声明让 PAN 的整个生命周期（初始化、线程切换检查、copyio 开关）重新生效。
+只放在 `copyio.c` 里是不够的 —— 那样只有那一个编译单元知道 PAN 存在。
+
+### 这一段学到的
+
+- 排查时**探针位置**必须先核对代码路径（我把探针放进了 `O_CREAT` 分支，白烧一轮）
+- **"没有日志"不等于"没进那段代码"**：`arm_fast_fault` 的成功提前返回会跳过所有后续探针
+- 只在"看起来相关"的 `.c` 文件里定义平台宏，会静默漏掉别的编译单元
+- 用户态第一次能写内存后，`write()` 的 `uiomove` 才真正开始工作 —— 之前所有 `open`/`gettimeofday`
+  的挂起都是同一个原因
+
 ## 七、待办
 
 近期顺序：
