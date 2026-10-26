@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,835 @@
+@@ -0,0 +1,837 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -39,6 +39,8 @@ new file mode 100644
 +/* Declared in arm/machine_routines.h, behind a guard this build does not
 + * satisfy; the negroni port spells it out for the same reason. */
 +extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++void kebab_usb_log(const char *buf, size_t len);
 +
 +/* ---------------------------------------------------------------- registers */
 +
@@ -455,7 +457,7 @@ new file mode 100644
 +	uint16_t value = (uint16_t)(st[2] | (st[3] << 8));
 +	uint16_t length = (uint16_t)(st[6] | (st[7] << 8));
 +	uint32_t n = 0;
-+	bool ok = true, had_data_stage = false;
++	bool ok = true;
 +
 +	ud.data_in = (type & 0x80) != 0;
 +	if (ud.events < 400) {
@@ -467,7 +469,6 @@ new file mode 100644
 +		switch (req) {
 +		case 0x20:                              /* SET_LINE_CODING, 7 bytes OUT */
 +			ok = (length == 7);
-+			had_data_stage = ok;
 +			break;
 +		case 0x21:                              /* GET_LINE_CODING, 7 bytes IN */
 +			memset(data, 0, 7);
@@ -629,6 +630,7 @@ new file mode 100644
 +
 +	unsigned ep = (ev >> 1) & 0x1f;
 +	unsigned type = (ev >> 6) & 0xf;
++	unsigned status = (ev >> 12) & 0xf;
 +
 +	if (ep == EP_BULK_OUT && type == 1) {
 +		if (ud.configured) {
