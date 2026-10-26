@@ -22,7 +22,7 @@ the host can reconnect and later console output keeps arriving.
  };
  
  OSDefineMetaClassAndStructors(KebabPlatformExpert, IODTPlatformExpert);
-@@ -94,3 +96,22 @@
+@@ -94,3 +96,24 @@
  	return true;
  }
  #endif /* KEBAB */
@@ -37,8 +37,10 @@ the host can reconnect and later console output keeps arriving.
 +int
 +KebabPlatformExpert::haltRestart(unsigned int type)
 +{
-+	extern bool kebab_usb_console_ready(void);
-+	extern void kebab_usb_panic_spin(void);
++	extern "C" {
++		bool kebab_usb_console_ready(void);
++		void kebab_usb_panic_spin(void);
++	}
 +
 +	if (panic_active() && kebab_usb_console_ready()) {
 +		kebab_usb_panic_spin();          /* does not return */
