@@ -69,7 +69,14 @@ done
 command -v git >/dev/null 2>&1 || die "git not found"
 command -v "$python" >/dev/null 2>&1 || die "$python not found"
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/kebab-verify.XXXXXX") || die "cannot create a scratch directory"
+# /tmp is a quota-limited tmpfs on some hosts: writing check logs there fails with
+# exit 120 and looks like five broken checks. Prefer a directory under $HOME.
+scratch_root=${TMPDIR:-}
+if [ -z "$scratch_root" ] || ! mkdir -p "$scratch_root" 2>/dev/null; then
+	scratch_root=$HOME/.cache
+	mkdir -p "$scratch_root" || die "cannot create a scratch directory"
+fi
+tmp=$(mktemp -d "$scratch_root/kebab-verify.XXXXXX") || die "cannot create a scratch directory"
 logdir=$tmp/log
 mkdir -p "$logdir"
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
