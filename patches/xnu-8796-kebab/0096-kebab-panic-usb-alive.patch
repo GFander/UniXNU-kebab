@@ -6,7 +6,7 @@ the host can reconnect and later console output keeps arriving.
 
 --- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
 +++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
-@@ -13,6 +13,7 @@
+@@ -13,10 +13,15 @@
   * display node, and the driver only needs a provider to attach to. */
  class AppleCLCD;
  extern "C" int kebab_display_start(IOService *provider);
@@ -14,7 +14,15 @@ the host can reconnect and later console output keeps arriving.
  #include <IOKit/IOPlatformExpert.h>
  #include <IOKit/IODeviceTreeSupport.h>
  #include <IOKit/IOLib.h>
-@@ -27,6 +28,7 @@
+ 
++/* the driver is C; these have to be declared before use */
++extern "C" bool kebab_usb_console_ready(void);
++extern "C" void kebab_usb_panic_spin(void);
++
+ class KebabPlatformExpert : public IODTPlatformExpert {
+ 	OSDeclareDefaultStructors(KebabPlatformExpert);
+ 
+@@ -27,6 +32,7 @@
  	const char *excludeList(void) APPLE_KEXT_OVERRIDE;
  	bool getTargetName(char *name, int maxLength) APPLE_KEXT_OVERRIDE;
  	bool getProductName(char *name, int maxLength) APPLE_KEXT_OVERRIDE;
@@ -22,7 +30,7 @@ the host can reconnect and later console output keeps arriving.
  };
  
  OSDefineMetaClassAndStructors(KebabPlatformExpert, IODTPlatformExpert);
-@@ -94,3 +96,24 @@
+@@ -94,3 +100,21 @@
  	return true;
  }
  #endif /* KEBAB */
@@ -37,10 +45,7 @@ the host can reconnect and later console output keeps arriving.
 +int
 +KebabPlatformExpert::haltRestart(unsigned int type)
 +{
-+	extern "C" {
-+		bool kebab_usb_console_ready(void);
-+		void kebab_usb_panic_spin(void);
-+	}
++
 +
 +	if (panic_active() && kebab_usb_console_ready()) {
 +		kebab_usb_panic_spin();          /* does not return */
