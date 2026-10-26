@@ -678,3 +678,72 @@ plist 的 inode 偏移 84 为 0，真正大小在 inode 尾部偏移 128 的
   `/home/albert` 只剩约 8.4 GB。整卷解压写盘会顶到上限，P1 根卷应分阶段：
   先解出启动必需的用户态，再按需补库；不要把 4.7 GB 压缩镜像和 5.6 GB
   解压结果同时留在盘上。
+
+## SystemOS cryptex
+
+`087-86593-047.dmg` 在 BuildManifest 里是 `Cryptex1,SystemOS`。它**不是 DMG**：
+最后 512 字节全零，没有 koly、没有 BLKX、没有分区表，0x20 处直接就是 `NXSB`。
+处理它的方式和 OS 卷完全不同。
+
+### 形态
+
+| 项目 | 值 |
+| --- | --- |
+| 成员大小 | 1,097,727,251 压缩 → 2,743,074,816 |
+| 压缩方式 | **deflate**（不是 stored） |
+| 容器 | 4096 字节块 × 669,696 = 恰好等于成员大小 |
+| 容器 UUID | `07490cba83ee4f50a4153de222723455` |
+| 卷 | `SydneyUpdate20H392.D22D221SystemCryptex` |
+| 内容 | 1,094 文件 / 634 目录 / 2 符号链接 |
+
+deflate 是**一条连续流**，所以 OS 卷那种按 1 MiB 块 range 读取的做法在这里用不了：
+必须整体解压（1.09 GB 成员，9.5 秒）。解压之后块地址就是 `块号 × 4096`，可以随机访问。
+
+### 里面是什么
+
+90.9% 是**拆分的 dyld 共享缓存**：
+
+```
+dyld_shared_cache_arm64        393,216
+  + .01 … .40                  40 个分片
+  + .27/.41.dylddata
+  + .28/.42.dyldlinkedit
+  + .symbols
+= 44 个文件，2,384,232,448 字节
+```
+
+头部取自块 4405，内容为 `dyld_v1   arm64`。
+
+其余是 `/System/{DriverKit,Library/{Accounts,Caches,CoreServices,Frameworks,PrivateFrameworks}}`
+和 `/usr/lib` —— 5 个 Frameworks、17 个 PrivateFrameworks，全部是 WebKit/Safari。
+
+### 三条路径的结果
+
+| 路径 | 结果 |
+| --- | --- |
+| `System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e` | **该名字不存在**；缓存以拆分形式存在（见上）|
+| `usr/lib/libSystem.B.dylib` | **不存在**。`/usr/lib` 只有 6 个条目，OS 卷里也没有 |
+| `usr/lib/dyld` | **不在 cryptex**，在 OS 卷（922,912 字节）|
+
+### 对 P1 的结论
+
+根卷必须同时包含两块：
+
+```
+OS 卷        → /usr/lib/dyld
+SystemOS     → 挂到 /System/Cryptexes/OS，提供 44 个缓存分片
+             → 以及 WebKit/Safari 的 22 个框架
+```
+
+**libSystem 在任何地方都不是一个文件**，它由共享缓存提供。缓存没挂上，libSystem 就
+不存在 —— P1 会在第一条 libSystem 调用上失败。
+
+### 技术要点
+
+OS 卷那边卡在容器 omap 的虚拟 oid 转换上；cryptex 这边**不需要转换**：每个 fs-tree
+节点都是物理对象（`o_subtype 0xe`），扫块头就能找到叶子节点。
+
+唯一的坑是 value 基址：应当是 `block_end - voff`，而不是 `- voff - vlen`。
+用前者子节点 id 100% 落在范围内，后者只有 47%。
+
+634 个目录全部走完，正好等于卷超级块里的 `apfs_num_directories`，说明遍历是完整的。
