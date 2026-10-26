@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1069 @@
+@@ -0,0 +1,1055 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -444,49 +444,35 @@ new file mode 100644
 +void
 +kebab_usb_log(const char *buf, size_t len)
 +{
-+	uint32_t expected = 0;
-+
 +	if (!ud.running) {
 +		return;
 +	}
-+	if (!os_atomic_cmpxchg(&ud.log_busy, expected, 1u, acquire)) {
-+		return;
-+	}
++	/*
++	 * Single producer, single consumer, so no lock: this runs from the console
++	 * path, which on a single core can be preempted at any instant, and a spin
++	 * on a gate it holds is a livelock.
++	 */
 +	for (size_t i = 0; i < len; i++) {
 +		uint32_t next = (ud.log_head + 1) % LOG_RING_SIZE;
 +		if (next == ud.log_tail) {
 +			break;
 +		}
 +		ud.log_ring[ud.log_head] = buf[i];
++		__asm__ volatile ("dmb ishst" ::: "memory");
 +		ud.log_head = next;
 +	}
-+	os_atomic_store(&ud.log_busy, 0u, release);
 +}
 +
 +static uint32_t
 +ud_log_take(char *out, uint32_t max)
 +{
 +	uint32_t n = 0;
-+	uint32_t expected = 0;
 +
-+	/*
-+	 * The console path takes the same gate for every printf, so a single attempt
-+	 * here almost always loses and the ring never drains. Wait for it instead:
-+	 * the producer only holds it for a short copy.
-+	 */
-+	for (unsigned tries = 0; tries < 20000; tries++) {
-+		if (os_atomic_cmpxchg(&ud.log_busy, expected, 1u, acquire)) {
-+			break;
-+		}
-+	}
-+	if (!os_atomic_load(&ud.log_busy, acquire)) {
-+		return 0;               /* never got it */
-+	}
 +	while (n < max && ud.log_tail != ud.log_head) {
 +		out[n++] = ud.log_ring[ud.log_tail];
++		__asm__ volatile ("dmb ish" ::: "memory");
 +		ud.log_tail = (ud.log_tail + 1) % LOG_RING_SIZE;
 +	}
-+	os_atomic_store(&ud.log_busy, 0u, release);
 +	return n;
 +}
 +
