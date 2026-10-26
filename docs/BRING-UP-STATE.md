@@ -308,3 +308,117 @@ KEBAB USB: configured, notify=5 bulk_out=2 bulk_in=3
 第一次上机先看两行：`KEBAB TOUCH: wrapper QUP_HW_VER ...` 与
 `KEBAB TOUCH: ... protocol ...`；它们决定后面的输出有没有意义。若芯片没有 TCM
 回应，驱动不会启动轮询线程，而是直接打印提示。
+
+## 十、serial KDP over CDC-ACM
+
+把 USB CDC-ACM 控制台同时当作串行 KDP 的物理层：KDP 帧仍按
+`osfmk/kdp/kdp_serial.c` 的格式在同一条 bulk 字节流里传输，主机侧由
+`scripts/kdp-cdc-bridge.py` 解帧后转给 LLDB 的 UDP 端口。
+
+### 接了什么
+
+* `osfmk/arm/pal_routines.c`：`kebabkdp=1` 且 USB 控制台已配置时，
+  `pal_serial_putc_nocr()` / `pal_serial_getc()` / `pal_serial_init()` 分别改走
+  `kebab_usb_log()` / `kebab_usb_getc()` / `kebab_usb_kdp_start()`；否则原样调用
+  UART 的 `serial_putc()` / `serial_getc()` / `serial_init()`，普通日志路径不变。
+* KDP 是一帧一帧调用 `kdp_serial_out()` 的，PAL 层按终止符 `0xFB` 攒完整帧，
+  再一次性写进 USB 日志环并同步冲刷。调试器进入后事件线程不再运行，只入环
+  不冲刷会让应答留在设备里。
+* `bsd/dev/kebab_usb.c`：`kebab_usb_start()` 加了幂等保护；新增
+  `kebab_usb_kdp_start()`（提前启动并禁止主机输入回显）、
+  `kebab_usb_kdp_pending()`、`kebab_usb_log_flush()`；bulk OUT 输入环从 256
+  字节扩到 4096 字节，因为一个转义后的 KDP 帧最长约 3 KB。
+* `osfmk/kern/startup.c`：`kebabkdp=1` 时在 `kdp_init()` 之前启动 USB 控制台，
+  否则 `debug=0x14f` 的 `DB_HALT` 会在控制台存在之前就停在调试器里。
+* `osfmk/kern/debug.c`：arm64 的 panic 只有 `kdp_match_name` 明确要求时才进入
+  KDP；`kebabkdp=1` 现在也算这个请求，所以 panic 能停在调试器里等 LLDB。
+* `osfmk/kdp/kdp_udp.c`：新增 `kdp_serial_panic_reenter()`。panic 泵收到新的
+  `0xFA` 帧头时把字节流交回 KDP，复用 panic 时保存的 `kdp.saved_state`，并
+  按调试器上下文把 `not_in_kdp` 清零。
+
+KDP 字节不经过 `_cnputc`，所以不会出现在面板和内核日志里；KDP 模式下主机
+写入的字节也不会再被当成键盘输入回显成 `KEBAB USB: host said ...`。
+
+### 启动参数
+
+在现有参数后加 `kebabkdp=1`（USB 控制台本身仍要 `kebabusb=1`）：
+
+```
+debug=0x14e serial=3 kebabusb=1 kebabkdp=1
+```
+
+* `0x14e`：正常启动，USB 控制台在 `bsd_init()` 起来；之后 panic（或 NMI，
+  如果硬件能触发）进入 KDP，等主机连接。
+* `0x14f`：多了 `DB_HALT`，`kdp_init()` 会在启动时直接停在
+  “Waiting for remote debugger connection.”；此时 USB 控制台已由
+  `kernel_bootstrap` 提前拉起。第一次上机建议先用这个参数验证连接。
+* 不要加 `0x200`（`DB_KDP_GETC_ENA`）：它会让键盘轮询和 KDP 抢同一个字节流。
+* `serial=3` 保留原来的串口控制台位；`kebabkdp` 未设置时 PAL 仍走 UART，
+  正常日志和 panic 报告路径不变。
+
+### 主机步骤
+
+```
+python3 scripts/kdp-cdc-bridge.py --list-ports
+python3 scripts/kdp-cdc-bridge.py /dev/ttyACM0 --baud 115200 --udp-port 41139 --verbose
+```
+
+Windows 上是 `COM7` 之类的名字：
+
+```
+python scripts\kdp-cdc-bridge.py COM7 --verbose
+```
+
+看到 `KDP CDC-ACM bridge` 和 `waiting for the debugger` 后，在另一个终端：
+
+```
+lldb
+(lldb) kdp-remote 127.0.0.1:41139
+```
+
+`--verbose` 会逐帧打印内层 Ethernet/IP/UDP/KDP 摘要；连接成功后应先看到
+`KDP_CONNECT`，随后是 `KDP_READREGS`、`KDP_READMEM64` 等请求。
+
+### 帧格式（与 `osfmk/kdp/kdp_serial.c` 一致）
+
+* 定界：`START=0xFA`、`END=0xFB`、`ESC=0xFE`。
+* 转义：`START`、`END`、`ESC` 和 `'\n'` 写成 `ESC` 后跟原字节的按位取反。
+* 一帧 = `START` + 转义后的 4 字节小端 CRC32 + `START` + 转义后的内层包 +
+  `END`；CRC 是 zlib 多项式、初值 0，只覆盖内层包。
+* 内层包最大 1518 字节，布局是 Ethernet(14) + IPv4(20) + UDP(8) + KDP 头；
+  KDP 的 UDP 目的端口固定 41139（`KDP_REMOTE_PORT`）。LLDB 发给桥的每个 UDP
+  数据报就是这一整个内层帧，桥不改写它。
+* 日志文本和 KDP 帧共用 bulk IN 字节流；桥只认 `START` 开头且 CRC 正确的帧，
+  帧外文本直接跳过，因此日志照常输出。
+* 转义后的帧最长约 3 KB，设备端输入环是 4096 字节；输出仍走 16 KiB 日志环，
+  panic 时按 511 字节一块同步冲刷。
+
+### 本轮验证
+
+* 79 个补丁按文件名顺序应用到 `xnu-8796.141.3`（`1b191cb`）干净通过：**79/79**。
+* `~/kebab-build/build-local.sh` 同一套步骤在构建机产出
+  `build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab`，
+  **17,065,976 字节（16 MiB）**；符号表里有 `kebab_usb_getc`、
+  `kebab_usb_log_flush`、`kebab_usb_kdp_start`、`kebab_usb_kdp_pending`、
+  `kebab_usb_kdp_enabled` 和 `kdp_serial_panic_reenter`。
+* `python3 scripts/kdp-cdc-bridge.py --selftest`：**16/16 passed**，不打开任何
+  串口，覆盖 CRC 向量、转义、分块解析、日志文本混流、坏 CRC/截断/超长帧、
+  双向 UDP 转发。
+
+### 还没有验证的部分
+
+* **没有手机可接**：LLDB 的 `kdp-remote` 握手、读寄存器/内存、continue 全部
+  没有在真机上跑过；目前只有编译和主机端自测。
+* `debug=0x14f` 的早期启动路径：`kernel_bootstrap` 在 `kdp_init()` 前调用
+  `kebab_usb_start()`，依赖 `kmem_alloc()`、`kernel_thread_start()` 在该上下文
+  可用。这是正常线程上下文，但尚未上机确认；USB 枚举与 KDP 等待之间也可能
+  有时序竞争。
+* panic 后重连：`kdp_serial_panic_reenter()` 复用 panic trap 的
+  `kdp.saved_state`，寄存器应指向 panic 现场；LLDB 是否接受这次第二次会话、
+  断点和单步是否可靠，未验证。
+* 吞吐：CDC-ACM 实际是 USB 全速/高速，`--baud` 只是主机侧行速率，设备端
+  `SET_LINE_CODING` 被忽略；大块内存读写可能触发 KDP 超时重传，未测。
+* Windows 串口后端只做了静态检查和端口枚举，没有在真实 CDC-ACM 上打开过；
+  POSIX 后端同样只做了语法检查与自测。
+* 如果主机要求 DTR/RTS 才发数据，设备端 CDC 控制请求处理能否满足所有主机
+  组合，未验证。

@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1463 @@
+@@ -0,0 +1,1571 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -44,6 +44,10 @@ new file mode 100644
 +extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +
 +void kebab_usb_log(const char *buf, size_t len);
++void kebab_usb_log_flush(void);
++bool kebab_usb_kdp_enabled(void);
++void kebab_usb_kdp_start(void);
++bool kebab_usb_kdp_pending(void);
 +static void ud_pump_log(void);
 +static uint32_t ud_log_take(char *out, uint32_t max);
 +
@@ -172,6 +176,7 @@ new file mode 100644
 +	bool        data_in;
 +	bool        configured;
 +	bool        running;
++	bool        start_attempted;
 +	bool        bulk_in_busy;
 +	bool        ep0_status3;
 +	bool        console_input;
@@ -188,7 +193,13 @@ new file mode 100644
 +	lck_mtx_t  *lock;
 +	uint32_t    in_head;
 +	uint32_t    in_tail;
-+	char        in_ring[256];
++	/*
++	 * A serialized KDP frame is up to about 3 KB (a 1518-byte inner packet
++	 * plus escaping and the CRC prefix), and the host's bulk-OUT writes can
++	 * arrive in 512-byte transfers.  256 bytes was enough for keystrokes but
++	 * would drop the middle of a debugger request; keep a whole frame here.
++	 */
++	char        in_ring[4096];
 +	uint32_t    log_head;
 +	uint32_t    log_tail;
 +	uint32_t    log_busy;
@@ -611,6 +622,30 @@ new file mode 100644
 +		ud_flush_from_panic();
 +		os_atomic_store(&ud.panic_owner, 0u, release);
 +	}
++}
++
++/*
++ * Drain the ring now instead of leaving it to the event thread.
++ *
++ * KDP runs with every other CPU stopped: a debugger entry parks them, and a
++ * panic stops the event thread outright.  A reply queued by kebab_usb_log()
++ * would therefore never leave the device.  The KDP path buffers a whole frame
++ * and calls this once per frame, so the cost is one synchronous drain per
++ * packet instead of one per byte; normal console output is untouched.
++ */
++void
++kebab_usb_log_flush(void)
++{
++	uint32_t expect = 0;
++
++	if (!ud.running || !ud.configured) {
++		return;
++	}
++	if (!os_atomic_cmpxchg(&ud.panic_owner, expect, 1u, acquire)) {
++		return;         /* a console write already owns the flush */
++	}
++	ud_flush_from_panic();
++	os_atomic_store(&ud.panic_owner, 0u, release);
 +}
 +
 +static uint32_t
@@ -1088,9 +1123,19 @@ new file mode 100644
 +	uint32_t enabled = 0;
 +	thread_t thread;
 +
++	/*
++	 * Called early from kernel_bootstrap when KDP over this port is requested,
++	 * and again from bsd_init for the ordinary console.  Only the first caller
++	 * that gets past the boot argument may touch the controller; a second full
++	 * bring-up would leak the DMA page and start a second event thread.
++	 */
++	if (ud.running || ud.start_attempted) {
++		return;
++	}
 +	if (!PE_parse_boot_argn("kebabusb", &enabled, sizeof(enabled)) || enabled == 0) {
 +		return;
 +	}
++	ud.start_attempted = true;
 +	{
 +		uint32_t hook = 0;
 +		ud.panic_hook = PE_parse_boot_argn("kebabpanic", &hook, sizeof(hook)) && hook != 0;
@@ -1318,6 +1363,56 @@ new file mode 100644
 +	return ud.running && ud.configured;
 +}
 +
++/*
++ * KDP over this port is opt-in: kebabusb=1 gives a console, kebabkdp=1 says
++ * the debugger owns its input and output as well.  Parsed once; this is
++ * reachable from the panic path, where PE_parse_boot_argn() is still safe but
++ * not free.
++ */
++bool
++kebab_usb_kdp_enabled(void)
++{
++	static int enabled = -1;
++
++	if (enabled < 0) {
++		uint32_t value = 0;
++
++		enabled = (PE_parse_boot_argn("kebabkdp", &value,
++		    sizeof(value)) && value != 0);
++	}
++	return enabled != 0;
++}
++
++/*
++ * Bring the port up before kdp_init() can trap into the debugger, and stop
++ * host input from being echoed into the visible log: once KDP is selected
++ * those bytes are frames, not keystrokes.
++ */
++void
++kebab_usb_kdp_start(void)
++{
++	if (!kebab_usb_kdp_enabled()) {
++		return;
++	}
++	kebab_usb_start();
++	if (ud.running) {
++		ud.console_input = true;
++	}
++}
++
++/*
++ * True when a host byte is waiting and it looks like the start of a serial KDP
++ * frame.  The panic pump uses this to decide whether to hand the stream back
++ * to KDP; console input cannot start with 0xfa because the serializer escapes
++ * that byte everywhere inside a frame.
++ */
++bool
++kebab_usb_kdp_pending(void)
++{
++	return ud.running && ud.configured && ud.in_head != ud.in_tail &&
++	    (unsigned char)ud.in_ring[ud.in_tail] == 0xfa;
++}
++
 +/* ---------------------------------------------------------- EP0 probe I/O */
 +
 +#define EP0_REPORT_SIZE 2048
@@ -1445,6 +1540,19 @@ new file mode 100644
 +		if (ud.log_head != ud.log_tail) {
 +			ud.bulk_in_busy = false;
 +			ud_pump_log();
++		}
++		/*
++		 * A debugger may reconnect after the panic has parked here.  Do not
++		 * leave its CONNECT frame in the input ring: hand the stream back to
++		 * KDP, which still has the saved state from the panic trap, so the
++		 * new session can read memory and registers.  With KDP not selected
++		 * this is one boot-argument check and the pump behaves as before.
++		 */
++		if (kebab_usb_kdp_enabled() && kebab_usb_kdp_pending()) {
++#if CONFIG_SERIAL_KDP
++			extern boolean_t kdp_serial_panic_reenter(void);
++			(void)kdp_serial_panic_reenter();
++#endif
 +		}
 +		/*
 +		 * Once the ring is empty the readings go out on their own transfer
