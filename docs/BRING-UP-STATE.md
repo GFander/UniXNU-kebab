@@ -215,3 +215,34 @@ KEBAB USB: configured, notify=5 bulk_out=2 bulk_in=3
 
 `patches/xnu-8796-kebab/0091-kebab-debug-probes.patch` 是**纯脚手架**：它只加
 `printf`，不改变任何行为。移植进入稳定期后应当直接删除该补丁，其余补丁不受影响。
+
+## 八、USB 调试串口与 panic 捕获（本轮）
+
+目标是彻底摆脱"崩溃只能拍照"。结论：**正常日志与 panic 报告都已经能从 USB 读到**，
+设备模式串口成为日常调试通道。
+
+### 走通的部分
+
+* DWC3 设备模式 + CDC-ACM：枚举、控制请求、bulk 双向全部正常，Windows 与 macOS 双主机验证
+* 内核日志经 16 KiB 环形缓冲流到主机
+* **panic 报告完整送出约 8.9 KB**，含栈回溯与 Stackshot
+* 显示驱动 `AppleCLCD` 启动，发布 IOSurface
+
+### 关键教训（按发现顺序）
+
+| 现象 | 根因 |
+| --- | --- |
+| 每个 STARTTRANSFER 返回 status 1 | 缺 `DEPSTARTCFG`，控制器还没建立端点资源 |
+| 提交后设备进 EDL | **TRB 地址高低位传反**（`DEPCMDPAR0` 是高半，见 `drivers/usb/dwc3/ep0.c`）|
+| 复位后第一个传输失败 | 总线复位会丢弃端点配置，必须重建 EP0 |
+| 控制传输的状态阶段永远不完成 | 必须等 `XferNotReady(status=2)` 再提交状态 TRB |
+| `SET_LINE_CODING` 卡住主机重试 | OUT 传输容量要按最大包长对齐（64），不能只给 7 字节 |
+| 数据端点全死 | bulk 缓冲要按包长（512）对齐，`0xB00` 只对 64 对齐 |
+| 端口能开但收不到日志 | 日志钩子被写在 `#if !defined(KEBAB)` 里，编译器整个丢掉 |
+| panic 文字一个字节都没有 | 钩子挂在 `_cnputs`，而 panic 走 `_cnputc` 的无缓冲通路 |
+
+### 仍然开放
+
+* panic 后重新连接：`haltRestart` 钩子生效，泵循环在跑，但主机无法重新配置端口
+* KDP over CDC-ACM 交互式调试器
+* `debug=0x14f` 未能停在调试器，需要运行时探针确认 `panicDebugging` 与 panic options
