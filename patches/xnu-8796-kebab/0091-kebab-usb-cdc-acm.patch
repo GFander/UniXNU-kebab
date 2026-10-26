@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1036 @@
+@@ -0,0 +1,1046 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -550,7 +550,17 @@ new file mode 100644
 +		case 0x22:                              /* SET_CONTROL_LINE_STATE */
 +			break;
 +		default:
-+			ok = false;
++			/*
++			 * usbser also probes SEND_BREAK, SET/GET_COMM_FEATURE and friends.
++			 * Stalling them makes SetCommState fail, and none of them mean
++			 * anything for a log pipe, so acknowledge and carry on.
++			 */
++			printf("KEBAB USB: class request %02x/%02x ignored\n", type, req);
++			if (ud.data_in && length > 0) {
++				uint32_t give = (length < 16) ? length : 16;
++				memset(data, 0, give);
++				n = give;
++			}
 +			break;
 +		}
 +	} else if ((type & 0x60) != 0) {                /* vendor */
