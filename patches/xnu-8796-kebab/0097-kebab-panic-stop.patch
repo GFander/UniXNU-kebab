@@ -1,0 +1,51 @@
+Stop a panic in a loop that can still be talked to.
+
+CSR policy comes from /chosen/asmb/lp-sip0, which this board does not have, so
+csr_check() starts restrictive, panicDebugging stayed false, and every panic
+asked for a reboot. This is a development port whose debugger is the console we
+bring up ourselves, so the restriction is lifted.
+
+panic_spin_forever() then hands over to the USB poll loop instead of sitting in
+WFE with the controller orphaned, which is what made the host lose the port the
+moment the panic report ended.
+
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -366,6 +366,15 @@
+ kernel_debugging_restricted(void)
+ {
+ #if XNU_TARGET_OS_OSX
++#if defined(KEBAB) && defined(DEVELOPMENT)
++	/*
++	 * The board has no /chosen/asmb/lp-sip0, so csr_check() starts restrictive and
++	 * would clear panicDebugging: every panic then asked for a reboot instead of
++	 * stopping. This is a development port whose only debugger is the console we
++	 * bring up ourselves, so the restriction does not apply.
++	 */
++	return FALSE;
++#endif
+ #if CONFIG_CSR
+ 	if (csr_check(CSR_ALLOW_KERNEL_DEBUGGER) != 0) {
+ 		return TRUE;
+@@ -1158,6 +1167,21 @@
+ void
+ panic_spin_forever(void)
+ {
++#if defined(KEBAB)
++	{
++		/*
++		 * A WFE loop stops the only thing still able to talk to the host, so the
++		 * port dies with the machine. Keep servicing the controller instead: the
++		 * panic report is already out by now, and the host can reconnect and read
++		 * whatever the terminal still prints.
++		 */
++		extern void kebab_usb_panic_spin(void) __dead2;
++		extern bool kebab_usb_console_ready(void);
++		if (kebab_usb_console_ready()) {
++			kebab_usb_panic_spin();
++		}
++	}
++#endif
+ 	for (;;) {
+ #if defined(__arm__) || defined(__arm64__)
+ 		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
