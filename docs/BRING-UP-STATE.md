@@ -1073,3 +1073,233 @@ KEBAB TOUCH: queue selftest: 64 slots, 192 pushed, 128 dropped without a reader,
 rm -f "$HOME/kebab-build/dxb/build/xnu.obj/kernel.development.kebab"
 cd "$HOME/kebab-build" && ./build-local.sh
 ```
+
+## 十四、共享缓存的映射计划
+
+本节做 P1 的前一半：内核能解析拆分 dyld 共享缓存、按 UUID 找齐 44 个文件、
+校验并生成共享区映射计划；真正的映射放在第二个启动开关后面。本节不包含
+dyld 本身，也不包含 slide/重定位。所有结论来自代码、host checker 和编译，
+**没有真机启动日志**。
+
+### 1. 代码结构
+
+新增两个文件：
+
+| 文件 | 作用 |
+| --- | --- |
+| `bsd/kern/kebab_dyldcache.h` | 两个入口：`kebab_dsc_boot()`（`bsd_init`）和 `kebab_dsc_exec_hook()`（第一次 exec）|
+| `bsd/kern/kebab_dyldcache.c` | 头解析、目录扫描、UUID 解析、计划、映射 |
+
+接入点：
+
+* `bsd/conf/files` 增加 `bsd/kern/kebab_dyldcache.c standard`。
+* `bsd/kern/bsd_init.c` 在根卷挂好、静态 trust cache 加载之后，
+  `load_init_program()` 之前调用 `kebab_dsc_boot()`。
+* `bsd/kern/kern_exec.c` 在 `exec_prefault_data()` 之后、`vm_map_switch(old_map)`
+  之前调用 `kebab_dsc_exec_hook(p)`；此时新地址空间和它的 shared region
+  已经是 current map。
+* 两个文件整体包在 `#if defined(KEBAB)` 里，非 KEBAB 构建不编译任何内容。
+
+内核里的结构（偏移用 `offsetof()` 静态断言固定，不依赖编译器布局）：
+
+| 结构 | 大小 | 关键字段 |
+| --- | ---: | --- |
+| `struct kebab_dsc_header` | 456 | `magic[16]`、`mappingOffset/Count`、`codeSignatureOffset/Size`、`uuid`、`cacheType`、`imagesTextOffset/Count`、`platform`、`formatVersion`、`sharedRegionStart/Size`、`maxSlide`、`mappingWithSlideOffset/Count`、`subCacheArrayOffset/Count`、`symbolFileUUID`、`imagesOffset/Count` |
+| `struct kebab_dsc_mapping_info` | 32 | `address`、`size`、`fileOffset`、`maxProt`、`initProt` |
+| `struct kebab_dsc_subcache_entry` | 56 | `uuid[16]`、`cacheVMOffset`、`fileSuffix[32]` |
+| `struct kebab_dsc_plan` | — | 目录、region、文件数/映射数、总映射字节、最高结束地址、`.symbols` 信息、`1 + 64` 个文件槽 |
+
+`imagesOffset/imagesCount` 在 448/452，不是头部的 24/28；24/28 是
+`imagesOffsetOld/imagesCountOld`，在 44 个文件里都是 0。`subCacheArrayOffset`
+在 392，`symbolFileUUID` 在 400。这些值和 `dyld_cache_format.h` 一致，
+`bsd/kern/kebab_dyldcache.c` 的 `static_assert` 会逐项检查。
+
+### 2. 校验规则
+
+主缓存和每个子缓存都走同一套检查；任一失败都打印文件名、字段和实际值，
+然后返回错误，不生成计划：
+
+1. `magic` 必须是 16 字节 `dyld_v1   arm64`（末尾 NUL）。
+2. `formatVersion` 的低 8 位必须是 0。
+3. `cacheType` 必须是 2（multi-cache）。
+4. `platform` 必须是 2（iOS）。
+5. `imagesOffset + imagesCount*32` 必须等于 `imagesTextOffset`。
+6. `subCacheArrayOffset + subCacheArrayCount*56` 必须小于等于
+   `codeSignatureOffset`。
+7. `codeSignatureOffset + codeSignatureSize` 必须在文件长度内；
+   `imagesTextOffset + imagesTextCount*32` 也必须在文件长度内。
+8. `mappingCount` 必须在 1..8；32 字节映射表必须在文件长度内。
+9. 有 `mappingWithSlideCount` 时，56 字节表必须在文件内，且数量必须等于
+   `mappingCount`（44 个文件都满足）。
+10. `sharedRegionStart`/`sharedRegionSize` 必须非零、16 KiB 对齐、加法不
+    溢出。
+11. 子缓存的 `sharedRegionStart` 必须等于
+    `sharedRegionStart + cacheVMOffset`；它的第一条映射地址也必须等于这个值。
+12. 每条映射的地址和大小必须 16 KiB 对齐，范围必须在共享区内；文件映射的
+    `fileOffset + size` 必须在文件长度内。
+13. `initProt`/`maxProt` 只允许 r/w/x（以及 zero-fill 标志）；不认识的位
+    一律拒绝。
+14. 42 个 `subCacheArray` 条目必须全部按 UUID 找到文件；重复 UUID 是错误，
+    找不到的文件会逐个打印（不会静默跳过）。
+15. 必须各有 2 个 `.dylddata` 和 2 个 `.dyldlinkedit`。少一个就意味着
+    `__DATA`/`__DATA_CONST` 或 `__LINKEDIT` 缺一块，dyld 走到第一个 GOT
+    就会 fault。
+
+`.symbols` 用主头的 `symbolFileUUID` 找，找到后只报告名字、大小和 UUID，
+**不进计划、不映射**。44 个文件里它是 592,101,376 字节，只用于符号化。
+
+### 3. 解析和计划
+
+`kebab_dsc_build_plan()` 的步骤：
+
+1. 打开目录下的主缓存 `dyld_shared_cache_arm64`，读 456 字节头，校验。
+2. 读主头里的 32 字节映射表（1 条：`0x180000000`，`0x5c000`，r-x）。
+3. 读 `subCacheArray`（42 条，每条 56 字节）。
+4. 用 `VNOP_READDIR` 扫目录，只收 `dyld_shared_cache_arm64*` 的普通文件；
+   逐个读 456 字节头，按头里的 `uuid` 建索引。
+5. 对 42 个条目逐个按 UUID 匹配，校验子缓存头、`sharedRegionStart`、第一条
+   映射地址和每条映射，然后把映射表转换成
+   `struct shared_file_mapping_slide_np`（slide 字段填 0）。
+6. 统计映射数、总字节、最高结束地址；核对 `.dylddata`/`.dyldlinkedit` 数量；
+   按 `symbolFileUUID` 找 `.symbols`。
+
+计划规则：
+
+* 主缓存放在 `sharedRegionStart`，它自己的映射地址就是 `0x180000000`。
+* 每个子缓存的第一条映射放在 `sharedRegionStart + cacheVMOffset`；后面的
+  映射用子缓存头里的绝对地址。保护位来自子缓存自己的 32 字节映射表，
+  `initProt`/`maxProt` 原样保留。
+* `.symbols` 不映射。
+
+真实 44 个文件的结果：
+
+| 项 | 值 |
+| --- | --- |
+| 要映射的文件 | 43（主缓存 + 42 个子缓存）|
+| 映射条目 | 51（38 个编号分片各 1 条；4 个数据文件共 12 条；主缓存 1 条）|
+| 共享区 | `0x180000000` + `0xaade8000`，结束 `0x22ade8000` |
+| 总映射字节 | `0xa2de4000`（2,732,474,368）|
+| 最高映射结束 | `0x22ade4000`，距共享区末尾 `0x4000` |
+| 未映射 | `dyld_shared_cache_arm64.symbols`，592,101,376 字节 |
+
+编号分片 `.01`–`.40` 都是 1 条 r-x 映射；两个 `.dylddata` 各 4 条
+（头页 r-x、`__DATA_CONST` init r--/max rw、`__DATA` rw、一条 r--）；
+两个 `.dyldlinkedit` 各 2 条（头页 r-x、`__LINKEDIT` r--）。`.01` 的
+`0x18005c000` 正好接在主缓存的 `0x5c000` 后面，`.42.dyldlinkedit` 的
+最后一条映射结束在 `0x22ade4000`。
+
+### 4. 已实现与 dry-run
+
+* **已实现**：头解析、目录扫描、42/42 UUID 解析、所有校验、计划生成、
+  逐文件/逐映射日志、`.symbols` 排除、`.dylddata`/`.dyldlinkedit` 强制检查。
+* **默认是 dry-run**：`kebab_dsc=<目录>`（或 `kebab_dsc=1` 用
+  `/System/Library/Caches/com.apple.dyld`）只解析、校验、打印计划，不映射。
+* **真实映射在第二个开关后面**：`kebab_dsc_map=1`。映射用
+  `vm_shared_region_map_file()`，也就是
+  `shared_region_map_and_slide_2_np()` 背后的同一个原语。
+* **为什么不在 bsd_init 映射**：`bsd_init` 的 current task 是 kernel task，
+  没有 shared region。`kebab_dsc_boot()` 会明确打印
+  `no shared region at boot (kernel task); deferred to first exec (ENODEV)`，
+  不会假装映射成功。真正的映射发生在 pid 1 第一次 exec 的
+  `kebab_dsc_exec_hook()`：此时 `vm_map_exec()` 已经建好 shared region，
+  且新 map 是 current map。
+* **映射前检查**：如果 shared region 已经非空（例如 dyld 已经自己映射过），
+  打印 `EEXIST` 并原样保留，不覆盖。任何 `vnode_lookup`、UUID/大小变化、
+  `ubc_getobject` 或 `vm_shared_region_map_file()` 失败都会打印 errno，
+  并把 `shared cache NOT mapped` 写进日志。
+* **没有实现**：slide/重定位。计划里的 `sms_max_prot` 不带
+  `VM_PROT_SLIDE`，`sms_slide_start/size` 为 0；`mappingWithSlide` 表只校验
+  数量，不消费。缓存按 unslid、slide=0 映射到 `0x180000000`。
+* **没有真机验证**：本节所有启动行为都是代码路径，没有一次在 OnePlus 8T
+  上带 3.3 GB 缓存启动过。
+
+### 5. 启动参数
+
+| 参数 | 作用 |
+| --- | --- |
+| `kebab_dsc=<绝对目录>` | 解析并打印计划（dry-run）|
+| `kebab_dsc=1` | 同上，目录固定为 `/System/Library/Caches/com.apple.dyld` |
+| `kebab_dsc_map=1` | 在计划通过后，第一次 exec 时真正映射 |
+| `kebab_cs=8`（或 `15`）| 以后 dyld 自己走 `shared_region_map_and_slide_2_np()` 时，放行未封存根卷上的共享缓存；内核直接映射这条路径不经过该 SIP 检查 |
+
+不给 `kebab_dsc` 时整个模块不运行，和没有这个补丁一样。
+
+### 6. 离线校验
+
+`scripts/check-shared-cache.py` 是内核解析/计划逻辑的 host 版本：同样的
+字段偏移、同样的 15 条校验、同样按 UUID 扫目录、同样的计划输出。它只读
+每个文件的前 4 KiB（主缓存多读到 `subCacheArray` 末尾），不读 3.3 GB。
+
+在真实提取目录上：
+
+```sh
+python3 scripts/check-shared-cache.py ~/ios-userland/cryptex-cache
+```
+
+结果：42/42 子缓存按 UUID 解析，`dylddata=2`、`dyldlinkedit=2`，
+`.symbols` 找到但不映射，43 个文件 / 51 条映射 / `0xa2de4000` 字节，
+最高结束 `0x22ade4000`，共享区剩余 `0x4000`。完整输出见本节末尾。
+
+### 7. 到 dyld 能用还差什么
+
+1. **缓存要真的在根卷上**：43 个文件共约 2.7 GB 映射量，磁盘上 44 个文件
+   共 3,330,359,296 字节。现在的根镜像是 64 MiB，放不下；要么扩根镜像，
+   要么把缓存放到另一个可读卷并把 `kebab_dsc` 指过去。
+2. **真机跑一次 dry-run**：`kebab_dsc=/...` 加普通启动参数，确认
+   HFS+ 的 `VNOP_READDIR` 能列出 44 个文件、42/42 解析、计划数字和 host
+   checker 一致。这是最便宜的一步，不需要 `kebab_dsc_map=1`。
+3. **真机跑一次映射**：加 `kebab_dsc_map=1`，预期日志是 boot 阶段
+   `ENODEV`、第一次 exec `mapping complete`；然后用一个最小用户程序调
+   `shared_region_check_np()`，应返回 `0x180000000`，并在该地址读到
+   uuid `8f970452c9e33e88b114feb1864bc9e0`。
+4. **slide/重定位**：现在固定 slide=0。若 dyld 需要非零 slide，下一阶段
+   要消费 `mappingWithSlideOffset/Count` 里的 56 字节表，设置
+   `VM_PROT_SLIDE` 并正确填 `sms_slide_start/size`；否则 dyld 只能把缓存
+   当 unslid 用。
+5. **dyld 本身**：`/usr/lib/dyld` 仍是 OS 卷里的 922,912 字节文件，不在这
+   44 个里；`libSystem.B.dylib` 才来自缓存。P1 只是让内核先把缓存放好，
+   还没有把 dyld、launchd 和真正的用户态接上。
+6. **签名策略**：内核直接 `vm_shared_region_map_file()` 的路径不经过
+   `shared_region_map_and_slide_setup()` 的 root/SF_RESTRICTED 检查；这是
+   `kebab_dsc_map=1` 的内核专属路径。将来 dyld 自己调 syscall 时仍需要
+   `kebab_cs=8`，否则未封存根卷会被 SIP 检查拒绝。
+7. **`.symbols`**：不映射不影响执行；符号化/崩溃解析仍需要它在盘上。
+
+### 8. 应用与构建结果
+
+* 82 个 kebab 补丁（原 81 + `0102-kebab-dyld-shared-cache.patch`）按文件名
+  顺序应用到 `xnu-8796.141.3`（`1b191cb`）的干净索引：**82/82** 成功
+  （`git apply --cached`，无 FAILED）。
+* 构建：`~/kebab-build/build.sh`（`MACHINE_CONFIG=KEBAB`、
+  `KERNEL_CONFIG=DEVELOPMENT`，macOS 13.5 + `KDK_13.5_22G74`）。
+* 产物：`build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab`，
+  **17,068,976 字节（16.28 MiB）**，Mach-O 64-bit arm64，
+  SHA-256 `86697207f7a4af603d055c9b8f6506a71d635c26206d13ad78a71681de233929`。
+* `kebab_dyldcache.c` 本身 **0 warning**（编译日志里
+  `kebab_dyldcache.c:<行>:<列>: warning` 为 0 条）；全树 3,282 条 warning
+  都是既有文件/头文件的，和本次新增文件无关。
+* 内核字符串里有 `KEBAB DSC: dry run: ...`、`KEBAB DSC: plan ...`、
+  `KEBAB DSC: mapping complete; ...` 等，确认代码进了镜像。
+
+host checker 的完整输出（106 行，节选头部和尾部）：
+
+```text
+KEBAB DSC: host checker: /home/albert/ios-userland/cryptex-cache
+KEBAB DSC: main dyld_shared_cache_arm64: 393216 bytes, uuid 8f970452c9e33e88b114feb1864bc9e0
+KEBAB DSC: validate magic=b'dyld_v1   arm64\x00' formatVersion=0 cacheType=2 platform=2
+KEBAB DSC: validate images 624 + 2710*32 = 87344 == imagesTextOffset 87344
+KEBAB DSC: validate subcache array 174064 + 42*56 = 176416 <= codeSignatureOffset 376832
+KEBAB DSC: region start=0x180000000 size=0xaade8000 end=0x22ade8000 maxSlide=0x55214000
+KEBAB DSC: resolved 42/42 subcaches by uuid; dylddata=2 dyldlinkedit=2
+KEBAB DSC: scanned 44 cache files in directory
+KEBAB DSC: symbols dyld_shared_cache_arm64.symbols: 592101376 bytes, uuid 51ccba451fc23f19aed047050bdf009a, NOT mapped
+KEBAB DSC: plan 43 files / 51 mappings / 0xa2de4000 bytes (2732474368)
+KEBAB DSC: highest mapped end 0x22ade4000, region slack 0x4000
+KEBAB DSC: file 00 main dyld_shared_cache_arm64                size=0x60000     mapped=0x5c000     vmOffset=0x0          uuid=8f970452c9e33e88b114feb1864bc9e0
+KEBAB DSC:      map 0x180000000 size=0x5c000     file=0x0         init=r-x max=r-x
+...
+KEBAB DSC: file 42 sub  dyld_shared_cache_arm64.42.dyldlinkedit size=0x13ea0000  mapped=0x13e00000  vmOffset=0x96fe4000   uuid=68ac84bcf0723a7e9806c21472133857
+KEBAB DSC:      map 0x216fe4000 size=0x5c000     file=0x0         init=r-x max=r-x
+KEBAB DSC:      map 0x217040000 size=0x13da4000  file=0x5c000     init=r-- max=r--
+KEBAB DSC: dry run: validated only; the kernel maps nothing unless kebab_dsc_map=1
+```

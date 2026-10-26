@@ -1,0 +1,1442 @@
+feat(kebab): parse and map the split dyld shared cache
+
+The iOS 16 userland ships a multi-cache dyld shared cache: a 393 KiB main
+cache that only carries the header, the 2,710 image records and the subcache
+table, plus 42 subcaches holding all executable code and data.  dyld cannot
+start from the old monolithic-cache assumptions, and nothing in the kernel
+currently locates or maps the split layout.
+
+Add a KEBAB-only module that reads the cache directory, validates the dyld
+header (magic, formatVersion, cacheType, platform, the imagesOffset +
+imagesCount*32 == imagesTextOffset identity, and the subCacheArray bound),
+resolves all 42 subcaches by the UUID in their own headers, and builds the
+VM mapping plan from each subcache's own mapping table.  The plan puts the
+main cache at sharedRegionStart and each subcache at sharedRegionStart +
+cacheVMOffset, keeps initProt/maxProt per mapping, counts the two .dylddata
+and two .dyldlinkedit files as mandatory, and reports .symbols without
+mapping it.
+
+The default is a dry run: kebab_dsc=<dir> (or kebab_dsc=1) parses and logs
+the plan at bsd_init and maps nothing.  kebab_dsc_map=1 is the second
+switch.  Mapping uses vm_shared_region_map_file(), the primitive behind
+shared_region_map_and_slide_2_np(), and therefore cannot run at bsd_init:
+the kernel task has no shared region.  It is deferred to the first exec,
+where vm_map_exec() has created one, and runs for pid 1 only.  If the region
+is missing or already populated the module logs the exact errno and leaves
+the cache unmapped; it never reports a mapping that did not happen.
+
+Also add scripts/check-shared-cache.py, the host-side twin of the parser and
+plan builder, so the kernel rules and the real 44 files can be compared
+without hardware.  On the extracted iOS 16.7.16 cache it resolves 42/42
+subcaches, produces 43 files / 51 mappings / 0xa2de4000 mapped bytes, and
+leaves 0x4000 of slack at the top of the 0xaade8000-byte region.
+
+Builds as DEVELOPMENT/KEBAB for arm64; no warnings from the new file.
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 606937aeb45815801bf9f4cadbcf77e69f6bc8b7..8c8da2e60aa8f5be0717eb4eda7c285dc017a7fe 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -386,6 +386,7 @@ bsd/kern/kern_crossarch.c		standard
+ bsd/kern/kern_cs.c			standard
+ bsd/kern/kebab_amfi.c			standard
+ bsd/kern/kebab_codesign.c		standard
++bsd/kern/kebab_dyldcache.c		standard
+ bsd/kern/kern_csr.c			optional config_csr
+ bsd/kern/kern_debug.c			standard
+ bsd/kern/kern_symfile.c			standard
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index 0a37a3eb6024f77ba9cbf8e6fa2e01d895365049..ba033705f13a4057f2a157760afc772ecea15017 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -103,6 +103,7 @@
+ 
+ #if defined(KEBAB)
+ #include "kebab_codesign.h"
++#include "kebab_dyldcache.h"
+ #endif /* KEBAB */
+ 
+ #include <kern/startup.h>
+@@ -1160,6 +1161,14 @@ bsdinit_task(void)
+ 	 * not stop the boot.
+ 	 */
+ 	kebab_cs_trustcache_load();
++
++	/*
++	 * Parse and validate the split dyld shared cache, log the mapping
++	 * plan, and remember it for the first exec.  Inert unless the boot
++	 * command line contains kebab_dsc; mapping additionally needs
++	 * kebab_dsc_map=1.
++	 */
++	kebab_dsc_boot();
+ #endif /* KEBAB */
+ 
+ 	load_init_program(p);
+diff --git a/bsd/kern/kebab_dyldcache.c b/bsd/kern/kebab_dyldcache.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..35395824a5a555086b4d0bc8efe7d6e6e7285b77
+--- /dev/null
++++ b/bsd/kern/kebab_dyldcache.c
+@@ -0,0 +1,1286 @@
++/*
++ * KEBAB split dyld shared cache: parse, validate, and map.
++ *
++ * See kebab_dyldcache.h and docs/BRING-UP-STATE.md section 14.  The cache is
++ * the iOS 16 split layout:
++ *
++ *   dyld_shared_cache_arm64             main cache, header + image records
++ *   dyld_shared_cache_arm64.01 ... .40  text/rodata shards
++ *   dyld_shared_cache_arm64.27.dylddata      __DATA_CONST + __DATA
++ *   dyld_shared_cache_arm64.41.dylddata
++ *   dyld_shared_cache_arm64.28.dyldlinkedit  __LINKEDIT
++ *   dyld_shared_cache_arm64.42.dyldlinkedit
++ *   dyld_shared_cache_arm64.symbols          not mapped by the kernel
++ *
++ * The kernel only needs the headers to build the plan: the main header's
++ * subCacheArray names the UUID and VM offset of every subcache, and each
++ * subcache's own mapping table gives the absolute address, size, file offset
++ * and protections.  Mapping is done with vm_shared_region_map_file(), the same
++ * primitive dyld reaches through shared_region_map_and_slide_2_np().
++ *
++ * This file is compiled only for KEBAB.  Nothing happens unless "kebab_dsc" is
++ * on the boot command line; "kebab_dsc_map=1" is the second switch that turns
++ * the logged plan into actual mappings.
++ */
++
++#include <sys/param.h>
++#include <sys/cdefs.h>
++#include <sys/types.h>
++#include <sys/errno.h>
++#include <sys/fcntl.h>
++#include <sys/proc.h>
++#include <sys/vnode.h>
++#include <sys/vnode_internal.h>
++#include <sys/mount.h>
++#include <sys/ubc.h>
++#include <sys/ubc_internal.h>
++#include <sys/uio.h>
++#include <sys/uio_internal.h>
++#include <sys/dirent.h>
++#include <sys/kauth.h>
++#include <sys/systm.h>
++
++#include <mach/boolean.h>
++#include <mach/vm_prot.h>
++#include <mach/shared_region.h>
++
++#include <kern/kalloc.h>
++#include <kern/task.h>
++#include <kern/thread.h>
++#include <kern/zalloc.h>
++#include <libkern/libkern.h>
++#include <pexpert/pexpert.h>
++
++#include <vm/vm_map.h>
++#include <vm/vm_shared_region.h>
++
++#include "kebab_dyldcache.h"
++
++#if defined(KEBAB)
++
++#define KEBAB_DSC_PREFIX                "dyld_shared_cache_arm64"
++#define KEBAB_DSC_MAIN                  "dyld_shared_cache_arm64"
++#define KEBAB_DSC_DEFAULT_DIR           "/System/Library/Caches/com.apple.dyld"
++#define KEBAB_DSC_PATH_MAX              256
++#define KEBAB_DSC_NAME_MAX              64
++#define KEBAB_DSC_DIRBUF                8192
++#define KEBAB_DSC_MAX_CANDIDATES        96
++#define KEBAB_DSC_MAX_SUBCACHES         64
++#define KEBAB_DSC_MAX_FILES             (1 + KEBAB_DSC_MAX_SUBCACHES)
++#define KEBAB_DSC_MAX_MAPPINGS          8
++#define KEBAB_DSC_HEADER_SIZE           456
++#define KEBAB_DSC_PAGE_SIZE             0x4000
++#define KEBAB_DSC_SUB_ENTRY_SIZE        56
++#define KEBAB_DSC_MAPPING_SIZE          32
++#define KEBAB_DSC_IMAGE_INFO_SIZE       32
++
++/*
++ * dyld_cache_header, from dyld's dyld_cache_format.h.  Only the fields this
++ * module reads are listed; the layout up to symbolFileUUID is fixed and is
++ * checked with offsetof() below.  imagesOffset/imagesCount were moved to the
++ * end of the header (448/452) when the split cache was introduced; the old
++ * copies at 24/28 are explicitly unused.
++ */
++struct kebab_dsc_header {
++	char            magic[16];                    /*   0 */
++	uint32_t        mapping_offset;               /*  16 */
++	uint32_t        mapping_count;                /*  20 */
++	uint32_t        images_offset_old;            /*  24 unused */
++	uint32_t        images_count_old;             /*  28 unused */
++	uint64_t        dyld_base_address;            /*  32 */
++	uint64_t        code_signature_offset;        /*  40 */
++	uint64_t        code_signature_size;          /*  48 */
++	uint64_t        slide_info_offset_unused;     /*  56 */
++	uint64_t        slide_info_size_unused;       /*  64 */
++	uint64_t        local_symbols_offset;         /*  72 */
++	uint64_t        local_symbols_size;           /*  80 */
++	uint8_t         uuid[16];                     /*  88 */
++	uint64_t        cache_type;                   /* 104 */
++	uint32_t        branch_pools_offset;          /* 112 */
++	uint32_t        branch_pools_count;           /* 116 */
++	uint64_t        dyld_in_cache_mh;             /* 120 */
++	uint64_t        dyld_in_cache_entry;          /* 128 */
++	uint64_t        images_text_offset;           /* 136 */
++	uint64_t        images_text_count;            /* 144 */
++	uint64_t        patch_info_addr;              /* 152 */
++	uint64_t        patch_info_size;              /* 160 */
++	uint64_t        other_image_group_addr_unused;/* 168 */
++	uint64_t        other_image_group_size_unused;/* 176 */
++	uint64_t        prog_closures_addr;           /* 184 */
++	uint64_t        prog_closures_size;           /* 192 */
++	uint64_t        prog_closures_trie_addr;      /* 200 */
++	uint64_t        prog_closures_trie_size;      /* 208 */
++	uint32_t        platform;                     /* 216 */
++	uint32_t        format_version;               /* 220 (bitfield) */
++	uint64_t        shared_region_start;          /* 224 */
++	uint64_t        shared_region_size;           /* 232 */
++	uint64_t        max_slide;                    /* 240 */
++	uint64_t        dylibs_image_array_addr;      /* 248 */
++	uint64_t        dylibs_image_array_size;      /* 256 */
++	uint64_t        dylibs_trie_addr;             /* 264 */
++	uint64_t        dylibs_trie_size;             /* 272 */
++	uint64_t        other_image_array_addr;       /* 280 */
++	uint64_t        other_image_array_size;       /* 288 */
++	uint64_t        other_trie_addr;              /* 296 */
++	uint64_t        other_trie_size;              /* 304 */
++	uint32_t        mapping_with_slide_offset;    /* 312 */
++	uint32_t        mapping_with_slide_count;     /* 316 */
++	uint64_t        dylibs_pbl_state_array_unused;/* 320 */
++	uint64_t        dylibs_pbl_set_addr;          /* 328 */
++	uint64_t        programs_pbl_set_pool_addr;   /* 336 */
++	uint64_t        programs_pbl_set_pool_size;   /* 344 */
++	uint64_t        program_trie_addr;            /* 352 */
++	uint32_t        program_trie_size;            /* 360 */
++	uint32_t        os_version;                   /* 364 */
++	uint32_t        alt_platform;                 /* 368 */
++	uint32_t        alt_os_version;               /* 372 */
++	uint64_t        swift_opts_offset;            /* 376 */
++	uint64_t        swift_opts_size;              /* 384 */
++	uint32_t        sub_cache_array_offset;       /* 392 */
++	uint32_t        sub_cache_array_count;        /* 396 */
++	uint8_t         symbol_file_uuid[16];         /* 400 */
++	uint64_t        rosetta_read_only_addr;       /* 416 */
++	uint64_t        rosetta_read_only_size;       /* 424 */
++	uint64_t        rosetta_read_write_addr;      /* 432 */
++	uint64_t        rosetta_read_write_size;      /* 440 */
++	uint32_t        images_offset;                /* 448 */
++	uint32_t        images_count;                 /* 452 */
++	/* 456 */
++};
++
++struct kebab_dsc_mapping_info {
++	uint64_t        address;
++	uint64_t        size;
++	uint64_t        file_offset;
++	uint32_t        max_prot;
++	uint32_t        init_prot;
++};
++
++struct kebab_dsc_subcache_entry {
++	uint8_t         uuid[16];
++	uint64_t        vm_offset;
++	char            suffix[32];
++};
++
++static_assert(sizeof(struct kebab_dsc_header) == KEBAB_DSC_HEADER_SIZE,
++    "dyld_cache_header size");
++static_assert(offsetof(struct kebab_dsc_header, mapping_offset) == 16, "mappingOffset");
++static_assert(offsetof(struct kebab_dsc_header, code_signature_offset) == 40, "codeSignatureOffset");
++static_assert(offsetof(struct kebab_dsc_header, uuid) == 88, "uuid");
++static_assert(offsetof(struct kebab_dsc_header, cache_type) == 104, "cacheType");
++static_assert(offsetof(struct kebab_dsc_header, images_text_offset) == 136, "imagesTextOffset");
++static_assert(offsetof(struct kebab_dsc_header, platform) == 216, "platform");
++static_assert(offsetof(struct kebab_dsc_header, shared_region_start) == 224, "sharedRegionStart");
++static_assert(offsetof(struct kebab_dsc_header, mapping_with_slide_offset) == 312, "mappingWithSlideOffset");
++static_assert(offsetof(struct kebab_dsc_header, sub_cache_array_offset) == 392, "subCacheArrayOffset");
++static_assert(offsetof(struct kebab_dsc_header, symbol_file_uuid) == 400, "symbolFileUUID");
++static_assert(offsetof(struct kebab_dsc_header, images_offset) == 448, "imagesOffset");
++static_assert(offsetof(struct kebab_dsc_header, images_count) == 452, "imagesCount");
++static_assert(sizeof(struct kebab_dsc_mapping_info) == KEBAB_DSC_MAPPING_SIZE, "mapping info size");
++static_assert(sizeof(struct kebab_dsc_subcache_entry) == KEBAB_DSC_SUB_ENTRY_SIZE, "subcache entry size");
++
++struct kebab_dsc_candidate {
++	char            name[KEBAB_DSC_NAME_MAX];
++	uint8_t         uuid[16];
++	uint64_t        size;
++};
++
++struct kebab_dsc_file {
++	char            name[KEBAB_DSC_NAME_MAX];
++	uint8_t         uuid[16];
++	uint64_t        vm_offset;
++	uint64_t        file_size;
++	uint32_t        mapping_count;
++	struct shared_file_mapping_slide_np mappings[KEBAB_DSC_MAX_MAPPINGS];
++};
++
++struct kebab_dsc_plan {
++	char            dir[KEBAB_DSC_PATH_MAX];
++	uint32_t        file_count;
++	uint32_t        subcache_count;
++	uint32_t        dylddata_count;
++	uint32_t        dyldlinkedit_count;
++	uint32_t        total_mappings;
++	uint64_t        region_start;
++	uint64_t        region_size;
++	uint64_t        max_slide;
++	uint64_t        total_mapped;
++	uint64_t        highest_end;
++	uint8_t         main_uuid[16];
++	uint8_t         symbol_uuid[16];
++	boolean_t       symbols_present;
++	uint64_t        symbols_size;
++	char            symbols_name[KEBAB_DSC_NAME_MAX];
++	struct kebab_dsc_file files[KEBAB_DSC_MAX_FILES];
++};
++
++static struct kebab_dsc_plan *kebab_dsc_plan;
++static char kebab_dsc_dir[KEBAB_DSC_PATH_MAX];
++static boolean_t kebab_dsc_enabled;
++static boolean_t kebab_dsc_map_enabled;
++static boolean_t kebab_dsc_map_attempted;
++
++#pragma mark - small helpers
++
++static void
++kebab_dsc_uuid_string(const uint8_t uuid[16], char out[33])
++{
++	static const char hex[] = "0123456789abcdef";
++	int i;
++
++	for (i = 0; i < 16; i++) {
++		out[i * 2] = hex[uuid[i] >> 4];
++		out[i * 2 + 1] = hex[uuid[i] & 0xf];
++	}
++	out[32] = '\0';
++}
++
++static void
++kebab_dsc_path(char out[KEBAB_DSC_PATH_MAX], const char *dir, const char *name)
++{
++	snprintf(out, KEBAB_DSC_PATH_MAX, "%s/%s", dir, name);
++}
++
++static boolean_t
++kebab_dsc_is_cache_name(const char *name)
++{
++	size_t prefix_len = sizeof(KEBAB_DSC_PREFIX) - 1;
++
++	return strncmp(name, KEBAB_DSC_PREFIX, prefix_len) == 0;
++}
++
++static boolean_t
++kebab_dsc_suffix_has(const char *suffix, const char *extension)
++{
++	size_t suffix_len = strlen(suffix);
++	size_t extension_len = strlen(extension);
++
++	if (suffix_len < extension_len) {
++		return FALSE;
++	}
++	return strcmp(suffix + suffix_len - extension_len, extension) == 0;
++}
++
++static int
++kebab_dsc_mapping_errno(kern_return_t kr)
++{
++	switch (kr) {
++	case KERN_SUCCESS:
++		return 0;
++	case KERN_INVALID_ADDRESS:
++		return EFAULT;
++	case KERN_PROTECTION_FAILURE:
++		return EPERM;
++	case KERN_NO_SPACE:
++		return ENOMEM;
++	default:
++		return EINVAL;
++	}
++}
++
++#pragma mark - file access
++
++static int
++kebab_dsc_read_at(vnode_t vp, void *buf, size_t len, off_t offset)
++{
++	int resid = 0;
++	int error;
++
++	if (len > 0x7fffffffU) {
++		return EINVAL;
++	}
++	error = vn_rdwr(UIO_READ, vp, (caddr_t)buf, (int)len, offset,
++	    UIO_SYSSPACE, 0, kauth_cred_get(), &resid, current_proc());
++	if (error != 0) {
++		return error;
++	}
++	if (resid != 0) {
++		return EIO;
++	}
++	return 0;
++}
++
++static int
++kebab_dsc_read_header(vnode_t vp, struct kebab_dsc_header *header)
++{
++	return kebab_dsc_read_at(vp, header, sizeof(*header), 0);
++}
++
++static int
++kebab_dsc_open_file(const char *dir, const char *name, vnode_t *vpp, off_t *sizep)
++{
++	char path[KEBAB_DSC_PATH_MAX];
++	vnode_t vp = NULLVP;
++	off_t size;
++	int error;
++
++	kebab_dsc_path(path, dir, name);
++	error = vnode_lookup(path, 0, &vp, vfs_context_current());
++	if (error != 0) {
++		return error;
++	}
++	if (vp->v_type != VREG) {
++		vnode_put(vp);
++		return EINVAL;
++	}
++	size = ubc_getsize(vp);
++	if (size < (off_t)KEBAB_DSC_HEADER_SIZE) {
++		vnode_put(vp);
++		return EINVAL;
++	}
++	*vpp = vp;
++	if (sizep != NULL) {
++		*sizep = size;
++	}
++	return 0;
++}
++
++/*
++ * Read the directory and return the cache-looking names.  This is how a
++ * subcache is resolved by the UUID in its header rather than by trusting the
++ * fileSuffix field: the suffix names the file the cache builder wrote, but the
++ * UUID is what the cache run-time will match against.
++ */
++static int
++kebab_dsc_list_dir(const char *dir, struct kebab_dsc_candidate *candidates,
++    uint32_t max_candidates, uint32_t *candidate_count)
++{
++	vfs_context_t ctx = vfs_context_current();
++	vnode_t dvp = NULLVP;
++	uio_t auio = NULL;
++	char *buf = NULL;
++	uint32_t count = 0;
++	off_t offset = 0;
++	boolean_t eofflag = FALSE;
++	int error = 0;
++	int opened = 0;
++
++	error = vnode_lookup(dir, 0, &dvp, ctx);
++	if (error != 0) {
++		return error;
++	}
++	if (dvp->v_type != VDIR) {
++		vnode_put(dvp);
++		return ENOTDIR;
++	}
++	error = VNOP_OPEN(dvp, FREAD, ctx);
++	if (error != 0) {
++		vnode_put(dvp);
++		return error;
++	}
++	opened = 1;
++
++	buf = kalloc_data(KEBAB_DSC_DIRBUF, Z_WAITOK);
++	auio = uio_create(1, 0, UIO_SYSSPACE, UIO_READ);
++	if (buf == NULL || auio == NULL) {
++		error = ENOMEM;
++		goto out;
++	}
++
++	while (!eofflag) {
++		uint32_t used;
++		uint32_t pos = 0;
++		int nentries = 0;
++
++		uio_reset(auio, offset, UIO_SYSSPACE, UIO_READ);
++		if (uio_addiov(auio, (uintptr_t)buf, KEBAB_DSC_DIRBUF) != 0) {
++			error = EINVAL;
++			goto out;
++		}
++		error = VNOP_READDIR(dvp, auio, 0, &eofflag, &nentries, ctx);
++		if (error != 0) {
++			goto out;
++		}
++		if (uio_resid(auio) < 0 || uio_resid(auio) > KEBAB_DSC_DIRBUF) {
++			error = EIO;
++			goto out;
++		}
++		used = KEBAB_DSC_DIRBUF - (uint32_t)uio_resid(auio);
++		offset = uio_offset(auio);
++		if (used == 0) {
++			break;
++		}
++
++		while (pos + sizeof(struct dirent) <= used) {
++			struct dirent *dp = (struct dirent *)(void *)(buf + pos);
++			uint32_t reclen = dp->d_reclen;
++
++			if (reclen == 0 || pos + reclen > used) {
++				break;
++			}
++			if (dp->d_ino != 0 && dp->d_namlen > 0 &&
++			    dp->d_namlen < KEBAB_DSC_NAME_MAX) {
++				char name[KEBAB_DSC_NAME_MAX];
++
++				memcpy(name, dp->d_name, dp->d_namlen);
++				name[dp->d_namlen] = '\0';
++				if (kebab_dsc_is_cache_name(name)) {
++					if (count == max_candidates) {
++						printf("KEBAB DSC: directory has more than %u cache files\n",
++						    max_candidates);
++						error = ENOSPC;
++						goto out;
++					}
++					strlcpy(candidates[count].name, name,
++					    sizeof(candidates[count].name));
++					count++;
++				}
++			}
++			pos += reclen;
++		}
++	}
++
++	*candidate_count = count;
++	error = 0;
++
++out:
++	if (opened) {
++		(void)VNOP_CLOSE(dvp, FREAD, ctx);
++	}
++	if (auio != NULL) {
++		uio_free(auio);
++	}
++	if (buf != NULL) {
++		kfree_data(buf, KEBAB_DSC_DIRBUF);
++	}
++	if (dvp != NULLVP) {
++		vnode_put(dvp);
++	}
++	return error;
++}
++
++#pragma mark - validation
++
++/*
++ * Validate the fields the P1 bring-up depends on.  Returns 0 or an errno; the
++ * caller has already printed which file it is.  Main and subcache headers are
++ * checked with the same rules; a subcache additionally has to agree with the
++ * sharedRegionStart the main header declared and with its cacheVMOffset.
++ */
++static int
++kebab_dsc_validate_header(const struct kebab_dsc_header *h, uint64_t file_size,
++    const char *name, boolean_t is_main, const struct kebab_dsc_plan *plan,
++    uint64_t vm_offset, boolean_t log_checks)
++{
++	static const char expected_magic[16] = {
++		'd', 'y', 'l', 'd', '_', 'v', '1', ' ',
++		' ', ' ', 'a', 'r', 'm', '6', '4', '\0'
++	};
++	uint64_t images_end;
++	uint64_t images_text_end;
++	uint64_t sub_end;
++	uint64_t mappings_end;
++	uint64_t region_end;
++
++	if (memcmp(h->magic, expected_magic, sizeof(expected_magic)) != 0) {
++		printf("KEBAB DSC: %s: bad magic (want \"dyld_v1   arm64\")\n", name);
++		return EINVAL;
++	}
++	if ((h->format_version & 0xff) != 0) {
++		printf("KEBAB DSC: %s: formatVersion %u, want 0\n",
++		    name, h->format_version & 0xff);
++		return EINVAL;
++	}
++	if (h->cache_type != 2) {
++		printf("KEBAB DSC: %s: cacheType %llu, want 2 (multi-cache)\n",
++		    name, (unsigned long long)h->cache_type);
++		return EINVAL;
++	}
++	if (h->platform != 2) {
++		printf("KEBAB DSC: %s: platform %u, want 2 (iOS)\n",
++		    name, h->platform);
++		return EINVAL;
++	}
++	if (log_checks) {
++		printf("KEBAB DSC: validate magic=%s formatVersion=0 cacheType=2 platform=2\n",
++		    "ok");
++	}
++
++	images_end = (uint64_t)h->images_offset + (uint64_t)h->images_count * KEBAB_DSC_IMAGE_INFO_SIZE;
++	if (images_end != h->images_text_offset) {
++		printf("KEBAB DSC: %s: imagesOffset %u + imagesCount %u*32 = %llu, "
++		    "want imagesTextOffset %llu\n", name, h->images_offset,
++		    h->images_count, (unsigned long long)images_end,
++		    (unsigned long long)h->images_text_offset);
++		return EINVAL;
++	}
++	if (log_checks) {
++		printf("KEBAB DSC: validate images %u + %u*32 = %llu == imagesTextOffset %llu\n",
++		    h->images_offset, h->images_count, (unsigned long long)images_end,
++		    (unsigned long long)h->images_text_offset);
++	}
++
++	images_text_end = h->images_text_offset +
++	    h->images_text_count * KEBAB_DSC_IMAGE_INFO_SIZE;
++	if (h->images_text_count >
++	    (UINT64_MAX - h->images_text_offset) / KEBAB_DSC_IMAGE_INFO_SIZE ||
++	    images_text_end < h->images_text_offset || images_text_end > file_size) {
++		printf("KEBAB DSC: %s: imagesText array ends at %llu, beyond file size %llu\n",
++		    name, (unsigned long long)images_text_end,
++		    (unsigned long long)file_size);
++		return EINVAL;
++	}
++
++	sub_end = (uint64_t)h->sub_cache_array_offset +
++	    (uint64_t)h->sub_cache_array_count * KEBAB_DSC_SUB_ENTRY_SIZE;
++	if (sub_end > h->code_signature_offset) {
++		printf("KEBAB DSC: %s: subCacheArray ends at %llu (%u + %u*56), "
++		    "beyond codeSignatureOffset %llu\n", name,
++		    (unsigned long long)sub_end, h->sub_cache_array_offset,
++		    h->sub_cache_array_count,
++		    (unsigned long long)h->code_signature_offset);
++		return EINVAL;
++	}
++	if (log_checks) {
++		printf("KEBAB DSC: validate subcache array %u + %u*56 = %llu <= codeSignatureOffset %llu\n",
++		    h->sub_cache_array_offset, h->sub_cache_array_count,
++		    (unsigned long long)sub_end,
++		    (unsigned long long)h->code_signature_offset);
++	}
++
++	if (h->code_signature_offset > file_size ||
++	    h->code_signature_size > file_size - h->code_signature_offset) {
++		printf("KEBAB DSC: %s: code signature [%llu, %llu) beyond file size %llu\n",
++		    name, (unsigned long long)h->code_signature_offset,
++		    (unsigned long long)(h->code_signature_offset + h->code_signature_size),
++		    (unsigned long long)file_size);
++		return EINVAL;
++	}
++
++	if (h->mapping_count == 0 || h->mapping_count > KEBAB_DSC_MAX_MAPPINGS) {
++		printf("KEBAB DSC: %s: mappingCount %u not in 1..%u\n", name,
++		    h->mapping_count, KEBAB_DSC_MAX_MAPPINGS);
++		return EINVAL;
++	}
++	mappings_end = (uint64_t)h->mapping_offset +
++	    (uint64_t)h->mapping_count * KEBAB_DSC_MAPPING_SIZE;
++	if (mappings_end > file_size) {
++		printf("KEBAB DSC: %s: mapping table ends at %llu, beyond file size %llu\n",
++		    name, (unsigned long long)mappings_end, (unsigned long long)file_size);
++		return EINVAL;
++	}
++	if (h->mapping_with_slide_count != 0) {
++		uint64_t slide_end = (uint64_t)h->mapping_with_slide_offset +
++		    (uint64_t)h->mapping_with_slide_count * 56;
++
++		if (slide_end > file_size) {
++			printf("KEBAB DSC: %s: mapping-and-slide table ends at %llu, "
++			    "beyond file size %llu\n", name,
++			    (unsigned long long)slide_end, (unsigned long long)file_size);
++			return EINVAL;
++		}
++		if (h->mapping_with_slide_count != h->mapping_count) {
++			printf("KEBAB DSC: %s: mappingWithSlideCount %u != mappingCount %u\n",
++			    name, h->mapping_with_slide_count, h->mapping_count);
++			return EINVAL;
++		}
++	}
++
++	if (is_main) {
++		if (h->shared_region_start != plan->region_start) {
++			printf("KEBAB DSC: %s: sharedRegionStart 0x%llx != 0x%llx\n",
++			    name, (unsigned long long)h->shared_region_start,
++			    (unsigned long long)plan->region_start);
++			return EINVAL;
++		}
++		if (h->shared_region_size != plan->region_size) {
++			printf("KEBAB DSC: %s: sharedRegionSize 0x%llx != 0x%llx\n",
++			    name, (unsigned long long)h->shared_region_size,
++			    (unsigned long long)plan->region_size);
++			return EINVAL;
++		}
++	} else {
++		uint64_t expected = plan->region_start + vm_offset;
++
++		if (expected < plan->region_start) {
++			printf("KEBAB DSC: %s: cacheVMOffset 0x%llx overflows the region\n",
++			    name, (unsigned long long)vm_offset);
++			return EINVAL;
++		}
++		if (h->shared_region_start != expected) {
++			printf("KEBAB DSC: %s: sharedRegionStart 0x%llx != region base "
++			    "0x%llx + cacheVMOffset 0x%llx = 0x%llx\n", name,
++			    (unsigned long long)h->shared_region_start,
++			    (unsigned long long)plan->region_start,
++			    (unsigned long long)vm_offset,
++			    (unsigned long long)expected);
++			return EINVAL;
++		}
++		if (h->shared_region_size != 0 &&
++		    (h->shared_region_start + h->shared_region_size < h->shared_region_start ||
++		    h->shared_region_start + h->shared_region_size >
++		    plan->region_start + plan->region_size)) {
++			printf("KEBAB DSC: %s: [0x%llx, 0x%llx) escapes region [0x%llx, 0x%llx)\n",
++			    name, (unsigned long long)h->shared_region_start,
++			    (unsigned long long)(h->shared_region_start + h->shared_region_size),
++			    (unsigned long long)plan->region_start,
++			    (unsigned long long)(plan->region_start + plan->region_size));
++			return EINVAL;
++		}
++	}
++
++	region_end = plan->region_start + plan->region_size;
++	if (region_end < plan->region_start) {
++		printf("KEBAB DSC: region 0x%llx + 0x%llx overflows\n",
++		    (unsigned long long)plan->region_start,
++		    (unsigned long long)plan->region_size);
++		return EINVAL;
++	}
++	if ((plan->region_start & (KEBAB_DSC_PAGE_SIZE - 1)) != 0 ||
++	    (plan->region_size & (KEBAB_DSC_PAGE_SIZE - 1)) != 0 ||
++	    plan->region_size == 0) {
++		printf("KEBAB DSC: region 0x%llx/0x%llx is not page aligned\n",
++		    (unsigned long long)plan->region_start,
++		    (unsigned long long)plan->region_size);
++		return EINVAL;
++	}
++	return 0;
++}
++
++static int
++kebab_dsc_read_mappings(vnode_t vp, const struct kebab_dsc_header *h,
++    uint64_t file_size, const char *name, struct kebab_dsc_plan *plan,
++    struct kebab_dsc_file *file)
++{
++	struct kebab_dsc_mapping_info info[KEBAB_DSC_MAX_MAPPINGS];
++	uint32_t i;
++	int error;
++
++	if (h->mapping_count > KEBAB_DSC_MAX_MAPPINGS) {
++		return EINVAL;
++	}
++	error = kebab_dsc_read_at(vp, info,
++	    h->mapping_count * sizeof(info[0]), h->mapping_offset);
++	if (error != 0) {
++		printf("KEBAB DSC: %s: reading mapping table failed (error %d)\n",
++		    name, error);
++		return error;
++	}
++	for (i = 0; i < h->mapping_count; i++) {
++		struct shared_file_mapping_slide_np *m = &file->mappings[i];
++		uint64_t end;
++
++		if (info[i].size == 0 ||
++		    (info[i].address & (KEBAB_DSC_PAGE_SIZE - 1)) != 0 ||
++		    (info[i].size & (KEBAB_DSC_PAGE_SIZE - 1)) != 0) {
++			printf("KEBAB DSC: %s: mapping %u [0x%llx, 0x%llx) is not "
++			    "a non-zero page-aligned range\n", name, i,
++			    (unsigned long long)info[i].address,
++			    (unsigned long long)info[i].size);
++			return EINVAL;
++		}
++		end = info[i].address + info[i].size;
++		if (end < info[i].address ||
++		    info[i].address < plan->region_start ||
++		    end > plan->region_start + plan->region_size) {
++			printf("KEBAB DSC: %s: mapping %u [0x%llx, 0x%llx) escapes "
++			    "region [0x%llx, 0x%llx)\n", name, i,
++			    (unsigned long long)info[i].address,
++			    (unsigned long long)end,
++			    (unsigned long long)plan->region_start,
++			    (unsigned long long)(plan->region_start + plan->region_size));
++			return EINVAL;
++		}
++		if ((info[i].init_prot & ~(VM_PROT_READ | VM_PROT_WRITE |
++		    VM_PROT_EXECUTE | VM_PROT_ZF)) != 0 ||
++		    (info[i].max_prot & ~(VM_PROT_READ | VM_PROT_WRITE |
++		    VM_PROT_EXECUTE)) != 0) {
++			printf("KEBAB DSC: %s: mapping %u has invalid protections "
++			    "init=0x%x max=0x%x\n", name, i,
++			    info[i].init_prot, info[i].max_prot);
++			return EINVAL;
++		}
++		if (!(info[i].init_prot & VM_PROT_ZF) &&
++		    (info[i].file_offset + info[i].size < info[i].file_offset ||
++		    info[i].file_offset + info[i].size > file_size)) {
++			printf("KEBAB DSC: %s: mapping %u covers file [0x%llx, 0x%llx) "
++			    "beyond size 0x%llx\n", name, i,
++			    (unsigned long long)info[i].file_offset,
++			    (unsigned long long)(info[i].file_offset + info[i].size),
++			    (unsigned long long)file_size);
++			return EINVAL;
++		}
++
++		m->sms_address = info[i].address;
++		m->sms_size = info[i].size;
++		m->sms_file_offset = info[i].file_offset;
++		m->sms_slide_size = 0;
++		m->sms_slide_start = 0;
++		m->sms_max_prot = info[i].max_prot;
++		m->sms_init_prot = info[i].init_prot;
++	}
++	file->mapping_count = h->mapping_count;
++	return 0;
++}
++
++#pragma mark - plan
++
++static void
++kebab_dsc_log_plan(const struct kebab_dsc_plan *plan)
++{
++	uint32_t i, j;
++	char uuid[33];
++
++	printf("KEBAB DSC: region start=0x%llx size=0x%llx end=0x%llx maxSlide=0x%llx\n",
++	    (unsigned long long)plan->region_start,
++	    (unsigned long long)plan->region_size,
++	    (unsigned long long)(plan->region_start + plan->region_size),
++	    (unsigned long long)plan->max_slide);
++	printf("KEBAB DSC: resolved %u/%u subcaches by uuid; dylddata=%u dyldlinkedit=%u\n",
++	    plan->file_count - 1, plan->subcache_count,
++	    plan->dylddata_count, plan->dyldlinkedit_count);
++	if (plan->symbols_present) {
++		kebab_dsc_uuid_string(plan->symbol_uuid, uuid);
++		printf("KEBAB DSC: symbols %s: %llu bytes, uuid %s, NOT mapped\n",
++		    plan->symbols_name,
++		    (unsigned long long)plan->symbols_size, uuid);
++	} else {
++		printf("KEBAB DSC: symbols: absent, NOT mapped\n");
++	}
++	printf("KEBAB DSC: plan %u files / %u mappings / 0x%llx bytes (%llu)\n",
++	    plan->file_count, plan->total_mappings,
++	    (unsigned long long)plan->total_mapped,
++	    (unsigned long long)plan->total_mapped);
++	printf("KEBAB DSC: highest mapped end 0x%llx, region slack 0x%llx\n",
++	    (unsigned long long)plan->highest_end,
++	    (unsigned long long)(plan->region_start + plan->region_size -
++	    plan->highest_end));
++
++	for (i = 0; i < plan->file_count; i++) {
++		const struct kebab_dsc_file *f = &plan->files[i];
++		uint64_t mapped = 0;
++
++		kebab_dsc_uuid_string(f->uuid, uuid);
++		for (j = 0; j < f->mapping_count; j++) {
++			mapped += f->mappings[j].sms_size;
++		}
++		printf("KEBAB DSC: file %02u %s %-38s size=0x%llx mapped=0x%llx "
++		    "vmOffset=0x%llx uuid=%s\n", i, i == 0 ? "main" : "sub ",
++		    f->name, (unsigned long long)f->file_size,
++		    (unsigned long long)mapped, (unsigned long long)f->vm_offset,
++		    uuid);
++		for (j = 0; j < f->mapping_count; j++) {
++			const struct shared_file_mapping_slide_np *m = &f->mappings[j];
++			char init[4], max[4];
++
++			init[0] = (m->sms_init_prot & VM_PROT_READ) ? 'r' : '-';
++			init[1] = (m->sms_init_prot & VM_PROT_WRITE) ? 'w' : '-';
++			init[2] = (m->sms_init_prot & VM_PROT_EXECUTE) ? 'x' : '-';
++			init[3] = '\0';
++			max[0] = (m->sms_max_prot & VM_PROT_READ) ? 'r' : '-';
++			max[1] = (m->sms_max_prot & VM_PROT_WRITE) ? 'w' : '-';
++			max[2] = (m->sms_max_prot & VM_PROT_EXECUTE) ? 'x' : '-';
++			max[3] = '\0';
++			printf("KEBAB DSC:      map 0x%09llx size=0x%-9llx file=0x%-9llx "
++			    "init=%s max=%s\n",
++			    (unsigned long long)m->sms_address,
++			    (unsigned long long)m->sms_size,
++			    (unsigned long long)m->sms_file_offset, init, max);
++		}
++	}
++}
++
++static int
++kebab_dsc_build_plan(const char *dir, struct kebab_dsc_plan *plan)
++{
++	struct kebab_dsc_header main_header;
++	struct kebab_dsc_candidate *candidates = NULL;
++	struct kebab_dsc_subcache_entry *entries = NULL;
++	struct kebab_dsc_file *main_file;
++	uint32_t candidate_count = 0;
++	uint32_t i, j;
++	vnode_t main_vp = NULLVP;
++	off_t main_size = 0;
++	int error;
++	char uuid[33];
++
++	strlcpy(plan->dir, dir, sizeof(plan->dir));
++
++	error = kebab_dsc_open_file(dir, KEBAB_DSC_MAIN, &main_vp, &main_size);
++	if (error != 0) {
++		printf("KEBAB DSC: main cache %s/%s: cannot open (error %d)\n",
++		    dir, KEBAB_DSC_MAIN, error);
++		return error;
++	}
++	error = kebab_dsc_read_header(main_vp, &main_header);
++	if (error != 0) {
++		printf("KEBAB DSC: %s: reading header failed (error %d)\n",
++		    KEBAB_DSC_MAIN, error);
++		goto out;
++	}
++
++	plan->region_start = main_header.shared_region_start;
++	plan->region_size = main_header.shared_region_size;
++	plan->max_slide = main_header.max_slide;
++	memcpy(plan->main_uuid, main_header.uuid, sizeof(plan->main_uuid));
++	memcpy(plan->symbol_uuid, main_header.symbol_file_uuid,
++	    sizeof(plan->symbol_uuid));
++
++	kebab_dsc_uuid_string(main_header.uuid, uuid);
++	printf("KEBAB DSC: main %s: %llu bytes, uuid %s\n", KEBAB_DSC_MAIN,
++	    (unsigned long long)main_size, uuid);
++
++	error = kebab_dsc_validate_header(&main_header, (uint64_t)main_size,
++	    KEBAB_DSC_MAIN, TRUE, plan, 0, TRUE);
++	if (error != 0) {
++		goto out;
++	}
++
++	plan->subcache_count = main_header.sub_cache_array_count;
++	if (plan->subcache_count == 0) {
++		printf("KEBAB DSC: %s: subCacheArrayCount is 0; not a split cache\n",
++		    KEBAB_DSC_MAIN);
++		error = EINVAL;
++		goto out;
++	}
++	if (plan->subcache_count > KEBAB_DSC_MAX_SUBCACHES) {
++		printf("KEBAB DSC: %s: subCacheArrayCount %u is larger than %u\n",
++		    KEBAB_DSC_MAIN, plan->subcache_count, KEBAB_DSC_MAX_SUBCACHES);
++		error = E2BIG;
++		goto out;
++	}
++
++	main_file = &plan->files[0];
++	strlcpy(main_file->name, KEBAB_DSC_MAIN, sizeof(main_file->name));
++	memcpy(main_file->uuid, main_header.uuid, sizeof(main_file->uuid));
++	main_file->vm_offset = 0;
++	main_file->file_size = (uint64_t)main_size;
++	error = kebab_dsc_read_mappings(main_vp, &main_header, (uint64_t)main_size,
++	    KEBAB_DSC_MAIN, plan, main_file);
++	if (error != 0) {
++		goto out;
++	}
++	plan->file_count = 1;
++
++	/* The subcache array itself is in the main file. */
++	entries = kalloc_data(plan->subcache_count * sizeof(*entries),
++	    Z_WAITOK | Z_ZERO);
++	if (entries == NULL) {
++		error = ENOMEM;
++		goto out;
++	}
++	error = kebab_dsc_read_at(main_vp, entries,
++	    plan->subcache_count * sizeof(*entries),
++	    main_header.sub_cache_array_offset);
++	if (error != 0) {
++		printf("KEBAB DSC: %s: reading subCacheArray failed (error %d)\n",
++		    KEBAB_DSC_MAIN, error);
++		goto out;
++	}
++	vnode_put(main_vp);
++	main_vp = NULLVP;
++
++	/* Index every cache-looking file by the UUID in its header. */
++	candidates = kalloc_data(KEBAB_DSC_MAX_CANDIDATES * sizeof(*candidates),
++	    Z_WAITOK | Z_ZERO);
++	if (candidates == NULL) {
++		error = ENOMEM;
++		goto out;
++	}
++	error = kebab_dsc_list_dir(dir, candidates, KEBAB_DSC_MAX_CANDIDATES,
++	    &candidate_count);
++	if (error != 0) {
++		printf("KEBAB DSC: reading directory %s failed (error %d)\n", dir, error);
++		goto out;
++	}
++	if (candidate_count == 0) {
++		printf("KEBAB DSC: directory %s has no %s* files\n", dir,
++		    KEBAB_DSC_PREFIX);
++		error = ENOENT;
++		goto out;
++	}
++
++	{
++		uint32_t indexed = 0;
++
++		for (i = 0; i < candidate_count; i++) {
++			struct kebab_dsc_header h;
++			vnode_t vp = NULLVP;
++			off_t size = 0;
++
++			if (strcmp(candidates[i].name, KEBAB_DSC_MAIN) == 0) {
++				continue;
++			}
++			error = kebab_dsc_open_file(dir, candidates[i].name, &vp, &size);
++			if (error != 0) {
++				printf("KEBAB DSC: %s: cannot open (error %d), skipped\n",
++				    candidates[i].name, error);
++				continue;
++			}
++			error = kebab_dsc_read_header(vp, &h);
++			vnode_put(vp);
++			if (error != 0 ||
++			    memcmp(h.magic, main_header.magic, sizeof(h.magic)) != 0) {
++				printf("KEBAB DSC: %s: not a dyld cache header, skipped\n",
++				    candidates[i].name);
++				continue;
++			}
++			for (j = 0; j < indexed; j++) {
++				if (memcmp(candidates[j].uuid, h.uuid, 16) == 0) {
++					kebab_dsc_uuid_string(h.uuid, uuid);
++					printf("KEBAB DSC: %s and %s have the same uuid %s\n",
++					    candidates[j].name, candidates[i].name, uuid);
++					error = EINVAL;
++					goto out;
++				}
++			}
++			memcpy(candidates[indexed].uuid, h.uuid, 16);
++			candidates[indexed].size = (uint64_t)size;
++			if (indexed != i) {
++				strlcpy(candidates[indexed].name, candidates[i].name,
++				    sizeof(candidates[indexed].name));
++			}
++			indexed++;
++		}
++		candidate_count = indexed;
++	}
++
++	for (i = 0; i < plan->subcache_count; i++) {
++		struct kebab_dsc_subcache_entry *entry = &entries[i];
++		struct kebab_dsc_file *file;
++		struct kebab_dsc_header h;
++		vnode_t vp = NULLVP;
++		off_t size = 0;
++		char suffix[33];
++		int found = -1;
++
++		memcpy(suffix, entry->suffix, sizeof(entry->suffix));
++		suffix[32] = '\0';
++
++		for (j = 0; j < candidate_count; j++) {
++			if (memcmp(candidates[j].uuid, entry->uuid, 16) == 0) {
++				found = (int)j;
++				break;
++			}
++		}
++		if (found < 0) {
++			kebab_dsc_uuid_string(entry->uuid, uuid);
++			printf("KEBAB DSC: subcache %02u suffix \"%s\" uuid %s: "
++			    "NO FILE WITH THIS UUID\n", i + 1, suffix, uuid);
++			error = ENOENT;
++			goto out;
++		}
++
++		error = kebab_dsc_open_file(dir, candidates[found].name, &vp, &size);
++		if (error != 0) {
++			printf("KEBAB DSC: %s: cannot open (error %d)\n",
++			    candidates[found].name, error);
++			goto out;
++		}
++		error = kebab_dsc_read_header(vp, &h);
++		if (error != 0) {
++			printf("KEBAB DSC: %s: reading header failed (error %d)\n",
++			    candidates[found].name, error);
++			vnode_put(vp);
++			goto out;
++		}
++		error = kebab_dsc_validate_header(&h, (uint64_t)size,
++		    candidates[found].name, FALSE, plan, entry->vm_offset, FALSE);
++		if (error != 0) {
++			vnode_put(vp);
++			goto out;
++		}
++
++		file = &plan->files[plan->file_count];
++		strlcpy(file->name, candidates[found].name, sizeof(file->name));
++		memcpy(file->uuid, h.uuid, sizeof(file->uuid));
++		file->vm_offset = entry->vm_offset;
++		file->file_size = (uint64_t)size;
++		error = kebab_dsc_read_mappings(vp, &h, (uint64_t)size,
++		    candidates[found].name, plan, file);
++		vnode_put(vp);
++		if (error != 0) {
++			goto out;
++		}
++		if (file->mappings[0].sms_address !=
++		    plan->region_start + entry->vm_offset) {
++			printf("KEBAB DSC: %s: first mapping 0x%llx != region base "
++			    "0x%llx + cacheVMOffset 0x%llx\n",
++			    file->name,
++			    (unsigned long long)file->mappings[0].sms_address,
++			    (unsigned long long)plan->region_start,
++			    (unsigned long long)entry->vm_offset);
++			error = EINVAL;
++			goto out;
++		}
++		if (kebab_dsc_suffix_has(suffix, ".dylddata")) {
++			plan->dylddata_count++;
++		} else if (kebab_dsc_suffix_has(suffix, ".dyldlinkedit")) {
++			plan->dyldlinkedit_count++;
++		}
++		plan->file_count++;
++	}
++
++	if (plan->dylddata_count != 2 || plan->dyldlinkedit_count != 2) {
++		printf("KEBAB DSC: found dylddata=%u dyldlinkedit=%u, want 2 and 2; "
++		    "the cache would be missing __DATA or __LINKEDIT\n",
++		    plan->dylddata_count, plan->dyldlinkedit_count);
++		error = EINVAL;
++		goto out;
++	}
++
++	for (i = 0; i < candidate_count; i++) {
++		if (memcmp(candidates[i].uuid, main_header.symbol_file_uuid, 16) == 0) {
++			plan->symbols_present = TRUE;
++			plan->symbols_size = candidates[i].size;
++			strlcpy(plan->symbols_name, candidates[i].name,
++			    sizeof(plan->symbols_name));
++			break;
++		}
++	}
++
++	plan->total_mapped = 0;
++	plan->total_mappings = 0;
++	plan->highest_end = 0;
++	for (i = 0; i < plan->file_count; i++) {
++		const struct kebab_dsc_file *f = &plan->files[i];
++
++		for (j = 0; j < f->mapping_count; j++) {
++			uint64_t end = f->mappings[j].sms_address +
++			    f->mappings[j].sms_size;
++
++			plan->total_mapped += f->mappings[j].sms_size;
++			plan->total_mappings++;
++			if (end > plan->highest_end) {
++				plan->highest_end = end;
++			}
++		}
++	}
++
++	error = 0;
++
++out:
++	if (main_vp != NULLVP) {
++		vnode_put(main_vp);
++	}
++	if (entries != NULL) {
++		kfree_data(entries,
++		    plan->subcache_count * sizeof(*entries));
++	}
++	if (candidates != NULL) {
++		kfree_data(candidates,
++		    KEBAB_DSC_MAX_CANDIDATES * sizeof(*candidates));
++	}
++	return error;
++}
++
++#pragma mark - mapping
++
++/*
++ * Map the validated plan into the current task's shared region using the same
++ * API dyld reaches through shared_region_map_and_slide_2_np().  This must run
++ * in process context, after the task's shared region has been created by
++ * vm_map_exec(); consequently it is called from kern_exec for pid 1, not from
++ * bsd_init.
++ */
++static int
++kebab_dsc_map_plan(struct kebab_dsc_plan *plan)
++{
++	vm_shared_region_t shared_region = NULL;
++	struct _sr_file_mappings *srm = NULL;
++	mach_vm_offset_t start = 0;
++	kern_return_t kr;
++	uint32_t i;
++	int error = 0;
++
++	shared_region = vm_shared_region_trim_and_get(current_task());
++	if (shared_region == NULL) {
++		printf("KEBAB DSC: map: current task has no shared region (ENODEV)\n");
++		return ENODEV;
++	}
++
++	kr = vm_shared_region_start_address(shared_region, &start, NULL);
++	if (kr == KERN_SUCCESS) {
++		printf("KEBAB DSC: map: shared region already has a mapping at 0x%llx; "
++		    "leaving it untouched (EEXIST)\n", (unsigned long long)start);
++		vm_shared_region_deallocate(shared_region);
++		return EEXIST;
++	}
++
++	srm = kalloc_data(plan->file_count * sizeof(*srm), Z_WAITOK | Z_ZERO);
++	if (srm == NULL) {
++		vm_shared_region_deallocate(shared_region);
++		return ENOMEM;
++	}
++
++	for (i = 0; i < plan->file_count; i++) {
++		struct kebab_dsc_file *f = &plan->files[i];
++		struct kebab_dsc_header h;
++		vnode_t vp = NULLVP;
++		off_t size = 0;
++
++		error = kebab_dsc_open_file(plan->dir, f->name, &vp, &size);
++		if (error != 0) {
++			printf("KEBAB DSC: map: %s: cannot open (error %d)\n",
++			    f->name, error);
++			goto fail;
++		}
++		error = kebab_dsc_read_header(vp, &h);
++		if (error != 0 || memcmp(h.uuid, f->uuid, 16) != 0) {
++			printf("KEBAB DSC: map: %s: header uuid changed since the plan "
++			    "was built\n", f->name);
++			vnode_put(vp);
++			error = EINVAL;
++			goto fail;
++		}
++		if ((uint64_t)size != f->file_size) {
++			printf("KEBAB DSC: map: %s: size %llu changed to %llu\n",
++			    f->name, (unsigned long long)f->file_size,
++			    (unsigned long long)size);
++			vnode_put(vp);
++			error = EINVAL;
++			goto fail;
++		}
++
++		srm[i].fd = 0;          /* not -1: this is a file-backed mapping */
++		srm[i].mappings_count = f->mapping_count;
++		srm[i].mappings = f->mappings;
++		srm[i].slide = 0;
++		srm[i].vp = vp;
++		srm[i].file_size = (memory_object_size_t)size;
++		srm[i].file_control = ubc_getobject(vp, UBC_HOLDOBJECT);
++		if (srm[i].file_control == MEMORY_OBJECT_CONTROL_NULL) {
++			printf("KEBAB DSC: map: %s: no UBC memory object\n", f->name);
++			vnode_put(vp);
++			srm[i].vp = NULLVP;
++			error = EINVAL;
++			goto fail;
++		}
++	}
++
++	printf("KEBAB DSC: map: mapping %u files / %u mappings into shared region "
++	    "at 0x%llx\n", plan->file_count, plan->total_mappings,
++	    (unsigned long long)plan->region_start);
++	kr = vm_shared_region_map_file(shared_region, (int)plan->file_count, srm);
++	error = (int)kebab_dsc_mapping_errno(kr);
++	if (error != 0) {
++		printf("KEBAB DSC: map: vm_shared_region_map_file failed 0x%x "
++		    "(error %d); shared cache NOT mapped\n", kr, error);
++		goto fail;
++	}
++
++	for (i = 0; i < plan->file_count; i++) {
++		if (srm[i].vp != NULLVP) {
++			vnode_lock_spin(srm[i].vp);
++			srm[i].vp->v_flag |= VSHARED_DYLD;
++			vnode_unlock(srm[i].vp);
++		}
++	}
++	printf("KEBAB DSC: map: mapped 0x%llx bytes at 0x%llx\n",
++	    (unsigned long long)plan->total_mapped,
++	    (unsigned long long)plan->region_start);
++
++fail:
++	for (i = 0; i < plan->file_count; i++) {
++		if (srm[i].vp != NULLVP) {
++			vnode_put(srm[i].vp);
++			srm[i].vp = NULLVP;
++		}
++	}
++	kfree_data(srm, plan->file_count * sizeof(*srm));
++	vm_shared_region_deallocate(shared_region);
++	return error;
++}
++
++#pragma mark - entry points
++
++void
++kebab_dsc_boot(void)
++{
++	char arg[KEBAB_DSC_PATH_MAX];
++	uint32_t map = 0;
++	int error;
++
++	if (!PE_parse_boot_argn("kebab_dsc", arg, sizeof(arg)) || arg[0] == '\0') {
++		return;
++	}
++	if (strcmp(arg, "0") == 0) {
++		return;
++	}
++	if (strcmp(arg, "1") == 0) {
++		strlcpy(kebab_dsc_dir, KEBAB_DSC_DEFAULT_DIR, sizeof(kebab_dsc_dir));
++	} else {
++		strlcpy(kebab_dsc_dir, arg, sizeof(kebab_dsc_dir));
++	}
++	if (kebab_dsc_dir[0] != '/') {
++		printf("KEBAB DSC: kebab_dsc=%s is not an absolute directory; ignored\n",
++		    kebab_dsc_dir);
++		return;
++	}
++	if (PE_parse_boot_argn("kebab_dsc_map", &map, sizeof(map)) && map != 0) {
++		kebab_dsc_map_enabled = TRUE;
++	}
++
++	kebab_dsc_enabled = TRUE;
++	printf("KEBAB DSC: enabled for \"%s\"; kebab_dsc_map=%u\n",
++	    kebab_dsc_dir, kebab_dsc_map_enabled ? 1 : 0);
++
++	kebab_dsc_plan = kalloc_data(sizeof(*kebab_dsc_plan), Z_WAITOK | Z_ZERO);
++	if (kebab_dsc_plan == NULL) {
++		printf("KEBAB DSC: cannot allocate plan; shared cache NOT mapped\n");
++		return;
++	}
++	error = kebab_dsc_build_plan(kebab_dsc_dir, kebab_dsc_plan);
++	if (error != 0) {
++		printf("KEBAB DSC: plan rejected (error %d); shared cache NOT mapped\n",
++		    error);
++		kfree_data(kebab_dsc_plan, sizeof(*kebab_dsc_plan));
++		kebab_dsc_plan = NULL;
++		return;
++	}
++	kebab_dsc_log_plan(kebab_dsc_plan);
++
++	if (!kebab_dsc_map_enabled) {
++		printf("KEBAB DSC: dry run: nothing mapped (kebab_dsc_map=0)\n");
++		return;
++	}
++
++	/*
++	 * At bsd_init the current task is the kernel task and has no shared
++	 * region; mapping is therefore deferred to the first exec, where
++	 * vm_map_exec() has created one.  Report the condition explicitly
++	 * instead of pretending the map happened.
++	 */
++	{
++		vm_shared_region_t shared_region =
++		    vm_shared_region_trim_and_get(current_task());
++
++		if (shared_region == NULL) {
++			printf("KEBAB DSC: map: no shared region at boot (kernel task); "
++			    "deferred to first exec (ENODEV)\n");
++		} else {
++			vm_shared_region_deallocate(shared_region);
++			error = kebab_dsc_map_plan(kebab_dsc_plan);
++			if (error != 0) {
++				printf("KEBAB DSC: map failed at boot (error %d); "
++				    "shared cache NOT mapped\n", error);
++			}
++		}
++	}
++}
++
++void
++kebab_dsc_exec_hook(struct proc *p)
++{
++	int error;
++
++	if (!kebab_dsc_enabled || !kebab_dsc_map_enabled ||
++	    kebab_dsc_map_attempted || kebab_dsc_plan == NULL) {
++		return;
++	}
++	if (p == NULL || proc_getpid(p) != 1) {
++		return;
++	}
++	kebab_dsc_map_attempted = TRUE;
++	printf("KEBAB DSC: first exec (pid 1): attempting the deferred mapping\n");
++	error = kebab_dsc_map_plan(kebab_dsc_plan);
++	if (error != 0) {
++		printf("KEBAB DSC: mapping failed (error %d); shared cache NOT mapped\n",
++		    error);
++	} else {
++		printf("KEBAB DSC: mapping complete; dyld will find the cache already "
++		    "in the shared region\n");
++	}
++}
++
++#endif /* KEBAB */
+diff --git a/bsd/kern/kebab_dyldcache.h b/bsd/kern/kebab_dyldcache.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..c23da57db0cdde19b0a5d8f07b2e91f8f830a2a0
+--- /dev/null
++++ b/bsd/kern/kebab_dyldcache.h
+@@ -0,0 +1,40 @@
++/*
++ * KEBAB split dyld shared cache mapper.
++ *
++ * The iOS 16 userland does not ship one dyld shared cache; it ships a main
++ * cache plus numbered subcaches, two .dylddata files and two .dyldlinkedit
++ * files.  This module parses the dyld_cache_header, resolves every subcache
++ * entry by the UUID in its own header, validates the mapping plan, and (when
++ * explicitly asked to) maps main + subcaches into the process' shared region
++ * through the existing vm_shared_region_map_file() API.
++ *
++ * Compiled only for KEBAB and inert unless "kebab_dsc" is passed on the boot
++ * command line.  See docs/BRING-UP-STATE.md, section 14.
++ */
++#ifndef _KEBAB_DYLD_CACHE_H_
++#define _KEBAB_DYLD_CACHE_H_
++
++#if defined(KEBAB)
++
++struct proc;
++
++/*
++ * bsd_init: if kebab_dsc is present, parse the cache, log the plan, and
++ * remember it for the first exec.
++ *
++ * kebab_dsc=<dir>       directory holding dyld_shared_cache_arm64*
++ * kebab_dsc=1           same, with the conventional iOS directory
++ * kebab_dsc_map=1       also map the plan (see kebab_dsc_exec_hook)
++ */
++void kebab_dsc_boot(void);
++
++/*
++ * kern_exec: called after the new address space (and its shared region) is
++ * current, but before returning to user mode.  Maps the plan once, for pid 1,
++ * and only when kebab_dsc_map=1.
++ */
++void kebab_dsc_exec_hook(struct proc *p);
++
++#endif /* KEBAB */
++
++#endif /* _KEBAB_DYLD_CACHE_H_ */
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index f41b75bf2ad17106f47c904c041f55e60e85bfac..85b2d7ece42542289c6e05c98523663d78fd8c84 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -114,6 +114,9 @@
+ #include <sys/spawn_internal.h>
+ #include <sys/process_policy.h>
+ #include <sys/codesign.h>
++#if defined(KEBAB)
++#include "kebab_dyldcache.h"
++#endif /* KEBAB */
+ #include <sys/random.h>
+ #include <crypto/sha1.h>
+ 
+@@ -1892,6 +1895,16 @@ cleanup_rosetta_fp:
+ 	/* Avoid immediate VM faults back into kernel */
+ 	exec_prefault_data(p, imgp, &load_result);
+ 
++#if defined(KEBAB)
++	/*
++	 * The new address space and its shared region are current here (the
++	 * switch to the old map is the next statement), which is the first
++	 * point at which the dyld shared cache can be mapped into it.  Only
++	 * pid 1, and only when kebab_dsc_map=1.
++	 */
++	kebab_dsc_exec_hook(p);
++#endif /* KEBAB */
++
+ 	vm_map_switch(old_map);
+ 
+ 	/*
