@@ -403,3 +403,98 @@ inode 记录读，或从别的清单读。
 
 输出是 TSV：`type  mode  size  inode  xattrsdigest  path`；`mode`/`size` 固定为
 `-`，因为 mtree 没有这两个字段。`--check` 打印四条验收路径和最近匹配。
+
+## APFS 进展：omap → 卷超级块 → inode
+
+第七节卡住的 omap value 布局已经解开，而且一路读到了卷超级块和 inode 记录。
+问题不在加密，也不在 omap 选错，而在 B 树节点的两个偏移基址。
+
+### 一、两个基址
+
+`btree_node_phys` 头是 56 字节，TOC 在 `56 + table_space.off`。key 区和 value
+区的基址不一样：
+
+```
+key   = 56 + table_space.off + table_space.len + koff
+value = block_size - (40 if ROOT else 0) - voff
+```
+
+- `table_space.len` 不是"TOC 有多少字节"这么简单：容器 omap 的根节点 19918 是
+  `(off=0, len=448)`，key 区从 `56 + 448 = 504` 开始；卷 omap 的根节点 87756 是
+  `(off=0, len=576)`，key 区从 632 开始。之前把 `koff` 当成"从块尾倒着数"，
+  在根节点上就会读空。
+- 40 字节的 `btree_info_t` footer **只有根节点有**。根节点的值区到
+  `block_size - 40` 为止，非根节点一直到 `block_size`。容器 omap 的叶节点
+  19918 是根节点（flags 0x7 = ROOT|LEAF|FIXED_KV），所以 value 在
+  `4096 - 40 - 16 = 4040`；非根节点必须用 `4096 - voff`，多减 40 会读偏。
+
+用这两条重读 19918：
+
+| 项 | 值 |
+| --- | --- |
+| TOC | `k=0, v=16`（key 在 504，value 在 4040）|
+| key | `(oid 1026, xid 255)` |
+| value | `{flags=0, size=4096, paddr=19916}` |
+| 块 19916 | `APSB`，卷超级块 |
+
+### 二、卷超级块与卷 omap
+
+块 19916 的 `APSB`：
+
+| 字段 | 值 |
+| --- | --- |
+| 卷名 | `SydneyUpdate20H392.D22D221OS` |
+| 文件 / 目录 / 符号链接 | 142,313 / 136,387 / 2,324 |
+| 卷 UUID | `dadd93f8dbbf4b17a1df0f11e64172f7` |
+| 卷 omap 对象 | 块 87,684（oid 87684, xid 251）|
+| `apfs_root_tree_oid` | 1028 |
+| extentref / snap meta | 88,421 / 89,162 |
+
+卷 omap 的树根在块 87,756：level 2，3 个 separator，footer 记着
+`36,173 keys / 421 nodes`。把 oid 1028 代进去，解析到块 66,076（xid 250）：
+
+| 项 | 值 |
+| --- | --- |
+| fs-tree 根 | 块 66,076，oid 1028，level 3，5 keys |
+| 根上的 separator | `(1, type 9)`、`(...13553, 3)`、`(...27791, 4)`、`(...3e592, 4)`、`(...527fb, 5)` |
+
+fs-tree 的 key 比较不是把 64 位打包值当无符号数比，而是先比低 60 位的 object
+id、再比高 4 位的 type；否则根上的 separator 看起来是乱序的。
+
+### 三、走到 inode
+
+dyld 的 oid 是 `1152921500312216349`，launchd 是 `1152921500312216239`。从根
+1028 按 `(obj_id, type)` 下降：
+
+| 对象 | 路径（oid/level/paddr）|
+| --- | --- |
+| `/usr/lib/dyld` | 1028(3) → 28300(2, 88606) → 36294(1, 88147) → 36318(0, 101073) |
+| `/sbin/launchd` | 1028(3) → 28300(2, 88606) → 36294(1, 88147) → 36311(0, 101045) |
+
+inode 记录是 `j_inode_val_t` 固定 92 字节，`uncompressed_size` 在偏移 84，
+xfield 从 92 开始。读出来：
+
+| 路径 | inode | parent | mode | uid/gid | size |
+| --- | --- | --- | --- | --- | --- |
+| `/usr/lib/dyld` | 1152921500312216349 | 1152921500312216305 | 0100755 | 0/0 | **922,912** |
+| `/sbin/launchd` | 1152921500312216239 | 1152921500312216232 | 0100755 | 0/0 | **541,600** |
+
+两个 parent 正好是 mtree 清单里的 `/usr/lib` 和 `/sbin`（inode 分别为
+1152921500312216305 和 1152921500312216232），inode 的 `private_id` 也等于
+mtree 的 inode 列。xfield NAME 分别是 `dyld` 和 `launchd`。所以这不是"读到一个
+像 inode 的块"，而是和 mtree 同一条记录。
+
+### 四、结论
+
+- 第七节的死结是 value 基址用错：根节点有 40 字节 footer，非根节点没有。
+- mtree 缺的 size/mode 可以从 APFS inode 补齐：清单给 308,564 条路径和 inode，
+  APFS 给 inode 的 mode/size，两边按 inode join。
+- `/usr/lib/dyld` 922,912 字节、`/sbin/launchd` 541,600 字节，都是 0100755。
+- `libSystem.B.dylib` 和 `dyld_shared_cache_arm64e` 在这个 OS 卷里确实不存在，
+  要把同一条链走到 `Cryptex1,SystemOS` 的 APFS 才能拿到。
+
+复现：
+
+```sh
+python3 scripts/probe-ios-apfs.py --url "$URL" --known
+```
