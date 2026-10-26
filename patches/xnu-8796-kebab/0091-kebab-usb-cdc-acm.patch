@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,820 @@
+@@ -0,0 +1,835 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -165,7 +165,7 @@ new file mode 100644
 +	char        log_ring[LOG_RING_SIZE];
 +} ud;
 +
-+enum { EP0_SETUP, EP0_DATA, EP0_STATUS };
++enum { EP0_SETUP, EP0_DATA, EP0_STATUS, EP0_WAIT_STATUS };
 +
 +/* --------------------------------------------------------------- helpers */
 +
@@ -436,16 +436,14 @@ new file mode 100644
 + * stage means OUT, STATUS2 after an OUT data stage means IN.
 + */
 +static void
-+ud_status_stage(bool had_data_stage)
++ud_status_stage(void)
 +{
-+	ud.state = EP0_STATUS;
-+	if (!had_data_stage) {
-+		ud_start(UD_TRB_IN, EP0_IN, UD_DATA, 0, TRBCTL_STATUS2);
-+	} else if (ud.data_in) {
-+		ud_start(UD_TRB_OUT, EP0_OUT, UD_DATA, 0, TRBCTL_STATUS3);
-+	} else {
-+		ud_start(UD_TRB_IN, EP0_IN, UD_DATA, 0, TRBCTL_STATUS2);
-+	}
++	/*
++	 * The controller reports XferNotReady(status=2) when it is ready for the
++	 * status stage and tells us which direction it wants; submitting before that
++	 * comes back as status 1 (invalid parameter) and the transfer never ends.
++	 */
++	ud.state = EP0_WAIT_STATUS;
 +}
 +
 +static void
@@ -460,6 +458,10 @@ new file mode 100644
 +	bool ok = true, had_data_stage = false;
 +
 +	ud.data_in = (type & 0x80) != 0;
++	if (ud.events < 400) {
++		printf("KEBAB USB: setup %02x/%02x value 0x%04x len %u\n",
++		    type, req, value, length);
++	}
 +
 +	if ((type & 0x60) == 0x20) {                    /* class */
 +		switch (req) {
@@ -554,7 +556,7 @@ new file mode 100644
 +		ud_start(UD_TRB_IN, EP0_IN, UD_DATA, chunk, TRBCTL_DATA);
 +		return;
 +	}
-+	ud_status_stage(had_data_stage);
++	ud_status_stage();
 +}
 +
 +/* ---------------------------------------------------------------- events */
@@ -649,12 +651,25 @@ new file mode 100644
 +			ud_setup();
 +			break;
 +		case EP0_DATA:
-+			ud_status_stage(true);
++			ud_status_stage();
 +			break;
 +		case EP0_STATUS:
 +			ud_start_setup();
 +			break;
++		default:
++			break;
 +		}
++		return;
++	}
++	if (type == 3 && status == 2 && ud.state == EP0_WAIT_STATUS) {
++		/*
++		 * The controller is ready for the status stage and its reported endpoint
++		 * says which direction it wants; STATUS2 is the two-stage status used
++		 * when the request itself carried no data.
++		 */
++		ud.state = EP0_STATUS;
++		ud_start(ep == EP0_IN ? UD_TRB_IN : UD_TRB_OUT, ep, UD_DATA, 0,
++		    TRBCTL_STATUS2);
 +	}
 +}
 +
