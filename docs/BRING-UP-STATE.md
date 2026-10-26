@@ -849,3 +849,227 @@ build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab
 - 符号表里有 `kebab_cs_policy`、`kebab_cs_classify_blob`、
   `kebab_cs_shared_cache_allowed`、`kebab_cs_trustcache_load`、
   `kebab_cs_grants_entitlements`，以及 `__startup_CODESIGNING_entry_...`。
+
+## 十三、触摸到输入栈
+
+本节对应 `0101-kebab-touch-input.patch`（接在 `0100-kebab-codesign.patch` 之后，
+系列共 81 个补丁）。它记录两件事：这个内核里到底有哪些输入设施，以及在没有
+HID 的前提下触摸能走到哪一步。结论先行：**没有 HID 栈，也没有 evdev；内核里
+唯一能读的接口是字符设备**。所以本次实现的是坐标变换、固定队列和
+`/dev/kebab_touch`，没有伪造一个 `IOHIDEventService`。
+
+### 1. 清点：有什么，没有什么
+
+查过的树是 `/home/albert/ios-work/verifySc2`（`xnu-8796.141.3` + 全部补丁）。
+
+不存在的（源码、`conf/files` 条目、导出符号都没有）：
+
+| 名字 | 结果 |
+| --- | --- |
+| `iokit/hid` 目录 | 不存在 |
+| `IOHIDSystem`、`IOHIDEvent`、`IOHIDEventService`、`IOHIDDevice`、`IOHIDEventDriver` | 没有 |
+| `AppleHID*` 系列 | 没有 |
+| `evdev` / `/dev/input` | 没有；`bsd/net/bpf.h` 的 `DLT_LINUX_EVDEV` 只是一个抓包链路类型 |
+| `iokit/conf/files`、`files.arm64` 里的 HID 条目 | 没有 |
+
+全树 `grep -rn IOHID` 只有下面几处，没有一处是 HID 实现：
+
+* `iokit/IOKit/IOReturn.h` 与 `iokit/DriverKit/IOReturn.h` 的
+  `sub_iokit_hidsystem`：错误子域编号。
+* `iokit/IOKit/IOTimeStamp.h` 的 `IODBG_HID`：kdebug 代码。
+* `bsd/sys/kdebug.h` 的 `DBG_IOHID`：kdebug 子类编号（`DBG_IOPOINTING`
+  是它的别名）。
+* `iokit/Kernel/IOCatalogue.cpp` 的 `gIOHIDInterfaceClassName =
+  "IOHIDInterface"`：catalogue 用来识别旧式 NDRV HID 接口的类名过滤器，
+  没有对应的类实现。
+* `libkern/libkern/c++/bounded_ptr.h` 里的一句注释。
+
+构建配置本身也把内核 HID 关掉了：`config/MASTER` 有
+`options NO_KERNEL_HID`，`config/MASTER.arm64.kebab` 的 `IOKIT_BASE`
+带 `no_kernel_hid`，编译命令行里是 `-DNO_KERNEL_HID`。
+
+**kext 这条路同样走不通。** `libkern/kxld` 的源码在树里，但
+`libkern/conf/files` 把它们标成 `optional config_kxld`，KEBAB 没有开这个
+选项。已构建内核里：
+
+```
+$ nm kernel.development.kebab | grep -ci kxld
+0
+$ strings kernel.development.kebab | grep -i kxld
+Refusing to link non-prelinked kext: %s (no kxld support)
+```
+
+构建机的 KDK 里确实有 `IOHIDFamily.kext`，但它是 macOS 的：
+`com.apple.iokit.IOHIDFamily` 2.0.0，通用二进制 `x86_64 + arm64e`，
+2,146,688 字节，`CFBundleSupportedPlatforms = ["MacOSX"]`，
+`DTPlatformName = macosx`。本内核是 **arm64**（`file` 输出
+`Mach-O 64-bit executable arm64`），没有 KXLD，也没有可用的 kext 加载
+链路，所以这个二进制既不能加载，也不是 iPhoneOS 的构建。
+
+存在的、这次用到的东西：
+
+* `devfs` + `cdevsw` + `uio` + `msleep`/`lck_mtx`。UFS 驱动的
+  `ufsroot0`/`rufsroot0` 和 `kebabcon` 就是同一套接口，本驱动照那个形状
+  加 `/dev/kebab_touch`。
+* IOKit 本身（`iokit/Kernel`、`iokit/IOKit`），但没有 HID 类。
+* 控制台输出 `_cnputc`，控制台输入 `_vcgetc`（`bsd/dev/arm/cons.c`）。
+* `bsd/dev/arm/km.c` 是 km 键盘多路复用器，`kminit` 会执行，但没有键盘
+  硬件驱动接上；触摸不走这条路径。
+
+### 2. 三个坐标空间与变换
+
+| 空间 | 尺寸/范围 | 来源 |
+| --- | --- | --- |
+| sensor | 0..1079 × 0..2399 | 触摸报告里的 12 位字段；`max` 来自 app info，设备树 `touchpanel,panel-coords = <0x437 0x95f>` |
+| panel | 1080 × 2400 像素 | 引导器帧缓冲、`IOMobileFramebuffer` 默认 surface、`canvas-width/height` |
+| logical | 1125 × 2436，3x | `0093` 的 `GetDisplaySize`/`GetDisplayArea`，`backboardd` 按这个尺寸布局 |
+
+驱动把 `1079`/`2399` 当作**最大下标，不是数量**：`0..1079` 是 1080 个
+位置，正好覆盖 1080 像素宽的面板，所以 sensor 到 panel 是 1:1。逻辑显示
+把 panel `(0,0)` 放在 logical `(22,18)`（`(1125-1080)/2` 向下取整、
+`(2436-2400)/2`），因此 `logical = panel + (22,18)`。
+
+变换只在 `bsd/dev/kebab_touch.c` 的 `kt_transform()` 一个函数里：
+
+```c
+panel_x   = (raw_x * (1080 - 1) + max_x / 2) / max_x;   /* 四舍五入 */
+panel_y   = (raw_y * (2400 - 1) + max_y / 2) / max_y;
+logical_x = panel_x + 22;
+logical_y = panel_y + 18;
+```
+
+* `max_x`/`max_y` 取 app info 的值；没有 app info（或值不合理）时用
+  1079/2399。当前固件下 `1079 -> 1079`、`2399 -> 2399`，比例是 1；公式仍按
+  比例写，换固件时才不会把坐标缩到面板一角。
+* 例子：raw `(0,0)` -> panel `(0,0)` -> logical `(22,18)`；raw
+  `(1079,2399)` -> panel `(1079,2399)` -> logical `(1101,2417)`；raw
+  `(540,1200)` -> logical `(562,1218)`。
+* 逻辑坐标的 `0..21`、`1102..1124` 列与 `0..17`、`2418..2435` 行下面没有
+  面板，点不到。这是 1080×2400 面板放进 1125×2436 逻辑显示的结果，不是
+  驱动的缺陷。
+* 越界处理是保守的：12 位字段不会为负；大于 `max` 的值（典型是手指抬起
+  时的 `0xfff`）先夹到 `max`，事件里带 `KT_EVENT_FLAG_CLAMPED`，不向面板
+  外推算。
+
+### 3. 已实现
+
+**事件记录**（`struct kt_event`，48 字节，`_Static_assert` 固定布局）：
+
+```c
+struct kt_event {           /* offset */
+    uint32_t magic;         /*  0  'KTEV' = 0x4b544556 */
+    uint32_t seq;           /*  4  报告序号，同一报告的事件相同 */
+    uint64_t timestamp_ns;  /*  8  开机以来的纳秒数 */
+    int32_t  raw_x, raw_y;  /* 16  sensor 空间 */
+    int32_t  panel_x, panel_y;   /* 24  0..1079 / 0..2399 */
+    int32_t  logical_x, logical_y; /* 32  22..1101 / 18..2417 */
+    uint16_t pressure;      /* 40  报告里的 z */
+    uint8_t  phase;         /* 42  1=down 2=move 3=up */
+    uint8_t  slot;          /* 43  报告里的触点 index */
+    uint8_t  flags;         /* 44  bit0 = clamped */
+    uint8_t  pad[3];        /* 45 */
+};
+```
+
+**队列**：64 槽环形缓冲，64 × 48 = 3072 字节，静态数组，不用分配器。
+生产者是 5 ms 轮询线程，消费者是 `read(2)`，两边共用一把 `lck_mtx`。
+没人读时覆盖最旧的一条并累加 `dropped`；容量不会超过 64 条，所以没有
+消费者只损失历史，不会增长内存。`ktq_push()` 只做拷贝和索引移动，不分配。
+
+**`/dev/kebab_touch`**（`cdevsw`，`UID_ROOT`/`GID_OPERATOR` 0440）：
+
+* `read(2)` 一次返回整数条 48 字节记录，最旧的在前；默认阻塞，`O_NONBLOCK`
+  时无数据返回 `EAGAIN`；多个读者共用同一个 tail（事件被分走，不复制）。
+  buffer 小于 48 字节时返回 0。
+* 只在报告解码打开（`kt.decode`）且队列自检通过时创建设备节点；节点在
+  轮询线程起来之后创建，线程创建失败时不会留下一个永远读不到东西的节点。
+
+**触摸语义**：按报告里的触点 index 维护 16 位 active 位图；新出现的 index
+发 down，持续存在的 index 发 move，从报告里消失的 index 用最后的坐标发 up。
+最多 10 个触点（`touchpanel,max-num-support`）。
+
+**启动自检**：在设备节点和轮询线程存在之前，向真实队列压
+3 × 64 = 192 条、完全不消费；检查只剩 64 条、`dropped == 128`、按顺序
+drain 出 64 条、再 pop 为空，然后清零计数。成功时打印：
+
+```
+KEBAB TOUCH: queue selftest: 64 slots, 192 pushed, 128 dropped without a reader, 64 drained: ok
+```
+
+**控制台输出**：down 和 up 每次都打印一行（`obj`/`raw`/`panel`/`logical`/
+`z`）；move 默认每 200 ms 最多一行；`kebab_touch_dump=1` 时在每个 down
+额外打印该报告的完整对象列表。
+
+### 4. 启动参数
+
+| 参数 | 作用 |
+| --- | --- |
+| `kebab_touch=1` | 启用驱动（必需，原有）|
+| `kebab_touch_dump=1` | 每个 down 打印解码后的完整对象列表 |
+| `kebab_touch_move_ms=N` | move 行的最小间隔，默认 200；0 关闭 move 行（down/up 仍打印）|
+| `kebab_touch_raw=1` | 原有：SE/TLMM 寄存器与原始报文 |
+| `kebab_touch_se=` / `pins=` / `reset=` / `hz=` | 原有，见第九节 |
+
+### 5. 没有实现、不能声称的
+
+* 没有 `IOHIDEvent`，没有 IORegistry 节点，没有 `IOHIDEventService`。
+* 没有中断：仍是 5 ms 轮询，`irq-gpio` 39 没有使用。
+* 没有 `select`/`poll`/`ioctl`；`read(2)` 是唯一接口，也没有 `mmap`。
+* 没有把触摸送进 SpringBoard/backboardd 的路径。用户态现在能做的只有
+  `open("/dev/kebab_touch")` + `read` 48 字节记录，而本移植的用户态还
+  没有到能跑这种进程的程度。
+* 没有校准、温度补偿或边缘补偿；映射是固定比例加原点。
+* 没有在真机上验证过：本节所有结论都来自编译、启动自检代码和内核字符串，
+  没有一次真实触摸。
+
+### 6. 到用户态还差什么
+
+要到 `backboardd`/SpringBoard 能收到触摸，缺的是整个 `IOHIDFamily`，
+不是一个补丁：
+
+* 需要 Apple 的 `IOHIDFamily` 源码（独立项目；`docs/GPU-ASSESSMENT.md`
+  记录 ios-sweet 用的是 1915 版源码），其中至少包括
+  `IOHIDEventService`、`IOHIDEventDriver`、`IOHIDEvent`/`IOHIDEventQueue`
+  和用户客户端；用户态还需要 `IOKit.framework` 的
+  `IOHIDEventSystemClient`，`backboardd` 正是通过它取事件的。
+* 两条落地路径：
+  1. **静态链接**：把 `IOHIDFamily` 的源码并进这个内核构建（和
+     `0070`/`0093` 的做法一样）。它依赖 IOKit/libkern 的平台细节，需要
+     逐项移植；好处是不需要 KXLD。
+  2. **打开 KXLD 并把 IOHIDFamily 做成 kext**：要开 `config_kxld`，
+     用与本内核一致的 arm64/iPhoneOS 平台构建，并解决 prelink/符号集。
+     KDK 里那个 macOS `x86_64 + arm64e` 的二进制不能直接用。
+* 体量：KDK 里同版本的 macOS `IOHIDFamily` 二进制本身是 2,146,688 字节，
+  源码是完整的 Apple kext 工程；再叠加用户态 `IOKit.framework` 的 HID
+  客户端。这不是"再写一个驱动文件"的量级，应作为独立阶段排期。
+* 过渡方案：写一个用户态进程读 `/dev/kebab_touch`，可以驱动自定义的
+  demo，但 iOS 的 `backboardd` 不会读它；在 `IOHIDFamily` 到位之前，
+  这条路径到不了真实 UI。
+
+### 7. 应用与构建结果
+
+* 81 个 kebab 补丁按文件名顺序应用到 `xnu-8796.141.3`（`1b191cb`）的
+  干净索引：**81/81** 成功（`git apply --cached`，无 FAILED）。
+* 构建：`~/kebab-build/build-local.sh`（`MACHINE_CONFIG=KEBAB`、
+  `KERNEL_CONFIG=DEVELOPMENT`，macOS 13.5 + `KDK_13.5_22G74`），
+  日志 `89 patches staged`（81 个 kebab 补丁 + 8 个构建用补丁），
+  `0101-kebab-touch-input.patch` 显示 `Applying patch`。
+* 产物：
+  `build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab`，
+  **17,051,184 字节（16.26 MiB）**，arm64，
+  SHA-256 `2052a141fe7357f5cb34e6ecf44b6f86b4efa516066773169c5aad78fcb00dc5`，
+  构建时间 2026-10-27 03:59:54。
+* `kebab_touch.c` 本身 **0 warning**；编译它时出现的 3 条来自已有头文件
+  （`kern/kcdata.h`、`mach/vm_param.h` 的 `-Wdeclaration-after-statement`
+  和 `pexpert/arm64/KEBAB.h` 的 `KEBAB` 宏重定义），原文件已经包含同一批
+  头（`kern/clock.h`、`pexpert/pexpert.h`），不是本次新增。
+* 内核字符串里有 `KEBAB TOUCH: queue selftest: %u slots, ...` 和设备节点名
+  `kebab_touch`，确认代码进了镜像。
+
+复现（构建机上）：
+
+```sh
+# 构建脚本不会自己删这个符号链接；不删可能跳过重新链接
+rm -f "$HOME/kebab-build/dxb/build/xnu.obj/kernel.development.kebab"
+cd "$HOME/kebab-build" && ./build-local.sh
+```
