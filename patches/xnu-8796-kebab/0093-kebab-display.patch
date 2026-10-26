@@ -1022,7 +1022,7 @@ diff --git a/iokit/Kernel/arm/KebabFramebuffer.cpp b/iokit/Kernel/arm/KebabFrame
 new file mode 100644
 --- /dev/null
 +++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
-@@ -0,0 +1,511 @@
+@@ -0,0 +1,513 @@
 +/*
 + * Built-in IOMobileFramebuffer for KEBAB: the ABL's continuous-splash
 + * framebuffer (1080x2400 a8r8g8b8 in RAM, the panel scans it out by
@@ -1055,6 +1055,8 @@ new file mode 100644
 + * first swap) switches the console to serial, which also hides panics.
 + */
 +#include "KebabSurface.h"
++
++static void kebab_publish_canvas(IOService *provider, uint32_t width, uint32_t height);
 +
 +extern "C" int kebab_console_muted;
 +int kebab_console_muted;      /* read by the console path */
