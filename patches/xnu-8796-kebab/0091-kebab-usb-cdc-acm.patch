@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,1028 @@
+@@ -0,0 +1,1037 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -530,9 +530,12 @@ new file mode 100644
 +				ok = false;
 +				break;
 +			}
++			/*
++			 * The controller reports XferNotReady(status=1) when it is ready for
++			 * the data stage; submitting before that is the same mistake that made
++			 * the status stage fail, so only remember what to receive here.
++			 */
 +			ud.state = EP0_DATA_OUT;
-+			ud_to_dev(UD_DATA, 7);
-+			ud_start(UD_TRB_OUT_DATA, EP0_OUT, UD_DATA, 7, TRBCTL_DATA);
 +			return;
 +		case 0x21:                              /* GET_LINE_CODING, 7 bytes IN */
 +			memset(data, 0, 7);
@@ -723,6 +726,12 @@ new file mode 100644
 +		default:
 +			break;
 +		}
++		return;
++	}
++	if (type == 3 && status == 1 && ud.state == EP0_DATA_OUT) {
++		/* data phase ready: hand the receive buffer over and submit */
++		ud_to_dev(UD_DATA, 7);
++		ud_start(UD_TRB_OUT_DATA, EP0_OUT, UD_DATA, 7, TRBCTL_DATA);
 +		return;
 +	}
 +	if (type == 3 && status == 2 && ud.state == EP0_WAIT_STATUS) {
