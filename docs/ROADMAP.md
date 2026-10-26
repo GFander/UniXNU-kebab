@@ -183,6 +183,23 @@ P0-1 必须先做：前三轮重连尝试都是猜测，没有一次命中，原
 | P1-3 | 代码签名/AMFI 降级路径 | 未签名二进制能通过 `cs_*` 校验 |
 | P1-4 | `launchd` 完成第一轮 bootstrap | 至少 `notifyd`、`configd` 起来，`launchctl list` 有输出 |
 
+### P1 的根卷构成（2026-10-27 更新）
+
+mtree 清单解出来之后（308,564 条路径），有一件事必须先纠正：**OS DMG 不足以启动 P1**。
+
+| 内容 | 位置 | 结论 |
+| --- | --- | --- |
+| `/usr/lib/dyld` | OS DMG ✅ | 在 |
+| `/sbin/launchd` | OS DMG ✅ | 在 |
+| `dyld_shared_cache_arm64e` | **不在 OS DMG** | 在 `Cryptex1,SystemOS` |
+| `/usr/lib/libSystem.B.dylib` | **不在 OS DMG** | 同样在 cryptex |
+
+`/System/Library/Caches` 里只有 `apticket.der`、`com.apple.factorydata`、
+`com.apple.kernelcaches` —— 没有共享缓存。
+
+所以 P1 的根卷至少由两块拼成：OS DMG（4.73 GB）+ SystemOS cryptex（2.74 GB）。
+在做 P1-2 之前，必须先能读 cryptex 里的 APFS 文件，这是当前的实际瓶颈。
+
 ## P2 输入
 
 屏幕有了但还不能操作。触摸是 GUI 的前置条件。
