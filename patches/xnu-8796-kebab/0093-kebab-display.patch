@@ -3,10 +3,17 @@ drives the bootloader's framebuffer.
 
 Ported from the OnePlus 9 port, which runs the same 1080x2400 panel and is in the
 same situation: the bootloader leaves framebuffer memory in RAM that the panel
-scans out by itself, so no DPU work is needed to get an image. The panel memory is
-published as an IOSurface, CoreAnimation's swaps are copied into it on the CPU, and
-a 60 Hz timer provides vsync. IOMobileFramebuffer.framework finds the service and
-asks its provider for the canvas size.
+scans out by itself, so no DPU work is needed to get an image. KebabSurface
+publishes that memory as an IOSurface, KebabFramebuffer (AppleCLCD, an
+IOMobileFramebuffer) copies CoreAnimation's swaps into it on the CPU and drives
+vsync from a 60 Hz timer.
+
+Includes the sibling's later fixes: a repeated lookup of a surface this client
+already owns reports it with -1 rather than counting a second reference (which
+made the framework tear down the first client's mapping), and the console is
+muted with a flag instead of switching consoles, because the console switch writes
+a read-only-late variable on arm64. IOCoreSurfaceRoot gets a personality so
+IOSurface.framework can connect.
 
 --- a/iokit/conf/files.arm64
 +++ b/iokit/conf/files.arm64
@@ -45,6 +52,20 @@ asks its provider for the canvas size.
  }
  
  bool
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -55,6 +55,11 @@
+     "     'IONameMatch'     = 'oneplus,kebab';"
+     "     'IOProbeScore'    = 9000:32;"
+     "   },"
++    "   {"
++    "     'IOClass'         = IOCoreSurfaceRoot;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = IOCoreSurfaceRoot;"
++    "   },"
+ #endif
+     "   {"
+     "     'IOClass'         = IOPanicPlatform;"
 diff --git a/iokit/Kernel/arm/KebabSurface.h b/iokit/Kernel/arm/KebabSurface.h
 new file mode 100644
 --- /dev/null
@@ -119,7 +140,7 @@ diff --git a/iokit/Kernel/arm/KebabSurface.cpp b/iokit/Kernel/arm/KebabSurface.c
 new file mode 100644
 --- /dev/null
 +++ b/iokit/Kernel/arm/KebabSurface.cpp
-@@ -0,0 +1,872 @@
+@@ -0,0 +1,877 @@
 +/*
 + * Built-in IOSurface for KEBAB.
 + *
@@ -529,7 +550,7 @@ new file mode 100644
 +	OSArray *fRefs;
 +
 +	KebabSurfaceRef *findRef(uint32_t id, unsigned int *index);
-+	IOReturn addRef(KebabSurface *s, KebabSurfaceRef **refOut);
++	IOReturn addRef(KebabSurface *s, KebabSurfaceRef **refOut, bool *existing);
 +	IOReturn returnSurface(KebabSurface *s, IOExternalMethodArguments *args);
 +	IOReturn create(IOExternalMethodArguments *args);
 +
@@ -619,15 +640,16 @@ new file mode 100644
 + * task the first time. Takes over the caller's user count on s.
 + */
 +IOReturn
-+IOSurfaceRootUserClient::addRef(KebabSurface *s, KebabSurfaceRef **refOut)
++IOSurfaceRootUserClient::addRef(KebabSurface *s, KebabSurfaceRef **refOut, bool *existing)
 +{
++	*existing = false;
 +	IOLockLock(fLock);
 +	KebabSurfaceRef *ref = findRef(s->id, NULL);
 +	if (ref != NULL && ref->surface == s) {
-+		ref->count++;
 +		IOLockUnlock(fLock);
 +		kebab_surface_put(s);
 +		*refOut = ref;
++		*existing = true;
 +		return kIOReturnSuccess;
 +	}
 +	IOLockUnlock(fLock);
@@ -737,7 +759,8 @@ new file mode 100644
 +IOSurfaceRootUserClient::returnSurface(KebabSurface *s, IOExternalMethodArguments *args)
 +{
 +	KebabSurfaceRef *ref = NULL;
-+	IOReturn ret = addRef(s, &ref);
++	bool existing = false;
++	IOReturn ret = addRef(s, &ref, &existing);
 +	if (ret != kIOReturnSuccess) {
 +		return ret;
 +	}
@@ -746,10 +769,13 @@ new file mode 100644
 +		ret = kIOReturnNoMemory;
 +	} else {
 +		kebab_surface_fill_result(s, ref, out);
++		if (existing) {
++			put64(out, 0x00, ~0ULL);        /* already yours: reuse the cached client */
++		}
 +		ret = kebab_struct_out(args, out, KEBAB_SURFACE_RESULT_SIZE);
 +		IOFreeData(out, KEBAB_SURFACE_RESULT_SIZE);
 +	}
-+	if (ret != kIOReturnSuccess) {
++	if (ret != kIOReturnSuccess && !existing) {
 +		/* The caller never learns the id: undo this create/lookup. */
 +		trapRelease((void *)(uintptr_t)s->id, NULL, NULL, NULL, NULL, NULL);
 +	}
@@ -996,7 +1022,7 @@ diff --git a/iokit/Kernel/arm/KebabFramebuffer.cpp b/iokit/Kernel/arm/KebabFrame
 new file mode 100644
 --- /dev/null
 +++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
-@@ -0,0 +1,485 @@
+@@ -0,0 +1,487 @@
 +/*
 + * Built-in IOMobileFramebuffer for KEBAB: the ABL's continuous-splash
 + * framebuffer (1080x2400 a8r8g8b8 in RAM, the panel scans it out by
@@ -1029,6 +1055,8 @@ new file mode 100644
 + * first swap) switches the console to serial, which also hides panics.
 + */
 +#include "KebabSurface.h"
++
++extern "C" int kebab_console_muted;   /* osfmk/console/serial_console.c */
 +
 +#if defined(KEBAB)
 +#include <IOKit/IOService.h>
@@ -1227,9 +1255,9 @@ new file mode 100644
 +		int quiet = 0;
 +		fConsolePaused = true;
 +		if (PE_parse_boot_argn("kebabfb_noconsole", &quiet, sizeof(quiet)) && quiet != 0) {
-+			PE_Video video;
-+			PE_current_console(&video);
-+			PE_initialize_console(&video, kPEDisableScreen);
++			/* Not PE_initialize_console(kPEDisableScreen): its console switch
++			 * writes the read-only-late cons_ops_index and panics on arm64. */
++			kebab_console_muted = 1;
 +		}
 +	}
 +
