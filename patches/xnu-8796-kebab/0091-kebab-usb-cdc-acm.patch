@@ -2,7 +2,7 @@ diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/kebab_usb.c
-@@ -0,0 +1,861 @@
+@@ -0,0 +1,866 @@
 +/*
 + * KEBAB USB: DWC3 device mode with a CDC-ACM interface, and a kernel log pipe.
 + *
@@ -265,7 +265,12 @@ new file mode 100644
 +		ud_to_dev(buf_off, len);
 +	}
 +	uint64_t tpa = ud.dma_pa + trb_off;
-+	return ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)(tpa >> 32), (uint32_t)tpa, 0);
++	/*
++	 * DEPCMDPAR0 carries the low 32 bits of the TRB address and DEPCMDPAR1 the
++	 * high half (Linux dwc3_gadget_ep_cmd splits it exactly this way). Swapping
++	 * them makes the controller answer every STARTTRANSFER with status 1.
++	 */
++	return ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)tpa, (uint32_t)(tpa >> 32), 0);
 +}
 +
 +/*
