@@ -9155,29 +9155,31 @@ mappings[totalMappings] = {
 | `KEBAB DSC: dynamic config page [...] overlaps %s mapping %u` | 与已有 mapping 重叠 |
 | `KEBAB DSC: dynamicDataOffset 0x%llx is not 0x%x-byte aligned` / `no room for the dynamic config page ...` | 对齐 / 数组满 |
 | `KEBAB DSC: %s: sharedRegionStart 0x%llx is not the kernel shared region base 0x%llx` | 缓存声明了别的基址（以前是永远为真的比较，现在才会出现） |
-| `KEBAB DSC: map: dynamic config page 0x%llx+0x%llx is zero-filled; dyld will report "no dynamic config data" and continue` | 映射成功之后（1 行） |
+| `KEBAB DSC: map: ... dynamic config page 0x%llx+0x%llx zero-filled` | 默认映射成功行的后缀（1 行）；`kebab_dsc_verbose=1` 时另加一行说明 dyld 会报告 "no dynamic config data" 并继续 |
 | `KEBAB DSC: map: vm_shared_region_map_file failed 0x%x (error %d); region is empty again, shared cache NOT mapped` | 映射失败，且内核自己的回滚把区清空了 |
 | `KEBAB DSC: map: vm_shared_region_map_file failed 0x%x (error %d) but the region still maps 0x%llx; shared cache is HALF MAPPED` | 映射失败但区里还有映射（半映射，dyld 会接受然后踩空） |
 | `KEBAB DSC: cannot allocate %u subcache entries; ...` / `cannot allocate %u directory candidates; ...` / `map: cannot allocate %u file mappings; ...` | 三处 `kalloc_data` 失败（以前静默返回 `ENOMEM`） |
 
-正常路径总共多 2 行（约 180 字节）；失败路径每处 1 行，最坏情况不超过 10 行。**注意**：完整的计划日志本身就有 ~103 行、约 7 KiB（43 个文件行 + 52 条 mapping 行 + 8 行摘要），控制台 ring 是 16 KiB，一次 `kebab_dsc_map=1` 启动会占掉将近一半。真机第一次建议先只带 `kebab_dsc=`（dry run）看计划，再开 `kebab_dsc_map=1`；如果 ring 不够用，下一步应该给逐条 mapping 的打印加第二个开关，而不是缩小 ring。
+正常路径总共多 2 行（约 180 字节）；失败路径每处 1 行，最坏情况不超过 10 行。**注意**：0142 时完整的计划日志在真实缓存上是 102 行 / 11,560 字节（43 个文件行 + 52 条 mapping 行 + 7 行摘要；这里原先写的“~103 行 / 约 7 KiB”是估算，偏低），控制台 ring 是 16 KiB，一次 `kebab_dsc_map=1` 启动会占掉约 70%。`0143` 已把逐条打印改成 `kebab_dsc_verbose=1` 才输出，默认只留一行摘要，详见第 10 小节；真机第一次仍建议先 dry run 看摘要，再开 `kebab_dsc_map=1`。
 
 ### 7. 真机启动会先告诉我们什么（按出现顺序）
 
+> `0143` 之后默认启动只打印第 10 小节列出的摘要和生命周期行（`kebab_dsc_map=1` 共 6 行，dry run 3 行）。下面第 1、2、4 条里的逐条行需要 **`kebab_dsc_verbose=1`** 才会出现；第 3 条是默认摘要行，第 6 条的 check_np 值合并在默认的 `map: mapped ...` 行里。
+
 1. `KEBAB DSC: main dyld_shared_cache_arm64: ...` + 42 个子缓存的解析行 —— 证明内核在真机上真的按 UUID 找到了 42/42，而不是只在主机脚本里成立。
 2. `KEBAB DSC: region start=0x180000000 size=0xaade8000 ... maxSlide=0x55214000` 与 `dynamic config page 0x22ade4000+0x4000` —— 证明窗口、动态页、slide 上界都是计划里的数。
-3. `KEBAB DSC: plan 43 files / 52 mappings / 0xa2de8000 bytes` —— 一次 syscall 交出去的量；出现 52 就说明 0142 生效了。
-4. `KEBAB DSC: map: slide 0x0; mapping 43 files / 52 mappings into shared region at 0x180000000` —— 真正开始调 `vm_shared_region_map_file()`。
+3. `KEBAB DSC: plan 43 files / 52 mappings, 0xa2de8000 mapped, extent 0xaade8000 (end 0x22ade8000), base 0x180000000, slide 0x0, dynamic config page appended` —— 默认摘要行，一次 syscall 交出去的量；出现 52 和 `appended` 就说明 0142 生效了。
+4. `KEBAB DSC: map: slide 0x0; mapping 43 files / 52 mappings into shared region at 0x180000000` —— 真正开始调 `vm_shared_region_map_file()`（详细模式）。
 5. 失败时：`... failed 0x%x` + `region is empty again`（干净回滚，dyld 会自己去映射）或 `HALF MAPPED`（内核的 undo 没清干净，这是必须先修的内核问题，不是移植层的）。`kr` 到 errno 的映射与 syscall 一致：`KERN_INVALID_ADDRESS→EFAULT`、`KERN_PROTECTION_FAILURE→EPERM`、`KERN_NO_SPACE→ENOMEM`、其余→`EINVAL`。
-6. `KEBAB DSC: map: shared_region_check_np base 0x180000000 (slide 0x0)` —— dyld 会拿到的基址；带了 `kebab_dsc_slide=` 时这里的 slide 必须与 boot arg 相等，不等就说明 `sr_first_mapping` 不是主缓存那条 mapping。
+6. 默认 `map: mapped 0xa2de8000 bytes at 0x180000000, check_np base 0x180000000, dynamic config page ... zero-filled` 行尾的 `check_np base` —— dyld 会拿到的基址；带了 `kebab_dsc_slide=` 时这里的 slide 必须与 boot arg 相等，不等就说明 `sr_first_mapping` 不是主缓存那条 mapping。不匹配时单独打印 `does not match` 行。
 7. **dyld 自己打印的 `mapped cache does not contain dynamic config data`** —— 这是最强的一条：它证明 dyld 已经越过 `shared_region_check_np()`、读到了 `base + 0xaade4000` 这一页、并且没有崩。看到这一行，映射整体就算成立。
 8. 若出现 `existing shared cache in memory is not compatible` → magic 或基址不对；若进程直接 bad access，异常地址在 `0x22ade4000` 附近 → 0142 没生效；在 `0x180000000` 附近 → 主缓存第一页没映射上。
 9. 再往后才是 launchd 的第一个 syscall（对照第六十六、七十二节）。中间任何一步断掉，日志都能指到上面某一行。
 
 ### 8. 构建与补丁序列
 
-* `0142` 之后序列共 **121 个补丁**。在 pristine `1b191cb` 上按 `build.sh` 的顺序应用：119 个由 `git apply` 打上；`0001-kernel-sdk-root.patch` 与 `0002-local-availability.patch` 显示 "already applied"，因为 `build.sh` 的 `patches()` 在循环之前就用 `sed` 做了同样的两处修改（`makedefs/MakeInc.def` 的 `LDFLAGS_KERNEL_SDK`、`bsd/sys/make_symbol_aliasing.sh` 的 `AVAILABILITY_PL`），不是失败。kebab 系列 121/121 全部到位。
-* `build-local.sh` 从重置后的树完整构建 `DEVELOPMENT/ARM64/KEBAB`：`🎉 XNU Build Done!`，`kernel.development.kebab` 17,208,864 字节，`kebab_dyldcache.c` **0 warning / 0 error**。这个"0 警告"是和改动前的基线比对过的：用构建自己记录的同一行 `clang` 命令单独编译新旧两个文件，两次都是 5 条警告且逐条相同 —— 那 5 条来自 `vm_param.h`、`mpsc_queue.h` 等被包含的头文件，不在本文件里。
+* `0143` 之后序列共 **122 个补丁**。在 pristine `1b191cb` 上按 `build.sh` 的顺序应用：120 个由 `git apply` 打上；`0001-kernel-sdk-root.patch` 与 `0002-local-availability.patch` 显示 "already applied"，因为 `build.sh` 的 `patches()` 在循环之前就用 `sed` 做了同样的两处修改（`makedefs/MakeInc.def` 的 `LDFLAGS_KERNEL_SDK`、`bsd/sys/make_symbol_aliasing.sh` 的 `AVAILABILITY_PL`），不是失败。kebab 系列 122/122 全部到位。
+* `build-local.sh` 从重置后的树完整构建 `DEVELOPMENT/ARM64/KEBAB`：`🎉 XNU Build Done!`，`kernel.development.kebab` 17,208,944 字节，`kebab_dyldcache.c` **0 warning / 0 error**。这个"0 警告"是和改动前的基线比对过的：用构建自己记录的同一行 `clang` 命令单独编译新旧两个文件，两次都是 4 条警告且逐条相同 —— 那 4 条来自 `vm_param.h`、`mpsc_queue.h` 等被包含的头文件，不在本文件里。
 * 真机仍然没有。板子 stranded，本节没有任何真机启动日志。
 
 ### 9. 仍未验证 / 风险
@@ -9187,6 +9189,30 @@ mappings[totalMappings] = {
 * **`VM_PROT_NOAUTH` 没设**：non-PAC 的 arm64 构建里这一位无效，四条 slid mapping 走普通 pager，正确。若将来改用 arm64e 构建，`vm_shared_region_slide_mapping()` 会把没有 `VM_PROT_NOAUTH` 的 mapping 当成 auth 段、不装 pager 而走 `vm_shared_region_auth_remap()`；那时必须按 `flags & DYLD_CACHE_MAPPING_AUTH_DATA` 补这一位（本缓存的四条都是非 AUTH，dyld 会给它们都设 `VM_PROT_NOAUTH`）。
 * **`value_add` 全为 0 这个前提没被检查**：移植层靠它得出"slide==0 时不用装 pager"。如果将来某版缓存的 `value_add != 0`，slide==0 也必须设 `VM_PROT_SLIDE`，否则内容会错。值得后续在 `kebab_dsc_validate_slide_info()` 里加一句：slide 为 0 时要求 `value_add == 0`。
 * **代码签名闸门整体绕过**：见第 1 小节末。真机上这意味着缓存只按"文件在、头对"被映射；这与 bring-up 的其它放松一致，但不是最终形态。
-* **计划日志很大**：~7 KiB / 103 行，见第 6 小节末。
+* **计划日志**：默认已压到一行摘要（`0143`），逐条表由 `kebab_dsc_verbose=1` 打开；失败时仍会打印完整 detail，见第 10 小节。
 * **`.symbols` 与 `dladdr`**：不映射是对的，但"dyld 之后 `dladdr` 拿不到本地符号"这条没有验证。
 * **4 GiB 的 pmap 保留**：`vm_shared_region_create()` 固定 `SHARED_REGION_SIZE_ARM64 = 4 GiB`，`pmap_trim()` 只保留实际用到的 `0xaade8000`（约 2.67 GiB）这一段页表。物理页只在真正缺页时才分配，洞和未用到的 1.33 GiB 都不占内存；每进程的固定开销是覆盖 2.67 GiB 的 L2/L3 页表（共享区 pmap 是嵌套共享的，不是每进程一份）。这一块没有真机内存数字，只有代码依据。
+
+### 10. 日志预算（`0143`）
+
+`0142` 的计划日志是逐文件、逐 mapping 打印的。用真实 44 个缓存文件和内核自己的格式串在主机上重放（没有真机），一份默认 `kebab_dsc_map=1` 启动在映射层要打印 **118 行 / 13,294 字节**，其中计划段本身 **102 行 / 11,560 字节**，已经超过 16 KiB console ring 的 70%。
+
+`0143` 之后默认只打印一行计划摘要：
+
+```
+KEBAB DSC: plan 43 files / 52 mappings, 0xa2de8000 mapped, extent 0xaade8000 (end 0x22ade8000), base 0x180000000, slide 0x0, dynamic config page appended
+```
+
+这一行包含 mapping 数（52）、mapped 总量、计划 extent、基址、slide，以及动态配置页是否追加。逐文件 / 逐 mapping 表、成功侧的 header 校验行、slide-info 解析行、mapping 前的 slide 行和 `shared_region_check_np` 的成功行都移到 **`kebab_dsc_verbose=1`** 之下，默认 `0`；`enabled` 行会带出这个值。check_np 的返回值没有丢：成功时合并在 `map: mapped ...` 行尾，不匹配 / 不可用时仍单独打印。
+
+预算（主机重放真实缓存；`kebab_dsc_map=1` 的完整 happy path，包含 `enabled`、摘要、boot 延迟、first exec、map 结果、complete）：
+
+| 输出 | `0143` 前 | `0143` 后 |
+| --- | ---: | ---: |
+| 计划段 | 102 行 / 11,560 B | 1 行 / 154 B |
+| `kebab_dsc_map=1` happy path | 118 行 / 13,294 B | 6 行 / 652 B |
+| dry run happy path | 112 行 / 12,795 B | 3 行 / 360 B |
+
+计划段减少 98.7%，整条 happy path 减少 95.1%。第 6 小节原先写的“~103 行 / 约 7 KiB”是估算，按真实格式串重放后实际是 102 行 / 11,560 B；16 KiB ring 没有改。
+
+失败路径不省：计划被拒时仍然先打失败原因，再把当时已经建好的部分计划完整 dump 出来；映射失败时仍然打 `vm_shared_region_map_file failed ... region is empty again` / `HALF MAPPED` 探针，并在非 verbose 模式下补一份完整计划 detail。`shared_region_check_np` 的失败分支（不匹配 / 不可用）保持原样。因此失败诊断信息不比 `0142` 少。

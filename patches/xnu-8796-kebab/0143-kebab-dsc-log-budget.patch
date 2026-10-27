@@ -1,0 +1,338 @@
+fix(dsc): make the shared-cache plan dump opt-in
+
+The plan dump prints every cache file and every mapping on the happy
+path.  Measured against the real 44-file cache with the kernel's own
+format strings, that is 102 lines / 11,560 bytes: about 70% of the
+16 KiB console ring, not the "~7 KiB" estimated in section 73.  The
+ring drops the tail when it fills, which is exactly where dyld's
+verdict, the exec diagnostics and the final failure end up.
+
+Keep one summary line by default with the file/mapping count, mapped
+bytes, extent, base, slide and whether the dynamic-config page was
+appended.  Move the per-file/per-mapping table and the success-side
+validation lines behind "kebab_dsc_verbose=1", default 0.
+
+A rejected plan and a failed map still print their short reasons; they
+now also dump the full plan detail when verbose is off, so a failure
+keeps every value the verbose path would have shown.  The post-failure
+shared_region_check_np probe is unchanged.
+
+Measured (host renderer over the real cache, no hardware):
+  plan dump:      102 lines / 11,560 bytes -> 1 line / 154 bytes
+  map=1 happy:    118 lines / 13,294 bytes -> 6 lines / 652 bytes
+  dry-run happy:  112 lines / 12,795 bytes -> 3 lines / 360 bytes
+
+The 16 KiB ring is untouched.  Build: DEVELOPMENT/ARM64/KEBAB links;
+kebab_dyldcache.c has the same warning set as before (four warnings
+from included headers, none from this file).  No hardware; the board is
+stranded.
+
+diff --git a/bsd/kern/kebab_dyldcache.c b/bsd/kern/kebab_dyldcache.c
+index baebd16..89eefef 100644
+--- a/bsd/kern/kebab_dyldcache.c
++++ b/bsd/kern/kebab_dyldcache.c
+@@ -36,6 +36,11 @@
+  * This file is compiled only for KEBAB.  Nothing happens unless "kebab_dsc" is
+  * on the boot command line; "kebab_dsc_map=1" is the second switch that turns
+  * the logged plan into actual mappings.
++ *
++ * The plan always ends in one summary line.  "kebab_dsc_verbose=1" adds the
++ * per-file / per-mapping table and the success-side validation lines; a
++ * failure dumps that detail automatically, so the console ring only pays for
++ * it when something has to be diagnosed.
+  */
+ 
+ #include <sys/param.h>
+@@ -302,6 +307,7 @@ static boolean_t kebab_dsc_enabled;
+ static boolean_t kebab_dsc_map_enabled;
+ static boolean_t kebab_dsc_map_attempted;
+ static boolean_t kebab_dsc_slide_requested;
++static boolean_t kebab_dsc_verbose;
+ static uint64_t kebab_dsc_slide_arg;
+ 
+ #pragma mark - small helpers
+@@ -544,7 +550,7 @@ out:
+ static int
+ kebab_dsc_validate_header(const struct kebab_dsc_header *h, uint64_t file_size,
+     const char *name, boolean_t is_main, const struct kebab_dsc_plan *plan,
+-    uint64_t vm_offset, boolean_t log_checks)
++    uint64_t vm_offset, boolean_t verbose)
+ {
+ 	static const char expected_magic[16] = {
+ 		'd', 'y', 'l', 'd', '_', 'v', '1', ' ',
+@@ -575,7 +581,7 @@ kebab_dsc_validate_header(const struct kebab_dsc_header *h, uint64_t file_size,
+ 		    name, h->platform);
+ 		return EINVAL;
+ 	}
+-	if (log_checks) {
++	if (verbose) {
+ 		printf("KEBAB DSC: validate magic=%s formatVersion=0 cacheType=2 platform=2\n",
+ 		    "ok");
+ 	}
+@@ -588,7 +594,7 @@ kebab_dsc_validate_header(const struct kebab_dsc_header *h, uint64_t file_size,
+ 		    (unsigned long long)h->images_text_offset);
+ 		return EINVAL;
+ 	}
+-	if (log_checks) {
++	if (verbose) {
+ 		printf("KEBAB DSC: validate images %u + %u*32 = %llu == imagesTextOffset %llu\n",
+ 		    h->images_offset, h->images_count, (unsigned long long)images_end,
+ 		    (unsigned long long)h->images_text_offset);
+@@ -615,7 +621,7 @@ kebab_dsc_validate_header(const struct kebab_dsc_header *h, uint64_t file_size,
+ 		    (unsigned long long)h->code_signature_offset);
+ 		return EINVAL;
+ 	}
+-	if (log_checks) {
++	if (verbose) {
+ 		printf("KEBAB DSC: validate subcache array %u + %u*56 = %llu <= codeSignatureOffset %llu\n",
+ 		    h->sub_cache_array_offset, h->sub_cache_array_count,
+ 		    (unsigned long long)sub_end,
+@@ -824,11 +830,13 @@ kebab_dsc_validate_slide_info(vnode_t vp, const char *name, uint32_t index,
+ 		    (unsigned long long)size);
+ 		return EINVAL;
+ 	}
+-	printf("KEBAB DSC: %s: mapping %u slide info v2 at file 0x%llx+0x%llx: "
+-	    "page_size=0x%x pages=%u extras=%u deltaMask=0x%llx valueAdd=0x%llx\n",
+-	    name, index, (unsigned long long)offset, (unsigned long long)size,
+-	    si.page_size, si.page_starts_count, si.page_extras_count,
+-	    (unsigned long long)si.delta_mask, (unsigned long long)si.value_add);
++	if (kebab_dsc_verbose) {
++		printf("KEBAB DSC: %s: mapping %u slide info v2 at file 0x%llx+0x%llx: "
++		    "page_size=0x%x pages=%u extras=%u deltaMask=0x%llx valueAdd=0x%llx\n",
++		    name, index, (unsigned long long)offset, (unsigned long long)size,
++		    si.page_size, si.page_starts_count, si.page_extras_count,
++		    (unsigned long long)si.delta_mask, (unsigned long long)si.value_add);
++	}
+ 	return 0;
+ }
+ 
+@@ -1236,7 +1244,7 @@ kebab_dsc_add_dynamic_config(struct kebab_dsc_plan *plan,
+ }
+ 
+ static void
+-kebab_dsc_log_plan(const struct kebab_dsc_plan *plan)
++kebab_dsc_log_plan_detail(const struct kebab_dsc_plan *plan)
+ {
+ 	uint32_t i, j;
+ 	char uuid[33];
+@@ -1262,7 +1270,7 @@ kebab_dsc_log_plan(const struct kebab_dsc_plan *plan)
+ 	    (unsigned long long)KEBAB_DSC_REGION_BASE,
+ 	    (unsigned long long)KEBAB_DSC_REGION_END);
+ 	printf("KEBAB DSC: resolved %u/%u subcaches by uuid; dylddata=%u dyldlinkedit=%u\n",
+-	    plan->file_count - 1, plan->subcache_count,
++	    plan->file_count > 0 ? plan->file_count - 1 : 0, plan->subcache_count,
+ 	    plan->dylddata_count, plan->dyldlinkedit_count);
+ 	if (plan->symbols_present) {
+ 		kebab_dsc_uuid_string(plan->symbol_uuid, uuid);
+@@ -1322,6 +1330,51 @@ kebab_dsc_log_plan(const struct kebab_dsc_plan *plan)
+ 	}
+ }
+ 
++/*
++ * The one line every boot gets, whether or not kebab_dsc_verbose is set.  It
++ * has to be enough to tell a built plan from an empty one: how many mappings
++ * were produced, how far they reach, where they start, how much they are slid
++ * and whether the synthetic dynamic-config page was added.  The per-file and
++ * per-mapping table is proof for a human reading a log, not something the next
++ * boot needs, so it stays behind the boot argument.
++ */
++static void
++kebab_dsc_log_plan_summary(const struct kebab_dsc_plan *plan)
++{
++	printf("KEBAB DSC: plan %u files / %u mappings, 0x%llx mapped, extent "
++	    "0x%llx (end 0x%llx), base 0x%llx, slide 0x%llx, dynamic config "
++	    "page %s\n",
++	    plan->file_count, plan->total_mappings,
++	    (unsigned long long)plan->total_mapped,
++	    (unsigned long long)(plan->highest_end - plan->region_start),
++	    (unsigned long long)plan->highest_end,
++	    (unsigned long long)plan->region_start,
++	    (unsigned long long)plan->slide,
++	    plan->dynamic_config_size != 0 ? "appended" : "absent");
++}
++
++static void
++kebab_dsc_log_plan(const struct kebab_dsc_plan *plan)
++{
++	kebab_dsc_log_plan_summary(plan);
++	if (kebab_dsc_verbose) {
++		kebab_dsc_log_plan_detail(plan);
++	}
++}
++
++/*
++ * A failure needs the tables that the happy path skips, so print them unless
++ * kebab_dsc_verbose already did.  Called for a rejected plan (where the plan is
++ * only partly filled in) and for a failed map; the caller decides whether the
++ * detail is already on the ring.
++ */
++static void
++kebab_dsc_log_plan_failure(const struct kebab_dsc_plan *plan)
++{
++	printf("KEBAB DSC: plan detail follows (failure path):\n");
++	kebab_dsc_log_plan_detail(plan);
++}
++
+ static int
+ kebab_dsc_build_plan(const char *dir, struct kebab_dsc_plan *plan)
+ {
+@@ -1358,12 +1411,14 @@ kebab_dsc_build_plan(const char *dir, struct kebab_dsc_plan *plan)
+ 	memcpy(plan->symbol_uuid, main_header.symbol_file_uuid,
+ 	    sizeof(plan->symbol_uuid));
+ 
+-	kebab_dsc_uuid_string(main_header.uuid, uuid);
+-	printf("KEBAB DSC: main %s: %llu bytes, uuid %s\n", KEBAB_DSC_MAIN,
+-	    (unsigned long long)main_size, uuid);
++	if (kebab_dsc_verbose) {
++		kebab_dsc_uuid_string(main_header.uuid, uuid);
++		printf("KEBAB DSC: main %s: %llu bytes, uuid %s\n", KEBAB_DSC_MAIN,
++		    (unsigned long long)main_size, uuid);
++	}
+ 
+ 	error = kebab_dsc_validate_header(&main_header, (uint64_t)main_size,
+-	    KEBAB_DSC_MAIN, TRUE, plan, 0, TRUE);
++	    KEBAB_DSC_MAIN, TRUE, plan, 0, kebab_dsc_verbose);
+ 	if (error != 0) {
+ 		goto out;
+ 	}
+@@ -1711,10 +1766,12 @@ kebab_dsc_map_plan(struct kebab_dsc_plan *plan)
+ 		}
+ 	}
+ 
+-	printf("KEBAB DSC: map: slide 0x%llx; mapping %u files / %u mappings into "
+-	    "shared region at 0x%llx\n", (unsigned long long)plan->slide,
+-	    plan->file_count, plan->total_mappings,
+-	    (unsigned long long)(plan->region_start + plan->slide));
++	if (kebab_dsc_verbose) {
++		printf("KEBAB DSC: map: slide 0x%llx; mapping %u files / %u mappings "
++		    "into shared region at 0x%llx\n", (unsigned long long)plan->slide,
++		    plan->file_count, plan->total_mappings,
++		    (unsigned long long)(plan->region_start + plan->slide));
++	}
+ 	kr = vm_shared_region_map_file(shared_region, (int)plan->file_count, srm);
+ 	error = (int)kebab_dsc_mapping_errno(kr);
+ 	if (error != 0) {
+@@ -1747,22 +1804,13 @@ kebab_dsc_map_plan(struct kebab_dsc_plan *plan)
+ 			vnode_unlock(srm[i].vp);
+ 		}
+ 	}
+-	printf("KEBAB DSC: map: mapped 0x%llx bytes at 0x%llx\n",
+-	    (unsigned long long)plan->total_mapped,
+-	    (unsigned long long)(plan->region_start + plan->slide));
+-	if (plan->dynamic_config_size != 0) {
+-		printf("KEBAB DSC: map: dynamic config page 0x%llx+0x%llx is "
+-		    "zero-filled; dyld will report \"no dynamic config data\" and "
+-		    "continue\n",
+-		    (unsigned long long)(plan->dynamic_config_addr + plan->slide),
+-		    (unsigned long long)plan->dynamic_config_size);
+-	}
+-
+ 	/*
+ 	 * shared_region_check_np() returns the address of the first mapping,
+-	 * which is the slid cache base.  Log it next to the requested slide so
+-	 * a boot log shows whether the value the pager uses and the value dyld
+-	 * will derive agree.
++	 * which is the slid cache base.  Compare it with the value the plan
++	 * expects before reporting success: a mismatch is a failure and gets
++	 * its own line.  The one line a successful map prints folds in the
++	 * check_np value, the mapped-byte total and the dynamic-config page, so
++	 * a normal boot does not need a line for each.
+ 	 */
+ 	start = 0;
+ 	kr = vm_shared_region_start_address(shared_region, &start, NULL);
+@@ -1773,10 +1821,6 @@ kebab_dsc_map_plan(struct kebab_dsc_plan *plan)
+ 			    (unsigned long long)start,
+ 			    (unsigned long long)plan->region_start,
+ 			    (unsigned long long)plan->slide);
+-		} else {
+-			printf("KEBAB DSC: map: shared_region_check_np base 0x%llx "
+-			    "(slide 0x%llx)\n", (unsigned long long)start,
+-			    (unsigned long long)(start - plan->region_start));
+ 		}
+ 	} else {
+ 		printf("KEBAB DSC: map: shared_region_check_np base unavailable "
+@@ -1784,6 +1828,23 @@ kebab_dsc_map_plan(struct kebab_dsc_plan *plan)
+ 		    (unsigned long long)plan->slide);
+ 	}
+ 
++	printf("KEBAB DSC: map: mapped 0x%llx bytes at 0x%llx",
++	    (unsigned long long)plan->total_mapped,
++	    (unsigned long long)(plan->region_start + plan->slide));
++	if (kr == KERN_SUCCESS) {
++		printf(", check_np base 0x%llx", (unsigned long long)start);
++	}
++	if (plan->dynamic_config_size != 0) {
++		printf(", dynamic config page 0x%llx+0x%llx zero-filled",
++		    (unsigned long long)(plan->dynamic_config_addr + plan->slide),
++		    (unsigned long long)plan->dynamic_config_size);
++	}
++	printf("\n");
++	if (kebab_dsc_verbose && plan->dynamic_config_size != 0) {
++		printf("KEBAB DSC: map: dyld will report \"no dynamic config data\" "
++		    "and continue\n");
++	}
++
+ fail:
+ 	for (i = 0; i < plan->file_count; i++) {
+ 		if (srm[i].vp != NULLVP) {
+@@ -1803,6 +1864,7 @@ kebab_dsc_boot(void)
+ {
+ 	char arg[KEBAB_DSC_PATH_MAX];
+ 	uint32_t map = 0;
++	uint32_t verbose = 0;
+ 	uint64_t slide = 0;
+ 	int error;
+ 
+@@ -1829,13 +1891,17 @@ kebab_dsc_boot(void)
+ 		kebab_dsc_slide_requested = TRUE;
+ 		kebab_dsc_slide_arg = slide;
+ 	}
++	if (PE_parse_boot_argn("kebab_dsc_verbose", &verbose, sizeof(verbose))) {
++		kebab_dsc_verbose = (verbose != 0);
++	}
+ 
+ 	kebab_dsc_enabled = TRUE;
+ 	printf("KEBAB DSC: enabled for \"%s\"; kebab_dsc_map=%u "
+-	    "kebab_dsc_slide=0x%llx%s\n", kebab_dsc_dir,
++	    "kebab_dsc_slide=0x%llx%s kebab_dsc_verbose=%u\n", kebab_dsc_dir,
+ 	    kebab_dsc_map_enabled ? 1 : 0,
+ 	    (unsigned long long)kebab_dsc_slide_arg,
+-	    kebab_dsc_slide_requested ? "" : " (default)");
++	    kebab_dsc_slide_requested ? "" : " (default)",
++	    kebab_dsc_verbose ? 1 : 0);
+ 
+ 	kebab_dsc_plan = kalloc_data(sizeof(*kebab_dsc_plan), Z_WAITOK | Z_ZERO);
+ 	if (kebab_dsc_plan == NULL) {
+@@ -1846,6 +1912,12 @@ kebab_dsc_boot(void)
+ 	if (error != 0) {
+ 		printf("KEBAB DSC: plan rejected (error %d); shared cache NOT mapped\n",
+ 		    error);
++		/*
++		 * The plan is only partly filled in here, which is exactly the
++		 * state the failure has to explain; print whatever the builder
++		 * managed to add before it gave up.
++		 */
++		kebab_dsc_log_plan_failure(kebab_dsc_plan);
+ 		kfree_data(kebab_dsc_plan, sizeof(*kebab_dsc_plan));
+ 		kebab_dsc_plan = NULL;
+ 		return;
+@@ -1878,6 +1950,9 @@ kebab_dsc_boot(void)
+ 			if (error != 0) {
+ 				printf("KEBAB DSC: map failed at boot (error %d); "
+ 				    "shared cache NOT mapped\n", error);
++				if (!kebab_dsc_verbose) {
++					kebab_dsc_log_plan_failure(kebab_dsc_plan);
++				}
+ 			}
+ 		}
+ 	}
+@@ -1901,6 +1976,9 @@ kebab_dsc_exec_hook(struct proc *p)
+ 	if (error != 0) {
+ 		printf("KEBAB DSC: mapping failed (error %d); shared cache NOT mapped\n",
+ 		    error);
++		if (!kebab_dsc_verbose) {
++			kebab_dsc_log_plan_failure(kebab_dsc_plan);
++		}
+ 	} else {
+ 		printf("KEBAB DSC: mapping complete; dyld will find the cache already "
+ 		    "in the shared region\n");
