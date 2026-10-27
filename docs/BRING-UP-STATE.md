@@ -5765,3 +5765,401 @@ DMA 池从一页 4 KiB 变成连续的 68 KiB（`UD_SIZE 0x11000`），新增
 **正确修法（未做）。** panic 路径在 owner 是"本机已被 panic 停掉的 CPU"时
 强制 `ud_controller_restart()` 再接管；或者 `ud_enter` 在 `panic_active()` 时
 直接放弃门、让 panic 自旋无条件接管。两条都需要真机验证，属于下一轮。
+
+## 六十三、把 userdata 做成真正的根卷
+
+> 目标：把 `userdata` 上那个 64 MiB 的玩具 `KebabRoot` 换成一个装得下 3.3 GB
+> 用户态的 HFS+ 卷。容量由卷头里的 `totalBlocks` 决定，不是分区大小，所以必须
+> 重建卷本身。内核里不实现 HFS+：卷在主机上用 Apple 的 `newfs_hfs` 造好，只有
+> 新卷实际分配的块被打包成一条流，内核通过 UFS 块路径原样写进 `userdata`。
+
+这一节记八件事：尺寸怎么定、主机工具与 extent 格式、内核侧写卷路径、控制台协议
+与安全门、真机上的旧/新卷参数、销毁与恢复、大于 64 MiB 的文件，以及装共享缓存
+之前还差什么。
+
+### 1. 尺寸：16 GiB
+
+先把计划里的数字加起来：
+
+| 载荷 | 字节 |
+| --- | ---: |
+| 44 个拆分 dyld 共享缓存 | 3,331,890,097 |
+| `dyld_shared_cache_arm64.symbols`（592 MB 分片） | 592,101,376 |
+| `launchd` + `dyld` | 1,464,512 |
+| 合计 | 约 3.93 GB |
+
+8 GiB 的卷装得下，但只剩约 4.1 GiB 余量（约 1.04 倍计划），共享缓存以后长一点
+就会再次撞墙；16 GiB 留 12 GiB 余量（约 4.9 倍计划），同时仍然只占 `userdata`
+分区（约 229 GiB；确切字节数以内核 `VOL?` 为准，见第 5 节）的 **7%**。
+再大没有意义：卷越大，HFS+ 的分配位图越大（16 GiB 只要 512 KiB），而块级写入
+和挂载路径并不因为卷大而变快。
+
+于是选 **16 GiB = 17,179,869,184 字节**，卷名 `KebabRoot`，分配块 4096 字节，
+共 **4,194,304 块**。三个选择都是被现有路径约束出来的：
+
+* **4096 字节分配块**：UFS 设备的块就是 4096，内核页是 16 KiB；4 KiB 分配块
+  让每一笔 UFS 写都是整数个设备块，不触发 `kebab_ufs_strategy()` 的
+  "读-改-写" 分支。旧卷也是 4096，挂载路径一行不用改。
+* **非日志（non-journaled）**：旧卷就是非日志，补丁 0086 已经允许脏的非日志
+  根卷；日志会多出至少 8 MiB 元数据和一个回放路径，bring-up 阶段不需要。
+* **无分区表**：镜像从字节 0 就是 HFS+，和设备上 `userdata` 的布局一致；
+  `hdiutil` 用 `diskimage-class=CRawDiskImage` 把普通文件当裸盘挂上，再跑
+  `newfs_hfs`，不会写 GPT。
+
+`newfs_hfs` 在 16 GiB 卷上默认会把 catalog 预分配到 32 MiB、attributes 到
+64 MiB；这些块全都置零但被位图标记为已分配。主机工具用
+`-c c=256,e=32,a=8 -I c=256,e=32,a=8` 把 clump/初始大小钉小，把已分配块压到
+**426 块（1.7 MiB）**，这才让"只送已分配块"这件事真正便宜。
+
+### 2. 主机侧：`scripts/make-root-volume.py` 与 VEXT v1
+
+用法（macOS，需要 `hdiutil` / `newfs_hfs`）：
+
+```sh
+scripts/make-root-volume.py --size 16g \
+    --image /tmp/KebabRoot.img --stream /tmp/KebabRoot.vext
+```
+
+它做四步：
+
+1. `mkfile -n 16g` 造一个稀疏文件（逻辑 16 GiB，实际只占元数据块）；
+2. `hdiutil attach -nomount -noverify -imagekey diskimage-class=CRawDiskImage`
+   把它挂成 `/dev/diskN`；
+3. `newfs_hfs -v KebabRoot -b 4096 -c c=256,e=32,a=8 -I c=256,e=32,a=8
+   /dev/rdiskN`，然后 detach。`hdiutil` 和 `newfs_hfs` 都是 Apple 自己的实现，
+   卷的每一个字节都由它们产生，内核不参与格式决策；
+4. 读新卷头里的 allocation file fork，取分配位图，按位图把**已分配块**合并成
+   extent，写出 VEXT v1 流。
+
+只送"非零字节"是不够的：实测 426 个已分配块里只有 11 个块含非零字节（45,056
+字节），其余 415 个是 catalog / extents / attributes 的预分配零块。这些块在
+HFS+ 眼里是已分配的 B-tree 节点区，如果跳过它们，旧卷的字节会留在新卷的
+metadata 文件里；虽然未使用的节点不会被读，但"新卷"就不干净了。所以工具送的是
+**位图标记为已分配的全部块**，零块也送。代价是 1.7 MiB，按 7.8 MiB/s 不到
+0.3 秒；收益是新卷的每一个已分配块都等于镜像。
+
+VEXT v1 的格式（全部小端）：
+
+```
+流头 32 字节
+  0   4  magic 'VEXT'          4   2  version 1
+  6   2  header_size 32        8   8  volume_bytes（整个卷的字节数）
+  16  4  block_size 4096       20  4  extent_count
+  24  8  data_bytes（所有 extent 长度之和）
+extent 头 16 字节 + 数据，重复 extent_count 次
+  0   8  offset（卷内字节偏移，4096 对齐）
+  8   4  length（4096 对齐，非零）
+  12  4  reserved = 0
+尾部：0 填充到 65536 字节的整数倍
+```
+
+4096 对齐是内核侧的硬要求：写入路径只接受整块，半块会被
+`kebab_ufs_raw_write()` 直接拒绝。填充保证最后一个 bulk-OUT 传输是满 64 KiB，
+否则"正好 512 整数倍"的短包不会让 TRB 完成——这条约束和 KIST 流完全一样。
+
+实测的主机输出（macOS 14.6.1，2026-10-28）：
+
+```
+volume size 17179869184 bytes (16384 MiB), block size 4096, total blocks 4194304
+free blocks 4193878 (16382 MiB), allocated blocks 426
+extents     3, data 1744896 bytes (1704 KiB), non-zero 45056 bytes, allocated-but-zero blocks 415
+stream      KebabRoot.vext, 1769472 bytes (27 chunks), padding 24496,
+            sha256 e37713002c463d99635ec790263eb21b7799c18388768a45b3910ace53f920eb
+```
+
+三个 extent 是：`0x0 + 0xa9000`（块 0..168，含卷头和 catalog 等）、
+`0xf9000 + 0x100000`（块 249..504）、`0x3fffff000 + 0x1000`（最后一个块里的
+备用卷头）。总线上 27 个 64 KiB 块，1.77 MB。
+
+工具自己会把写出的流再读一遍：核对每个 extent 头和载荷、总长度、填充字节，任何
+不一致都直接失败，不会把一个坏流交给内核。
+
+### 3. 内核侧：`bsd/dev/kebab_vol.c`（补丁 0133）
+
+新增 `bsd/dev/kebab_vol.{c,h}` 和 `bsd/dev/kebab_ufs.h`，并在 `bsd/conf/files`
+登记。代码分三层：
+
+**（1）流状态机。** 和安装器一样只向前读：流头 → extent 头 → extent 数据 →
+填充。每读一个字段先验上界，绝不相信线上的长度：
+
+* `volume_bytes` 必须等于命令参数、必须是 4096 的倍数、必须不超过
+  `userdata` 分区字节数；
+* 每个 extent 的 offset/length 必须 4096 对齐、非零、按 offset 递增不重叠、
+  完全落在声明的卷内；第一个 extent 必须从 0 开始；
+* 所有 extent 数据之和必须等于流头声明的 `data_bytes`，加上头部后必须正好等于
+  `VOL BEGIN` 的 wire 字节数，填充必须全零；
+* **卷头在写第一个块之前校验**：从流里截住偏移 1024 的 512 字节，核对
+  `sig == 0x482b`、`version == 4`、`blockSize == 4096`、
+  `totalBlocks * blockSize == volume_bytes`。不一致就 `VOL ABORT`，块 0 一个
+  字节都没动。
+
+**（2）块写入。** 64 KiB 暂存缓冲按 extent 顺序累积，满了就调
+`kebab_ufs_raw_write()`；extent 末尾的余数也必须是整块。这个函数在
+`kebab_ufs.c` 里，绕过 buffer cache，且每次都在 UFS 锁内把
+`offset + length` 和 `userdata` 分区重新比一遍——不信任解析器传来的任何范围。
+写路径就是原有的 `ufs_write_blocks()`，和 HFS+ 读写走同一套 WRITE(10)。
+
+**（3）写后验证。** 流结束后从设备重新读 512 字节卷头，和流里截住的 512 字节
+逐字节比较；一致才打印 `VOL NEW` 和 `VOL DONE`。旧卷头在开始前同样读一遍，
+字段和 512 字节原始十六进制都打印到控制台——不依赖主机保存文件。
+
+`kebab_vol=1` 还会在 `bsd/vfs/vfs_subr.c` 里压过 `rootrw=1`，让旧根卷以只读
+方式挂载。这不是洁癖：旧 HFS+ 如果带着脏 buffer 在写完之后回写一个缓存的卷头，
+新卷头会被悄悄盖掉，故障要等到下一次启动才出现。新卷下一次普通启动
+（不带 `kebab_vol`）仍然按 `rootrw=1` 读写挂载。
+
+另外给测试加了一个默认关闭的启动参数 `kebab_noinit=1`：init 线程在
+`load_init_program()` 之前看到它就打印一行并阻塞在核内（不返回用户态，因为那是
+init task 的 BSD AST，返回会回到不存在的用户上下文），USB 事件线程、控制台和
+文件系统路径继续工作。
+当前镜像的 `launchd` 会以 `CS_KILLED` panic，panic 会把正在写卷或正在装 565 MB
+文件的控制台打断；这个参数让 bring-up 测试有一个稳定的内核控制台。普通启动
+不带它，行为不变。
+
+HFS+ 挂载日志在补丁里加了一行，卷的大小不再需要推断：
+
+```
+KEBAB HFS: KebabRoot: block size 4096, total blocks 4194304 (16384 MiB),
+           free blocks 4193878 (16382 MiB)
+```
+
+### 4. 控制台协议与安全门
+
+命令族沿用 INST 的匹配方式：一次 bulk-OUT 传输里匹配完整命令行，参数从同一次
+传输里读出来。所有数字都做上界检查。
+
+| 命令 | 作用 |
+| --- | --- |
+| `VOL?` | 门禁、分区字节数、磁盘上的卷头字段、当前根卷的空闲空间 |
+| `VOL DRY <wire_bytes>` | 接下整条流、完整校验、打印计划，不写一个字节 |
+| `VOL BEGIN <wire_bytes> <volume_bytes> CONFIRM` | 接下整条流并写 `userdata` |
+
+一次一块，块大小 65536：
+
+```
+主机                                     设备
+VOL BEGIN 1769472 17179869184 CONFIRM ──▶ 读旧卷头、打印、校验命令
+                     ◀──────────────────  VOL OLD vh …（字段 + 512 字节）
+                     ◀──────────────────  VOL BEGIN 1769472 volume … chunk 65536
+<65536 字节>         ──────────────────▶  校验流头，开始写第一个 extent
+                     ◀──────────────────  VOL ACK 65536
+<65536 字节>         ──────────────────▶  …
+                     ◀──────────────────  VOL EXTENT 3/3 off … len …
+                     ◀──────────────────  VOL ACK 1769472
+                     ◀──────────────────  VOL NEW vh …（读回的字段 + 512 字节）
+                     ◀──────────────────  VOL DONE extents 3 bytes … wire … ms …
+```
+
+ACK 在块真正写完（`ufs_write_blocks()` 返回）之后才打印，`n` 是累计字节数；
+设备一次只挂一个 TRB，块没写完不重新挂载，主机想抢跑也写不进来。60 秒没有
+新块就 `VOL TIMEOUT`，把控制台还回来。
+
+安全门有六层，任何一层不满足都只打印拒绝，不 panic：
+
+1. 启动参数 `kebab_vol=1`（默认关）；
+2. `ufsrw=1` 且 UFS 盘确实可写，否则 `VOL refused: userdata is read-only`；
+3. 真写必须带字面量 `CONFIRM`，且 `volume_bytes` 必须与流头一致；
+4. `volume_bytes` 必须不超过 `userdata` 分区（`kebab_ufs_partition_bytes()`），
+   超过就打印两个数字并拒绝；
+5. 卷头/流/分区三者必须自洽，见上一节；
+6. `kebab_vol=1` 强制旧根只读，避免旧 HFS+ 回写。
+
+所有写都经过 `kebab_ufs_raw_write()`，它只认 `su.first_block..first_block+
+su.nblocks` 这一段；代码里没有任何直接写 UFS 寄存器或别的分区的路径。
+
+### 5. 真机验收（待真机）
+
+> 到这份文档提交时，板子仍卡在另一个 worker 留下的 panic 里：COM7 能枚举，但
+> 任何写入都超时，`fastboot devices` 为空，只有用户物理断电才能恢复。因此这一节
+> 是**尚未执行的验收步骤和预期输出**，不是实测记录。已经证明的是第 3.1 节的主机
+> 重建（同一份 `kebab_vol.c` 跑真实流）、`verify-all.sh` 的 112/112、从零构建，
+> 以及两个已打包的镜像。
+
+#### 5.1 写卷镜像 `boot-vol.img`
+
+完整命令行见第 5 节开头的表。刷入 `boot_b` 后预期看到（关键行）：
+
+```
+KEBAB UFS: "userdata" on LUN 0: first block 0x2c7420, ... MiB, read-write
+BSD root: ufsroot0, major 1, minor 0
+hfs: mounted KebabRoot on device b(1, 0)
+KEBAB HFS: KebabRoot: block size 4096, total blocks 16384 (64 MiB), free blocks <n> (<n> MiB)
+KEBAB VOL: kebab_vol=1 keeps the old root read-only
+KEBAB: kebab_noinit=1: staying in the kernel, no init program
+```
+
+`KEBAB HFS:` 这一行是补丁 0133 新加的；旧卷的实际块数和空闲块以真机日志为准，
+如果与第 5.6 节的 16,384 / 0 不同，按日志更新表格。`VOL?` 的预期输出：
+
+```
+VOL? gated 1 active 0 dry 0 chunk 65536 writable 1
+VOL? partition <bytes> bytes (<MiB> MiB)
+VOL? DISK vh sig 0x482b version 4 attributes 0x... ... bsize 4096 blocks 16384 free <n> ...
+```
+
+#### 5.2 `VOL DRY`：校验整条流，不写
+
+```sh
+python work/vol/send-volume.py --dry work/vol/KebabRoot.vext
+```
+
+预期最后一行：
+
+```
+VOL PLAN extents 3 bytes 1744896 wire 1769472 volume 17179869184
+```
+
+#### 5.3 `VOL BEGIN`：旧卷头的 512 字节先落日志
+
+```sh
+python work/vol/send-volume.py --yes work/vol/KebabRoot.vext
+```
+
+预期的顺序是：`VOL partition …`、`VOL OLD vh …` 三行字段、32 行
+`VOL OLD bytes <off> <32 字节十六进制>`、然后才是 `VOL BEGIN …`。**这 32 行旧
+卷头字节要在本节抄录一份，再继续**。随后是：
+
+```
+VOL STREAM volume 17179869184 bytes (16384 MiB), block 4096, extents 3, data 1744896 bytes, wire 1769472
+VOL EXTENT 1/3 off 0x0 len 0xa9000
+VOL EXTENT 2/3 off 0xf9000 len 0x100000
+VOL EXTENT 3/3 off 0x3fffff000 len 0x1000
+VOL NEW vh sig 0x482b version 4 attributes 0x80000100 ... bsize 4096 blocks 4194304 free 4193878 ...
+VOL DONE extents 3 bytes 1744896 wire 1769472 ms <n>
+```
+
+`VOL NEW` 的 512 字节是从设备重新读回来、和流里那 512 字节逐字节比较通过之后才
+打印的。旧的 512 字节在写入之前打印，新的 512 字节在写入之后打印，两者都在同一
+份控制台日志里。
+
+#### 5.4 重启：HFS+ 挂载新卷
+
+写完后发 `REBOOT`（`boot-vol.img` 的 `kebab_vol=1` 仍然在，所以新卷先只读
+挂载一次），预期：
+
+```
+hfs: mounted KebabRoot on device b(1, 0)
+KEBAB HFS: KebabRoot: block size 4096, total blocks 4194304 (16384 MiB), free blocks 4193878 (16382 MiB)
+```
+
+这一行 `total blocks 4194304` 就是"内核的 HFS+ 挂载成功并报告更大卷"的验收点。
+
+#### 5.5 `INST?`：新卷的空闲空间
+
+刷 `boot-inst.img`（去掉 `kebab_vol=1`，保留 `rootrw=1` 和 `kebab_noinit=1`）
+之后：
+
+```sh
+python send-userland.py --status
+```
+
+预期：
+
+```
+INST? gated 1 active 0 dry 0 root rw chunk 65536
+INST? wire 0/0 entries 0/0 ok 0 skip 0 fail 0
+INST? space 17178124288 free of 17179869184 bytes
+INST? bsize 4096 blocks 4194304 free 4193878
+```
+
+（`space` 的数字以 `f_bavail × f_bsize` 为准，可能因 HFS+ 的保留块与
+4,193,878 略有出入，报告两个数。）
+
+#### 5.6 前后对比（旧卷数字来自第 5.1 节的真实日志）
+
+| 项 | 旧卷 | 新卷 |
+| --- | ---: | ---: |
+| 卷大小 | 64 MiB = 67,108,864 B | 16 GiB = 17,179,869,184 B |
+| 分配块大小 | 4096 | 4096 |
+| 总块数 | 16,384（待真机确认） | 4,194,304 |
+| 空闲块 | 0（待真机确认） | 4,193,878 |
+| 空闲空间 | 0 | 16,382 MiB |
+| 文件系统 | HFS+，非日志，`KebabRoot` | HFS+，非日志，`KebabRoot` |
+
+旧卷的 512 字节卷头以真机日志为准；本节不会用推断值代替它。
+
+### 6. 销毁了什么，怎么恢复
+
+`userdata` 上原来只有三样东西，全部在写卷时被覆盖：
+
+| 路径 | 大小 | 说明 |
+| --- | ---: | --- |
+| `/sbin/launchd` | 541,600 B | 手写静态 arm64 Mach-O |
+| `/usr/lib/dyld` | 922,912 B | 用户态 dyld |
+| `/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.symbols` | 64,028,672 B | 592 MB 分片的**前 64 MiB**，两次都在这里 ENOSPC |
+
+旧卷头的 512 字节在写之前由 `VOL BEGIN` 打印到控制台（第 5.3 节），不依赖主机
+保存的二进制文件。主机上的原件都在，且哈希可查：
+
+| 主机文件 | 大小 | SHA-256 |
+| --- | ---: | --- |
+| `ios-userland/extracted/sbin/launchd` | 541,600 | `12370e5e…18cac61c` |
+| `ios-userland/extracted/usr/lib/dyld` | 922,912 | `58068345…254933757` |
+| `ios-userland/cryptex-cache/dyld_shared_cache_arm64.symbols` | 592,101,376 | `e763b0ea…5126b308` |
+| `ios-userland/static.trustcache` | 66,289 | `63e01c03…c6100ef4b` |
+
+恢复路径就是安装器本身，不需要新工具：
+
+```sh
+# 三个小文件（launchd、dyld、静态信任缓存），576 KiB 流
+python send-userland.py work/vol/restore.kist
+
+# 592 MB 的 symbols，565 MB 流
+python send-userland.py big.kist
+```
+
+`restore.kist` 的第三条目的地是
+`/System/Library/Caches/com.apple.kernelcaches/static.trustcache`，正好是补丁
+0100 的 `KEBAB_TC_DEFAULT_PATH` 默认读取路径；`kebab_cs=15` 的下一次启动会把它
+当作平台信任缓存加载。按第 62 节在 64 MiB 卷上实测的 7.84 MiB/s，1.4 MB 的
+launchd+dyld 不到一秒，565 MB 的 symbols 约 72 秒；等 3.3 GB 的 44 个缓存分片
+就位，整卷恢复约 7 分钟。恢复只还原文件，不解决 `launchd` 的 `CS_KILLED`——那
+是签名/AMFI 那条线，见第 8 节。
+
+### 7. 大于 64 MiB 的文件（待真机）
+
+这是旧卷上不可能的写入：两次都停在 64,028,672 字节并返回 ENOSPC。新卷上同一
+条流完整跑完，安装器写完后重新打开文件、再算一次 SHA-256：
+
+```sh
+python send-userland.py big.kist
+```
+
+预期（`big.kist` 已在主机上 `--verify` 通过：1 条 entry、592,101,376 字节、
+store、SHA-256 `e763b0ea…5126b308`）：
+
+```
+OK   /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.symbols 592101376 mode 0644
+INST DONE entries 1 ok 1 skipped 0 bytes 592101376 wire 592117760 ms <n>
+```
+
+再单独复核：
+
+```sh
+python send-userland.py --probe big.manifest --skip-list work/vol/logs/have.txt
+```
+
+预期 `SAME    /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.symbols`。
+旧卷的失败点 64,028,672 B 正好是 64 MiB（67,108,864 B）减去 HFS+ 元数据后的
+可用空间；新卷 16 GiB 上，同一个文件只占 3.4% 的卷。
+
+### 8. 装共享缓存之前还差什么
+
+1. **完整的 3.3 GB 真装**：本节只准备了最大的单个文件（592 MB symbols）。44 个
+   分片的 KIST 流总量 3,331,890,097 字节，按 7.84 MiB/s 约 7 分钟；卷的空闲
+   空间足够，剩下的只是把整条流跑完并核对 44 条 `OK`。
+2. **`LaunchDaemons` 的内容**：允许清单里留了
+   `/System/Library/LaunchDaemons/`，但真正要哪几个 plist 还没有定；现在放进去
+   也没有东西消费它们。
+3. **共享缓存的消费路径**：0133 只保证卷能装下缓存；`kebab_dsc` 的映射、
+   slide、UUID 校验是另一条线，和卷大小无关。
+4. **真 `launchd` 的签名**：当前 `launchd` 仍然 `CS_KILLED`。这是 AMFI/codesign
+   的问题，与根卷无关；`kebab_noinit=1` 只是让 bring-up 测试不被这个 panic
+   打断。普通启动不带 `kebab_noinit`，行为和以前一样。
+5. **恢复后不带 `kebab_noinit` 的一次启动**：`restore.kist` 把 launchd、dyld 和
+   静态信任缓存放回新卷之后，再启动一次**不带** `kebab_noinit` 的镜像，就能直接
+   回答签名问题：如果 `launchd` 不再 `CS_KILLED`，它应该死在缺少共享缓存
+   （`libSystem`）的更后面一步；如果仍然 `CS_KILLED`，说明信任缓存路径或
+   `kebab_cs` 的策略位和预期不符，下一步要对比期望/实际 cdhash。
+6. **恢复**：写卷之后先跑 `restore.kist`，再跑 44 个缓存分片；主机上的原件和
+   哈希见第 6 节。
