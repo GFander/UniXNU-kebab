@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Build the two KIST streams that make the smallest bootable userland.
+"""Build the three KIST streams that make the smallest bootable userland.
+
+`skel.kist` carries the root-volume directory skeleton that the installer
+creates before any file is written: /dev, /private/etc, /private/tmp (01777),
+/private/var and its db/log/run/tmp/root children, the /etc, /tmp and /var
+symlinks, and the root entries in passwd, master.passwd and group.  It is KIST
+v2 because v1 could only carry regular files and masked modes to 0777.
 
 `base.kist` carries the five files launchd needs before it can run a job:
 launchd, dyld, the static trust cache, one job executable and its plist.
 `cache.kist` carries the 44 split dyld shared cache files (43 mapped files and
 the .symbols file the kernel reports but does not map).
 
-The stream format itself is scripts/pack-userland.py's KIST v1; this script
+Send them in that order: skel.kist, base.kist, cache.kist.
+
+The stream format itself is scripts/pack-userland.py's KIST v2; this script
 only decides what goes in, checks the claims against the binaries, and then
 runs the packer and its offline verifier.
 
@@ -53,6 +61,42 @@ ALLOW = [
     "/System/Library/Caches/com.apple.kernelcaches/",
     "/System/Library/LaunchDaemons/",
 ]
+
+F_ENTRY_DEFLATE = 0x0001
+F_ENTRY_DIR = 0x0002
+F_ENTRY_SYMLINK = 0x0004
+
+# The root-volume skeleton.  This table is mirrored by the kernel's exact
+# allowlist in bsd/dev/kebab_install.c; a mismatch is a failed install.
+SKELETON_DIRS = (
+    ("/dev", 0o755),
+    ("/private", 0o755),
+    ("/private/etc", 0o755),
+    ("/private/tmp", 0o1777),
+    ("/private/var", 0o755),
+    ("/private/var/db", 0o755),
+    ("/private/var/log", 0o755),
+    ("/private/var/root", 0o700),
+    ("/private/var/run", 0o755),
+    ("/private/var/tmp", 0o1777),
+)
+
+SKELETON_LINKS = (
+    ("/etc", "private/etc"),
+    ("/tmp", "private/tmp"),
+    ("/var", "private/var"),
+)
+
+SKELETON_FILES = {
+    "/private/etc/passwd":
+        (0o644,
+         b"root:*:0:0:System Administrator:/var/root:/bin/sh\n"),
+    "/private/etc/master.passwd":
+        (0o644,
+         b"root:*:0:0::0:0:System Administrator:/var/root:/bin/sh\n"),
+    "/private/etc/group":
+        (0o644, b"wheel:*:0:root\n"),
+}
 
 STREAM_HDR = struct.Struct("<4sHHIIQQ")
 ENTRY_HDR = struct.Struct("<4sHHHHQQ32s128sI")
@@ -232,8 +276,8 @@ def stream_stats(path):
         hdr = f.read(STREAM_HDR.size)
         magic, version, flags, count, hsize, usize, wire = \
             STREAM_HDR.unpack(hdr)
-        if magic != b"KIST" or version != 1:
-            raise RuntimeError("%s: not KIST v1" % path)
+        if magic != b"KIST" or version not in (1, 2):
+            raise RuntimeError("%s: not a KIST stream" % path)
         entries = []
         payload = 0
         for i in range(count):
@@ -244,18 +288,27 @@ def stream_stats(path):
              rawpath, _r2) = ENTRY_HDR.unpack(h)
             if emagic != b"KENT":
                 raise RuntimeError("%s: entry %d bad magic" % (path, i))
+            if eflags & F_ENTRY_DIR:
+                kind = "dir"
+            elif eflags & F_ENTRY_SYMLINK:
+                kind = "link"
+            else:
+                kind = "file"
             dest = rawpath[:plen].decode("utf-8")
             entries.append({"dest": dest, "mode": mode, "wire": w,
-                            "size": fsize, "flags": eflags})
+                            "size": fsize, "flags": eflags, "kind": kind})
             payload += w
             f.seek(w, 1)
     padding = wire - payload - count * ENTRY_HDR.size
     ratio = (STREAM_HDR.size + wire) / float(usize) if usize else 0.0
+    files = [e for e in entries if e["kind"] == "file"]
     return {
-        "path": path, "count": count, "usize": usize,
+        "path": path, "version": version, "count": count, "usize": usize,
         "file": size, "wire": wire, "padding": padding, "ratio": ratio,
-        "largest_size": max(entries, key=lambda e: e["size"]),
-        "largest_wire": max(entries, key=lambda e: e["wire"]),
+        "kinds": {k: sum(1 for e in entries if e["kind"] == k)
+                  for k in ("file", "dir", "link")},
+        "largest_size": max(files, key=lambda e: e["size"]) if files else None,
+        "largest_wire": max(files, key=lambda e: e["wire"]) if files else None,
         "entries": entries,
     }
 
@@ -266,11 +319,37 @@ def write_spec(path, rows):
             f.write("%s\t%s\t%04o\n" % (src, dest, mode))
 
 
-def run_packer(spec, out, compress):
+def write_skeleton_spec(out):
+    """Write the three /private/etc files and the DIR/LINK spec for skel.kist."""
+    src_dir = os.path.join(out, "skel")
+    os.makedirs(src_dir, exist_ok=True)
+    rows = []
+    for dest, (mode, data) in sorted(SKELETON_FILES.items()):
+        src = os.path.join(src_dir, os.path.basename(dest))
+        with open(src, "wb") as f:
+            f.write(data)
+        rows.append((src, dest, mode))
+    spec = os.path.join(out, "skel.spec")
+    with open(spec, "w") as f:
+        f.write("# KIST v2 root-volume skeleton; pack-userland.py sorts by\n")
+        f.write("# destination, so this order is only for reading.\n")
+        for dest, mode in SKELETON_DIRS:
+            f.write("DIR\t%s\t%04o\n" % (dest, mode))
+        for dest, target in SKELETON_LINKS:
+            f.write("LINK\t%s\t%s\n" % (dest, target))
+        for src, dest, mode in rows:
+            f.write("%s\t%s\t%04o\n" % (src, dest, mode))
+    return spec, rows
+
+
+def run_packer(spec, out, compress, skeleton=False):
     cmd = [sys.executable, PACK, "--spec", spec, "--compress", compress,
            "-o", out, "--chunk", "65536"]
-    for prefix in ALLOW:
-        cmd += ["--allow", prefix]
+    if skeleton:
+        cmd += ["--skeleton"]
+    else:
+        for prefix in ALLOW:
+            cmd += ["--allow", prefix]
     print("+ " + " ".join(cmd))
     subprocess.run(cmd, check=True)
     print("+ %s %s --verify %s" % (sys.executable, PACK, out))
@@ -285,16 +364,31 @@ def print_inventory(rows, title):
         print("    %s" % why)
 
 
+def print_skeleton_inventory(rows):
+    print("\nskel.kist inventory")
+    print("%-56s %-6s %5s  %s" % ("destination", "type", "mode", "content"))
+    for dest, mode in SKELETON_DIRS:
+        print("%-56s %-6s %04o" % (dest, "dir", mode))
+    for dest, target in SKELETON_LINKS:
+        print("%-56s %-6s %04o  -> %s" % (dest, "link", 0o777, target))
+    for _src, dest, mode in rows:
+        data = SKELETON_FILES[dest][1].decode("ascii").rstrip("\n")
+        print("%-56s %-6s %04o  %s" % (dest, "file", mode, data))
+
+
 def print_stream(stats):
-    print("\nstream %s" % stats["path"])
-    print("  entries    %d" % stats["count"])
+    print("\nstream %s (KIST v%d)" % (stats["path"], stats["version"]))
+    print("  entries    %d (%d files, %d dirs, %d links)"
+          % (stats["count"], stats["kinds"]["file"], stats["kinds"]["dir"],
+             stats["kinds"]["link"]))
     print("  installed  %d bytes (%s)" % (stats["usize"], human(stats["usize"])))
     print("  wire       %d bytes (%s), %.1f%% of installed"
           % (stats["file"], human(stats["file"]), 100.0 * stats["ratio"]))
     print("  padding    %d bytes" % stats["padding"])
-    print("  largest    %s, %d bytes (wire %d)"
-          % (stats["largest_size"]["dest"], stats["largest_size"]["size"],
-             stats["largest_size"]["wire"]))
+    if stats["largest_size"] is not None:
+        print("  largest    %s, %d bytes (wire %d)"
+              % (stats["largest_size"]["dest"], stats["largest_size"]["size"],
+                 stats["largest_size"]["wire"]))
 
 
 def main():
@@ -309,8 +403,10 @@ def main():
         "~/ios-userland/static.trustcache"), help="extracted static trust cache")
     ap.add_argument("--out", default=os.path.expanduser("~/ios-userland/kist"),
                     help="output directory (needs ~2.2 GB free for cache.kist)")
-    ap.add_argument("--only", choices=("base", "cache", "both"),
-                    default="both")
+    ap.add_argument("--only", choices=("skel", "base", "cache", "both"),
+                    default="both",
+                    help="which streams to build; skel.kist is always built, "
+                         "--only skel stops after it")
     ap.add_argument("--no-symbols", action="store_true",
                     help="leave .symbols out of cache.kist (43 mapped files)")
     ap.add_argument("--skip-checks", action="store_true",
@@ -320,6 +416,13 @@ def main():
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
+    skel_spec, skel_rows = write_skeleton_spec(args.out)
+    print_skeleton_inventory(skel_rows)
+    run_packer(skel_spec, os.path.join(args.out, "skel.kist"), "none",
+               skeleton=True)
+    if args.only == "skel":
+        return 0
+
     launchd = os.path.join(args.userland, "sbin", "launchd")
     dyld = os.path.join(args.userland, "usr", "lib", "dyld")
     zprint = os.path.join(args.userland, "usr", "bin", "zprint")
@@ -385,7 +488,7 @@ def main():
         run_packer(spec, os.path.join(args.out, "cache.kist"), args.compress)
 
     print("\nsummary")
-    for name in ("base.kist", "cache.kist"):
+    for name in ("skel.kist", "base.kist", "cache.kist"):
         path = os.path.join(args.out, name)
         if os.path.isfile(path):
             print_stream(stream_stats(path))

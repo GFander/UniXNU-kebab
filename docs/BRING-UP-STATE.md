@@ -7377,6 +7377,11 @@ launchd 用自己已解析的 uid 0，不再依赖目录服务里的其他用户
 
 ### 5. 卷骨架：为什么必须改 `make-root-volume.py`
 
+> **更正（第七十节）：本节 1-5 步的“主机侧骨架”已放弃。** 该方案需要 root，
+> 而 macOS VM 和 Linux 主机都没有免密 sudo，脚本从未跑过。现在
+> `make-root-volume.py` 只生成裸卷；骨架是 `skel.kist`（KIST v2，16 条），
+> 由内核在写卷之后创建。下面的步骤仅作为旧方案存档，不要再执行。
+
 安装器能到的地方只有六个前缀，`/dev`、`/var`、`/tmp`、`/private/etc` 都不在
 里面；它也不能建 sticky 目录、不能建符号链接、不能 mknod。因此这些必须在
 **卷生成**时写进去。`scripts/make-root-volume.py` 现在在 `newfs_hfs` 之后：
@@ -7390,10 +7395,11 @@ launchd 用自己已解析的 uid 0，不再依赖目录服务里的其他用户
 4. 建 `/etc -> private/etc`、`/tmp -> private/tmp`、`/var -> private/var`；
 5. 全部 `chown 0:0`（符号链接用 `lchown`），然后 detach。
 
-这一步需要 root（`hdiutil -owners on` 和 chown），所以脚本在非 root 时直接拒绝，
-并提示 `--skip-skeleton`。VEXT 流只送位图标记为已分配的块，因此骨架的 catalog
-记录会自然进入流，增量是几 KiB 量级。**如果卷已经按旧脚本写过，骨架不在卷上，
-base.kist 补不了**；见第 10 节。
+这一步曾需要 root（`hdiutil -owners on` 和 chown），旧脚本在非 root 时直接
+拒绝并提示 `--skip-skeleton`；该选项和整段骨架代码已在第七十节删除。
+VEXT 流只送位图标记为已分配的块，因此骨架的 catalog 记录会自然进入流，增量
+是几 KiB 量级。**如果卷已经按旧脚本写过，骨架不在卷上，base.kist 补不了**；
+第七十节改为由 `skel.kist` 补，见该节。
 
 ### 6. 两条流与离线校验
 
@@ -7653,9 +7659,15 @@ namespace 6 看共享缓存；三者都有 `pid 1 exited`/`initproc ...` 但原�
    codesign 一行没动（0136/0137 是 origin 上已有的内核补丁，不是这次加的）。
    如果最终决定不走卷骨架，就必须加 `/dev/`、`/var/`、`/tmp/`、`/private/`
    到允许清单，并让安装器支持目录 sticky 位/设备节点——那是另一条内核补丁
-   路线。
+   路线。**第七十节已经走了这条路线**：0138 加 KIST v2 的 DIR/LINK 条目和
+   `skel.kist`，仍然不需要设备节点（devfs 自己创建）。
 
 ### 10. blocker：已经写过的 16 GiB 卷
+
+> **更正（第七十节）：下面的“必须重建带骨架的卷”已作废。** 新顺序是
+> 写裸卷 → 重启 → 安装镜像 → `skel.kist` → `base.kist` → `cache.kist` →
+> 去 `kebab_noinit` 重启。裸卷不需要重建；骨架由 `skel.kist` 创建。
+> 下面的旧顺序仅存档。
 
 这是本轮唯一会让"流都 verify 通过、但 launchd 仍然起不来"的问题：
 
@@ -7666,7 +7678,7 @@ namespace 6 看共享缓存；三者都有 `pid 1 exited`/`initproc ...` 但原�
   都打不开 `/dev/null`；
 * 没有 `/etc/passwd`，launchd 的 `getpwuid_r(0)` 失败，job 连 uid 都建不起来。
 
-所以顺序必须是：
+旧方案下的顺序（已作废）：
 
 1. 在 macOS 上用**新版** `scripts/make-root-volume.py` 重建 16 GiB 卷（带骨架），
    用 `send-volume.py` 写入 `userdata`；写卷时旧根是只读的，写完必须重启，让新
@@ -7690,6 +7702,13 @@ namespace 6 看共享缓存；三者都有 `pid 1 exited`/`initproc ...` 但原�
 > 状态：**脚本、离线验证和文档完成，真机未执行**。板子仍处于 stranded 状态，
 > 需要用户物理断电一次；本节所有“预期日志”都来自内核源码、已有真机日志和
 > fake-device 回环，不是这次 P1 的实测记录。
+>
+> **更正（见第七十节，2026-10-28）：** 主机侧骨架方案已放弃。`KebabRoot.vext`
+> 重新是**裸卷**（1,769,472 B、3 extents、426 块），骨架改由 KIST v2 的
+> `skel.kist` 在写卷之后、`base.kist` 之前由内核创建。本节中“VEXT 必须带
+> 骨架”的说法、产物表和已知缺口 3/5 均已按第七十节更正；
+> `send-volume.py --dry` 的超时 bug 也已修。阶段顺序应改为
+> vol → install → **skel** → base → cache → final。
 
 ### 1. 入口、产物与默认路径
 
@@ -7704,17 +7723,19 @@ python scripts/bring-up.py --from vol
 | `boot-vol.img` | 写卷镜像 | 100,663,296 B；payload TOML 的 `args` 含 `kebab_vol=1` |
 | `boot-inst.img` | 安装镜像 | 同上，但**不含** `kebab_vol=1` |
 | `boot-final.img` | 最终启动镜像 | 不含 `kebab_vol=1`、不含 `kebab_noinit=1`，含 `kebab_dsc=1 kebab_dsc_map=1` |
-| `KebabRoot.vext` | VEXT v1 写卷流 | 1,769,472 B，3 个 extent，内嵌 HFS+ 头 4,194,304 块；必须由**带骨架**的新版 `make-root-volume.py` 生成 |
-| `base.kist` | 最小用户态 | 5 条，`make-minimal-userland.py` 生成 |
-| `cache.kist` | 共享缓存 | 44 条，同一工具生成 |
+| `KebabRoot.vext` | VEXT v1 写卷流 | 1,769,472 B，3 个 extent，内嵌 HFS+ 头 4,194,304 块；**裸卷**（骨架见 `skel.kist`，第七十节） |
+| `skel.kist` | 根卷骨架 | 16 条（10 dir + 3 link + 3 file），KIST v2，64 KiB；写卷后、`base.kist` 前发送 |
+| `base.kist` | 最小用户态 | 5 条，`make-minimal-userland.py` 生成；内核接受 v1/v2 |
+| `cache.kist` | 共享缓存 | 44 条，同一工具生成；内核接受 v1/v2 |
 
-`KebabRoot.vext` 的 1,769,472 B 是当前三个 extent 的主机实测值；如果卷骨架
-（`/dev`、`/private/var`、`/etc/passwd` 等，见第 68 节）让 catalog 多占了一个
-块，流可能仍然是 1,769,472 B（旧流有 24,496 B padding 可吸收），也可能变成
-下一个 64 KiB 倍数。脚本把大小、extent 数和 data 字节都做成可覆盖参数
-（`--expected-vol-stream`、`--expected-vol-extents`、`--expected-vol-data`）；
-真机前先跑 dry-run，若这三个数字与生成器输出不同，按生成器输出更新，不要
-拿旧数字硬套。
+`KebabRoot.vext` 的 1,769,472 B / 3 extents / 426 allocated blocks 是**裸卷**的
+主机实测值（2026-10-28 在 macOS VM 上以 `albertlee` 无 root 重跑，sha256
+`1a31c5b67864f643351d29fb89d64c2150f86b9061101354ab9082cd3fc917f8`）。
+骨架不再进入 VEXT，所以这三个数字不会因骨架而变。`newfs_hfs` 的时间戳会让
+每次生成的 SHA-256 不同，尺寸、extent 数和 data 字节是稳定的。脚本仍把大小、
+extent 数和 data 字节做成可覆盖参数（`--expected-vol-stream`、
+`--expected-vol-extents`、`--expected-vol-data`）；真机前先跑 dry-run，若与
+生成器输出不同，按生成器输出更新，不要拿旧数字硬套。
 
 **三张镜像不是可选项。** 启动参数不在 Android boot 头的 `cmdline` 里（那里
 是空的），而是在镜像偏移 `0x800000` 的 payload TOML 的 `args = "..."` 中；
@@ -8055,14 +8076,304 @@ USB 时序、真 HFS+ 卷、真 launchd 和真 3.3 GB 传输**——那要等板
    需要按第 3 节打 `boot-vol.img`、`boot-inst.img`、`boot-final.img`。
 2. **`boot-final.img` 的 DSC 参数**：没有 `kebab_dsc=1 kebab_dsc_map=1` 时
    最终启动会停在 launchd 找不到共享缓存，而不是签名失败。
-3. **卷骨架**：`KebabRoot.vext` 必须由新版 `make-root-volume.py` 生成（带
-   `/dev`、`/private/var`、`/etc/passwd` 等）。旧脚本的流即使 HFS+ 几何正确，
-   最终也会死在 `devfs_kernel_mount`；当前没有控制台命令能在写卷阶段验证骨架，
-   只能从生成命令保证。详见第 68 节。
+3. **卷骨架**：不再要求 `KebabRoot.vext` 带骨架。骨架由 `skel.kist` 在写卷
+   之后、`base.kist` 之前创建；VEXT 只验 HFS+ 几何。`skel.kist` 是 64 KiB、
+   16 条 KIST v2；内核 DIR/LINK 路径尚未在真机执行。详见第七十节。
 4. **`ufsrw=1`**：题目的短参数表没写，但 VOL/INST 写路径都必须有；dry-run
    会在刷写前拒绝缺少它的镜像。
-5. **`send-volume.py --dry` 的超时 bug**：见 8.1；P1 编排器已绕开，辅助脚本
-   本身未改（本轮不动别人的工具）。
+5. **`send-volume.py --dry` 的超时 bug**：已修（第七十节）；dry run 现在等
+   `VOL PLAN` 并核对 extents/bytes/wire/volume，不再等 `VOL DONE`。
 6. **真机未跑**：板子 stranded，需要一次物理断电。下一次上电后的第一条命令
    仍是 `python scripts/bring-up.py --from vol`；若卡住，先看 `failure.txt`
    的 checkpoint，再决定物理断电还是重跑。
+
+## 七十、根卷骨架的真机前验证
+
+> 目标：回答第六十三/六十八/六十九节留下的问题——根卷里到底有没有 launchd
+> 需要的那套目录，以及 `make-root-volume.py` 到底能不能做出来。
+>
+> 结论：**主机侧 root 骨架方案放弃**。根卷骨架改为 KIST v2 的 `skel.kist`，
+> 由内核在写卷之后、`base.kist` 之前以 uid 0 创建；裸卷 `KebabRoot.vext`
+> 重新变成 1,769,472 B / 3 extents / 426 块的纯 HFS+ 卷。主机侧做了裸卷
+> 生成、`fsck_hfs`、KIST v2 打包/校验、`base.kist` 重打和内核
+> `-fsyntax-only` 编译检查；**真机仍未执行**。
+>
+> 状态：**主机验证完成，真机未执行**。板子 stranded，无刷写、无 USB 传输、
+> 无 launchd。
+
+### 1. 为什么放弃主机侧骨架
+
+上一版 `make-root-volume.py` 在 `newfs_hfs` 之后 mount 镜像、`mkdir`/`write`/
+`symlink`，再 `chown(0,0)` 并用 `hdiutil attach -owners on` 保留属主。这条路
+在现有两台主机上都无法执行：
+
+| 检查 | 实测结果 |
+| --- | --- |
+| `ssh albertlee@192.168.30.165`（Windows 侧） | 通，macOS 14.6.1 23G93 |
+| `ssh albertlee@192.168.30.165`（从 `ssh ubuntualbert`） | 拒绝：该主机的 key 不在 VM 的 `authorized_keys` |
+| `hdiutil` / `newfs_hfs` / `fsck_hfs` | 都在 |
+| `sudo -n true` | `sudo: a password is required` |
+| NOPASSWD 规则（`/bin/true`、`hdiutil`、`newfs_hfs`、`fsck_hfs`、`chown`、`chmod`） | 全部要求密码；`/etc/sudoers.d/` 为空 |
+| `root@192.168.30.165` publickey | `Permission denied (publickey,password,...)` |
+| 空密码 | 拒绝（只做了一次非交互测试，没有猜密码） |
+| 无 root `newfs_hfs` | **可以**：`hdiutil attach -nomount` 后设备属主就是 `albertlee`，`newfs_hfs -b 4096` 成功 |
+| 无 root `chown 0:0` | **EPERM**：默认 mount 和 `hdiutil attach -owners on` 都一样 |
+| Linux 主机 | 也没有免密 sudo；没有 `mkfs.hfsplus` / `fsck.hfsplus`；根分区只剩 1.7 GB |
+
+关键点：`newfs_hfs` 以 `albertlee` 运行时，卷根目录的属主是 `501:20`，不是
+`0:0`；而 `chown(0,0)` 在无 root 时一定失败。因此即使把 `populate_skeleton`
+的 `geteuid()!=0` 检查删掉，得到的也只是 `501:20` 的假骨架，不能交给 launchd。
+**本轮没有伪造这个结果**：`make-root-volume.py` 的主机骨架代码已删除，脚本
+只做不需要 root 的裸卷创建和 VEXT 导出。
+
+### 2. 新设计：KIST v2 + skel.kist + 内核创建
+
+KIST 从 v1 升到 **v2**，只增加“安装器原先表达不了”的两类条目；v1 仍然被
+内核接受，所以已有的 `base.kist`/`cache.kist` 不必为了格式重打。
+
+流头（32 B）的 `version` 改为 2，`flags` 增加 bit1：
+
+| 位 | 含义 |
+| --- | --- |
+| bit0 `F_STREAM_DEFLATE` | 至少一个文件条目是 deflate |
+| bit1 `F_STREAM_SKELETON` | 骨架流；内核只允许精确的骨架路径 |
+
+条目头（192 B）的 `flags` 增加 bit1/bit2，`mode` 的解释从 `& 0777` 改为
+`& 07777`：
+
+| 位/字段 | 含义 |
+| --- | --- |
+| bit0 `F_ENTRY_DEFLATE` | 载荷是 zlib；只允许普通文件 |
+| bit1 `F_ENTRY_DIR` | 目录条目；`wire=0`、`size=0`、sha256 全零，`mode` 是精确权限 |
+| bit2 `F_ENTRY_SYMLINK` | 符号链接；载荷就是 target，`wire=size=len(target)`，sha256 是 target 的摘要，不允许 deflate |
+| `mode` | 0..07777；`01777` 的 sticky 位不再被 `0777` 掩掉 |
+
+`scripts/make-minimal-userland.py` 现在先构建 **`skel.kist`**（16 条，
+`--only skel` 可在没有任何 iOS 用户态源码的机器上单独跑），然后再构建
+`base.kist`/`cache.kist`。`skel.kist` 的完整表：
+
+| 路径 | 类型 | 模式 | 内容 / 目标 |
+| --- | --- | --- | --- |
+| `/dev` | dir | 0755 | devfs 的挂载点；`console/tty/null/zero/klog` 由 devfs 创建 |
+| `/private` | dir | 0755 | |
+| `/private/etc` | dir | 0755 | |
+| `/private/tmp` | dir | **01777** | 旧 KIST 的 `0777` 掩码丢掉的正是这个 sticky 位 |
+| `/private/var` | dir | 0755 | |
+| `/private/var/db` | dir | 0755 | |
+| `/private/var/log` | dir | 0755 | |
+| `/private/var/root` | dir | 0700 | |
+| `/private/var/run` | dir | 0755 | |
+| `/private/var/tmp` | dir | **01777** | |
+| `/etc` | symlink | 0777 | `private/etc` |
+| `/tmp` | symlink | 0777 | `private/tmp` |
+| `/var` | symlink | 0777 | `private/var` |
+| `/private/etc/passwd` | file | 0644 | `root:*:0:0:System Administrator:/var/root:/bin/sh\n` |
+| `/private/etc/master.passwd` | file | 0644 | `root:*:0:0::0:0:System Administrator:/var/root:/bin/sh\n` |
+| `/private/etc/group` | file | 0644 | `wheel:*:0:root\n` |
+
+passwd 的决定不变：launchd 在没有 `UserName` 的 plist 上也会
+`getpwuid_r(0)`，没有 root 条目就报
+`Could not find uid associated with service`。这里只放 root；`daemon`/`nobody`
+等条目等第一个 job 真正需要时再加。`/var/root` 通过 `/var -> private/var`
+解析到 `/private/var/root`，所以 home 字段可以保留 iOS 的写法。
+
+内核侧（`patches/xnu-8796-kebab/0138-kebab-kernel-skeleton.patch`）：
+
+- `KI_VERSION 2`，接受 1..2；v1 条目不允许 DIR/LINK；
+- `KI_F_DIR`/`KI_F_SYMLINK`，两者互斥且不允许 deflate；
+- `ki_path_ok()` 对骨架流使用精确路径表（和上面的 16 条一一对应），普通流
+  仍只允许原来的六个前缀；
+- 目录用 `vn_create` 创建后立刻 `vnode_setattr`，显式设 `uid=0/gid=0` 和
+  精确 mode（所以 `01777` 不会被 umask 或父目录属主改掉）；
+- 符号链接用 `nameiat(CREATE, OP_SYMLINK)` + `VNOP_SYMLINK` 创建，target
+  来自载荷，不用格式化字符串；`lchown` 语义用 vnode 属主设置完成；
+- 每个条目创建后 `vnode_getattr` 读回，打印
+  `OK <path> ... mode 0%o uid %u gid %u`；uid/gid 不是 0:0 或目录/文件 mode
+  不符就 `INST ABORT`。符号链接只强制 uid/gid，不强制 mode（symlink 的
+  mode 本来就不参与访问判断）；
+- 重跑语义：目录会重新设精确 mode/属主；骨架文件总是重写（不做 SKIP），
+  以保证属主正确；已存在的符号链接打印 `SKIP ... link exists`，不重复创建。
+
+### 3. 裸卷实测（macOS VM，无 root）
+
+在 `albertlee@192.168.30.165` 上直接跑（**没有 sudo**）：
+
+```sh
+python3 scripts/make-root-volume.py --size 16g \
+    --image /tmp/KebabRoot.img --stream /tmp/KebabRoot.vext
+```
+
+输出：
+
+```
+volume      /tmp/KebabRoot.img
+volume size 17179869184 bytes (16384 MiB), block size 4096, total blocks 4194304
+free blocks 4193878 (16382 MiB), allocated blocks 426
+extents     3, data 1744896 bytes (1704 KiB), non-zero 45056 bytes, allocated-but-zero blocks 415
+stream      /tmp/KebabRoot.vext, 1769472 bytes (27 chunks), padding 24496, sha256 1a31c5b67864f643351d29fb89d64c2150f86b9061101354ab9082cd3fc917f8
+```
+
+三个 extent（字节偏移 / 长度 / 块数）：
+
+| # | offset | length | blocks |
+| --- | --- | --- | --- |
+| 0 | 0x0 | 692,224 | 169 |
+| 1 | 0xF9000 | 1,048,576 | 256 |
+| 2 | 0x3FFFFF000 | 4,096 | 1 |
+| 合计 | | 1,744,896 | **426** |
+
+和旧值对比：
+
+| 项 | 旧值 | 本次 | 说明 |
+| --- | --- | --- | --- |
+| 卷大小 | 16 GiB | 16 GiB | 不变 |
+| block size | 4096 | 4096 | 不变 |
+| total blocks | 4,194,304 | 4,194,304 | 不变 |
+| allocated blocks | 426 | **426** | 不变；骨架已不在 VEXT |
+| extents | 3 | **3** | 不变 |
+| stream bytes | 1,769,472 | **1,769,472** | 不变 |
+| SHA-256 | 旧 run 的 `e3771300...` | `1a31c5b6...` | `newfs_hfs` 的时间戳使每次 run 不同；尺寸/extents 稳定 |
+
+`fsck_hfs -n`（Apple hfs-650.140.2，只读检查）：
+
+```
+** Checking non-journaled HFS Plus Volume.
+   The volume name is KebabRoot
+** Checking extents overflow file.
+** Checking catalog file.
+** Checking multi-linked files.
+** Checking catalog hierarchy.
+** Checking extended attributes file.
+** Checking volume bitmap.
+** Checking volume information.
+** The volume KebabRoot appears to be OK.
+```
+
+第一次以读写方式打开 `/dev/rdisk4` 被拒（无 root），fsck 随即按 `(NO WRITE)`
+只读检查并通过；上面的判定来自这次只读检查。
+
+裸卷 read-only mount 的 `ls -la` 只有 `.`（`..` 是宿主的 `/Volumes`，不属于
+这个卷）：
+
+```
+drwxr-xr-x  2 501  20   68 ... .
+drwxr-xr-x  4 0    0  128 ... ..
+```
+
+这是**预期**的：骨架不再由主机写进卷里，所以裸卷上没有 `/dev` 等目录。
+卷根 `501:20` 是 `newfs_hfs` 以无 root 运行留下的；每个由内核创建的骨架
+条目都会显式 chown 到 0:0，但 `/` 本身不会。若真机上 launchd 还要求 `/`
+是 `0:0`，需要再加一条内核侧的根目录 chown；这是目前唯一已知的属主缺口。
+
+### 4. KIST v2 主机侧验证
+
+构建 `skel.kist`（Linux 主机，无 root）：
+
+```
++ pack-userland.py --spec .../skel.spec --compress none -o .../skel.kist --chunk 65536 --skeleton
++ pack-userland.py --verify .../skel.kist
+skel.kist: v2 skeleton, 16 entries, 153 B installed, 64.0 KiB on the wire
+verify: 16 entries (3 files, 10 dirs, 3 symlinks), all digests match
+```
+
+`scripts/verify-skel-kist.py` 按语义再查一遍（路径、类型、mode、target、
+passwd 内容、旧 `0777` 掩码算术）：
+
+```
+OK   /dev                         dir   mode 0755
+OK   /etc                         link  -> private/etc
+OK   /private                     dir   mode 0755
+OK   /private/etc                 dir   mode 0755
+OK   /private/etc/group           file  mode 0644  wheel:*:0:root
+OK   /private/etc/master.passwd   file  mode 0644  root:*:0:0::0:0:System Administrator:/var/root:/bin/sh
+OK   /private/etc/passwd          file  mode 0644  root:*:0:0:System Administrator:/var/root:/bin/sh
+OK   /private/tmp                 dir   mode 01777
+OK   /private/var                 dir   mode 0755
+OK   /private/var/db              dir   mode 0755
+OK   /private/var/log             dir   mode 0755
+OK   /private/var/root            dir   mode 0700
+OK   /private/var/run             dir   mode 0755
+OK   /private/var/tmp             dir   mode 01777
+OK   /tmp                         link  -> private/tmp
+OK   /var                         link  -> private/var
+mode mask: 01777 & 07777 = 01777 (old 0777 mask = 0777)
+verify-skel-kist: 16 entries match the skeleton table
+```
+
+产物：
+
+| 流 | 版本 | 条目 | installed | wire | SHA-256 |
+| --- | --- | --- | --- | --- | --- |
+| `skel.kist` | v2 skeleton | 16（10 dir + 3 link + 3 file） | 153 B | 65,536 B | `b0b22fad2086de1f3d7eb3c054822c4746633ebd2439dad384f73aee9dad2bc2` |
+| `base-v2.kist`（重打） | v2 | 5 | 1,619,682 B | 589,824 B | `d8691e5869f54affd0a64515332e1f61ab2059fb81f628f62c6821273debf1d9` |
+| 旧 `real/base.kist` | v1 | 5 | 1,619,682 B | 589,824 B | `f4a1e2e07ede7cbd145c356421e9f54db9cc402d9249c34807b1aee512819bf0` |
+
+旧 v1 `base.kist` 用新 `pack-userland.py --verify` 仍通过（5 条，digest 全对），
+说明**内核接受 v1**的兼容路径是必要的。真实 1.0 GB `cache.kist` 没有在 1.7 GB
+剩余磁盘上重打；只用一个 44 条 v1 fake 流验证了格式兼容，真 cache 的
+1,067,909,120 B wire / 3,330,359,296 B installed 未在本轮重新校验。
+
+内核 `kebab_install.c` 用 macOS VM 上 `build-0131.log` 里的真实 XNU 编译命令
+做 `-fsyntax-only`（同样的 `-DKEBAB`、`-I` 和 SDK）：
+
+```
+compile rc: 0
+```
+
+只出现系统头文件原有的 warning；我们修改的文件没有再产生 warning，也没有
+error。**这不是完整内核链接/构建**，只是编译级验证；完整构建要等下一次
+不占用别人构建树的窗口。
+
+### 5. 空间算术
+
+裸卷 free blocks 来自卷头：`4,193,878`；block 4096：
+
+```
+free = 4,193,878 × 4096 = 17,178,124,288 B
+base  = ceil(1,619,682 / 4096) = 396 blocks
+cache = 3,330,359,296 / 4096  = 813,076 blocks（整除）
+合计  = 813,472 blocks
+free after both = 4,193,878 - 813,472 = 3,380,406 blocks
+                = 13,846,142,976 B = 12.895 GiB
+```
+
+再给 HFS+ catalog/extents/属性留 4 MiB（1,024 块）余量：约 **12.891 GiB**。
+骨架本身只有 3 个文件的数据块（120 B）加 10 个目录的 catalog 记录，远小于
+这个余量；真正的 3.3 GB 安装不受影响。
+
+### 6. 编排器（`scripts/bring-up.py`）必须改什么
+
+`bring-up.py`（`7b07627`）仍是旧顺序，按新设计需要改：
+
+1. **阶段顺序**：`vol → install → skel → base → cache → final`。`skel.kist`
+   在写卷并重启进安装镜像之后、`base.kist` 之前发送；它只有 64 KiB。
+2. **VEXT 不再验骨架**：`KebabRoot.vext` 是裸卷，仍验
+   `1,769,472 B / 3 extents / 1,744,896 data bytes / HFS+ 4,194,304 blocks`。
+   删除“VEXT 必须带 `/dev`、`/private/...`”之类的检查；骨架只能从
+   `skel.kist` 的条目表验证，不能在写卷阶段从 VEXT 里看。
+3. **新增 `skel.kist` 产物**：路径、16 条、KIST v2；`INST CHECK`/`SKIP`
+   对骨架不适用（骨架流小，整条重发；内核重跑语义见第 2 节）。
+4. **不要改的协议细节**：`VOL BEGIN <wire> <volume> CONFIRM` 没有卷名；
+   `VOL?` 的磁盘几何在第三条 `VOL? DISK vh` 行；任何写路径都要 `ufsrw=1`；
+   最终启动必须有 `kebab_dsc=1 kebab_dsc_map=1`；每阶段一张镜像，因为启动
+   参数在 payload TOML（镜像偏移 `0x800000`）里，不在 Android boot 头。
+5. **`send-volume.py --dry` 已修**：旧版等 `VOL DONE`，dry run 实际以
+   `VOL PLAN` 结束，会白等 60 s。现在 dry 分支等
+   `VOL PLAN extents <n> bytes <data> wire <wire> volume <vol>`，并对照
+   stream header 校验四个字段；`VOL DONE` 仍只用于真实写。
+
+### 7. 真机前仍未验证
+
+- 内核的 `DIR`/`SYMLINK` 创建路径**没有在真实 HFS+ 上跑过**：
+  `vn_create`+`vnode_setattr` 的 uid/gid 0、`01777` 的持久化、
+  `VNOP_SYMLINK` 的 target、`vnode_getattr` 的读回，都只有编译检查。
+- 裸卷 `/` 仍是 `501:20`；内核创建的 16 个条目会 chown 到 0:0，但 `/` 不会。
+- `skel.kist` 没有经过 USB 发送；`INST STREAM v2 skeleton`、
+  `OK ... uid 0 gid 0`、`SKIP ... link exists` 都还没有真机日志。
+- 没有 launchd、没有最终启动、没有 3.3 GB 传输；板子 stranded。
+- 没有完整内核链接/构建；只有 `-fsyntax-only`。
+- 真实 `cache.kist`（1.0 GB）没有重打；v1 兼容性只用 fake 流验证过。
+
+下一次真机的入口仍是 `python scripts/bring-up.py --from vol`，但顺序要按
+第 6 节改；如果 `skel` 阶段失败，先看 `INST STREAM` 的版本/骨架标志和第一条
+`FAIL`，再决定是否重发 `skel.kist`。

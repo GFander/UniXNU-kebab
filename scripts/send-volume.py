@@ -39,6 +39,7 @@ except ImportError:
 CHUNK = 64 * 1024
 ACK_RE = re.compile(r"^VOL ACK (\d+)$")
 DONE_RE = re.compile(r"^VOL DONE(?: extents| with)")
+PLAN_RE = re.compile(r"^VOL PLAN extents (\d+) bytes (\d+) wire (\d+) volume (\d+)$")
 FAIL_RE = re.compile(r"^VOL (ABORT|FAIL|TIMEOUT|refused|disabled)")
 BEGIN_RE = re.compile(r"^VOL BEGIN (\d+) volume (\d+) (dry|write) chunk (\d+)$")
 INTEREST_RE = re.compile(r"^(VOL (STREAM|EXTENT|DONE|ABORT|FAIL|TIMEOUT|"
@@ -171,6 +172,8 @@ def main():
 
         sent = 0
         done = False
+        done_line = ""
+        done_re = PLAN_RE if args.dry else DONE_RE
         start = time.time()
         while sent < wire and not done:
             chunk = data[sent:sent + CHUNK]
@@ -179,9 +182,10 @@ def main():
             want = sent
             line = con.wait(lambda l: (ACK_RE.match(l) and
                                        int(ACK_RE.match(l).group(1)) == want)
-                            or DONE_RE.match(l) or False, 180)
-            if DONE_RE.match(line):
+                            or done_re.match(l) or False, 180)
+            if done_re.match(line):
                 done = True
+                done_line = line
                 break
             if sent % (16 * CHUNK) == 0 or sent == wire:
                 rate = sent / max(1e-6, time.time() - start) / (1024 * 1024)
@@ -189,7 +193,18 @@ def main():
                       flush=True)
 
         if not done:
-            con.wait(lambda l: DONE_RE.match(l) or False, 60)
+            done_line = con.wait(lambda l: done_re.match(l) or False, 60)
+        if args.dry:
+            # A dry run ends with VOL PLAN, not VOL DONE.  Check the plan
+            # against the stream header instead of waiting out the timeout.
+            m = PLAN_RE.match(done_line)
+            if not m:
+                raise SystemExit("dry run did not print a VOL PLAN: %r"
+                                 % done_line)
+            got = tuple(int(m.group(i)) for i in range(1, 5))
+            want = (count, dbytes, wire, volume)
+            if got != want:
+                raise SystemExit("VOL PLAN %s != stream %s" % (got, want))
         print("done in %.1fs" % (time.time() - start), flush=True)
         return 0
     finally:

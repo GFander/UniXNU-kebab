@@ -15,25 +15,25 @@ What it does:
      `newfs_hfs -v KebabRoot -b 4096` on the device and detaches it.  No
      partition map is written: the HFS+ volume starts at byte 0 of userdata,
      which is what the kernel's root mount expects;
-  2. mounts the new volume and writes the directory skeleton that neither the
-     installer nor launchd can create for itself: the `/dev` mountpoint (devfs
-     supplies the nodes once it exists), `/private/var` and its subdirectories,
-     `/private/tmp`, the `/etc`, `/tmp` and `/var` symlinks, and the root entry
-     in `/etc/passwd` and `/etc/group`.  The installer's destination allowlist
-     only covers six prefixes and it can only create regular files, so these
-     paths cannot come from a KIST stream.  `--skip-skeleton` leaves the volume
-     empty for an experiment;
-  3. reads the new volume header and its allocation bitmap.  Only blocks the
+  2. reads the new volume header and its allocation bitmap.  Only blocks the
      bitmap calls allocated are shipped: a free block may legally contain
      anything (the old volume's bytes live there after the switch), but an
      allocated one must contain this image's bytes.  Blocks that are allocated
      but all zero are therefore included too; they are rare once the metadata
      clump sizes are pinned, and leaving the old volume's catalog nodes there
      would be sloppy even though an unused B-tree node is never read;
-  4. writes a VEXT v1 stream: a 32-byte header, then `extent_count` records of
+  3. writes a VEXT v1 stream: a 32-byte header, then `extent_count` records of
      {u64 offset, u32 length, u32 reserved, length bytes of data}, then zero
      padding to a 64 KiB boundary.  Offsets and lengths are allocation-block
      aligned, the kernel only ever writes whole 4 KiB device blocks.
+
+The volume is deliberately empty.  The directory skeleton (/dev, /private/etc,
+/private/tmp, /private/var and children, the /etc, /tmp and /var symlinks and
+the root passwd/group entries) is scripts/make-minimal-userland.py's
+`skel.kist`, which the kernel installer creates as uid 0.  Building the
+skeleton here needed root to chown it, and neither the macOS VM nor the Linux
+host has passwordless sudo, so that path was abandoned; this script now only
+does the part that needs no privileges.
 
 The stream is what `scripts/send-volume.py` hands to `VOL BEGIN`; the kernel
 side (bsd/dev/kebab_vol.c) verifies every field and checks the volume against
@@ -50,7 +50,6 @@ import re
 import struct
 import subprocess
 import sys
-import tempfile
 
 BLOCK = 4096
 CHUNK = 65536
@@ -59,45 +58,6 @@ VERSION = 1
 HDR = 32
 EXT_HDR = 16
 VH_OFF = 1024
-
-# The smallest skeleton that lets launchd reach its first job.  /dev is only a
-# mountpoint: the kernel mounts devfs over it in bsd_init and devfs creates
-# console/tty/null/zero/klog itself, so no device node is ever written here.
-SKELETON_DIRS = (
-    ("/dev", 0o755),
-    ("/private", 0o755),
-    ("/private/etc", 0o755),
-    ("/private/tmp", 0o1777),
-    ("/private/var", 0o755),
-    ("/private/var/db", 0o755),
-    ("/private/var/db/com.apple.xpc.launchd", 0o755),
-    ("/private/var/db/com.apple.xpc.launchd/config", 0o755),
-    ("/private/var/log", 0o755),
-    ("/private/var/log/com.apple.xpc.launchd", 0o755),
-    ("/private/var/root", 0o700),
-    ("/private/var/run", 0o755),
-    ("/private/var/tmp", 0o1777),
-)
-
-# /etc, /tmp and /var are symlinks on iOS; launchd uses both spellings
-# (/var/run and /private/var/...), so both have to resolve to the same tree.
-SKELETON_LINKS = (
-    ("etc", "private/etc"),
-    ("tmp", "private/tmp"),
-    ("var", "private/var"),
-)
-
-# launchd resolves its own uid/gid with getpwuid_r() before it builds a job's
-# credentials.  Without these files every job fails with "Could not find uid
-# associated with service", even when the plist does not name a user.
-SKELETON_FILES = {
-    "/private/etc/passwd":
-        (0o644, b"root:*:0:0:System Administrator:/var/root:/bin/sh\n"),
-    "/private/etc/master.passwd":
-        (0o644, b"root:*:0:0::0:0:System Administrator:/var/root:/bin/sh\n"),
-    "/private/etc/group":
-        (0o644, b"wheel:*:0:root\n"),
-}
 
 
 def die(msg):
@@ -145,57 +105,6 @@ def create_image(image, size, name):
         run(["hdiutil", "detach", "/dev/" + dev, "-quiet"])
     print("created %s: %d bytes (%d blocks of %d)"
           % (image, size, size // BLOCK, BLOCK), file=sys.stderr)
-
-
-def populate_skeleton(image):
-    """Mount the new image and write the paths a KIST stream cannot reach."""
-    if os.geteuid() != 0:
-        raise RuntimeError("the volume skeleton needs root (hdiutil -owners on "
-                           "and chown to root:wheel); re-run under sudo or "
-                           "pass --skip-skeleton")
-
-    mountpoint = tempfile.mkdtemp(prefix="kebab-root-")
-    attached = False
-    try:
-        run(["hdiutil", "attach", "-noverify", "-noautoopen", "-owners", "on",
-             "-mountpoint", mountpoint, image])
-        attached = True
-        for path, _mode in SKELETON_DIRS:
-            os.makedirs(os.path.join(mountpoint, path.lstrip("/")),
-                        exist_ok=True)
-        for path, (mode, data) in SKELETON_FILES.items():
-            full = os.path.join(mountpoint, path.lstrip("/"))
-            with open(full, "wb") as f:
-                f.write(data)
-        for name, target in SKELETON_LINKS:
-            full = os.path.join(mountpoint, name)
-            if os.path.lexists(full):
-                os.unlink(full)
-            os.symlink(target, full)
-
-        # Deepest first, so chmod/chown of a parent cannot affect a child that
-        # still needs its own mode.  Symlinks get lchown, never chown.
-        for path, mode in sorted(SKELETON_DIRS,
-                                 key=lambda item: -item[0].count("/")):
-            full = os.path.join(mountpoint, path.lstrip("/"))
-            os.chmod(full, mode)
-            os.chown(full, 0, 0)
-        for path, (mode, _data) in SKELETON_FILES.items():
-            full = os.path.join(mountpoint, path.lstrip("/"))
-            os.chmod(full, mode)
-            os.chown(full, 0, 0)
-        for name, _target in SKELETON_LINKS:
-            os.lchown(os.path.join(mountpoint, name), 0, 0)
-    finally:
-        if attached:
-            run(["hdiutil", "detach", mountpoint, "-quiet"])
-        try:
-            os.rmdir(mountpoint)
-        except OSError:
-            pass
-    print("skeleton: %d directories, %d files, %d symlinks"
-          % (len(SKELETON_DIRS), len(SKELETON_FILES), len(SKELETON_LINKS)),
-          file=sys.stderr)
 
 
 def read_block(f, index, block=BLOCK):
@@ -348,9 +257,6 @@ def main():
     ap.add_argument("--name", default="KebabRoot")
     ap.add_argument("--reuse", action="store_true",
                     help="use the existing image instead of rebuilding it")
-    ap.add_argument("--skip-skeleton", action="store_true",
-                    help="leave /dev, /var, /tmp and /etc off the volume "
-                         "(launchd will not be able to spawn a job)")
     args = ap.parse_args()
 
     try:
@@ -369,12 +275,6 @@ def main():
                        % (args.image, os.path.getsize(args.image), size))
     else:
         create_image(args.image, size, args.name)
-
-    if not args.skip_skeleton:
-        try:
-            populate_skeleton(args.image)
-        except RuntimeError as exc:
-            return die(str(exc))
 
     vol = parse_volume(args.image)
     blocks = allocated_blocks(vol)
