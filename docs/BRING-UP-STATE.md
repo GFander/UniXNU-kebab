@@ -4690,3 +4690,51 @@ EBS 之后直接写像素表示 `last_stage`，不调用 GOP。
 | TCS1 所有权 | UNKNOWN |
 
 真实 RPMh 写入继续 NO-GO。
+
+## 五十四、O3-C6-E4b：探针记录模块（主机侧）
+
+### 1. 三处修正已落实
+
+- **身份匹配**：比较的是 `Prot->Interface` 与安装时的接口指针，加上 handle 与
+  GUID；`PROTOCOL_INTERFACE` 对象地址被明确拒绝（测试里单独有一条断言）。
+- **事件序列**：结构改为固定 64 条的事件数组，每条含 `seq/stage/context/
+  object/status`，满后置 `overflow`，不扩容；另保留 `last_stage` 给 framebuffer。
+- **时间戳**：不再设计成 EBS 期间调用 UEFI 时间服务，第一版只用单调递增的
+  `seq`。
+
+### 2. 模块与测试
+
+`package/KebabEbsProbe.{h,c}`：无分配、无 UEFI 服务依赖的纯记录模块；可选
+`kebab_ebs_mirror` 回调把 `stage` 直接写显示通道。`KebabEbsProbeHostTests.c`
+18 项断言，覆盖顺序、嵌套（E4→E4a→E4b→E4c→E4b→E5→E6 全保留）、溢出标记、
+身份匹配与“Prot 对象地址不算匹配”。
+
+```text
+18 checks, 0 failure(s)
+```
+
+### 3. 可见性与交接（待实现部分）
+
+- `volatile` 只约束编译器，不保证 Cache 写回；实现时需要一个 `ProbeWrite()`
+  统一做固定内存写入 + `dsb`/`dmb` 屏障，是否做 Cache 维护取决于记录页的实际
+  内存属性；
+- 记录页在最后一次 `GetMemoryMap` 之前用 `EfiReservedMemoryType` 分配，通过
+  `InstallConfigurationTable` 发布；`EfiReservedMemoryType` 只避免被普通分配
+  复用，不会自动给 XNU 建立映射；
+- 交接链必须显式验证：**UEFI ConfigurationTable → DarwinBoot 取物理地址 →
+  ADT/boot_args 传递 → XNU 映射并读取**，缺一段都不能算可见。
+
+### 4. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| 记录模块（主机侧） | 已实现，18 项断言通过 |
+| 身份匹配修正 | 已实现并测试 |
+| 嵌套/溢出 | 已实现并测试 |
+| Cache 可见性与 ProbeWrite | 未实现 |
+| XNU 交接链 | 未实现 |
+| Mu 树内插桩 | 未开始 |
+| 历史挂死根因 | UNKNOWN |
+| TCS1 所有权 | UNKNOWN |
+
+真实 RPMh 写入继续 NO-GO；本轮没有修改固件或设备镜像。
