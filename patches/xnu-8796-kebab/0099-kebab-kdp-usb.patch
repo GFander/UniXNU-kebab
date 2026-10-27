@@ -1,0 +1,222 @@
+Route serial KDP over the USB console.
+
+The board has no usable UART, so serial KDP initialised but had no transport:
+pal_serial_putc_nocr() and pal_serial_getc() still drove the UART, while the
+CDC-ACM console was only reachable by the console code.  kebabkdp=1 now selects
+the USB port for the debugger's byte stream, buffers a whole serialized frame
+before handing it to the USB ring, and flushes it synchronously because a
+debugger entry stops the event thread.  KDP bytes bypass _cnputc, so they never
+appear in the visible log, and host input is claimed before KDP frames can be
+echoed as console text.
+
+kdp_init() can enter the debugger immediately when debug has DB_HALT, before
+bsd_init() starts the console, so kernel_bootstrap starts the port first when
+kebabkdp=1.  On arm64 the panic path also only traps to KDP when kdp_match_name
+asked for it; kebabkdp counts as that request, otherwise a panic would never
+reach the debugger.  The panic pump hands a reconnecting debugger back to KDP
+with the saved state of the panic trap.
+
+--- a/osfmk/arm/pal_routines.c
++++ b/osfmk/arm/pal_routines.c
+@@ -36,16 +36,86 @@
+ #include <mach/mach_types.h>
+ #include <pexpert/arm/protos.h>
+ 
++#if defined(KEBAB)
++#include <pexpert/pexpert.h>
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++/*
++ * On this board there is no usable UART: the only console is the CDC-ACM port
++ * built by kebab_usb.c.  When kebabkdp=1 is present, route the byte stream KDP
++ * uses to that port.  Only the PAL calls the debugger makes are redirected, so
++ * ordinary console logging keeps its own path and is not duplicated here.
++ *
++ * A KDP frame arrives one byte at a time, and a whole frame is buffered until
++ * its terminator so it can be handed to the USB ring in one piece.  The flush
++ * then pushes it out synchronously: during a debugger entry or a panic the
++ * event thread is not running, and a merely queued reply would stay on the
++ * device.
++ */
++extern void kebab_usb_log(const char *buf, size_t len);
++extern void kebab_usb_log_flush(void);
++extern int kebab_usb_getc(bool wait);
++extern void kebab_usb_kdp_start(void);
++extern bool kebab_usb_console_ready(void);
++
++#define KDP_SERIAL_END  0xfb
++#define KDP_TX_MAX      4096
++
++static char kdp_tx[KDP_TX_MAX];
++static size_t kdp_tx_len;
++
++static bool
++kebab_usb_kdp_selected(void)
++{
++	static int selected = -1;
++
++	if (selected < 0) {
++		uint32_t value = 0;
++
++		selected = (PE_parse_boot_argn("kebabkdp", &value,
++		    sizeof(value)) && value != 0);
++	}
++	return selected != 0;
++}
++#endif /* KEBAB */
++
+ /* Serial routines */
+ int
+ pal_serial_init(void)
+ {
++#if defined(KEBAB)
++	if (kebab_usb_kdp_selected()) {
++		kebab_usb_kdp_start();
++		if (kebab_usb_console_ready()) {
++			return 1;
++		}
++	}
++#endif
+ 	return serial_init();
+ }
+ 
+ void
+ pal_serial_putc_nocr(char c)
+ {
++#if defined(KEBAB)
++	if (kebab_usb_kdp_selected() && kebab_usb_console_ready()) {
++		if (kdp_tx_len < sizeof(kdp_tx)) {
++			kdp_tx[kdp_tx_len++] = c;
++		}
++		if ((unsigned char)c == KDP_SERIAL_END ||
++		    kdp_tx_len == sizeof(kdp_tx)) {
++			/* drain console text first so the frame cannot overrun the ring */
++			kebab_usb_log_flush();
++			kebab_usb_log(kdp_tx, kdp_tx_len);
++			kdp_tx_len = 0;
++			kebab_usb_log_flush();
++		}
++		return;
++	}
++	kdp_tx_len = 0;         /* USB went away mid-frame: drop the fragment */
++#endif
+ 	serial_putc(c);
+ }
+ 
+@@ -58,5 +128,10 @@ pal_serial_putc(char c)
+ int
+ pal_serial_getc(void)
+ {
++#if defined(KEBAB)
++	if (kebab_usb_kdp_selected() && kebab_usb_console_ready()) {
++		return kebab_usb_getc(false);
++	}
++#endif
+ 	return serial_getc();
+ }
+--- a/osfmk/kdp/kdp_udp.c
++++ b/osfmk/kdp/kdp_udp.c
+@@ -52,6 +52,9 @@
+ #include <kdp/kdp_core.h>
+ #if CONFIG_SERIAL_KDP
+ #include <kdp/kdp_serial.h>
++
++/* Used by the USB console's panic loop to resume a session after a reconnect. */
++boolean_t kdp_serial_panic_reenter(void);
+ #endif
+ 
+ #include <vm/vm_map.h>
+@@ -2217,6 +2220,42 @@ kdp_serial_callout(__unused void *arg, kdp_event_t event)
+ 	}
+ }
+ 
++/*
++ * Re-enter the debugger from the USB panic pump.
++ *
++ * A panic enters KDP before it parks in panic_spin_forever(), so kdp.saved_state
++ * still describes the faulting context when a host reconnects later.  Starting a
++ * new session on that state is what lets a debugger attach after the first one
++ * continued; without it the pump would consume the CONNECT frame and never
++ * answer.  Returns FALSE when serial KDP is not the active transport or no panic
++ * session has run, so a console-only panic is unchanged.
++ */
++boolean_t
++kdp_serial_panic_reenter(void)
++{
++	unsigned int was_not_in_kdp;
++
++	if (!KDP_SERIAL_ENABLED() || !(kdp_flag & KDP_READY)) {
++		return FALSE;
++	}
++	if ((current_debugger != KDP_CUR_DB) || (kdp.saved_state == NULL) ||
++	    kdp.is_conn || pkt.input) {
++		return FALSE;
++	}
++
++	/*
++	 * KDP's memory accessors assert that they are in debugger context, and
++	 * the lock stubs use the same flag to skip locking.  panic_spin runs
++	 * with it set to "not in KDP", so clear it for the session just as
++	 * handle_debugger_trap() does.
++	 */
++	was_not_in_kdp = not_in_kdp;
++	not_in_kdp = 0;
++	kdp_raise_exception(EXC_BREAKPOINT, 0, 0, kdp.saved_state);
++	not_in_kdp = was_not_in_kdp;
++	return TRUE;
++}
++
+ #endif /* CONFIG_SERIAL_KDP */
+ 
+ void
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -423,6 +423,24 @@ panic_init(void)
+ 	kdp_explicitly_requested = PE_parse_boot_argn("kdp_match_name", kdpname, sizeof(kdpname));
+ #endif /* defined(__arm64__) */
+ 
++#if defined(KEBAB)
++	/*
++	 * On arm64 the panic path only traps to KDP when kdp_match_name asked for
++	 * it.  There is no Ethernet on this board, and the debugger is selected
++	 * with the kebabkdp boot argument instead, so count that as the explicit
++	 * request: without it a panic never reaches the debugger, and the USB KDP
++	 * transport would only be reachable by an NMI or a breakpoint.
++	 */
++	{
++		unsigned int kebabkdp = 0;
++
++		if (PE_parse_boot_argn("kebabkdp", &kebabkdp, sizeof(kebabkdp)) &&
++		    kebabkdp != 0) {
++			kdp_explicitly_requested = TRUE;
++		}
++	}
++#endif /* defined(KEBAB) */
++
+ #endif /* MACH_KDP */
+ 
+ #if defined (__x86_64__)
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -656,6 +656,19 @@ kernel_bootstrap_thread(void)
+ 	phys_carveout_init();
+ 
+ #if MACH_KDP
++#if defined(KEBAB)
++	{
++		/*
++		 * When kebabkdp=1 the debugger rides the CDC-ACM port, and kdp_init()
++		 * can enter the debugger immediately (debug has DB_HALT) before
++		 * bsd_init() gets a chance to start that port.  Bring it up here,
++		 * while the VM and thread machinery are already available; the
++		 * console start in bsd_init becomes a no-op after this.
++		 */
++		extern void kebab_usb_kdp_start(void);
++		kebab_usb_kdp_start();
++	}
++#endif
+ 	kernel_bootstrap_log("kdp_init");
+ 	kdp_init();
+ #endif

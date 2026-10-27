@@ -9,7 +9,7 @@ iPhone X 的身份启动 iOS 16.7.16 用户态。
 ```
 board.toml                   unixnu 读取的板级描述
 configs/                     defconfig 与 iPhone X 的 /product 子树
-patches/xnu-8796-kebab/      本机内核补丁集（52 个，按文件名顺序应用）
+patches/xnu-8796-kebab/      本机内核补丁集（83 个，按文件名顺序应用）
 scripts/make-kebab-adt.py    设备树（ADT）生成器
 drivers/KebabCPU/            子模块 -> GFander/KebabCPU（PSCI / 多核）
 drivers/KebabEarlyConsole/   子模块 -> GFander/KebabEarlyConsole（面板控制台）
@@ -17,6 +17,12 @@ crypto-bearssl/              备用密码学补丁集（当前未启用，见文
 docs/BRING-UP-STATE.md       详细的移植状态记录
 docs/FIRMWARE.md             固件的构建、镜像布局与重新打包
 docs/ROADMAP.md              对照参考实现的路线图与差距分析
+docs/EP0-PROBE.md            EP0 进度探针的编码与记录点
+docs/EP0-TEST-PLAN.md        panic 后重连的真机测试流程
+docs/IOS-USERLAND.md         从 IPSW 取用户态：提取、APFS、缓存、依赖
+docs/PANEL-DSI.md            面板 AMB655X 的初始化序列与时序
+docs/GPU-ASSESSMENT.md       图形路线的决策与依据
+scripts/verify-all.sh        一条命令验证整棵树
 ```
 
 克隆时加 `--recurse-submodules`。
@@ -43,7 +49,12 @@ docs/ROADMAP.md              对照参考实现的路线图与差距分析
 | 图形输出（GOP）：`0x9C000000`，1080×2400，行距 4320 字节，32 bpp | ✅ |
 | USB（主机 / 设备 / USB-C）| ⚠️ 仅排入 APRIORI，未打通 |
 
-### ⚠️ USB 尚未适配完成
+### USB
+
+**内核侧的设备模式 USB 调试串口已经打通**，见第 3 节。
+下面是固件侧的状态，与本节的串口是两件事。
+
+#### ⚠️ 固件侧的 USB 尚未适配完成
 
 USB 相关组件只是被**排进了 DXE APRIORI**，真机上还没有打通任何一条路径：
 
@@ -105,8 +116,12 @@ ABL → boot_b 上的镜像 → Mu-Silicium UEFI → UniXNU 菜单
 | **`bsd_init()` 进入 BSD 层** | ✅ |
 | `pthread_init()`（内置 libpthread-514.100.2）| ✅ |
 | **UFS 驱动：找到 `userdata` 分区（229043 MiB），发布 `ufsroot0`** | ✅ |
-| 挂载根文件系统 | ⛔ 当前阻塞点（内核里没有任何文件系统）|
-| 根卷挂载（`ufsroot0`，UFS 驱动已就位）| ⬜ 待 pthread 之后验证 |
+| 挂载根文件系统（内置 HFS+，`KebabRoot`，可读写）| ✅ |
+| 加载 `/sbin/launchd`，PID 1 打开 `/dev/kebabcon` | ✅ |
+| **设备模式 USB CDC-ACM 调试串口** | ✅ 见第 3 节 |
+| **serial KDP over CDC-ACM**（LLDB 可连） | ✅ 见第 6 节 |
+| **S6SY761 触摸** + `/dev/kebab_touch` 事件节点 | ✅ 见第 7 节 |
+| **内置 `IOMobileFramebuffer`（AppleCLCD）** | ✅ 见第 4 节 |
 
 ### 已修复的关键问题
 
@@ -255,3 +270,137 @@ fastboot reboot
 MD5、SHA-256/384/512、HMAC-DRBG、AES-CBC），应用、编译与 982 组测试向量均已
 验证通过。当前内核只需要 SHA-1 与 PRNG，因此尚未启用；等后续阶段需要 MD5、
 SHA-384/512 或 AES 时再应用（注意 `0050` 会取代现有 SHA-1 补丁）。
+
+---
+
+## 3. USB 调试串口（内核侧，已打通）
+
+内核把 DWC3 从设备模式接管过来，枚举成一个 **CDC-ACM 串口**：主机侧不需要装驱动，
+Windows 显示为「USB 串行设备 (COMx)」，macOS 是 `/dev/tty.usbmodem*`。
+
+```
+内核 printf ──→ _cnputc() ──→ 16 KiB 无锁环形缓冲 ──→ 事件线程每 2 ms 提交 bulk IN
+```
+
+**挂点在 `_cnputc`，不是 `_cnputs`**：panic 报告走的是无缓冲通路
+（`paniclog_append_noflush` → `consdebug_putc_unbuffered` →
+`console_write_unbuffered` → `_cnputc`），挂在 `_cnputs` 上会漏掉全部 panic 输出。
+`_cnputs` 本身逐字符调用 `_cnputc`，一个钩子覆盖两条路径。
+
+### panic 捕获
+
+panic 时事件线程已停，因此 `kebab_usb_log()` 在 `panic_active()` 下走同步路径
+`ud_flush_from_panic()`：每次取 511 字节、提交、**等待完成事件**，直到环空；带单所有者
+原子标志，防止传输路径里的 `printf` 递归进来。
+
+实测一次 panic 能送出 **约 8.9 KB**，包含寄存器现场、逐层栈回溯（lr/fp）、Zone info、
+Metadata 和 Stackshot 统计。
+
+> **使用前提**：串口必须在 panic 之前就已经打开。panic 之后设备不再完成控制传输，
+> 主机无法重新配置端口。
+
+### 已知问题
+
+| 问题 | 状态 |
+| --- | --- |
+| panic 后重新连接 | ❌ 未打通。`haltRestart` 钩子已确认被调用（panic 后没有 `MACH Reboot`，说明 `PEHaltRestart` 没返回），泵循环在跑，但主机无法重新配置端口 |
+| 交互式调试器（KDP over CDC-ACM） | ❌ 未实现，需要把 KDP 架到 bulk 端点上 |
+| `debug=0x14f` 停在调试器 | ❌ 仍然走重启路径，运行时的 `panicDebugging` / panic options 待用探针确认 |
+
+## 4. 显示（内置 IOMobileFramebuffer）
+
+`AppleCLCD` 从 `PE_current_console()` 取引导器留下的 GOP 帧缓冲
+（`0x9C000000`，1080×2400，行距 4320，32 bpp），把它发布成 IOSurface，
+再作为 `IOMobileFramebuffer` 服务注册。启动日志：
+
+```
+KEBAB FB: AppleCLCD 1080x2400 stride 4320 at 0x9c000000, default surface 1
+KEBAB FB: started 1080x2400
+```
+
+面板由引导器直接扫描输出，因此不需要写 DPU 就能出画面。`KebabSurface` 提供
+IOSurface 语义，`SwapEnd` 用 CPU 把图层拷进面板内存，vsync 是 60 Hz 定时器。
+
+## 5. 本地构建（不再依赖 CI）
+
+一台 macOS 14.6 虚拟机 + Xcode 15.4 即可，首次约 20 分钟，之后增量 2～4 分钟：
+
+```bash
+~/kebab-build/build-local.sh          # 增量构建
+~/kebab-build/check-file.sh bsd/dev/kebab_usb.c   # 单文件语法检查，1 秒
+```
+
+`pack-payload.py` 直接在 FAT32 里替换内核文件（保留 ADT 与启动参数），
+`pack-boot.py` 把 64 MiB 载荷放到 boot 镜像的 `0x800000`。
+
+需要注意的三点：
+
+* Xcode 必须是 **15.x**。Xcode 26/27 的 `iig` 生成的代码引用 xnu-8796 没有的 `IORPC` 成员。
+* dxb 编译 `libfirehose_kernel.a` 时写死了 `ARCHS="x86_64 arm64e"`，arm64 内核链不上，要补上 `arm64`。
+* dxb 会把 PATH 净化成只含 Xcode 与系统目录，`python`（macOS 只有 `python3`）需要
+  `$HOME/bin` 提供包装脚本，并让 build.sh 保留该目录。
+
+---
+
+## 6. 内核调试（serial KDP over CDC-ACM）
+
+控制台本身就是 KDP 的传输层：`pal_serial_putc_nocr`/`pal_serial_getc` 在
+`kebabkdp=1` 时改走 USB，其余情况仍是 UART。一帧 KDP 约 3 KB，所以 bulk-OUT
+环从 256 字节扩到 4096。
+
+```
+启动           debug=0x14e serial=3 kebabusb=1 kebabkdp=1
+启动即停在 KDP debug=0x14f serial=3 kebabusb=1 kebabkdp=1
+
+主机           python3 scripts/kdp-cdc-bridge.py /dev/ttyACM0 --udp-port 41139
+               lldb -o "kdp-remote 127.0.0.1:41139"
+```
+
+KDP 字节直接注入 USB 环，不经过 `_cnputc`，所以不会打到屏幕上；主机桥只接受
+`0xFA..0xFB` 且 CRC32 正确的帧，中间的日志文本被忽略。
+
+`DB_KDP_GETC_ENA (0x200)` 一律不使用 —— 键盘轮询会把协议字节吃掉。
+
+## 7. 触摸
+
+`S6SY761` over QUPv3 SE13（基址 `0xA94000`，wrapper `0xAC0000`，I2C `0x48`，
+GPIO 36/37 mux 到 qup13，reset 38，irq 39）。地址取自设备自己的 DTB，不是猜的。
+
+坐标要经过三个空间：
+
+```
+传感器  0..1079 × 0..2399
+   ↓  kt_transform()
+面板    1080 × 2400
+   ↓  加上显示呈现原点 (22,18)
+逻辑    1125 × 2436     ← 用户态看到的分辨率
+```
+
+事件写进 64 槽静态环，通过 `/dev/kebab_touch` 供 `read(2)` 读取；队列满时覆盖最旧
+并计数丢弃，没有消费者时只丢历史、不丢内存。开机自检会压 192 条验证这一行为。
+
+**内核里没有 HID 框架**：`iokit/hid` 不存在，配置里 `options NO_KERNEL_HID`，
+而且没有 kxld 所以不能加载 kext。要走 `IOHIDFamily` 得先移植整个子系统 ——
+那是独立的工程，不是补丁。
+
+## 8. 用户态提取（P1 前置）
+
+真实 iOS 16.7.16（20H392）的二进制已经从 IPSW 里取出来了，走 HTTP Range，
+不需要下载 6.17 GB：
+
+```
+/usr/lib/dyld     922,912   dyld-1067
+/sbin/launchd     541,600
+```
+
+iOS 的文件是 `UF_COMPRESSED` + decmpfs **type 4**（64 KiB zlib 分块，存在资源叉里），
+不是 LZFSE。资源叉的 oid 是 inode+1，chunk offset 相对 `0x104`。
+
+根卷需要两块：OS 卷给 `/usr/lib/dyld`，`Cryptex1,SystemOS` 给 44 个分片的共享缓存。
+**libSystem 在任何地方都不是文件**，它由共享缓存提供。
+
+签名侧：IPSW 里有独立的 `087-86698-044.dmg.trustcache`（2,760 条），
+内核在 `bsd_init` 从 `/System/Library/Caches/com.apple.kernelcaches/static.trustcache`
+加载，`kebab_cs` 位掩码控制策略（开发用 `kebab_cs=15`）。
+
+细节见 `docs/IOS-USERLAND.md`。

@@ -1,0 +1,62 @@
+Keep USB alive across a panic instead of halting with a dead controller.
+
+haltRestart is where a panic ends in a halt or restart request, but it also
+carries lifecycle notifications: kPEPanicBegin arrives before the report is
+written, so only the final stop is taken over. Once there, stay in a loop that
+still services the endpoint so the host can reconnect.
+
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -13,10 +13,15 @@
+  * display node, and the driver only needs a provider to attach to. */
+ class AppleCLCD;
+ extern "C" int kebab_display_start(IOService *provider);
++#include <kern/debug.h>
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
+ 
++/* the driver is C; these have to be declared before use */
++extern "C" bool kebab_usb_console_ready(void);
++extern "C" void kebab_usb_panic_spin(void);
++
+ class KebabPlatformExpert : public IODTPlatformExpert {
+ 	OSDeclareDefaultStructors(KebabPlatformExpert);
+ 
+@@ -27,6 +32,7 @@
+ 	const char *excludeList(void) APPLE_KEXT_OVERRIDE;
+ 	bool getTargetName(char *name, int maxLength) APPLE_KEXT_OVERRIDE;
+ 	bool getProductName(char *name, int maxLength) APPLE_KEXT_OVERRIDE;
++	int haltRestart(unsigned int type) APPLE_KEXT_OVERRIDE;
+ };
+ 
+ OSDefineMetaClassAndStructors(KebabPlatformExpert, IODTPlatformExpert);
+@@ -94,3 +100,28 @@
+ 	return true;
+ }
+ #endif /* KEBAB */
++
++
++/*
++ * A panic ends in a halt or a restart request. Halting leaves the USB controller
++ * orphaned and the host loses the port, so when the panic report has been produced
++ * we stay in a loop that keeps servicing it: the host can reconnect and later
++ * console output still arrives. Any other halt/restart goes to the stock path.
++ */
++int
++KebabPlatformExpert::haltRestart(unsigned int type)
++{
++
++
++	/*
++	 * haltRestart also carries panic lifecycle notifications, and kPEPanicBegin
++	 * arrives before the report has been written - spinning on that would swallow
++	 * the panic output. Only take over the final stop.
++	 */
++	if (panic_active() && kebab_usb_console_ready() &&
++	    (type == kPEHaltCPU || type == kPERestartCPU ||
++	    type == kPEPanicRestartCPU || type == kPEPanicRestartCPUNoCallouts)) {
++		kebab_usb_panic_spin();          /* does not return */
++	}
++	return IODTPlatformExpert::haltRestart(type);
++}

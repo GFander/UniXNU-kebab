@@ -1,5 +1,9 @@
-Wire the kebab USB console in: start it during bsd_init and tee console
-output into its ring, so a host connected over USB sees the kernel log live.
+Wire the USB console in, and start it at the top of bsd_init.
+
+The VM and the kernel thread machinery are already up when bsd_init runs, so
+the log ring, the DMA page and the event thread all work there; starting the
+console at the top means a panic anywhere after that point - UFS, the
+filesystem, launchd - can be read from the host instead of photographed.
 
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
@@ -13,41 +17,23 @@ output into its ring, so a host connected over USB sees the kernel log live.
  bsd/dev/unix_startup.c			standard
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -809,6 +809,11 @@
- 	bsd_init_kprintf("calling sysctl_mib_init\n");
- 	sysctl_mib_init();
+@@ -491,6 +491,19 @@
+ #endif
  
-+#if defined(KEBAB)
-+	/* Device-mode USB, so the console can also go to /dev/ttyACM0. */
-+	extern void kebab_usb_start(void);
-+	kebab_usb_start();
-+#endif
- 	bsd_init_kprintf("calling bsd_autoconf\n");
- 	bsd_autoconf();
- 
---- a/osfmk/console/serial_console.c
-+++ b/osfmk/console/serial_console.c
-@@ -289,9 +289,23 @@
- {
- 	extern int disableConsoleOutput;
- 
-+#if !defined(KEBAB)
+ #if defined(KEBAB)
 +	/*
-+	 * stock code drops console output while the graphics console is paused;
-+	 * on this port the panel is the only console, so keep it always on.
++	 * Bring up the device-mode USB console as early as it is safe: the VM and the
++	 * kernel thread machinery are up by the time bsd_init runs, so the log ring,
++	 * the DMA page and the event thread all work, and a panic anywhere after this
++	 * point can be read from the host instead of photographed.
 +	 */
-+#if !defined(KEBAB)
- 	if (disableConsoleOutput) {
- 		return;
- 	}
-+#endif
-+#if defined(KEBAB)
 +	{
-+		extern void kebab_usb_log(const char *buf, size_t len);
-+		kebab_usb_log(c, (size_t)size);
++		extern void kebab_usb_start(void);
++		kebab_usb_start();
 +	}
 +#endif
-+#endif
- 
- 	assert(c != NULL);
- 
++
++#if defined(KEBAB)
+ /* Panic reports arrive through the panel console, so the bsd_init trace is
+  * worth its output on this port. */
+ #define DEBUG_BSDINIT 1
