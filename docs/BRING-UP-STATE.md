@@ -4472,3 +4472,72 @@ UEFI 规范要求在 EBS 通知回调里不得调用会改变内存映射的服�
 2. 在 `0x14b0` 的卸载路径上确认 EDK II 是否会走到 `CoreFreePool`；
 3. 若要验证历史挂死，最省事的是在 UEFI 侧加一条“EBS 前后”的预留内存记录，
    而不是再改内核。
+
+## 五十一、O3-C6-E1/E2：在真实 Mu 源码里确认释放路径
+
+### 1. 协议卸载必然走到 `CoreFreePool`
+
+`Mu_Basecore/MdeModulePkg/Core/Dxe/Hand/Handle.c`（实际用于构建的树）里，
+`CoreUninstallProtocolInterface()` 的成功分支：
+
+```c
+Prot = CoreRemoveInterfaceFromProtocol (Handle, Protocol, Interface);
+if (Prot != NULL) {
+    gHandleDatabaseKey++;
+    Handle->Key = gHandleDatabaseKey;
+    RemoveEntryList (&Prot->Link);
+    Prot->Signature = 0;
+    CoreFreePool (Prot);          /* line 881 */
+    Status = EFI_SUCCESS;
+}
+```
+
+释放的是 `PROTOCOL_INTERFACE` 本身，**与“是否最后一个协议”无关**；随后才判断
+`IsListEmpty (&Handle->Protocols)` 决定是否释放 Handle。
+
+`Mem/Pool.c` 里还有 `CoreFreePoolPagesI()`（line 630），调用点在 681、813、871，
+说明池释放可能下降到页级释放。
+
+结论：在 RpmhDxe 的 EBS 回调里调用 `UninstallMultipleProtocolInterfaces()`，只要
+接口移除成功，就会进入 `CoreFreePool(Prot)`；这一步发生在
+`CoreTerminateMemoryMap()` 之后，属于规范禁止的“EBS 回调中调用内存服务”形状。
+
+### 2. RpmhDxe 的注册与安装顺序
+
+```text
+0x1514  blr [gBS+0x170]        ; CreateEventEx(EBS group)
+0x1528  x0 = 0x1584, x1 = 0
+0x1534  bl 0x2218              ; 回调注册辅助
+0x153c  失败则 0x18dc 打印 "Rpmh ... callback registration failed"（0xa779）
+0x1554  ldr x4, [gBS+0x148]    ; InstallMultipleProtocolInterfaces
+0x1568  x0 = 0xe250, x1 = 0xe068, x2 = 0xe0d8, x3 = 0
+0x1580  br x4                  ; 尾调用，未检查返回值
+```
+
+即：先注册 EBS 事件，再安装协议接口；安装是尾调用，返回值不在本函数里检查。
+
+### 3. 证据状态
+
+| 项 | 判定 |
+| --- | --- |
+| Mu Handle.c 成功卸载后 `CoreFreePool(Prot)` | DIRECT（源码 line 881） |
+| 池释放可能进入页级释放 | DIRECT（Pool.c 630/681/813/871） |
+| RpmhDxe EBS 回调调用卸载 | DIRECT |
+| 回调运行在内存映射终止之后 | DIRECT（DxeMain.c 790/802/816） |
+| 真机上回调实际到达释放点 | UNKNOWN |
+| 与历史 EBS 挂死的因果 | UNKNOWN |
+| TCS1 硬件回收 | UNKNOWN |
+
+### 4. 边界
+
+- `0x7fdc/0x80c4` 只证明“没有直接 MMIO 地址构造”，不能排除它们调用的函数间接
+  触碰硬件；上一轮的 HIGH CONFIDENCE 只适用于这个局部判断；
+- 这套结论基于当前 Mu_Basecore 工作区（`7013966c` + 本地修改），与刷入固件的
+  对应关系仍是“同一棵树，未锁定提交”。
+
+### 5. 下一步
+
+1. C6-E3：确认卸载时接口移除成功的条件（GUID/接口指针是否与安装一致），
+   以及 Mu 的 Pool 实现在 EBS 后是否直接进入页级路径；
+2. C6-A1：解析 `0x65f0`、`0xe850` 与 `0x3ba4`，把软件清理和间接硬件调用分开；
+3. C6-E4：设计 EBS 阶段探针（预留内存 + 直接写 framebuffer 两条通道），先离线。
