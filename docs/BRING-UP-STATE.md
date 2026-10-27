@@ -3955,3 +3955,46 @@ UEFI 阶段确实带了一个 RPMh 驱动。这解释了 TCS0 的 CLK/BUS 残留
 
 - 实测：两套主机测试、DarwinBoot 源码对比、RpmhDxe 二进制字符串；
 - 未做：未反汇编 RpmhDxe，未证明镜像中的 DarwinBoot 版本，未做真机 RPMh 写入。
+
+## 四十三、C6-F 私有化与 O3-C2 镜像级闭环
+
+### 1. C6-F
+
+`kebab_rpmh_tcs_init()` 在内核构建里已不存在：实现改为 `static
+kebab_rpmh_tcs_init_impl()`，带自定义锁的包装函数只在非 `KEBAB_RPMH_KERNEL` 构建
+里定义。发送入口的锁身份检查保留。两套主机测试仍全过（58 + 57）。
+
+### 2. O3-C2：把 signed.img 拆开看
+
+- FV 头 `_FVH` 在文件偏移 `0x1098`，FV 从 `0x1070` 开始；
+- 用 `uefi_firmware` 递归解包（FV 是压缩的，原始字节里搜不到 GUID），共 106 个 FFS；
+- 找到 `RpmhDxe`：FFS GUID `cb29f4d1-7f37-4692-a416-93e82e219766`，文件 65,608
+  字节；内部三段：
+  - `0x13` DEPEX 18 字节：`02 42 b9 37 ae 7f 45 91 4c a1 96 d9 66 9f d3 47 a3 08`，
+    即 PUSH GUID `AE37B942-457F-4C91-A196-D9669FD347` + END；
+  - `0x10` PE32 65,536 字节，SHA-256
+    `166f49bdbc6955a74718be9a2907bc1dfbd15c6e2e28c1b7707ede941c17eb67`；
+  - `0x15` UI 16 字节（`RpmhDxe`）。
+
+### 3. 与本地构建产物比对
+
+`Binaries/kebab/QcomPkg/Drivers/RpmhDxe/RpmhDxe.efi` 的 SHA-256 与镜像里的 PE32
+**完全一致**，`.depex` 逐字节相同。这说明镜像里的 RpmhDxe 就是本仓库 `Binaries/`
+下那份二进制，出处确定。
+
+### 4. APRIORI 把 DEPEX 绕过去了
+
+FV 里还有一个 1,284 字节的 FFS，GUID `fc510ee7-ffdc-11d4-bd41-0080c73c8881`
+（UEFI PI 的 APRIORI 文件 GUID），其内容包含 RpmhDxe 的 GUID。按 PI 规范，
+APRIORI 列出的驱动按列表顺序调度，**DEPEX 条件不参与调度判断**。
+
+结论：这个镜像里 RpmhDxe 会被早期调度，不能用“DEPEX 依赖的协议没装”来推断它
+没有运行。UEFI 确实执行了 RPMh 驱动，XNU 不是唯一的 RPMh 使用者，TCS0/TCS1 的
+残留有了明确候选来源。
+
+### 5. 仍未证明
+
+- RpmhDxe 具体写了哪些 TCS、是否在退出前完成事务（需要反汇编或运行时探针）；
+- 引导器是否调用 EBS 仍未在镜像级闭环（FV 里的 DarwinBoot 模块未按名字找到，
+  可能在 payload 或另一个 FV）；
+- 因此 TCS1 所有权仍是 UNKNOWN，真实写入继续 NO-GO。

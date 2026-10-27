@@ -306,7 +306,8 @@ void kebab_tcs_release(kebab_tcs *tcs)
 #define KEBAB_TCS_RB_POLLS   1000u
 #define KEBAB_TCS_CMPL_POLLS 10000u
 
-void kebab_rpmh_tcs_init(kebab_rpmh_tcs *t, kebab_tcs_io io,
+static void
+kebab_rpmh_tcs_init_impl(kebab_rpmh_tcs *t, kebab_tcs_io io,
     kebab_rpmh_lock *lock)
 {
 	memset(t, 0, sizeof(*t));
@@ -411,8 +412,17 @@ static kebab_rpmh_lock kebab_rpmh_global_lock;
 void
 kebab_rpmh_tcs_init_global(kebab_rpmh_tcs *t, kebab_tcs_io io)
 {
-	kebab_rpmh_tcs_init(t, io, &kebab_rpmh_global_lock);
+	kebab_rpmh_tcs_init_impl(t, io, &kebab_rpmh_global_lock);
 }
+
+
+#ifndef KEBAB_RPMH_KERNEL
+void
+kebab_rpmh_tcs_init(kebab_rpmh_tcs *t, kebab_tcs_io io, kebab_rpmh_lock *lock)
+{
+	kebab_rpmh_tcs_init_impl(t, io, lock);
+}
+#endif
 
 #ifndef KEBAB_RPMH_KERNEL
 /* Test-only view of the global lock so a suite can prove it is shared. */
