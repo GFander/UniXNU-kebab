@@ -8839,13 +8839,15 @@ KEBAB EXEC: copyout checks user_eq_alloc=1 str_eq_user=1 argc_ge_guard=1
   表示该函数没有被调用（`fast` 返回 `KERN_PROTECTION_FAILURE` 时不再调
   `vm_fault`；本机 `XNU_MONITOR=0`，`arm_fast_fault()` 不会返回 2，所以实际
   只会看到 `fast=-1`）。没记录到 fault 时打印 `copyout fault none`。
-- **pmap**：新增的 `kebab_pmap_probe()`（`osfmk/arm/pmap/pmap.c`），沿
-  `pmap_ttne()` 从 root 走到 leaf，不取锁、不触发 fault。`tte` 是叶级表项
-  原值；`valid` 是表项 bit0（`ARM_TTE_VALID`）；`af` 是 `ARM_PTE_AF`
-  （bit 10）；`ap` 是 `ARM_PTE_AP`（bit 6–7，取值见判定表）；`uxn` 是
-  `ARM_PTE_NX`，`pxn` 是 `ARM_PTE_PNX`；`lvl` 是给出该表项的层级（用户 pmap
-  是 L1–L3，见 `osfmk/arm/pmap/pmap.c:254`，数字表示走到哪一层就断了）。
-  压缩页会显示成 `tte=0x8000...` 且 `valid=0`。
+- **pmap**：新增的 `kebab_pmap_probe_log()`（`osfmk/arm/pmap/pmap.c`），沿
+  `pmap_ttne()` 从 root 走到 leaf，不取锁、不触发 fault，并自己打印这一行。
+  解码放在 pmap.c 里，是因为 bsd 看不到 `osfmk/arm/pmap/pmap.h`：`vm/pmap.h`
+  只在 `MACH_KERNEL_PRIVATE` 下包含 `<machine/pmap.h>`，所以结构体不跨这层
+  边界。`tte` 是叶级表项原值；`valid` 是表项 bit0（`ARM_TTE_VALID`）；`af`
+  是 `ARM_PTE_AF`（bit 10）；`ap` 是 `ARM_PTE_AP`（bit 6–7，取值见判定表）；
+  `uxn` 是 `ARM_PTE_NX`，`pxn` 是 `ARM_PTE_PNX`；`lvl` 是给出该表项的层级
+  （用户 pmap 是 L1–L3，见 `osfmk/arm/pmap/pmap.c:254`，数字表示走到哪一层
+  就断了）。压缩页会显示成 `tte=0x8000...` 且 `valid=0`。
   不复用 `pmap_get_arm64_prot()` 的原因：它对“没有翻译”和“有翻译但
   protection 位恰好为 0”都返回 0，并且丢掉 AF——而 AF 正好是区分
   access flag fault 和缺页的那一位。也不用 `pmap_query_page_info()`：它只给

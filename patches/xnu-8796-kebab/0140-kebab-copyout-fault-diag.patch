@@ -1,8 +1,8 @@
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index 716c1eb..154ad02 100644
+index 716c1eb..b8d2a9f 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -5338,6 +5338,38 @@ copyoutptr(user_addr_t ua, user_addr_t ptr, int ptr_size)
+@@ -5338,6 +5338,45 @@ copyoutptr(user_addr_t ua, user_addr_t ptr, int ptr_size)
  }
  
  
@@ -36,12 +36,19 @@ index 716c1eb..154ad02 100644
 +extern int       kebab_kfault_vm;
 +extern boolean_t kebab_kfault_valid;
 +extern void     *kebab_kfault_thread;
++
++/*
++ * Defined in osfmk/arm/pmap/pmap.c.  The walk and the PTE bits are pmap
++ * internals (bsd does not see osfmk/arm/pmap/pmap.h), so the helper prints
++ * its own line instead of returning a struct.
++ */
++extern void kebab_pmap_probe_log(vm_map_t map, vm_map_offset_t va);
 +#endif /* KEBAB */
 +
  /*
   * exec_copyout_strings
   *
-@@ -5428,6 +5460,7 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+@@ -5428,6 +5467,7 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
  	int error;
  #if defined(KEBAB)
  	const char *stage = "alignment";
@@ -49,7 +56,7 @@ index 716c1eb..154ad02 100644
  #endif
  
  	unsigned i;
-@@ -5475,6 +5508,10 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+@@ -5475,6 +5515,10 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
  
  	stack = *stackp;
  
@@ -60,7 +67,7 @@ index 716c1eb..154ad02 100644
  	/*
  	 * All previous contributors to the string area
  	 * should have aligned their sub-area
-@@ -5526,6 +5563,7 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+@@ -5526,6 +5570,7 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
  	 */
  #if defined(KEBAB)
  	stage = "strings";
@@ -68,7 +75,7 @@ index 716c1eb..154ad02 100644
  #endif
  	error = copyout(imgp->ip_strings, string_area,
  	    string_size);
-@@ -5579,6 +5617,7 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+@@ -5579,6 +5624,7 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
  	 */
  #if defined(KEBAB)
  	stage = "pointers";
@@ -76,7 +83,7 @@ index 716c1eb..154ad02 100644
  #endif
  	error = copyout(ptr_buffer_start, ptr_area,
  	    ptr_area_size);
-@@ -5589,6 +5628,7 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+@@ -5589,6 +5635,7 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
  	/* argc (int32, stored in a ptr_size area) */
  #if defined(KEBAB)
  	stage = "argc";
@@ -84,7 +91,7 @@ index 716c1eb..154ad02 100644
  #endif
  	error = copyoutptr((user_addr_t)imgp->ip_argc, argc_area, ptr_size);
  	if (error) {
-@@ -5598,6 +5638,12 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+@@ -5598,6 +5645,11 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
  bad:
  #if defined(KEBAB)
  	if (error != 0) {
@@ -92,12 +99,11 @@ index 716c1eb..154ad02 100644
 +		vm_map_t cur_map = current_map();
 +		boolean_t have_fault;
 +		user_addr_t probe_addr;
-+		struct kebab_pmap_probe probe;
 +
  		printf("KEBAB EXEC: copyout stage=%s error=%d ptr_size=%d "
  		    "strspace_mod=%d string_size=%lu string=0x%llx ptr=0x%llx "
  		    "argc=0x%llx\n",
-@@ -5606,6 +5652,65 @@ bad:
+@@ -5606,6 +5658,55 @@ bad:
  		    (unsigned long long)string_area,
  		    (unsigned long long)ptr_area,
  		    (unsigned long long)argc_area);
@@ -135,17 +141,7 @@ index 716c1eb..154ad02 100644
 +		probe_addr = have_fault ? (user_addr_t)kebab_kfault_far :
 +		    (kebab_fail_addr != 0 ? kebab_fail_addr :
 +		    (user_addr_t)p->user_stack);
-+		if (kebab_pmap_probe(cur_map, probe_addr, &probe) == KERN_SUCCESS) {
-+			printf("KEBAB EXEC: copyout pmap va=0x%llx tte=0x%llx "
-+			    "lvl=%d valid=%d af=%d ap=%u uxn=%d pxn=%d\n",
-+			    (unsigned long long)probe_addr,
-+			    (unsigned long long)probe.tte, probe.level,
-+			    (int)probe.valid, (int)probe.af, probe.ap,
-+			    (int)probe.uxn, (int)probe.pxn);
-+		} else {
-+			printf("KEBAB EXEC: copyout pmap va=0x%llx unavailable\n",
-+			    (unsigned long long)probe_addr);
-+		}
++		kebab_pmap_probe_log(cur_map, probe_addr);
 +
 +		/*
 +		 * The audit's containment checks.  "user" is the stack top this
@@ -163,7 +159,7 @@ index 716c1eb..154ad02 100644
  	}
  #endif /* KEBAB */
  	return error;
-@@ -6816,6 +6921,15 @@ create_unix_stack(vm_map_t map, load_result_t* load_result,
+@@ -6816,6 +6917,15 @@ create_unix_stack(vm_map_t map, load_result_t* load_result,
  		}
  	}
  
@@ -180,47 +176,51 @@ index 716c1eb..154ad02 100644
  	return KERN_SUCCESS;
  }
 diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
-index 68cadfc..1151b05 100644
+index 68cadfc..fb904f6 100644
 --- a/osfmk/arm/pmap/pmap.c
 +++ b/osfmk/arm/pmap/pmap.c
-@@ -2073,6 +2073,73 @@ pmap_get_arm64_prot(
+@@ -2073,6 +2073,78 @@ pmap_get_arm64_prot(
  
  	return effective_prot_bits;
  }
 +
 +#if defined(KEBAB)
 +/*
-+ * Kebab bring-up (0140): describe the leaf translation for one user address
++ * Kebab bring-up (0140): print the leaf translation for one user address
 + * without faulting it in and without taking the pmap lock.
 + *
 + * Called only from exec_copyout_strings() after a copyout into the new task's
 + * stack failed, against a task that has not run yet, so the page tables cannot
-+ * change while this walks them.
++ * change while this walks them.  The decode stays here because the walk and
++ * the PTE bits are pmap-private; bsd does not include osfmk/arm/pmap/pmap.h
++ * (vm/pmap.h only pulls in <machine/pmap.h> under MACH_KERNEL_PRIVATE), so the
++ * helper prints its own line instead of returning a struct.
 + *
 + * pmap_get_arm64_prot() above cannot be reused for this: it returns 0 both for
 + * "no translation" and for a translation whose protection bits happen to be
 + * zero, and it drops the access flag, which is the bit that separates an
-+ * access-flag fault from a missing mapping.  The raw entry is returned as
-+ * well, so a compressed entry reads as tte=0x8000... instead of as a hole.
++ * access-flag fault from a missing mapping.  The raw entry is printed as well,
++ * so a compressed entry reads as tte=0x8000... instead of as a hole.
 + */
-+kern_return_t
-+kebab_pmap_probe(vm_map_t map, vm_map_offset_t va, struct kebab_pmap_probe *out)
++void
++kebab_pmap_probe_log(vm_map_t map, vm_map_offset_t va)
 +{
 +	pmap_t pmap;
 +	const pt_attr_t *pt_attr;
 +	tt_entry_t tte = ARM_TTE_EMPTY;
 +	boolean_t leaf = FALSE;
++	boolean_t valid = FALSE;
++	boolean_t af = FALSE;
++	boolean_t uxn = FALSE;
++	boolean_t pxn = FALSE;
++	unsigned int ap = 0;
 +	unsigned int level;
 +
-+	bzero(out, sizeof(*out));
-+	out->level = -1;
-+
-+	if (map == VM_MAP_NULL) {
-+		return KERN_INVALID_ARGUMENT;
-+	}
-+	pmap = vm_map_pmap(map);
++	pmap = (map != VM_MAP_NULL) ? vm_map_pmap(map) : PMAP_NULL;
 +	if (pmap == PMAP_NULL || pmap == kernel_pmap) {
-+		return KERN_INVALID_ARGUMENT;
++		printf("KEBAB EXEC: copyout pmap va=0x%llx unavailable\n",
++		    (unsigned long long)va);
++		return;
 +	}
 +
 +	pt_attr = pmap_get_pt_attr(pmap);
@@ -242,52 +242,22 @@ index 68cadfc..1151b05 100644
 +		}
 +	}
 +
-+	out->tte = tte;
-+	out->level = (int)level;
 +	if (leaf) {
-+		out->valid = TRUE;
-+		out->af = (tte & ARM_PTE_AF) != 0;
-+		out->ap = (uint32_t)ARM_PTE_EXTRACT_AP(tte);
-+		out->uxn = (tte & ARM_PTE_NX) != 0;
-+		out->pxn = (tte & ARM_PTE_PNX) != 0;
++		valid = TRUE;
++		af = (tte & ARM_PTE_AF) != 0;
++		ap = (unsigned int)ARM_PTE_EXTRACT_AP(tte);
++		uxn = (tte & ARM_PTE_NX) != 0;
++		pxn = (tte & ARM_PTE_PNX) != 0;
 +	}
-+	return KERN_SUCCESS;
++	printf("KEBAB EXEC: copyout pmap va=0x%llx tte=0x%llx lvl=%d "
++	    "valid=%d af=%d ap=%u uxn=%d pxn=%d\n",
++	    (unsigned long long)va, (unsigned long long)tte, (int)level,
++	    (int)valid, (int)af, ap, (int)uxn, (int)pxn);
 +}
 +#endif /* KEBAB */
  #endif /* __arm64__ */
  
  /*
-diff --git a/osfmk/arm/pmap/pmap.h b/osfmk/arm/pmap/pmap.h
-index 75f3db0..b4b08bf 100644
---- a/osfmk/arm/pmap/pmap.h
-+++ b/osfmk/arm/pmap/pmap.h
-@@ -283,6 +283,26 @@ extern void set_mmu_ttb_alternate(uint64_t);
- extern uint64_t get_tcr(void);
- extern void set_tcr(uint64_t);
- extern uint64_t pmap_get_arm64_prot(pmap_t, vm_offset_t);
-+
-+#if defined(KEBAB)
-+/*
-+ * Kebab bring-up (0140): the leaf translation for one user address, filled in
-+ * by kebab_pmap_probe().  The exported pmap API cannot say "the translation is
-+ * there but the access flag is clear", and that is one of the three ways a
-+ * copyout into a fresh stack can fail.
-+ */
-+struct kebab_pmap_probe {
-+	uint64_t        tte;    /* raw leaf/block entry, 0 if none was found */
-+	uint32_t        ap;     /* ARM_PTE_AP bits, meaningful only when valid */
-+	int             level;  /* level the entry came from, -1 if unknown */
-+	boolean_t       valid;  /* a valid leaf/block translation was found */
-+	boolean_t       af;     /* access flag: clear means the first fault */
-+	boolean_t       uxn;    /* user execute-never */
-+	boolean_t       pxn;    /* privileged execute-never */
-+};
-+extern kern_return_t kebab_pmap_probe(vm_map_t map, vm_map_offset_t va,
-+    struct kebab_pmap_probe *out);
-+#endif /* KEBAB */
- #else /* defined(__arm64__) */
- #error Unsupported architecture
- #endif /* defined(__arm64__) */
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
 index 4911ff2..dfd54fb 100644
 --- a/osfmk/arm64/sleh.c
