@@ -1,0 +1,56 @@
+fix(spmi): give the two new PON entry points prototypes and 64-bit prints
+
+0114 made the kernel build emit exactly four warnings that were not
+there before, and all four are in its own new code:
+
+  - kebab_spmi_pon_writes_enabled() and kebab_spmi_pon_reason_write()
+    are defined here and called from kebab_usb.c, which carries its own
+    extern declarations for them; the definitions had no prototype in
+    scope, so -Wmissing-prototypes fired;
+  - the chnls slice is a vm_offset_t, but both lines that report it
+    formatted it with %08x, so -Wformat fired.
+
+Declare the two entry points next to the existing externs at the top of
+the file, and print the slice with %08lx and an unsigned long cast,
+which is how the rest of the kernel prints an address-sized value.
+
+No behaviour change: the same 4 KiB slice is mapped, the same
+kebab_pon_write gate applies, and both lines print the same number.  The
+file keeps its older warnings; this only removes the four that the
+previous patch added.
+
+diff --git a/bsd/dev/kebab_spmi.c b/bsd/dev/kebab_spmi.c
+index d9acc77..06d2c3d 100644
+--- a/bsd/dev/kebab_spmi.c
++++ b/bsd/dev/kebab_spmi.c
+@@ -67,6 +67,14 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+  */
+ extern void kebab_usb_log_flush(void);
+ 
++/*
++ * bsd/dev/kebab_usb.c calls these two and carries its own extern
++ * declarations for them; repeating the prototypes here makes the
++ * definitions below checked against a declaration.
++ */
++bool kebab_spmi_pon_writes_enabled(void);
++int kebab_spmi_pon_reason_write(void);
++
+ /* ------------------------------------------------------------ board facts */
+ 
+ #define KEBAB_SPMI_CORE_PA      0x0c440000u
+@@ -633,11 +641,11 @@ kebab_spmi_init(void)
+ 			if (spmi.chnl != 0) {
+ 				spmi.chnl_apid = apid;
+ 				spmi.chnl_mapped = true;
+-				printf("KEBAB SPMI: write path ready: APID 0x%03x, 4 KiB chnls slice 0x%08x mapped\n",
+-				    apid, slice);
++				printf("KEBAB SPMI: write path ready: APID 0x%03x, 4 KiB chnls slice 0x%08lx mapped\n",
++				    apid, (unsigned long)slice);
+ 			} else {
+-				printf("KEBAB SPMI: cannot map the chnls slice 0x%08x; the write path will refuse\n",
+-				    slice);
++				printf("KEBAB SPMI: cannot map the chnls slice 0x%08lx; the write path will refuse\n",
++				    (unsigned long)slice);
+ 			}
+ 		}
+ 	} else {
