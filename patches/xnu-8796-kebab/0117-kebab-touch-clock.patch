@@ -1,0 +1,131 @@
+feat(touch): enable the SE13 core clock from the console, and land the first GENI command
+
+0116's probe showed GCC 0x52008 = 0x063c83c0: both AHB clocks on,
+GCC_QUPV3_WRAP1_S5_CLK (bit 27) off.  The SE's registers were readable
+through AHB but its state machine had no clock, which is consistent with
+the previous boot stopping at the first GENI write.
+
+Add TOUCHCLK:
+
+  - dump the S5 clock source block (cmd_rcgr 0x18600, eight words) read-only;
+  - set only bit 27 of 0x52008, then read the enable and the halt register
+    back.  Nothing else in the register is written and no RESET is used.
+
+Measured: 0x52008 goes 0x063c83c0 -> 0x0e3c83c0 and the S5 halt register
+drops from 0x80004220 to 0x00004220.  Running TOUCHINIT after that, all
+four se_init register groups complete with the console still alive, and the
+first TCM command reaches the hardware: GENI_STATUS reads 0x00000041 (master
+command active), M_IRQ_STATUS stays 0, so the bus transaction never
+completes and never NACKs - the next problem is the slave side, not GENI.
+
+Also pass mode 1 to kt_reset_pulse() from TOUCHINIT; 0116 passed the pin
+number there, which only looked wrong in the log but now reads correctly.
+
+No I2C transfer is added, no supply is touched, and the boot path still
+leaves the hardware alone.
+
+diff --git a/bsd/dev/kebab_touch.c b/bsd/dev/kebab_touch.c
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -159,6 +159,7 @@
+ /* bsd/dev/kebab_usb.c: console entry points, read-only probe first. */
+ void kebab_touch_probe(void);
+ void kebab_touch_init_now(void);
++void kebab_touch_clock_enable(void);
+ 
+ void kebab_touch_start(void);
+ 
+@@ -1216,7 +1217,7 @@
+ 	kt_trace("KEBAB TOUCH: TOUCHINIT begin; writes follow\n");
+ 	kt_gcc_probe();
+ 	kt_pins_config();
+-	kt_reset_pulse(KT_PIN_RESET);
++	kt_reset_pulse(1);
+ 	if (!kt_se_init(100000)) {
+ 		return;
+ 	}
+@@ -1224,6 +1225,45 @@
+ 	kt_trace("KEBAB TOUCH: TOUCHINIT end\n");
+ }
+ 
++/*
++ * The S5 clock source (RCG) sits at 0x18600, inside the halt page already
++ * mapped: gcc-kona.c gives cmd_rcgr = 0x18600 for
++ * gcc_qupv3_wrap1_s5_clk_src.  Dump the block first, then set only bit 27 of
++ * 0x52008 and read the enable and halt registers back.  Nothing else in the
++ * enable register is written.
++ */
++#define KT_GCC_RCG_S5       0x00018600u
++#define KT_GCC_RCG_WORDS    8u
++
++void
++kebab_touch_clock_enable(void)
++{
++	uint32_t en, i;
++
++	if (kt.gcc_en == 0) {
++		kt.gcc_en = ml_io_map(KT_GCC_PA + KT_GCC_PAGE_EN, 0x1000);
++		kt.gcc_halt = ml_io_map(KT_GCC_PA + KT_GCC_PAGE_HALT, 0x1000);
++	}
++	if (kt.gcc_en == 0 || kt.gcc_halt == 0) {
++		printf("KEBAB TOUCH: cannot map the GCC pages\n");
++		return;
++	}
++	kt_trace("KEBAB TOUCH: TOUCHCLK: S5 RCG at 0x%05x\n", KT_GCC_RCG_S5);
++	for (i = 0; i < KT_GCC_RCG_WORDS; i++) {
++		kt_trace("KEBAB TOUCH:   RCG+0x%02x = 0x%08x\n", i * 4,
++		    kt_rd(kt.gcc_halt, KT_GCC_RCG_S5 + i * 4 - KT_GCC_PAGE_HALT));
++	}
++	en = kt_rd(kt.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN);
++	kt_trace("KEBAB TOUCH: TOUCHCLK: 0x%05x 0x%08x -> 0x%08x\n",
++	    KT_GCC_ENABLE, en, en | KT_GCC_EN_S5);
++	kt_wr(kt.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN, en | KT_GCC_EN_S5);
++	kt_sleep_ms(2);
++	en = kt_rd(kt.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN);
++	kt_trace("KEBAB TOUCH: TOUCHCLK: 0x%05x now 0x%08x (s5 %u), halt 0x%08x\n",
++	    KT_GCC_ENABLE, en, (en & KT_GCC_EN_S5) != 0,
++	    kt_rd(kt.gcc_halt, KT_GCC_HALT_WRAP1_S5 - KT_GCC_PAGE_HALT));
++}
++
+ /* ---------------------------------------------------- bit-banged GPIO I2C */
+ 
+ /*
+diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -80,6 +80,7 @@
+ /* bsd/dev/kebab_touch.c: read-only probe and explicit bring-up. */
+ extern void kebab_touch_probe(void);
+ extern void kebab_touch_init_now(void);
++extern void kebab_touch_clock_enable(void);
+ extern bool kebab_spmi_pon_writes_enabled(void);
+ extern int kebab_spmi_pon_reason_write(void);
+ 
+@@ -243,6 +244,7 @@
+ #define UD_REBOOT_PON_REPORT    8u
+ #define UD_REBOOT_TOUCH_PROBE   9u
+ #define UD_REBOOT_TOUCH_INIT    10u
++#define UD_REBOOT_TOUCH_CLOCK   11u
+ 
+ struct ud_endpoint {
+ 	uint32_t trb, length, ctl, resource;
+@@ -1204,6 +1206,10 @@
+ 	    !memcmp(buf, "TOUCHINIT\n", sizeof("TOUCHINIT\n") - 1)) {
+ 		return UD_REBOOT_TOUCH_INIT;
+ 	}
++	if (received >= sizeof("TOUCHCLK\n") - 1 &&
++	    !memcmp(buf, "TOUCHCLK\n", sizeof("TOUCHCLK\n") - 1)) {
++		return UD_REBOOT_TOUCH_CLOCK;
++	}
+ 	return 0;
+ }
+ 
+@@ -1432,6 +1438,8 @@
+ 		kebab_touch_probe();
+ 	} else if (command == UD_REBOOT_TOUCH_INIT) {
+ 		kebab_touch_init_now();
++	} else if (command == UD_REBOOT_TOUCH_CLOCK) {
++		kebab_touch_clock_enable();
+ 	}
+ }
+ 

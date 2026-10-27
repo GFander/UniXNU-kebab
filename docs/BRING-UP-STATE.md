@@ -3117,3 +3117,77 @@ GENI 寄存器能通过 AHB 读，但 GENI 状态机没有核心时钟就不会�
 - 推断：核心时钟缺失是 GENI 写失败的原因；尚未置位验证，也没有量过时钟。
 - 下一步（0117）：先只读 S5 的 RCG（`0x18600` 一带），再单独置位 `0x52008`
   bit 27，回读 halt 寄存器；确认时钟真的跑起来之后，才用 `TOUCHINIT` 去写 GENI。
+
+## 二十六、SE13 时钟与第一次真正的 GENI 命令（0117）
+
+### 1. 0117 做了什么
+
+- 新增控制台命令 `TOUCHCLK`：只读转储 S5 的 RCG 块（`0x18600` 起八个字），然后
+  只置位 `0x52008` 的 bit 27，回读使能位与 halt 寄存器；
+- `TOUCHINIT` 保持不变，仍是引脚、复位、`kt_se_init`、识别，但它跑在时钟打开之后。
+
+### 2. 实测：打开 S5 时钟
+
+```text
+KEBAB TOUCH:   RCG+0x00 = 0x80000000
+KEBAB TOUCH:   RCG+0x04 = 0x00100000
+KEBAB TOUCH:   RCG+0x14 = 0x00000021
+KEBAB TOUCH: TOUCHCLK: 0x52008 0x063c83c0 -> 0x0e3c83c0
+KEBAB TOUCH: TOUCHCLK: 0x52008 now 0x0e3c83c0 (s5 1), halt 0x00004220
+```
+
+置位前 halt 是 `0x80004220`，置位后变成 `0x00004220`：bit 31 清掉，说明这一路
+分支时钟真的起来了。这一步没有触发任何复位或总线访问，控制台全程正常。
+
+### 3. 实测：时钟打开后的 TOUCHINIT
+
+```text
+KEBAB TOUCH: reset pulse (mode 1), ctl 0x00000200 io 0x00000003
+KEBAB TOUCH: se_init: clear IRQs
+KEBAB TOUCH: se_init: force default, output ctrl
+KEBAB TOUCH: se_init: packing + byte granularity
+KEBAB TOUCH: se_init: clock select + SCL counters
+KEBAB TOUCH: TCM command 0x02, 0 payload byte(s)
+KEBAB TOUCH: write watermark timeout, status 0x00000000
+KEBAB TOUCH: command 0x02 was not written
+```
+
+上一轮在这一步会把 USB 控制台一起带走，这一轮四组 GENI 写全部走完，控制台还在。
+所以上一轮的失联就是**SE 核心时钟没开**：AHB 能读寄存器，GENI 状态机不推进，
+写命令后总线挂住。
+
+之后 `TOUCH?` 读到：
+
+```text
+GENI_STATUS 0x00000041 M_IRQ_STATUS 0x00000000
+SER_M_CLK_CFG 0x00000071 SCL_COUNTERS 0x00a02c1a
+pin 36 ctl 0x00000004  pin 37 ctl 0x00000004
+```
+
+`GENI_STATUS` 的 bit 0 是 master 命令仍在执行：命令发出去了，但总线上的事务永远
+不完成，也没有 NACK 中断。SCL 计数器已经按 100 kHz 写入，引脚也复用到 qup13。
+
+### 4. 这说明什么
+
+- 时钟这一层已经解决：SE13 可以安全地配置，不再需要担心写 GENI 会带走控制台；
+- 现在卡在总线层：命令 active、无中断、无 NACK，最可能是从机不响应（没供电或
+  总线被拉低），而不是 GENI 配置错误；
+- 之前 bit-bang 观察到 SDA/SCL 释放后仍为 0，与“从机侧没电”一致。
+
+### 5. 芯片身份出现矛盾（需要在真机上定）
+
+- 项目早先记录：设备 DTB 里是 `sec-s6sy761@48`，`chip-name = "SY771"`（Samsung）；
+- LineageOS 的 `arch/arm64/boot/dts/vendor/oplus/kebab/kona-mtp.dtsi` 里，
+  `qupv3_se13_i2c` 下是 `synaptics@4B`，`compatible = "synaptics-s3908"`，
+  `reg = <0x4B>`，供电 `vdd_2v8-supply = <&pm8150_l13>`、
+  `vcc_1v8-supply = <&pm8150a_l1>`，reset 仍是 GPIO 38、中断仍是 39。
+
+两者地址和驱动都不同，必须先确认手里这台机器到底是哪一颗，再谈协议。确认方法：
+给触摸供电后，在 0x48 和 0x4B 各做一次只读地址探测（ACK/NACK 就能区分），
+或者从设备的原厂 DTB 里直接读节点。
+
+### 6. 验证边界
+
+- 实测：时钟置位与 halt 变化、`TOUCHINIT` 全程不丢失控制台、`TOUCH?` 的寄存器读数；
+- 推断：命令不完成是因为从机不响应；芯片型号与地址尚未在本机确认；
+- 没有做：供电使能、I2C 实际读写、协议层。
