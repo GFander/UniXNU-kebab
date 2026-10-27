@@ -3635,3 +3635,61 @@ tcs 8: 全零
 AMC trigger 的 `CONTROL` 位定义还需要对着 `rpmh-rsc.c` 的触发路径逐项确认；
 在把“已触发”和“已完成”分开之前写 sink，风险大于收益。下一轮先补这段静态分析，
 再按批准的条件实现编译期不可达的写路径。
+
+## 三十六、IRQ 寄存器归位与 TCS1 完整状态（0127）
+
+### 1. 修正：IRQ 寄存器在 tcs_base，不在 drv base
+
+`rpmh-rsc.c` 里 `read_tcs_reg(drv, RSC_DRV_IRQ_STATUS, 0, 0)` 的地址是
+`tcs_base + reg + 672*tcs_id`，所以：
+
+| 寄存器 | 物理地址 |
+| --- | --- |
+| `IRQ_ENABLE` | `0x18220d00` |
+| `IRQ_STATUS` | `0x18220d04` |
+| `IRQ_CLEAR` | `0x18220d08` |
+| `DRV_PRNT_CHLD_CONFIG` | `0x1822000c` |
+
+0126 从 `drv+0x00/0x04/0x08` 读到的三个数（`0x00020000` 等）不是 RSC 中断状态，
+0127 已改回 `tcs_base+0x00/0x04/0x08`。实测 `irq_en = 0x00000001`，即只有 TCS0
+的完成中断被使能，TCS1 没有。
+
+### 2. `prnt_chld` 解码
+
+`0x800c8104` → drv-2 `tcs = (config >> 12) & 0x3F = 8`，
+`ncpt = (config >> 27) & 0x1F = 16`。硬件每个 TCS 有 16 个命令槽，而设备树的
+`2+3+3+1` 要把控制 TCS 排除在连续数组之外；探针现在只遍历 TCS0–7。
+
+### 3. TCS 实测
+
+```text
+irq_en 0x00000001 irq_status 0x00000000 irq_clear 0x00000000 prnt_chld 0x800c8104
+prnt_chld decode: drv-2 tcs 8, ncpt 16
+tcs 0: control 0x01010000 (amc_en 1 amc_trig 1) status 0x1 enable 0x3
+tcs 0 slot 0: msgid 0x00010108 addr 0x00030000 data 0x5  status 0x00010101
+tcs 0 slot 1: msgid 0x00010108 addr 0x00030010 data 0x5  status 0x00010101
+tcs 0 slot 2..7: addr 0x00050004/0x000500a4/0x00050044/0x00050028/0x00050074/0x0005007c
+tcs 1: control 0x00010000 (amc_en 1 amc_trig 0) status 0x1 enable 0
+tcs 2..7: control 0x00000000 status 0x1 enable 0
+```
+
+- TCS0 实际有 **8 条**残留命令（不止两条），`0x30000/0x30010` 是 CLK 类，
+  `0x500xx` 是另一类资源；`status` 前两条是 `0x00010101`，其余为 0。TCS0 继续完全排除；
+- TCS1 的 AMC 已使能、Trigger 未置位、使能字为 0、16 个命令槽全空；
+  这比 TCS0 干净得多，但仍不等于“所有权已交给 XNU”；
+- `irq_en` 只有 TCS0 的位，所以第一次真实发送只能用轮询，不能等中断。
+
+### 4. R5-C1：写路径已写成但编译期关闭
+
+`kebab_spmi.c` 里新增了 `kebab_rpmh_tcs_send()`（只针对 TCS1、只接受编码器能产出的
+命令、每次写回都有界等待、完成后立即把通道标记为不可再用），整段包在
+`#if KEBAB_RPMH_WRITES` 里，宏为 0，所以**这一版内核里不存在该函数**：
+没有控制台命令、没有启动参数、没有运行时开关能到达它。
+
+需要说明：因为宏是 0，这段代码没有被编译器检查过，属于待审草案；R5-C2 的离线模拟
+和真正的编译验证要在打开宏之后单独做。
+
+### 5. 验证边界
+
+- 实测：上述逐槽输出、`prnt_chld` 解码、IRQ 寄存器归位；
+- 未做：任何 TCS/RSC 写；写路径未编译进内核。
