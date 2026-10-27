@@ -4541,3 +4541,70 @@ if (Prot != NULL) {
    以及 Mu 的 Pool 实现在 EBS 后是否直接进入页级路径；
 2. C6-A1：解析 `0x65f0`、`0xe850` 与 `0x3ba4`，把软件清理和间接硬件调用分开；
 3. C6-E4：设计 EBS 阶段探针（预留内存 + 直接写 framebuffer 两条通道），先离线。
+
+## 五十二、O3-C6-E3：卸载成功的三个前提
+
+`Mu_Basecore/.../Hand/Handle.c` 的 `CoreUninstallProtocolInterface()` 顺序：
+
+```c
+if (Protocol == NULL) return EFI_INVALID_PARAMETER;
+CoreAcquireProtocolLock ();
+Status = CoreValidateHandle (UserHandle);              /* 句柄仍有效 */
+if (EFI_ERROR (Status)) goto Done;
+Prot = CoreFindProtocolInterface (UserHandle, Protocol, Interface);
+if (Prot == NULL) { Status = EFI_NOT_FOUND; goto Done; }  /* GUID+接口指针必须匹配 */
+Status = CoreDisconnectControllersUsingProtocolInterface (UserHandle, Prot);
+if (EFI_ERROR (Status)) goto Done;                      /* 有驱动拒绝释放 */
+Prot = CoreRemoveInterfaceFromProtocol (Handle, Protocol, Interface);
+if (Prot != NULL) { ...; CoreFreePool (Prot); }
+```
+
+因此进入 `CoreFreePool(Prot)` 需要同时满足：
+
+1. `[0xe250]` 里的句柄在 EBS 时仍有效；
+2. `0xe068` 的 GUID 与 `0xe0d8` 的接口指针仍登记在该句柄上（与
+   `0x1568` 安装时的参数一致，这一点反汇编已对上）；
+3. `CoreDisconnectControllersUsingProtocolInterface()` 成功——它会调用驱动
+   binding 的 `Stop()`，也就是执行第三方驱动代码，本身就可能分配/释放内存。
+
+第 3 点意味着：即使最终没有走到 `CoreRemoveInterfaceFromProtocol`，卸载过程也
+已经进入了会调用任意驱动 `Stop()` 的路径；错误分支不能当作“没有副作用”。
+
+### 1. 安装侧的返回值
+
+`0x1568` 是 `br x4` 尾调用 `InstallMultipleProtocolInterfaces`，返回值直接交回
+调用者，本函数不检查。也就是说，安装是否成功在这里没有记录；但 `0x14b0` 在 EBS
+时无条件尝试卸载，失败会返回错误给 DXE Core。
+
+### 2. 探针设计（E4，离线）
+
+阶段记录只用预分配的固定内存和已映射的 framebuffer，不在 EBS 期间调用
+`Print()`、分配或动态日志：
+
+| 阶段 | 位置 | 用途 |
+| --- | --- | --- |
+| E1 | `CoreTerminateMemoryMap` 返回 | 证明内存映射终止完成 |
+| E2 | EBS 事件分发前 | 证明进入通知阶段 |
+| E3 | 调用 RpmhDxe 回调前 | 证明回调被执行 |
+| E4 | 进入协议卸载 | 证明风险路径到达 |
+| E5 | `CoreFreePool(Prot)` 前 | 证明即将释放 |
+| E6 | `CoreFreePool(Prot)` 后 | 判断释放是否返回 |
+| E7 | RpmhDxe 回调返回 | 判断是否卡在回调内部 |
+| E8 | EBS 返回 DarwinBoot | 确认整体退出完成 |
+
+E1/E2/E5 需要改 `Mu_Basecore`（可控源码）；E3/E4/E7 可以在 RpmhDxe 里打点，但那是
+二进制，优先级低于 DXE Core。framebuffer 通道用于 EBS 卡死时也能看到最后阶段。
+
+### 3. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| 卸载成功三前提 | DIRECT（源码） |
+| 卸载错误分支仍有驱动 `Stop()` 调用 | DIRECT |
+| 安装返回值未检查 | DIRECT（尾调用） |
+| 真机是否到达 E5 | UNKNOWN |
+| 历史挂死因果 | UNKNOWN |
+| TCS1 所有权 | UNKNOWN |
+
+下一步：C6-E3 的剩余部分（实际协议打开记录与 `Stop()` 行为）与 C6-E4 的离线探针
+实现；真实 RPMh 写入继续 NO-GO。
