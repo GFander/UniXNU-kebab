@@ -2,8 +2,8 @@
 """One-command P1 bring-up for the kebab board.
 
 This is the host side of the sequence: flash the root-volume image, imprint the
-16 GiB HFS+ volume, flash the installer image, send base.kist and cache.kist,
-then boot without kebab_noinit and watch launchd.
+16 GiB HFS+ volume, flash the installer image, send skel.kist, base.kist and
+cache.kist, then boot without kebab_noinit and watch launchd.
 
 The script is deliberately linear and stops at the first observation it did not
 expect.  Every checkpoint states what it wanted to see; on failure the report
@@ -76,8 +76,15 @@ KIST_STREAM_HDR = 32
 KIST_ENTRY_HDR = 192
 KIST_MAGIC = b"KIST"
 KENT_MAGIC = b"KENT"
-KIST_VERSION = 1
+KIST_VERSION = 2
+KIST_VERSION_MIN = 1
 KIST_F_DEFLATE = 0x0001
+KIST_F_DIR = 0x0002
+KIST_F_SYMLINK = 0x0004
+KIST_F_TYPE = KIST_F_DIR | KIST_F_SYMLINK
+KIST_SF_SKELETON = 0x0002
+KIST_MODE_MASK = 0o7777
+KIST_PATH_MAX = 128
 
 VEXT_MAGIC = b"VEXT"
 VEXT_VERSION = 1
@@ -87,6 +94,16 @@ VEXT_EXT_HDR = 16
 BASE_ENTRIES = 5
 CACHE_ENTRIES = 44
 SAMPLE_PATHS = 8
+
+# skel.kist's fixed shape.  The numbers come from make-minimal-userland.py's
+# SKELETON_DIRS/LINKS/FILES tables and are asserted by the dry run; a change
+# there has to be reflected here and in the kernel's exact path allowlist.
+SKEL_ENTRIES = 16
+SKEL_FILES = 3
+SKEL_DIRS = 10
+SKEL_LINKS = 3
+SKEL_INSTALLED = 153
+SKEL_WIRE = 65536
 
 FASTBOOT_DEFAULT = r"D:\TOOL\platform-tools\fastboot.exe"
 PORT_DEFAULT = "COM7"
@@ -163,6 +180,12 @@ HFS_RE = re.compile(
     r"\((\d+) MiB\), free blocks (\d+)"
 )
 CHECK_LINE_PREFIX = "INST CHECK "
+SKEL_STREAM_RE = re.compile(
+    r"^INST STREAM v(\d+)( skeleton)? entries (\d+) bytes (\d+) wire (\d+)$")
+SKEL_OK_RE = re.compile(
+    r"^OK (/\S+) (\d+) (?:(dir)|link -> (\S+))? ?mode 0([0-7]+) "
+    r"uid (\d+) gid (\d+)$")
+SKEL_SKIP_RE = re.compile(r"^SKIP (/\S+) (\d+) link exists$")
 
 
 class BringUpError(Exception):
@@ -299,6 +322,8 @@ class KistEntry:
     size: int
     sha: bytes
     offset: int  # payload offset in the stream file
+    kind: str = "file"  # "file", "dir" or "link" (KIST v2)
+    target: str = ""  # symlink target, decoded by a deep read
 
 
 @dataclass
@@ -309,32 +334,48 @@ class KistStream:
     total_usize: int
     total_wire: int
     flags: int
+    version: int = 1
+    skeleton: bool = False
     file_sha256: str = ""
 
     @property
     def entry_count(self) -> int:
         return len(self.entries)
 
+    def kinds(self) -> dict[str, int]:
+        out = {"file": 0, "dir": 0, "link": 0}
+        for entry in self.entries:
+            out[entry.kind] += 1
+        return out
+
 
 def read_kist(path: str, deep: bool = False,
               progress: Callable[[str, int, int], None] | None = None) -> KistStream:
-    """Parse a KIST v1 stream.
+    """Parse a KIST v1 or v2 stream.
+
+    v2 adds DIR entries (wire=size=0, all-zero hash) and SYMLINK entries (the
+    payload is the target, wire=size=len(target)) in a stream whose flags carry
+    KIST_SF_SKELETON.  The entry mode mask becomes 07777, so the skeleton's
+    sticky 01777 survives instead of being masked to 0777.  v1 streams are
+    still accepted unchanged, exactly like the kernel and the packer.
 
     Header-only is the runtime path (fast, enough to build INST CHECK
     manifests).  deep=True hashes every entry's uncompressed payload, checks
-    deflate framing and verifies the padding; it is the dry-run path.
+    deflate framing, decodes symlink targets and verifies the padding; it is
+    the dry-run path and is also used for the 64 KiB skel.kist.
     """
     size = os.path.getsize(path)
     with open(path, "rb") as f:
         hdr = f.read(KIST_STREAM_HDR)
         if len(hdr) != KIST_STREAM_HDR:
             raise ValueError("%s: short KIST header" % path)
-        magic, version, flags, count, hsize, usize, wire = struct.unpack(
+        magic, version, sflags, count, hsize, usize, wire = struct.unpack(
             "<4sHHIIQQ", hdr
         )
-        if magic != KIST_MAGIC or version != KIST_VERSION or hsize != KIST_STREAM_HDR:
+        if magic != KIST_MAGIC or not KIST_VERSION_MIN <= version <= KIST_VERSION \
+                or hsize != KIST_STREAM_HDR:
             raise ValueError(
-                "%s: not a KIST v1 stream (magic=%r version=%d hsize=%d)"
+                "%s: not a KIST v1/v2 stream (magic=%r version=%d hsize=%d)"
                 % (path, magic, version, hsize)
             )
         if size != KIST_STREAM_HDR + wire:
@@ -346,6 +387,15 @@ def read_kist(path: str, deep: bool = False,
             raise ValueError("%s: size %d is not a multiple of %d" % (path, size, CHUNK))
         if count > 100000:
             raise ValueError("%s: implausible entry count %d" % (path, count))
+        if version == 1:
+            if sflags & ~KIST_F_DEFLATE:
+                raise ValueError("%s: v1 stream flags 0x%04x" % (path, sflags))
+            skeleton = False
+        else:
+            if sflags & ~(KIST_F_DEFLATE | KIST_SF_SKELETON):
+                raise ValueError("%s: unknown stream flags 0x%04x" % (path, sflags))
+            skeleton = bool(sflags & KIST_SF_SKELETON)
+        mode_mask = 0o777 if version == 1 else KIST_MODE_MASK
 
         entries: list[KistEntry] = []
         payload_end = KIST_STREAM_HDR
@@ -370,52 +420,85 @@ def read_kist(path: str, deep: bool = False,
             if ewire > wire:
                 raise ValueError("%s: entry %d wire length exceeds the stream"
                                  % (path, i))
-            if not (eflags & KIST_F_DEFLATE) and ewire != esize:
+            etype = eflags & KIST_F_TYPE
+            if eflags & ~(KIST_F_DEFLATE | KIST_F_TYPE):
+                raise ValueError("%s: entry %d unknown flags 0x%04x"
+                                 % (path, i, eflags))
+            if etype == KIST_F_TYPE:
+                raise ValueError("%s: entry %d is both a directory and a symlink"
+                                 % (path, i))
+            if etype and version < 2:
+                raise ValueError("%s: entry %d needs a KIST v2 stream" % (path, i))
+            if etype and not skeleton:
+                raise ValueError("%s: entry %d is DIR/LINK outside a skeleton stream"
+                                 % (path, i))
+            kind = "dir" if etype == KIST_F_DIR else \
+                "link" if etype == KIST_F_SYMLINK else "file"
+            if etype and eflags & KIST_F_DEFLATE:
+                raise ValueError("%s: entry %d deflates a %s" % (path, i, kind))
+            if kind == "dir":
+                if ewire != 0 or esize != 0 or digest != b"\0" * 32:
+                    raise ValueError("%s: entry %d directory has a payload or hash"
+                                     % (path, i))
+            elif kind == "link":
+                if ewire != esize or not 1 <= ewire < KIST_PATH_MAX:
+                    raise ValueError("%s: entry %d symlink target length %d"
+                                     % (path, i, ewire))
+            elif ewire != esize and not (eflags & KIST_F_DEFLATE):
                 raise ValueError(
                     "%s: entry %d stored payload %d != file size %d"
                     % (path, i, ewire, esize)
                 )
-            entry = KistEntry(path=epath, mode=mode & 0o777, flags=eflags,
+            entry = KistEntry(path=epath, mode=mode & mode_mask, flags=eflags,
                               wire=ewire, size=esize, sha=digest,
-                              offset=payload_end)
+                              offset=payload_end, kind=kind)
             entries.append(entry)
 
             if deep:
                 if progress:
                     progress(epath, i + 1, count)
-                h = hashlib.sha256()
-                left = ewire
-                if eflags & KIST_F_DEFLATE:
-                    d = zlib.decompressobj()
-                    produced = 0
-                    while left:
-                        b = f.read(min(1 << 20, left))
-                        if not b:
-                            raise ValueError("%s: short payload for %s" % (path, epath))
-                        left -= len(b)
-                        out = d.decompress(b)
+                if kind != "dir":
+                    h = hashlib.sha256()
+                    left = ewire
+                    target = bytearray()
+                    if kind == "file" and eflags & KIST_F_DEFLATE:
+                        d = zlib.decompressobj()
+                        produced = 0
+                        while left:
+                            b = f.read(min(1 << 20, left))
+                            if not b:
+                                raise ValueError("%s: short payload for %s"
+                                                 % (path, epath))
+                            left -= len(b)
+                            out = d.decompress(b)
+                            produced += len(out)
+                            h.update(out)
+                        out = d.flush()
                         produced += len(out)
                         h.update(out)
-                    out = d.flush()
-                    produced += len(out)
-                    h.update(out)
-                    if not d.eof:
-                        raise ValueError("%s: deflate stream for %s did not end"
+                        if not d.eof:
+                            raise ValueError("%s: deflate stream for %s did not end"
+                                             % (path, epath))
+                        if produced != esize:
+                            raise ValueError(
+                                "%s: entry %s produced %d bytes, header says %d"
+                                % (path, epath, produced, esize)
+                            )
+                    else:
+                        while left:
+                            b = f.read(min(1 << 20, left))
+                            if not b:
+                                raise ValueError("%s: short payload for %s"
+                                                 % (path, epath))
+                            left -= len(b)
+                            h.update(b)
+                            if kind == "link":
+                                target += b
+                    if h.digest() != digest:
+                        raise ValueError("%s: payload hash mismatch for %s"
                                          % (path, epath))
-                    if produced != esize:
-                        raise ValueError(
-                            "%s: entry %s produced %d bytes, header says %d"
-                            % (path, epath, produced, esize)
-                        )
-                else:
-                    while left:
-                        b = f.read(min(1 << 20, left))
-                        if not b:
-                            raise ValueError("%s: short payload for %s" % (path, epath))
-                        left -= len(b)
-                        h.update(b)
-                if h.digest() != digest:
-                    raise ValueError("%s: payload hash mismatch for %s" % (path, epath))
+                    if kind == "link":
+                        entry.target = bytes(target).decode("utf-8")
             else:
                 f.seek(ewire, os.SEEK_CUR)
             payload_end += KIST_ENTRY_HDR + ewire
@@ -434,7 +517,8 @@ def read_kist(path: str, deep: bool = False,
                     % (path, sum(e.size for e in entries), usize)
                 )
         return KistStream(path=path, file_size=size, entries=entries,
-                          total_usize=usize, total_wire=wire, flags=flags)
+                          total_usize=usize, total_wire=wire, flags=sflags,
+                          version=version, skeleton=skeleton)
 
 
 @dataclass
@@ -1078,6 +1162,7 @@ class Options:
     install_image: str = ""
     final_image: str = ""
     volume_stream: str = ""
+    skel_stream: str = ""
     base_stream: str = ""
     cache_stream: str = ""
     force_vol: bool = False
@@ -1118,6 +1203,7 @@ class Options:
         self.install_image = pick(self.install_image, "boot-inst.img")
         self.final_image = pick(self.final_image, "boot-final.img")
         self.volume_stream = pick(self.volume_stream, "KebabRoot.vext")
+        self.skel_stream = pick(self.skel_stream, "skel.kist")
         self.base_stream = pick(self.base_stream, "base.kist")
         self.cache_stream = pick(self.cache_stream, "cache.kist")
         if not self.fastboot:
@@ -1416,24 +1502,60 @@ class Orchestrator:
             "imprinted" if self.volume_imprinted else "not imprinted"))
 
     # -- streams -----------------------------------------------------------
-    def load_streams(self, need_base: bool, need_cache: bool) -> None:
-        for key, path, entries, label in (
-            ("base", self.opts.base_stream, self.opts.expected_base_entries, "base"),
-            ("cache", self.opts.cache_stream, self.opts.expected_cache_entries, "cache"),
+    @staticmethod
+    def skel_shape_problem(st: KistStream) -> str:
+        """Return why st is not the fixed skel.kist shape, or "" when it is."""
+        if st.version != 2 or not st.skeleton:
+            return ("%s is KIST v%d%s, not a v2 skeleton stream"
+                    % (st.path, st.version,
+                       " skeleton" if st.skeleton else ""))
+        kinds = st.kinds()
+        if (st.entry_count, kinds["file"], kinds["dir"], kinds["link"]) != \
+                (SKEL_ENTRIES, SKEL_FILES, SKEL_DIRS, SKEL_LINKS):
+            return ("%s has %d entries (%d files, %d dirs, %d links), wanted %d "
+                    "(%d files, %d dirs, %d links)"
+                    % (st.path, st.entry_count, kinds["file"], kinds["dir"],
+                       kinds["link"], SKEL_ENTRIES, SKEL_FILES, SKEL_DIRS,
+                       SKEL_LINKS))
+        if st.total_usize != SKEL_INSTALLED:
+            return ("%s installs %d bytes, wanted %d (file contents plus symlink "
+                    "target lengths)" % (st.path, st.total_usize, SKEL_INSTALLED))
+        if st.file_size != SKEL_WIRE:
+            return ("%s is %d bytes on the wire, wanted %d"
+                    % (st.path, st.file_size, SKEL_WIRE))
+        return ""
+
+    def load_streams(self, need_base: bool, need_cache: bool,
+                     need_skel: bool = False) -> None:
+        for key, path, entries, label, deep in (
+            ("base", self.opts.base_stream, self.opts.expected_base_entries,
+             "base", False),
+            ("cache", self.opts.cache_stream, self.opts.expected_cache_entries,
+             "cache", False),
+            ("skel", self.opts.skel_stream, SKEL_ENTRIES, "skel", True),
         ):
-            if (key == "base" and not need_base) or (key == "cache" and not need_cache):
+            need = {"base": need_base, "cache": need_cache, "skel": need_skel}[key]
+            if not need:
                 continue
             if not os.path.isfile(path):
                 self.fail("precondition.artifacts", "%s stream %s to exist"
                           % (label, path), "missing",
                           hint="build it with scripts/make-minimal-userland.py")
             try:
-                st = read_kist(path, deep=False)
+                st = read_kist(path, deep=deep)
             except ValueError as exc:
-                self.fail("precondition.artifacts", "%s to be a valid KIST v1 stream"
-                          % path, str(exc))
+                self.fail("precondition.artifacts",
+                          "%s to be a valid KIST v1/v2 stream" % path, str(exc))
                 raise AssertionError("unreachable")
-            if entries and st.entry_count != entries:
+            if key == "skel":
+                problem = self.skel_shape_problem(st)
+                if problem:
+                    self.fail("precondition.artifacts",
+                              "skel.kist to be the 16-entry v2 skeleton",
+                              problem,
+                              hint="rebuild it with "
+                                   "scripts/make-minimal-userland.py --only skel")
+            elif entries and st.entry_count != entries:
                 self.fail("precondition.artifacts",
                           "%s to carry %d entries" % (label, entries),
                           "%d entries" % st.entry_count,
@@ -1605,14 +1727,18 @@ class Orchestrator:
             self.precondition()
             self.choose_start()
             self.load_streams(need_base=self.want_phase("base"),
-                              need_cache=self.want_phase("cache"))
+                              need_cache=self.want_phase("cache"),
+                              need_skel=self.want_phase("skel"))
             if self.want_phase("vol"):
                 self.phase_vol()
-            # Every path that reaches base/cache/final must boot the install
-            # image first, even when --from starts after it.  The only case
-            # with no install boot is --from final, and --to vol stops early.
+            # Every path that reaches skel/base/cache/final must boot the
+            # install image first, even when --from starts after it.  The only
+            # case with no install boot is --from final, and --to vol stops
+            # early.
             if self.start_phase != "final" and self.opts.to_phase != "vol":
                 self.phase_install()
+            if self.want_phase("skel"):
+                self.phase_skel()
             if self.want_phase("base"):
                 self.phase_userland("base")
             if self.want_phase("cache"):
@@ -1624,7 +1750,7 @@ class Orchestrator:
             self.console.stop()
 
     def want_phase(self, phase: str) -> bool:
-        order = ["vol", "install", "base", "cache", "final"]
+        order = ["vol", "install", "skel", "base", "cache", "final"]
         if phase not in order:
             return False
         start = self.start_phase
@@ -1712,8 +1838,8 @@ class Orchestrator:
             return False
 
     def choose_start(self) -> None:
-        if self.volume_imprinted is None and self.opts.from_phase in ("auto", "install",
-                                                                     "base", "cache"):
+        if self.volume_imprinted is None and self.opts.from_phase in (
+                "auto", "install", "skel", "base", "cache"):
             self.log.info("volume state unknown: flashing the install image to "
                           "probe INST? before touching the volume")
         # From vol: skip only when the console already reported the large
@@ -1732,7 +1858,8 @@ class Orchestrator:
                 self.start_phase = "vol"
         else:
             self.start_phase = self.opts.from_phase
-        if self.start_phase not in ("vol", "install", "base", "cache", "final"):
+        if self.start_phase not in ("vol", "install", "skel", "base", "cache",
+                                    "final"):
             self.start_phase = "vol"
         self.log.info("start phase: %s -> %s" % (self.start_phase, self.opts.to_phase))
 
@@ -2042,6 +2169,112 @@ class Orchestrator:
                         % (blocks, human(free), info["chunk"]))
         self.phase_done("install")
 
+    # -- skeleton phase ----------------------------------------------------
+    def phase_skel(self) -> None:
+        """Send skel.kist on the running install image, then check the read-back.
+
+        INST CHECK is a file-size-and-hash probe and cannot describe a
+        directory or a symlink, so the skeleton is never prechecked and is
+        always sent whole: it is one 64 KiB chunk, and the kernel re-applies
+        the exact mode and owner on a re-run.  What matters is the console
+        evidence after the write: every created inode must report uid 0/gid 0
+        and the expected mode (including the sticky 01777 on /private/tmp).
+        """
+        stream = self.streams.get("skel")
+        if stream is None:
+            stream = read_kist(self.opts.skel_stream, deep=True)
+            self.streams["skel"] = stream
+        self.phase_start("skel", "install skel.kist (%d entries, %s)"
+                         % (stream.entry_count, human(stream.file_size)))
+        self.arm_panic_detector("skel")
+        mark = self.console.mark()
+        result = self.send_stream(stream, "inst", "skel")
+        lines = self.console.since(mark)
+        self.check_skel_console(stream, lines)
+        self.log.info("skel.kist: %d entries, %d ok, %d skipped, %.1fs"
+                      % (result["entries"], result["ok"], result["skipped"],
+                         result["elapsed"]))
+        self.phase_done("skel")
+
+    def check_skel_console(self, stream: KistStream,
+                           lines: Sequence[str]) -> None:
+        want_stream = ("INST STREAM v2 skeleton entries %d bytes %d wire %d"
+                       % (stream.entry_count, stream.total_usize,
+                          stream.file_size))
+        stream_line = next((l for l in lines if SKEL_STREAM_RE.match(l)), "")
+        if stream_line != want_stream:
+            self.fail("skel.stream", want_stream,
+                      stream_line or "no INST STREAM line during the send",
+                      hint="a v1 or non-skeleton header means skel.kist was "
+                           "rebuilt with an old packer or without --skeleton")
+        self.checkpoint("C-SKEL-STREAM", "skel.stream", want_stream, stream_line)
+
+        by_path = {e.path: e for e in stream.entries}
+        checked: dict[str, str] = {}
+        for line in lines:
+            m = SKEL_OK_RE.match(line)
+            if m:
+                path = m.group(1)
+                size = int(m.group(2))
+                is_dir = m.group(3) is not None
+                target = m.group(4) or ""
+                mode = int(m.group(5), 8)
+                uid, gid = int(m.group(6)), int(m.group(7))
+                entry = by_path.get(path)
+                if entry is None:
+                    self.fail("skel.attrs", "only paths from skel.kist",
+                              "unexpected read-back: %s" % line)
+                if path in checked:
+                    self.fail("skel.attrs", "one read-back line per entry",
+                              "duplicate: %s" % line)
+                if uid != 0 or gid != 0:
+                    self.fail("skel.attrs",
+                              "every created inode to report uid 0 gid 0",
+                              "%s reports uid %d gid %d" % (path, uid, gid),
+                              hint="the kernel's ki_set_attrs did not take "
+                                   "effect on this filesystem; do not continue")
+                if entry.kind == "dir":
+                    if not is_dir or size != 0 or mode != entry.mode:
+                        self.fail("skel.attrs",
+                                  "%s dir mode 0%o" % (path, entry.mode), line)
+                elif entry.kind == "link":
+                    if is_dir or size != entry.size or target != entry.target:
+                        self.fail("skel.attrs",
+                                  "%s link -> %s" % (path, entry.target), line)
+                    # A symlink's mode is fixed at creation and is not part of
+                    # the kernel's check; only the owner is enforced.
+                else:
+                    if is_dir or size != entry.size or mode != entry.mode:
+                        self.fail("skel.attrs",
+                                  "%s mode 0%o size %d"
+                                  % (path, entry.mode, entry.size), line)
+                checked[path] = line
+                continue
+            m = SKEL_SKIP_RE.match(line)
+            if m:
+                path, size = m.group(1), int(m.group(2))
+                entry = by_path.get(path)
+                if entry is None or entry.kind != "link" or size != entry.size:
+                    self.fail("skel.attrs", "a SKIP only for an existing "
+                              "symlink with the right target length", line)
+                checked.setdefault(path, line)
+        missing = [e.path for e in stream.entries if e.path not in checked]
+        if missing:
+            self.fail("skel.attrs", "one read-back line per skeleton entry",
+                      "%d of %d missing: %s" % (len(missing), len(stream.entries),
+                                                ", ".join(missing[:4])),
+                      hint="the kernel stopped before creating every entry; "
+                           "look for the first FAIL line")
+        links_skipped = sum(1 for e in stream.entries
+                            if e.kind == "link"
+                            and checked.get(e.path, "").startswith("SKIP "))
+        self.checkpoint("C-SKEL-ATTRS", "skel.attrs",
+                        "16 inodes report uid 0 gid 0 and their exact modes "
+                        "(01777 included)",
+                        "%d/%d read back, uid 0 gid 0%s"
+                        % (len(checked), len(stream.entries),
+                           ", %d link(s) already present" % links_skipped))
+
     # -- userland phases ---------------------------------------------------
     def phase_userland(self, label: str) -> None:
         stream = self.streams.get(label)
@@ -2277,6 +2510,9 @@ class Orchestrator:
         check("dry.stream.volume", "%d-byte VEXT with a 4,194,304-block HFS+ header"
               % self.opts.expected_vol_stream,
               lambda: self.dry_volume_stream())
+        check("dry.stream.skel", "%d-entry KIST v2 skeleton, %d B installed, "
+              "%d B wire" % (SKEL_ENTRIES, SKEL_INSTALLED, SKEL_WIRE),
+              lambda: self.dry_skel(self.opts.skel_stream))
         check("dry.stream.base", "%d-entry KIST stream, hashes verified"
               % self.opts.expected_base_entries,
               lambda: self.dry_kist(self.opts.base_stream, "base",
@@ -2352,6 +2588,20 @@ class Orchestrator:
             vs.file_size, vs.extent_count, human(vs.data_bytes), vh["blocks"],
             sha256_file(path))
 
+    def dry_skel(self, path: str) -> str:
+        if not os.path.isfile(path):
+            raise ValueError("missing %s" % path)
+        st = read_kist(path, deep=True,
+                       progress=lambda p, i, n: self.log.info(
+                           "  verify skel [%d/%d] %s" % (i, n, p)))
+        problem = self.skel_shape_problem(st)
+        if problem:
+            raise ValueError(problem)
+        return ("%d entries (%d files, %d dirs, %d links), %d B installed, "
+                "%d B wire, sha256 %s"
+                % (st.entry_count, SKEL_FILES, SKEL_DIRS, SKEL_LINKS,
+                   st.total_usize, st.file_size, sha256_file(path)))
+
     def dry_kist(self, path: str, label: str, expected: int) -> str:
         if not os.path.isfile(path):
             raise ValueError("missing %s" % path)
@@ -2385,11 +2635,15 @@ class Orchestrator:
              "512 bytes, VOL DONE and the new HFS+ mount" % os.path.basename(self.opts.vol_image)),
             ("3", "install", "flash %s; require INST? root rw, 4,194,304 blocks, "
              "17,179,869,184 bytes and free space" % os.path.basename(self.opts.install_image)),
-            ("4", "base", "INST CHECK all %d entries; send only if incomplete; "
+            ("4", "skel", "send skel.kist (%d v2 entries: %d files, %d dirs, %d "
+             "links, %d B installed); require 'INST STREAM v2 skeleton' and "
+             "uid 0/gid 0 read-back" % (SKEL_ENTRIES, SKEL_FILES, SKEL_DIRS,
+                                        SKEL_LINKS, SKEL_INSTALLED)),
+            ("5", "base", "INST CHECK all %d entries; send only if incomplete; "
              "verify a sample" % self.opts.expected_base_entries),
-            ("5", "cache", "INST CHECK all %d entries; send only if incomplete; "
+            ("6", "cache", "INST CHECK all %d entries; send only if incomplete; "
              "verify a sample; report elapsed" % self.opts.expected_cache_entries),
-            ("6", "final", "flash %s; capture to the first failure or launchd; "
+            ("7", "final", "flash %s; capture to the first failure or launchd; "
              "print the last 100 lines" % os.path.basename(self.opts.final_image)),
         ]
         for row in rows:
@@ -2493,10 +2747,11 @@ def make_parser() -> argparse.ArgumentParser:
         epilog=__doc__,
     )
     ap.add_argument("--from", dest="from_phase", default="auto",
-                    choices=["auto", "vol", "install", "base", "cache", "final"],
+                    choices=["auto", "vol", "install", "skel", "base", "cache",
+                             "final"],
                     help="first phase to run (default auto: use INST? if known)")
     ap.add_argument("--to", dest="to_phase", default="final",
-                    choices=["vol", "install", "base", "cache", "final"],
+                    choices=["vol", "install", "skel", "base", "cache", "final"],
                     help="last phase to run (default final)")
     ap.add_argument("--dry-run", action="store_true",
                     help="verify artifacts, streams and boot args; write nothing")
@@ -2511,6 +2766,7 @@ def make_parser() -> argparse.ArgumentParser:
     ap.add_argument("--install-image", default="")
     ap.add_argument("--final-image", default="")
     ap.add_argument("--volume-stream", default="")
+    ap.add_argument("--skel-stream", default="")
     ap.add_argument("--base-stream", default="")
     ap.add_argument("--cache-stream", default="")
     ap.add_argument("--force-vol", action="store_true",
@@ -2548,6 +2804,7 @@ def main(argv: Sequence[str] | None = None,
         fastboot=args.fastboot, port=args.port, baud=args.baud,
         vol_image=args.vol_image, install_image=args.install_image,
         final_image=args.final_image, volume_stream=args.volume_stream,
+        skel_stream=args.skel_stream,
         base_stream=args.base_stream, cache_stream=args.cache_stream,
         force_vol=args.force_vol, no_precheck=args.no_precheck,
         allow_kdp=args.allow_kdp,

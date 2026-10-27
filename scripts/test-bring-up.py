@@ -60,7 +60,7 @@ def sha256(data: bytes) -> bytes:
 
 
 def write_kist(path: str, entries: list[tuple[str, bytes, int, bool]]) -> None:
-    """entries: (destination, content, mode, deflate)."""
+    """entries: (destination, content, mode, deflate); v1, files only."""
     payload = bytearray()
     body = bytearray()
     for dest, content, mode, deflate in entries:
@@ -78,6 +78,47 @@ def write_kist(path: str, entries: list[tuple[str, bytes, int, bool]]) -> None:
     with open(path, "wb") as f:
         f.write(struct.pack("<4sHHIIQQ", b"KIST", 1, 0, len(entries), 32,
                             sum(len(c) for _, c, _, _ in entries), total_wire))
+        f.write(body)
+        f.write(b"\0" * pad)
+
+
+def write_kist_v2(path: str, entries: list[tuple[str, str, int, object]],
+                  skeleton: bool = True, version: int = 2) -> None:
+    """v2 stream: entries are (kind, destination, mode, payload).
+
+    kind is "file" (payload bytes), "dir" (payload None) or "link" (payload is
+    the target string).  total_usize is file bytes plus symlink target lengths,
+    exactly like pack-userland.py.
+    """
+    body = bytearray()
+    total_usize = 0
+    for kind, dest, mode, data in entries:
+        bh = dest.encode("utf-8")
+        if kind == "dir":
+            flags, wire, size, digest, payload = bu.KIST_F_DIR, 0, 0, b"\0" * 32, b""
+        elif kind == "link":
+            payload = data.encode("utf-8")
+            flags = bu.KIST_F_SYMLINK
+            wire = size = len(payload)
+            digest = sha256(payload)
+        elif kind == "file":
+            assert isinstance(data, bytes), data
+            payload = data
+            flags = 0
+            wire = size = len(data)
+            digest = sha256(data)
+        else:
+            raise AssertionError(kind)
+        total_usize += size
+        body += struct.pack("<4sHHHHQQ32s128sI", b"KENT", len(bh), mode,
+                            flags, 0, wire, size, digest, bh, 0)
+        body += payload
+    pad = (-(32 + len(body))) % bu.CHUNK
+    total_wire = len(body) + pad
+    stream_flags = bu.KIST_SF_SKELETON if skeleton else 0
+    with open(path, "wb") as f:
+        f.write(struct.pack("<4sHHIIQQ", b"KIST", version, stream_flags,
+                            len(entries), 32, total_usize, total_wire))
         f.write(body)
         f.write(b"\0" * pad)
 
@@ -149,6 +190,7 @@ class Fixture:
         self.install_image = os.path.join(dirpath, "boot-inst.img")
         self.final_image = os.path.join(dirpath, "boot-final.img")
         self.volume_stream = os.path.join(dirpath, "KebabRoot.vext")
+        self.skel_stream = os.path.join(dirpath, "skel.kist")
         self.base_stream = os.path.join(dirpath, "base.kist")
         self.cache_stream = os.path.join(dirpath, "cache.kist")
         self.bad_install_image = os.path.join(dirpath, "boot-bad.img")
@@ -184,6 +226,34 @@ class Fixture:
                                   0o644, i % 3 == 0))
         write_kist(self.base_stream, base_entries)
         write_kist(self.cache_stream, cache_entries)
+        # The v2 skeleton, byte-for-byte the shape make-minimal-userland.py
+        # builds: 10 directories, 3 symlinks, 3 files, 16 entries, 153 bytes
+        # installed and one 64 KiB chunk on the wire.
+        skel_entries = [
+            ("dir", "/dev", 0o755, None),
+            ("link", "/etc", 0o777, "private/etc"),
+            ("dir", "/private", 0o755, None),
+            ("dir", "/private/etc", 0o755, None),
+            ("file", "/private/etc/group", 0o644, b"wheel:*:0:root\n"),
+            ("file", "/private/etc/master.passwd", 0o644,
+             b"root:*:0:0::0:0:System Administrator:/var/root:/bin/sh\n"),
+            ("file", "/private/etc/passwd", 0o644,
+             b"root:*:0:0:System Administrator:/var/root:/bin/sh\n"),
+            ("dir", "/private/tmp", 0o1777, None),
+            ("dir", "/private/var", 0o755, None),
+            ("dir", "/private/var/db", 0o755, None),
+            ("dir", "/private/var/log", 0o755, None),
+            ("dir", "/private/var/root", 0o700, None),
+            ("dir", "/private/var/run", 0o755, None),
+            ("dir", "/private/var/tmp", 0o1777, None),
+            ("link", "/tmp", 0o777, "private/tmp"),
+            ("link", "/var", 0o777, "private/var"),
+        ]
+        write_kist_v2(self.skel_stream, skel_entries)
+        skel = bu.read_kist(self.skel_stream, deep=True)
+        assert (skel.entry_count, skel.total_usize, skel.file_size) == \
+            (16, 153, 65536), (skel.entry_count, skel.total_usize, skel.file_size)
+        assert skel.kinds() == {"file": 3, "dir": 10, "link": 3}, skel.kinds()
         # A stream whose payload no longer matches its SHA-256 header.
         st = bu.read_kist(self.base_stream)
         data = bytearray(open(self.base_stream, "rb").read())
@@ -191,10 +261,10 @@ class Fixture:
         open(self.corrupt_base, "wb").write(data)
         self.base_entries = base_entries
         self.cache_entries = cache_entries
-        self.streams_by_size = {}
-        for path in (self.base_stream, self.cache_stream):
-            st = bu.read_kist(path)
-            self.streams_by_size[st.file_size] = st
+        self.streams: list = []
+        for path in (self.skel_stream, self.base_stream, self.cache_stream):
+            st = bu.read_kist(path, deep=(path == self.skel_stream))
+            self.streams.append(st)
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +338,8 @@ class FakeDevice:
                  slot: str = "b", volume_blocks: int = 16384,
                  files: dict | None = None, final: str = "success",
                  panic_after: int | None = None,
-                 silent_panic: bool = False):
+                 silent_panic: bool = False,
+                 bad_attrs: str = ""):
         self.fx = fixture
         self.console = console
         self.serial = "kebab-test"
@@ -278,6 +349,10 @@ class FakeDevice:
         self.final = final
         self.panic_after = panic_after
         self.silent_panic = silent_panic
+        # A path whose read-back reports uid 501/gid 20 instead of 0:0.  The
+        # real kernel aborts; this models the case where it does not, so the
+        # orchestrator's own checkpoint has to catch it.
+        self.bad_attrs = bad_attrs
         self.mode = "kernel"
         self.pending_image = None
         self.current_image = None
@@ -288,6 +363,7 @@ class FakeDevice:
         self.active_data = bytearray()
         self.active_dry = False
         self.active_chunks = 0
+        self.active_stream_printed = False
         self.sent_log: list[tuple[str, int]] = []
         self.acks = 0
         self.panicked = False
@@ -444,6 +520,7 @@ class FakeDevice:
         self.active_data = bytearray()
         self.active_dry = False
         self.active_chunks = 0
+        self.active_stream_printed = False
         self.console.feed("INST BEGIN %d write chunk 65536" % size)
 
     def chunk(self, data: bytes):
@@ -457,6 +534,16 @@ class FakeDevice:
             self.console.feed("VOL ACK %d" % (self.active_size - self.active_remaining))
         else:
             self.console.feed("INST ACK %d" % (self.active_size - self.active_remaining))
+            # The kernel parses the 32-byte stream header out of the first
+            # chunk and prints the version, skeleton flag and totals.
+            if not self.active_stream_printed and len(self.active_data) >= 32:
+                self.active_stream_printed = True
+                (magic, version, sflags, count, hsize, usize,
+                 wire) = struct.unpack_from("<4sHHIIQQ", self.active_data)
+                self.console.feed("INST STREAM v%d%s entries %d bytes %d "
+                                  "wire %d" % (version,
+                                               " skeleton" if sflags & 0x2 else "",
+                                               count, usize, self.active_size))
         if self.panic_after is not None and self.active_chunks >= self.panic_after:
             self.panic()
             return
@@ -494,25 +581,65 @@ class FakeDevice:
                 self.console.feed("VOL DONE extents 3 bytes 1744896 wire %d "
                                   "ms 100" % self.active_size)
             return
-        st = self.fx.streams_by_size.get(self.active_size)
+        st = self.select_stream()
         if st is None:
             self.console.feed("INST ABORT bad test stream size")
             return
         ok = skipped = 0
         for e in st.entries:
             cur = self.files.get(e.path)
-            if cur is not None and cur[0] == e.size and cur[1] == e.sha.hex():
+            if e.kind == "dir":
+                # A directory entry is always re-applied, never SKIPped.
+                self.files[e.path] = (0, "dir")
+                ok += 1
+                self.feed_ok(e)
+                continue
+            same = cur is not None and cur[0] == e.size and cur[1] == e.sha.hex()
+            if e.kind == "link" and same:
+                skipped += 1
+                self.console.feed("SKIP %s %d link exists" % (e.path, e.size))
+                continue
+            if e.kind == "file" and same and not st.skeleton:
                 skipped += 1
                 self.console.feed("SKIP %s %d" % (e.path, e.size))
-            else:
-                self.files[e.path] = (e.size, e.sha.hex())
-                ok += 1
-                self.console.feed("OK %s %d mode 0%o" % (e.path, e.size, e.mode))
+                continue
+            self.files[e.path] = (e.size, e.sha.hex())
+            ok += 1
+            self.feed_ok(e)
         self.console.feed("INST DONE entries %d ok %d skipped %d bytes %d "
                           "wire %d ms 100"
                           % (st.entry_count, ok, skipped, st.total_usize,
                              self.active_size))
         self.sent_log.append((self.active_size, ok + skipped))
+
+    def select_stream(self):
+        """Identify the stream by size and by the header the board received.
+
+        skel.kist and the 5-entry base fixture are both one 64 KiB chunk, so
+        the INST BEGIN size alone is ambiguous in the tests.
+        """
+        try:
+            magic, version, sflags, count, hsize, usize, wire = \
+                struct.unpack_from("<4sHHIIQQ", self.active_data)
+        except struct.error:
+            return None
+        for st in self.fx.streams:
+            if st.file_size == self.active_size and st.version == version \
+                    and st.entry_count == count:
+                return st
+        return None
+
+    def feed_ok(self, e):
+        uid, gid = (501, 20) if e.path == self.bad_attrs else (0, 0)
+        if e.kind == "dir":
+            self.console.feed("OK %s 0 dir mode 0%o uid %d gid %d"
+                              % (e.path, e.mode, uid, gid))
+        elif e.kind == "link":
+            self.console.feed("OK %s %d link -> %s mode 0%o uid %d gid %d"
+                              % (e.path, e.size, e.target, e.mode, uid, gid))
+        else:
+            self.console.feed("OK %s %d mode 0%o uid %d gid %d"
+                              % (e.path, e.size, e.mode, uid, gid))
 
 
 class FakeBoard:
@@ -562,6 +689,55 @@ def check_kist_compressed_large(tmp: str) -> None:
     if st.entries[0].wire >= st.total_wire:
         raise AssertionError("wire %d total %d" % (st.entries[0].wire, st.total_wire))
     bu.read_kist(path, deep=True)
+
+
+def check_kist_v2(tmp: str) -> None:
+    """v2 DIR/LINK parsing, the widened 07777 mask, and v1 compatibility."""
+    path = os.path.join(tmp, "skel-check.kist")
+    entries = [
+        ("dir", "/dev", 0o755, None),
+        ("link", "/etc", 0o777, "private/etc"),
+        ("dir", "/private", 0o755, None),
+        ("dir", "/private/tmp", 0o1777, None),
+        ("file", "/private/etc/passwd", 0o644,
+         b"root:*:0:0:System Administrator:/var/root:/bin/sh\n"),
+    ]
+    write_kist_v2(path, entries)
+    st = bu.read_kist(path, deep=True)
+    if st.version != 2 or not st.skeleton:
+        raise AssertionError("version %d skeleton %s" % (st.version, st.skeleton))
+    by_path = {e.path: e for e in st.entries}
+    if by_path["/private/tmp"].mode != 0o1777:
+        raise AssertionError("sticky bit lost: mode 0%o"
+                             % by_path["/private/tmp"].mode)
+    if by_path["/private/tmp"].kind != "dir" or by_path["/private/tmp"].size:
+        raise AssertionError("directory entry shape: %r"
+                             % (by_path["/private/tmp"],))
+    if by_path["/etc"].kind != "link" or by_path["/etc"].target != "private/etc":
+        raise AssertionError("symlink target: %r" % (by_path["/etc"],))
+    if by_path["/etc"].size != len("private/etc"):
+        raise AssertionError("symlink size %d" % by_path["/etc"].size)
+    if st.total_usize != 50 + len("private/etc"):
+        raise AssertionError("total_usize %d" % st.total_usize)
+
+    # v1 is still accepted by the same reader, with the old 0777 mask.
+    v1 = os.path.join(tmp, "v1-check.kist")
+    write_kist(v1, [("/sbin/v1", b"v1", 0o4755, False)])
+    old = bu.read_kist(v1, deep=True)
+    if old.version != 1 or old.skeleton:
+        raise AssertionError("v1 version/skeleton")
+    if old.entries[0].mode != 0o755:
+        raise AssertionError("v1 mode mask: 0%o" % old.entries[0].mode)
+
+    # A v1 stream may not carry a DIR entry; the reader must refuse it.
+    bad = os.path.join(tmp, "v1-dir.kist")
+    write_kist_v2(bad, [("dir", "/dev", 0o755, None)], skeleton=False, version=1)
+    try:
+        bu.read_kist(bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a v1 stream with a DIR entry was accepted")
 
 
 # ---------------------------------------------------------------------------
@@ -679,6 +855,13 @@ def main(argv=None) -> int:
             failures += 1
             print("FAIL kist-compressed-size")
             traceback.print_exc()
+        try:
+            check_kist_v2(tmp)
+            print("PASS kist-v2")
+        except Exception:
+            failures += 1
+            print("FAIL kist-v2")
+            traceback.print_exc()
 
         cases = [
             Case("dry-run", ["--dry-run", "--work-dir", fixture.dir,
@@ -700,6 +883,14 @@ def main(argv=None) -> int:
                              "--work-dir", fixture.dir,
                              "--log-dir", os.path.join(log_root, "segment")],
                  fixture, 0, volume_blocks=4194304),
+            Case("skel-only", ["--from", "skel", "--to", "skel",
+                               "--work-dir", fixture.dir,
+                               "--log-dir", os.path.join(log_root, "skel")],
+                 fixture, 0, volume_blocks=4194304),
+            Case("skel-bad-attrs", ["--from", "skel", "--to", "skel",
+                                    "--work-dir", fixture.dir,
+                                    "--log-dir", os.path.join(log_root, "skelbad")],
+                 fixture, 3, volume_blocks=4194304, bad_attrs="/private/tmp"),
             Case("partial-base", ["--from", "base", "--to", "base",
                                   "--work-dir", fixture.dir,
                                   "--log-dir", os.path.join(log_root, "partial")],
@@ -757,13 +948,23 @@ def main(argv=None) -> int:
                         flashed.index(os.path.basename(fixture.final_image)), flashed
                     assert "phase install: boot-inst.img" in out, out[-3000:]
                     assert "C-INST-GEOM" in out, out[-3000:]
-                    assert len(board.device.sent_log) == 2, board.device.sent_log
+                    assert "C-SKEL-ATTRS" in out, out[-3000:]
+                    assert "phase skel: install skel.kist" in out, out[-3000:]
+                    assert "INST STREAM v2 skeleton entries 16 bytes 153 wire 65536" \
+                        in out, out[-3000:]
+                    assert "OK /private/tmp 0 dir mode 01777 uid 0 gid 0" in out, \
+                        out[-3000:]
+                    assert len(board.device.sent_log) == 3, board.device.sent_log
+                    assert board.device.sent_log[0][0] == 65536, board.device.sent_log
                     assert board.device.volume_blocks == 4194304
                 if case.name == "resume" and board is not None:
                     assert os.path.basename(fixture.vol_image) not in \
                         [os.path.basename(x) for x in board.fastboot.flashed], \
                         board.fastboot.flashed
-                    assert not board.device.sent_log, board.device.sent_log
+                    # base/cache are complete and are not re-sent; the 64 KiB
+                    # skeleton is always re-applied by design.
+                    assert len(board.device.sent_log) == 1, board.device.sent_log
+                    assert board.device.sent_log[0][0] == 65536, board.device.sent_log
                 if case.name == "from-vol-resume" and board is not None:
                     assert os.path.basename(fixture.vol_image) not in \
                         [os.path.basename(x) for x in board.fastboot.flashed], \
@@ -773,6 +974,14 @@ def main(argv=None) -> int:
                     assert "skipped 1" in out, out[-2000:]
                 if case.name == "segment" and board is not None:
                     assert len(board.device.sent_log) == 1, board.device.sent_log
+                if case.name == "skel-only" and board is not None:
+                    assert len(board.device.sent_log) == 1, board.device.sent_log
+                    assert board.device.sent_log[0][0] == 65536, board.device.sent_log
+                    assert "C-SKEL-ATTRS" in out, out[-3000:]
+                    assert "mode 01777" in out, out[-3000:]
+                if case.name == "skel-bad-attrs":
+                    assert "skel.attrs" in err, err[-3000:]
+                    assert "uid 501 gid 20" in err, err[-3000:]
             except Exception:
                 failures += 1
                 print("FAIL %-18s exception" % case.name)

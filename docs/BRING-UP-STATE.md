@@ -8375,9 +8375,53 @@ free after both = 4,193,878 - 813,472 = 3,380,406 blocks
 - `skel.kist` 没有经过 USB 发送；`INST STREAM v2 skeleton`、
   `OK ... uid 0 gid 0`、`SKIP ... link exists` 都还没有真机日志。
 - 没有 launchd、没有最终启动、没有 3.3 GB 传输；板子 stranded。
-- 没有完整内核链接/构建；只有 `-fsyntax-only`。
+- 本节写于完整构建之前；0138 的完整内核链接结果见第 8 节。
 - 真实 `cache.kist`（1.0 GB）没有重打；v1 兼容性只用 fake 流验证过。
 
-下一次真机的入口仍是 `python scripts/bring-up.py --from vol`，但顺序要按
-第 6 节改；如果 `skel` 阶段失败，先看 `INST STREAM` 的版本/骨架标志和第一条
-`FAIL`，再决定是否重发 `skel.kist`。
+下一次真机的入口仍是 `python scripts/bring-up.py --from vol`；顺序已按第 6
+节改为 `vol -> install -> skel -> base -> cache -> final`（见第 8 节）。如果
+`skel` 阶段失败，先看 `INST STREAM` 的版本/骨架标志和第一条 `FAIL`，再决定
+是否重发 `skel.kist`。
+
+### 8. 0138 完整构建与编排器更新（2026-10-28）
+
+`0138-kebab-kernel-skeleton.patch` 不再只是 `-fsyntax-only`。在
+`albertlee@192.168.30.165` 上删除 `build/xnu.obj/kernel.development.kebab`
+符号链接后，用 `build-local.sh` 做了一次完整构建：117 个 kebab patch 加 8 个
+上游辅助 patch（共 125 个）全部重新 staged，`kebab_install.o` 重新编译并参与
+链接。结果：
+
+| 项 | 结果 |
+| --- | --- |
+| 构建 | `XNU Build Done`；961 次 clang 编译；0 个编译错误 |
+| patch | 6 个被 `build.sh` 跳过（`0001`、`0002` 和 4 个上游 helper），与 `build-0134-final.log` / `build-exec-clean.log` 的基线逐项相同；`0138` 已应用并重新编译 |
+| 内核 | `kernel.development.kebab`，17,175,000 B（16.38 MiB），Mach-O arm64 |
+| `kebab_install.c` warning | 0 条带 `kebab_install.c:<行>` 的 warning；只有其 include 的系统头文件产生基线 warning |
+| 新格式串 | `OK %s 0 dir mode 0%o uid %u gid %u`、`OK %s %llu link -> %s mode 0%o uid %u gid %u`、`INST STREAM v%u%s entries %u bytes %llu wire %llu`、`FAIL %s attrs ...` 都已在二进制中（`strings` 命中） |
+
+构建没有暴露需要修正的代码问题，因此**没有新增 corrective patch**，内核
+patch 集与 `dfa7d6f` 相同。
+
+`scripts/bring-up.py` 已按第 6 节改完：
+
+1. 阶段顺序为 `vol -> install -> skel -> base -> cache -> final`；`skel.kist`
+   在安装镜像启动后、`base.kist` 前发送，且始终整条重发（一个 64 KiB chunk）。
+2. VEXT 仍是裸卷口径：校验 `1,769,472 B / 3 extents / 1,744,896 data /
+   4,194,304 blocks`，不再要求 VEXT 里带 `/dev`、`/private/...`。
+3. `read_kist()` 接受 v1/v2：stream flag bit1 = 骨架流；entry flag bit1 =
+   目录（`wire=size=0`、sha 全零），bit2 = 符号链接（payload 是 target，
+   长度进 `size` 并计入 `total_usize`）；mode 掩码从 `0777` 放宽到 `07777`，
+   `01777` 得以保留。v1 流仍按 `0777` 解析。
+4. 新增 `skel.kist` 产物：16 条（3 files / 10 dirs / 3 links）、153 B
+   installed、65,536 B wire；校验 `INST STREAM v2 skeleton entries 16 bytes
+   153 wire 65536` 和每条 `OK ... uid 0 gid 0`（链接允许
+   `SKIP ... link exists`）。uid/gid 不是 0:0 时 phase 直接失败。
+5. `scripts/test-bring-up.py` 的假板增加 v2 骨架流、`01777` 目录、三个符号
+   链接，以及一个读回 uid 501/gid 20 的失败用例（退出码 3，命中
+   `skel.attrs`）。全套离线测试与 `--dry-run` 重跑通过，
+   `scripts/bring-up-dryrun.log` 已更新。
+
+仍未验证的仍是真机部分：`vn_create` + `vnode_setattr`、`VNOP_SYMLINK` 和
+`vnode_getattr` 读回没有在真实 HFS+ 上执行，`skel.kist` 没有走过 USB，卷根
+仍是 `501:20`。0138 现在是“完整链接且二进制含新格式串”的状态，但板子
+stranded，不能把它当作真机通过。

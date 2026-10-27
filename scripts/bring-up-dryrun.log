@@ -12,12 +12,29 @@
 [    0.16] [ OK ] D-02 dry.image.install        100663296 bytes, 1 args string(s), kebab_cs=15 kebab_install=1 kebab_noinit=1 kebab_pon_write=1 kebabusb=1 rootrw=1 ufsrw=1
 [    0.24] [ OK ] D-03 dry.image.final          100663296 bytes, 1 args string(s), kebab_cs=15 kebab_dsc=1 kebab_dsc_map=1 kebab_pon_write=1 kebabusb=1 rootrw=1 ufsrw=1
 [    0.24] [ OK ] D-04 dry.stream.volume        1769472 bytes, 3 extents, 1.7 MiB data, HFS+ 4194304 blocks, sha256 16b235b53e6a2792b1b1f6437dd6cea946b75230cd3eb4f094dc724d30c765ee
+[    0.24]   verify skel [1/16] /dev
+[    0.24]   verify skel [2/16] /etc
+[    0.24]   verify skel [3/16] /private
+[    0.24]   verify skel [4/16] /private/etc
+[    0.24]   verify skel [5/16] /private/etc/group
+[    0.24]   verify skel [6/16] /private/etc/master.passwd
+[    0.24]   verify skel [7/16] /private/etc/passwd
+[    0.24]   verify skel [8/16] /private/tmp
+[    0.24]   verify skel [9/16] /private/var
+[    0.24]   verify skel [10/16] /private/var/db
+[    0.24]   verify skel [11/16] /private/var/log
+[    0.24]   verify skel [12/16] /private/var/root
+[    0.24]   verify skel [13/16] /private/var/run
+[    0.24]   verify skel [14/16] /private/var/tmp
+[    0.24]   verify skel [15/16] /tmp
+[    0.24]   verify skel [16/16] /var
+[    0.24] [ OK ] D-05 dry.stream.skel          16 entries (3 files, 10 dirs, 3 links), 153 B installed, 65536 B wire, sha256 b0b22fad2086de1f3d7eb3c054822c4746633ebd2439dad384f73aee9dad2bc2
 [    0.24]   verify base [1/5] /sbin/launchd
 [    0.24]   verify base [2/5] /usr/lib/dyld
 [    0.24]   verify base [3/5] /System/Library/Caches/com.apple.kernelcaches/static.trustcache
 [    0.24]   verify base [4/5] /usr/lib/zprint
 [    0.24]   verify base [5/5] /System/Library/LaunchDaemons/com.kebab.zprint.plist
-[    0.24] [ OK ] D-05 dry.stream.base          5 entries, 6.8 KiB installed, 64.0 KiB wire, sha256 d1ed835388fed3ad97e9ff455f6e3cdbd529439fae128470d6d60d0f275f6710
+[    0.24] [ OK ] D-06 dry.stream.base          5 entries, 6.8 KiB installed, 64.0 KiB wire, sha256 d1ed835388fed3ad97e9ff455f6e3cdbd529439fae128470d6d60d0f275f6710
 [    0.24]   verify cache [1/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64
 [    0.24]   verify cache [2/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6401
 [    0.24]   verify cache [3/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6402
@@ -62,17 +79,18 @@
 [    0.24]   verify cache [42/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6441
 [    0.24]   verify cache [43/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6442
 [    0.24]   verify cache [44/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6443
-[    0.24] [ OK ] D-06 dry.stream.cache         44 entries, 343.8 KiB installed, 256.0 KiB wire, sha256 4eef48db289515f71bacef515635b0ccc064e2f0612bb0b58d27a928c1a2c3ec
-[    0.24] [ OK ] D-07 dry.fastboot             /bin/true
-[    0.24] 
-[    0.24] PLAN (auto -> final):
-[    0.24]   1. precondition fastboot devices; current-slot == b; FASTBOOT through the console only if needed
-[    0.24]   2. vol          flash boot-vol.img; VOL DRY; VOL BEGIN ... CONFIRM; require OLD 512 bytes, VOL DONE and the new HFS+ mount
-[    0.24]   3. install      flash boot-inst.img; require INST? root rw, 4,194,304 blocks, 17,179,869,184 bytes and free space
-[    0.24]   4. base         INST CHECK all 5 entries; send only if incomplete; verify a sample
-[    0.24]   5. cache        INST CHECK all 44 entries; send only if incomplete; verify a sample; report elapsed
-[    0.24]   6. final        flash boot-final.img; capture to the first failure or launchd; print the last 100 lines
-[    0.24] 
-[    0.24] DRY RUN OK: all artifacts and command strings verified; nothing was written
-[    0.24] 
-[    0.24] DRY RUN COMPLETE: nothing was written
+[    0.25] [ OK ] D-07 dry.stream.cache         44 entries, 343.8 KiB installed, 256.0 KiB wire, sha256 4eef48db289515f71bacef515635b0ccc064e2f0612bb0b58d27a928c1a2c3ec
+[    0.25] [ OK ] D-08 dry.fastboot             /bin/true
+[    0.25] 
+[    0.25] PLAN (auto -> final):
+[    0.25]   1. precondition fastboot devices; current-slot == b; FASTBOOT through the console only if needed
+[    0.25]   2. vol          flash boot-vol.img; VOL DRY; VOL BEGIN ... CONFIRM; require OLD 512 bytes, VOL DONE and the new HFS+ mount
+[    0.25]   3. install      flash boot-inst.img; require INST? root rw, 4,194,304 blocks, 17,179,869,184 bytes and free space
+[    0.25]   4. skel         send skel.kist (16 v2 entries: 3 files, 10 dirs, 3 links, 153 B installed); require 'INST STREAM v2 skeleton' and uid 0/gid 0 read-back
+[    0.25]   5. base         INST CHECK all 5 entries; send only if incomplete; verify a sample
+[    0.25]   6. cache        INST CHECK all 44 entries; send only if incomplete; verify a sample; report elapsed
+[    0.25]   7. final        flash boot-final.img; capture to the first failure or launchd; print the last 100 lines
+[    0.25] 
+[    0.25] DRY RUN OK: all artifacts and command strings verified; nothing was written
+[    0.25] 
+[    0.25] DRY RUN COMPLETE: nothing was written
