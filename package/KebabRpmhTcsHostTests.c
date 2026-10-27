@@ -38,6 +38,8 @@ typedef struct {
 	int      compl_after;
 	uint32_t status_preset;
 	int      triggered;
+	int      trigger_no_echo;
+	uint64_t now;
 } fake;
 
 static int fake_rd(void *ctx, uint32_t off, uint32_t *val)
@@ -69,6 +71,14 @@ static int fake_rd(void *ctx, uint32_t off, uint32_t *val)
 	return 0;
 }
 
+static uint64_t fake_now(void *ctx)
+{
+	fake *f = ctx;
+
+	f->now += 100;      /* 100 us per call by default */
+	return f->now;
+}
+
 static int fake_wr(void *ctx, uint32_t off, uint32_t val)
 {
 	fake *f = ctx;
@@ -94,6 +104,11 @@ static int fake_wr(void *ctx, uint32_t off, uint32_t val)
 		f->reg[off / 4] = val ^ 0x1u;
 		return 0;
 	}
+	if (off == KEBAB_TCS_CONTROL && f->trigger_no_echo != 0 &&
+	    (val & KEBAB_TCS_AMC_TRIGGER) != 0) {
+		f->triggered = 1;
+		return 0;       /* the write lands, the register does not echo */
+	}
 	f->reg[off / 4] = val;
 	if (off == KEBAB_TCS_CONTROL) {
 		f->triggered = (val & KEBAB_TCS_AMC_TRIGGER) != 0;
@@ -114,7 +129,7 @@ static void fake_init(fake *f, uint32_t control)
 
 static kebab_tcs_io fake_io(fake *f)
 {
-	kebab_tcs_io io = { fake_rd, fake_wr, f };
+	kebab_tcs_io io = { fake_rd, fake_wr, fake_now, f };
 
 	return io;
 }
@@ -191,8 +206,8 @@ int main(void)
 	fake_init(&f, KEBAB_TCS_AMC_ENABLE);
 	f.mismatch_off = KEBAB_TCS_CMD_ENABLE;
 	kebab_rpmh_tcs_init(&tcs, fake_io(&f), &lock);
-	CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) == KEBAB_RPMH_ERR_SINK_FAILED,
-	    "mismatch reported");
+	CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) == KEBAB_RPMH_ERR_TCS_STATE,
+	    "unconfirmed write is uncertainty, not a rollback");
 	CHECK(tcs.phase == KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER, "pre-trigger phase");
 	CHECK(lock.dead == 1, "lock closed after a failed attempt");
 
@@ -278,6 +293,51 @@ int main(void)
 	CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) == KEBAB_RPMH_ERR_TCS_STATE,
 	    "TCS2 refused");
 	CHECK(f.wr_count == 0, "zero writes for both");
+
+
+	printf("C13 preflight read failure closes the lock\n");
+	memset(&lock, 0, sizeof(lock));
+	fake_init(&f, KEBAB_TCS_AMC_ENABLE);
+	f.rd_fail_off = KEBAB_TCS_CMD_WAIT;
+	kebab_rpmh_tcs_init(&tcs, fake_io(&f), &lock);
+	CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) == KEBAB_RPMH_ERR_TCS_STATE,
+	    "unreadable preflight register refused");
+	CHECK(lock.dead == 1, "fail-closed");
+
+	printf("C14 a stale ISSUED bit is refused\n");
+	memset(&lock, 0, sizeof(lock));
+	fake_init(&f, KEBAB_TCS_AMC_ENABLE);
+	f.status_preset = KEBAB_TCS_CMD_ISSUED;
+	kebab_rpmh_tcs_init(&tcs, fake_io(&f), &lock);
+	CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) == KEBAB_RPMH_ERR_TCS_BUSY,
+	    "leftover ISSUED refused");
+	CHECK(f.wr_count == 0, "zero writes");
+
+	printf("C15 the trigger write is not expected to echo\n");
+	memset(&lock, 0, sizeof(lock));
+	fake_init(&f, KEBAB_TCS_AMC_ENABLE);
+	f.trigger_no_echo = 1;
+	kebab_rpmh_tcs_init(&tcs, fake_io(&f), &lock);
+	CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) == KEBAB_RPMH_OK,
+	    "completion judged by status, not by the trigger bit");
+
+	printf("C16 a stalled clock cannot spin forever\n");
+	memset(&lock, 0, sizeof(lock));
+	fake_init(&f, KEBAB_TCS_AMC_ENABLE);
+	f.compl_after = -1;
+	f.now = 0;
+	kebab_rpmh_tcs_init(&tcs, fake_io(&f), &lock);
+	CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) == KEBAB_RPMH_ERR_TIMEOUT,
+	    "timeout reached and returned");
+
+	printf("C17 a busy lock refuses a second caller\n");
+	memset(&lock, 0, sizeof(lock));
+	fake_init(&f, KEBAB_TCS_AMC_ENABLE);
+	lock.busy = 1;
+	kebab_rpmh_tcs_init(&tcs, fake_io(&f), &lock);
+	CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) == KEBAB_RPMH_ERR_TCS_STATE,
+	    "concurrent claim refused");
+	CHECK(f.wr_count == 0, "zero writes");
 
 	printf("\n%d checks, %d failure(s)\n", checks, failures);
 	return failures == 0 ? 0 : 1;

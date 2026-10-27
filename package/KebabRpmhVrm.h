@@ -91,12 +91,18 @@ kebab_rpmh_status kebab_rpmh_cmd_db_lookup(const uint8_t *db, size_t len,
 
 /* ---------------------------------------------------------- hardware model */
 
-/* rd/wr return 0 on success and -1 on failure; an unset operation fails. */
+/* rd/wr return 0 on success and -1 on failure; an unset operation fails.
+ * now_us is optional; when present every wait has a time budget as well as a
+ * poll cap, so a stalled or jumping clock cannot spin forever. */
 typedef struct {
 	int (*rd)(void *ctx, uint32_t off, uint32_t *val);
 	int (*wr)(void *ctx, uint32_t off, uint32_t val);
+	uint64_t (*now_us)(void *ctx);
 	void *ctx;
 } kebab_tcs_io;
+
+#define KEBAB_TCS_RB_TIMEOUT_US   10000u
+#define KEBAB_TCS_CMPL_TIMEOUT_US 100000u
 
 typedef enum {
 	KEBAB_TCS_PHASE_IDLE = 0,
@@ -117,6 +123,7 @@ typedef enum {
 typedef struct {
 	int dead;
 	int used;
+	int busy;      /* in-flight claim; a second caller is refused */
 } kebab_rpmh_lock;
 
 typedef struct {

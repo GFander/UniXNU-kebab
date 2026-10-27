@@ -303,8 +303,8 @@ void kebab_tcs_release(kebab_tcs *tcs)
 
 /* ------------------------------------------------- TCS1 send state machine */
 
-#define KEBAB_TCS_RB_POLLS   100u
-#define KEBAB_TCS_CMPL_POLLS 1000u
+#define KEBAB_TCS_RB_POLLS   1000u
+#define KEBAB_TCS_CMPL_POLLS 10000u
 
 void kebab_rpmh_tcs_init(kebab_rpmh_tcs *t, kebab_tcs_io io,
     kebab_rpmh_lock *lock)
@@ -334,52 +334,69 @@ tcs_write(kebab_rpmh_tcs *t, uint32_t off, uint32_t val)
 	return t->io.wr(t->io.ctx, off, val);
 }
 
-/* A write only counts once it reads back; the wait is bounded on purpose. */
+/*
+ * Bounded wait for a register to read back as written.  With a monotonic
+ * clock the wait also has a wall budget; without one it falls back to the poll
+ * cap, and either way it terminates.
+ */
 static int
-tcs_write_sync(kebab_rpmh_tcs *t, uint32_t off, uint32_t val)
+tcs_wait_reg(kebab_rpmh_tcs *t, uint32_t off, uint32_t want)
 {
-	uint32_t i, readback = 0;
+	uint64_t start = 0;
+	int have_time = 0;
+	uint32_t i, val = 0;
 
-	if (tcs_write(t, off, val) != 0) {
-		return -1;
+	if (t->io.now_us != NULL) {
+		start = t->io.now_us(t->io.ctx);
+		have_time = 1;
 	}
 	for (i = 0; i < KEBAB_TCS_RB_POLLS; i++) {
-		if (tcs_read(t, off, &readback) == 0 && readback == val) {
+		if (tcs_read(t, off, &val) == 0 && val == want) {
 			return 0;
+		}
+		if (have_time &&
+		    t->io.now_us(t->io.ctx) - start >= KEBAB_TCS_RB_TIMEOUT_US) {
+			break;
 		}
 	}
 	return -1;
 }
 
+static int
+tcs_write_sync(kebab_rpmh_tcs *t, uint32_t off, uint32_t val)
+{
+	if (tcs_write(t, off, val) != 0) {
+		return -1;
+	}
+	return tcs_wait_reg(t, off, val);
+}
+
 /*
- * Undo only the stages this attempt actually reached, and verify each rollback
- * write.  A failed rollback leaves the channel in an unknown state, which is
- * exactly when the lock must stay closed.
+ * Undo only the writes whose readback was confirmed.  Anything attempted but
+ * not confirmed may already be in effect, so it is not "rolled back": the
+ * caller must keep the evidence and close the lock instead.
  */
 #define STAGED_WAIT    (1u << 0)
 #define STAGED_ENABLE  (1u << 1)
 #define STAGED_CONTROL (1u << 2)
 
 static int
-tcs_undo_pre_trigger(kebab_rpmh_tcs *t, uint32_t control, uint32_t staged)
+tcs_undo_pre_trigger(kebab_rpmh_tcs *t, uint32_t control, uint32_t confirmed)
 {
 	int failed = 0;
 
-	if ((staged & STAGED_CONTROL) != 0) {
-		if (tcs_write_sync(t, KEBAB_TCS_CONTROL,
-		    control & ~KEBAB_TCS_AMC_TRIGGER) != 0) {
-			failed = 1;
-		}
+	if ((confirmed & STAGED_CONTROL) != 0 &&
+	    tcs_write_sync(t, KEBAB_TCS_CONTROL,
+	    control & ~KEBAB_TCS_AMC_TRIGGER) != 0) {
+		failed = 1;
 	}
-	if ((staged & STAGED_ENABLE) != 0) {
-		if (tcs_write_sync(t, KEBAB_TCS_CMD_ENABLE, 0) != 0) {
-			failed = 1;
-		}
+	if ((confirmed & STAGED_ENABLE) != 0 &&
+	    tcs_write_sync(t, KEBAB_TCS_CMD_ENABLE, 0) != 0) {
+		failed = 1;
 	}
-	if ((staged & STAGED_WAIT) != 0) {
-		if (tcs_write_sync(t, KEBAB_TCS_CMD_WAIT, 0) != 0) {
-			failed = 1;
-		}
+	if ((confirmed & STAGED_WAIT) != 0 &&
+	    tcs_write_sync(t, KEBAB_TCS_CMD_WAIT, 0) != 0) {
+		failed = 1;
 	}
 	return failed;
 }
@@ -389,12 +406,11 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 {
 	kebab_rpmh_lock *lock;
 	uint32_t control = 0, enable = 0, wait = 0, status = 0, i;
-	uint32_t staged = 0;
+	uint32_t confirmed = 0, attempted = 0;
 
 	if (t == NULL || cmd == NULL || t->lock == NULL) {
 		return KEBAB_RPMH_ERR_ARGUMENT;
 	}
-	/* The MMIO entry point re-checks what the caller already checked. */
 	if (!kebab_rpmh_cmd_allowed(cmd)) {
 		return KEBAB_RPMH_ERR_NOT_ALLOWED;
 	}
@@ -402,23 +418,29 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 		return KEBAB_RPMH_ERR_TCS_STATE;
 	}
 	lock = t->lock;
-	if (lock->dead || lock->used) {
+	if (lock->dead || lock->used || lock->busy) {
 		return KEBAB_RPMH_ERR_TCS_STATE;
 	}
+	lock->busy = 1;
+
 	if (tcs_read(t, KEBAB_TCS_CMD_ENABLE, &enable) != 0 ||
 	    tcs_read(t, KEBAB_TCS_CMD_WAIT, &wait) != 0 ||
 	    tcs_read(t, KEBAB_TCS_CONTROL, &control) != 0 ||
 	    tcs_read(t, KEBAB_TCS_CMD_STATUS, &status) != 0) {
+		/* A failed preflight read leaves the channel state unknown. */
+		lock->dead = 1;
+		lock->busy = 0;
 		return KEBAB_RPMH_ERR_TCS_STATE;
 	}
 	/*
-	 * A COMPL bit left by an earlier command would make the completion
-	 * check below pass without this command ever running, so a dirty
-	 * status word is treated as an occupied channel.
+	 * Both status bits matter: a leftover ISSUED with a fresh COMPL would
+	 * otherwise look like a completed command, and a leftover COMPL alone
+	 * would satisfy the completion check without running anything.
 	 */
 	if (enable != 0 || wait != 0 || (control & KEBAB_TCS_AMC_TRIGGER) != 0 ||
-	    (status & KEBAB_TCS_CMD_COMPL) != 0) {
+	    (status & (KEBAB_TCS_CMD_ISSUED | KEBAB_TCS_CMD_COMPL)) != 0) {
 		lock->dead = 1;
+		lock->busy = 0;
 		return KEBAB_RPMH_ERR_TCS_BUSY;
 	}
 	t->phase = KEBAB_TCS_PHASE_VALIDATED;
@@ -428,24 +450,31 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 	    tcs_write(t, KEBAB_TCS_CMD_DATA, cmd->data) != 0) {
 		goto pre_fail;
 	}
+	attempted |= STAGED_WAIT;
 	if (tcs_write_sync(t, KEBAB_TCS_CMD_WAIT, 1u) != 0) {
 		goto pre_fail;
 	}
-	staged |= STAGED_WAIT;
+	confirmed |= STAGED_WAIT;
+	attempted |= STAGED_ENABLE;
 	if (tcs_write_sync(t, KEBAB_TCS_CMD_ENABLE, 1u) != 0) {
 		goto pre_fail;
 	}
-	staged |= STAGED_ENABLE;
+	confirmed |= STAGED_ENABLE;
+	attempted |= STAGED_CONTROL;
 	if (tcs_write_sync(t, KEBAB_TCS_CONTROL,
 	    control | KEBAB_TCS_AMC_ENABLE) != 0) {
 		goto pre_fail;
 	}
-	staged |= STAGED_CONTROL;
+	confirmed |= STAGED_CONTROL;
 	t->phase = KEBAB_TCS_PHASE_ARMED;
-	if (tcs_write_sync(t, KEBAB_TCS_CONTROL,
+
+	/*
+	 * The trigger is written once and not read back: the vendor driver
+	 * does the same, and acceptance is judged by ISSUED/COMPL below, not
+	 * by the trigger bit echoing the write.
+	 */
+	if (tcs_write(t, KEBAB_TCS_CONTROL,
 	    control | KEBAB_TCS_AMC_ENABLE | KEBAB_TCS_AMC_TRIGGER) != 0) {
-		/* The trigger write itself failed: the command may still be
-		 * armed, so this is already the post-trigger class. */
 		goto post_fail;
 	}
 	t->phase = KEBAB_TCS_PHASE_TRIGGERED;
@@ -477,32 +506,42 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 		t->phase = KEBAB_TCS_PHASE_COMPLETE_UNCLEAN;
 		lock->dead = 1;
 		lock->used = 1;
+		lock->busy = 0;
 		return KEBAB_RPMH_ERR_RECLAIM;
 	}
 	t->phase = KEBAB_TCS_PHASE_COMPLETE;
 	lock->used = 1;
-	lock->dead = 1;           /* one request per boot until this is reviewed */
+	lock->dead = 1;
+	lock->busy = 0;
 	return KEBAB_RPMH_OK;
 
 pre_fail:
-	if (tcs_undo_pre_trigger(t, control, staged) != 0) {
-		/* Rollback did not verify: the channel state is unknown. */
+	/*
+	 * A write that was attempted but never read back may already have
+	 * landed.  That is not something a rollback can prove, so it is kept
+	 * as evidence and the lock stays shut.
+	 */
+	if ((attempted & ~confirmed) != 0) {
 		t->phase = KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER;
 		lock->dead = 1;
+		lock->busy = 0;
+		return KEBAB_RPMH_ERR_TCS_STATE;
+	}
+	if (tcs_undo_pre_trigger(t, control, confirmed) != 0) {
+		t->phase = KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER;
+		lock->dead = 1;
+		lock->busy = 0;
 		return KEBAB_RPMH_ERR_TCS_STATE;
 	}
 	t->phase = KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER;
-	lock->dead = 1;           /* a failed attempt is not retried this boot */
+	lock->dead = 1;
+	lock->busy = 0;
 	return KEBAB_RPMH_ERR_SINK_FAILED;
 
 post_fail:
-	/*
-	 * A triggered command whose completion is not proven must not be
-	 * cleaned up: clearing enable or rewriting control could destroy a
-	 * transfer that is still running, and the evidence would be gone.
-	 */
 	(void)tcs_read(t, KEBAB_TCS_CMD_STATUS, &t->last_status);
 	t->phase = KEBAB_TCS_PHASE_FAILED_POST_TRIGGER;
 	lock->dead = 1;
+	lock->busy = 0;
 	return KEBAB_RPMH_ERR_TIMEOUT;
 }
