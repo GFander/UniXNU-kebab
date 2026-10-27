@@ -4314,3 +4314,88 @@ TCS1 所有权仍 UNRESOLVED，真实写入 NO-GO。
 | TCS1 所有权 | UNKNOWN |
 
 真实写入继续 NO-GO。
+
+## 四十九、更正：RpmhDxe 确实注册了 EBS 事件
+
+### 1. Boot Services 偏移表纠正
+
+| 偏移 | 正确函数 | 上一轮的错误命名 |
+| --- | --- | --- |
+| `0x30` | `FreePages` | 正确 |
+| `0x98` | `HandleProtocol` | 正确 |
+| `0x148` | `InstallMultipleProtocolInterfaces` | 未识别 |
+| `0x150` | `UninstallMultipleProtocolInterfaces` | 误称 `InstallConfigurationTable` |
+| `0x170` | `CreateEventEx` | 误称 `UnloadImage` |
+| `0xC0` | `InstallConfigurationTable` | 没有证据 |
+| `0xE0` | `UnloadImage` | 没有证据 |
+| `0xE8` | `ExitBootServices` | 没有调用 |
+
+`0x178` 是结构体尾部，不是 `ExitBootServices`；上一轮按 `0x178` 搜索是错的。
+
+### 2. `CreateEventEx` 调用现场（0x1514）
+
+```text
+0x14f8  adrp x2, #0x1000
+0x1508  add  x2, x2, #0x49c      ; NotifyFunction = 0x149c
+0x14fc  adrp x4, #0xe000
+0x150c  add  x4, x4, #0x28       ; EventGroup = 0xe028
+0x1504  adrp x5, #0xe000
+0x1510  add  x5, x5, #0x248      ; &Event = 0xe248
+0x1518  mov  w0, #0x200          ; Type = EVT_NOTIFY_SIGNAL
+0x151c  mov  w1, #8              ; NotifyTpl = TPL_CALLBACK
+0x1520  mov  x3, xzr             ; Context = NULL
+0x1524  blr  x9                  ; gBS->CreateEventEx
+```
+
+`0xe028` 的 16 字节是 `55 f0 ab 27 b8 b1 26 4c 80 48 74 8f 37 ba a2 df`，
+即 **`27ABF055-B1B8-4C26-8048-748F37BAA2DF` = `EFI_EVENT_GROUP_EXIT_BOOT_SERVICES`**。
+
+上一轮“RpmhDxe 不注册 EBS 事件、不会在 EBS 回收 TCS”的结论**撤回**。
+
+### 3. EBS 回调做了什么
+
+`0x149c`（NotifyFunction）：
+
+```text
+0x149c  stp  x29, x30, [sp, #-0x10]!
+0x14a4  bl   #0x14b0
+0x14ac  b    #0x3ba4
+```
+
+`0x14b0`：
+
+```text
+x10 = gBS
+x0  = [0xe250]                    ; 镜像句柄
+x1  = 0xe068                      ; 协议 GUID
+x2  = 0xe0d8                      ; 接口实例
+x3  = 0
+x4  = [gBS + 0x150]               ; UninstallMultipleProtocolInterfaces
+br  x4
+```
+
+`0x3ba4`（尾调用）遍历一张表：全局指针 `[0xbef8]`，元素步长 `0x30`，对每个元素
+调用 `0x7fdc` 与 `0x80c4`。
+
+也就是说，EBS 时驱动会注销自己的协议接口，再走一遍“客户端/命令表”的清理。
+这是**真实的 EBS 清理路径**，其内部是否完成或丢弃 TCS 事务，取决于 `0x7fdc`、
+`0x80c4` 两个函数。
+
+### 4. 之前误读的 `0xe0d8`
+
+`0xe0d0` 那 16 字节并不是 UEFI Configuration Table 的 GUID，而是协议接口结构；
+`InstallMultipleProtocolInterfaces` 在 `0x1568`、`UninstallMultipleProtocolInterfaces`
+在 `0x14d4`，配对使用同一个 GUID（`0xe068`）与接口指针（`0xe0d8`）。
+
+### 5. 状态
+
+| 项 | 状态 |
+| --- | --- |
+| EBS 事件注册 | 已证实（GUID 与 CreateEventEx 参数均对齐） |
+| EBS 回调内容 | 注销协议 + 表清理（`0x7fdc`/`0x80c4`） |
+| 回调是否触及 RSC/TCS | UNRESOLVED，下一步 |
+| drv-2 TCS1 所有权 | UNKNOWN |
+| 真实写入 | NO-GO |
+
+下一步只有三件事：反汇编 `0x7fdc` 与 `0x80c4`、解析 `[0xbef8]` 的表结构、
+确认回调清理的是命令队列还是 TCS 硬件状态。
