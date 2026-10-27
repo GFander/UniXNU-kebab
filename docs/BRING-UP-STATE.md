@@ -9216,3 +9216,385 @@ KEBAB DSC: plan 43 files / 52 mappings, 0xa2de8000 mapped, extent 0xaade8000 (en
 计划段减少 98.7%，整条 happy path 减少 95.1%。第 6 小节原先写的“~103 行 / 约 7 KiB”是估算，按真实格式串重放后实际是 102 行 / 11,560 B；16 KiB ring 没有改。
 
 失败路径不省：计划被拒时仍然先打失败原因，再把当时已经建好的部分计划完整 dump 出来；映射失败时仍然打 `vm_shared_region_map_file failed ... region is empty again` / `HALF MAPPED` 探针，并在非 verbose 模式下补一份完整计划 detail。`shared_region_check_np` 的失败分支（不匹配 / 不可用）保持原样。因此失败诊断信息不比 `0142` 少。
+
+
+## 七十四、launchd 起步所需的支持
+
+> 目标：把“exec 成功之后 launchd 会走到哪里、还需要什么”变成一张可以在下一次
+> 启动日志里逐行核对的表，而不是等真机一个门一个门地撞。
+>
+> 方法：读真实的 `/sbin/launchd`（541,600 字节，iOS 16.7.16 / 20H392，
+> `libxpc_executables-2462.140.4.702.1`）的 `LC_MAIN`、导入表、`__TEXT,__config`
+> 和调用点；对照 `xnu-8796.141.3` 加 122 个补丁后的源码树
+> （`~/xnu-0139`，`DEVELOPMENT/ARM64/KEBAB`）。板子仍然 stranded，本节没有
+> 任何真机日志。
+>
+> 边界：二进制能证明“它调用什么”，不能证明“这块板子上那条路径真的通”。
+> 凡是后者，都单列在第 6 节，不混进“已具备”。
+
+结论先写在这里：
+
+1. **这个 launchd 的 job 只有一个 spawn 入口：`posix_spawnp("/usr/libexec/xpcproxy", …)`。**
+   整个二进制的 `posix_spawn*` 调用只有三处：job 走 xpcproxy
+   （`posix_spawnp`，`0x100024abc`）、boot task 直跑（`posix_spawnp`，
+   `0x10003fe1c`）、以及 launchd **自我 re-exec**（`posix_spawn("/sbin/launchd",
+   …)`，flags `0x4040` = `SETEXEC|CLOEXEC_DEFAULT`，`0x100040ab8`，不是 job）。
+   因此卷上没有 `/usr/libexec/xpcproxy` 时，`com.kebab.zprint.plist` 一定起不来。
+   `launchd_proxyless_spawn=` 的默认值是 **1**（尝试 elide），它只改变 xpcproxy
+   内部的 elision；设成 `=0` 只会关掉 elision，**不会**把 xpcproxy 从路径里去掉。
+2. **job 的 stdio 在 launchd 里硬编码为 `/dev/console`**（xpcproxy 的 fd 0/1/2，
+   `0x1000249c4`），不是从 plist 的 `StandardOutPath` 推出来的。`/dev/console`
+   打不开时任何 job 都 spawn 不了；launchd 自己的日志 fallback 也是
+   `open("/dev/console")`，所以那一次启动会“看起来什么都没发生”。
+3. **main 的早期硬门在 xnu-8796 + kebab 上都不缺**：`kern.initproc_spawned`、
+   `task_set_special_port(TASK_BOOTSTRAP_PORT)`、`mach_ports_register`、
+   `host_set_special_port(HOST_COALITION_PORT)`、`proc_pidinfo(18)`、
+   `proc_rlimit_control`、`setlogin`、`setsid`、`chdir("/")` 都有实现，权限也对
+   （launchd 是 `initproc`）。唯一会因“非 Apple 配置”失败的是 `hw.targettype`
+   整个 sysctl 不存在（本树有，见 2.2）和 `kern.bootargs` 为空（本树有）。
+4. 卷上缺的东西里，只有 `/usr/libexec/xpcproxy` 是**硬 blocker**；
+   `/private/var/db/com.apple.xpc.launchd`、`/System/Library/xpc/launchd.plist`、
+   jetsam/limits/personas plist 缺失都只影响某一项功能或产生一行日志。
+5. 只有真机能定的关键三条：`/dev/console` 的 `cnopen → km_tty[0] → kmopen` 是否
+   真的通；xpcproxy 的 cdhash 是否在静态信任缓存里；xpcproxy 的
+   `POSIX_SPAWN_SETEXEC` 第二次 exec 是否和 launchd 的第一次 exec 一样过关。
+
+### 1. 真实二进制：launchd 的第一秒
+
+#### 1.1 版本与控制流
+
+`LC_MAIN entryoff = 92596 (0x169b4)`，入口 `0x1000169b4`；`LC_UUID =
+5C15DB07-B3BC-3DF3-B62F-3E498B993B8E`，`LC_BUILD_VERSION platform ios, sdk
+16.7.3, minos 16.7`。导入 537 个符号，直接依赖只有 `libSystem.B` 和
+`libobjc.A`，两条都在 43 个缓存分片里。
+
+main 的顺序（地址都是二进制 vaddr）：
+
+| 顺序 | 地址 | 做什么 | 失败行为 |
+| ---: | --- | --- | --- |
+| 1 | `0x1000169cc` | `getenv("LAUNCH_DID_REEXEC")` / `getenv("XPC_USERSPACE_REBOOTED")`；都没有才写 `sysctl kern.initproc_spawned=1` | 写失败只记日志，不退出（`0x10003e0ac` 忽略 ENOENT） |
+| 2 | `0x100016a10` | `isatty(1)`；若 fd 1 是 tty 且内部标志为假，`launchd_fatal("launchd cannot be run directly (stdout: %d)")` | `__os_crash`（`brk #1`），PID 1 死，内核 `pid 1 exited` |
+| 3 | `0x100016a68` | `getpid() != 1` 同上，`"(pid = %d)"` | 同上 |
+| 4 | `0x100016ab8` | `mach_host_self()`、`panic_init()` | — |
+| 5 | `0x100016ac0` | `launchd_runtime_init`：建 5 个 dispatch queue（`eventq/spawn/ioq/bgioq/bglogq`，`0x100014fac`） | 内存不足才失败 |
+| 6 | `0x100016af0` | PGM（Probabilistic Guard Malloc）配置 | 非致命 |
+| 7 | `0x100016b18` | 日志 `"hello"` | — |
+| 8 | `0x100016ba4` | `memorystatus_control(6, getpid(), highwater, 0, 0)` | 失败只打 `Could not opt into %d MB Jetsam high watermark` |
+| 9 | `0x100016c18` | 读 `kern.bootargs` 并打 `boot-args = %s` | 读不到只少一行 |
+| 10 | `0x100016c48` | `proc_disable_wakemon(getpid())` | 返回 `-1` 则 `__os_crash` |
+| 11 | `0x100016c54`…`0x100016ce0` | 判 lean / restore / BaseSystem / darwinos / PGM 环境变量 | — |
+| 12 | `0x100016cfc` | `setsid()`；只允许成功或 `EPERM`（已是 session leader） | 其它 errno `__os_crash` |
+| 13 | `0x100016d3c` | `chdir("/")` | `__os_crash` |
+| 14 | `0x100016d50` | `setlogin("root")` | `__os_crash` |
+| 15 | `0x100016d64` | 对约 21 个信号 `signal(sig, SIG_IGN)` | — |
+| 16 | `0x100016dcc` | `task_set_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT=4, MACH_PORT_NULL)`，把内核给的 bootstrap port 清空 | 打 `Could not neuter bootstrap port: 0x%x` 并 `exit(1)` |
+| 17 | `0x100016dfc` | 建自己的 bootstrap port（`0x1000168c4`，内部用 `0x433`/`0x7507` 两个常量） | — |
+| 18 | `0x100016e14` | `mach_ports_register(mach_task_self(), &port, 1)` | `launchd_fatal("could not set up inheritance port")` |
+| 19 | `0x100016e40`…`0x100016ec4` | 缓存 `mach_absolute_time`、UUID、uid/euid/egid/pid，`proc_pidinfo(getpid(), 18, 1, buf, 192)` | 返回 0 或 45（EOPNOTSUPP）之外 → `launchd_fatal("could not get unique pid")` |
+| 20 | `0x100016ed8`…`0x100016f18` | 注册一批 xpc 事件 handler，最后取 main queue | — |
+| 21 | `0x100016f1c` | `dispatch_activate(main_q)`；`dispatch_main()` | 之后全部异步 |
+
+`isatty(1)` 这一条在本移植上应当通过：内核 `load_init_program_at_path()`
+（`bsd/kern/kern_exec.c:6958`）用 `execve(..., envp=NULL)` 装载 launchd，
+init 进程的 fd 表是空的，fd 1 没有打开，`isatty(1)` 返回 0。**如果哪天内核给
+PID 1 预开了 `/dev/console`，这里反而会 abort**，因为 `cdevsw[0]` 的
+`d_type = D_TTY`。
+
+#### 1.2 `__TEXT,__config`：boot task 表
+
+`__TEXT,__config` 在文件偏移 `0x6485f`，2,056 字节，是一份 XML plist。和
+job 相关的键：
+
+* `Bootstrap.Paths`（按顺序）：`/System/Library/LaunchDaemons`、
+  `/System/Library/LaunchAngels`、`/AppleInternal/Library/LaunchDaemons`、
+  `/AppleInternal/Library/LaunchAngels`、`/System/Library/NanoLaunchDaemons`、
+  `/System/Library/NanoLaunchDaemonsAltAccount`、
+  `/System/Library/DeveloperModeLaunchDaemons`。**本卷只有第一个存在。**
+* `Bootstrap.UserPaths`：`/System/Library/LaunchAgents`、
+  `/AppleInternal/Library/LaunchAgents`，本卷都没有。
+* `Bootstrap.ChildDefaults.PATH`：`/usr/bin:/bin:/usr/sbin:/sbin`。
+* `SystemRoots`：`/System/Library`、`/AppleInternal/Library`、
+  `/System/Cryptexes/{OS,App}/System/Library`、`/private/preboot/Cryptexes/...`；
+  后四个本卷没有，缺失只是少几个候选根。
+* `Boot`：29 项。普通首启（不是 userspace reboot、不是 restore）只有
+  **`commit-boot-mode`** 和 **`init-with-data-volume`** 是 `PerformAlways`；
+  `detect-installed-roots`、`workload-properties-init` 是 `Block` 但没有
+  `Perform*` 标志；`fsck`、`mount-phase-1/2`、`data-protection` 等没有标志，
+  直接 `Skipping boot-task`；`launchd_cache_loader`、`keybag`、`dirs_cleaner`
+  等带 `PerformAfterUserspaceReboot`，普通首启不跑。第 68 节 2.1 的过滤规则
+  在这里被真实二进制再次确认。
+* `HighWatermark = 50`、`SIGTERMTimeout = 3`、`ExtensionWatchdog = true`。
+
+**修正一个容易误解的点**：`init-with-data-volume` 的 block handler 是
+`0x100027df8`，它只做三件事：`os_variant_init_4launchd()`、
+`__os_trace_update_with_datavolume_4launchd()`，然后跳到 `0x100045fb0`
+（读 `/private/etc/com.apple.xpc.launchd.limits.plist`、
+`/System/Library/UserManagement/com.apple.xpc.launchd.personas.plist`、
+`hw.targettype`，再装 jetsam 属性）。**它不是扫描 LaunchDaemons 的那一步**；
+job plist 的扫描/解析属于 system domain 初始化，和这个 block 是两件事。
+
+#### 1.3 job 的唯一 spawn 入口
+
+`0x100024398..0x100024c74` 是 job 的 spawn 函数。它最终在 `0x100024958`
+无条件加载全局 `0x100071778`，这个槽在 `__DATA` 里由 chained fixup 指向
+`"/usr/libexec/xpcproxy"`；随后：
+
+```
+argv = { "xpcproxy", <job->service_name>, … }
+fa   = addopen(0, "/dev/console", O_RDONLY, 0)
+       addopen(1, "/dev/console", O_WRONLY, 0)
+       addopen(2, "/dev/console", O_WRONLY, 0)
+attr = posix_spawnattr_set_registered_ports_np(&attr, {bootstrap_port, pid, …}, 2)
+posix_spawnp("/usr/libexec/xpcproxy", argv, fa, attr, envp)   // 0x100024abc
+```
+
+整个二进制里 `posix_spawn*` 只有三处：这一处、boot task 直跑
+（`0x10003fe1c`，`posix_spawnp(program, …)`，同样把 0/1/2 指向
+`/dev/console`，并用 `csops(pid, CS_OPS_STATUS)` 检查 bit 26
+`CS_PLATFORM_BINARY`），以及 launchd 自我 re-exec（`0x100040ab8`，
+`posix_spawn("/sbin/launchd", …, flags=0x4040)`；`0x100040a60` 先
+`setenv("LAUNCH_DID_REEXEC", …)`，成功后 `__os_crash` 不返回）。第三处不是 job，
+但说明 `POSIX_SPAWN_SETEXEC` 这条路径在 launchd 里本身也被用到。
+
+`0x1000454a0` 读 `launchd_proxyless_spawn=`，调用 `0x10003e108` 时第三个参数
+（默认值）是 **1**；所以：
+
+* 不写这个 boot-arg → `0x1000717bc = 1` → `0x100008618` 走
+  `"service will attempt to elide xpcproxy"`；
+* 写 `launchd_proxyless_spawn=0` → 走
+  `"service will always use xpcproxy, elision was disabled by boot-arg"`。
+
+两种情况下 `0x100024958` 都仍然 spawn `xpcproxy`。elide 的具体效果发生在
+xpcproxy 内部（它可以选择 `SETEXEC` 目标，省掉一次 fork）；无论哪种，
+**launchd 这一步都要 spawn `xpcproxy`，这个文件必须在卷上**。
+
+### 2. 需求表：设施/路径 → 现状 → 证据 → 症状
+
+“现状”只有三种：**具备**（源码/二进制能指到实现）、**具备但真机未验**
+（实现存在，但这条板级路径没跑过）、**缺失**（卷上没有或内核没有）。
+
+#### 2.1 Mach / BSD 设施
+
+| 设施 | 谁需要 | 现状 | 证据 | 缺失/失败时的症状 |
+| --- | --- | --- | --- | --- |
+| `task_set_special_port(TASK_BOOTSTRAP_PORT=4)` | main 清空内核给的 bootstrap port | 具备 | `osfmk/kern/ipc_tt.c:2142`；`case TASK_BOOTSTRAP_PORT` 在 `:2231`；MACF 默认无策略 | `Could not neuter bootstrap port: 0x%x` + `exit(1)` |
+| `mach_ports_register` | 把 bootstrap port 存进 task，子进程继承 | 具备 | `osfmk/kern/ipc_tt.c:2295`；只检查 `ipc_active` 和 immovable right | `could not set up inheritance port`（`__os_crash`） |
+| `host_set_special_port(HOST_COALITION_PORT=22)` | 把 main 建的 port 发布到 host special port 22 | 具备 | `osfmk/kern/host.c:1253`；`id=22` 在 `HOST_COALITION_PORT` 范围；`get_bsdtask_info(current_task()) == initproc` 时放行 | 只记 `__os_assumes_log_ctx`（`0x10004eb9c`），不退出 |
+| `mach_host_self` / `host_get_special_port` | 取 host 端口 | 具备 | `osfmk/kern/host.c`；`host_priv` 转换要求 `port == current_task()->itk_host` | 取不到只影响对应功能 |
+| `proc_pidinfo(PROC_PIDT_BSDINFOWITHUNIQID=18)` | main 缓存自己的 unique pid/start time | 具备 | flavor 18 在 `bsd/sys/proc_info.h:848`，实现于 `bsd/kern/proc_info.c:1981/2124`；size 0xc0 | 非 0/45 → `could not get unique pid`（`__os_crash`） |
+| `proc_rlimit_control`（`proc_disable_wakemon`） | main 关掉自己的 wakeups monitor | 具备 | `bsd/kern/syscalls.master:446`；`bsd/kern/kern_resource.c` `RLIMIT_WAKEUPS_MONITOR`；`osfmk/kern/task.c:7361` 对 `WAKEMON_DISABLE` 返回 `KERN_SUCCESS` | 返回 `-1` → `__os_crash`（无消息，只剩内核 `pid 1 exited`） |
+| `memorystatus_control(6, …)` | 设 Jetsam high watermark | 具备 | `bsd/kern/syscalls.master:440`；`CONFIG_MEMORYSTATUS` 在 `config/MASTER:365` | 只打 `Could not opt into %d MB Jetsam high watermark` |
+| `setlogin` | 设 session login name | 具备 | `bsd/kern/kern_prot.c:1656`；`proc_suser` + `proc_pgrp` | `__os_crash` |
+| `setsid` / `chdir` | 建 session、切到 `/` | 具备 | 标准 syscall；`chdir` 需要 root vnode | 非 `EPERM` 的 `setsid` 失败 / `chdir` 失败 → `__os_crash` |
+| `kqueue` / `kevent` / `kevent_qos` | libdispatch 的 timer、read source、throttle | 具备 | `bsd/kern/syscalls.master:362/363/374/375`；`bsd/conf/files:403` `kern_event.c standard` | `dispatch_source_create(TIMER)` 失败；job 的 penalty-box/throttle 计时不生效，**首次 spawn 仍可立即发生** |
+| `posix_spawn` / `posix_spawnp` | xpcproxy 的 `SETEXEC`、boot task 直跑 | 具备 | `bsd/kern/kern_exec.c:3423`；`SETEXEC` 分支在 `:3722`；special-port file action 在 `:2612` | 返回 errno；launchd 打 `posix_spawn(%s) failed` / `%s spawn failed: %d: %s` |
+| `csops` / `csops_audittoken` | boot task 的平台位检查；launchd 判断子进程是否 platform | 具备 | `bsd/kern/kern_proc.c:3078`；`CS_OPS_STATUS` 在 `:3146/:3205`；`CS_PLATFORM_BINARY` 来自 `csproc_get_platform_binary()` | `csops returned %d` / `unexpected exec of non-platform binary: %s: %s [%d]` |
+| `coalition`（create/terminate/reap/info） | xpcproxy/job 的 coalition 归属 | 具备 | `bsd/kern/sys_coalition.c`；`osfmk/kern/coalition.c:2023` 把 `init_coalition` 建成 `privileged=TRUE`，PID 1 在其中 | 非 privileged 会 EPERM；`coalition_find_and_activate_by_id` 找不到 → `ESRCH`，`posix_spawn` 失败 |
+| `persona` | 用户域 job 的 persona；root daemon 通常不用 | 具备 | `bsd/kern/sys_persona.c`；`CONFIG_PERSONAS` 在 `config/MASTER:543` | `spawn_persona_adopt` 失败 → `posix_spawn` 失败；本 job 不触发 |
+| `proc_pid_rusage` / `proc_pidinfo` / `task_name_for_pid` / `proc_terminate` | launchd 管理子进程 | 具备 | `bsd/kern/proc_info.c`；syscall 336 | 打 `proc_pid_rusage() failed for PID…` 等，通常不致命 |
+| `kern.proc.all`（`sysctl`） | launchd 枚举进程/回收 | 具备 | `bsd/kern/kern_sysctl.c:958` | 枚举失败只影响孤儿回收 |
+
+#### 2.2 sysctl
+
+| sysctl | 谁需要 | 现状 | 证据 | 缺失时的症状 |
+| --- | --- | --- | --- | --- |
+| `kern.initproc_spawned` | main 通知内核 PID 1 已到 main | 具备 | `bsd/kern/kern_exit.c:1306-1318`，仅 PID 1 可写一次 | 写失败被 `0x10003e0ac` 忽略；不改启动 |
+| `kern.bootargs` | 解析 `-v`、`launchd_proxyless_spawn=` 等 | 具备，且必须非空 | `bsd/kern/kern_sysctl.c:2174`；kebab 的 `board.toml [payload] kernel_args` 会填它 | 读不到或为空会走到 `launchd_fatal("no bootargs string")` 的 fatal 路径 |
+| `hw.targettype` | jetsam 属性文件名的 `%s.%s.plist` | 具备（可为空串） | `iokit/Kernel/IOPMrootDomain.cpp:1387`；`sysctl_targettype` 返回 `""` 而不是错误 | 整个 sysctl 不存在 → `sysctl hw.targettype was not set`（`launchd_fatal`）；空串只导致找不到 plist |
+| `kern.osversion` / `kern.osproductversion` / `kern.osreleasetype` | 版本/变体判断 | 具备 | `bsd/kern/kern_sysctl.c:1897/2015/2039` | 打 `Unable to reload kern.osversion: %d` 等，不致命 |
+| `kern.willshutdown` | 关机路径 | 具备，但只在 `IOPMrootDomain::start` 之后注册 | `iokit/Kernel/IOPMrootDomain.cpp:1235`，`gWillShutdownSysctlRegistered=true` 在 `:1801` | 启动早期读会得到 `ENOENT`；launchd 当作“未关机”，不致命 |
+| `kern.willuserspacereboot` | userspace reboot 判断 | 具备 | `bsd/kern/kern_xxx.c` | 只影响 reboot 模式 |
+| `kern.proc.all` | 进程枚举 | 具备 | `bsd/kern/kern_sysctl.c:958` | 回收/枚举少几条 |
+| `kern.maxfiles` / `maxfilesperproc` / `maxproc` / `maxprocperuid` | 设 rlimit | 具备 | `bsd/kern/kern_mib.c` 的 `KERN_MAXFILES` 等 | 读不到只少一次 `setrlimit` |
+| `kern.roots_installed` | `detect-installed-roots` block | 具备，但读需要 entitlement | `bsd/kern/kern_sysctl.c:1921`；`kRootsInstalled*Entitlement` | 无 entitlement → `EPERM`；`detect-installed-roots` 只打日志/继续（`Found roots installed cookie` 不出现） |
+| `kern.syscall_rejection_masks` | launchd 的可选安全配置 | 具备（DEVELOPMENT/DEBUG） | `bsd/kern/kern_debug.c:468`；`config_debug_syscall_rejection` 只在 DEV/DEBUG | 读失败只打 `sysctl failed with error (%i)` |
+| `kern.workload_config` / `kern.bootobjectspath` / `kern.minimalboot` / `kern.hostname` | 启动模式/主机名 | 具备 | `bsd/kern/kern_sysctl.c:555/2964/4052`；`kern.hostname` 在 `kern_mib.c` | 分别只影响对应功能 |
+
+#### 2.3 文件与目录
+
+| 路径 | 谁需要 | 现状 | 证据 | 缺失时的症状 |
+| --- | --- | --- | --- | --- |
+| `/sbin/launchd` | `load_init_program()` | 具备 | `base.kist` 第一条；`bsd/kern/kern_exec.c:6958` | 内核 `load_init_program: failed loading /sbin/launchd` |
+| `/usr/lib/dyld` | exec 的解释器 | 具备 | `base.kist`；`LC_LOAD_DYLINKER` | `initproc failed to start`（namespace 6） |
+| `/usr/lib/zprint` | 唯一 job 的 Program | 具备 | `base.kist`；依赖 5 条全在缓存 | `Could not find and/or execute program specified by service: 2: …` |
+| `/System/Library/LaunchDaemons/com.kebab.zprint.plist` | 唯一 LaunchDaemon | 具备 | `base.kist`；`RunAtLoad`，无 `UserName` | 目录空 → 没有 job，日志无 spawn 行 |
+| `/System/Library/xpc/launchd.plist` | 追加 boot task；普通首启可缺 | **缺失** | 二进制 `0x100019964` 读它；缺失只打 `Unable to open … [2:No such file or directory]` | 继续；但也就不能用“boot task 直跑”这条备用路线 |
+| `/usr/libexec/xpcproxy` | **所有 job 的 spawn 入口** | **缺失** | `0x100071778` → 字符串；`0x100024abc` 唯一 job spawn 调用 | `service spawn failed: 2: No such file or directory`（也可能是 `xpcproxy spawn failed`，取决于 `job->flags & 0x80`）；console 不正常时先报 errno 6 |
+| `/private/etc/passwd` + `master.passwd` + `group` | `getpwuid_r(0)` / `getpwnam_r("root")` | 具备 | `skel.kist`；`libsystem_info` 的缓存分片 `.05` 里有 `/etc/master.passwd`、`/etc/passwd`、`/etc/group` 字符串 | `Could not find uid associated with service: 0: … 0`，job 不 spawn |
+| `/private/var/tmp`（01777） | job 的 `mkdtemp("/private/var/tmp/com.apple.launchd.XXXXXXXXXX")` | 具备 | `skel.kist`；`0x10001be88` `_mkdtemp` | `Unable to create stdout/stderr directory (%s)`；带 `StandardOutPath` 的 job 失败 |
+| `/private/var/log/com.apple.xpc.launchd` | launchd 的日志目录 | 自动创建 | `0x10003e904` `_mkdir(path, 0700)`，path 是 `0x100071768` 指向的该字符串 | `mkdir` 失败只忽略；日志 fallback 到 console |
+| `/private/var/db/com.apple.xpc.launchd` | `disabled.plist` / `overrides.plist` / 迁移状态 | **缺失** | `0x100045dd4`/`0x100045ed4` 读该目录；卷骨架没有它 | `fts`/`stat` 失败，打 `Unable to stat/open`，单 job 仍可 spawn；建议补 |
+| `/private/var/run` + `/var` 符号链接 | `/var/run/syslog` 的父目录；`mkdir` 只发生在日志目录 | 具备 | `skel.kist`；launchd 唯一的 `_mkdir` 是日志目录（见上一行） | `/var/run` 缺失时 syslog 路径解析失败，fallback 到 console |
+| `/var/run/syslog` | launchd 的 syslog sink | **缺失** | `0x10003e9a0` 用 `/private/%s` + `/var/run/syslog` 拼路径 | 连不上 → 日志走 `open("/dev/console")` 的 fallback；若 console 也打不开则日志全丢 |
+| `/dev/console` | launchd 日志 fallback + 每个 job 的 fd 0/1/2 | **节点具备，open 未验证** | `devfs_vfsops.c:116` 建 `makedev(0,0)` 0622；`cnopen → cndev → km_tty[0] → kmopen`（`bsd/dev/arm/cons.c:52`、`bsd/dev/arm/km.c:69`）；`bsd/dev/kebab_ufs.c:813` 注释明确说这条路径“does not complete here yet” | `xpcproxy spawn failed: 6: Device not configured`；`launchd logging initialized …` 不出现；没有任何 launchd 日志 |
+| `/dev/null` | 无 `StandardOutPath` 的 job 的 stdio | 具备 | `devfs_vfsops.c` 建 `makedev(3,2)` 0666 | 对应 job 的 spawn 失败；本 job 用 console，不受影响 |
+| `/dev/kebabcon` | 面板直写备用通道 | 具备 | `bsd/dev/kebab_ufs.c:819`，0666，只写 | launchd 不认这个路径；只能人工改 plist，且**不能**替代 xpcproxy 的硬编码 console fd |
+| `/System/Library/CoreServices/SystemVersion.plist` | `os_variant_*` | **缺失** | launchd 的 `os_variant` 依赖它 | `os_variant_has_internal_diagnostics` 等返回 false；不致命，但 `os_variant_init_4launchd` 后行为按非 internal 走 |
+| `/System/Library/.../com.apple.jetsamproperties*.plist` | jetsam 属性 | 缺失 | `0x10000fd38` 依次试 NonUI、target 专属、System 路径 | 都打不开时安静返回；不致命 |
+| `/private/etc/com.apple.xpc.launchd.limits.plist` | 全局资源限制 | 缺失 | `0x100045fb0` 读它 | 读不到跳过；不致命 |
+| `/System/Library/UserManagement/com.apple.xpc.launchd.personas.plist` | persona 服务列表 | 缺失 | `0x100045ff4` 读它 | 读不到跳过；不致命 |
+| `/private/preboot` | cryptex 根 | 缺失 | `SystemRoots` 里的候选 | 只少几个候选根；不致命 |
+| `/etc/nologin` | 拒绝登录 | 缺失 | 二进制里有该字符串检查 | 不存在就是允许；不致命 |
+
+#### 2.4 代码签名
+
+| 项 | 现状 | 证据 | 缺失时的症状 |
+| --- | --- | --- | --- |
+| 静态信任缓存 `/System/Library/Caches/com.apple.kernelcaches/static.trustcache` | 具备 | `base.kist`；`kebab_cs_trustcache_load()` 默认路径 | `kebab_cs=15` 下没有 TC → 没有 `CS_PLATFORM_BINARY` |
+| `kebab_cs=15` | 需要 | `KEBAB_CS_TRUSTCACHE_PLATFORM`（bit 1）+ `KEBAB_CS_GRANT_ENTITLEMENTS`（bit 2）+ 其余两位；`kebab_cs_classify_blob()` | 无 platform 位、所有 entitlement 查询 deny；launchd 会拒绝/boot task 报 `not a platform binary` |
+| launchd/dyld/zprint 的 cdhash 在 TC 里 | 主机脚本已核对 | `make-minimal-userland.py` 的 `check_trustcache()` | `exec cdhash … tc=miss platform=0`，随后 `CS_KILLED` 或 `unexpected exec of non-platform binary` |
+| xpcproxy 的 cdhash 在 TC 里 | **无法核对（文件不在卷/提取树里）** | mtree 有 `/usr/libexec/xpcproxy`，但本地没提取 | 若不在 TC：xpcproxy 自己 exec 时被当成非 platform，`unexpected exec of non-platform binary: /usr/libexec/xpcproxy …` |
+
+**没有 entitlement 会挡路。** `IOTaskHasEntitlement()` 的实现是
+`iokit/bsddev/IOKitBSDInit.cpp:1534` → `amfi->OSEntitlements.queryEntitlementBooleanWithProc`；
+kebab 的 provider（`bsd/kern/kebab_amfi.c:114`）在 `kebab_cs` 有
+`KEBAB_CS_GRANT_ENTITLEMENTS`（`0xf` 的 bit 2）时对**任何** entitlement 返回
+`KERN_SUCCESS`。所以 `kebab_cs=15` 下，launchd 的
+`com.apple.private.roots-installed-read-write`、coalition spawn、
+`com.apple.private.spawn-subsystem-root` 等等都不会是 blocker；反过来说，
+如果启动参数写成别的值（比如 `kebab_cs=3`），这些门会一起变回 deny，症状是
+`EPERM`/“not permitted”，而不是 launchd 的某一行。
+
+### 3. zprint job 的路径逐段
+
+1. **扫描**：system domain 初始化时按 `Bootstrap.Paths` 扫
+   `/System/Library/LaunchDaemons`（本卷唯一存在的路径），`xpc_create_from_plist`
+   读 `com.kebab.zprint.plist`。plist 必须是 root 所有、不可被他人写；内核
+   installer 建的文件是 root:wheel 0644，满足。
+2. **建 job**：`Label=com.kebab.zprint`，没有 `Program`，所以 `ProgramArguments[0]`
+   `/usr/lib/zprint` 就是 Program；`RunAtLoad=true`，`KeepAlive=false`，
+   `StandardOutPath/StandardErrorPath=/dev/console`。
+3. **凭据**：没有 `UserName`，launchd 用 uid 0，调 `getpwuid_r(0, …)`
+   （`0x10001ad08`）。找不到 entry 时返回 114，打
+   `Could not find uid associated with service: 0: … 0`，job 不 spawn。
+4. **stdio**：job 的 `StandardOutPath` 是 console，但**即使不是**，launchd 给
+   xpcproxy 的 fd 0/1/2 也硬编码为 `/dev/console`（`0x1000249c4`）。所以
+   `/dev/console` 是“每个 job 都要”的条件，不是“只有日志要”。
+5. **bootstrap/attr**：`posix_spawnattr_set_registered_ports_np(&attr,
+   {bootstrap_port, pid, …}, 2)`（`0x100024a80`）；attr 里还有 coalition、
+   jetsam、launch type、role、信号掩码等，都是 xnu-8796 的 stock 路径。
+6. **spawn**：`posix_spawnp("/usr/libexec/xpcproxy", {"xpcproxy", <service>, …},
+   fa, attr, envp)`。xpcproxy 再通过 bootstrap port 拿到 launchd 的 spawn
+   请求，最后 `posix_spawn`（`SETEXEC`）到 `/usr/lib/zprint`。
+7. **throttle/timer**：job 的 penalty box/`dispatch_after` 用 libdispatch 的
+   timer（kqueue `EVFILT_TIMER`）。kqueue 坏了只会让 throttle 计时不准，不会
+   阻止第一次 `RunAtLoad` spawn；但 `dispatch_source_set_timer` 失败会在
+   launchd 日志里留下 `__os_assumes_log` 行。
+8. **平台检查**：launchd 在子进程 exec 之后用 `csops` 看 `CS_PLATFORM_BINARY`；
+   zprint 在 TC 里，正常应命中。boot task 的那条路径则是**在 spawn 后立刻**
+   `csops`，不命中就直接 `boot task is not a platform binary (%s, %s)`。
+
+### 4. 排序：下一次启动最可能先坏什么
+
+排名按“当前卷 + 当前内核”的实际可能性，不按修复难度。
+
+| # | 失败 | 第一行/关键行 | 随后 | 判读 | 修法 |
+| ---: | --- | --- | --- | --- | --- |
+| 1 | **`/usr/libexec/xpcproxy` 不在卷上** | （console 正常时）`service spawn failed: 2: No such file or directory` 或 `xpcproxy spawn failed: 2: …` 或 `Could not spawn process com.kebab.zprint: 2: …` | job 进 penalty box，`service throttled by %llu seconds`；zprint 表永远不出现；launchd 本身不退出 | 这是**确定的**，与硬件无关；不是 plist/签名/console 的问题 | 把 `/usr/libexec/` 加进 installer 允许清单并装 xpcproxy（+ 核对 TC/依赖）；或改用 boot task 直跑（见 5/7） |
+| 2 | **`/dev/console` open 失败** | `service spawn failed: 6: Device not configured`（errno 6 来自 file action，先于 xpcproxy 的 ENOENT） | 连 `launchd logging initialized. name: com.apple.xpc.launchd pid: 1` 都没有；USB 面板上看不到任何 launchd 行 | 这不是 launchd 坏了，是 `cnopen → km_tty[0] → kmopen` 这条 tty 路径没通；它同时吃掉日志和 job | 修 tty 层（`kmopen/kmstart/kmputc/console_write_char`），或让 `cnopen` 对 console 走 `/dev/kebabcon` 的直写；只改 job plist 的 `StandardOutPath` **无效**，因为 xpcproxy 的 0/1/2 是硬编码 |
+| 3 | **xpcproxy 的第二次 exec / 平台位** | `xpcproxy could not exec: 85: Bad executable` 或 `unexpected SIGKILL … namespace 9 code 0x6`；或 `unexpected exec of non-platform binary: /usr/lib/zprint: …` | 若有 9/6，内核先打 `KEBAB EXEC: copyout stage=strings …`；若是平台位，`exec cdhash … tc=miss platform=0` | 第一次 exec（launchd）修好后，`SETEXEC` 是**另一种形状**的 exec；`posix_spawn` 的 argv/envp 非空、走 `:3722` 的 `SETEXEC` 分支，不能假设和 init exec 完全等价 | 用同一个 copyout 修法覆盖 `posix_spawn` 入口；先 `verify-trustcache-cdhash.py` 核 xpcproxy/zprint 的 cdhash |
+| 4 | **`getpwuid_r(0)` 无 entry** | `Could not find uid associated with service: 0: … 0` | 没有 xpcproxy spawn 行 | 卷上有 `/etc/passwd`/`master.passwd`，且 `libsystem_info` 分片里有 `/etc/master.passwd` 字符串；但“没有 opendirectoryd 时是否回退到文件”只有真机能证 | 保留 root entry；如仍失败，先确认 `getpwuid_r(0)` 的返回值，而不是怀疑 launchd |
+| 5 | **`init-with-data-volume` / 启动模式块失败** | `boot-mode …` / `init-with-data-volume` 相关行；或 `launchd built improperly` / `no boot tasks` | 没有 plist 扫描行，直接没有 job | 这个块本身只做 os_variant/trace/limits/personas/jetsam，**不扫 job**；但它失败是否连带影响 system domain 初始化，只有真机能定 | 先看有没有 `Could not parse plist` 或 `Unable to stat/open`；没有就说明还没走到 job 扫描 |
+| 6 | **kqueue / timer 失败** | `__os_assumes_log`（`dispatch_source_set_timer`）/ `dispatch_source_create` 失败行 | 首次 `RunAtLoad` 仍可能成功；throttle 重试计时不准 | 不要把“10 秒后没重试”误判成 launchd 死了 | 单独测 `kqueue()`/`kevent(EVFILT_TIMER)`；不影响首轮 spawn |
+
+#### 4.1 读日志的顺序（决策表）
+
+| 最早看到 | 说明 | 下一步 |
+| --- | --- | --- |
+| `pid 1 exited -- exit reason …` / `initproc exited` | launchd 在 main 之前或 main 早期死了；先看 `KEBAB EXEC: copyout stage=…` / namespace 9 的 code | 回到第 66/72 节的 exec 诊断，不要看 plist |
+| `launchd cannot be run directly (stdout: %d)` | fd 1 被内核预开成了 tty | 不要给 PID 1 预开 console；保持 fd 表为空 |
+| `no bootargs string` / `no boot tasks` / `launchd built improperly` | `kern.bootargs` 空、`__config` 的 `Boot` 空/不是 dict | 检查 loader 是否把 `kernel_args` 传进 `kern.bootargs` |
+| `sysctl hw.targettype was not set` | `IOPMrootDomain` 的 `hw.targettype` 节点整个不存在 | 检查 IOKit/IOPMrootDomain 是否编进内核并 start |
+| `Could not neuter bootstrap port` / `could not set up inheritance port` / `could not get unique pid` | main 的 Mach/端口硬门 | 看对应的 `task_set_special_port`/`mach_ports_register`/`proc_pidinfo(18)` errno |
+| `launchd logging initialized. name: com.apple.xpc.launchd pid: 1` | main 和 boot task 都过了，日志 sink 也建立了 | 说明 `/dev/console` 至少能 open；继续看 job |
+| `service spawn failed: 6: …` / `xpcproxy spawn failed: 6: …` | `/dev/console` 打不开（file action 先失败） | 修 tty/console，先别看 xpcproxy |
+| `service spawn failed: 2: …` / `xpcproxy spawn failed: 2: …` | console 正常，xpcproxy 不存在 | 装 xpcproxy 或改 boot task |
+| `Could not find uid associated with service: 0: …` | passwd 没被 libinfo 读到 | 查 `/etc/passwd`/`master.passwd` 与 `getpwuid_r(0)` |
+| `unexpected exec of non-platform binary: …` | TC 没覆盖该二进制，或 `kebab_cs` 没给 platform 位 | 核 cdhash/TC/`kebab_cs=15` |
+| `zone name` / `ZONE TOTALS` | zprint 真的跑了 | 目标达成；之后才是 zprint 自身 `mach_memory_info` 的权限问题 |
+
+### 5. 卷还缺什么
+
+按“下一版 `base.kist` / `skel.kist` 要不要加”排列：
+
+| 路径 | 缺失后果 | 建议 |
+| --- | --- | --- |
+| `/usr/libexec/xpcproxy` | **所有 job 无法 spawn**（硬 blocker） | 必须加；同时把 `/usr/libexec/` 加进 `kebab_install.c` 的 `ki_alloc[]` 前缀表，或改走 boot task |
+| `/private/var/db/com.apple.xpc.launchd` | `disabled.plist`/`overrides.plist` 迁移读不到；单 job 仍可跑 | 加进 `SKELETON_DIRS`（0755）；`config` 子目录可选 |
+| `/private/var/log/com.apple.xpc.launchd` | launchd 自己会 `mkdir` | 可不加；加了少一次 `mkdir` |
+| `/System/Library/xpc/launchd.plist` | 普通首启只多一行 `Unable to open` | 若要“boot task 直跑”这条备用路线，必须加（且要加 `/System/Library/xpc/` 前缀或 skel 允许清单） |
+| `/var/run/syslog` | 连不上 syslogd；日志 fallback 到 console | 不加；但 console 必须通，否则日志全丢 |
+| `/System/Library/CoreServices/SystemVersion.plist` | `os_variant_*` 走非 internal 分支 | 可选；不影响 spawn |
+| jetsam/limits/personas 三个 plist | 对应功能缺席，均非致命 | 可选；先保证 job 能跑 |
+| `/private/var/tmp`（01777） | `mkdtemp` 失败，带 `StandardOutPath` 的 job 失败 | 已在 `skel.kist`，保留 |
+| `/dev` 目录 | `devfs_kernel_mount: kernel_mount failed: 2`，所有 `/dev/*` 没有 | 已在 `skel.kist`，保留 |
+| `/etc`、`/tmp`、`/var` 符号链接 | `/etc/passwd`、`/var/run/syslog`、`mkdtemp` 全部走错 | 已在 `skel.kist`，保留 |
+
+**更正第 68 节的一处**：第 68 节 3 写“整个二进制只有一处 `_mkdir` 调用，
+参数是 `/var/run`、模式 0700”。按真实二进制复核，`_mkdir` 只有一处
+（`0x10003e904`），但参数是 `0x100071768` 指向的
+`/private/var/log/com.apple.xpc.launchd`，不是 `/var/run`。`/var/run` 由
+`skel.kist` 提供即可；`/private/var/log/com.apple.xpc.launchd` 则由 launchd
+自己按 0700 建。这个更正不影响第 68 节的结论（`/dev`、`/var`、`/tmp` 仍必须
+由卷骨架提供）。
+
+**不要**把 `/dev/console`、`/dev/null` 当普通文件装进去：devfs 的节点是
+`devfs_init` 在挂载时创建的，普通文件会遮住它们，语义完全错（第 68 节 3 已写）。
+
+### 6. 只有真机能定的
+
+1. **`/dev/console` 的 open 是否成功。** 源码链是
+   `devfs(0,0) → cnopen → cndev() → km_tty[0]->t_dev(12,0) → kmopen →
+   ttyopen/PE_current_console`，`kminit()` 在 `bsd_autoconf` 里跑过；但
+   `bsd/dev/kebab_ufs.c:813` 的注释明确说这条路径“does not complete here yet”。
+   USB 面板上看不到 `launchd logging initialized` 时，先怀疑它，不要先怀疑
+   launchd。
+2. **xpcproxy 的 cdhash 是否在静态信任缓存里。** 文件不在当前提取树里；
+   mtree 只证明它在 OS 里存在。加进卷之前必须用
+   `scripts/verify-trustcache-cdhash.py` 核；否则 `unexpected exec of
+   non-platform binary` 会把“缺文件”换成“签名不对”。
+3. **xpcproxy 的 `POSIX_SPAWN_SETEXEC` 第二次 exec。** launchd 的 exec 是
+   `load_init_program_at_path()` 的 `execve(envp=NULL)`；xpcproxy 的是
+   `posix_spawn` 的 `SETEXEC` 分支（`kern_exec.c:3722`），argv/envp 都非空。
+   9/6 的修法是否覆盖这条，只有真机能证。
+4. **`getpwuid_r(0)` 在没有 opendirectoryd 时是否回退到 `/etc/master.passwd`。**
+   缓存分片 `.05` 里确实有 `/etc/master.passwd`/`/etc/passwd`/`/etc/group`
+   字符串，但“先 mach lookup 失败、再 files 回退”的实际路径没跑过。
+5. **`init-with-data-volume` 与 system domain 初始化的先后。** 这个 block
+   本身只碰 os_variant/trace/limits/personas/jetsam；job 扫描是否在它之前完成，
+   决定“它失败会不会连带没有 job”。
+6. **kqueue/`EVFILT_TIMER` 在这块板子上的行为。** 内核源码在，但 libdispatch
+   的 timer 是 16 KiB 页 + 新 kqueue 的第一批真实用户；首次 spawn 不依赖它，
+   重试/throttle 依赖它。
+7. **os_log 的可见性。** launchd 的日志 fallback 是 `open("/dev/console")`；
+   如果 console 通，日志应该上面板；如果不通，即使 oslog 设备在，也没有
+   logd 消费，不能用“没有日志”推断“launchd 没跑”。
+
+### 7. 下一次启动的最小改动（建议，不含真机验证）
+
+按“先让 zprint 出来”的目标，有两条路，二选一：
+
+**A. 装 xpcproxy（推荐，走原设计）**
+
+1. 从 SystemOS cryptex 提取 `/usr/libexec/xpcproxy`（mtree 已确认存在）。
+2. `verify-trustcache-cdhash.py` 核它的 cdhash；不在 TC 就先解决 TC，不要指望
+   `kebab_cs` 能给它 platform 位。
+3. 在 `kebab_install.c` 的允许前缀里加 `/usr/libexec/`（这是内核改动，需重编）。
+4. 把它放进 `base.kist`；依赖应该只有 `libSystem`/`libxpc`，都在缓存里。
+5. 保留 `launchd_proxyless_spawn` 默认值（elide），不要设 `=0`。
+
+**B. 用 boot task 直跑（最小绕过，不改 launchd）**
+
+1. 写一份 `/System/Library/xpc/launchd.plist`，`Boot` 字典里加一个
+   `PerformAlways` 的任务：
+   `Program=/usr/lib/zprint`、`ProgramArguments=[/usr/lib/zprint, -L]`。
+2. 该文件不在 installer 的六个前缀里：要么加 `/System/Library/xpc/`，要么把
+   这个精确路径加进 `ki_skel_allow[]` 并用 `skel.kist` 送。
+3. boot task 的 runner 也是 `posix_spawnp` 直跑，stdio 同样硬编码
+   `/dev/console`，并会 `csops` 检查 platform 位；所以它绕开 xpcproxy，但**绕不开
+   console 和 TC**。
+4. 这条路的输出在 launchd 日志初始化之前，仍然走 `/dev/console`；若 console
+   不通，一样看不到。
+
+两条路都要求 console 先通；如果下一次启动没有
+`launchd logging initialized`，先修 console，不要先动 xpcproxy。
