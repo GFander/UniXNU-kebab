@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
+#define _GNU_SOURCE
 /*
  * R5-C2/C3: the TCS1 send state machine against a virtual register file,
  * including per-stage fault injection.  No MMIO, no kernel, no device.
@@ -144,6 +145,8 @@ static kebab_tcs_io fake_io(fake *f)
 }
 
 
+static pthread_barrier_t race_barrier;
+
 typedef struct {
 	kebab_rpmh_tcs  *tcs;
 	kebab_rpmh_cmd  *cmd;
@@ -154,6 +157,7 @@ static void *race_thread(void *arg)
 {
 	thread_arg *a = arg;
 
+	pthread_barrier_wait(&race_barrier);
 	*a->rc = kebab_rpmh_tcs_send(a->tcs, a->cmd);
 	return NULL;
 }
@@ -399,26 +403,52 @@ int main(void)
 	    "missing clock still terminates");
 
 	printf("C21 two threads cannot both claim the channel\n");
-	memset(&lock, 0, sizeof(lock));
-	fake_init(&f, KEBAB_TCS_AMC_ENABLE);
-	kebab_rpmh_tcs_init(&tcs, fake_io(&f), &lock);
 	{
-		int rc1 = -1, rc2 = -1;
+		int round, wins = 0, refusals = 0, bad_writes = 0;
 
-		thread_arg a1 = { &tcs, &cmd, &rc1 };
-		thread_arg a2 = { &tcs, &cmd, &rc2 };
-		pthread_t t1, t2;
+		for (round = 0; round < 50; round++) {
+			int rc1 = -1, rc2 = -1;
+			thread_arg a1 = { &tcs, &cmd, &rc1 };
+			thread_arg a2 = { &tcs, &cmd, &rc2 };
+			pthread_t t1, t2;
 
-		pthread_create(&t1, NULL, race_thread, &a1);
-		pthread_create(&t2, NULL, race_thread, &a2);
-		pthread_join(t1, NULL);
-		pthread_join(t2, NULL);
-		CHECK((rc1 == KEBAB_RPMH_OK) != (rc2 == KEBAB_RPMH_OK),
-		    "exactly one thread ran the command");
-		CHECK(rc1 == KEBAB_RPMH_ERR_TCS_STATE ||
-		    rc2 == KEBAB_RPMH_ERR_TCS_STATE,
-		    "the loser was refused by the claim");
-		CHECK(f.wr_count == 10, "only one transaction reached the registers");
+			memset(&lock, 0, sizeof(lock));
+			fake_init(&f, KEBAB_TCS_AMC_ENABLE);
+			kebab_rpmh_tcs_init(&tcs, fake_io(&f), &lock);
+			pthread_barrier_init(&race_barrier, NULL, 3);
+			pthread_create(&t1, NULL, race_thread, &a1);
+			pthread_create(&t2, NULL, race_thread, &a2);
+			pthread_barrier_wait(&race_barrier);
+			pthread_join(t1, NULL);
+			pthread_join(t2, NULL);
+			pthread_barrier_destroy(&race_barrier);
+			if ((rc1 == KEBAB_RPMH_OK) != (rc2 == KEBAB_RPMH_OK)) {
+				wins++;
+			}
+			if (rc1 == KEBAB_RPMH_ERR_TCS_STATE ||
+			    rc2 == KEBAB_RPMH_ERR_TCS_STATE) {
+				refusals++;
+			}
+			if (f.wr_count != 10) {
+				bad_writes++;
+			}
+		}
+		CHECK(wins == 50, "every round had exactly one winner");
+		CHECK(refusals == 50, "every round refused the loser");
+		CHECK(bad_writes == 0, "every round issued exactly one transaction");
+	}
+
+	printf("C22 the global lock is shared across channels\n");
+	{
+		kebab_rpmh_tcs tcs2;
+		kebab_rpmh_lock *g1, *g2;
+
+		kebab_rpmh_tcs_init_global(&tcs, fake_io(&f));
+		kebab_rpmh_tcs_init_global(&tcs2, fake_io(&f));
+		g1 = kebab_rpmh_global_lock_get();
+		g2 = kebab_rpmh_global_lock_get();
+		CHECK(g1 == g2, "both channels use the same lock object");
+		CHECK(tcs.lock == g1 && tcs2.lock == g1, "init_global wired it through");
 	}
 
 	printf("\n%d checks, %d failure(s)\n", checks, failures);

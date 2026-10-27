@@ -401,6 +401,28 @@ tcs_undo_pre_trigger(kebab_rpmh_tcs *t, uint32_t control, uint32_t confirmed)
 	return failed;
 }
 
+/*
+ * One lock for the whole boot.  A caller-owned lock is fine for the host
+ * tests, but the kernel port has to use this single instance: two call sites
+ * each declaring their own lock would each get their own "once per boot".
+ */
+static kebab_rpmh_lock kebab_rpmh_global_lock;
+
+void
+kebab_rpmh_tcs_init_global(kebab_rpmh_tcs *t, kebab_tcs_io io)
+{
+	kebab_rpmh_tcs_init(t, io, &kebab_rpmh_global_lock);
+}
+
+/*
+ * Test-only view of the global lock so a suite can prove it is shared.
+ */
+kebab_rpmh_lock *
+kebab_rpmh_global_lock_get(void)
+{
+	return &kebab_rpmh_global_lock;
+}
+
 kebab_rpmh_status
 kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 {

@@ -139,6 +139,10 @@ void kebab_rpmh_tcs_init(kebab_rpmh_tcs *t, kebab_tcs_io io,
 kebab_rpmh_status kebab_rpmh_tcs_send(kebab_rpmh_tcs *t,
     const kebab_rpmh_cmd *cmd);
 
+/* The kernel port uses these two: one global lock, never a local one. */
+void kebab_rpmh_tcs_init_global(kebab_rpmh_tcs *t, kebab_tcs_io io);
+kebab_rpmh_lock *kebab_rpmh_global_lock_get(void);
+
 /* Simulated channel used by the TCS state tests (not used by send). */
 typedef enum {
 	KEBAB_TCS_FREE = 0,

@@ -3865,3 +3865,49 @@ ABL/UEFI 侧的 RPMh 初始化与交接证据，或者与固件约定一个明�
 
 - 实测：56 项主机断言（含并发）、105 项编码/授权与故障注入断言；
 - 未做：真实 RSC/TCS 写入；`XNU-0127.img` 未变。
+
+## 四十一、C6 全局锁与 O3-A/B 启动链审计
+
+### 1. C6：全局唯一锁与并发压力
+
+- 新增 `kebab_rpmh_tcs_init_global()`：内核端口必须使用模块内的单一
+  `kebab_rpmh_global_lock`，不再允许两个调用点各自建锁绕过“每次启动一次”；
+- 并发测试改为 50 轮、`pthread_barrier` 同步起跑的双线程竞争：每轮恰好一个赢家、
+  一个被拒绝、寄存器只收到一笔事务（10 次写）；另加一条断言确认两个通道拿到的是
+  同一个全局锁对象；
+- 本套 58 项断言全过。
+
+### 2. O3-A：实际镜像对应哪份固件源码
+
+- `signed.img` 前 8 MiB 里保留了固件构建路径
+  `/home/albert/Codex/UEFI/Mu-Silicium/Build/kebabPkg/DEBUG_CLANGPDB/AARCH64/...`；
+- 该源码树在 Ubuntu 上存在：`/home/albert/Codex/UEFI/Mu-Silicium`，HEAD 为
+  `7013966c`，但工作区有未提交修改（`APRIORI.inc`、`DXE.inc`、`DeviceBuild.py`、
+  `BootManager.c` 等），**所以刷入的 UEFI 不等于 7013966c 这个提交**；
+- 结论：能定位到树，但还不能把某个 git 提交声明为设备上运行的那一份；需要构建
+  记录或镜像哈希才能锁定版本。
+
+### 3. O3-B：UEFI/UniXNU/DarwinBoot 是否碰 RSC
+
+| 组件 | 结果 |
+| --- | --- |
+| GFander/UniXNU（公开） | 无 `18200000`/RSC 访问；只有一个 Python 脚本提到 rpmh/GMU votes |
+| UniXNU/DarwinBoot（公开） | 完全没有匹配 |
+| Mu-Silicium kebabPkg | `APRIORI.inc`/`DXE.inc` 都加载 `Binaries/kebab/QcomPkg/Drivers/RpmhDxe/RpmhDxe.inf` |
+
+`RpmhDxe.efi`（65,536 字节）里能读出 53 处 “TCS” 和 6 处 “Rpmh” 字符串，说明
+UEFI 阶段确实带了一个 RPMh 驱动。这解释了 TCS0 的 CLK/BUS 残留与 TCS1 的
+`AMC_ENABLE=1` 可能来自哪里，也说明“XNU 是唯一 RPMh 使用者”不成立。
+
+### 4. 对交接协议的影响
+
+- 最后一个可控阶段（UEFI）既然能访问 RPMh，就必须由它显式声明是否在退出前停止
+  使用 TCS1，并把当时的只读状态写进交接记录；
+- 现有公开的 UniXNU/DarwinBoot 源码没有 RSC 访问，说明交接记录可以放在它们这一层
+  传递，而不必改 ABL；
+- 但 `RpmhDxe` 是二进制、行为未知，交接前还需要知道它是否会留下未完成的请求。
+
+### 5. 验证边界
+
+- 实测：58 项主机断言（含 50 轮并发）、UEFI 源码树与镜像构建路径、RpmhDxe 字符串；
+- 未做：没有解析 `RpmhDxe.efi` 的实际行为，没有改启动链，没有真机 RPMh 写入。
