@@ -1,0 +1,572 @@
+feat(spmi): write the PON bootloader restart reason through a gated RW channel
+
+The FASTBOOT command writes the Qualcomm restart cookie to IMEM, but the
+next boot never sees it.  The vendor kernel also stores
+PON_RESTART_REASON_BOOTLOADER in the PMIC PON block, and that register is
+the one part of the path this kernel could only read.  Add the write half:
+
+  - map exactly one 4 KiB read/write channel slice at
+    chnls + 0x10000*apid (0x0C6D0000 for the PON APID 0x00d), not the
+    32 MiB window, which does not fit the 8 MiB io_map submap;
+  - issue a single-byte PMIC_ARB_OP_EXT_WRITEL command and poll the
+    channel status with the same bounded timeout and DONE/FAILURE/
+    DENIED/DROPPED checks the observer path uses;
+  - re-read the APID mapping and ownership registers before every write
+    and refuse unless the APID still maps PPID 0x008 and write_ee is this
+    EE (0), matching pmic_arb_offset_v5();
+  - read SOFT_RB_SPARE 0x88F, print the old value, write
+    (old & 0x01) | 0x04 under mask 0xFE (Gen2 layout, reason 0x02 << 1),
+    read it back with bounded retries, and verify both the target field
+    and the untouched bit 0.
+
+Everything is behind kebab_pon_write=1, default off.  A new PON-RB
+command performs and verifies the masked write without resetting, and
+FASTBOOT now writes the reason before the IMEM cookie and the unchanged
+PSCI SYSTEM_RESET.  PON? still reports the read-only view.
+
+The channel is mapped at start-up in kebab_spmi_init(), next to IMEM,
+because these commands can run from the panic loop where ml_io_map cannot
+allocate.
+
+diff --git a/bsd/dev/kebab_spmi.c b/bsd/dev/kebab_spmi.c
+index 33f6da3..e3e784c 100644
+--- a/bsd/dev/kebab_spmi.c
++++ b/bsd/dev/kebab_spmi.c
+@@ -1,26 +1,27 @@
+ /*
+- * KEBAB SPMI: read-only access to the SM8250 PMIC arbiter.
++ * KEBAB SPMI: access to the SM8250 PMIC arbiter.
+  *
+  * The PMIC on this board is reachable only through the SPMI PMIC arbiter, and
+- * this kernel has no SPMI bus driver.  The next step of the restart-reason
+- * work needs the PMIC PON block, so this file provides the smallest piece that
+- * can be justified without writing anything: the arbiter version, the
+- * PPID -> APID mapping, and observer reads of a PMIC register.
++ * this kernel has no SPMI bus driver.  The restart-reason work needs the PMIC
++ * PON block: this file provides the arbiter version, the PPID -> APID mapping,
++ * observer reads of PMIC registers, and one gated masked write of the PON
++ * restart-reason register.
+  *
+  * Addresses and layout come from the device's own kona.dtsi and the vendor
+  * driver drivers/spmi/spmi-pmic-arb.c, not from another SoC:
+  *
+  *   core   0x0C440000  0x1100      version, APID mapping table
+- *   chnls  0x0C600000  0x2000000   read/write channels (not mapped: see below)
++ *   chnls  0x0C600000  0x2000000   read/write channels (one 4 KiB slice)
+  *   obsrvr 0x0E600000  0x100000    read-only observer channels
+  *   intr   0x0E700000  0x0A0000    interrupt controller (not used)
+  *   cnfg   0x0C40A000  0x26000     ownership table
+  *   qcom,ee = <0>, qcom,channel = <0>
+  *
+- * Only core, obsrvr and cnfg are mapped.  chnls is 32 MiB and the kernel's
+- * io_map submap is 8 MiB in total (osfmk/arm/io_map.c); the read-only path
+- * never touches a read/write channel, so mapping it would waste the submap
+- * for no evidence.  intr is interrupt-only and this driver has no interrupts.
++ * core, obsrvr and cnfg are mapped unconditionally.  chnls is 32 MiB and the
++ * kernel's io_map submap is 8 MiB in total (osfmk/arm/io_map.c), so only the
++ * 4 KiB read/write channel of the PON APID is mapped, and only when the write
++ * gate is on: chnls + 0x10000*apid = 0x0C6D0000 for APID 0x00d on this board.
++ * intr is interrupt-only and this driver has no interrupts.
+  *
+  * v5 layout:
+  *   - APID mapping register for APID n is core + 0x900 + 4*n; while that
+@@ -30,13 +31,22 @@
+  *     bit 24.  The write execution environment of the same APID is the low
+  *     three bits of cnfg + 0x700 + 4*n.
+  *   - Several APIDs may map one PPID, one per EE; the walk prints every one
+- *     instead of taking the first.
++ *     instead of taking the first, and a write requires write_ee == local EE,
++ *     exactly as pmic_arb_offset_v5() refuses one that is not.
+  *   - Observer address arithmetic is obsrvr + 0x10000*ee + 0x80*apid, which
+  *     is not the read/write arithmetic (chnls + 0x10000*apid).
++ *   - The read/write channel has the same CMD/STATUS/WDATA0/RDATA0 layout as
++ *     the observer; a single byte is written with PMIC_ARB_OP_EXT_WRITEL and
++ *     byte count 0, as pmic_arb_fmt_cmd_v2() encodes it.
+  *
+- * This file has no write path.  Issuing a read means writing the observer
+- * command register, which is the arbiter's read request, not a PMIC register:
+- * no PMIC register is written by any function here.
++ * Everything that writes a PMIC register is gated by the boot argument
++ * kebab_pon_write, default off.  The PON restart-reason semantics are from the
++ * vendor's drivers/input/misc/qpnp-power-on.c and the DT binding
++ * include/dt-bindings/input/qcom,qpnp-power-on.h, not guessed:
++ *
++ *   SOFT_RB_SPARE            0x88F
++ *   Gen2 reason field        mask GENMASK(7,1) = 0xFE, value reason << 1
++ *   PON_RESTART_REASON_BOOTLOADER = 0x02, so the field value is 0x04
+  */
+ #if defined(KEBAB)
+ 
+@@ -44,12 +54,19 @@
+ #include <sys/systm.h>
+ #include <kern/clock.h>
+ #include <mach/boolean.h>
++#include <pexpert/pexpert.h>
+ #include <vm/pmap.h>
+ #include <vm/vm_kern.h>
+ 
+ /* osfmk/arm64/machine_routines.c; the header declaration is guarded out. */
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
++/*
++ * bsd/dev/kebab_usb.c.  The reset path has to push the diagnostic lines out
++ * before the PMIC is allowed to reset the SoC, and the console owns that ring.
++ */
++extern void kebab_usb_log_flush(void);
++
+ /* ------------------------------------------------------------ board facts */
+ 
+ #define KEBAB_SPMI_CORE_PA      0x0c440000u
+@@ -58,6 +75,10 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ #define KEBAB_SPMI_OBSRV_SIZE   0x00100000u
+ #define KEBAB_SPMI_CNFG_PA      0x0c40a000u
+ #define KEBAB_SPMI_CNFG_SIZE    0x00026000u
++/* The whole read/write window is 32 MiB; only one APID's slice is mapped. */
++#define KEBAB_SPMI_CHNLS_PA     0x0c600000u
++#define KEBAB_SPMI_CHNLS_SIZE   0x02000000u
++#define KEBAB_SPMI_CHNL_SLICE   0x00001000u
+ 
+ #define KEBAB_SPMI_EE           0u
+ #define KEBAB_SPMI_CHANNEL      0u      /* qcom,channel; not used for reads */
+@@ -71,6 +92,7 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
+ #define KEBAB_SPMI_CMD          0x0000u
+ #define KEBAB_SPMI_STATUS       0x0008u
++#define KEBAB_SPMI_WDATA0       0x0010u
+ #define KEBAB_SPMI_RDATA0       0x0018u
+ 
+ #define KEBAB_SPMI_STATUS_DONE      (1u << 0)
+@@ -79,6 +101,7 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ #define KEBAB_SPMI_STATUS_DROPPED   (1u << 3)
+ 
+ #define KEBAB_SPMI_OP_READ      15u     /* PMIC_ARB_OP_READ */
++#define KEBAB_SPMI_OP_WRITEL    0u      /* PMIC_ARB_OP_EXT_WRITEL */
+ 
+ /* One poll per microsecond for a millisecond, like PMIC_ARB_TIMEOUT_US. */
+ #define KEBAB_SPMI_TIMEOUT_US   1000u
+@@ -89,6 +112,11 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ #define KEBAB_SPMI_PON_SUBTYPE  0x0805u
+ #define KEBAB_SPMI_PON_SPARE    0x088fu
+ 
++/* qpnp_pon_set_restart_reason(), Gen2 layout. */
++#define KEBAB_SPMI_PON_REASON_MASK   0xfeu
++#define KEBAB_SPMI_PON_REASON_BOOTLOADER 0x02u
++#define KEBAB_SPMI_PON_REASON_FIELD  (KEBAB_SPMI_PON_REASON_BOOTLOADER << 1)
++
+ /*
+  * A PPID that belongs to the AP block rather than to a PMIC, used as a
+  * negative control for the mapping walk.  No PMIC on this board has SID 0x0F,
+@@ -111,8 +139,14 @@ static struct {
+ 	vm_offset_t core;
+ 	vm_offset_t obsrvr;
+ 	vm_offset_t cnfg;
++	vm_offset_t chnl;              /* one 4 KiB read/write channel slice */
++	uint32_t    chnl_apid;
++	uint32_t    read_attempt;
+ 	bool        mapped;
+ 	bool        attempted;
++	bool        write_gate;
++	bool        write_gate_parsed;
++	bool        chnl_mapped;
+ } spmi;
+ 
+ static uint32_t kebab_spmi_nonzero;
+@@ -137,6 +171,26 @@ kebab_spmi_wr(vm_offset_t base, uint32_t offset, uint32_t value)
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+ }
+ 
++/*
++ * One gate for every PMIC write in this file.  Parsed once, in kebab_spmi_init()
++ * at boot, so a command running from the panic loop only reads a boolean.
++ * Default off: an unmodified boot never writes a PMIC register.
++ */
++bool
++kebab_spmi_pon_writes_enabled(void)
++{
++	uint32_t enabled = 0;
++
++	if (!spmi.write_gate_parsed) {
++		spmi.write_gate_parsed = true;
++		spmi.write_gate = PE_parse_boot_argn("kebab_pon_write", &enabled,
++		    sizeof(enabled)) && enabled != 0;
++		printf("KEBAB SPMI: kebab_pon_write=%u: PMIC writes %s\n", enabled,
++		    spmi.write_gate ? "ENABLED" : "disabled (default)");
++	}
++	return spmi.write_gate;
++}
++
+ /*
+  * The vendor driver selects the layout by threshold, not by an exact value:
+  * v1 below 0x20010000, v2 below 0x30000000, v3/v4 below 0x50000000, v5 at or
+@@ -257,6 +311,42 @@ kebab_spmi_match_line(const struct kebab_spmi_match *m)
+ 	    m->write_ee == KEBAB_SPMI_EE ? " (owned by this EE)" : "");
+ }
+ 
++/*
++ * The APID the local EE may write the PON block through.  Several APIDs can
++ * map PPID 0x008 (one per execution environment); only the one whose
++ * ownership register says write_ee == this EE is usable, which is the same
++ * test pmic_arb_offset_v5() applies to a read/write channel.  Refusing here
++ * keeps every later write from being a permission experiment.
++ */
++static int
++kebab_spmi_pon_apid(uint32_t *apid_out)
++{
++	struct kebab_spmi_match matches[8];
++	uint32_t count, i;
++
++	count = kebab_spmi_scan(KEBAB_SPMI_PON_PPID, matches, 8);
++	if (count == 0) {
++		printf("KEBAB SPMI: no APID maps PPID 0x%03x; no PON write is possible\n",
++		    KEBAB_SPMI_PON_PPID);
++		return -1;
++	}
++	if (count > 8) {
++		count = 8;
++	}
++	for (i = 0; i < count; i++) {
++		if (matches[i].write_ee == KEBAB_SPMI_EE) {
++			*apid_out = matches[i].apid;
++			printf("KEBAB SPMI: PON write APID 0x%03x, write_ee 0x%x (this EE); chnls slice 0x%08x\n",
++			    matches[i].apid, matches[i].write_ee,
++			    KEBAB_SPMI_CHNLS_PA + 0x10000u * matches[i].apid);
++			return 0;
++		}
++	}
++	printf("KEBAB SPMI: PPID 0x%03x has %u APID(s), none with write_ee %u; refusing every PON write\n",
++	    KEBAB_SPMI_PON_PPID, count, KEBAB_SPMI_EE);
++	return -1;
++}
++
+ /* ---------------------------------------------------------- observer reads */
+ 
+ /*
+@@ -324,6 +414,157 @@ kebab_spmi_obs_read(uint32_t apid, uint32_t sid, uint32_t addr,
+ 	return 0;
+ }
+ 
++/* -------------------------------------------------- read/write PON registers */
++
++static int
++kebab_spmi_pon_read(uint32_t apid, uint32_t addr, uint8_t *value)
++{
++	return kebab_spmi_obs_read(apid, KEBAB_SPMI_PON_SID, addr,
++	    ++spmi.read_attempt, value);
++}
++
++/*
++ * One PMIC byte write through the read/write channel slice mapped for apid.
++ * The mapping and ownership registers are re-read here, not trusted from the
++ * caller: a write is only issued when the APID still maps the PPID derived
++ * from sid/addr and its write_ee is this EE.
++ *
++ * The caller must have read the old register value through the observer
++ * first; this primitive does not do the read-modify-write by itself.
++ */
++static int
++kebab_spmi_rw_write(uint32_t apid, uint32_t sid, uint32_t addr, uint8_t value)
++{
++	uint32_t ppid = (sid << 8) | (addr >> 8);
++	uint32_t map, map_ppid, own, write_ee, cmd, status = 0, polls;
++
++	if (!spmi.chnl_mapped || spmi.chnl == 0 || spmi.chnl_apid != apid) {
++		printf("KEBAB SPMI: read/write channel for APID 0x%03x is not the mapped slice (mapped APID 0x%03x); no write issued\n",
++		    apid, spmi.chnl_apid);
++		return -1;
++	}
++	map = kebab_spmi_rd(spmi.core, KEBAB_SPMI_APID_MAP + 4u * apid);
++	map_ppid = (map >> 8) & 0xfffu;
++	own = kebab_spmi_rd(spmi.cnfg, KEBAB_SPMI_OWNERSHIP + 4u * apid);
++	write_ee = own & 0x7u;
++	if (map == 0 || map_ppid != ppid || write_ee != KEBAB_SPMI_EE) {
++		printf("KEBAB SPMI: APID 0x%03x maps PPID 0x%03x write_ee 0x%x; refusing the write to 0x%04x (need PPID 0x%03x write_ee 0x%x)\n",
++		    apid, map_ppid, write_ee, addr, ppid, KEBAB_SPMI_EE);
++		return -1;
++	}
++
++	cmd = (KEBAB_SPMI_OP_WRITEL << 27) | ((addr & 0xffu) << 4);
++	printf("KEBAB SPMI: write REG 0x%04x: APID 0x%03x chnls-slice+0x%03x cmd 0x%08x wdata 0x%02x\n",
++	    addr, apid, 0x10000u * apid, cmd, value);
++	kebab_spmi_wr(spmi.chnl, KEBAB_SPMI_WDATA0, value);
++	kebab_spmi_wr(spmi.chnl, KEBAB_SPMI_CMD, cmd);
++
++	for (polls = 0; polls < KEBAB_SPMI_TIMEOUT_US; polls++) {
++		status = kebab_spmi_rd(spmi.chnl, KEBAB_SPMI_STATUS);
++		if (status & KEBAB_SPMI_STATUS_DONE) {
++			break;
++		}
++		delay(1);
++	}
++	if (!(status & KEBAB_SPMI_STATUS_DONE)) {
++		printf("KEBAB SPMI: REG 0x%04x write TIMEOUT after %u us: cmd 0x%08x status 0x%08x\n",
++		    addr, KEBAB_SPMI_TIMEOUT_US, cmd, status);
++		return -1;
++	}
++	if (status & (KEBAB_SPMI_STATUS_FAILURE | KEBAB_SPMI_STATUS_DENIED |
++	    KEBAB_SPMI_STATUS_DROPPED)) {
++		printf("KEBAB SPMI: REG 0x%04x write FAILED: cmd 0x%08x status 0x%08x%s%s%s\n",
++		    addr, cmd, status,
++		    (status & KEBAB_SPMI_STATUS_FAILURE) ? " FAILURE" : "",
++		    (status & KEBAB_SPMI_STATUS_DENIED) ? " DENIED" : "",
++		    (status & KEBAB_SPMI_STATUS_DROPPED) ? " DROPPED" : "");
++		return -1;
++	}
++	printf("KEBAB SPMI: write REG 0x%04x status 0x%08x DONE\n", addr, status);
++	return 0;
++}
++
++/*
++ * Gen2 restart reason: qpnp_pon_set_restart_reason() does a masked write of
++ * GENMASK(7,1) with (reason << 1); reason 0x02 is PON_RESTART_REASON_BOOTLOADER,
++ * so the target field value is 0x04 and bit 0 is outside the mask and must
++ * survive unchanged.
++ *
++ * The old value is read first and printed; the write is issued only after the
++ * APID ownership check inside kebab_spmi_rw_write(); the register is then read
++ * back (bounded retries) and both the target bits and the untouched bits are
++ * checked before this returns success.
++ */
++int
++kebab_spmi_pon_reason_write(void)
++{
++	uint32_t apid, i, old, expect, readback = 0;
++	uint8_t value = 0;
++	bool readback_ok = false;
++	int rc;
++
++	if (!kebab_spmi_pon_writes_enabled()) {
++		printf("KEBAB PON: kebab_pon_write is off; refusing to write SOFT_RB_SPARE\n");
++		return -1;
++	}
++	if (kebab_spmi_pon_apid(&apid) != 0) {
++		return -1;
++	}
++	if (kebab_spmi_pon_read(apid, KEBAB_SPMI_PON_SPARE, &value) != 0) {
++		printf("KEBAB PON: could not read SOFT_RB_SPARE 0x%04x; not writing it\n",
++		    KEBAB_SPMI_PON_SPARE);
++		return -1;
++	}
++	old = value;
++	expect = (old & ~KEBAB_SPMI_PON_REASON_MASK) |
++	    KEBAB_SPMI_PON_REASON_FIELD;
++	printf("KEBAB PON: SOFT_RB_SPARE 0x%04x old 0x%02x; mask 0x%02x; reason 0x%02x << 1 = 0x%02x; new 0x%02x\n",
++	    KEBAB_SPMI_PON_SPARE, old, KEBAB_SPMI_PON_REASON_MASK,
++	    KEBAB_SPMI_PON_REASON_BOOTLOADER, KEBAB_SPMI_PON_REASON_FIELD,
++	    expect);
++	if (expect == old) {
++		printf("KEBAB PON: the register already holds the bootloader value; writing it again to prove the path\n");
++	}
++	rc = kebab_spmi_rw_write(apid, KEBAB_SPMI_PON_SID, KEBAB_SPMI_PON_SPARE,
++	    (uint8_t)expect);
++	if (rc != 0) {
++		printf("KEBAB PON: SOFT_RB_SPARE write failed; nothing verified\n");
++		return -1;
++	}
++
++	for (i = 0; i < 20u; i++) {
++		if (kebab_spmi_pon_read(apid, KEBAB_SPMI_PON_SPARE, &value) == 0) {
++			readback = value;
++			readback_ok = true;
++			if (value == expect) {
++				break;
++			}
++		}
++		delay(1000);
++	}
++	if (!readback_ok) {
++		printf("KEBAB PON: FAIL: the write completed but SOFT_RB_SPARE could not be read back\n");
++		return -1;
++	}
++	printf("KEBAB PON: read back 0x%02x, expected 0x%02x\n", readback, expect);
++	if ((readback & KEBAB_SPMI_PON_REASON_MASK) != KEBAB_SPMI_PON_REASON_FIELD) {
++		printf("KEBAB PON: FAIL: reason field is 0x%02x, not 0x%02x\n",
++		    readback & KEBAB_SPMI_PON_REASON_MASK,
++		    KEBAB_SPMI_PON_REASON_FIELD);
++		return -1;
++	}
++	if ((readback & ~KEBAB_SPMI_PON_REASON_MASK) !=
++	    (old & ~KEBAB_SPMI_PON_REASON_MASK)) {
++		printf("KEBAB PON: FAIL: bit 0 changed 0x%x -> 0x%x although it is outside mask 0x%02x\n",
++		    old & 1u, readback & 1u, KEBAB_SPMI_PON_REASON_MASK);
++		return -1;
++	}
++	printf("KEBAB PON: PASS: SOFT_RB_SPARE 0x%02x -> 0x%02x, field 0x%02x, bit 0 unchanged 0x%x\n",
++	    old, readback, readback & KEBAB_SPMI_PON_REASON_MASK,
++	    readback & 1u);
++	return 0;
++}
++
+ /* ------------------------------------------------------------------- probe */
+ 
+ void
+@@ -349,9 +590,37 @@ kebab_spmi_init(void)
+ 	    KEBAB_SPMI_CORE_PA, KEBAB_SPMI_CORE_SIZE, KEBAB_SPMI_OBSRV_PA,
+ 	    KEBAB_SPMI_OBSRV_SIZE, KEBAB_SPMI_CNFG_PA, KEBAB_SPMI_CNFG_SIZE,
+ 	    KEBAB_SPMI_EE, KEBAB_SPMI_CHANNEL);
+-	printf("KEBAB SPMI: version core+0x0000 = 0x%08x (%s); chnls 0x%08x and intr 0x%08x not mapped (no write/interrupt path)\n",
++	printf("KEBAB SPMI: version core+0x0000 = 0x%08x (%s); intr 0x%08x not mapped\n",
+ 	    version, kebab_spmi_version_known(version) ? kebab_spmi_family(version) : "unrecognised",
+-	    0x0c600000u, 0x0e700000u);
++	    0x0e700000u);
++	if (!kebab_spmi_pon_writes_enabled()) {
++		printf("KEBAB SPMI: chnls 0x%08x not mapped; the write path is off\n",
++		    KEBAB_SPMI_CHNLS_PA);
++		return;
++	}
++	/*
++	 * Map the write resources here, in normal context, for the same reason
++	 * IMEM is mapped at start-up: a console command can run from the panic
++	 * loop, where ml_io_map cannot allocate.
++	 */
++	if (kebab_spmi_version_known(version) && version >= 0x50000000u) {
++		uint32_t apid;
++		if (kebab_spmi_pon_apid(&apid) == 0) {
++			vm_offset_t slice = KEBAB_SPMI_CHNLS_PA + 0x10000u * apid;
++			spmi.chnl = ml_io_map(slice, KEBAB_SPMI_CHNL_SLICE);
++			if (spmi.chnl != 0) {
++				spmi.chnl_apid = apid;
++				spmi.chnl_mapped = true;
++				printf("KEBAB SPMI: chnls 0x%08x+0x%x mapped (APID 0x%03x, one 4 KiB slice)\n",
++				    slice, KEBAB_SPMI_CHNL_SLICE, apid);
++			} else {
++				printf("KEBAB SPMI: cannot map the chnls slice 0x%08x; the write path will refuse\n",
++				    slice);
++			}
++		}
++	} else {
++		printf("KEBAB SPMI: arbiter is not v5; the write path is not implemented for it\n");
++	}
+ }
+ 
+ /*
+diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
+index 25af74f..953d70f 100644
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -68,13 +68,16 @@ extern uint32_t kebab_psci_features(uint32_t function);
+ extern uint64_t kebab_psci_system_reset2(uint32_t reset_type, uint32_t cookie);
+ 
+ /*
+- * Read-only SPMI arbiter probe.  The driver lives in bsd/dev/kebab_spmi.c and
+- * owns every PMIC-facing register; this file only matches the console command
+- * and calls it, so the USB path never touches the arbiter or the PMIC.
++ * Read-only SPMI arbiter probe, plus the gated PMIC PON write path.  The
++ * driver lives in bsd/dev/kebab_spmi.c and owns every PMIC-facing register;
++ * this file only matches the console commands and calls it, so the USB path
++ * never touches the arbiter or the PMIC directly.
+  */
+ extern void kebab_spmi_init(void);
+ extern void kebab_spmi_report(void);
+ extern void kebab_spmi_pon_report(void);
++extern bool kebab_spmi_pon_writes_enabled(void);
++extern int kebab_spmi_pon_reason_write(void);
+ 
+ /* ---------------------------------------------------------------- registers */
+ 
+@@ -234,6 +237,7 @@ extern void kebab_spmi_pon_report(void);
+ #define UD_REBOOT_PSCI_NEGATIVE 6u
+ #define UD_REBOOT_SPMI_REPORT   7u
+ #define UD_REBOOT_PON_REPORT    8u
++#define UD_REBOOT_PON_REASON    9u
+ 
+ struct ud_endpoint {
+ 	uint32_t trb, length, ctl, resource;
+@@ -1126,8 +1130,8 @@ ud_reboot_command(const char *buf, uint32_t received)
+ {
+ 	if (!kebab_usb_kdp_enabled()) {
+ 		/*
+-		 * FASTBOOT2 and FASTBOOT share a prefix; the longer command has to
+-		 * be tested first or "FASTBOOT2\n" would never reach it.
++		 * FASTBOOT2 and FASTBOOT share a prefix; the longer command has
++		 * to be tested first or its bytes would never reach it.
+ 		 */
+ 		if (ud_command_seen(buf, received, "REBOOT\n", sizeof("REBOOT\n") - 1)) {
+ 			return UD_REBOOT_PLAIN;
+@@ -1153,12 +1157,17 @@ ud_reboot_command(const char *buf, uint32_t received)
+ 		if (ud_command_seen(buf, received, "PON?\n", sizeof("PON?\n") - 1)) {
+ 			return UD_REBOOT_PON_REPORT;
+ 		}
++		if (ud_command_seen(buf, received, "PON-RB\n", sizeof("PON-RB\n") - 1)) {
++			return UD_REBOOT_PON_REASON;
++		}
+ 		return 0;
+ 	}
+ 	if (received >= sizeof("REBOOT\n") - 1 &&
+ 	    !memcmp(buf, "REBOOT\n", sizeof("REBOOT\n") - 1)) {
+ 		return UD_REBOOT_PLAIN;
+ 	}
++	}
++	}
+ 	if (received >= sizeof("FASTBOOT2\n") - 1 &&
+ 	    !memcmp(buf, "FASTBOOT2\n", sizeof("FASTBOOT2\n") - 1)) {
+ 		return UD_REBOOT_FASTBOOT2;
+@@ -1187,6 +1196,11 @@ ud_reboot_command(const char *buf, uint32_t received)
+ 	    !memcmp(buf, "PON?\n", sizeof("PON?\n") - 1)) {
+ 		return UD_REBOOT_PON_REPORT;
+ 	}
++	if (received >= sizeof("PON-RB\n") - 1 &&
++	    !memcmp(buf, "PON-RB\n", sizeof("PON-RB\n") - 1)) {
++		return UD_REBOOT_PON_REASON;
++	}
++	}
+ 	return 0;
+ }
+ 
+@@ -1255,19 +1269,23 @@ ud_platform_restart2(void)
+ 	return rc;
+ }
+ 
++/*
++ * Write the PON restart reason and the IMEM cookie, then reset through PSCI
++ * SYSTEM_RESET (or SYSTEM_RESET2 when FASTBOOT2 asks for it).  The reset
++ * mechanism is deliberately unchanged from the earlier experiments: a
++ * different boot outcome can then only come from the newly written reason.
++ */
+ static void
+ ud_fastboot_restart(bool use_reset2)
+ {
+ 	volatile uint32_t *reason;
+ 	uint32_t previous, cookie, readback;
+ 	uint64_t rc;
++	bool pon_writes = kebab_spmi_pon_writes_enabled();
+ 
+ 	if (ud.imem == 0) {
+-		printf("KEBAB FASTBOOT: cannot map IMEM at 0x%x; %s\n", KEBAB_IMEM_PA,
+-		    use_reset2 ? "not resetting" : "falling back to a plain restart");
+-		if (!use_reset2) {
+-			(void)ud_platform_restart();
+-		}
++		printf("KEBAB FASTBOOT: cannot map IMEM at 0x%x; not resetting\n",
++		    KEBAB_IMEM_PA);
+ 		return;
+ 	}
+ 	if (use_reset2) {
+@@ -1285,6 +1303,19 @@ ud_fastboot_restart(bool use_reset2)
+ 			return;
+ 		}
+ 	}
++	/*
++	 * Writing the reason without verifying it would make the reset an
++	 * uncontrolled experiment: if the masked write fails, the boot that
++	 * follows would not be attributable to the PON reason.
++	 */
++	if (pon_writes) {
++		if (kebab_spmi_pon_reason_write() != 0) {
++			printf("KEBAB FASTBOOT: PON restart reason was not verified; not resetting\n");
++			return;
++		}
++	} else {
++		printf("KEBAB FASTBOOT: kebab_pon_write is off; only the IMEM cookie is written\n");
++	}
+ 	reason = (volatile uint32_t *)(ud.imem + KEBAB_IMEM_RESTART);
+ 	previous = *reason;
+ 	cookie = ud_fastboot_cookie();
+@@ -1388,6 +1419,8 @@ ud_run_reboot_command(uint32_t command)
+ 		kebab_spmi_report();
+ 	} else if (command == UD_REBOOT_PON_REPORT) {
+ 		kebab_spmi_pon_report();
++	} else if (command == UD_REBOOT_PON_REASON) {
++		(void)kebab_spmi_pon_reason_write();
+ 	}
+ }
+ 

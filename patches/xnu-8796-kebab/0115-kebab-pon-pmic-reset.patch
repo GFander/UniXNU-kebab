@@ -1,0 +1,488 @@
+feat(power): reset through the PMIC PON hard-reset path
+
+Writing the PON reason and resetting with PSCI SYSTEM_RESET did not put
+the board into fastboot.  The vendor's reboot bootloader path does not
+use PSCI at all: msm-poweroff.c configures qpnp_pon_system_pwr_off() and
+then calls deassert_ps_hold().  Add that path, keeping the reason write
+and the IMEM cookie unchanged:
+
+  - PS_HOLD_RST_CTL2 (0x85B) bit 7 is QPNP_PON_RESET_EN and
+    PS_HOLD_RST_CTL (0x85A) low nibble is the power-off type.  Clear the
+    enable, wait 500 us, write PON_POWER_OFF_TYPE_HARD_RESET (0x07) or
+    ..._WARM_RESET (0x01), set the enable, and read both registers back;
+  - deassert PS_HOLD by reading and then writing 0 to the TCSR register
+    at 0x0C264000, the documented fallback of deassert_ps_hold() (this
+    port has no SCM layer);
+  - keep the vendor order: configure the reset, write the reason, write
+    IMEM, then drop PS_HOLD.
+
+Two new commands select the mechanism per test without a reflash:
+FASTBOOT-PMIC (hard reset) and FASTBOOT-WARM (warm reset).  PON-RST
+writes the same two registers, verifies them, then restores their old
+values, so the reset configuration can be validated while the board can
+still answer.  FASTBOOT keeps the PSCI reset, so the reason write and
+the reset mechanism remain separate variables.
+
+All PMIC and PS_HOLD writes stay behind kebab_pon_write=1, default off.
+
+diff --git a/bsd/dev/kebab_spmi.c b/bsd/dev/kebab_spmi.c
+index e3e784c..77a56f2 100644
+--- a/bsd/dev/kebab_spmi.c
++++ b/bsd/dev/kebab_spmi.c
+@@ -40,13 +40,22 @@
+  *     byte count 0, as pmic_arb_fmt_cmd_v2() encodes it.
+  *
+  * Everything that writes a PMIC register is gated by the boot argument
+- * kebab_pon_write, default off.  The PON restart-reason semantics are from the
++ * kebab_pon_write, default off.  The PON register semantics are from the
+  * vendor's drivers/input/misc/qpnp-power-on.c and the DT binding
+  * include/dt-bindings/input/qcom,qpnp-power-on.h, not guessed:
+  *
+  *   SOFT_RB_SPARE            0x88F
+  *   Gen2 reason field        mask GENMASK(7,1) = 0xFE, value reason << 1
+  *   PON_RESTART_REASON_BOOTLOADER = 0x02, so the field value is 0x04
++ *
++ *   PS_HOLD_RST_CTL2         0x85B, bit 7 = QPNP_PON_RESET_EN
++ *   PS_HOLD_RST_CTL          0x85A, low nibble = power-off type
++ *   PON_POWER_OFF_TYPE_WARM_RESET = 0x01, ..._HARD_RESET = 0x07
++ *
++ *   qpnp_pon_reset_config(): clear RESET_EN, delay 500 us, write the type,
++ *   set RESET_EN.  qpnp_pon_system_pwr_off() only configures the PMIC; the
++ *   reset happens when msm-poweroff.c calls deassert_ps_hold(), whose fallback
++ *   is a zero write to the TCSR PSHOLD register at 0x0C264000.
+  */
+ #if defined(KEBAB)
+ 
+@@ -112,11 +121,21 @@ extern void kebab_usb_log_flush(void);
+ #define KEBAB_SPMI_PON_SUBTYPE  0x0805u
+ #define KEBAB_SPMI_PON_SPARE    0x088fu
+ 
+-/* qpnp_pon_set_restart_reason(), Gen2 layout. */
++/* qpnp_pon_reset_config() and qpnp_pon_set_restart_reason() addresses. */
++#define KEBAB_SPMI_PON_PS_HOLD_CTL   0x085au
++#define KEBAB_SPMI_PON_PS_HOLD_CTL2  0x085bu
++#define KEBAB_SPMI_PON_POWER_OFF_MASK 0x0fu
++#define KEBAB_SPMI_PON_RESET_EN      (1u << 7)
++#define KEBAB_SPMI_PON_WARM_RESET    0x01u
++#define KEBAB_SPMI_PON_HARD_RESET    0x07u
+ #define KEBAB_SPMI_PON_REASON_MASK   0xfeu
+ #define KEBAB_SPMI_PON_REASON_BOOTLOADER 0x02u
+ #define KEBAB_SPMI_PON_REASON_FIELD  (KEBAB_SPMI_PON_REASON_BOOTLOADER << 1)
+ 
++/* TCSR PS_HOLD: kona.dtsi /soc/restart@c264000, reg-name "pshold-base". */
++#define KEBAB_PSHOLD_PA         0x0c264000u
++#define KEBAB_PSHOLD_SIZE       0x00001000u
++
+ /*
+  * A PPID that belongs to the AP block rather than to a PMIC, used as a
+  * negative control for the mapping walk.  No PMIC on this board has SID 0x0F,
+@@ -140,6 +159,7 @@ static struct {
+ 	vm_offset_t obsrvr;
+ 	vm_offset_t cnfg;
+ 	vm_offset_t chnl;              /* one 4 KiB read/write channel slice */
++	vm_offset_t pshold;            /* KEBAB_PSHOLD_PA, gated like the writes */
+ 	uint32_t    chnl_apid;
+ 	uint32_t    read_attempt;
+ 	bool        mapped;
+@@ -172,7 +192,8 @@ kebab_spmi_wr(vm_offset_t base, uint32_t offset, uint32_t value)
+ }
+ 
+ /*
+- * One gate for every PMIC write in this file.  Parsed once, in kebab_spmi_init()
++ * One gate for every PMIC write in this file, and for the PS_HOLD write that
++ * turns the PMIC configuration into a reset.  Parsed once, in kebab_spmi_init()
+  * at boot, so a command running from the panic loop only reads a boolean.
+  * Default off: an unmodified boot never writes a PMIC register.
+  */
+@@ -565,6 +586,209 @@ kebab_spmi_pon_reason_write(void)
+ 	return 0;
+ }
+ 
++/*
++ * qpnp_pon_reset_config() with the Gen2 register pair.  The two registers are
++ * read before they are written and every write is read back; old_ctl and
++ * old_ctl2 are returned so a rehearsal can put the PMIC back.
++ */
++static int
++kebab_spmi_pon_config_seq(uint32_t apid, uint32_t type, uint8_t *old_ctl,
++    uint8_t *old_ctl2)
++{
++	uint8_t ctl, ctl2, want, value;
++
++	if (kebab_spmi_pon_read(apid, KEBAB_SPMI_PON_PS_HOLD_CTL, &ctl) != 0 ||
++	    kebab_spmi_pon_read(apid, KEBAB_SPMI_PON_PS_HOLD_CTL2, &ctl2) != 0) {
++		printf("KEBAB PON: could not read PS_HOLD_RST_CTL/CTL2; not configuring a reset\n");
++		return -1;
++	}
++	*old_ctl = ctl;
++	*old_ctl2 = ctl2;
++	printf("KEBAB PON: PS_HOLD_RST_CTL 0x%04x old 0x%02x (type 0x%x), PS_HOLD_RST_CTL2 0x%04x old 0x%02x (reset_en %u)\n",
++	    KEBAB_SPMI_PON_PS_HOLD_CTL, ctl, ctl & KEBAB_SPMI_PON_POWER_OFF_MASK,
++	    KEBAB_SPMI_PON_PS_HOLD_CTL2, ctl2,
++	    (ctl2 & KEBAB_SPMI_PON_RESET_EN) ? 1u : 0u);
++
++	/* 1. Disable the PS_HOLD reset path before changing its type. */
++	want = ctl2 & ~KEBAB_SPMI_PON_RESET_EN;
++	if (want != ctl2) {
++		if (kebab_spmi_rw_write(apid, KEBAB_SPMI_PON_SID,
++		    KEBAB_SPMI_PON_PS_HOLD_CTL2, want) != 0) {
++			return -1;
++		}
++		if (kebab_spmi_pon_read(apid, KEBAB_SPMI_PON_PS_HOLD_CTL2,
++		    &value) != 0 || value != want) {
++			printf("KEBAB PON: FAIL: CTL2 read back 0x%02x, expected 0x%02x after clearing reset_en\n",
++			    value, want);
++			return -1;
++		}
++	} else {
++		printf("KEBAB PON: reset_en already clear; no write needed\n");
++	}
++
++	/* 2. The vendor waits ten sleep-clock cycles (plus tolerance). */
++	delay(500);
++
++	/* 3. Program the power-off type in the low nibble. */
++	want = (ctl & ~KEBAB_SPMI_PON_POWER_OFF_MASK) |
++	    (type & KEBAB_SPMI_PON_POWER_OFF_MASK);
++	if (kebab_spmi_rw_write(apid, KEBAB_SPMI_PON_SID,
++	    KEBAB_SPMI_PON_PS_HOLD_CTL, want) != 0) {
++		return -1;
++	}
++	if (kebab_spmi_pon_read(apid, KEBAB_SPMI_PON_PS_HOLD_CTL, &value) != 0 ||
++	    value != want) {
++		printf("KEBAB PON: FAIL: CTL read back 0x%02x, expected 0x%02x\n",
++		    value, want);
++		return -1;
++	}
++
++	/* 4. Re-enable the PS_HOLD reset path. */
++	want = ctl2 | KEBAB_SPMI_PON_RESET_EN;
++	if (kebab_spmi_rw_write(apid, KEBAB_SPMI_PON_SID,
++	    KEBAB_SPMI_PON_PS_HOLD_CTL2, want) != 0) {
++		return -1;
++	}
++	if (kebab_spmi_pon_read(apid, KEBAB_SPMI_PON_PS_HOLD_CTL2, &value) != 0 ||
++	    value != want) {
++		printf("KEBAB PON: FAIL: CTL2 read back 0x%02x, expected 0x%02x after setting reset_en\n",
++		    value, want);
++		return -1;
++	}
++	printf("KEBAB PON: reset type 0x%02x (%s) configured and read back, reset_en set\n",
++	    type, type == KEBAB_SPMI_PON_HARD_RESET ? "hard reset" : "warm reset");
++	return 0;
++}
++
++/*
++ * Arm the PS_HOLD reset path for real.  Called by FASTBOOT-PMIC/FASTBOOT-WARM
++ * before the reason and the IMEM cookie are written, in the vendor order:
++ * qpnp_pon_system_pwr_off() -> qpnp_pon_set_restart_reason() -> IMEM ->
++ * deassert_ps_hold().
++ */
++int
++kebab_spmi_pon_reset_config(bool warm)
++{
++	uint32_t apid, type;
++	uint8_t old_ctl, old_ctl2;
++
++	if (!kebab_spmi_pon_writes_enabled()) {
++		printf("KEBAB PON: kebab_pon_write is off; refusing to arm a PMIC reset\n");
++		return -1;
++	}
++	if (kebab_spmi_pon_apid(&apid) != 0) {
++		return -1;
++	}
++	type = warm ? KEBAB_SPMI_PON_WARM_RESET : KEBAB_SPMI_PON_HARD_RESET;
++	printf("KEBAB PON: arming the PS_HOLD %s reset path\n",
++	    warm ? "warm" : "hard");
++	return kebab_spmi_pon_config_seq(apid, type, &old_ctl, &old_ctl2);
++}
++
++/*
++ * PON-RST: write the same two registers the real reset uses, read them back,
++ * then restore the exact old values.  This is the last chance to see the
++ * reset configuration work while the board can still answer: the real arm is
++ * followed by a PS_HOLD deassert, after which only the next boot can report.
++ */
++int
++kebab_spmi_pon_reset_rehearsal(bool warm)
++{
++	uint32_t apid, type;
++	uint8_t old_ctl = 0, old_ctl2 = 0, value;
++
++	if (!kebab_spmi_pon_writes_enabled()) {
++		printf("KEBAB PON: kebab_pon_write is off; refusing the reset rehearsal\n");
++		return -1;
++	}
++	if (kebab_spmi_pon_apid(&apid) != 0) {
++		return -1;
++	}
++	type = warm ? KEBAB_SPMI_PON_WARM_RESET : KEBAB_SPMI_PON_HARD_RESET;
++	printf("KEBAB PON: === reset-config rehearsal (%s), old values will be restored ===\n",
++	    warm ? "warm" : "hard");
++	if (kebab_spmi_pon_config_seq(apid, type, &old_ctl, &old_ctl2) != 0) {
++		printf("KEBAB PON: rehearsal FAIL: the reset registers did not verify\n");
++		return -1;
++	}
++
++	/*
++	 * Put the PMIC back exactly as it was: disable, restore, re-enable.
++	 * Every write is attempted even if one fails, because returning with
++	 * reset_en still set would leave a rehearsed hard reset armed.
++	 */
++	{
++		int restore_rc = 0;
++
++		if (kebab_spmi_rw_write(apid, KEBAB_SPMI_PON_SID,
++		    KEBAB_SPMI_PON_PS_HOLD_CTL2,
++		    old_ctl2 & ~KEBAB_SPMI_PON_RESET_EN) != 0) {
++			restore_rc = -1;
++		}
++		if (kebab_spmi_rw_write(apid, KEBAB_SPMI_PON_SID,
++		    KEBAB_SPMI_PON_PS_HOLD_CTL, old_ctl) != 0) {
++			restore_rc = -1;
++		}
++		if (kebab_spmi_rw_write(apid, KEBAB_SPMI_PON_SID,
++		    KEBAB_SPMI_PON_PS_HOLD_CTL2, old_ctl2) != 0) {
++			restore_rc = -1;
++		}
++		if (restore_rc != 0) {
++			printf("KEBAB PON: rehearsal FAIL: restoring CTL/CTL2 failed\n");
++			return -1;
++		}
++	}
++	if (kebab_spmi_pon_read(apid, KEBAB_SPMI_PON_PS_HOLD_CTL, &value) != 0 ||
++	    value != old_ctl) {
++		printf("KEBAB PON: rehearsal FAIL: CTL restored to 0x%02x, expected 0x%02x\n",
++		    value, old_ctl);
++		return -1;
++	}
++	if (kebab_spmi_pon_read(apid, KEBAB_SPMI_PON_PS_HOLD_CTL2, &value) != 0 ||
++	    value != old_ctl2) {
++		printf("KEBAB PON: rehearsal FAIL: CTL2 restored to 0x%02x, expected 0x%02x\n",
++		    value, old_ctl2);
++		return -1;
++	}
++	printf("KEBAB PON: PASS: reset registers wrote and verified, then restored to CTL 0x%02x / CTL2 0x%02x\n",
++	    old_ctl, old_ctl2);
++	return 0;
++}
++
++/*
++ * deassert_ps_hold(): the vendor calls SCM first when that call is available
++ * and always falls through to a zero write of the TCSR PS_HOLD register.  This
++ * port has no SCM layer, so it does the documented fallback.  The register is
++ * read first and printed, then the line is flushed through the console before
++ * the write that can take the machine down.
++ */
++void
++kebab_spmi_pon_deassert_pshold(void)
++{
++	uint32_t before, after;
++
++	if (!kebab_spmi_pon_writes_enabled()) {
++		printf("KEBAB PON: kebab_pon_write is off; refusing to touch PS_HOLD\n");
++		return;
++	}
++	if (spmi.pshold == 0) {
++		printf("KEBAB PON: PS_HOLD at 0x%x is not mapped; no reset issued\n",
++		    KEBAB_PSHOLD_PA);
++		return;
++	}
++	before = kebab_spmi_rd(spmi.pshold, 0);
++	printf("KEBAB PON: PS_HOLD 0x%x reads 0x%08x; writing 0 to deassert it\n",
++	    KEBAB_PSHOLD_PA, before);
++	kebab_usb_log_flush();
++	delay(300000);
++	kebab_spmi_wr(spmi.pshold, 0, 0);
++	__asm__ volatile ("dsb sy" ::: "memory");
++	delay(1000000);
++	after = kebab_spmi_rd(spmi.pshold, 0);
++	printf("KEBAB PON: PS_HOLD write returned, register now 0x%08x, the SoC did not reset\n",
++	    after);
++}
++
+ /* ------------------------------------------------------------------- probe */
+ 
+ void
+@@ -621,6 +845,15 @@ kebab_spmi_init(void)
+ 	} else {
+ 		printf("KEBAB SPMI: arbiter is not v5; the write path is not implemented for it\n");
+ 	}
++	spmi.pshold = ml_io_map(KEBAB_PSHOLD_PA, KEBAB_PSHOLD_SIZE);
++	if (spmi.pshold == 0) {
++		printf("KEBAB SPMI: cannot map PS_HOLD 0x%x; the PMIC reset path will refuse\n",
++		    KEBAB_PSHOLD_PA);
++	} else {
++		printf("KEBAB SPMI: PS_HOLD 0x%08x+0x%x mapped, reads 0x%08x\n",
++		    KEBAB_PSHOLD_PA, KEBAB_PSHOLD_SIZE,
++		    kebab_spmi_rd(spmi.pshold, 0));
++	}
+ }
+ 
+ /*
+diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
+index 953d70f..e9e75d2 100644
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -78,6 +78,9 @@ extern void kebab_spmi_report(void);
+ extern void kebab_spmi_pon_report(void);
+ extern bool kebab_spmi_pon_writes_enabled(void);
+ extern int kebab_spmi_pon_reason_write(void);
++extern int kebab_spmi_pon_reset_config(bool warm);
++extern int kebab_spmi_pon_reset_rehearsal(bool warm);
++extern void kebab_spmi_pon_deassert_pshold(void);
+ 
+ /* ---------------------------------------------------------------- registers */
+ 
+@@ -238,6 +241,9 @@ extern int kebab_spmi_pon_reason_write(void);
+ #define UD_REBOOT_SPMI_REPORT   7u
+ #define UD_REBOOT_PON_REPORT    8u
+ #define UD_REBOOT_PON_REASON    9u
++#define UD_REBOOT_PON_REHEARSE  10u
++#define UD_REBOOT_FASTBOOT_PMIC 11u
++#define UD_REBOOT_FASTBOOT_WARM 12u
+ 
+ struct ud_endpoint {
+ 	uint32_t trb, length, ctl, resource;
+@@ -1130,12 +1136,19 @@ ud_reboot_command(const char *buf, uint32_t received)
+ {
+ 	if (!kebab_usb_kdp_enabled()) {
+ 		/*
+-		 * FASTBOOT2 and FASTBOOT share a prefix; the longer command has
+-		 * to be tested first or its bytes would never reach it.
++		 * FASTBOOT-PMIC, FASTBOOT-WARM, FASTBOOT2 and FASTBOOT share a
++		 * prefix; the longer commands have to be tested first or their
++		 * bytes would never reach them.
+ 		 */
+ 		if (ud_command_seen(buf, received, "REBOOT\n", sizeof("REBOOT\n") - 1)) {
+ 			return UD_REBOOT_PLAIN;
+ 		}
++		if (ud_command_seen(buf, received, "FASTBOOT-PMIC\n", sizeof("FASTBOOT-PMIC\n") - 1)) {
++			return UD_REBOOT_FASTBOOT_PMIC;
++		}
++		if (ud_command_seen(buf, received, "FASTBOOT-WARM\n", sizeof("FASTBOOT-WARM\n") - 1)) {
++			return UD_REBOOT_FASTBOOT_WARM;
++		}
+ 		if (ud_command_seen(buf, received, "FASTBOOT2\n", sizeof("FASTBOOT2\n") - 1)) {
+ 			return UD_REBOOT_FASTBOOT2;
+ 		}
+@@ -1160,13 +1173,22 @@ ud_reboot_command(const char *buf, uint32_t received)
+ 		if (ud_command_seen(buf, received, "PON-RB\n", sizeof("PON-RB\n") - 1)) {
+ 			return UD_REBOOT_PON_REASON;
+ 		}
++		if (ud_command_seen(buf, received, "PON-RST\n", sizeof("PON-RST\n") - 1)) {
++			return UD_REBOOT_PON_REHEARSE;
++		}
+ 		return 0;
+ 	}
+ 	if (received >= sizeof("REBOOT\n") - 1 &&
+ 	    !memcmp(buf, "REBOOT\n", sizeof("REBOOT\n") - 1)) {
+ 		return UD_REBOOT_PLAIN;
+ 	}
++	if (received >= sizeof("FASTBOOT-PMIC\n") - 1 &&
++	    !memcmp(buf, "FASTBOOT-PMIC\n", sizeof("FASTBOOT-PMIC\n") - 1)) {
++		return UD_REBOOT_FASTBOOT_PMIC;
+ 	}
++	if (received >= sizeof("FASTBOOT-WARM\n") - 1 &&
++	    !memcmp(buf, "FASTBOOT-WARM\n", sizeof("FASTBOOT-WARM\n") - 1)) {
++		return UD_REBOOT_FASTBOOT_WARM;
+ 	}
+ 	if (received >= sizeof("FASTBOOT2\n") - 1 &&
+ 	    !memcmp(buf, "FASTBOOT2\n", sizeof("FASTBOOT2\n") - 1)) {
+@@ -1200,6 +1222,9 @@ ud_reboot_command(const char *buf, uint32_t received)
+ 	    !memcmp(buf, "PON-RB\n", sizeof("PON-RB\n") - 1)) {
+ 		return UD_REBOOT_PON_REASON;
+ 	}
++	if (received >= sizeof("PON-RST\n") - 1 &&
++	    !memcmp(buf, "PON-RST\n", sizeof("PON-RST\n") - 1)) {
++		return UD_REBOOT_PON_REHEARSE;
+ 	}
+ 	return 0;
+ }
+@@ -1270,13 +1295,19 @@ ud_platform_restart2(void)
+ }
+ 
+ /*
+- * Write the PON restart reason and the IMEM cookie, then reset through PSCI
+- * SYSTEM_RESET (or SYSTEM_RESET2 when FASTBOOT2 asks for it).  The reset
+- * mechanism is deliberately unchanged from the earlier experiments: a
+- * different boot outcome can then only come from the newly written reason.
++ * The reset mechanism is the one variable the caller selects:
++ *
++ *   pmic_reset = 0  PSCI SYSTEM_RESET (or SYSTEM_RESET2 for FASTBOOT2)
++ *   pmic_reset = 1  PMIC PON hard reset, then deassert PS_HOLD
++ *   pmic_reset = 2  PMIC PON warm reset, then deassert PS_HOLD
++ *
++ * The PMIC PON reason and the IMEM cookie are written in every case when the
++ * kebab_pon_write gate is on, so FASTBOOT and FASTBOOT-PMIC differ only in how
++ * the reset happens.  The vendor order is kept: configure the power-off type,
++ * store the PON reason, write IMEM, then deassert PS_HOLD.
+  */
+ static void
+-ud_fastboot_restart(bool use_reset2)
++ud_fastboot_restart(bool use_reset2, uint32_t pmic_reset)
+ {
+ 	volatile uint32_t *reason;
+ 	uint32_t previous, cookie, readback;
+@@ -1303,6 +1334,16 @@ ud_fastboot_restart(bool use_reset2)
+ 			return;
+ 		}
+ 	}
++	if (pmic_reset != 0) {
++		if (!pon_writes) {
++			printf("KEBAB FASTBOOT: PMIC reset requested but kebab_pon_write is off; not resetting\n");
++			return;
++		}
++		if (kebab_spmi_pon_reset_config(pmic_reset == 2) != 0) {
++			printf("KEBAB FASTBOOT: PMIC reset configuration did not verify; not resetting\n");
++			return;
++		}
++	}
+ 	/*
+ 	 * Writing the reason without verifying it would make the reset an
+ 	 * uncontrolled experiment: if the masked write fails, the boot that
+@@ -1327,6 +1368,19 @@ ud_fastboot_restart(bool use_reset2)
+ 	    readback == cookie ? "MATCH" : "MISMATCH");
+ 	/* The cookie has to be in memory before the firmware can read it. */
+ 	__asm__ volatile ("dsb sy" ::: "memory");
++
++	if (pmic_reset != 0) {
++		printf("KEBAB FASTBOOT: reset by deasserting PS_HOLD (%s PMIC reset)\n",
++		    pmic_reset == 2 ? "warm" : "hard");
++		kebab_spmi_pon_deassert_pshold();
++		/* Only reached when the PMIC did not reset the SoC. */
++		*reason = previous;
++		__asm__ volatile ("dsb sy" ::: "memory");
++		printf("KEBAB FASTBOOT: PMIC reset returned; restored restart_reason to 0x%08x\n",
++		    previous);
++		return;
++	}
++
+ 	rc = use_reset2 ? ud_platform_restart2() : (uint64_t)ud_platform_restart();
+ 	if (rc != 0) {
+ 		/* The machine is still here, so a later reset must not inherit a
+@@ -1404,9 +1458,13 @@ static void
+ ud_run_reboot_command(uint32_t command)
+ {
+ 	if (command == UD_REBOOT_FASTBOOT) {
+-		ud_fastboot_restart(false);
++		ud_fastboot_restart(false, 0);
+ 	} else if (command == UD_REBOOT_FASTBOOT2) {
+-		ud_fastboot_restart(true);
++		ud_fastboot_restart(true, 0);
++	} else if (command == UD_REBOOT_FASTBOOT_PMIC) {
++		ud_fastboot_restart(false, 1);
++	} else if (command == UD_REBOOT_FASTBOOT_WARM) {
++		ud_fastboot_restart(false, 2);
+ 	} else if (command == UD_REBOOT_PLAIN) {
+ 		(void)ud_platform_restart();
+ 	} else if (command == UD_REBOOT_PSCI_REPORT) {
+@@ -1421,6 +1479,8 @@ ud_run_reboot_command(uint32_t command)
+ 		kebab_spmi_pon_report();
+ 	} else if (command == UD_REBOOT_PON_REASON) {
+ 		(void)kebab_spmi_pon_reason_write();
++	} else if (command == UD_REBOOT_PON_REHEARSE) {
++		(void)kebab_spmi_pon_reset_rehearsal(false);
+ 	}
+ }
+ 
