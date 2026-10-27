@@ -8037,6 +8037,13 @@ PASS silent-panic       rc=4 expected=4
 PASS command-lint       9 commands in kebab_usb.c
 ```
 
+另外用主机上的真实产物跑过同一 dry-run：`/home/albert/tmp/KebabRoot.vext`
+（1,769,472 B，sha256 `e37713002c463d99635ec790263eb21b7799c18388768a45b3910ace53f920eb`）
+的 D-04 通过；`make-minimal-userland.py --only base` 生成的 `base.kist`
+（589,824 B，sha256 `f4a1e2e07ede7cbd145c356421e9f54db9cc402d9249c34807b1aee512819bf0`）
+的 D-05 通过。`cache.kist` 的 1.0 GB 真流没有在本机重打，避免占满
+1.7 GB 的剩余磁盘；44 条路径由 fake stream 覆盖。
+
 fake board 会真的解析 KIST/VEXT、每块回 ACK、模拟 `VOL DRY/BEGIN`、
 `INST CHECK`、`SKIP`、中途 panic（带/不带 panic 文本）以及错槽位/错参数；
 因此阶段顺序、流控和停止条件是经过代码路径验证的。**没有验证的是真实
