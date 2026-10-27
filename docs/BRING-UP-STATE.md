@@ -3693,3 +3693,41 @@ tcs 2..7: control 0x00000000 status 0x1 enable 0
 
 - 实测：上述逐槽输出、`prnt_chld` 解码、IRQ 寄存器归位；
 - 未做：任何 TCS/RSC 写；写路径未编译进内核。
+
+## 三十七、TCS1 发送状态机的虚拟 MMIO 验证（R5-C2，0128）
+
+### 1. 草案的四个阻塞问题都改了
+
+| 问题 | 处理 |
+| --- | --- |
+| 入口没有命令白名单 | `kebab_rpmh_tcs_send()` 先检查空指针、`kebab_rpmh_cmd_allowed()`，再检查通道必须是 TCS1 |
+| 完成只看 COMPL | 要求 `ISSUED` 与 `COMPL` 同时成立；预检发现残留 COMPL 直接拒绝，旧完成位不能冒充本次完成 |
+| 失败路径无条件清理 | 触发前只撤销本次写入（CONTROL 清 trigger、ENABLE/WAIT 清零）；触发后不清理、保留现场、标记 dead 并返回超时 |
+| 一次性限制被当成完整供电 | 注释与文档明确：单条命令实验模式，不等于两路 LDO 的完整上电序列 |
+
+### 2. 同一套状态机跑虚拟寄存器
+
+`package/KebabRpmhTcsHostTests.c` 用注入的 `kebab_tcs_io` 驱动与内核将要用同一份
+`kebab_rpmh_tcs_send()`，33 项断言全过，覆盖：
+
+- `CONTROL=0x00010000`（AMC 已使能、Trigger 未置位）可以进入；
+- 正常路径的写序列与顺序（msgid→addr→data→wait→enable→control→trigger→回收）；
+- 未授权命令零次 MMIO 写；
+- `ENABLE≠0`、`TRIGGER=1`、残留 `COMPL` 都拒绝且零写；
+- 回读不匹配时有界超时，不无限循环；
+- 只有 COMPL 没有 ISSUED、或只有 ISSUED 没有 COMPL 都不判成功；
+- 触发后超时：不再写任何寄存器，`enable` 保持原值留作证据，通道标记不可用；
+- 一次性门控：第二次调用直接拒绝且零写；
+- TCS0/TCS2 一律拒绝。
+
+### 3. 内核侧
+
+0128 删除了 0127 里那段未编译的 `#if KEBAB_RPMH_WRITES` 草案，改成一条指向
+`package/KebabRpmhVrm.c` 的说明。理由：同一份状态机不应在树里存在两份，一份
+已通过虚拟测试、一份从未被编译器检查过。生产镜像仍然没有任何写路径。
+
+### 4. 验证边界
+
+- 实测：33 项虚拟 MMIO 断言、整树构建 0 error；
+- 未做：没有把启用写路径的镜像刷到设备，没有真实 TCS 写入；
+- 未解决：TCS1 的实际所有权（AMC 已使能、Trigger 未置位只是必要条件）。

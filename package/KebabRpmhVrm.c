@@ -298,3 +298,164 @@ void kebab_tcs_release(kebab_tcs *tcs)
 		tcs->owner = 0;
 	}
 }
+
+/* ------------------------------------------------- TCS1 send state machine */
+
+#define KEBAB_TCS_RB_POLLS   100u
+#define KEBAB_TCS_CMPL_POLLS 1000u
+
+void kebab_rpmh_tcs_init(kebab_rpmh_tcs *t, kebab_tcs_io io)
+{
+	memset(t, 0, sizeof(*t));
+	t->io = io;
+	t->tcs = 1;
+	t->phase = KEBAB_TCS_PHASE_IDLE;
+}
+
+static int
+tcs_read(kebab_rpmh_tcs *t, uint32_t off, uint32_t *val)
+{
+	if (t->io.rd == NULL) {
+		return -1;
+	}
+	return t->io.rd(t->io.ctx, off, val);
+}
+
+static int
+tcs_write(kebab_rpmh_tcs *t, uint32_t off, uint32_t val)
+{
+	if (t->io.wr == NULL) {
+		return -1;
+	}
+	return t->io.wr(t->io.ctx, off, val);
+}
+
+/* A write only counts once it reads back; the wait is bounded on purpose. */
+static int
+tcs_write_sync(kebab_rpmh_tcs *t, uint32_t off, uint32_t val)
+{
+	uint32_t i, readback = 0;
+
+	if (tcs_write(t, off, val) != 0) {
+		return -1;
+	}
+	for (i = 0; i < KEBAB_TCS_RB_POLLS; i++) {
+		if (tcs_read(t, off, &readback) == 0 && readback == val) {
+			return 0;
+		}
+	}
+	return -1;
+}
+
+static void
+tcs_undo_pre_trigger(kebab_rpmh_tcs *t, uint32_t control)
+{
+	/* Only what this attempt wrote, and only before a trigger. */
+	(void)tcs_write(t, KEBAB_TCS_CONTROL, control & ~KEBAB_TCS_AMC_TRIGGER);
+	(void)tcs_write(t, KEBAB_TCS_CMD_ENABLE, 0);
+	(void)tcs_write(t, KEBAB_TCS_CMD_WAIT, 0);
+}
+
+kebab_rpmh_status
+kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
+{
+	uint32_t control = 0, enable = 0, wait = 0, status = 0, i;
+	int triggered = 0;
+
+	if (t == NULL || cmd == NULL) {
+		return KEBAB_RPMH_ERR_ARGUMENT;
+	}
+	/* The MMIO entry point re-checks what the caller already checked. */
+	if (!kebab_rpmh_cmd_allowed(cmd)) {
+		return KEBAB_RPMH_ERR_NOT_ALLOWED;
+	}
+	if (t->tcs != 1) {
+		return KEBAB_RPMH_ERR_TCS_STATE;
+	}
+	if (t->dead || t->sent) {
+		return KEBAB_RPMH_ERR_TCS_STATE;
+	}
+	if (tcs_read(t, KEBAB_TCS_CMD_ENABLE, &enable) != 0 ||
+	    tcs_read(t, KEBAB_TCS_CMD_WAIT, &wait) != 0 ||
+	    tcs_read(t, KEBAB_TCS_CONTROL, &control) != 0 ||
+	    tcs_read(t, KEBAB_TCS_CMD_STATUS, &status) != 0) {
+		return KEBAB_RPMH_ERR_TCS_STATE;
+	}
+	/*
+	 * A COMPL bit left by an earlier command would make the completion
+	 * check below pass without this command ever running, so a dirty
+	 * status word is treated as an occupied channel.
+	 */
+	if (enable != 0 || wait != 0 || (control & KEBAB_TCS_AMC_TRIGGER) != 0 ||
+	    (status & KEBAB_TCS_CMD_COMPL) != 0) {
+		t->dead = 1;
+		return KEBAB_RPMH_ERR_TCS_BUSY;
+	}
+	t->phase = KEBAB_TCS_PHASE_VALIDATED;
+
+	if (tcs_write(t, KEBAB_TCS_CMD_MSGID, cmd->msgid) != 0 ||
+	    tcs_write(t, KEBAB_TCS_CMD_ADDR, cmd->addr) != 0 ||
+	    tcs_write(t, KEBAB_TCS_CMD_DATA, cmd->data) != 0) {
+		t->phase = KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER;
+		tcs_undo_pre_trigger(t, control);
+		return KEBAB_RPMH_ERR_SINK_FAILED;
+	}
+	if (tcs_write_sync(t, KEBAB_TCS_CMD_WAIT, 1u) != 0 ||
+	    tcs_write_sync(t, KEBAB_TCS_CMD_ENABLE, 1u) != 0) {
+		t->phase = KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER;
+		tcs_undo_pre_trigger(t, control);
+		return KEBAB_RPMH_ERR_SINK_FAILED;
+	}
+	t->phase = KEBAB_TCS_PHASE_ARMED;
+	if (tcs_write_sync(t, KEBAB_TCS_CONTROL,
+	    control | KEBAB_TCS_AMC_ENABLE) != 0) {
+		t->phase = KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER;
+		tcs_undo_pre_trigger(t, control);
+		return KEBAB_RPMH_ERR_SINK_FAILED;
+	}
+	if (tcs_write_sync(t, KEBAB_TCS_CONTROL,
+	    control | KEBAB_TCS_AMC_ENABLE | KEBAB_TCS_AMC_TRIGGER) != 0) {
+		/* The trigger write itself failed: the command may still have
+		 * been armed, so this is already the post-trigger class. */
+		triggered = 1;
+		goto post_trigger;
+	}
+	triggered = 1;
+	t->phase = KEBAB_TCS_PHASE_TRIGGERED;
+
+	for (i = 0; i < KEBAB_TCS_CMPL_POLLS; i++) {
+		if (tcs_read(t, KEBAB_TCS_CMD_STATUS, &status) != 0) {
+			goto post_trigger;
+		}
+		if ((status & KEBAB_TCS_CMD_ISSUED) != 0 &&
+		    (status & KEBAB_TCS_CMD_COMPL) != 0) {
+			break;
+		}
+	}
+	t->last_status = status;
+	if ((status & KEBAB_TCS_CMD_ISSUED) == 0 ||
+	    (status & KEBAB_TCS_CMD_COMPL) == 0) {
+		goto post_trigger;
+	}
+
+	/* Success: release in the vendor's order, then keep the gate shut. */
+	(void)tcs_write(t, KEBAB_TCS_CONTROL, control & ~KEBAB_TCS_AMC_TRIGGER);
+	(void)tcs_write(t, KEBAB_TCS_CMD_ENABLE, 0);
+	(void)tcs_write(t, KEBAB_TCS_CMD_WAIT, 0);
+	t->phase = KEBAB_TCS_PHASE_COMPLETE;
+	t->sent = 1;
+	t->dead = 1;              /* one request per boot until this is reviewed */
+	return KEBAB_RPMH_OK;
+
+post_trigger:
+	/*
+	 * A triggered command whose completion is not proven must not be
+	 * cleaned up: clearing enable or rewriting control could destroy a
+	 * transfer that is still running, and the evidence would be gone.
+	 */
+	(void)triggered;
+	(void)tcs_read(t, KEBAB_TCS_CMD_STATUS, &t->last_status);
+	t->phase = KEBAB_TCS_PHASE_FAILED_POST_TRIGGER;
+	t->dead = 1;
+	return KEBAB_RPMH_ERR_TIMEOUT;
+}

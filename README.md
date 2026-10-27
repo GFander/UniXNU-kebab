@@ -9,7 +9,7 @@ iPhone X 的身份启动 iOS 16.7.16 用户态。
 ```
 board.toml                   unixnu 读取的板级描述
 configs/                     defconfig 与 iPhone X 的 /product 子树
-patches/xnu-8796-kebab/      本机内核补丁集（106 个文件，按文件名顺序应用）
+patches/xnu-8796-kebab/      本机内核补丁集（107 个文件，按文件名顺序应用）
 scripts/make-kebab-adt.py    设备树（ADT）生成器
 drivers/KebabCPU/            子模块 -> GFander/KebabCPU（PSCI / 多核）
 drivers/KebabEarlyConsole/   子模块 -> GFander/KebabEarlyConsole（面板控制台）

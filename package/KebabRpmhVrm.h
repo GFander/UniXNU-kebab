@@ -1,16 +1,16 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
 /*
- * RPMh VRM encoding for the two rails the kebab touch part needs.
+ * RPMh VRM encoding and the TCS1 send state machine for the two rails the
+ * kebab touch part needs.
  *
  * The module is free of MMIO and of kernel dependencies.  It never trusts a
  * caller-supplied resource structure: the encoder takes a name, looks it up in
  * its own read-only table, and checks the address and the voltage against that
- * table.  A struct with a valid address and an invented voltage therefore has
- * no path through this API.
+ * table.  The send path talks to an injected kebab_tcs_io, so the host tests
+ * drive the same state machine against a virtual register file.
  *
  * The address is the full 32-bit command DB word.  Bits 19:16 are the
- * accelerator type (4 = VREG) and are part of what a TCS must carry; adding
- * the register offset keeps them.
+ * accelerator type (4 = VREG) and are part of what a TCS must carry.
  */
 #ifndef KEBAB_RPMH_VRM_H
 #define KEBAB_RPMH_VRM_H
@@ -27,6 +27,22 @@
 #define KEBAB_RPMH_ACCEL_VREG  0x4u
 #define KEBAB_RPMH_ACCEL_SHIFT 16
 
+/* TCS register offsets, from rpmh-rsc.c. */
+#define KEBAB_TCS_CMD_WAIT     0x10u
+#define KEBAB_TCS_CONTROL      0x14u
+#define KEBAB_TCS_STATUS       0x18u
+#define KEBAB_TCS_CMD_ENABLE   0x1cu
+#define KEBAB_TCS_CMD_MSGID    0x30u
+#define KEBAB_TCS_CMD_ADDR     0x34u
+#define KEBAB_TCS_CMD_DATA     0x38u
+#define KEBAB_TCS_CMD_STATUS   0x3cu
+#define KEBAB_TCS_RESP_DATA    0x40u
+
+#define KEBAB_TCS_AMC_ENABLE   (1u << 16)
+#define KEBAB_TCS_AMC_TRIGGER  (1u << 24)
+#define KEBAB_TCS_CMD_ISSUED   (1u << 8)
+#define KEBAB_TCS_CMD_COMPL    (1u << 16)
+
 typedef enum {
 	KEBAB_RPMH_OK = 0,
 	KEBAB_RPMH_ERR_ARGUMENT,
@@ -41,6 +57,7 @@ typedef enum {
 	KEBAB_RPMH_ERR_SINK_FAILED,
 	KEBAB_RPMH_ERR_NOT_ALLOWED,
 	KEBAB_RPMH_PENDING,
+	KEBAB_RPMH_ERR_TIMEOUT,
 } kebab_rpmh_status;
 
 typedef struct {
@@ -55,10 +72,49 @@ typedef struct {
 	uint32_t data;
 } kebab_rpmh_cmd;
 
-/* A sink is the only place a command could ever reach hardware. */
-typedef kebab_rpmh_status (*kebab_rpmh_sink)(const kebab_rpmh_cmd *cmd,
-    void *ctx);
+const kebab_rpmh_resource *kebab_rpmh_resource_by_name(const char *name);
+int kebab_rpmh_address_known(uint32_t addr);
+kebab_rpmh_status kebab_rpmh_encode_enable(const char *name,
+    kebab_rpmh_cmd *out);
+kebab_rpmh_status kebab_rpmh_encode_voltage(const char *name, uint32_t mv,
+    kebab_rpmh_cmd *out);
+int kebab_rpmh_cmd_allowed(const kebab_rpmh_cmd *cmd);
+kebab_rpmh_status kebab_rpmh_cmd_db_lookup(const uint8_t *db, size_t len,
+    const char *name, uint32_t *addr_out);
 
+/* ---------------------------------------------------------- hardware model */
+
+/* rd/wr return 0 on success and -1 on failure; an unset operation fails. */
+typedef struct {
+	int (*rd)(void *ctx, uint32_t off, uint32_t *val);
+	int (*wr)(void *ctx, uint32_t off, uint32_t val);
+	void *ctx;
+} kebab_tcs_io;
+
+typedef enum {
+	KEBAB_TCS_PHASE_IDLE = 0,
+	KEBAB_TCS_PHASE_VALIDATED,
+	KEBAB_TCS_PHASE_ARMED,
+	KEBAB_TCS_PHASE_TRIGGERED,
+	KEBAB_TCS_PHASE_COMPLETE,
+	KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER,
+	KEBAB_TCS_PHASE_FAILED_POST_TRIGGER,
+} kebab_tcs_phase;
+
+typedef struct {
+	kebab_tcs_io   io;
+	uint32_t       tcs;          /* only 1 is accepted */
+	int            dead;         /* no further requests, ever */
+	int            sent;         /* one-shot experiment gate */
+	kebab_tcs_phase phase;
+	uint32_t       last_status;  /* CMD_STATUS at the end of the attempt */
+} kebab_rpmh_tcs;
+
+void kebab_rpmh_tcs_init(kebab_rpmh_tcs *t, kebab_tcs_io io);
+kebab_rpmh_status kebab_rpmh_tcs_send(kebab_rpmh_tcs *t,
+    const kebab_rpmh_cmd *cmd);
+
+/* Simulated channel used by the TCS state tests (not used by send). */
 typedef enum {
 	KEBAB_TCS_FREE = 0,
 	KEBAB_TCS_BUSY,
@@ -68,30 +124,15 @@ typedef enum {
 	KEBAB_TCS_ERROR,
 } kebab_tcs_state;
 
+typedef kebab_rpmh_status (*kebab_rpmh_sink)(const kebab_rpmh_cmd *cmd,
+    void *ctx);
+
 typedef struct {
 	kebab_tcs_state state;
 	uint32_t        owner;
 	uint32_t        submits;
 	kebab_rpmh_cmd  inflight;
 } kebab_tcs;
-
-/* Read-only table of the two allowed rails. */
-const kebab_rpmh_resource *kebab_rpmh_resource_by_name(const char *name);
-int kebab_rpmh_address_known(uint32_t addr);
-
-/* Encode by name; the table, not the caller, decides address and voltage. */
-kebab_rpmh_status kebab_rpmh_encode_enable(const char *name,
-    kebab_rpmh_cmd *out);
-kebab_rpmh_status kebab_rpmh_encode_voltage(const char *name, uint32_t mv,
-    kebab_rpmh_cmd *out);
-
-/* True only for a command this module could itself have produced. */
-int kebab_rpmh_cmd_allowed(const kebab_rpmh_cmd *cmd);
-
-/* Read-only parse of a command DB snapshot; name, address and VREG slave id
- * are all checked against the table. */
-kebab_rpmh_status kebab_rpmh_cmd_db_lookup(const uint8_t *db, size_t len,
-    const char *name, uint32_t *addr_out);
 
 kebab_rpmh_status kebab_tcs_acquire(kebab_tcs *tcs, uint32_t owner);
 kebab_rpmh_status kebab_tcs_submit(kebab_tcs *tcs, const kebab_rpmh_cmd *cmd,
