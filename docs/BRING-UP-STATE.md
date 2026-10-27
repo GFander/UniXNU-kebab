@@ -8964,3 +8964,229 @@ sp = ((arm_thread_state64_t *)tstate)->sp;
 
 真机没跑之前，这一节的所有“应该”都是代码路径的推断；`far`/`esr`/`tte` 的
 真实值正是下一次启动要补上的证据。
+
+## 七十三、共享区映射的代码审查
+
+第六十七节验的是**算术**：`base + cacheVMOffset`、每条 mapping 的 `address/size`、slide 之后的地址，全部对得上磁盘上的 44 个文件。本节看算术**之下**那一层：这些算好的数字怎么交给 VM，内核据此造出来的共享区长什么样，以及 dyld 到底要求在那里看到什么。
+
+结论先写：
+
+* **发现并修了一个真 bug**：计划少了 dyld 无条件要读的一页 —— `sharedRegionStart + dynamicDataOffset` 上的 `dyld_cache_dynamic_data_header` 页。51 条 mapping 的跨度是 `0xaade4000`，缓存头声明的 `sharedRegionSize` 是 `0xaade8000`，差的正好是这一页。缺了它，dyld 在 `shared_region_check_np()` 成功之后**第一次**碰缓存就会落在空页上。补丁 `0142`。
+* 顺手拆掉一处**永远为真的检查**。`kebab_dsc_validate_header()` 的 `is_main` 分支拿 `sharedRegionStart` 和刚从它复制出来的 `plan->region_start` 比较，不可能失败；默认 slide 为 0 时 `kebab_dsc_apply_slide()` 又提前返回，于是"缓存基址必须是内核共享区基址"这条前提**从来没有被验过**。改成与 `SHARED_REGION_BASE_ARM64` 比。
+* 其余部分**是对的**：51 条 mapping 的 fileOffset / size / prot 逐条成立；四条 slide mapping 的 blob 地址、大小、页数全部对上，`0137` 补的 `sms_slide_size` 正是内核 `vm_shared_region_slide_sanity_check_v2()` 要求的最小值；16 KiB 页与 4 KiB slide info 的配合在内核侧成立；部分失败由内核自己回滚，移植层不需要再补。
+* 增加了 5 处日志，正常路径只多 2 行（约 180 字节），失败路径每处 1 行。
+* 仍然**没有真机日志**。本节全部来自：源码对照（xnu-8796.141.3）、44 个真实文件的头、`scripts/verify-shared-cache-plan.py` 的实跑，以及缓存里 `dyld-1067` 二进制中的字符串。
+
+### 1. 映射循环：一条 mapping 交出去的是什么
+
+`kebab_dsc_map_plan()`（`bsd/kern/kebab_dyldcache.c`）做的事只有三件：把计划里的 43 个 `kebab_dsc_file` 变成 43 个 `struct _sr_file_mappings`，每个指向计划里那几条已经算好、并且已经 slide 过的 `shared_file_mapping_slide_np`，然后**一次**调用
+
+```c
+vm_shared_region_map_file(shared_region, plan->file_count, srm);
+```
+
+也就是说 51 条 mapping 是**一次**系统调用语义交出去的，不是 51 次。这一点很关键：内核的 `vm_shared_region_map_file_setup()` 在同一把 `sr_mapping_in_progress` 锁下把 43 个文件的映射全部建好，第二遍才回到需要 rebase 的 mapping 上装 pager；分多次调用会每次都想重新抢 `sr_first_mapping`，而它一旦不是 `-1` 就直接返回 `KERN_FAILURE`（`vm_shared_region.c:1460`）。
+
+按类别把这 51 条摊开（数字来自 `verify-shared-cache-plan.py` 的实跑）：
+
+| 类别 | 条数 | init / max | fileOffset | 大小 |
+| --- | ---: | --- | --- | --- |
+| 主缓存 text（头 + 2710 条镜像记录 + subCacheArray） | 1 | r-x / r-x | `0x0` | `0x5c000` |
+| 子缓存 text（`.01`–`.26`、`.29`–`.40`，每个 1 条） | 38 | r-x / r-x | `0x0` | `0x14000`–`0x6e3c000` |
+| `.dyldlinkedit` 头页（`.28`、`.42`） | 2 | r-x / r-x | `0x0` | `0x5c000` |
+| `.dyldlinkedit` `__LINKEDIT` | 2 | r-- / r-- | `0x5c000` | `0x1298000`、`0x13da4000` |
+| `.dylddata` 头页（`.27`、`.41`） | 2 | r-x / r-x | `0x0` | `0x5c000` |
+| `.dylddata` `__DATA_CONST`（带 slide） | 2 | r-- / rw- | `0x5c000` | `0x53b0000`、`0x2994000` |
+| `.dylddata` `__DATA`（带 slide） | 2 | rw- / rw- | `0x540c000`、`0x29f0000` | `0x5df0000`、`0x3798000` |
+| `.dylddata` 尾部 slide-info 页 | 2 | r-- / r-- | `0xb1fc000`、`0x6188000` | `0x18000`、`0x10000` |
+| **动态配置页（本次新增）** | 1 | r-- / r--（`VM_PROT_ZF`） | — | `0x4000` |
+
+合计 1+38+2+2+2+2+2+2+1 = **52 条**，分布在 43 个文件里。逐条核对的结果：
+
+* **fileOffset 全部是"相对该文件自己的偏移"**。这一点在移植里最容易错：51 条 mapping 落在 43 个不同的 vnode / UBC object 上，`sms_file_offset` 是每个文件各自的偏移，`vm_map_enter_mem_object()` 用的也是每个文件自己的 `file_control`。计划里没有把任何一条 mapping 的偏移折算成"全局文件偏移"，这是对的；内核的 `assert(VME_OFFSET(tmp_entry) == start)`（`vm_shared_region_slide_mapping()`）也正是靠这个相等关系成立。
+* **size 全部是 16 KiB 的整数倍**，`kebab_dsc_read_mappings()` 逐条验过（`info[i].size & 0x3fff`），内核 `vm_map_round_page()` 因此不会改变任何一条的长度，slid mapping 的 `assert(tmp_entry->vme_end - tmp_entry->vme_start == size)` 才成立。
+* **prot 逐条取自缓存自己的 mapping 表**，`max_prot` 只在四条 slid mapping 上或进 `VM_PROT_SLIDE`。`vm_map_enter` 只取 `& VM_PROT_ALL`，所以 `VM_PROT_SLIDE`（`0x20`）和 `VM_PROT_ZF`（`0x10`）都不会污染映射的保护位。
+* **四个 32 MiB 的洞不需要特殊处理**。它们不是"缺失的映射"，而是两个 `.dylddata` 文件内部 `__DATA_CONST → __DATA`、`__DATA → 尾部页` 之间故意留的 VA 空洞（每个文件 2 个 ×32 MiB，共 `0x4000000`）。循环逐条按绝对地址 `vm_map_enter(..., VMAP_KERNEL_FLAGS_FIXED, vmkf_already)`，洞就自然留空，这正是缓存要的。`pmap_trim()` 只按 `[sfm_min, sfm_max]` 保留页表，洞不额外付任何物理页。
+* **最后那 `0x4000` 不是洞，是 dyld 要读的一页** —— 见第 5 小节，这是本次唯一的真 bug。
+* `.symbols` 不映射是对的：它的 `sharedRegionStart` 是 `0x22ade8000`，正好等于 `sharedRegionStart + sharedRegionSize`，在窗口之外；dyld 只在 `dladdr` 这类本地符号路径上才需要它。
+
+移植层**没有**做的事情，需要写清楚：`shared_region_map_and_slide_setup()`（`bsd/vm/vm_unix.c:2233`）里那一串闸门 —— 文件必须 root 所有、SIP/`SF_RESTRICTED`（KEBAB 已经用 `kebab_cs_shared_cache_allowed()` 局部放松）、信任缓存、`ubc_cs_is_range_codesigned()` 覆盖检查、`mac_file_check_mmap()` —— 全部被绕过，因为 `kebab_dsc_map_plan()` 直接调用 `vm_shared_region_map_file()`，走的不是 syscall 入口。这是 bring-up 的既有决定（`0085`/`0088`/`0100` 已在别处放松代码签名），但含义要说白：真机上这份计划只按"文件在、头对、UUID 对"被接受，没有任何签名闸门。反过来，`vnode` 的 `VSHARED_DYLD` 标记移植层补上了（`kebab_dsc_map_plan()` 成功后逐个 `v_flag |= VSHARED_DYLD`），和内核 cleanup 的行为一致；漏掉的是 atime 更新和 `NAMEDSTREAMS` 的伴随 vnode —— 对这个缓存都没有影响（`.dylddata`/`.dyldlinkedit` 没有命名流）。
+
+### 2. 四条 slid mapping 与四块 v2 blob
+
+`0137` 的标题是"给 pager 一个 blob 大小"，本小节把它落到具体地址上。四个 blob 的原始数据（直接读文件头得到）：
+
+| 文件 | mapping | mapping 地址（unslid） | mapping 大小 | blob 文件偏移 | blob 大小 | blob 地址（unslid） | page_size | page_starts | page_extras |
+| --- | ---: | --- | --- | --- | --- | --- | ---: | ---: | ---: |
+| `.27.dylddata` | 1 | `0x1d5964000` | `0x53b0000` | `0xb207c08` | `0xa788` | `0x1e4b0fc08` | `0x1000` | 21424 | 0 |
+| `.27.dylddata` | 2 | `0x1dcd14000` | `0x5df0000` | `0xb1fc000` | `0xbc08` | `0x1e4b04000` | `0x1000` | 24048 | 0 |
+| `.41.dylddata` | 1 | `0x20cea8000` | `0x2994000` | `0x618ef58` | `0x5350` | `0x216fdaf58` | `0x1000` | 10644 | 0 |
+| `.41.dylddata` | 2 | `0x21183c000` | `0x3798000` | `0x6188000` | `0x6f58` | `0x216fd4000` | `0x1000` | 14232 | 0 |
+
+四块的 `delta_mask` 都是 `0xffff0000000000`、`value_add` 都是 `0`，`page_extras_count` 都是 0，`page_starts_offset` 都是 `0x28`（= 40，紧跟头）。
+
+**每个 blob 都在同一个文件的第三条 mapping 里**（尾部那条 `r--`），不是在被 slide 的那条 mapping 里：
+
+* `.27` 尾部页 `[0x1e4b04000, 0x1e4b1c000)`，文件 `[0xb1fc000, 0xb214000)`；两块 blob 分别占 `[0xb1fc000, 0xb207c08)`（`0xbc08` 字节）和 `[0xb207c08, 0xb208390)`（`0xa788` 字节）—— 首尾相接，都在尾部页的前 `0x16390` 字节里。
+* `.41` 尾部页 `[0x216fd4000, 0x216fe4000)`，文件 `[0x6188000, 0x6198000)`；两块占 `[0x6188000, 0x618ef58)` 与 `[0x618ef58, 0x61942a8)`。
+
+`kebab_dsc_read_mappings()` 算 `sms_slide_start` 的办法是"找哪条 mapping 的文件区间盖住 blob 偏移，然后 `该 mapping 的地址 + (blob 偏移 - 该 mapping 的文件偏移)`"。dyld 自己的办法是 `linkeditMapping->address + (slideInfoFileOffset - linkeditMapping->fileOffset)`（`dyld/SharedCacheRuntime.cpp:492`）；对这个缓存两者给出**同一个地址**（尾部页就是 dyld 认定的 linkedit mapping）。移植的写法更一般，结果一致。
+
+内核侧的消费路径（全部照原样用缓存的 v2 blob，不重建任何东西）：
+
+1. `vm_shared_region_map_file()` 先数一遍有几条 mapping 带 `VM_PROT_SLIDE`，得 4（`vm_shared_region.c:1956`）。
+2. 第一遍把 52 条 mapping 全部 `vm_map_enter_mem_object()` 建好，顺手记下这 4 条的 region 内地址（`slid_mappings[]`）和 `file_control`。
+3. 第二遍对每条调 `vm_shared_region_slide(sr_slide, sms_file_offset, sms_size, sms_slide_start, sms_slide_size, ...)`（`vm_shared_region.c:2012`）。
+4. `vm_shared_region_slide_mapping()` 用 `copyin(slide_info_addr, ..., slide_info_size)` 把整块 blob 拷进内核（`:2593`），过 `vm_shared_region_slide_sanity_check_v2()`，建 pager，再把那条 mapping 覆盖成 pager 的映射。
+5. pager 的 `shared_region_pager_data_request()` 在缺页时按 4 KiB 一段 rebase，写进 16 KiB 的页。
+
+`0137` 补的 `sms_slide_size` 必须**等于** blob 大小，因为：
+
+* 太大 → `copyin()` 从 `sms_slide_start` 读 `slide_info_size` 字节，越界就是 `KERN_INVALID_ADDRESS`（会打 "copyin of slide_info failed"）；
+* 太小 → `sanity_check_v2()` 要求 `40 + (starts+extras)*2 <= slide_info_size`，四块的真实大小恰好等于这个下界：`0xa788 = 40 + 21424*2`、`0xbc08 = 40 + 24048*2`、`0x5350 = 40 + 10644*2`、`0x6f58 = 40 + 14232*2`。少一个字节就 `Sanity Check failed`。
+
+顺带说清 0137 到底修的是什么：`vm_shared_region_map_file()` 只按 `sms_max_prot & VM_PROT_SLIDE` 数数，而 `kebab_dsc_apply_slide()` 只在 `sms_slide_size != 0` 时才或这一位。0137 之前 `sms_slide_size` 恒为 0，于是非零 slide 时四条数据 mapping 都是**普通文件映射**：地址滑了、`sr_slide` 也滑了、pager 没装。`value_add` 全为 0，所以 slide 为 0 时"装 pager"与"不装"内容完全等价 —— 这也是移植层在 slide==0 时干脆不设 `VM_PROT_SLIDE` 的依据，不算偷懒。
+
+### 3. 16 KiB 页与 4 KiB slide info
+
+结论：**成立**，而且不是碰巧成立。四条事实互相咬合：
+
+1. **内核只接受 4096**。`PAGE_SIZE_FOR_SR_SLIDE` 是编译期常量 4096（`osfmk/vm/vm_shared_region.h:98`），`vm_shared_region_slide_sanity_check_v2()` 第一件事就是 `s_info->page_size != PAGE_SIZE_FOR_SR_SLIDE` 直接 `KERN_FAILURE`（`vm_shared_region.c:2790`）。注意它**不**看 VM 页大小 —— 16 KiB 内核也要求 blob 里写 4096。
+2. **页数必须精确等于 mapping 大小 / 4096**。四块都满足：`21424*0x1000 = 0x53b0000`、`24048*0x1000 = 0x5df0000`、`10644*0x1000 = 0x2994000`、`14232*0x1000 = 0x3798000`。移植层把这条当成硬校验（`si.page_starts_count * si.page_size != mapping_size` 即拒），这就是"mapping 大小 16 KiB 对齐"够用的理由：对齐 ⇒ 页数是 4 的倍数 ⇒ 最后一条 4 KiB 链不会跨出 `si_end`。
+3. **pager 按 4 KiB 切 16 KiB 页**。`vm_shared_region_pager.c:683` 的 `for (offset_in_page = 0; offset_in_page < PAGE_SIZE; offset_in_page += PAGE_SIZE_FOR_SR_SLIDE)` 就是给 16 KiB 页准备的：一页切成 4 段，每段各自查 `si_start`/`si_end`、各自用 `(offset_in_backing_object - si_start)/4096` 当 `pageIndex`。`si_start`（= 该 mapping 的 `sms_file_offset`：`0x5c000`、`0x540c000`、`0x5c000`、`0x29f0000`）和 `si_end` 都是 16 KiB 对齐，所以没有任何一段会跨过滑动的边界。
+4. **跨 4 KiB 边界的指针有专门处理**。`rebase_chain_64()` 里 `page_offset + 4 == PAGE_SIZE_FOR_SR_SLIDE` 的分支（`vm_shared_region.c:3050`）处理"链上最后一个指针一半在下一页"的情况 —— 在 16 KiB 页里这仍然是同一页，所以那个分支写的是同一块内存，语义正确。
+
+**slide 必须是 16 KiB 的倍数**，这道约束在两个独立的地方：`kebab_dsc_apply_slide()` 的 `slide & 0x3fff`，以及内核 `vm_shared_region_map_file_setup()` 的 `FOURK_COMPAT` 检查（`vm_shared_region.c:1519`，`SIXTEENK_PAGE_MASK`）。两边都拒，所以非 16 KiB 对齐的 slide 不会被"一方接受另一方拒绝"地漏进来。
+
+唯一没有验证的消费者是**别的东西读这块 blob**：dyld 自己在 `forEachSlideInMappedCache()` 里也用同一份 v2 数据做 `forEachPatchableUseOfExport`（rebasing 之外的 patchable 引用），那条路径同样以 `page_size` 为步长；本节只审了内核侧，dyld 侧按源码读是一致的，但没有真机日志。
+
+### 4. dyld 会检查什么，内核给出什么
+
+dyld 侧的结论来自 `dyld-1066.8`（公开源码，与缓存里的 `dyld-1067` 相邻）以及缓存里那个真正的 `dyld-1067` 二进制。后者的字符串直接印证了代码路径存在：
+
+```
+[@(#)PROGRAM:dyld  PROJECT:dyld-1067
+dyld_v1   arm64
+mapped cache does not contain dynamic config data
+existing shared cache in memory is not compatible
+syscall to map cache into shared region failed
+Could not vm_allocate fixed range for dynamic config data
+```
+
+`loadDyldCache()`（`dyld/SharedCacheRuntime.cpp:1166`）的第一条路是 `reuseExistingCache()`：只要 `__shared_region_check_np()` 成功，它就认为"共享区里已经有缓存"，然后：
+
+```c
+const DyldSharedCache* existingCache = (DyldSharedCache*)cacheBaseAddress;
+if ( !validMagic(options, existingCache) ) { ... "not compatible" ... }
+results->slide = (long)existingCache->slide();
+dyld_cache_dynamic_data_header* dynamicData =
+    (dyld_cache_dynamic_data_header*)((uintptr_t)results->loadAddress + existingCache->header.dynamicDataOffset);
+if (strncmp((char*)dynamicData, DYLD_SHARED_CACHE_DYNAMIC_DATA_MAGIC, 16) == 0) { ... }
+```
+
+另外 `SyscallDelegate::hasExistingDyldCache()`（`dyld/DyldDelegates.cpp:268`）在 `dyldMain` 最前面就已经做过一次 `check_np` + 同一处 `dynamicDataOffset` 解引用（它用来判断"这个 dyld 是不是缓存里那个"，好把自己从缓存里重启）。
+
+对齐起来，进程里必须成立的条件是这五条：
+
+| dyld 读什么 | 在哪 | 要求 | 内核实际给出 |
+| --- | --- | --- | --- |
+| `shared_region_check_np()` 返回值 | `DyldDelegates.cpp:270`、`SharedCacheRuntime.cpp:790` | 0（非空区） | 0；区为空时返回 `ENOMEM` |
+| 缓存基址 `cacheBaseAddress` | 同上 | `0x180000000 + slide` | `sr_base_address + sr_first_mapping` = `0x180000000 + slide` |
+| `DyldSharedCache::slide()` | `common/DyldSharedCache.cpp:822` | `base - mapping[0].address` | `(0x180000000+slide) - 0x180000000 = slide` |
+| `Atlas::SharedCache::_slide` | `common/ProcessAtlas.cpp:889` | `base - sharedRegionStart` | 同上，`sharedRegionStart` 也是 `0x180000000` |
+| `base + dynamicDataOffset` 可读 | `DyldDelegates.cpp:275`、`SharedCacheRuntime.cpp:799` | 必须已映射 | **改前缺**，改后是零页 |
+| `strcmp(magic, ARCH_CACHE_MAGIC)` | `SharedCacheRuntime.cpp:247` | `"dyld_v1   arm64"` | 缓存文件原样映射，magic 就在第一页 |
+| `header.cacheType` | `SharedCacheRuntime.cpp:795` | 2（multi-cache）不拒绝 | 2 |
+
+两个"slide"的算法不一样（一个减 `mapping[0].address`，一个减 `sharedRegionStart`），要同时等于真 slide，等价于要求 `mapping[0].address == sharedRegionStart`。这个恒等式在真实文件上成立：主缓存只有一条 mapping，地址就是 `0x180000000`，而头的 `sharedRegionStart` 也是 `0x180000000`。**这就是"计划基址必须等于头声明"的具体形式** —— 它不是美观问题，两个独立的 dyld 计算都依赖它。
+
+`cacheBaseAddress` 又是由内核的 `sr_first_mapping` 决定的：`vm_shared_region_map_file_setup()` 把"第一条成功建立的 mapping"记成 `sr_first_mapping = sms_address - sr_base_address`（`vm_shared_region.c:1815`），`vm_shared_region_start_address()` 再加回 `sr_base_address`（`:1027`）。计划里 `files[0]` 是主缓存、它的第一条 mapping 就是 `0x180000000`，所以 `sr_first_mapping` 正好等于 slide。**如果顺序反了**（比如把动态配置页放到主缓存 text 前面），`sr_first_mapping` 会变成 `0xaade4000 + slide`，dyld 算出来的 slide 就会是 `0xaade4000 + slide`，一切都错 —— 这也是把新页追加在主缓存 mapping 数组的**第二条**、而不是第 0 条的原因。
+
+匹配失败时 dyld 的行为值得写下来，因为症状会骗人：`validMagic()` 失败 → `reuseExistingCache()` 返回 false 并带 `"existing shared cache in memory is not compatible"` → `loadDyldCache()` 转去 `mapSplitCacheSystemWide()` → 那个 syscall 因为共享区已经被占而失败（内核 `sr_first_mapping != -1` → `KERN_FAILURE`）→ 再 `reuseExistingCache()` 还是失败 → dyld 放弃共享缓存、回到"逐个 dylib 从文件系统加载"。在 kebab 的根卷上那就是**一堆 file not found**，看上去像缺文件，其实是映射没人认。
+
+### 5. 改的是什么：`0142`
+
+**缺的那一页。** dyld 的 `mapSplitCacheSystemWide()` 不止映射 43 个文件，它还会追加一个 `fd == -1` 的"文件"：
+
+```c
+files[numFiles] = { -1, 1, 0 };
+...
+mappings[totalMappings] = {
+    firstFileInfo.dynamicConfigAddress,   // sharedRegionStart + dynamicDataOffset
+    dynamicConfigSize,                    // round_page(sizeof(dyld_cache_dynamic_data_header)) = 0x4000
+    (mach_vm_offset_t)dynamicConfigData,  // 用户态源地址
+    0, 0, VM_PROT_READ, VM_PROT_READ
+};
+```
+
+内核的 `fd == -1` 分支（`vm_shared_region.c:1530`）从用户态 `copyin` 到一块匿名 object，再映射到共享区。也就是说**真机上的共享区里这一页一定存在**，内容由 dyld 自己写（magic + fsId + fsObjId）。
+
+真实缓存头里的数字：
+
+| 字段 | 值 |
+| --- | --- |
+| `dynamicDataOffset` | `0xaade4000` |
+| `dynamicDataMaxSize` | `0x4000` |
+| `sharedRegionSize` | `0xaade8000` |
+| 51 条 mapping 的 extent | `0xaade4000` |
+| 缺的页 | `0x180000000 + 0xaade4000 = 0x22ade4000`，`0x4000` 字节 |
+
+`0xaade4000 + 0x4000 = 0xaade8000` —— 加回这一页，extent 正好等于 `sharedRegionSize`；之前少的正是它。它紧贴 `.42.dyldlinkedit` 最后一条 mapping 的末尾（`0x22ade4000`），落在 4 GiB 窗口内（`< 0x280000000`），也落在 `pmap_trim()` 允许的 `[nested_region_addr, +nested_region_size)` 内。
+
+为什么缺了会**崩**而不是"退回文件系统"：那一页在共享区里没有映射，进程页表里也没有；`pmap_fault` 落空 → `vm_fault()` 对 sub-map entry 直接 `return KERN_FAILURE`（`osfmk/vm/vm_fault.c:6689`）→ 用户态收到 bad access。dyld 在 `hasExistingDyldCache()` 里读它的时候还没有任何"容错"分支可走。
+
+**修法**：在计划里补一条 mapping —— 追加到主缓存 `files[0]` 的 mapping 数组第二条，`init = READ|VM_PROT_ZF`、`max = READ`、无 slide。`VM_PROT_ZF` 让内核走 `vm_map_enter()` + `vm_object_allocate()` 的匿名零页分支（`vm_shared_region.c:1764`），而不是文件映射。内容保持全零，于是 dyld 的 `strncmp` 不匹配、打印 `mapped cache does not contain dynamic config data`、继续跑；内核没有也不该伪造 dyld 的 fsId/fsObjId。这一页跟着其它 mapping 一起被 slide，和真机上 dyld 的 `mappings[totalMappings]` 同步。
+
+顺带的三处收紧：
+
+* `struct kebab_dsc_header` 从 456 字节长到 512 字节（mapping 表就从 512 开始），把 `cacheSubType`(456)、`objcOptsOffset/Size`(464/472)、`cacheAtlasOffset/Size`(480/488)、`dynamicDataOffset/Size`(496/504) 都摆进去并用 `static_assert` 钉住偏移 —— 否则读 `dynamicDataOffset` 只能靠魔数偏移。
+* 新增页的落点要做完整校验：16 KiB 对齐、`addr + size <= region_start + region_size`、与 52 条里已有的任何一条不重叠、主缓存的 mapping 数组还有空位（`KEBAB_DSC_MAX_MAPPINGS` 是 8，用了 2）。任何一条不成立就拒绝整份计划并打印原因。
+* `is_main` 的基址检查改成与 `SHARED_REGION_BASE_ARM64` 比较（原来比较的是自己）。
+
+`sharedRegionSize` 也从此自洽：计划里 `highest_end - region_start == region_size == 0xaade8000`，最大可用 slide `0x55210000` 之后仍有 `0x8000` 余量。
+
+### 6. 新增的日志（每处一行）
+
+| 行 | 触发 |
+| --- | --- |
+| `KEBAB DSC: dynamic config page 0x%llx+0x%llx (offset 0x%llx), zero-filled read-only` | 计划日志，成功加上这一页时（1 行） |
+| `KEBAB DSC: dynamicDataOffset is 0; no dynamic config page to map` | 缓存头没有动态区（正常缓存不会有） |
+| `KEBAB DSC: dynamic config page [...] is outside the declared region [...]` | `dynamicDataOffset + size` 越出 `sharedRegionSize` |
+| `KEBAB DSC: dynamic config page [...] overlaps %s mapping %u` | 与已有 mapping 重叠 |
+| `KEBAB DSC: dynamicDataOffset 0x%llx is not 0x%x-byte aligned` / `no room for the dynamic config page ...` | 对齐 / 数组满 |
+| `KEBAB DSC: %s: sharedRegionStart 0x%llx is not the kernel shared region base 0x%llx` | 缓存声明了别的基址（以前是永远为真的比较，现在才会出现） |
+| `KEBAB DSC: map: dynamic config page 0x%llx+0x%llx is zero-filled; dyld will report "no dynamic config data" and continue` | 映射成功之后（1 行） |
+| `KEBAB DSC: map: vm_shared_region_map_file failed 0x%x (error %d); region is empty again, shared cache NOT mapped` | 映射失败，且内核自己的回滚把区清空了 |
+| `KEBAB DSC: map: vm_shared_region_map_file failed 0x%x (error %d) but the region still maps 0x%llx; shared cache is HALF MAPPED` | 映射失败但区里还有映射（半映射，dyld 会接受然后踩空） |
+| `KEBAB DSC: cannot allocate %u subcache entries; ...` / `cannot allocate %u directory candidates; ...` / `map: cannot allocate %u file mappings; ...` | 三处 `kalloc_data` 失败（以前静默返回 `ENOMEM`） |
+
+正常路径总共多 2 行（约 180 字节）；失败路径每处 1 行，最坏情况不超过 10 行。**注意**：完整的计划日志本身就有 ~103 行、约 7 KiB（43 个文件行 + 52 条 mapping 行 + 8 行摘要），控制台 ring 是 16 KiB，一次 `kebab_dsc_map=1` 启动会占掉将近一半。真机第一次建议先只带 `kebab_dsc=`（dry run）看计划，再开 `kebab_dsc_map=1`；如果 ring 不够用，下一步应该给逐条 mapping 的打印加第二个开关，而不是缩小 ring。
+
+### 7. 真机启动会先告诉我们什么（按出现顺序）
+
+1. `KEBAB DSC: main dyld_shared_cache_arm64: ...` + 42 个子缓存的解析行 —— 证明内核在真机上真的按 UUID 找到了 42/42，而不是只在主机脚本里成立。
+2. `KEBAB DSC: region start=0x180000000 size=0xaade8000 ... maxSlide=0x55214000` 与 `dynamic config page 0x22ade4000+0x4000` —— 证明窗口、动态页、slide 上界都是计划里的数。
+3. `KEBAB DSC: plan 43 files / 52 mappings / 0xa2de8000 bytes` —— 一次 syscall 交出去的量；出现 52 就说明 0142 生效了。
+4. `KEBAB DSC: map: slide 0x0; mapping 43 files / 52 mappings into shared region at 0x180000000` —— 真正开始调 `vm_shared_region_map_file()`。
+5. 失败时：`... failed 0x%x` + `region is empty again`（干净回滚，dyld 会自己去映射）或 `HALF MAPPED`（内核的 undo 没清干净，这是必须先修的内核问题，不是移植层的）。`kr` 到 errno 的映射与 syscall 一致：`KERN_INVALID_ADDRESS→EFAULT`、`KERN_PROTECTION_FAILURE→EPERM`、`KERN_NO_SPACE→ENOMEM`、其余→`EINVAL`。
+6. `KEBAB DSC: map: shared_region_check_np base 0x180000000 (slide 0x0)` —— dyld 会拿到的基址；带了 `kebab_dsc_slide=` 时这里的 slide 必须与 boot arg 相等，不等就说明 `sr_first_mapping` 不是主缓存那条 mapping。
+7. **dyld 自己打印的 `mapped cache does not contain dynamic config data`** —— 这是最强的一条：它证明 dyld 已经越过 `shared_region_check_np()`、读到了 `base + 0xaade4000` 这一页、并且没有崩。看到这一行，映射整体就算成立。
+8. 若出现 `existing shared cache in memory is not compatible` → magic 或基址不对；若进程直接 bad access，异常地址在 `0x22ade4000` 附近 → 0142 没生效；在 `0x180000000` 附近 → 主缓存第一页没映射上。
+9. 再往后才是 launchd 的第一个 syscall（对照第六十六、七十二节）。中间任何一步断掉，日志都能指到上面某一行。
+
+### 8. 构建与补丁序列
+
+* `0142` 之后序列共 **121 个补丁**。在 pristine `1b191cb` 上按 `build.sh` 的顺序应用：119 个由 `git apply` 打上；`0001-kernel-sdk-root.patch` 与 `0002-local-availability.patch` 显示 "already applied"，因为 `build.sh` 的 `patches()` 在循环之前就用 `sed` 做了同样的两处修改（`makedefs/MakeInc.def` 的 `LDFLAGS_KERNEL_SDK`、`bsd/sys/make_symbol_aliasing.sh` 的 `AVAILABILITY_PL`），不是失败。kebab 系列 121/121 全部到位。
+* `build-local.sh` 从重置后的树完整构建 `DEVELOPMENT/ARM64/KEBAB`：`🎉 XNU Build Done!`，`kernel.development.kebab` 17,208,864 字节，`kebab_dyldcache.c` **0 warning / 0 error**。这个"0 警告"是和改动前的基线比对过的：用构建自己记录的同一行 `clang` 命令单独编译新旧两个文件，两次都是 5 条警告且逐条相同 —— 那 5 条来自 `vm_param.h`、`mpsc_queue.h` 等被包含的头文件，不在本文件里。
+* 真机仍然没有。板子 stranded，本节没有任何真机启动日志。
+
+### 9. 仍未验证 / 风险
+
+* **真机零验证**：板子 stranded。本节所有"会打印什么"都是代码路径的预期。`0142` 能证明的只有：真实文件的 `dynamicDataOffset`/`dynamicDataMaxSize` 与 `sharedRegionSize` 自洽、新页不与 52 条 mapping 重叠、每个可接受的 slide 之后仍在窗口内。
+* **动态页内容是零**：每个用这份共享区的进程都会打印一次 `mapped cache does not contain dynamic config data`（dyld 的 `dyld4::console`）。这是预期行为，不是错误；但也意味着 `fsgetpath` 那类依赖 fsId/fsObjId 的日志会是空的。
+* **`VM_PROT_NOAUTH` 没设**：non-PAC 的 arm64 构建里这一位无效，四条 slid mapping 走普通 pager，正确。若将来改用 arm64e 构建，`vm_shared_region_slide_mapping()` 会把没有 `VM_PROT_NOAUTH` 的 mapping 当成 auth 段、不装 pager 而走 `vm_shared_region_auth_remap()`；那时必须按 `flags & DYLD_CACHE_MAPPING_AUTH_DATA` 补这一位（本缓存的四条都是非 AUTH，dyld 会给它们都设 `VM_PROT_NOAUTH`）。
+* **`value_add` 全为 0 这个前提没被检查**：移植层靠它得出"slide==0 时不用装 pager"。如果将来某版缓存的 `value_add != 0`，slide==0 也必须设 `VM_PROT_SLIDE`，否则内容会错。值得后续在 `kebab_dsc_validate_slide_info()` 里加一句：slide 为 0 时要求 `value_add == 0`。
+* **代码签名闸门整体绕过**：见第 1 小节末。真机上这意味着缓存只按"文件在、头对"被映射；这与 bring-up 的其它放松一致，但不是最终形态。
+* **计划日志很大**：~7 KiB / 103 行，见第 6 小节末。
+* **`.symbols` 与 `dladdr`**：不映射是对的，但"dyld 之后 `dladdr` 拿不到本地符号"这条没有验证。
+* **4 GiB 的 pmap 保留**：`vm_shared_region_create()` 固定 `SHARED_REGION_SIZE_ARM64 = 4 GiB`，`pmap_trim()` 只保留实际用到的 `0xaade8000`（约 2.67 GiB）这一段页表。物理页只在真正缺页时才分配，洞和未用到的 1.33 GiB 都不占内存；每进程的固定开销是覆盖 2.67 GiB 的 L2/L3 页表（共享区 pmap 是嵌套共享的，不是每进程一份）。这一块没有真机内存数字，只有代码依据。
