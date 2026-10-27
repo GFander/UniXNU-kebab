@@ -1,0 +1,497 @@
+diff --git a/bsd/kern/kebab_codesign.c b/bsd/kern/kebab_codesign.c
+index 4704b52..04c47e1 100644
+--- a/bsd/kern/kebab_codesign.c
++++ b/bsd/kern/kebab_codesign.c
+@@ -98,10 +98,9 @@ static uint32_t kebab_tc_entry_size;
+ static boolean_t kebab_tc_sorted;
+ 
+ static int kebab_shared_cache_logged;
+-static int kebab_platform_logged;
+ 
+-/* Cap the "platform binary" chatter; there can be hundreds of dylibs. */
+-#define KEBAB_CS_MAX_CLASSIFY_LOGS 64
++/* Cap the per-exec classification chatter; the interesting exec is the first. */
++#define KEBAB_CS_MAX_EXEC_LOGS 32
+ 
+ static void
+ kebab_cdhash_string(const uint8_t *cdhash, char out[2 * KEBAB_TC_CDHASH_SIZE + 1])
+@@ -254,6 +253,7 @@ kebab_tc_parse(const uint8_t *data, size_t size)
+ 	uint32_t hash_types[5] = { 0, 0, 0, 0, 0 };
+ 	size_t needed, n;
+ 	boolean_t sorted = TRUE;
++	char residual[48];
+ 
+ 	if (size < KEBAB_TC_HEADER_SIZE) {
+ 		return EINVAL;
+@@ -314,9 +314,18 @@ kebab_tc_parse(const uint8_t *data, size_t size)
+ 	kebab_tc_entry_size = entry_size;
+ 	kebab_tc_sorted = sorted;
+ 
+-	printf("KEBAB CS: static trust cache v%u: %u entries (%u bytes), "
+-	    "hash types sha1=%u sha256=%u sha256-trunc=%u sha384=%u, %s\n",
+-	    tc_version, entries, (unsigned)needed,
++	if (size > needed) {
++		snprintf(residual, sizeof(residual),
++		    ", residual %lu bytes, first %02x",
++		    (unsigned long)(size - needed), data[needed]);
++	} else {
++		strlcpy(residual, ", residual 0 bytes", sizeof(residual));
++	}
++
++	printf("KEBAB CS: static trust cache v%u: %u entries x %u bytes "
++	    "(%lu used%s), hash types sha1=%u sha256=%u sha256-trunc=%u "
++	    "sha384=%u, %s\n",
++	    tc_version, entries, entry_size, (unsigned long)needed, residual,
+ 	    hash_types[1], hash_types[2], hash_types[3], hash_types[4],
+ 	    sorted ? "sorted" : "UNSORTED (linear lookup)");
+ 
+@@ -455,11 +464,142 @@ kebab_tc_lookup(const uint8_t cdhash[KEBAB_TC_CDHASH_SIZE])
+ 
+ #pragma mark - blob classification
+ 
++/*
++ * Mirror of hash_rank() in bsd/kern/ubc_subr.c: the kernel selects the
++ * CodeDirectory with the strongest supported hash, not the first one in the
++ * superblob.  Keep this in sync when the kernel's hashPriorities change.
++ */
++static unsigned int
++kebab_cd_hash_rank(uint8_t hash_type)
++{
++	switch (hash_type) {
++	case CS_HASHTYPE_SHA1:
++		return 1;
++	case CS_HASHTYPE_SHA256_TRUNCATED:
++		return 2;
++	case CS_HASHTYPE_SHA256:
++		return 3;
++	case CS_HASHTYPE_SHA384:
++		return 4;
++	default:
++		return 0;
++	}
++}
++
++int
++kebab_cs_find_code_directory(const void *sigbuf, size_t siglen,
++    off_t *cd_offset, uint32_t *cd_length, uint8_t *cd_hash_type)
++{
++	const uint8_t *base = (const uint8_t *)sigbuf;
++	const CS_SuperBlob *sb;
++	const CS_CodeDirectory *best = NULL;
++	uint32_t best_offset = 0;
++	uint32_t count, n;
++	unsigned int best_rank = 0;
++
++	if (base == NULL || siglen < sizeof(CS_CodeDirectory)) {
++		return EINVAL;
++	}
++	sb = (const CS_SuperBlob *)sigbuf;
++	if (ntohl(sb->magic) != CSMAGIC_EMBEDDED_SIGNATURE) {
++		return EINVAL;
++	}
++	count = ntohl(sb->count);
++	if (count > (siglen - sizeof(CS_SuperBlob)) / sizeof(CS_BlobIndex)) {
++		return EINVAL;
++	}
++
++	for (n = 0; n < count; n++) {
++		uint32_t type = ntohl(sb->index[n].type);
++		uint32_t offset = ntohl(sb->index[n].offset);
++		const CS_CodeDirectory *cd;
++		uint32_t length;
++		unsigned int rank;
++
++		if (type != CSSLOT_CODEDIRECTORY &&
++		    !(type >= CSSLOT_ALTERNATE_CODEDIRECTORIES &&
++		    type < CSSLOT_ALTERNATE_CODEDIRECTORY_LIMIT)) {
++			continue;
++		}
++		if (offset < sizeof(CS_SuperBlob) ||
++		    offset > siglen - sizeof(CS_CodeDirectory)) {
++			continue;
++		}
++		cd = (const CS_CodeDirectory *)(base + offset);
++		if (ntohl(cd->magic) != CSMAGIC_CODEDIRECTORY) {
++			continue;
++		}
++		length = ntohl(cd->length);
++		if (length < sizeof(CS_CodeDirectory) || length > siglen - offset) {
++			continue;
++		}
++		rank = kebab_cd_hash_rank(cd->hashType);
++		if (rank == 0) {
++			continue;
++		}
++		if (best == NULL || rank > best_rank) {
++			best = cd;
++			best_offset = offset;
++			best_rank = rank;
++		} else if (rank == best_rank) {
++			/* Same rule as cs_validate_csblob(): duplicates are illegal. */
++			return EINVAL;
++		}
++	}
++
++	if (best == NULL) {
++		return ENOENT;
++	}
++	*cd_offset = (off_t)best_offset;
++	*cd_length = ntohl(best->length);
++	*cd_hash_type = best->hashType;
++	return 0;
++}
++
+ void
+-kebab_cs_classify_blob(struct cs_blob *blob)
++kebab_cs_log_exec(struct cs_blob *blob, off_t cd_file_offset, off_t slice_offset)
+ {
++	static int exec_logs;
+ 	char cdhash_string[2 * KEBAB_TC_CDHASH_SIZE + 1];
++	uint32_t cd_length;
++	uint8_t cd_hash_type;
++	const char *hit;
+ 
++	if (blob == NULL || blob->csb_cd == NULL) {
++		return;
++	}
++	if (exec_logs >= KEBAB_CS_MAX_EXEC_LOGS) {
++		if (exec_logs == KEBAB_CS_MAX_EXEC_LOGS) {
++			printf("KEBAB CS: further exec classification lines suppressed\n");
++		}
++		exec_logs++;
++		return;
++	}
++	exec_logs++;
++
++	kebab_cdhash_string(blob->csb_cdhash, cdhash_string);
++	cd_length = ntohl(blob->csb_cd->length);
++	cd_hash_type = blob->csb_cd->hashType;
++	hit = kebab_tc_lookup(blob->csb_cdhash) ? "hit" : "miss";
++
++	if (cd_file_offset >= 0) {
++		printf("KEBAB CS: exec cdhash %s cd=0x%llx+%u hash=%u "
++		    "slice=0x%llx tc=%s platform=%d\n",
++		    cdhash_string, (unsigned long long)cd_file_offset, cd_length,
++		    cd_hash_type, (unsigned long long)slice_offset, hit,
++		    (int)blob->csb_platform_binary);
++	} else {
++		printf("KEBAB CS: exec cdhash %s cd=cached+%u hash=%u "
++		    "slice=0x%llx tc=%s platform=%d\n",
++		    cdhash_string, cd_length, cd_hash_type,
++		    (unsigned long long)slice_offset, hit,
++		    (int)blob->csb_platform_binary);
++	}
++}
++
++void
++kebab_cs_classify_blob(struct cs_blob *blob)
++{
+ 	if (blob == NULL || (kebab_cs_policy & KEBAB_CS_TRUSTCACHE_PLATFORM) == 0) {
+ 		return;
+ 	}
+@@ -481,15 +621,6 @@ kebab_cs_classify_blob(struct cs_blob *blob)
+ 	blob->csb_platform_binary = 1;
+ 	blob->csb_platform_path = 0;
+ 	blob->csb_teamid = NULL;
+-
+-	if (kebab_platform_logged < KEBAB_CS_MAX_CLASSIFY_LOGS) {
+-		kebab_cdhash_string(blob->csb_cdhash, cdhash_string);
+-		printf("KEBAB CS: cdhash %s is in Apple's static trust cache: "
+-		    "platform binary\n", cdhash_string);
+-	} else if (kebab_platform_logged == KEBAB_CS_MAX_CLASSIFY_LOGS) {
+-		printf("KEBAB CS: further platform binaries are not logged\n");
+-	}
+-	kebab_platform_logged++;
+ }
+ 
+ #pragma mark - shared cache
+diff --git a/bsd/kern/kebab_codesign.h b/bsd/kern/kebab_codesign.h
+index b880a11..2ad983b 100644
+--- a/bsd/kern/kebab_codesign.h
++++ b/bsd/kern/kebab_codesign.h
+@@ -67,6 +67,26 @@ int kebab_cs_grants_entitlements(void);
+  */
+ void kebab_cs_classify_blob(struct cs_blob *blob);
+ 
++/*
++ * Find the CodeDirectory that cs_validate_csblob() would select in a raw
++ * embedded signature, without modifying it.  On success returns 0 and the
++ * CodeDirectory's offset relative to the signature blob, its blob length and
++ * its hash type; on failure returns non-zero.  Used only for logging, so it
++ * follows the kernel's hashPriorities ranking rather than duplicating any
++ * validation.
++ */
++int kebab_cs_find_code_directory(const void *sigbuf, size_t siglen,
++    off_t *cd_offset, uint32_t *cd_length, uint8_t *cd_hash_type);
++
++/*
++ * One classification line per exec: cdhash, selected CodeDirectory, slice,
++ * trust-cache hit and final platform status.  cd_file_offset is the
++ * CodeDirectory's offset in the Mach-O file, or -1 if it is not known
++ * (blob already attached to the vnode).
++ */
++void kebab_cs_log_exec(struct cs_blob *blob, off_t cd_file_offset,
++    off_t slice_offset);
++
+ /* Used by shared_region_map_and_slide_setup(): SIP gate for the shared cache. */
+ int kebab_cs_shared_cache_allowed(struct vnode *vp, struct vnode *rdir_vp);
+ 
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 85b2d7e..716c1eb 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -196,7 +196,21 @@ static TUNABLE(bool, bootarg_arm64e_preview_abi, "-arm64e_preview_abi", false);
+ #endif /* __has_feature(ptrauth_calls) */
+ 
+ #if DEBUG || DEVELOPMENT
++/*
++ * KEBAB: this port runs Apple's real iOS launchd, so proc_platform() is
++ * PLATFORM_IOS and process_signature() would reject the initial exec unless
++ * the spawn platform is supplied.  There is no posix_spawn here, and the
++ * stranded board cannot be given a new boot-command line, so default the
++ * documented switch on for this port.  An explicit
++ * "unentitled_ios_sim_launch=0" still turns it back off.  This affects only
++ * the platform check in process_signature(); it does not relax signature
++ * validation and does not touch CS_HARD/CS_KILL.
++ */
++#if defined(KEBAB)
++static TUNABLE(bool, unentitled_ios_sim_launch, "unentitled_ios_sim_launch", true);
++#else
+ static TUNABLE(bool, unentitled_ios_sim_launch, "unentitled_ios_sim_launch", false);
++#endif /* KEBAB */
+ #endif /* DEBUG || DEVELOPMENT */
+ #endif /* XNU_TARGET_OS_OSX */
+ 
+@@ -1729,11 +1743,31 @@ grade:
+ 		 * Copy the strings area out into the new process address
+ 		 * space.
+ 		 */
++#if defined(KEBAB)
++		printf("KEBAB EXEC: pid %d pre-copyout cs=0x%llx imgp_cs=0x%llx "
++		    "load_cs=0x%llx stack=0x%llx\n",
++		    proc_getpid(p),
++		    (unsigned long long)proc_getcsflags(current_proc()),
++		    (unsigned long long)imgp->ip_csflags,
++		    (unsigned long long)load_result.csflags,
++		    (unsigned long long)p->user_stack);
++#endif /* KEBAB */
+ 		ap = p->user_stack;
+ 		error = exec_copyout_strings(imgp, &ap);
+ 		if (error) {
+ 			vm_map_switch(old_map);
+ 
++#if defined(KEBAB)
++			printf("KEBAB EXEC: pid %d copyout-failed error=%d "
++			    "cs=0x%llx imgp_cs=0x%llx load_cs=0x%llx "
++			    "ap=0x%llx\n",
++			    proc_getpid(p), error,
++			    (unsigned long long)proc_getcsflags(current_proc()),
++			    (unsigned long long)imgp->ip_csflags,
++			    (unsigned long long)load_result.csflags,
++			    (unsigned long long)ap);
++#endif /* KEBAB */
++
+ 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
+ 			    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_COPYOUT_STRINGS, 0, 0);
+ 
+@@ -5385,13 +5419,16 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+ 	int     ptr_size = (imgp->ip_flags & IMGPF_IS_64BIT_ADDR) ? 8 : 4;
+ 	int     ptr_area_size;
+ 	void *ptr_buffer_start, *ptr_buffer;
+-	size_t string_size;
++	size_t string_size = 0;
+ 
+-	user_addr_t     string_area;    /* *argv[], *env[] */
+-	user_addr_t     ptr_area;       /* argv[], env[], applev[] */
+-	user_addr_t argc_area;  /* argc */
++	user_addr_t     string_area = 0;        /* *argv[], *env[] */
++	user_addr_t     ptr_area = 0;   /* argv[], env[], applev[] */
++	user_addr_t argc_area = 0;      /* argc */
+ 	user_addr_t     stack;
+ 	int error;
++#if defined(KEBAB)
++	const char *stage = "alignment";
++#endif
+ 
+ 	unsigned i;
+ 	struct copyout_desc {
+@@ -5487,6 +5524,9 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+ 	/*
+ 	 * Copy out the entire strings area.
+ 	 */
++#if defined(KEBAB)
++	stage = "strings";
++#endif
+ 	error = copyout(imgp->ip_strings, string_area,
+ 	    string_size);
+ 	if (error) {
+@@ -5537,6 +5577,9 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+ 	/*
+ 	 * Copy out all our pointer arrays in bulk.
+ 	 */
++#if defined(KEBAB)
++	stage = "pointers";
++#endif
+ 	error = copyout(ptr_buffer_start, ptr_area,
+ 	    ptr_area_size);
+ 	if (error) {
+@@ -5544,12 +5587,27 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+ 	}
+ 
+ 	/* argc (int32, stored in a ptr_size area) */
++#if defined(KEBAB)
++	stage = "argc";
++#endif
+ 	error = copyoutptr((user_addr_t)imgp->ip_argc, argc_area, ptr_size);
+ 	if (error) {
+ 		goto bad;
+ 	}
+ 
+ bad:
++#if defined(KEBAB)
++	if (error != 0) {
++		printf("KEBAB EXEC: copyout stage=%s error=%d ptr_size=%d "
++		    "strspace_mod=%d string_size=%lu string=0x%llx ptr=0x%llx "
++		    "argc=0x%llx\n",
++		    stage, error, ptr_size,
++		    imgp->ip_strspace % ptr_size, (unsigned long)string_size,
++		    (unsigned long long)string_area,
++		    (unsigned long long)ptr_area,
++		    (unsigned long long)argc_area);
++	}
++#endif /* KEBAB */
+ 	return error;
+ }
+ 
+@@ -6656,14 +6714,35 @@ handle_mac_transition:
+  * Returns:	KERN_SUCCESS		Stack successfully created
+  *		!KERN_SUCCESS		Mach failure code
+  */
++#if defined(KEBAB)
++#define KEBAB_UNIX_STACK_LOG(res) do { \
++	if (kebab_stack_logs < 8 || (res) != KERN_SUCCESS) { \
++		kebab_stack_logs++; \
++		printf("KEBAB EXEC: stack map=%p shift=%d custom=%d " \
++		    "user=0x%llx alloc=0x%llx+0x%llx guard=0x%llx+0x%llx " \
++		    "kr=%d\n", \
++		    (void *)map, vm_map_page_shift(map), \
++		    (int)load_result->custom_stack, \
++		    (unsigned long long)user_stack, (unsigned long long)addr, \
++		    (unsigned long long)size, (unsigned long long)prot_addr, \
++		    (unsigned long long)prot_size, (int)(res)); \
++	} \
++} while (0)
++#else
++#define KEBAB_UNIX_STACK_LOG(res) do { } while (0)
++#endif /* KEBAB */
++
+ __attribute__((noinline))
+ static kern_return_t
+ create_unix_stack(vm_map_t map, load_result_t* load_result,
+     proc_t p)
+ {
+-	mach_vm_size_t          size, prot_size;
+-	mach_vm_offset_t        addr, prot_addr;
+-	kern_return_t           kr;
++	mach_vm_size_t          size = 0, prot_size = 0;
++	mach_vm_offset_t        addr = 0, prot_addr = 0;
++	kern_return_t           kr = KERN_SUCCESS;
++#if defined(KEBAB)
++	static int kebab_stack_logs;
++#endif
+ 
+ 	mach_vm_address_t       user_stack = load_result->user_stack;
+ 
+@@ -6686,6 +6765,7 @@ create_unix_stack(vm_map_t map, load_result_t* load_result,
+ 		 * Otherwise we must allocate it ourselves.
+ 		 */
+ 		if (mach_vm_round_page_overflow(load_result->user_stack_alloc_size, &size)) {
++			KEBAB_UNIX_STACK_LOG(KERN_INVALID_ARGUMENT);
+ 			return KERN_INVALID_ARGUMENT;
+ 		}
+ 		addr = vm_map_trunc_page(load_result->user_stack - size,
+@@ -6698,6 +6778,7 @@ create_unix_stack(vm_map_t map, load_result_t* load_result,
+ 			kr = mach_vm_allocate_kernel(map, &addr, size,
+ 			    VM_FLAGS_ANYWHERE, VM_MEMORY_STACK);
+ 			if (kr != KERN_SUCCESS) {
++				KEBAB_UNIX_STACK_LOG(kr);
+ 				return kr;
+ 			}
+ 
+@@ -6730,10 +6811,12 @@ create_unix_stack(vm_map_t map, load_result_t* load_result,
+ 		    VM_PROT_NONE);
+ 		if (kr != KERN_SUCCESS) {
+ 			(void)mach_vm_deallocate(map, addr, size);
++			KEBAB_UNIX_STACK_LOG(kr);
+ 			return kr;
+ 		}
+ 	}
+ 
++	KEBAB_UNIX_STACK_LOG(KERN_SUCCESS);
+ 	return KERN_SUCCESS;
+ }
+ 
+diff --git a/bsd/kern/mach_loader.c b/bsd/kern/mach_loader.c
+index 4530d43..dc2c123 100644
+--- a/bsd/kern/mach_loader.c
++++ b/bsd/kern/mach_loader.c
+@@ -103,6 +103,10 @@ char kebab_loader_trace[48] = "none";
+ 
+ #include "kern_exec_internal.h"
+ 
++#if defined(KEBAB)
++#include "kebab_codesign.h"
++#endif /* KEBAB */
++
+ /* XXX should have prototypes in a shared header file */
+ extern int      get_map_nentries(vm_map_t);
+ 
+@@ -3413,6 +3417,9 @@ load_code_signature(
+ 	vm_size_t       blob_size;
+ 	uint32_t        sum;
+ 	boolean_t               anyCPU;
++#if defined(KEBAB)
++	off_t           kebab_cd_offset = -1;
++#endif
+ 
+ 	addr = 0;
+ 	blob = NULL;
+@@ -3512,6 +3519,25 @@ load_code_signature(
+ 		goto out;
+ 	}
+ 
++#if defined(KEBAB)
++	/*
++	 * Save the selected CodeDirectory's offset before ubc_cs_blob_add()
++	 * reconstitutes the signature and moves the blob around; the log line
++	 * reports a file offset, which only the raw signature can provide.
++	 */
++	{
++		off_t cd_offset;
++		uint32_t cd_length;
++		uint8_t cd_hash_type;
++
++		if (kebab_cs_find_code_directory((const void *)addr,
++		    lcp->datasize, &cd_offset, &cd_length,
++		    &cd_hash_type) == 0) {
++			kebab_cd_offset = cd_offset;
++		}
++	}
++#endif /* KEBAB */
++
+ 	if (ubc_cs_blob_add(vp,
+ 	    result->ip_platform,
+ 	    cputype,
+@@ -3547,6 +3573,12 @@ out:
+ 		result->csflags |= blob->csb_flags;
+ 		result->platform_binary = blob->csb_platform_binary;
+ 		result->cs_end_offset = blob->csb_end_offset;
++#if defined(KEBAB)
++		kebab_cs_log_exec(blob,
++		    kebab_cd_offset >= 0 ?
++		    macho_offset + lcp->dataoff + kebab_cd_offset : -1,
++		    macho_offset);
++#endif /* KEBAB */
+ 	}
+ 	if (addr != 0) {
+ 		ubc_cs_blob_deallocate(addr, blob_size);

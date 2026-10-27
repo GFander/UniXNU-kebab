@@ -6645,3 +6645,236 @@ KEBAB TOUCH: down obj 0 raw 540 1200 panel 540 1200 logical 562 1218 z 41
   错位。
 * 本节的所有数字（193 项断言、合成样例、程序字节）都是主机上的结果。**板子上的
   验收还没做**：stranded，无法烧写。第 (1)–(4) 步就是板子回来后的验收清单。
+
+## 六十六、exec 失败的两个真实原因
+
+这一节纠正第 63 节末尾和第 8 节把 `launchd` 的死亡笼统归给 `CS_KILLED` 的说法。
+日志里的 namespace 9 有两个完全不同的 code，它们来自两条互不相干的代码路径；
+把 9/e 当成签名问题会一直查错方向。
+
+### 1. 9/6：`exec_copyout_strings()` 失败
+
+调用链在 `bsd/kern/kern_exec.c`：
+
+- `exec_mach_imgact()` 在切换进目标 map 后调用
+  `exec_copyout_strings(imgp, &ap)`（打上本补丁后第 1756 行；函数本体在第 5416 行）。
+- 失败后创建 `os_reason_create(OS_REASON_EXEC,
+  EXEC_EXIT_REASON_COPYOUT_STRINGS)`（第 1774 行），然后 `goto badtoolate`
+  （第 1779 行）。
+- `EXEC_EXIT_REASON_COPYOUT_STRINGS` 的值是 **6**，见
+  `bsd/sys/reason.h:249`。
+- pid 1 在 `badtoolate` 之后被 `SIGKILL`，`psignal_internal()` 对
+  `initproc` 的 SIGKILL 直接 panic，见 `bsd/kern/kern_sig.c:2069` 起；
+  本移植的 KEBAB 分支还会把 `kebab_loader_trace` 一起打出来。
+
+这条路径只说明“往新用户栈拷贝字符串/指针/argc 时某一步失败了”。它既没有查
+CodeDirectory，也没有查信任缓存；`CS_HARD`/`CS_KILL` 在这里不参与。之前把
+它和签名混为一谈，是因为两条路径最后都以 pid 1 的 SIGKILL panic 收场。
+
+### 2. 9/e：`process_signature()` 的 `PLATFORM_IOS` 门
+
+另一条在 `bsd/kern/kern_exec.c:process_signature()`（第 7425 行）：
+
+- 第 1385 行 `proc_setplatformdata(p, load_result.ip_platform, ...)` 把
+  Mach-O `LC_BUILD_VERSION` 里的 platform 写进 proc。真 `launchd` 是
+  `PLATFORM_IOS`，所以 `proc_platform(p) == PLATFORM_IOS` 成立。
+- `#if XNU_TARGET_OS_OSX` 下第 7485–7516 行检查 spawn platform：`execve`
+  路径没有 `imgp->ip_px_sa`（`psa == NULL`），于是要求
+  `unentitled_ios_sim_launch` 或 `com.apple.private.security.no-sandbox`
+  entitlement。
+- 两者都不满足时创建 `os_reason_create(OS_REASON_EXEC,
+  EXEC_EXIT_REASON_WRONG_PLATFORM)`（第 7505 行）。这个 code 是 **0xe**，
+  见 `bsd/sys/reason.h:257`。
+- 这个判断**不看** `CS_PLATFORM_BINARY`。即使 `kebab_cs=2` 已经按信任缓存
+  把 blob 标成 platform，`process_signature()` 仍然会走到 9/e。
+- `kebab_cs` 的 `0x4`（`KEBAB_CS_GRANT_ENTITLEMENTS`）也救不了：这个门调用
+  `IOVnodeHasEntitlement()`（`iokit/bsddev/IOKitBSDInit.cpp:1602`），后者经
+  `IOUserClient::copyClientEntitlementVnode()`
+  （`iokit/Kernel/IOUserClient.cpp:1521`）和
+  `copyClientEntitlementsVnode()`（同文件第 1481 行）去读 vnode 的签名
+  entitlement 字典，走的是 `cs_entitlements_dictionary_copy_vnode()`，不是
+  `kebab_amfi_query_*` 那几个回调。因此 0x4 只影响 AMFI 查询接口，不影响
+  这里。
+
+结论：9/e 是“宿主 macOS 内核不愿意在没有 spawn platform 的情况下启动 iOS
+二进制”，不是签名校验失败，也不是信任缓存没装。
+
+### 3. 这次改了什么
+
+**平台门（唯一的真实行为改动）**：`bsd/kern/kern_exec.c` 顶部第 198 行起（补丁后第 210 行），
+`unentitled_ios_sim_launch` 这个 `TUNABLE` 在 `KEBAB` 下默认值改为 `true`：
+
+```c
+#if defined(KEBAB)
+static TUNABLE(bool, unentitled_ios_sim_launch, "unentitled_ios_sim_launch", true);
+#else
+static TUNABLE(bool, unentitled_ios_sim_launch, "unentitled_ios_sim_launch", false);
+#endif
+```
+
+理由和边界：
+
+- 这个开关本来就在 `XNU_TARGET_OS_OSX && (DEBUG || DEVELOPMENT)` 内编译；
+  本内核的编译命令确实带 `-DXNU_TARGET_OS_OSX` 和 `-DDEVELOPMENT`（构造
+  `build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/.../*.json` 的 `arguments` 可见）。
+- `TUNABLE` 由 `kernel_startup_tunable_init()`（`osfmk/kern/startup.c:289`）
+  在启动时调用 `PE_parse_boot_argn()`；本板没有可靠的 boot-args 通道，且
+  板子已 stranded，不能再改命令行，所以只能让默认值生效。若以后命令行里
+  明确写 `unentitled_ios_sim_launch=0`，`PE_parse_boot_argn()` 仍会把它改回
+  `false`，开关没有被废掉。
+- 它只影响 `process_signature()` 里上面那一个 `PLATFORM_IOS` 判断。没有
+  全局签名豁免，没有清 `CS_HARD`/`CS_KILL`，没有改 `CS_PLATFORM_BINARY`
+  的判定，也没有改信任缓存策略。
+
+**copyout 路径**：`exec_copyout_strings()` 现在记录失败阶段（`alignment`、
+`strings`、`pointers`、`argc`），失败时打印：
+
+```
+KEBAB EXEC: copyout stage=strings error=14 ptr_size=8 strspace_mod=0 string_size=280 string=0x16fdffe8 ptr=0x16fdff80 argc=0x16fdff78
+```
+
+各字段含义：
+
+| 字段 | 含义 |
+| --- | --- |
+| `stage` | `alignment` = `ip_strspace % ptr_size != 0`；`strings` = 字符串区 `copyout`；`pointers` = 指针数组 `copyout`；`argc` = 最后的 `copyoutptr` |
+| `error` | 该次 `copyout`/`copyoutptr` 的 errno（常见 `EFAULT=14`、`EINVAL=22`） |
+| `ptr_size` | 本次 exec 的用户指针宽度，4 或 8 |
+| `strspace_mod` | `imgp->ip_strspace % ptr_size`；非 0 说明对齐检查先失败，后面的地址都没有意义 |
+| `string_size` | `ip_strendp - ip_strings`，字符串区字节数 |
+| `string`/`ptr`/`argc` | 三个目标地址：字符串区、指针数组区、argc 槽 |
+
+`exec_mach_imgact()` 在 copyout 前后各打一行状态：
+
+```
+KEBAB EXEC: pid 1 pre-copyout cs=0x0 imgp_cs=0x0 load_cs=0x0 stack=0x16fe0000
+KEBAB EXEC: pid 1 copyout-failed error=14 cs=0x0 imgp_cs=0x0 load_cs=0x0 ap=0x16fdff78
+```
+
+`cs` 是 `proc_getcsflags(current_proc())`，`imgp_cs` 是 `imgp->ip_csflags`，
+`load_cs` 是 `load_result.csflags`。三者在失败前后都不变，说明这不是签名
+状态在 exec 中途被改写；如果 `load_cs` 带 `CS_HARD`/`CS_KILL` 而
+`imgp_cs` 没有，才需要回到签名线。
+
+**用户栈**：`create_unix_stack()`（`bsd/kern/kern_exec.c:6737`）在返回前打印：
+
+```
+KEBAB EXEC: stack map=0xfffffe... shift=14 custom=0 user=0x16fe0000 alloc=0x16fd0000+0x10000 guard=0x16fd0000+0xc000 kr=0
+```
+
+依次是 map 指针、`vm_map_page_shift()`（16 KiB 页时为 14）、
+`load_result->custom_stack`、最终 `user_stack`、分配基址和长度、guard 区
+基址和长度、返回值。默认栈（`user_stack_alloc_size == 0`）会打出
+`alloc=0x0+0x0 guard=0x0+0x0`，表示没有单独分配，栈由
+`vm_initial_limit_stack` 的默认布局提供。成功路径最多打 8 行，失败路径
+不受限制，避免刷爆 16 KiB 的 console ring。
+
+### 4. 分类可观测性
+
+信任缓存加载后的一行现在包含版本、条目数、每条大小、已用/残余字节：
+
+```
+KEBAB CS: static trust cache v2: 2760 entries x 24 bytes (66264 used, residual 0 bytes), hash types sha1=2 sha256=2758 sha256-trunc=0 sha384=0, sorted
+```
+
+- `v2` / `24 bytes`：模块版本 2，条目固定 24 字节（20 字节 cdhash +
+  hashType + flags + constraintCategory + reserved）。
+- `66264 used, residual 0`：24 字节头 + 2760×24；`residual` 不是 0 说明
+  文件在条目表后面还有多余字节，解析或文件本身有问题。
+- `hash types`：这个 20H392 缓存里 2758 条是 SHA-256（type 2），另有 2 条
+  历史 SHA-1 条目；内核查找只看 20 字节 cdhash，不看条目里的 hashType，
+  所以这 2 条不影响 launchd/dyld。
+- `sorted`：内核的 `kebab_tc_lookup()` 对有序表做二分，无序时退化为线性。
+
+每次 exec 的 `load_code_signature()` 成功后打一行（最多 32 行）：
+
+```
+KEBAB CS: exec cdhash b65c36c9f5b287a6a8f5ca83d9427fb55ef04f4e cd=0x7e124+4398 hash=2 slice=0x0 tc=hit platform=1
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `cdhash` | 内核用 `SHA256_*` 对选中的整个 CodeDirectory 求 SHA-256，取前 20 字节 |
+| `cd=0x7e124+4398` | CodeDirectory 在文件里的绝对偏移和 blob 长度；`cached` 表示该 vnode 的 blob 已经存在，无法从原始签名再算文件偏移 |
+| `hash=2` | CodeDirectory 的 `hashType`：1=SHA-1，2=SHA-256，3=SHA-256-truncated，4=SHA-384 |
+| `slice=0x0` | Mach-O 在 fat 文件里的切片偏移；thin 文件为 0 |
+| `tc=hit/miss` | 上述 cdhash 是否在已加载的静态信任缓存里 |
+| `platform=1/0` | `blob->csb_platform_binary` 最终值，也就是 `kebab_cs` 分类有没有把它标成平台二进制 |
+
+选择 CodeDirectory 的规则与 `cs_validate_csblob()` 一致：只看 slot 0 和
+0x1000–0x1004，按 `hashPriorities[]`（SHA-1 < SHA-256-truncated < SHA-256
+< SHA-384）取最高 rank；同 rank 重复会像内核一样拒绝。不是取第一个
+CodeDirectory。
+
+### 5. 主机侧复核
+
+新工具 `scripts/verify-trustcache-cdhash.py` 直接读真实的
+`/sbin/launchd`、`/usr/lib/dyld` 和 IPSW 的 `static.trustcache`，按内核
+规则选 CodeDirectory、用 SHA-256 算 cdhash、逐页核对 code slot，再在缓存里
+查找。它和以前的 `check_cdhash.py` 不是一套解析：后者把文件当成裸 `trst`
+模块（`tc[:4] == b"trst"`、version 在 offset 8、20 字节条目），而实际 IPSW
+成员是 25 字节 DER/IM4P 包装 + 24 字节 v2 条目。
+
+在 `ubuntualbert` 上对真实文件运行：
+
+```sh
+python3 scripts/verify-trustcache-cdhash.py
+```
+
+输出：
+
+```
+trust cache  /home/albert/ios-userland/static.trustcache (66289 bytes)
+  IM4P       25-byte DER wrapper, 66264-byte payload
+  module     v2, 2760 entries x 24 bytes, 66264 used, 0 residual, sorted
+  hash types sha1=2, sha256=2758
+
+binary        slice  cd off    cd len  hash          page  slots     trust cache
+launchd       0x0    0x7e124   4398    sha256(2)     12    127/127   hit
+              cdhash b65c36c9f5b287a6a8f5ca83d9427fb55ef04f4e
+dyld          0x0    0xdb284   7218    sha256(2)     12    220/220   hit
+              cdhash 684d847c40e6e873eeaec693011d4d997a869d2a
+
+PASS launchd  cdhash, CodeDirectory, 127/127 slots and trust cache all match
+PASS dyld     cdhash, CodeDirectory, 220/220 slots and trust cache all match
+OK: the kernel's cdhash and Apple's cache agree for both binaries
+```
+
+对应表格：
+
+| 二进制 | cdhash | CD 偏移 | CD 长度 | hash type | page shift | code slots | 信任缓存 |
+| --- | --- | ---: | ---: | --- | ---: | ---: | --- |
+| `/sbin/launchd` | `b65c36c9f5b287a6a8f5ca83d9427fb55ef04f4e` | `0x7e124` | 4398 | 2 (SHA-256) | 12 | 127/127 | hit |
+| `/usr/lib/dyld` | `684d847c40e6e873eeaec693011d4d997a869d2a` | `0xdb284` | 7218 | 2 (SHA-256) | 12 | 220/220 | hit |
+
+工具退出码为 0 才表示“内核会算出的 cdhash”和“缓存里存的 cdhash”一致；
+退出码非 0 时，未来日志里的 `tc=miss` 就是真 miss，而不是主机工具解析错。
+
+### 6. 下一次启动应该看到什么
+
+如果 9/e 已经消失、copyout 也成功，exec 会继续到 dyld。此时 dyld 找不到
+`libSystem.B.dylib`（它只在尚未映射的 split shared cache 里），会调用
+`abort_with_payload()`（`libsyscall/wrappers/terminate_with_reason.c:120`），
+走 syscall 521 到内核的 `abort_with_payload_internal()`
+（`bsd/kern/kern_exit.c:1333`），namespace 是 **6**
+（`OS_REASON_DYLD`，`bsd/sys/reason.h:93`），code 是 **1**。pid 1 的退出
+由 `proc_handle_critical_exit()`（`bsd/kern/kern_exit.c:1776`）处理，panic
+文本类似：
+
+```
+initproc exited -- exit reason namespace 6 subcode 0x1 description: ...
+```
+
+这是**预期的下一步**，不是签名失败。判读顺序：
+
+1. 先看有没有 `KEBAB CS: exec cdhash ... platform=1`。有，说明分类和信任
+   缓存都对了。
+2. 如果接着出现 namespace **6** code **1**，说明 exec 已经过了 9/e 和 9/6，
+   问题在共享缓存映射，不在签名。
+3. 如果仍然是 namespace **9** code **0x6**，看紧邻的
+   `KEBAB EXEC: copyout stage=...` 行，按 stage 定位。
+4. 如果仍然是 namespace **9** code **0xe**，说明平台门没有生效，检查
+   `unentitled_ios_sim_launch` 是否被命令行显式置 0，以及
+   `proc_platform(p)` 的值。
+5. 只有 panic 文本里出现 `CS_KILLED`，或者 `load_cs`/`imgp_cs` 带
+   `CS_HARD`/`CS_KILL`，才回到签名线。
