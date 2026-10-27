@@ -4399,3 +4399,76 @@ br  x4
 
 下一步只有三件事：反汇编 `0x7fdc` 与 `0x80c4`、解析 `[0xbef8]` 的表结构、
 确认回调清理的是命令队列还是 TCS 硬件状态。
+
+## 五十、O3-C5：EBS 回调的清理内容与内存服务风险
+
+### 1. `0x7fdc` / `0x80c4` 做什么
+
+两者结构几乎相同：
+
+```text
+0x7fec  adrp x22, #0xe000 ; x22 = 0xe850
+0x7ffc  mov  x0, x22
+0x08000  mov  w1, w21     ; w21 = 第一个参数（id）
+0x08004  bl   #0x65f0     ; 查表/查询
+0x08008  mov  w19, w0
+0x0800c  cbz  w19, #0x8044
+0x08018  adrp x3, #0xc000
+0x0801c  add  x3, x3, #0x2c3   ; 出错日志字符串
+0x0802c  bl   #0xa49c          ; 日志输出
+```
+
+查询失败时打印日志返回；成功分支在 `0x8044`/`0x812c` 处用 `id * 0x18` 计算
+表项地址（元素 24 字节）。两条路径都**没有**任何指向 `0x18xxxxxx` 的地址构造，
+也没有写 RSC 寄存器的迹象——它们更像“按 id 清理客户端/命令状态”，不是 TCS 硬件
+回收。
+
+### 2. DXE Core 的 EBS 顺序（Mu 源码）
+
+`Mu_Basecore/MdeModulePkg/Core/Dxe/DxeMain/DxeMain.c`：
+
+```text
+790:  CoreNotifySignalList (&gEfiEventBeforeExitBootServicesGuid);
+802:  Status = CoreTerminateMemoryMap (MapKey);
+807:    CoreNotifySignalList (&gEventExitBootServicesFailedGuid);
+816:  CoreNotifySignalList (&gEfiEventExitBootServicesGuid);
+```
+
+即：先通知 BeforeEBS，再终止内存映射，成功后才通知 EBS。RpmhDxe 注册的正是
+`gEfiEventExitBootServicesGuid`，所以它的回调（`0x149c`）**运行在内存映射已经
+终止之后**。
+
+### 3. 风险链
+
+```text
+CoreTerminateMemoryMap() 成功
+  -> CoreNotifySignalList(ExitBootServicesGuid)
+    -> RpmhDxe 0x149c -> 0x14b0
+      -> UninstallMultipleProtocolInterfaces(gBS+0x150)
+        -> EDK II 可能进入 CoreFreePool / 释放协议或句柄路径
+```
+
+UEFI 规范要求在 EBS 通知回调里不得调用会改变内存映射的服务；EDK II 的协议卸载
+路径在移除最后一个协议时可能释放内存。这与历史上“EBS 卡在
+`CoreTerminateMemoryMap` 之后、`CoreNotifySignalList` 处理中”的位置吻合。
+
+**这仍是假设**：需要证明事件注册在真机上成功、回调确实被触发、且卸载路径进入了
+释放分支。但它是目前最有解释力的线索，优先级高于继续猜测 TCS1 状态。
+
+### 4. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| `0x7fdc/0x80c4` 为软件表清理 | HIGH CONFIDENCE（无 MMIO 地址构造） |
+| EBS 回调运行在内存映射终止之后 | DIRECT（Mu 源码顺序） |
+| 回调可能在 EBS 期间释放内存 | 高风险，待证明 |
+| 与历史 EBS 挂死的因果 | 未证明 |
+| TCS1 是否被释放 | UNKNOWN |
+| 真实写入 | NO-GO |
+
+### 5. 下一步
+
+1. 反汇编 `0x65f0` 与表 `0xe850`，确认 `0x7fdc/0x80c4` 清理的对象；
+2. 在 `0x14b0` 的卸载路径上确认 EDK II 是否会走到 `CoreFreePool`；
+3. 若要验证历史挂死，最省事的是在 UEFI 侧加一条“EBS 前后”的预留内存记录，
+   而不是再改内核。
