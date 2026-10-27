@@ -280,3 +280,121 @@ KEBAB EP0 STATE: resets=.. disconnects=.. fences=.. events=.. acked=..
 
 重连测试的判据：`resets` 增加、`discarded` 保持 0、`events/acked` 同步增长、
 `line` 与主机设置的终端参数一致。
+
+## KDP 桥的帧格式
+
+这一节记录 2026-10-27 在 arm64 kebab 上实测到的 KDP 桥问题、xnu 串口 KDP 的真实线格式，
+以及修复后的复测命令。桥是 `scripts/kdp-cdc-bridge.py`。
+
+### 实测现象
+
+设备 panic 后串口出现：
+
+```text
+Using serial KDP.
+Waiting for remote debugger connection.
+```
+
+说明 `kdp_init()` 已经把 `kdp_serial_send` / `kdp_serial_receive` 注册为 KDP 的收发函数，
+内核停在调试器里等主机。主机执行 `lldb` 的 `kdp-remote 127.0.0.1:41139` 后，桥日志是：
+
+```text
+[udp] packet 1 from 127.0.0.1:51262: 10 bytes: short inner packet (10 bytes)
+[udp] packet 4 from 127.0.0.1:51262: 8 bytes: short inner packet (8 bytes)
+```
+
+之后串口没有任何写入，设备不回包，LLDB 报 `error: KDP_REATTACH failed`。
+
+10 字节正好是 8 字节 `kdp_hdr_t` 加 2 字节 `req_reply_port`（`KDP_REATTACH`，
+`osfmk/kdp/kdp_protocol.h:167-173`、`:231-234`）；8 字节是只有 `kdp_hdr_t` 的请求
+（例如 `KDP_DISCONNECT`）。这说明 LLDB 的 UDP 数据报载荷就是裸 KDP 包，不是以太网帧；
+桥却要求数据报里已经含有内层以太网/IPv4/UDP 帧，所以每个包都被判成 `short` 丢掉。
+
+### xnu 串口 KDP 的线格式
+
+常量取自本仓库锁定的 xnu（`unixnu.lock` 的 `1b191cb58250d0705d8a51287127505aa4bc0789`）：
+
+- `osfmk/kdp/kdp_udp.c:623-685` 的 `kdp_send()` 和 `:542-620` 的 `kdp_reply()` 会在 KDP
+  包前依次写 14 字节以太网头、20 字节 IPv4 头和 8 字节 UDP 头。`kdp_serial_send()`
+  （`:2149-2154`）随后把整个以太网帧交给 `kdp_serialize_packet()`。
+- `osfmk/kdp/kdp_udp.c:2297-2305` 的 `kdp_init()` 给串口 KDP 造了一个假身份：MAC 是
+  ASCII `serial`（`73:65:72:69:61:6c`），IP 是 `KDP_SERIAL_IPADDR = 0xABADBABE`
+  （`:89`）。`s_addr` 按网络字节序存放，所以线上字节是 `be ba ad ab`，即
+  `190.186.173.171`；`libkern/net/inet_ntoa.c:49-58` 直接按 `s_addr` 的内存字节打印，
+  `kdp_connection_wait()` 用 `ntohl()` 后打印的也是这个值。
+- `osfmk/kdp/kdp_protocol.h:72`：`KDP_REMOTE_PORT = 41139`。
+- 入方向 `kdp_poll()`（`kdp_udp.c:924-1017`）只接受 UDP 目的端口 41139（`:987`）；
+  它不校验目的 MAC/IP，也不校验 IP/UDP 校验和。`kdp_udp.c:1006-1011` 在第一包到达时
+  从以太网/IP 头学习对端地址，所以源 MAC/IP 没有内核常量，由桥决定。
+- 出方向 `kdp_send()`/`kdp_reply()` 固定 UDP 源端口 41139（`:576`、`:653`），回复的
+  以太网/IP 源地址就是入包的以太网/IP 目的地址。
+
+因此 LLDB -> 串口的包必须是：
+
+| 层 | 字段 | 值 |
+| --- | --- | --- |
+| Ethernet | dst | `73:65:72:69:61:6c`（xnu 的 `serial`） |
+| Ethernet | src | `02:00:00:00:00:01`（桥代表调试器） |
+| Ethernet | type | `0x0800` |
+| IPv4 | version/IHL | `0x45` |
+| IPv4 | total length | `20 + 8 + KDP 长度` |
+| IPv4 | ID / flags / TTL | 递增 / 0 / `64` |
+| IPv4 | protocol | `17`（UDP） |
+| IPv4 | dst | `190.186.173.171` |
+| IPv4 | src | LLDB 对端地址（本机是 `127.0.0.1`） |
+| IPv4 | header checksum | 标准 16 位反码和 |
+| UDP | sport / dport | LLDB 的源端口 / `41139` |
+| UDP | length | `8 + KDP 长度` |
+| UDP | checksum | 带 IPv4 伪头的标准校验和 |
+| UDP | payload | 裸 KDP 包 |
+
+串口 -> LLDB 则反过来：从 0xfa/0xfb 帧里取出这个以太网帧，按上面的长度字段解析后，
+只把 UDP 载荷（裸 KDP）发给最后一个 UDP 对端。原有的 0xfa/0xfb、转义和 CRC32 层
+（`osfmk/kdp/kdp_serial.c:44-76`）完全不变。
+
+兼容性：桥按内容判断，不看命令行开关。若 UDP 数据报本身已经是以太网/IPv4/UDP 帧，
+并且 41139 出现在源或目的端口，就原样送到串口；若串口帧没有这层封装，也原样送回
+UDP 对端。
+
+### 复测命令
+
+设备侧不需要改；本次测量里内核已经打印 `Using serial KDP.`。主机在 WSL 里（仓库路径
+`/home/albert/kebab-dev`）：
+
+```sh
+cd /home/albert/kebab-dev
+python3 scripts/kdp-cdc-bridge.py --selftest
+python3 scripts/kdp-cdc-bridge.py --list-ports
+python3 scripts/kdp-cdc-bridge.py /dev/ttyACM0 --verbose --udp-port 41139
+```
+
+Windows 原生 Python 把最后一行换成实际 COM 口：
+
+```powershell
+python scripts\kdp-cdc-bridge.py --selftest
+python scripts\kdp-cdc-bridge.py COM7 --verbose --udp-port 41139
+```
+
+另开一个终端：
+
+```sh
+lldb
+(lldb) kdp-remote 127.0.0.1:41139
+```
+
+期望桥日志（端口号会变）：
+
+```text
+[udp] packet 1 from 127.0.0.1:51262: 10 bytes: bare KDP_REATTACH seq 1 len 10 -> 52-byte envelope
+[serial] frame 1: 52 bytes: 02:00:00:00:00:01 > 73:65:72:69:61:6c ethertype 0x0800 ip 127.0.0.1 > 190.186.173.171 proto 17 ttl 64 udp 51262 > 41139 KDP_REATTACH reply seq 1 len 10 -> bare KDP 10 bytes
+```
+
+LLDB 应能连上并停在 panic 现场，不再报 `KDP_REATTACH failed`。若仍失败，按顺序查：
+
+1. `--selftest` 是否为 `42/42 passed`；
+2. 设备是否仍停在 `Waiting for remote debugger connection.`；
+3. 桥有没有 `[serial] frame` 行（没有就是没收到设备回包，查 CDC-ACM 口和 `kebabusb`）；
+4. 裸 KDP 数据报是否被误判成以太网帧（日志里应显示 `bare KDP_...`，不应显示
+   `already enveloped`）。
+
+> 本次只改主机侧 `scripts/kdp-cdc-bridge.py`；内核、补丁和串口线格式都没有改。

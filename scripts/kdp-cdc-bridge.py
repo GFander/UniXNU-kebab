@@ -13,9 +13,16 @@ or '\\n' is sent as ESC followed by its bitwise complement.  The CRC is zlib's
 crc32 of the inner packet.  Kernel log text shares the same byte stream, so the
 decoder simply ignores anything outside a frame.
 
-This tool opens the serial port, decodes those frames, and relays the inner
-Ethernet/IPv4/UDP packet to and from a local UDP socket.  Point LLDB at that
-socket with:
+LLDB's kdp-remote speaks KDP directly over UDP: the datagram payload is the
+KDP packet itself.  xnu's serial KDP, however, carries a whole
+Ethernet/IPv4/UDP frame inside those serial frames (kdp_send() and kdp_reply()
+in osfmk/kdp/kdp_udp.c).  This tool translates between the two: bare KDP from
+LLDB gets the envelope xnu expects before it is framed for the port, and an
+enveloped frame from the kernel is stripped back to the bare KDP packet for
+LLDB.  A datagram that already is an Ethernet/IPv4/UDP KDP frame is passed
+through unchanged.
+
+Point LLDB at that socket with:
 
     lldb
     (lldb) kdp-remote 127.0.0.1:41139
@@ -41,6 +48,7 @@ import sys
 import threading
 import time
 import zlib
+from collections import namedtuple
 
 # ---------------------------------------------------------------- protocol
 
@@ -55,6 +63,24 @@ KDP_MAX_PACKET = 1518
 DEFAULT_BAUD = 115200
 DEFAULT_UDP_PORT = 41139          # KDP_REMOTE_PORT in osfmk/kdp/kdp_protocol.h
 DEFAULT_UDP_BIND = "127.0.0.1"
+
+# xnu's serial KDP does not put a bare KDP packet on the wire.  kdp_send() and
+# kdp_reply() in osfmk/kdp/kdp_udp.c build a 14-byte Ethernet, 20-byte IPv4 and
+# 8-byte UDP header around the KDP payload, and kdp_serial_send() hands that
+# whole frame to kdp_serialize_packet().  kdp_init() gives the serial link a
+# fake identity: MAC 'serial' and IP 0xABADBABE (stored in network byte order,
+# so the bytes on the wire are be ba ad ab = 190.186.173.171).
+SERIAL_KDP_MAC = b"serial"                  # 73:65:72:69:61:6c
+SERIAL_KDP_IP = "190.186.173.171"           # KDP_SERIAL_IPADDR 0xABADBABE
+SERIAL_KDP_PORT = DEFAULT_UDP_PORT          # KDP_REMOTE_PORT 41139
+DEBUGGER_MAC = bytes.fromhex("020000000001")
+ETHERTYPE_IP = 0x0800
+IPPROTO_UDP = 17
+ETH_HEADER_LEN = 14
+IP_HEADER_LEN = 20
+UDP_HEADER_LEN = 8
+ENVELOPE_LEN = ETH_HEADER_LEN + IP_HEADER_LEN + UDP_HEADER_LEN
+DEFAULT_TTL = 64
 
 # KDP request numbers, osfmk/kdp/kdp_protocol.h.  Only used for --verbose.
 KDP_REQUESTS = {
@@ -91,6 +117,125 @@ KDP_REQUESTS = {
 def crc32(data):
     """CRC used by kdp_serial.c (zlib polynomial, initial value 0)."""
     return zlib.crc32(data) & 0xFFFFFFFF
+
+
+# ------------------------------------------------------- KDP envelope codec
+
+
+SerialEnvelope = namedtuple(
+    "SerialEnvelope",
+    "dst_mac src_mac src_ip dst_ip sport dport ttl ip_len payload")
+
+
+def _ones_complement_sum(data):
+    """16-bit one's-complement sum, the basis of IPv4 and UDP checksums."""
+    if len(data) & 1:
+        data += b"\x00"
+    total = 0
+    for index in range(0, len(data), 2):
+        total += (data[index] << 8) | data[index + 1]
+        total = (total & 0xFFFF) + (total >> 16)
+    return (total & 0xFFFF) + (total >> 16)
+
+
+def ipv4_checksum(header):
+    """Checksum over a complete IPv4 header whose checksum field is zero."""
+    return (~_ones_complement_sum(header)) & 0xFFFF
+
+
+def udp_checksum(src_ip, dst_ip, segment):
+    """Checksum over the UDP pseudo-header plus the UDP header and payload."""
+    pseudo = (socket.inet_aton(src_ip) + socket.inet_aton(dst_ip) +
+              struct.pack("!BBH", 0, IPPROTO_UDP, len(segment)))
+    return (~_ones_complement_sum(pseudo + segment)) & 0xFFFF
+
+
+def build_serial_envelope(payload, sport, src_ip=DEFAULT_UDP_BIND,
+                          dst_ip=SERIAL_KDP_IP, src_mac=DEBUGGER_MAC,
+                          dst_mac=SERIAL_KDP_MAC, dport=SERIAL_KDP_PORT,
+                          ip_id=0, ttl=DEFAULT_TTL):
+    """Wrap a bare KDP payload in the envelope xnu's serial KDP expects.
+
+    The defaults are the LLDB -> kernel direction: the destination is xnu's
+    fake serial identity, the source is the host that runs this bridge, and
+    the UDP destination port is KDP_REMOTE_PORT.  kdp_poll() only validates
+    the destination port, but the checksums are real so the frame is also
+    valid for packet captures and stricter peers.
+    """
+    limit = KDP_MAX_PACKET - ENVELOPE_LEN
+    if len(payload) > limit:
+        raise ValueError("KDP payload is %d bytes, the enveloped serial limit "
+                         "is %d" % (len(payload), limit))
+    udp_len = UDP_HEADER_LEN + len(payload)
+    ip_len = IP_HEADER_LEN + udp_len
+    ethernet = dst_mac + src_mac + struct.pack("!H", ETHERTYPE_IP)
+    ip = struct.pack("!BBHHHBBH4s4s", 0x45, 0, ip_len, ip_id & 0xFFFF,
+                     0, ttl, IPPROTO_UDP, 0,
+                     socket.inet_aton(src_ip), socket.inet_aton(dst_ip))
+    ip = ip[:10] + struct.pack("!H", ipv4_checksum(ip)) + ip[12:]
+    udp = struct.pack("!HHHH", sport, dport, udp_len, 0) + payload
+    checksum = udp_checksum(src_ip, dst_ip, udp) or 0xFFFF
+    udp = udp[:6] + struct.pack("!H", checksum) + udp[8:]
+    return ethernet + ip + udp
+
+
+def parse_serial_envelope(data):
+    """Parse an Ethernet/IPv4/UDP frame, or return None if it is not one.
+
+    Only framing is validated; checksums are not, so an already-enveloped
+    datagram from another client is recognised even if that client left the
+    checksums zero (xnu itself never looks at them).
+    """
+    if len(data) < ENVELOPE_LEN:
+        return None
+    dst_mac = data[0:6]
+    src_mac = data[6:12]
+    if struct.unpack("!H", data[12:14])[0] != ETHERTYPE_IP:
+        return None
+    if data[14] >> 4 != 4:
+        return None
+    ihl = (data[14] & 0x0F) * 4
+    if ihl < IP_HEADER_LEN or len(data) < ETH_HEADER_LEN + ihl + UDP_HEADER_LEN:
+        return None
+    ip_len = struct.unpack("!H", data[16:18])[0]
+    if ip_len < ihl + UDP_HEADER_LEN or ETH_HEADER_LEN + ip_len > len(data):
+        return None
+    ttl = data[22]
+    if data[23] != IPPROTO_UDP:
+        return None
+    udp_off = ETH_HEADER_LEN + ihl
+    sport, dport, udp_len = struct.unpack("!HHH", data[udp_off:udp_off + 6])
+    if udp_len < UDP_HEADER_LEN or udp_len != ip_len - ihl:
+        return None
+    if udp_off + udp_len > len(data):
+        return None
+    payload = data[udp_off + UDP_HEADER_LEN:udp_off + udp_len]
+    return SerialEnvelope(dst_mac, src_mac,
+                          socket.inet_ntoa(data[26:30]),
+                          socket.inet_ntoa(data[30:34]),
+                          sport, dport, ttl, ip_len, payload)
+
+
+def is_kdp_envelope(data):
+    """True if data is an Ethernet/IPv4/UDP frame carrying KDP traffic."""
+    envelope = parse_serial_envelope(data)
+    return (envelope is not None and
+            SERIAL_KDP_PORT in (envelope.sport, envelope.dport))
+
+
+def describe_kdp(payload):
+    """One-line summary of a bare KDP packet."""
+    if len(payload) < 8:
+        return "short KDP packet (%d bytes)" % len(payload)
+    first, seq, length = struct.unpack("<BBH", payload[:4])
+    request = first & 0x7F
+    name = KDP_REQUESTS.get(request, "KDP_%u" % request)
+    if first & 0x80:
+        name += " reply"
+    if length != len(payload):
+        return "%s seq %u len %u (actual %d)" % (
+            name, seq, length, len(payload))
+    return "%s seq %u len %u" % (name, seq, length)
 
 
 def escape_bytes(data):
@@ -209,33 +354,16 @@ def _mac(raw):
 
 
 def describe_packet(packet):
-    """Return a one-line human summary of an inner Ethernet/IP/UDP frame."""
-    if len(packet) < 14:
-        return "short inner packet (%d bytes)" % len(packet)
-    dst, src, ethertype = struct.unpack("!6s6sH", packet[:14])
-    text = "%s > %s ethertype 0x%04x" % (_mac(src), _mac(dst), ethertype)
-    if ethertype != 0x0800 or len(packet) < 34:
-        return text + " (not IPv4)"
-    (version_ihl, _tos, total_len, _ident, _frag, ttl, proto, _csum,
-     ip_src, ip_dst) = struct.unpack("!BBHHHBBH4s4s", packet[14:34])
-    ihl = (version_ihl & 0x0F) * 4
-    text += " ip %s > %s proto %u ttl %u len %u" % (
-        socket.inet_ntoa(ip_src), socket.inet_ntoa(ip_dst), proto, ttl,
-        total_len)
-    if proto != 17 or len(packet) < 14 + ihl + 8:
-        return text
-    sport, dport, udp_len, _udp_csum = struct.unpack(
-        "!HHHH", packet[14 + ihl:14 + ihl + 8])
-    text += " udp %u > %u len %u" % (sport, dport, udp_len)
-    kdp_off = 14 + ihl + 8
-    if len(packet) >= kdp_off + 4:
-        first, seq, length = struct.unpack("<BBH", packet[kdp_off:kdp_off + 4])
-        request = first & 0x7F
-        name = KDP_REQUESTS.get(request, "KDP_%u" % request)
-        if first & 0x80:
-            name += " reply"
-        text += " %s seq %u len %u" % (name, seq, length)
-    return text
+    """Return a one-line summary of a serial-KDP inner frame."""
+    envelope = parse_serial_envelope(packet)
+    if envelope is None:
+        return "bare %s" % describe_kdp(packet)
+    return ("%s > %s ethertype 0x%04x ip %s > %s proto %u ttl %u "
+            "udp %u > %u %s" % (
+                _mac(envelope.src_mac), _mac(envelope.dst_mac),
+                ETHERTYPE_IP, envelope.src_ip, envelope.dst_ip, IPPROTO_UDP,
+                envelope.ttl, envelope.sport, envelope.dport,
+                describe_kdp(envelope.payload)))
 
 
 # ------------------------------------------------------------ serial links
@@ -587,17 +715,29 @@ class Relay:
             print(message, flush=True)
 
     def serial_to_udp(self, data):
-        """Decode serial bytes and forward every complete frame to the peer."""
+        """Decode serial frames and forward the bare KDP packet to the peer."""
         for packet in self.decoder.feed(data):
             self.rx_frames += 1
-            self._log("[serial] frame %d: %d bytes: %s" %
-                      (self.rx_frames, len(packet), describe_packet(packet)))
+            envelope = parse_serial_envelope(packet)
+            if envelope is not None and SERIAL_KDP_PORT not in (
+                    envelope.sport, envelope.dport):
+                envelope = None
+            if envelope is not None:
+                payload = envelope.payload
+                self._log("[serial] frame %d: %d bytes: %s -> bare KDP "
+                          "%d bytes" % (self.rx_frames, len(packet),
+                                        describe_packet(packet), len(payload)))
+            else:
+                payload = packet
+                self._log("[serial] frame %d: %d bytes: %s (no envelope, "
+                          "passing through)" % (self.rx_frames, len(packet),
+                                                describe_packet(packet)))
             if self.peer is None:
                 self.dropped += 1
                 self._log("[udp] dropping frame: no debugger has sent a packet")
                 continue
             try:
-                self.udp.sendto(packet, self.peer)
+                self.udp.sendto(payload, self.peer)
             except OSError as exc:
                 self.dropped += 1
                 self._log("[udp] send to %s failed: %s" % (self.peer, exc))
@@ -617,11 +757,29 @@ class Relay:
             return False
         self.peer = peer
         self.tx_frames += 1
-        self._log("[udp] packet %d from %s:%d: %d bytes: %s" %
-                  (self.tx_frames, peer[0], peer[1], len(packet),
-                   describe_packet(packet)))
+        if is_kdp_envelope(packet):
+            frame_packet = packet
+            self._log("[udp] packet %d from %s:%d: %d bytes: %s (already "
+                      "enveloped, passing through)" %
+                      (self.tx_frames, peer[0], peer[1], len(packet),
+                       describe_packet(packet)))
+        else:
+            try:
+                # LLDB sends the KDP packet by itself.  Put it in the envelope
+                # xnu's serial KDP receives, using LLDB's own address and port
+                # as the inner source so the direction stays recognisable.
+                frame_packet = build_serial_envelope(
+                    packet, sport=peer[1], src_ip=peer[0])
+            except ValueError as exc:
+                self.dropped += 1
+                self._log("[serial] dropping packet: %s" % exc)
+                return True
+            self._log("[udp] packet %d from %s:%d: %d bytes: bare %s -> "
+                      "%d-byte envelope" %
+                      (self.tx_frames, peer[0], peer[1], len(packet),
+                       describe_kdp(packet), len(frame_packet)))
         try:
-            self.link.write(serialize_packet(packet))
+            self.link.write(serialize_packet(frame_packet))
         except ValueError as exc:
             self._log("[serial] dropping packet: %s" % exc)
             self.dropped += 1
@@ -689,7 +847,7 @@ def _select_readable(sock, timeout):
 def _synthetic_kdp_packet(payload, request=7, seq=1,
                           src="10.0.0.2", dst="10.0.0.1",
                           sport=41139, dport=41140):
-    """Build Ethernet/IPv4/UDP/KDP like the host stack does for LLDB."""
+    """Build an already-enveloped Ethernet/IPv4/UDP/KDP frame."""
     eth = (bytes.fromhex("020000000002") + bytes.fromhex("020000000001") +
            struct.pack("!H", 0x0800))
     kdp = struct.pack("<BBHI", request & 0x7F, seq & 0xFF,
@@ -699,6 +857,13 @@ def _synthetic_kdp_packet(payload, request=7, seq=1,
                      0, 0, 64, 17, 0,
                      socket.inet_aton(src), socket.inet_aton(dst))
     return eth + ip + udp + kdp
+
+
+def _kdp_packet(payload=b"", request=18, seq=0, key=0, is_reply=False):
+    """Build a bare KDP packet, as LLDB puts it in a UDP datagram."""
+    first = (request & 0x7F) | (0x80 if is_reply else 0)
+    return struct.pack("<BBHI", first, seq & 0xFF,
+                       8 + len(payload), key) + payload
 
 
 def _selftest_packet(rng, index):
@@ -819,6 +984,68 @@ def run_selftest():
     _check(got == [packet] and decoder.frames_oversize >= 1,
            "oversized packet dropped, next frame parsed", checks)
 
+    # --- KDP envelope (LLDB's bare UDP payload <-> xnu's serial frame) ---
+    peer_port = 51262
+    bare = _kdp_packet(struct.pack("!H", peer_port), request=18, seq=1,
+                       key=0x10203040)
+    envelope = build_serial_envelope(bare, sport=peer_port, ip_id=0x1234)
+
+    _check(len(bare) == 10 and len(envelope) == 52,
+           "measured 10-byte KDP_REATTACH becomes a 52-byte envelope", checks)
+    disconnect = _kdp_packet(b"", request=1, seq=0)
+    short_envelope = build_serial_envelope(disconnect, sport=peer_port)
+    _check(len(disconnect) == 8 and len(short_envelope) == 50,
+           "measured 8-byte KDP packet becomes a 50-byte envelope", checks)
+    _check(envelope[0:6] == SERIAL_KDP_MAC,
+           "envelope destination MAC is xnu's 'serial'", checks)
+    _check(envelope[6:12] == DEBUGGER_MAC,
+           "envelope source MAC is the bridge's debugger MAC", checks)
+    _check(struct.unpack("!H", envelope[12:14])[0] == ETHERTYPE_IP,
+           "envelope ethertype is IPv4 (0x0800)", checks)
+
+    ip_header = envelope[14:34]
+    dst_ip = socket.inet_ntoa(ip_header[16:20])
+    _check(ip_header[0] == 0x45,
+           "IPv4 version 4, IHL 5", checks)
+    _check(struct.unpack("!H", ip_header[2:4])[0] == len(envelope) - 14,
+           "IPv4 total length covers the UDP datagram", checks)
+    _check(struct.unpack("!H", ip_header[4:6])[0] == 0x1234,
+           "IPv4 identification field is preserved", checks)
+    _check(ip_header[8] == DEFAULT_TTL and ip_header[9] == IPPROTO_UDP,
+           "IPv4 TTL and protocol are sane", checks)
+    _check(ip_header[12:16] == socket.inet_aton("127.0.0.1"),
+           "IPv4 source is the LLDB peer address", checks)
+    _check(dst_ip == SERIAL_KDP_IP,
+           "IPv4 destination is xnu's serial address (190.186.173.171)",
+           checks)
+    _check(ipv4_checksum(ip_header) == 0,
+           "IPv4 header checksum verifies", checks)
+
+    udp_segment = envelope[34:]
+    udp_sport, udp_dport, udp_len, udp_sum = struct.unpack(
+        "!HHHH", udp_segment[:8])
+    _check(udp_sport == peer_port and udp_dport == SERIAL_KDP_PORT,
+           "UDP source is LLDB's port and destination is KDP_REMOTE_PORT 41139",
+           checks)
+    _check(udp_len == 8 + len(bare) and len(udp_segment) == udp_len,
+           "UDP length matches the KDP payload", checks)
+    zeroed_udp = udp_segment[:6] + b"\x00\x00" + udp_segment[8:]
+    expected_udp_sum = udp_checksum("127.0.0.1", SERIAL_KDP_IP,
+                                    zeroed_udp) or 0xFFFF
+    _check(udp_sum == expected_udp_sum,
+           "UDP checksum matches its pseudo-header and payload", checks)
+    _check(udp_checksum("127.0.0.1", SERIAL_KDP_IP, udp_segment) == 0,
+           "UDP checksum verifies over the final segment", checks)
+    _check(udp_segment[8:] == bare,
+           "UDP payload is exactly the bare KDP packet", checks)
+
+    parsed = parse_serial_envelope(envelope)
+    _check(parsed is not None and parsed.payload == bare,
+           "envelope parser recovers the bare KDP packet", checks)
+    _check(is_kdp_envelope(envelope) and not is_kdp_envelope(bare),
+           "inspection distinguishes an envelope from a bare KDP packet",
+           checks)
+
     # Relay in both directions, using a real localhost UDP socket pair.
     link = MemoryLink()
     bridge_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -829,16 +1056,62 @@ def run_selftest():
     try:
         relay = Relay(link, bridge_sock, verbose=False)
         relay.peer = peer_sock.getsockname()
-        relay.serial_to_udp(serialize_packet(packet))
+
+        # serial -> LLDB: xnu wraps the reply; LLDB must see the bare packet.
+        reply = _kdp_packet(b"", request=18, seq=1, is_reply=True)
+        reply_envelope = build_serial_envelope(
+            reply, sport=SERIAL_KDP_PORT, dport=peer_sock.getsockname()[1],
+            src_mac=SERIAL_KDP_MAC, dst_mac=DEBUGGER_MAC,
+            src_ip=SERIAL_KDP_IP, dst_ip="127.0.0.1")
+        relay.serial_to_udp(serialize_packet(reply_envelope))
         from_device, _addr = peer_sock.recvfrom(65535)
-        _check(from_device == packet, "serial frame relayed to UDP peer",
+        _check(from_device == reply,
+               "enveloped serial frame reaches LLDB as bare KDP", checks)
+
+        # LLDB -> serial: a bare KDP datagram gets the xnu envelope.
+        del link.tx[:]
+        lldb_port = peer_sock.getsockname()[1]
+        request = _kdp_packet(struct.pack("!H", lldb_port), request=18, seq=1)
+        peer_sock.sendto(request, bridge_sock.getsockname())
+        _check(relay.udp_to_serial(), "bare KDP datagram accepted from LLDB",
+               checks)
+        frames = FrameDecoder().feed(bytes(link.tx))
+        built = parse_serial_envelope(frames[0]) if len(frames) == 1 else None
+        _check(len(frames) == 1 and built is not None,
+               "bare KDP datagram produced exactly one enveloped frame",
+               checks)
+        _check(built is not None and built.payload == request,
+               "enveloped frame carries the original KDP packet", checks)
+        _check(built is not None and built.dst_mac == SERIAL_KDP_MAC and
+               built.src_mac == DEBUGGER_MAC,
+               "outbound envelope uses xnu's MAC and the debugger MAC", checks)
+        _check(built is not None and built.sport == lldb_port and
+               built.dport == SERIAL_KDP_PORT,
+               "outbound envelope uses LLDB's port and KDP_REMOTE_PORT",
+               checks)
+        _check(len(frames) == 1 and ipv4_checksum(frames[0][14:34]) == 0,
+               "outbound envelope has a valid IPv4 checksum", checks)
+
+        # An already-enveloped datagram must pass through byte-for-byte.
+        del link.tx[:]
+        foreign = build_serial_envelope(
+            _kdp_packet(b"x" * 20, request=2, seq=7), sport=50000,
+            src_ip="10.1.2.3", ip_id=3)
+        peer_sock.sendto(foreign, bridge_sock.getsockname())
+        _check(relay.udp_to_serial(),
+               "already-enveloped datagram accepted from peer", checks)
+        frames = FrameDecoder().feed(bytes(link.tx))
+        _check(frames == [foreign],
+               "already-enveloped datagram passes through byte-for-byte",
                checks)
 
-        from_host = _synthetic_kdp_packet(b"reply payload", request=2, seq=9)
-        peer_sock.sendto(from_host, bridge_sock.getsockname())
-        _check(relay.udp_to_serial(), "UDP datagram accepted from peer", checks)
-        _check(decoder.feed(bytes(link.tx)) == [from_host],
-               "UDP datagram framed to the serial link", checks)
+        # A frame that is already bare KDP (no envelope) must also survive.
+        del link.tx[:]
+        bare_reply = _kdp_packet(b"", request=18, seq=2, is_reply=True)
+        relay.serial_to_udp(serialize_packet(bare_reply))
+        from_device, _addr = peer_sock.recvfrom(65535)
+        _check(from_device == bare_reply,
+               "bare KDP serial frame passes through unchanged", checks)
     finally:
         bridge_sock.close()
         peer_sock.close()
@@ -905,7 +1178,8 @@ def main(argv=None):
     parser.add_argument("--list-ports", action="store_true",
                         help="list serial ports and exit")
     parser.add_argument("--selftest", action="store_true",
-                        help="run the framing/relay selftest without hardware")
+                        help="run the framing/envelope/relay selftest without "
+                             "hardware")
     args = parser.parse_args(argv)
 
     if args.selftest:
