@@ -1992,7 +1992,7 @@ ready 时会调用 `kebab_usb_panic_spin()`。如果控制台自己请求重启�
   再调用 `PEHaltRestart()`。
 * 如果启动时 IMEM 映射失败，日志会明确打印“cannot map IMEM”，然后回退到
   普通的 `REBOOT`，不会假装已经写了 cookie。
-* 如果 `PEHaltRestart()` 返回（说明没有重启成功），驱动会把旧值写回去并打印，
+* 如果 `PEHaltRestart()` 返回错误（说明没有重启成功），驱动会把旧值写回去并打印，
   避免下一次手动重启意外进入 fastboot。
 
 **风险要写清楚**：cookie 不对时，机器可能进入 recovery，也可能进入 EDL。进入
@@ -2002,9 +2002,10 @@ recovery 还可以再重启；进入 EDL 需要 firehose/QFIL 这一类工具，
 
 ### 5. 启动参数与主机侧用法
 
-控制台仍然需要 `kebabusb=1`；panic 后发命令还需要 `kebabpanic=1`（`PANIC!`
-钩子）。`kebabkdp=1` 时字节流是 KDP 的，文本命令只认传输首字节开始的形式；
-如果要在 panic 后用文本命令，建议这一轮不要加 `kebabkdp=1`。
+控制台仍然需要 `kebabusb=1`；用 `PANIC!` 触发测试 panic 还需要 `kebabpanic=1`，
+真实 panic 不需要它（`kebabpanic` 只控制 `PANIC!` 钩子）。`kebabkdp=1` 时
+字节流是 KDP 的，文本命令只认传输首字节开始的形式；如果要在 panic 后用文本
+命令，建议这一轮不要加 `kebabkdp=1`。
 
 主机一次写入整条命令，例如：
 
