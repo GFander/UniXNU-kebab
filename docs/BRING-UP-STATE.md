@@ -8352,7 +8352,11 @@ free after both = 4,193,878 - 813,472 = 3,380,406 blocks
    删除“VEXT 必须带 `/dev`、`/private/...`”之类的检查；骨架只能从
    `skel.kist` 的条目表验证，不能在写卷阶段从 VEXT 里看。
 3. **新增 `skel.kist` 产物**：路径、16 条、KIST v2；`INST CHECK`/`SKIP`
-   对骨架不适用（骨架流小，整条重发；内核重跑语义见第 2 节）。
+   对骨架不适用（骨架流小，整条重发；内核重跑语义见第 2 节）。注意
+   `bring-up.py` 的 `read_kist()` 目前硬编码 `version == 1` 和 `mode & 0777`，
+   并假设每条都有文件 payload；要扩成 v2：接受 `F_STREAM_SKELETON`，
+   `DIR` 条目 `wire=size=0`，`LINK` 条目的 payload 是 target，且 `total_usize`
+   把 target 长度算进去。
 4. **不要改的协议细节**：`VOL BEGIN <wire> <volume> CONFIRM` 没有卷名；
    `VOL?` 的磁盘几何在第三条 `VOL? DISK vh` 行；任何写路径都要 `ufsrw=1`；
    最终启动必须有 `kebab_dsc=1 kebab_dsc_map=1`；每阶段一张镜像，因为启动
