@@ -4185,3 +4185,72 @@ TCS 组数），但这只是结构猜测，尚未证明代码如何索引它。
 | TCS1 初始化/回收 | UNRESOLVED |
 
 真实写入继续 NO-GO。
+
+## 四十七、更正：`0x1c2c` 是 UEFI 服务表初始化，不是 RSC 配置
+
+### 1. 入口证据
+
+`EFI_SYSTEM_TABLE`（64 位）字段偏移：`RuntimeServices` = `0x58`，
+`BootServices` = `0x60`，`NumberOfTableEntries` = `0x68`，`ConfigurationTable` = `0x70`。
+
+`0x1000` 的入口代码：
+
+```text
+0x1000  cmp  x0, #0
+0x1004  b.eq #0x10bc
+0x1018  cmp  x1, #0
+0x1020  ldrb w8, [x1]        ; 检查 x1 开头的三个字节
+0x1024  cmp  w8, #0x49
+0x102c  ldrb w8, [x1, #1]
+0x1030  cmp  w8, #0x42
+0x1038  ldrb w8, [x1, #2]
+0x103c  cmp  w8, #0x49
+0x104c  ldr  x2, [x1, #0x68] ; NumberOfTableEntries
+0x1050  ldr  x3, [x1, #0x70] ; ConfigurationTable
+```
+
+`x1` 被按 `EFI_SYSTEM_TABLE` 的 `0x68`/`0x70` 字段访问，且每个字段都是 64 位，
+与“x1 = SystemTable”吻合。入口处还检查了 `x1` 开头三个字节是否为 `I B I`
+（`0x49 0x42 0x49`），这一步目前无法解释，先记为未解决细节。
+
+### 2. 因此 `0x1c2c` 的语义要改
+
+```text
+0x123c(x0 = ImageHandle, x1 = SystemTable)
+  -> 0x1c2c
+       0xe258 = x0            ; gImageHandle
+       0xe260 = x1            ; gST
+       0xe268 = [x1 + 0x60]   ; gBS   = SystemTable->BootServices
+       0xe270 = [x1 + 0x58]   ; gRT   = SystemTable->RuntimeServices
+```
+
+四个全局的用途与 EDK II 的 `gImageHandle/gST/gBS/gRT` 完全一致。这条链属于
+**UEFI 驱动生命周期（B 图）**，不是 RPMh 配置（A 图）。上一节的“配置结构”判断
+撤回。
+
+### 3. 证据等级重排
+
+| 发现 | 等级 |
+| --- | --- |
+| `0x123c → 0x1c2c` 调用 | DIRECT |
+| `0x1c2c` 四次全局存储 | DIRECT |
+| `x1+0x58/0x60` 对应 RT/BS | HIGH CONFIDENCE（入口按 0x68/0x70 访问同一结构） |
+| `0x1c2c` 为服务表初始化 | HIGH CONFIDENCE |
+| `0xe228` 与 `0x18200000` 的字节关系 | DIRECT |
+| `0xe228` 字段含义 | UNRESOLVED |
+| `0xe228` 被这条链使用 | UNRESOLVED（已证伪为“配置结构”） |
+
+另外说明：`ImageBase = 0` 只说明文件里的首选 VA 等于 RVA，运行时地址仍由加载器
+和重定位决定。
+
+### 4. 下一步（两条并行）
+
+- **C4-B1**：确认 `0x1000 → 0x123c` 的调用关系，并检查 `0xe268/0xe270` 的读方
+  是否通过 `blr` 间接调用 Boot/Runtime Services 函数表；成立即可把四个全局
+  正式命名为 `gImageHandle/gST/gBS/gRT`；
+- **C4-A2**：从 `0xe200` 的函数指针候选 `0x61e8/0x6268/0x6280/0x6298` 出发恢复
+  函数边界与间接调用者，并独立分析 `0xe240 → 0xe228` 的数据关系，找真正形成
+  RSC 基址并访问寄存器的路径。函数地址出现在数据结构里不等于被调用，必须找到
+  `blr` 或结构被传递的证据。
+
+TCS1 所有权仍 UNRESOLVED，真实写入 NO-GO。
