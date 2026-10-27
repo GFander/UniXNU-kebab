@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
 #include "KebabRpmhVrm.h"
 
+#ifndef KEBAB_RPMH_KERNEL
 #include <string.h>
+#endif
 
 static const kebab_rpmh_resource kebab_resources[] = {
 	{ "ldoa13", 0x00040c00u, 3008u },
@@ -304,11 +306,13 @@ void kebab_tcs_release(kebab_tcs *tcs)
 #define KEBAB_TCS_RB_POLLS   100u
 #define KEBAB_TCS_CMPL_POLLS 1000u
 
-void kebab_rpmh_tcs_init(kebab_rpmh_tcs *t, kebab_tcs_io io)
+void kebab_rpmh_tcs_init(kebab_rpmh_tcs *t, kebab_tcs_io io,
+    kebab_rpmh_lock *lock)
 {
 	memset(t, 0, sizeof(*t));
 	t->io = io;
 	t->tcs = 1;
+	t->lock = lock;
 	t->phase = KEBAB_TCS_PHASE_IDLE;
 }
 
@@ -347,22 +351,47 @@ tcs_write_sync(kebab_rpmh_tcs *t, uint32_t off, uint32_t val)
 	return -1;
 }
 
-static void
-tcs_undo_pre_trigger(kebab_rpmh_tcs *t, uint32_t control)
+/*
+ * Undo only the stages this attempt actually reached, and verify each rollback
+ * write.  A failed rollback leaves the channel in an unknown state, which is
+ * exactly when the lock must stay closed.
+ */
+#define STAGED_WAIT    (1u << 0)
+#define STAGED_ENABLE  (1u << 1)
+#define STAGED_CONTROL (1u << 2)
+
+static int
+tcs_undo_pre_trigger(kebab_rpmh_tcs *t, uint32_t control, uint32_t staged)
 {
-	/* Only what this attempt wrote, and only before a trigger. */
-	(void)tcs_write(t, KEBAB_TCS_CONTROL, control & ~KEBAB_TCS_AMC_TRIGGER);
-	(void)tcs_write(t, KEBAB_TCS_CMD_ENABLE, 0);
-	(void)tcs_write(t, KEBAB_TCS_CMD_WAIT, 0);
+	int failed = 0;
+
+	if ((staged & STAGED_CONTROL) != 0) {
+		if (tcs_write_sync(t, KEBAB_TCS_CONTROL,
+		    control & ~KEBAB_TCS_AMC_TRIGGER) != 0) {
+			failed = 1;
+		}
+	}
+	if ((staged & STAGED_ENABLE) != 0) {
+		if (tcs_write_sync(t, KEBAB_TCS_CMD_ENABLE, 0) != 0) {
+			failed = 1;
+		}
+	}
+	if ((staged & STAGED_WAIT) != 0) {
+		if (tcs_write_sync(t, KEBAB_TCS_CMD_WAIT, 0) != 0) {
+			failed = 1;
+		}
+	}
+	return failed;
 }
 
 kebab_rpmh_status
 kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 {
+	kebab_rpmh_lock *lock;
 	uint32_t control = 0, enable = 0, wait = 0, status = 0, i;
-	int triggered = 0;
+	uint32_t staged = 0;
 
-	if (t == NULL || cmd == NULL) {
+	if (t == NULL || cmd == NULL || t->lock == NULL) {
 		return KEBAB_RPMH_ERR_ARGUMENT;
 	}
 	/* The MMIO entry point re-checks what the caller already checked. */
@@ -372,7 +401,8 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 	if (t->tcs != 1) {
 		return KEBAB_RPMH_ERR_TCS_STATE;
 	}
-	if (t->dead || t->sent) {
+	lock = t->lock;
+	if (lock->dead || lock->used) {
 		return KEBAB_RPMH_ERR_TCS_STATE;
 	}
 	if (tcs_read(t, KEBAB_TCS_CMD_ENABLE, &enable) != 0 ||
@@ -388,7 +418,7 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 	 */
 	if (enable != 0 || wait != 0 || (control & KEBAB_TCS_AMC_TRIGGER) != 0 ||
 	    (status & KEBAB_TCS_CMD_COMPL) != 0) {
-		t->dead = 1;
+		lock->dead = 1;
 		return KEBAB_RPMH_ERR_TCS_BUSY;
 	}
 	t->phase = KEBAB_TCS_PHASE_VALIDATED;
@@ -396,36 +426,33 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 	if (tcs_write(t, KEBAB_TCS_CMD_MSGID, cmd->msgid) != 0 ||
 	    tcs_write(t, KEBAB_TCS_CMD_ADDR, cmd->addr) != 0 ||
 	    tcs_write(t, KEBAB_TCS_CMD_DATA, cmd->data) != 0) {
-		t->phase = KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER;
-		tcs_undo_pre_trigger(t, control);
-		return KEBAB_RPMH_ERR_SINK_FAILED;
+		goto pre_fail;
 	}
-	if (tcs_write_sync(t, KEBAB_TCS_CMD_WAIT, 1u) != 0 ||
-	    tcs_write_sync(t, KEBAB_TCS_CMD_ENABLE, 1u) != 0) {
-		t->phase = KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER;
-		tcs_undo_pre_trigger(t, control);
-		return KEBAB_RPMH_ERR_SINK_FAILED;
+	if (tcs_write_sync(t, KEBAB_TCS_CMD_WAIT, 1u) != 0) {
+		goto pre_fail;
 	}
-	t->phase = KEBAB_TCS_PHASE_ARMED;
+	staged |= STAGED_WAIT;
+	if (tcs_write_sync(t, KEBAB_TCS_CMD_ENABLE, 1u) != 0) {
+		goto pre_fail;
+	}
+	staged |= STAGED_ENABLE;
 	if (tcs_write_sync(t, KEBAB_TCS_CONTROL,
 	    control | KEBAB_TCS_AMC_ENABLE) != 0) {
-		t->phase = KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER;
-		tcs_undo_pre_trigger(t, control);
-		return KEBAB_RPMH_ERR_SINK_FAILED;
+		goto pre_fail;
 	}
+	staged |= STAGED_CONTROL;
+	t->phase = KEBAB_TCS_PHASE_ARMED;
 	if (tcs_write_sync(t, KEBAB_TCS_CONTROL,
 	    control | KEBAB_TCS_AMC_ENABLE | KEBAB_TCS_AMC_TRIGGER) != 0) {
-		/* The trigger write itself failed: the command may still have
-		 * been armed, so this is already the post-trigger class. */
-		triggered = 1;
-		goto post_trigger;
+		/* The trigger write itself failed: the command may still be
+		 * armed, so this is already the post-trigger class. */
+		goto post_fail;
 	}
-	triggered = 1;
 	t->phase = KEBAB_TCS_PHASE_TRIGGERED;
 
 	for (i = 0; i < KEBAB_TCS_CMPL_POLLS; i++) {
 		if (tcs_read(t, KEBAB_TCS_CMD_STATUS, &status) != 0) {
-			goto post_trigger;
+			goto post_fail;
 		}
 		if ((status & KEBAB_TCS_CMD_ISSUED) != 0 &&
 		    (status & KEBAB_TCS_CMD_COMPL) != 0) {
@@ -435,27 +462,47 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 	t->last_status = status;
 	if ((status & KEBAB_TCS_CMD_ISSUED) == 0 ||
 	    (status & KEBAB_TCS_CMD_COMPL) == 0) {
-		goto post_trigger;
+		goto post_fail;
 	}
 
-	/* Success: release in the vendor's order, then keep the gate shut. */
-	(void)tcs_write(t, KEBAB_TCS_CONTROL, control & ~KEBAB_TCS_AMC_TRIGGER);
-	(void)tcs_write(t, KEBAB_TCS_CMD_ENABLE, 0);
-	(void)tcs_write(t, KEBAB_TCS_CMD_WAIT, 0);
+	/*
+	 * Completion and a clean channel are two different results: if the
+	 * release writes do not read back, the command ran but the channel is
+	 * in an unknown state, and the caller must not be told OK.
+	 */
+	if (tcs_write_sync(t, KEBAB_TCS_CONTROL,
+	    control & ~KEBAB_TCS_AMC_TRIGGER) != 0 ||
+	    tcs_write_sync(t, KEBAB_TCS_CMD_ENABLE, 0) != 0 ||
+	    tcs_write_sync(t, KEBAB_TCS_CMD_WAIT, 0) != 0) {
+		t->phase = KEBAB_TCS_PHASE_COMPLETE_UNCLEAN;
+		lock->dead = 1;
+		lock->used = 1;
+		return KEBAB_RPMH_ERR_RECLAIM;
+	}
 	t->phase = KEBAB_TCS_PHASE_COMPLETE;
-	t->sent = 1;
-	t->dead = 1;              /* one request per boot until this is reviewed */
+	lock->used = 1;
+	lock->dead = 1;           /* one request per boot until this is reviewed */
 	return KEBAB_RPMH_OK;
 
-post_trigger:
+pre_fail:
+	if (tcs_undo_pre_trigger(t, control, staged) != 0) {
+		/* Rollback did not verify: the channel state is unknown. */
+		t->phase = KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER;
+		lock->dead = 1;
+		return KEBAB_RPMH_ERR_TCS_STATE;
+	}
+	t->phase = KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER;
+	lock->dead = 1;           /* a failed attempt is not retried this boot */
+	return KEBAB_RPMH_ERR_SINK_FAILED;
+
+post_fail:
 	/*
 	 * A triggered command whose completion is not proven must not be
 	 * cleaned up: clearing enable or rewriting control could destroy a
 	 * transfer that is still running, and the evidence would be gone.
 	 */
-	(void)triggered;
 	(void)tcs_read(t, KEBAB_TCS_CMD_STATUS, &t->last_status);
 	t->phase = KEBAB_TCS_PHASE_FAILED_POST_TRIGGER;
-	t->dead = 1;
+	lock->dead = 1;
 	return KEBAB_RPMH_ERR_TIMEOUT;
 }

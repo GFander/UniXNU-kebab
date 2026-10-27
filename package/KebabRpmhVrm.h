@@ -15,8 +15,14 @@
 #ifndef KEBAB_RPMH_VRM_H
 #define KEBAB_RPMH_VRM_H
 
+#ifdef KEBAB_RPMH_KERNEL
+#include <sys/types.h>
+#include <libkern/libkern.h>
+#else
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+#endif
 
 #define KEBAB_RPMH_MSGID_WRITE_ACK 0x00010108u
 
@@ -58,6 +64,7 @@ typedef enum {
 	KEBAB_RPMH_ERR_NOT_ALLOWED,
 	KEBAB_RPMH_PENDING,
 	KEBAB_RPMH_ERR_TIMEOUT,
+	KEBAB_RPMH_ERR_RECLAIM,
 } kebab_rpmh_status;
 
 typedef struct {
@@ -99,18 +106,29 @@ typedef enum {
 	KEBAB_TCS_PHASE_COMPLETE,
 	KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER,
 	KEBAB_TCS_PHASE_FAILED_POST_TRIGGER,
+	KEBAB_TCS_PHASE_COMPLETE_UNCLEAN,
 } kebab_tcs_phase;
 
+/*
+ * One-shot and dead state live outside the channel structure, in an object the
+ * caller owns for the life of the boot: re-initialising a channel must not be
+ * able to unlock another attempt.
+ */
 typedef struct {
-	kebab_tcs_io   io;
-	uint32_t       tcs;          /* only 1 is accepted */
-	int            dead;         /* no further requests, ever */
-	int            sent;         /* one-shot experiment gate */
-	kebab_tcs_phase phase;
-	uint32_t       last_status;  /* CMD_STATUS at the end of the attempt */
+	int dead;
+	int used;
+} kebab_rpmh_lock;
+
+typedef struct {
+	kebab_tcs_io     io;
+	uint32_t         tcs;        /* only 1 is accepted */
+	kebab_rpmh_lock *lock;
+	kebab_tcs_phase  phase;
+	uint32_t         last_status; /* CMD_STATUS at the end of the attempt */
 } kebab_rpmh_tcs;
 
-void kebab_rpmh_tcs_init(kebab_rpmh_tcs *t, kebab_tcs_io io);
+void kebab_rpmh_tcs_init(kebab_rpmh_tcs *t, kebab_tcs_io io,
+    kebab_rpmh_lock *lock);
 kebab_rpmh_status kebab_rpmh_tcs_send(kebab_rpmh_tcs *t,
     const kebab_rpmh_cmd *cmd);
 

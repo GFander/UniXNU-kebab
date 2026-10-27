@@ -3731,3 +3731,48 @@ tcs 2..7: control 0x00000000 status 0x1 enable 0
 - 实测：33 项虚拟 MMIO 断言、整树构建 0 error；
 - 未做：没有把启用写路径的镜像刷到设备，没有真实 TCS 写入；
 - 未解决：TCS1 的实际所有权（AMC 已使能、Trigger 未置位只是必要条件）。
+
+## 三十八、R5-C3：隔离编译与故障注入补强
+
+### 1. 四个边界问题都改了
+
+| 问题 | 处理 |
+| --- | --- |
+| 触发前失败无条件回滚 | 用 `staged` 位记录本次真正写成功的阶段（WAIT/ENABLE/CONTROL），`tcs_undo_pre_trigger()` 只撤销这些阶段，且每次回滚都读回确认 |
+| 失败后还能重试 | 任何一次失败（含回滚失败）都把 `lock->dead` 置位，本次启动不再尝试 |
+| 成功后回收失败被忽略 | 回收的三次写改为 `tcs_write_sync()` 并检查结果；失败返回新的 `KEBAB_RPMH_ERR_RECLAIM`，阶段记为 `COMPLETE_UNCLEAN`——“命令完成”和“通道已安全回收”从此是两个结论 |
+| 重新初始化绕过一次性限制 | `dead/used` 移出通道结构，放进调用者持有的 `kebab_rpmh_lock`；`kebab_rpmh_tcs_init()` 不再碰这两个字段 |
+
+### 2. 故障注入测试：40 项
+
+新增/扩展的用例：
+
+- 第一条命令写失败：只尝试一次写，不做任何回滚写；
+- 回读不匹配：有界返回、回滚只覆盖已写入阶段、锁关闭；
+- 状态寄存器读失败：预检阶段拒绝，零次写；
+- 清理阶段写失败：返回 `RECLAIM`、阶段 `COMPLETE_UNCLEAN`、锁永久关闭；
+- 成功后重新 `init`：第二次发送仍被拒绝且零写；
+- 触发后超时：不写任何清理寄存器，`enable` 原样保留作证据。
+
+`40 checks, 0 failure(s)`；加上编码/授权那套 57 项，共 97 项主机断言。
+
+### 3. R5-C3 第一阶段：隔离内核编译
+
+用 XNU 自己的编译命令（从构建日志取 `kebab_spmi.c` 那条，替换源文件）编译
+`package/KebabRpmhVrm.c`，加 `-DKEBAB_RPMH_KERNEL`：
+
+- 头文件切换为 `sys/types.h` + `libkern/libkern.h`，用户态那套 `stdint/stddef/string`
+  在宏打开时不再引入；
+- 结果：0 error、3 warning，全部来自既有头文件（`KEBAB` 宏重定义、`kcdata.h`
+  的 declaration-after-statement 等），没有一条指向本模块；
+- 符号导出正常：`kebab_rpmh_encode_*`、`kebab_rpmh_cmd_db_lookup`、
+  `kebab_rpmh_tcs_send` 等全部生成，未解析符号只有 `_strcmp`/`_strlen`
+  （内核本来提供）。
+
+产物只是目标文件，没有链接进内核，也没有刷机镜像。
+
+### 4. 验证边界
+
+- 实测：97 项主机断言、内核标志编译的告警与符号；
+- 未做：没有把 `kebab_tcs_io` 绑到真实 RSC 寄存器，没有控制台写入口，没有真机写入；
+- 未解决：TCS1 的独占所有权；超时仍是循环次数上限，不是按 XNU 时钟标定的时间上限。
