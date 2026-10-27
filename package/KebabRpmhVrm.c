@@ -407,6 +407,8 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 	kebab_rpmh_lock *lock;
 	uint32_t control = 0, enable = 0, wait = 0, status = 0, i;
 	uint32_t confirmed = 0, attempted = 0;
+	uint64_t start = 0;
+	int have_time = 0;
 
 	if (t == NULL || cmd == NULL || t->lock == NULL) {
 		return KEBAB_RPMH_ERR_ARGUMENT;
@@ -418,18 +420,31 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 		return KEBAB_RPMH_ERR_TCS_STATE;
 	}
 	lock = t->lock;
-	if (lock->dead || lock->used || lock->busy) {
+	/*
+	 * Claim the channel atomically: the dead/used checks and the busy
+	 * exchange have to be one decision, otherwise two callers can both
+	 * pass the checks and then both write busy.
+	 */
+	if (__atomic_load_n(&lock->dead, __ATOMIC_ACQUIRE) != 0 ||
+	    __atomic_load_n(&lock->used, __ATOMIC_ACQUIRE) != 0) {
 		return KEBAB_RPMH_ERR_TCS_STATE;
 	}
-	lock->busy = 1;
+	if (__atomic_exchange_n(&lock->busy, 1, __ATOMIC_ACQ_REL) != 0) {
+		return KEBAB_RPMH_ERR_TCS_STATE;
+	}
+	if (__atomic_load_n(&lock->dead, __ATOMIC_ACQUIRE) != 0 ||
+	    __atomic_load_n(&lock->used, __ATOMIC_ACQUIRE) != 0) {
+		__atomic_store_n(&lock->busy, 0, __ATOMIC_RELEASE);
+		return KEBAB_RPMH_ERR_TCS_STATE;
+	}
 
 	if (tcs_read(t, KEBAB_TCS_CMD_ENABLE, &enable) != 0 ||
 	    tcs_read(t, KEBAB_TCS_CMD_WAIT, &wait) != 0 ||
 	    tcs_read(t, KEBAB_TCS_CONTROL, &control) != 0 ||
 	    tcs_read(t, KEBAB_TCS_CMD_STATUS, &status) != 0) {
 		/* A failed preflight read leaves the channel state unknown. */
-		lock->dead = 1;
-		lock->busy = 0;
+		__atomic_store_n(&lock->dead, 1, __ATOMIC_RELEASE);
+		__atomic_store_n(&lock->busy, 0, __ATOMIC_RELEASE);
 		return KEBAB_RPMH_ERR_TCS_STATE;
 	}
 	/*
@@ -439,8 +454,8 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 	 */
 	if (enable != 0 || wait != 0 || (control & KEBAB_TCS_AMC_TRIGGER) != 0 ||
 	    (status & (KEBAB_TCS_CMD_ISSUED | KEBAB_TCS_CMD_COMPL)) != 0) {
-		lock->dead = 1;
-		lock->busy = 0;
+		__atomic_store_n(&lock->dead, 1, __ATOMIC_RELEASE);
+		__atomic_store_n(&lock->busy, 0, __ATOMIC_RELEASE);
 		return KEBAB_RPMH_ERR_TCS_BUSY;
 	}
 	t->phase = KEBAB_TCS_PHASE_VALIDATED;
@@ -479,12 +494,26 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 	}
 	t->phase = KEBAB_TCS_PHASE_TRIGGERED;
 
+	if (t->io.now_us != NULL) {
+		start = t->io.now_us(t->io.ctx);
+		have_time = 1;
+	}
 	for (i = 0; i < KEBAB_TCS_CMPL_POLLS; i++) {
 		if (tcs_read(t, KEBAB_TCS_CMD_STATUS, &status) != 0) {
 			goto post_fail;
 		}
 		if ((status & KEBAB_TCS_CMD_ISSUED) != 0 &&
 		    (status & KEBAB_TCS_CMD_COMPL) != 0) {
+			break;
+		}
+		/*
+		 * The completion wait has both a wall budget and a poll cap.
+		 * A clock that stalls or runs backwards only extends the loop
+		 * to the cap; a clock that runs normally ends it early.
+		 */
+		if (have_time &&
+		    t->io.now_us(t->io.ctx) - start >=
+		    KEBAB_TCS_CMPL_TIMEOUT_US) {
 			break;
 		}
 	}
@@ -504,15 +533,15 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 	    tcs_write_sync(t, KEBAB_TCS_CMD_ENABLE, 0) != 0 ||
 	    tcs_write_sync(t, KEBAB_TCS_CMD_WAIT, 0) != 0) {
 		t->phase = KEBAB_TCS_PHASE_COMPLETE_UNCLEAN;
-		lock->dead = 1;
-		lock->used = 1;
-		lock->busy = 0;
+		__atomic_store_n(&lock->dead, 1, __ATOMIC_RELEASE);
+		__atomic_store_n(&lock->used, 1, __ATOMIC_RELEASE);
+		__atomic_store_n(&lock->busy, 0, __ATOMIC_RELEASE);
 		return KEBAB_RPMH_ERR_RECLAIM;
 	}
 	t->phase = KEBAB_TCS_PHASE_COMPLETE;
-	lock->used = 1;
-	lock->dead = 1;
-	lock->busy = 0;
+	__atomic_store_n(&lock->used, 1, __ATOMIC_RELEASE);
+	__atomic_store_n(&lock->dead, 1, __ATOMIC_RELEASE);
+	__atomic_store_n(&lock->busy, 0, __ATOMIC_RELEASE);
 	return KEBAB_RPMH_OK;
 
 pre_fail:
@@ -523,25 +552,25 @@ pre_fail:
 	 */
 	if ((attempted & ~confirmed) != 0) {
 		t->phase = KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER;
-		lock->dead = 1;
-		lock->busy = 0;
+		__atomic_store_n(&lock->dead, 1, __ATOMIC_RELEASE);
+		__atomic_store_n(&lock->busy, 0, __ATOMIC_RELEASE);
 		return KEBAB_RPMH_ERR_TCS_STATE;
 	}
 	if (tcs_undo_pre_trigger(t, control, confirmed) != 0) {
 		t->phase = KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER;
-		lock->dead = 1;
-		lock->busy = 0;
+		__atomic_store_n(&lock->dead, 1, __ATOMIC_RELEASE);
+		__atomic_store_n(&lock->busy, 0, __ATOMIC_RELEASE);
 		return KEBAB_RPMH_ERR_TCS_STATE;
 	}
 	t->phase = KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER;
-	lock->dead = 1;
-	lock->busy = 0;
+	__atomic_store_n(&lock->dead, 1, __ATOMIC_RELEASE);
+	__atomic_store_n(&lock->busy, 0, __ATOMIC_RELEASE);
 	return KEBAB_RPMH_ERR_SINK_FAILED;
 
 post_fail:
 	(void)tcs_read(t, KEBAB_TCS_CMD_STATUS, &t->last_status);
 	t->phase = KEBAB_TCS_PHASE_FAILED_POST_TRIGGER;
-	lock->dead = 1;
-	lock->busy = 0;
+	__atomic_store_n(&lock->dead, 1, __ATOMIC_RELEASE);
+	__atomic_store_n(&lock->busy, 0, __ATOMIC_RELEASE);
 	return KEBAB_RPMH_ERR_TIMEOUT;
 }

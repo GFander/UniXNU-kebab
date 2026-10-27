@@ -5,6 +5,7 @@
  */
 #include "KebabRpmhVrm.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -39,6 +40,7 @@ typedef struct {
 	uint32_t status_preset;
 	int      triggered;
 	int      trigger_no_echo;
+	int      now_mode;      /* 0 advance, 1 frozen, 2 backwards, 3 no clock */
 	uint64_t now;
 } fake;
 
@@ -75,7 +77,14 @@ static uint64_t fake_now(void *ctx)
 {
 	fake *f = ctx;
 
-	f->now += 100;      /* 100 us per call by default */
+	if (f->now_mode == 1) {
+		return f->now;          /* frozen: the poll cap must end it */
+	}
+	if (f->now_mode == 2) {
+		f->now -= 50;           /* backwards: unsigned math must not loop */
+		return f->now;
+	}
+	f->now += 100;                  /* 100 us per call by default */
 	return f->now;
 }
 
@@ -132,6 +141,21 @@ static kebab_tcs_io fake_io(fake *f)
 	kebab_tcs_io io = { fake_rd, fake_wr, fake_now, f };
 
 	return io;
+}
+
+
+typedef struct {
+	kebab_rpmh_tcs  *tcs;
+	kebab_rpmh_cmd  *cmd;
+	int             *rc;
+} thread_arg;
+
+static void *race_thread(void *arg)
+{
+	thread_arg *a = arg;
+
+	*a->rc = kebab_rpmh_tcs_send(a->tcs, a->cmd);
+	return NULL;
 }
 
 int main(void)
@@ -326,9 +350,11 @@ int main(void)
 	fake_init(&f, KEBAB_TCS_AMC_ENABLE);
 	f.compl_after = -1;
 	f.now = 0;
+	f.now_mode = 1;         /* frozen clock */
 	kebab_rpmh_tcs_init(&tcs, fake_io(&f), &lock);
 	CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) == KEBAB_RPMH_ERR_TIMEOUT,
-	    "timeout reached and returned");
+	    "frozen clock still ends by the poll cap");
+	CHECK(f.status_reads >= 1000, "the poll cap was actually exercised");
 
 	printf("C17 a busy lock refuses a second caller\n");
 	memset(&lock, 0, sizeof(lock));
@@ -338,6 +364,62 @@ int main(void)
 	CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) == KEBAB_RPMH_ERR_TCS_STATE,
 	    "concurrent claim refused");
 	CHECK(f.wr_count == 0, "zero writes");
+
+
+	printf("C18 completion has a real wall-clock budget\n");
+	memset(&lock, 0, sizeof(lock));
+	fake_init(&f, KEBAB_TCS_AMC_ENABLE);
+	f.compl_after = -1;
+	kebab_rpmh_tcs_init(&tcs, fake_io(&f), &lock);
+	CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) == KEBAB_RPMH_ERR_TIMEOUT,
+	    "normal clock still times out");
+	CHECK(f.status_reads > 100 && f.status_reads < 3000,
+	    "the wall budget ends the loop, not the poll cap");
+
+	printf("C19 a backwards clock cannot extend the wait\n");
+	memset(&lock, 0, sizeof(lock));
+	fake_init(&f, KEBAB_TCS_AMC_ENABLE);
+	f.compl_after = -1;
+	f.now = 1000000;
+	f.now_mode = 2;
+	kebab_rpmh_tcs_init(&tcs, fake_io(&f), &lock);
+	CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) == KEBAB_RPMH_ERR_TIMEOUT,
+	    "backwards clock terminates");
+
+	printf("C20 no clock callback falls back to the poll cap\n");
+	memset(&lock, 0, sizeof(lock));
+	fake_init(&f, KEBAB_TCS_AMC_ENABLE);
+	f.compl_after = -1;
+	{
+		kebab_tcs_io io = { fake_rd, fake_wr, NULL, &f };
+
+		kebab_rpmh_tcs_init(&tcs, io, &lock);
+	}
+	CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) == KEBAB_RPMH_ERR_TIMEOUT,
+	    "missing clock still terminates");
+
+	printf("C21 two threads cannot both claim the channel\n");
+	memset(&lock, 0, sizeof(lock));
+	fake_init(&f, KEBAB_TCS_AMC_ENABLE);
+	kebab_rpmh_tcs_init(&tcs, fake_io(&f), &lock);
+	{
+		int rc1 = -1, rc2 = -1;
+
+		thread_arg a1 = { &tcs, &cmd, &rc1 };
+		thread_arg a2 = { &tcs, &cmd, &rc2 };
+		pthread_t t1, t2;
+
+		pthread_create(&t1, NULL, race_thread, &a1);
+		pthread_create(&t2, NULL, race_thread, &a2);
+		pthread_join(t1, NULL);
+		pthread_join(t2, NULL);
+		CHECK((rc1 == KEBAB_RPMH_OK) != (rc2 == KEBAB_RPMH_OK),
+		    "exactly one thread ran the command");
+		CHECK(rc1 == KEBAB_RPMH_ERR_TCS_STATE ||
+		    rc2 == KEBAB_RPMH_ERR_TCS_STATE,
+		    "the loser was refused by the claim");
+		CHECK(f.wr_count == 10, "only one transaction reached the registers");
+	}
 
 	printf("\n%d checks, %d failure(s)\n", checks, failures);
 	return failures == 0 ? 0 : 1;
