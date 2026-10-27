@@ -3248,3 +3248,59 @@ TCM 命令族保留（厂商对 S3908 用的就是 Synaptics 自己的 TCM 风�
   （`-Wformat-nonliteral`、`-Wdeclaration-after-statement`）；
 - 未做：这一版没有刷机，也没有发送新的 I²C 事务；`TOUCHINIT` 与
   `TOUCHCLK` 的下一次实机验证要等镜像刷入。
+
+## 二十九、Abort 控制位修正与 Gate B–D（0120）
+
+### 1. 0120 修了什么
+
+0118 的 `kt_se_abort()` 把 `M_CMD_ABORT`（IRQ 状态位 5）写进了
+`SE_GENI_M_CMD_CTRL_REG`，而控制寄存器的位定义是 cancel = bit 2、abort = bit 1
+（`geni-se.h`）。写 0x20 是空操作，超时恢复其实从未生效。
+
+0120 把两类位分开命名（`M_GENI_CMD_CANCEL_REQ`/`M_GENI_CMD_ABORT_REQ` 对
+`M_CMD_CANCEL`/`M_CMD_ABORT`），并把恢复流程改成：
+
+1. 读 `GENI_STATUS`，bit 0 不置位就直接清 watermark/中断返回成功；
+2. 仍 active 时写 cancel，有界等待 cancel/done 或 active 清零；
+3. 仍 active 才写 abort，继续有界等待；
+4. 清 watermark 与中断，再读一次 `GENI_STATUS`；
+5. 只有 active 清零才返回成功，否则置 `kt.se_dead`，本次运行不再发任何 I²C。
+
+`kt_i2c_error()` 也改成先保留原始状态再决定是否恢复；写/读入口在 `se_dead` 时
+直接拒绝。
+
+新增两条控制台命令：`TOUCHSE`（引脚、复位、`se_init`，要求 S5 时钟已开）与
+`TOUCHPING`（向 0x4B 发一个字节的 FIFO 写事务，走修好的 watermark 路径）。
+
+### 2. 实测（Gate A–D）
+
+- Gate A：刷入后串口 20.0 秒回来，启动不自动初始化触摸；
+- Gate B：`TOUCH?` 显示 `GENI_STATUS 0`、`M_IRQ_EN 0x33c0007e`，SE 空闲；
+- Gate C：`TOUCHCLK` 把 `0x52008` 从 `0x063c83c0` 改成 `0x0e3c83c0`，halt 的
+  bit 31 清零；
+- Gate D：`TOUCHSE` 四组 `se_init` 全部完成（此后 `M_IRQ_EN 0x7fc0007f`，
+  FIFO 位已使能），`TOUCHPING` 一个字节写 0x4B：
+
+```text
+KEBAB TOUCH: ping 0x4b: one byte, FIFO path
+KEBAB TOUCH: write did not complete, status 0x00000000
+KEBAB TOUCH: recover (write completion timeout): GENI_STATUS 0x00000041 M_IRQ_STATUS 0x00000000
+KEBAB TOUCH: recovered: GENI_STATUS 0x00000000, last status 0x00000021
+```
+
+`0x21` = `M_CMD_DONE | M_CMD_ABORT`，说明 cancel/abort 这条恢复路径这次真的
+生效了，SE 回到空闲。
+
+### 3. 结论
+
+- watermark 置位与恢复路径都已验证可用；
+- 事务仍然停在 active、没有 watermark、没有 NACK，说明 I²C 根本没有开始；同一次
+  会话里 `TOUCH?` 读到的引脚 36/37 `io = 0`（释放状态仍为低），与“触摸供电没开、
+  外部上拉没有电源”一致；
+- 因此下一步不是继续改 GENI，而是给触摸供电：DTB 里两个节点共用
+  `pm8150_l13`（3,008,000 µV）与 `pm8150a_l1`（1,800,000 µV）。
+
+### 4. 验证边界
+
+- 实测：上述四段日志、恢复路径、`M_IRQ_EN` 前后值；
+- 推断：总线被拉低来自供电；没有量电压，也没有执行任何 PMIC 写。
