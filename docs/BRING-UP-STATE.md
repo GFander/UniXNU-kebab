@@ -2063,3 +2063,205 @@ ser.write(b"FASTBOOT\n")
   分别发过 `REBOOT\n` / `FASTBOOT\n`。
 * `kebabkdp=1` 时的首字节匹配、以及 PM 关闭通知对 USB 事件线程的影响，都
   需要真机会话确认。
+
+## 十九、Fastboot 进入条件的诊断
+
+本轮要回答的问题：控制台 `FASTBOOT` 已经把 Qualcomm 的 restart reason 写进 IMEM
+并复位，为什么板子没有进 fastboot。
+
+测量用的镜像是 `XNU-151-FbDiag.img`（`0106-kebab-fastboot-diagnosis.patch`，
+CI run 40449214321），刷 `boot_b`。启动参数与基线一致：
+
+```text
+-v -enable_kprintf_spam startup_debug=1 serial=3 debug=0x14e cpus=1
+rd=ufsroot0 ufsroot=userdata ufsrw=1 rootrw=1 kebabusb=1 kebabpanic=1
+kebabkdp=1 kebab_fastboot_cookie=0x77665500 keepsyms=1
+```
+
+主机侧：Windows，COM7（CDC-ACM，`VID_1209&PID_0001`），
+`D:\TOOL\platform-tools\fastboot.exe`。命令必须一次 bulk OUT 写完，否则内核不匹配。
+
+### 1. PSCI：先测，不猜
+
+`0106` 在 `kebab_usb_start()` 里用 SMC 调 `PSCI_VERSION`，再对
+`SYSTEM_RESET`（`0x84000009`）和 `SYSTEM_RESET2`（`0xC4000012`）各调一次
+`PSCI_FEATURES`（`0x8400000A`）。启动日志被 `-v` 的 16 KiB 环冲掉，
+所以下机后又用 `PSCI?` 复测，结果一致：
+
+```text
+KEBAB PSCI: version 0x00010001; FEATURES(0x84000009)=0 FEATURES(0xc4000012)=0
+KEBAB PSCI: SYSTEM_RESET2 NOT_SUPPORTED
+```
+
+读数是 **0**（PSCI_FEATURES：0 = not supported）。按规则记
+`SYSTEM_RESET2 = NOT_SUPPORTED`，没有换成 vendor 私有的 reset type，
+`FASTBOOT2` 命令因此拒绝执行（`ud.psci_reset2 != 1` 时只打印、不复位），
+也没有强行调用未声明的功能。
+
+**这条读数自相矛盾，是独立的一条发现**：PSCI 版本 1.1 里 `SYSTEM_RESET`
+是强制功能，而且它实测有效（`REBOOT` 和 `FASTBOOT` 都靠它复位），
+`PSCI_FEATURES(0x84000009)` 却返回 0。也就是说这颗固件的
+`PSCI_FEATURES` 是一个对已实现功能也回答 0 的桩：
+`0xC4000012 -> 0` 只能说明"固件没有声明支持"，不能证明 `SYSTEM_RESET2`
+一定不存在。**在这台机器上，任何依赖 PSCI_FEATURES 做能力探测的东西都不可信**，
+包括以后想用 `SYSTEM_RESET2`、`SYSTEM_OFF` 或其它可选功能的代码。
+
+### 2. IMEM 写入路径：写进去了，也确实读得回来
+
+`FASTBOOT` 现在先打印旧值，写 `0x77665500`，`dsb sy` 后回读，再冲刷日志、
+等 300 ms 才复位。实测：
+
+```text
+KEBAB FASTBOOT: cookie 0x77665500 from kebab_fastboot_cookie
+KEBAB FASTBOOT: IMEM restart_reason at 0x146bf000+0x65c is 0x0b39bda4; writing 0x77665500
+KEBAB FASTBOOT: read back 0x77665500 (MATCH)
+KEBAB REBOOT: PEHaltRestart(kPERestartCPU)
+```
+
+回读 **MATCH**，说明 `0x146BF65C` 的映射、写和读都成立，写操作本身没有丢。
+写前值是 `0x0b39bda4`，既不是 0 也不是 cookie。
+
+### 3. 三次复位的实测矩阵
+
+每一次都记录：写前 IMEM、写后回读、PSCI 调用、是否进 fastboot、是否正常启动、
+是否出现 crash dump、下次启动时 IMEM 的值。时间以命令发出为零点。
+
+| # | 命令 | 复位调用 | 写前 IMEM | 回读 | 进 fastboot | 正常启动 | crash dump | 下次启动 IMEM |
+|---|------|----------|-----------|------|-------------|----------|------------|----------------|
+| 0 | 刷机后 `fastboot reboot` | ABL 冷启动 | — | — | 否 | 是 | 无 | `0x0b39bda4` |
+| 1 | `FASTBOOT` | `PEHaltRestart(kPERestartCPU)` → `SYSTEM_RESET` | `0x0b39bda4` | `0x77665500` MATCH | **否** | 是，1.0 s 端口消失 / 19.8 s 回来 | 无 | `0x836999ac` |
+| 2 | `REBOOT`（回归） | 同上，`SYSTEM_RESET` | — | — | 否 | 是，1.0 s / 19.8 s | 无 | `0x532989ac` |
+| 3 | `REBOOT`（收尾再验一次） | 同上，`SYSTEM_RESET` | — | — | 否 | 是，1.0 s / 19.8 s | 无 | `0x616998ac` |
+
+crash dump 的判据是主机上不出现 `VID_05C6&PID_900E`（QUSB_BULK）；
+复位后 USB 上只有 `VID_1209&PID_0001`，没有别的 Qualcomm 设备。
+"下次启动 IMEM" 是板子重新枚举后在控制台上立刻发 `IMEM?` 读到的值。
+启动时的 `KEBAB USB: IMEM mapped ... boot read 0x...` 探针也在，但这段早于
+USB 枚举的日志被 `-v` 的启动刷屏冲掉了；`IMEM?` 在同一启动内读三次值都一样
+（例如 `0x836999ac` ×3），所以它和启动时的读数等价。
+
+**最重要的一条结果在第 2、3 行**：`REBOOT` 根本没有写 IMEM，复位后 `0x65c`
+仍然从 `0x836999ac` 变成 `0x532989ac`、再变成 `0x616998ac`。四次启动四个值，
+没有一个等于 OS 写的 cookie。也就是说，每次启动都有比内核更早的环节
+（XBL / ABL / UEFI 中的一个或多个）在重写这个单元，OS 在复位前写的 cookie
+到不了 ABL 做启动模式判断的那个时刻。
+
+复位调用不是差别：`REBOOT` 和 `FASTBOOT` 走的是同一条 `SYSTEM_RESET`，
+一个能复位，另一个也能复位（端口都在 1.0 s 消失、19.8 s 回来），
+区别只在那个没被保住的 IMEM 值。**所以本机这条启动链上，
+"写 IMEM + `SYSTEM_RESET`" 这条路本身不成立，不是复位方式选错了。**
+
+### 4. vendor 源码核对（为 Stage B 打底）
+
+全部来自 LineageOS `android_kernel_oneplus_sm8250`，分支 `lineage-24.0`，
+不是凭记忆：
+
+* `drivers/power/reset/msm-poweroff.c`，`msm_restart_prepare()`：
+  `cmd = "bootloader"` 时先 `qpnp_pon_set_restart_reason(PON_RESTART_REASON_BOOTLOADER)`，
+  再 `__raw_writel(0x77665500, restart_reason)`。同一个 `else` 分支写的是
+  `0x77665501`。**所以 `0x77665500` 才是 bootloader 值**，启动参数里的
+  `kebab_fastboot_cookie=0x77665500` 是对的，`0105` 原来默认的 `0x77665501`
+  反而是"普通重启"。
+* `arch/arm64/boot/dts/vendor/qcom/pm8150.dtsi`：`qcom,pm8150@0` 的
+  `reg = <0x0 SPMI_USID>`（SID 0），`qcom,power-on@800`（PON base `0x0800`），
+  并且带 `qcom,store-hard-reset-reason`（没有这个属性
+  `qpnp_pon_set_restart_reason()` 直接返回 0，不写）。
+* `drivers/input/misc/qpnp-power-on.c`：
+  `QPNP_PON_PERPH_SUBTYPE(pon) = base + 0x05` → **`0x0805`**；
+  `QPNP_PON_SOFT_RB_SPARE(pon) = base + 0x8F` → **`0x088F`**；
+  `is_pon_gen2()` 是 subtype `0x04`（GEN2_PRIMARY）或 `0x05`（GEN2_SECONDARY）；
+  Gen2 分支 `masked_write(0x088F, GENMASK(7,1)=0xFE, reason << 1)`，
+  `PON_RESTART_REASON_BOOTLOADER = 0x02` → 写进 bit7:1 的值是 **`0x04`**；
+  Gen1 分支才是 `GENMASK(7,2)=0xFC`、`reason << 2`。
+* `arch/arm64/boot/dts/vendor/qcom/kona.dtsi`：
+  `qcom,msm-imem@146bf000` + `restart_reason@65c`（4 字节）；
+  SPMI arbiter 是 `qcom,spmi@c440000`，`reg-names = "core","chnls","obsrvr","intr","cnfg"`，
+  对应 `0xc440000` / `0xc600000` / `0xe600000` / `0xe700000` / `0xc40a000`，
+  `qcom,ee = <0>`。
+
+### 5. Stage B 的判定：BLOCKED（SPMI 不存在）
+
+Stage A 没有成功，所以按计划做 Stage B。Stage B 的第一件事是只读探测 PON 的
+`0x0805`，确认这颗 PMIC 是不是 Gen2；但这个问题在本内核上**无法回答**：
+
+* XNU 树里没有任何 SPMI 控制器驱动。`grep -ri spmi` 只命中
+  `EXTERNAL_HEADERS/acpi/Acpi_v1.h` 里一个无关的词；`bsd/conf/files`、
+  `iokit/conf/files*`、`configs/kebab_defconfig` 里都没有 SPMI 相关项。
+* KDK 里的 `AppleSPMI.kext` 是 Apple Silicon 的 macOS 驱动（二进制），
+  不参与这个内核的构建，也不匹配 kebab 的设备树。
+* `package/BootReset.c` 里确实有一套直接操作 SPMI PMIC-arbiter 的代码，
+  但那是 **sheng（SM8550）** 的，arbiter 地址（`0xc400000` 等）和
+  kona（`0xc440000` 等）不是一套；它也没有编进 kebab 内核。
+  不能把它当成"已经有 SPMI"。
+* 没有任何东西"已经占用"arbiter：XNU 侧没有驱动，也就没有 APID/EE 的
+  ownership 声明。
+
+因此 Stage B 的结论是 **BLOCKED**：没有 SPMI 事务，读不了 `0x0805`，
+确认不了 Gen2；**Stage C 的 `0x088F` 写操作 NOT_RUN**，一个 PMIC 寄存器都没写。
+
+如果将来补上 SPMI，要做的事是明确的（可直接照此实现）：
+
+1. **读 subtype**：SID 0、PON 基址 `0x0800`、寄存器 `0x0805`
+   （`QPNP_PON_PERPH_SUBTYPE`）。只有读到 `0x04` 或 `0x05` 才是 Gen2；
+   `0x01`/`0x02`/`0x03` 是 Gen1/1REG，掩码和移位都不同，必须停下重算。
+2. **写 reason（仅当 Gen2）**：SID 0、寄存器 `0x088F`
+   （`QPNP_PON_SOFT_RB_SPARE`），读改写
+   `new = (old & 0x01) | (0x02 << 1)`，即 mask `0xFE`、值 `0x04`；
+   写完回读，确认 bit7:1 = `0b0000010`。
+3. **缺的基础设施**（这是 BLOCKED 的具体内容）：
+   * 一个 SM8250 `qcom,spmi-pmic-arb` 驱动，映射 core `0xc440000`、
+     chnls `0xc600000`、obsrvr `0xe600000`、intr `0xe700000`、
+     cnfg `0xc40a000`；
+   * EE0 的 APID 映射：在 cnfg 空间里为 SID 0 / PON 外设找到 APID，
+     再核对 ownership 表（`qcom,ee = <0>` 要求 owner 是 EE0）；
+   * 命令编码与超时轮询：`PMIC_ARB_CMD`（core+`0x00`）、
+     `PMIC_ARB_CONFIG`（+`0x04`）、`PMIC_ARB_STATUS`（+`0x08`）、
+     `WDATA0/1`、`RDATA0/1`，单次最多 8 字节，超时按 1000 µs 量级处理；
+   * 没有这些，"读一个 PMIC 寄存器"都不是一条已建立的操作，
+     更不能拿一个猜的地址去写。
+
+### 6. 判定：FASTBOOT 仍然不可用，失败点不在 cookie，也不在写入
+
+| 项 | 结果 | 读数 / 说明 |
+|----|------|-------------|
+| A1 `PSCI_FEATURES(0xC4000012)` | **PASS**（测量完成） | `0` → 记 `NOT_SUPPORTED`；同一次 `SYSTEM_RESET` 也返回 0，故 FEATURES 是桩，0 不等于不存在 |
+| A2 IMEM 写入 + 回读 | **PASS** | `0x0b39bda4` → 写 `0x77665500` → 回读 `0x77665500` MATCH |
+| A3 `SYSTEM_RESET2` 单测 | **NOT_RUN** | 固件未声明支持；按规则不强行调用未声明功能，也不换 vendor reset type |
+| A4 每次尝试的记录 | **PASS** | 见第 3 节矩阵（写前值、回读、PSCI 调用、fastboot、正常启动、crash dump、下次启动值） |
+| A5 启动后最早可观察的 restart reason | **PASS**（有保留） | 探针已加；启动日志被 `-v` 刷屏冲掉，用同一启动内的 `IMEM?` 等价读数；不是 ABL 读它的那一刻 |
+| B1 vendor 源码确认 | **PASS** | SID 0、`0x0800`、`0x088F`、`0x0805`、Gen2=`0x04/0x05`、mask `0xFE`、`0x02<<1`，全部有出处 |
+| B2 只读探测 `0x0805` | **BLOCKED** | 没有 SPMI 控制器驱动，发不出 SPMI 事务 |
+| B3 SPMI 是否可用 | **PASS**（调查完成） | 无驱动、无 owner；`BootReset.c` 是 SM8550 的另一套地址 |
+| B4 读数不一致就停 | **PASS** | 一个 PMIC 寄存器都没写 |
+| C `SOFT_RB_SPARE` 原型 | **NOT_RUN** | B 已 BLOCKED |
+| 回归：`REBOOT` 基线 | **PASS** | 收尾再验一次：1.0 s 端口消失、19.8 s 回来，控制台可用 |
+
+**结论要写清楚**：
+
+* `FASTBOOT` 命令**仍然不可用**——它写 IMEM、复位，但板子正常启动，不进 fastboot。
+* 失败**不是** cookie 值不对：vendor 源码确认 `0x77665500` 就是 bootloader 值，
+  启动参数里的值是对的（`0105` 原来的默认 `0x77665501` 才是普通重启值）。
+* 失败**也不是**写没写进去：回读 MATCH，映射和读写都成立。
+* 失败**也不是**复位方式：`REBOOT` 和 `FASTBOOT` 用同一条 `SYSTEM_RESET`，
+  都能复位。
+* 已证明的失败点是：**OS 写进 `0x65c` 的 cookie 不保留到下一次启动**。
+  四次启动四个不同的值，`REBOOT` 没写它也会变，说明有更早的启动环节在
+  每次启动时重写这个单元；ABL 做判断时看到的不是 OS 写的值。
+* 与 vendor 行为对照，缺的另一半是 **PMIC PON 的 restart reason**
+  （`PON_RESTART_REASON_BOOTLOADER`，Gen2 下写 `0x088F` 的 bit7:1）。
+  本内核没有 SPMI，无法复现 vendor 的完整路径，所以这部分是 BLOCKED，
+  不是"已经排除"。
+
+### 7. 本轮刷机与测试日志
+
+| 镜像 | 启动参数 | 命令 | 板子的反应 |
+|------|----------|------|------------|
+| `XNU-151-FbDiag.img`（96 MiB，payload 来自 CI 40449214321） | 见本节开头 | `fastboot flash boot_b` + `fastboot reboot` | 约 20 s 后 COM7 出现，控制台可用；`IMEM?` = `0x0b39bda4` |
+| 同上 | 同上 | `PSCI?` | `version 0x00010001`，两个 FEATURES 都是 0 |
+| 同上 | 同上 | `FASTBOOT\n`（一次写入） | 旧值/新值/回读 MATCH；1.0 s 端口消失；19.8 s 回来；正常启动；无 fastboot、无 crash dump；`IMEM?` = `0x836999ac` |
+| 同上 | 同上 | `REBOOT\n`（一次写入） | 1.0 s 端口消失；19.8 s 回来；正常启动；`IMEM?` = `0x532989ac` |
+| 同上 | 同上 | `REBOOT\n`（收尾回归） | 1.0 s 端口消失；19.8 s 回来；正常启动；`IMEM?` = `0x616998ac` |
+
+所有命令都是主机侧一次 `write()` 发出的完整一行（`FASTBOOT\n` 9 字节、
+`REBOOT\n` 7 字节、`PSCI?\n` 6 字节、`IMEM?\n` 6 字节），没有逐字符输入。
+整个过程手机没有落入 recovery / fastboot / EDL：每次复位后都回到 XNU 控制台。
