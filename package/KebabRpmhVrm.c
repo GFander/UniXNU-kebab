@@ -414,14 +414,14 @@ kebab_rpmh_tcs_init_global(kebab_rpmh_tcs *t, kebab_tcs_io io)
 	kebab_rpmh_tcs_init(t, io, &kebab_rpmh_global_lock);
 }
 
-/*
- * Test-only view of the global lock so a suite can prove it is shared.
- */
+#ifndef KEBAB_RPMH_KERNEL
+/* Test-only view of the global lock so a suite can prove it is shared. */
 kebab_rpmh_lock *
 kebab_rpmh_global_lock_get(void)
 {
 	return &kebab_rpmh_global_lock;
 }
+#endif
 
 kebab_rpmh_status
 kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
@@ -442,6 +442,16 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 		return KEBAB_RPMH_ERR_TCS_STATE;
 	}
 	lock = t->lock;
+#ifdef KEBAB_RPMH_KERNEL
+	/*
+	 * In the kernel build the only admissible lock is this module's own
+	 * instance: a caller that brought its own would get a fresh "once per
+	 * boot" and bypass the global gate.
+	 */
+	if (lock != &kebab_rpmh_global_lock) {
+		return KEBAB_RPMH_ERR_TCS_STATE;
+	}
+#endif
 	/*
 	 * Claim the channel atomically: the dead/used checks and the busy
 	 * exchange have to be one decision, otherwise two callers can both

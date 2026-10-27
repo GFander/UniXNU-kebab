@@ -3911,3 +3911,47 @@ UEFI 阶段确实带了一个 RPMh 驱动。这解释了 TCS0 的 CLK/BUS 残留
 
 - 实测：58 项主机断言（含 50 轮并发）、UEFI 源码树与镜像构建路径、RpmhDxe 字符串；
 - 未做：没有解析 `RpmhDxe.efi` 的实际行为，没有改启动链，没有真机 RPMh 写入。
+
+## 四十二、C6 锁身份收紧与 O3-C0/C1 启动链取证
+
+### 1. C6：内核构建只能使用全局锁
+
+- `kebab_rpmh_tcs_init(t, io, lock)` 与 `kebab_rpmh_global_lock_get()` 现在只在
+  非 `KEBAB_RPMH_KERNEL` 构建里可见；
+- 内核构建下 `kebab_rpmh_tcs_send()` 会校验 `t->lock == &kebab_rpmh_global_lock`，
+  调用者自带锁直接返回 `TCS_STATE`；
+- 两套主机测试仍全过（58 + 57）。
+
+### 2. O3-C0：当前源码确实调用 ExitBootServices
+
+- 本机实际用于构建的 DarwinBoot 源码在 `/home/albert/tmpwork/dboot`，与公开仓库
+  版本只差两处打印字符串，**没有绕过分支**；`DarwinBoot.c` 第 686–691 行仍是
+  `GetMemoryMap` → `ExitBootServices(mImage, Key)`，循环最多三次；
+- 历史记录里的“EBS 卡在 CoreTerminateMemoryMap 后绕过”在这次源码里找不到，
+  说明那是另一次构建或另一个分支；
+- 但**镜像级验证受阻**：`signed.img` 里的 FV 是压缩的，搜不到 `DARWINBOOT`
+  的宽字符或 ASCII 字符串，无法直接证明刷入的固件就是这份源码编出来的。
+  要闭环需要：构建产物的哈希与 FV 对照，或在 UEFI 阶段加一条可见输出。
+
+另外 Mu-Silicium 里存在 `KernelErrataPatcherLib`，它会挂钩 `gBS->ExitBootServices`；
+但 kebabPkg 的 dsc/fdf 没有引用它，所以这条 hook 在 kebab 构建里是否生效同样未知。
+
+### 3. O3-C1：RpmhDxe 目前只能静态观察
+
+- `RpmhDxe.efi` 65536 字节，`.depex` 18 字节（无依赖表达式），字符串里有
+  `Rpmh` 与 53 处 `TCS`，没有 `ExitBootServices` 字样；
+- 它是二进制、无源码，无法判断它是否在 EBS 前完成所有 TCS 事务；
+- 若实际启动路径跳过 EBS，那么它的退出回调（如果有）就不会执行，残留状态可能
+  比正常退出更多。
+
+### 4. O3-C2/C3 的结论
+
+- 在拿到“是否调用 EBS”的镜像级证据之前，不能依赖“固件正常退出”作为交接前提；
+- 交接记录（`KebabRscHandoff`）应设计为在**最后一次进入 XNU 之前**由引导器写入，
+  而不是依赖 EBS 通知；
+- 对 TCS0/TCS1 的早期残留统一标记 `PREEXISTING_UNKNOWN`，不声明所有权。
+
+### 5. 验证边界
+
+- 实测：两套主机测试、DarwinBoot 源码对比、RpmhDxe 二进制字符串；
+- 未做：未反汇编 RpmhDxe，未证明镜像中的 DarwinBoot 版本，未做真机 RPMh 写入。

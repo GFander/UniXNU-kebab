@@ -134,14 +134,20 @@ typedef struct {
 	uint32_t         last_status; /* CMD_STATUS at the end of the attempt */
 } kebab_rpmh_tcs;
 
+#ifndef KEBAB_RPMH_KERNEL
+/* Host tests may hand in their own lock; the kernel build may not. */
 void kebab_rpmh_tcs_init(kebab_rpmh_tcs *t, kebab_tcs_io io,
     kebab_rpmh_lock *lock);
+#endif
 kebab_rpmh_status kebab_rpmh_tcs_send(kebab_rpmh_tcs *t,
     const kebab_rpmh_cmd *cmd);
 
 /* The kernel port uses these two: one global lock, never a local one. */
 void kebab_rpmh_tcs_init_global(kebab_rpmh_tcs *t, kebab_tcs_io io);
+#ifndef KEBAB_RPMH_KERNEL
+/* A writable view of the global lock exists for the host tests only. */
 kebab_rpmh_lock *kebab_rpmh_global_lock_get(void);
+#endif
 
 /* Simulated channel used by the TCS state tests (not used by send). */
 typedef enum {
