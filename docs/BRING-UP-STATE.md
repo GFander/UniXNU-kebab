@@ -4840,3 +4840,44 @@ ENTER/RETURN 顺序、乱序提交、溢出与拒绝分开计数。
 | TCS1 所有权 | UNKNOWN |
 
 真实 RPMh 写入继续 NO-GO。
+
+## 五十七、O3-C6-E4b-F3：mirror 单调性与回调身份
+
+### 1. 修复
+
+| 问题 | 处理 |
+| --- | --- |
+| mirror 可能显示旧阶段 | mirror 回调改收**已发布的 `newest` 值**（`seq<<32|stage`），不再收调用者自己的 stage；旧槽晚提交时显示保持新阶段 |
+| 乱序测试不确定 | 新增 `test_block_slot()/test_release_slot()`：slot 0 在发布 `seq` 前阻塞，slot 1 完整提交后才放行，确定性复现“旧槽晚提交” |
+| E3/E7 无身份 | 新增 `kebab_ebs_set_callback()` 与 `event_add_callback()`：E3/E7 必须匹配注册时的 NotifyFunction 与 Event 对象；E7 从全局白名单移除 |
+| 全局/目标边界 | 全局入口只收 E1/E2/E8；目标入口拒收 E3/E7 |
+
+### 2. 测试 26 项
+
+新增：E7 走全局入口被拒、E3/E7 的错误 NotifyFunction/Event 被拒、E3 走目标入口被拒、
+阻塞式乱序提交（slot 1 先提交、slot 0 后提交）、mirror 从未看到更小值且最终显示
+`seq == 2`。
+
+```text
+26 checks, 0 failure(s)
+```
+
+### 3. 仍未做
+
+- `ProbeWrite()`：屏障与按内存属性决定是否 `dc cvac`，`dsb` 不等于写回缓存；
+- `ConfigurationTable → DarwinBoot → ADT/boot_args → XNU` 交接；
+- 在 Mu_Basecore 内插桩并隔离编译；
+- 目标身份的动态绑定：RpmhDxe 先注册事件再安装协议，Handle 只能在安装后确定。
+
+### 4. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| mirror 单调性 | 已实现并测试 |
+| 确定性乱序提交 | 已实现并测试 |
+| E3/E7 回调身份 | 已实现并测试 |
+| 固件集成 | 未开始 |
+| 历史挂死根因 | UNKNOWN |
+| TCS1 所有权 | UNKNOWN |
+
+真实 RPMh 写入继续 NO-GO。

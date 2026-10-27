@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
 /*
- * Kebab EBS probe record (E4b-F2 revision).
+ * Kebab EBS probe record (E4b-F3 revision).
  *
  * Fixed, pre-allocated record written without allocation or UEFI services.
  * Rules this revision enforces:
@@ -24,7 +24,7 @@
 
 /* Bytes K R S C in memory (little endian). */
 #define KEBAB_EBS_MAGIC   0x4353524bu
-#define KEBAB_EBS_VERSION 3u
+#define KEBAB_EBS_VERSION 4u
 #define KEBAB_EBS_EVENTS  64u
 
 typedef enum {
@@ -73,7 +73,21 @@ typedef struct {
 	uint32_t valid;
 } kebab_ebs_target;
 
-typedef void (*kebab_ebs_mirror)(uint32_t stage, void *ctx);
+/* The mirror receives the published newest value (seq << 32 | stage), not the
+ * caller's stage, so an older slot that commits late cannot repaint an older
+ * stage.  Consumers must still keep their own monotonic guard. */
+typedef void (*kebab_ebs_mirror)(uint64_t newest, void *ctx);
+
+/* E3/E7 are tied to the registered EBS callback, not to a protocol identity:
+ * the DXE dispatcher sees NotifyFunction and the event object, not the
+ * uninstall handle/GUID/interface. */
+typedef struct {
+	uint64_t notify;
+	uint64_t event;
+	uint32_t valid;
+} kebab_ebs_callback;
+void kebab_ebs_set_callback(kebab_ebs_callback *cb, uint64_t notify,
+    uint64_t event);
 
 void kebab_ebs_init(kebab_ebs_record *rec, kebab_ebs_target *target,
     kebab_ebs_mirror mirror, void *ctx);
@@ -84,16 +98,23 @@ int kebab_ebs_target_valid(const kebab_ebs_target *t);
 int kebab_ebs_target_matches(const kebab_ebs_target *t, uint64_t handle,
     uint64_t guid_ptr, const uint8_t guid[16], uint64_t prot_interface);
 
-/* Global lifecycle events: only E1, E2, E7 and E8 are accepted. */
+/* Global lifecycle events: only E1, E2 and E8 are accepted. */
 int kebab_ebs_event_add_global(kebab_ebs_stage stage, uint64_t object,
     uint32_t status);
 /* Target events: full identity required. */
 int kebab_ebs_event_add_target(kebab_ebs_stage stage, uint64_t handle,
     uint64_t guid_ptr, const uint8_t guid[16], uint64_t prot_interface,
     uint32_t context, uint64_t object, uint32_t status);
+/* Callback events: stage must be E3 or E7, and both the notify function and
+ * the event object must match what was recorded at registration time. */
+int kebab_ebs_event_add_callback(kebab_ebs_stage stage, uint64_t notify,
+    uint64_t event, uint32_t status);
 
 #ifdef KEBAB_EBS_TESTING
 void kebab_ebs_test_reset(void);
+/* Block the commit of one slot until kebab_ebs_test_release_slot(). */
+void kebab_ebs_test_block_slot(uint32_t slot);
+void kebab_ebs_test_release_slot(void);
 /* Hold a claimed slot for a while, to force out-of-order commits. */
 void kebab_ebs_test_delay_slot(uint32_t slot, uint32_t spins);
 #endif

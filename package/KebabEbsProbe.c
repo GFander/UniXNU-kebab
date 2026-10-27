@@ -5,13 +5,14 @@
 
 static kebab_ebs_record *g_rec;
 static kebab_ebs_target *g_target;
+static kebab_ebs_callback *g_cb;
 static kebab_ebs_mirror g_mirror;
 static void *g_mirror_ctx;
 static int g_sealed;
 
 #ifdef KEBAB_EBS_TESTING
-static uint32_t g_delay_slot;
-static uint32_t g_delay_spins;
+static uint32_t g_block_slot = UINT32_MAX;
+static uint32_t g_released;
 #endif
 
 void
@@ -31,6 +32,18 @@ kebab_ebs_init(kebab_ebs_record *rec, kebab_ebs_target *target,
 	g_mirror = mirror;
 	g_mirror_ctx = ctx;
 	g_sealed = 1;
+}
+
+void
+kebab_ebs_set_callback(kebab_ebs_callback *cb, uint64_t notify, uint64_t event)
+{
+	if (cb == NULL) {
+		return;
+	}
+	cb->notify = notify;
+	cb->event = event;
+	cb->valid = (notify != 0 && event != 0) ? 1u : 0u;
+	g_cb = cb;
 }
 
 void
@@ -77,11 +90,6 @@ kebab_ebs_target_matches(const kebab_ebs_target *t, uint64_t handle,
 	if (t->guid_ptr != 0 && t->guid_ptr != guid_ptr) {
 		return 0;
 	}
-	/*
-	 * When the exact GUID bytes were recorded, the caller must present the
-	 * same 16 bytes; a pointer match alone would accept another GUID that
-	 * happens to live at a reused address.
-	 */
 	if (t->have_guid != 0) {
 		if (guid == NULL || memcmp(t->guid, guid, 16) != 0) {
 			return 0;
@@ -94,7 +102,7 @@ static int
 stage_is_global(kebab_ebs_stage stage)
 {
 	return stage == KEBAB_EBS_E1 || stage == KEBAB_EBS_E2 ||
-	    stage == KEBAB_EBS_E7 || stage == KEBAB_EBS_E8;
+	    stage == KEBAB_EBS_E8;
 }
 
 static uint32_t
@@ -123,13 +131,9 @@ publish(kebab_ebs_record *rec, uint32_t slot, kebab_ebs_stage stage,
 	ev->object = object;
 
 #ifdef KEBAB_EBS_TESTING
-	if (slot == __atomic_load_n(&g_delay_slot, __ATOMIC_ACQUIRE)) {
-		uint32_t n = __atomic_load_n(&g_delay_spins, __ATOMIC_ACQUIRE);
-		uint32_t d;
-
-		for (d = 0; d < n; d++) {
-			__atomic_thread_fence(__ATOMIC_SEQ_CST);
-		}
+	while (slot == __atomic_load_n(&g_block_slot, __ATOMIC_ACQUIRE) &&
+	    __atomic_load_n(&g_released, __ATOMIC_ACQUIRE) == 0) {
+		__atomic_thread_fence(__ATOMIC_SEQ_CST);
 	}
 #endif
 
@@ -153,8 +157,14 @@ publish(kebab_ebs_record *rec, uint32_t slot, kebab_ebs_stage stage,
 			break;
 		}
 	}
+	/*
+	 * The mirror is handed the published newest value, not this caller's
+	 * stage: when an older slot commits late, the display keeps showing
+	 * the newer stage instead of repainting the old one.
+	 */
 	if (g_mirror != NULL) {
-		g_mirror((uint32_t)stage, g_mirror_ctx);
+		g_mirror(__atomic_load_n(&rec->newest, __ATOMIC_ACQUIRE),
+		    g_mirror_ctx);
 	}
 }
 
@@ -186,7 +196,8 @@ kebab_ebs_event_add_target(kebab_ebs_stage stage, uint64_t handle,
 	uint32_t slot;
 
 	if (rec == NULL || rec->magic != KEBAB_EBS_MAGIC ||
-	    stage_is_global(stage)) {
+	    stage_is_global(stage) || stage == KEBAB_EBS_E3 ||
+	    stage == KEBAB_EBS_E7) {
 		return 0;
 	}
 	if (!kebab_ebs_target_matches(g_target, handle, guid_ptr, guid,
@@ -202,23 +213,54 @@ kebab_ebs_event_add_target(kebab_ebs_stage stage, uint64_t handle,
 	return 1;
 }
 
+int
+kebab_ebs_event_add_callback(kebab_ebs_stage stage, uint64_t notify,
+    uint64_t event, uint32_t status)
+{
+	kebab_ebs_record *rec = g_rec;
+	uint32_t slot;
+
+	if (rec == NULL || rec->magic != KEBAB_EBS_MAGIC ||
+	    (stage != KEBAB_EBS_E3 && stage != KEBAB_EBS_E7)) {
+		return 0;
+	}
+	if (g_cb == NULL || g_cb->valid == 0 || g_cb->notify != notify ||
+	    (g_cb->event != 0 && g_cb->event != event)) {
+		__atomic_store_n(&rec->rejected, 1u, __ATOMIC_RELAXED);
+		return 0;
+	}
+	slot = claim_slot(rec);
+	if (slot == UINT32_MAX) {
+		return 0;
+	}
+	publish(rec, slot, stage, 0, event, status);
+	return 1;
+}
+
 #ifdef KEBAB_EBS_TESTING
 void
 kebab_ebs_test_reset(void)
 {
 	g_rec = NULL;
 	g_target = NULL;
+	g_cb = NULL;
 	g_mirror = NULL;
 	g_mirror_ctx = NULL;
 	g_sealed = 0;
-	g_delay_slot = 0;
-	g_delay_spins = 0;
+	g_block_slot = UINT32_MAX;
+	g_released = 0;
 }
 
 void
-kebab_ebs_test_delay_slot(uint32_t slot, uint32_t spins)
+kebab_ebs_test_block_slot(uint32_t slot)
 {
-	g_delay_slot = slot;
-	g_delay_spins = spins;
+	g_block_slot = slot;
+	g_released = 0;
+}
+
+void
+kebab_ebs_test_release_slot(void)
+{
+	__atomic_store_n(&g_released, 1u, __ATOMIC_RELEASE);
 }
 #endif

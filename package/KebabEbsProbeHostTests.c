@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
-/* Host tests for the EBS probe record, E4b-F2 revision. */
+/* Host tests for the EBS probe record, E4b-F3 revision. */
 #include "KebabEbsProbe.h"
 
 #include <pthread.h>
@@ -21,13 +21,29 @@ static int failures;
 
 static kebab_ebs_record rec;
 static kebab_ebs_target tgt;
+static kebab_ebs_callback cb;
 static uint32_t mirror_calls;
+static uint64_t mirror_max;
+static uint64_t mirror_last;
+static int mirror_regressed;
 
-static void mirror(uint32_t stage, void *ctx)
+static void mirror(uint64_t newest, void *ctx)
 {
-	(void)stage;
+	uint64_t prev;
+
 	(void)ctx;
 	__atomic_fetch_add(&mirror_calls, 1u, __ATOMIC_RELAXED);
+	prev = __atomic_load_n(&mirror_max, __ATOMIC_ACQUIRE);
+	if (newest < prev) {
+		mirror_regressed = 1;
+	}
+	while (newest > prev) {
+		if (__atomic_compare_exchange_n(&mirror_max, &prev, newest, 0,
+		    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+			break;
+		}
+	}
+	mirror_last = newest;
 }
 
 static void fresh(void)
@@ -35,9 +51,14 @@ static void fresh(void)
 	kebab_ebs_test_reset();
 	memset(&rec, 0, sizeof(rec));
 	memset(&tgt, 0, sizeof(tgt));
+	memset(&cb, 0, sizeof(cb));
 	kebab_ebs_target_set(&tgt, 0xa000, 0xb000, 0xc000);
+	kebab_ebs_set_callback(&cb, 0xd000, 0xe000);
 	kebab_ebs_init(&rec, &tgt, mirror, NULL);
 	mirror_calls = 0;
+	mirror_max = 0;
+	mirror_last = 0;
+	mirror_regressed = 0;
 }
 
 static int add_t(kebab_ebs_stage s, uint32_t ctx, uint64_t obj)
@@ -55,16 +76,28 @@ static void *late_commit(void *arg)
 
 int main(void)
 {
-	printf("G1 global stages go through the global entry only\n");
+	printf("G1 global stages are E1/E2/E8 only\n");
 	fresh();
 	CHECK(kebab_ebs_event_add_global(KEBAB_EBS_E1, 0, 0) == 1, "E1 accepted");
 	CHECK(kebab_ebs_event_add_global(KEBAB_EBS_E2, 0, 0) == 1, "E2 accepted");
-	CHECK(kebab_ebs_event_add_global(KEBAB_EBS_E4, 0, 0) == 0,
-	    "target stage refused by the global entry");
-	CHECK(kebab_ebs_event_add_target(KEBAB_EBS_E8, 0xa000, 0xb000, NULL,
-	    0xc000, 0, 0, 0) == 0, "global stage refused by the target entry");
+	CHECK(kebab_ebs_event_add_global(KEBAB_EBS_E7, 0, 0) == 0,
+	    "E7 must go through the callback entry");
+	CHECK(kebab_ebs_event_add_global(KEBAB_EBS_E8, 0, 0) == 1, "E8 accepted");
 
-	printf("G2 an invalid target refuses every event\n");
+	printf("G2 callback identity gates E3 and E7\n");
+	fresh();
+	CHECK(kebab_ebs_event_add_callback(KEBAB_EBS_E3, 0xd000, 0xe000, 0) == 1,
+	    "E3 with the registered callback accepted");
+	CHECK(kebab_ebs_event_add_callback(KEBAB_EBS_E3, 0xdead, 0xe000, 0) == 0,
+	    "other notify function refused");
+	CHECK(kebab_ebs_event_add_callback(KEBAB_EBS_E7, 0xd000, 0xbeef, 0) == 0,
+	    "other event object refused");
+	CHECK(kebab_ebs_event_add_callback(KEBAB_EBS_E8, 0xd000, 0xe000, 0) == 0,
+	    "E8 is not a callback stage");
+	CHECK(kebab_ebs_event_add_target(KEBAB_EBS_E3, 0xa000, 0xb000, NULL,
+	    0xc000, 0, 0, 0) == 0, "E3 is not a target stage");
+
+	printf("G3 an invalid target refuses every target event\n");
 	kebab_ebs_test_reset();
 	memset(&rec, 0, sizeof(rec));
 	memset(&tgt, 0, sizeof(tgt));
@@ -73,14 +106,13 @@ int main(void)
 	CHECK(kebab_ebs_event_add_target(KEBAB_EBS_E4, 0, 0, NULL, 0, 0, 0,
 	    0) == 0, "event refused");
 	CHECK(rec.claimed == 0, "no slot was claimed");
-	CHECK(rec.rejected == 1, "refusal counted as rejected, not overflow");
+	CHECK(rec.rejected == 1, "refusal counted as rejected");
 
-	printf("G3 identity: interface, pointer and GUID value\n");
+	printf("G4 identity: interface, pointer and GUID value\n");
 	fresh();
+	CHECK(add_t(KEBAB_EBS_E4, 1, 0) == 1, "matching target accepted");
 	CHECK(kebab_ebs_event_add_target(KEBAB_EBS_E4, 0xa000, 0xb000, NULL,
 	    0xdead, 0, 0, 0) == 0, "wrong interface refused");
-	CHECK(kebab_ebs_event_add_target(KEBAB_EBS_E4, 0xa000, 0xbeef, NULL,
-	    0xc000, 0, 0, 0) == 0, "wrong GUID pointer refused");
 	{
 		uint8_t g1[16], g2[16];
 
@@ -93,19 +125,9 @@ int main(void)
 		    g1, 0xc000, 0, 0, 0) == 1, "same GUID bytes accepted");
 	}
 
-	printf("E1 ordering and newest stage\n");
+	printf("E1 deterministic out-of-order commit\n");
 	fresh();
-	CHECK(add_t(KEBAB_EBS_E4, 7, 0x4000) == 1, "E4 committed");
-	CHECK(add_t(KEBAB_EBS_E4B_ENTER, 7, 0x4000) == 1, "E4B_ENTER");
-	CHECK(add_t(KEBAB_EBS_E4B_RETURN, 7, 0x4000) == 1, "E4B_RETURN");
-	CHECK(add_t(KEBAB_EBS_E5_ENTER, 7, 0x5000) == 1, "E5_ENTER");
-	CHECK(rec.ev[3].seq == 4, "slot 3 has seq 4");
-	CHECK((uint32_t)(rec.newest >> 32) == 4, "newest seq is 4");
-	CHECK((uint32_t)rec.newest == KEBAB_EBS_E5_ENTER, "newest stage is E5");
-
-	printf("E2 out-of-order commit cannot regress the newest stage\n");
-	fresh();
-	kebab_ebs_test_delay_slot(0, 2000000u);
+	kebab_ebs_test_block_slot(0);
 	{
 		pthread_t t1, t2;
 
@@ -115,14 +137,25 @@ int main(void)
 		}
 		pthread_create(&t2, NULL, late_commit, NULL);   /* slot 1 */
 		pthread_join(t2, NULL);
+		CHECK(__atomic_load_n(&rec.ev[1].seq, __ATOMIC_ACQUIRE) == 2,
+		    "slot 1 committed while slot 0 is held");
+		kebab_ebs_test_release_slot();
 		pthread_join(t1, NULL);
 	}
-	kebab_ebs_test_delay_slot(0, 0);
 	CHECK(__atomic_load_n(&rec.ev[0].seq, __ATOMIC_ACQUIRE) == 1,
-	    "slot 0 committed late");
-	CHECK(__atomic_load_n(&rec.ev[1].seq, __ATOMIC_ACQUIRE) == 2,
-	    "slot 1 committed first");
+	    "slot 0 committed after slot 1");
 	CHECK((uint32_t)(rec.newest >> 32) == 2, "newest seq is 2, not 1");
+	CHECK((uint32_t)rec.newest == KEBAB_EBS_E4, "newest stage unchanged");
+	CHECK(mirror_regressed == 0, "the mirror never saw a lower value");
+	CHECK((uint32_t)(mirror_last >> 32) == 2, "the display shows seq 2");
+
+	printf("E2 the mirror gets the newest value, not the caller stage\n");
+	fresh();
+	(void)add_t(KEBAB_EBS_E4B_ENTER, 1, 0);
+	(void)add_t(KEBAB_EBS_E4B_RETURN, 1, 0);
+	CHECK((uint32_t)(mirror_last >> 32) == 2 &&
+	    (uint32_t)mirror_last == KEBAB_EBS_E4B_RETURN,
+	    "mirror last value is the latest stage");
 
 	printf("E3 overflow is separate from rejection\n");
 	fresh();
