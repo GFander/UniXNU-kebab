@@ -4063,3 +4063,56 @@ APRIORI 列出的驱动按列表顺序调度，**DEPEX 条件不参与调度判�
 4. 只有在调用图能连到“进入内核前”这条路径上，才谈得上 TCS1 的交接证据。
 
 真实写入仍 NO-GO。
+
+## 四十五、O3-C4 进展与术语修正
+
+### 1. 术语修正：`rpmh_exit_sleep` 不是驱动退出
+
+`rpmh_exit_sleep`、`flushing sleep AMCs`、`flushing wake AMCs` 这一组字符串属于
+RPMh 的**电源状态转换**（sleep/wake），与 UEFI 的 `ExitBootServices`、驱动 Unload
+不是同一类。之前把它列为“固件退出时完成或回收”的证据是错的，本轮撤回。
+
+要分开两张调用图：
+
+- A：RPMh 初始化与命令执行（配置 TCS → AMC → Trigger → 完成）；
+- B：UEFI 驱动生命周期（DXE 入口 → 事件注册 → EBS/Unload 处理）。
+
+只有 B 的路径能连到 A 的回收动作，才谈得上 EBS 触发 TCS 回收。
+
+### 2. `.data` 里那个基址
+
+文件偏移 `0xe22c` 属于 `.data`（raw `0xe000` ↔ RVA `0xe000`），所以它同时也是
+RVA `0xe22c`。周边是按 4 字节排列的字段：
+
+```text
+... 0x00000000 0x18200000 0x00000002 0x00000000 0x00000001 ...
+```
+
+`0x18200000` 紧邻的值是 `2`，看起来像 `{base, count}` 形式的表项（可能是 DRV 数或
+TCS 组数），但这只是结构猜测，尚未证明代码如何索引它。
+
+### 3. 字符串引用没有走 ADR/ADRP
+
+对 `TCS IDLE`、`configuring TCS`、`TCS STUCK`、`TCS SENT`、`RscHalTriggerTCS`
+错误串、`rpmh_exit_sleep` 等 RVA 做 ADR/ADRP 直接引用扫描，命中数为 0。说明这些
+字符串不是通过 ADR/ADRP 直接取址，更可能是经由指针表、`ldr` 字面量或间接计算。
+这同时也说明：之前“按字符串找函数”的方法需要换成“先找引用表/字面量，再回溯
+函数边界”。
+
+### 4. 本轮没有建立调用图
+
+- C4-A（Trigger 日志的 XREF 与调用者）：未完成；
+- C4-B（基址表引用者与 DRV 索引）：只做到结构旁证；
+- C4-C/D（退出路径与事件注册）：未开始；
+- TCS1 所有权：仍 UNKNOWN。
+
+### 5. 下一步的具体做法
+
+1. 在 `.data` 里找指向字符串的 4/8 字节表项（RVA 或 image-relative），再找引用该
+   表的代码；
+2. 在 `.text` 里扫描 `ldr` 字面量池，匹配字符串或基址结构的地址；
+3. 用函数边界（`pacibsp`/`stp x29,x30` 序言与 `ret`）把命中点归到具体函数，
+   记录 RVA；
+4. 沿调用者向上，直到 DXE 入口，才可能回答“是否存在 TCS 回收”。
+
+真实写入继续 NO-GO；设备保持 `XNU-0127.img`。
