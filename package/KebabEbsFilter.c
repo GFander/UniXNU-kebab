@@ -16,8 +16,14 @@ const uint8_t kebab_other_group_guid[16] = {
 	0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01
 };
 
+const uint8_t kebab_rpmh_ffs_guid[16] = {
+	0xd1, 0xf4, 0x29, 0xcb, 0x37, 0x7f, 0x92, 0x46,
+	0xa4, 0x16, 0x93, 0xe8, 0x2e, 0x21, 0x97, 0x66
+};
+
 static kebab_filter_image g_images[KEBAB_FILTER_MAX_IMAGES];
 static uint32_t g_image_count;
+static int g_capacity_hit;
 static kebab_filter_event g_events[KEBAB_FILTER_MAX_EVENTS];
 static uint32_t g_event_count;
 
@@ -26,6 +32,7 @@ kebab_filter_reset(void)
 {
 	memset(g_images, 0, sizeof(g_images));
 	g_image_count = 0;
+	g_capacity_hit = 0;
 	memset(g_events, 0, sizeof(g_events));
 	g_event_count = 0;
 }
@@ -33,7 +40,11 @@ kebab_filter_reset(void)
 int
 kebab_filter_add_image(uint64_t base, uint64_t size, int is_rpmh)
 {
-	if (g_image_count >= KEBAB_FILTER_MAX_IMAGES || size == 0) {
+	if (size == 0) {
+		return 0;
+	}
+	if (g_image_count >= KEBAB_FILTER_MAX_IMAGES) {
+		g_capacity_hit = 1;
 		return 0;
 	}
 	g_images[g_image_count].base = base;
@@ -41,6 +52,22 @@ kebab_filter_add_image(uint64_t base, uint64_t size, int is_rpmh)
 	g_images[g_image_count].is_rpmh = is_rpmh != 0;
 	g_image_count++;
 	return 1;
+}
+
+int
+kebab_filter_add_rpmh_image(const uint8_t ffs_guid[16], uint64_t base,
+    uint64_t size)
+{
+	if (ffs_guid == NULL || memcmp(ffs_guid, kebab_rpmh_ffs_guid, 16) != 0) {
+		return 0;
+	}
+	return kebab_filter_add_image(base, size, 1);
+}
+
+int
+kebab_filter_capacity_hit(void)
+{
+	return g_capacity_hit;
 }
 
 int
@@ -64,7 +91,7 @@ in_rpmh_image(uint64_t addr)
 
 	for (i = 0; i < g_image_count; i++) {
 		if (g_images[i].is_rpmh != 0 && addr >= g_images[i].base &&
-		    addr < g_images[i].base + g_images[i].size) {
+		    addr - g_images[i].base < g_images[i].size) {
 			return 1;
 		}
 	}

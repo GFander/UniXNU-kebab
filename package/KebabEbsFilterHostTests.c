@@ -127,6 +127,33 @@ int main(void)
 	CHECK(ran == 3 && evs[0].ran == 1 && evs[1].ran == 1 &&
 	    evs[2].ran == 1, "every callback ran");
 
+	printf("T7 FFS GUID identifies the target image only\n");
+	setup();
+	kebab_filter_reset();
+	CHECK(kebab_filter_add_rpmh_image(kebab_other_group_guid, RPMH_BASE,
+	    RPMH_SIZE) == 0, "a different FFS GUID is refused");
+	CHECK(kebab_filter_add_rpmh_image(kebab_rpmh_ffs_guid, RPMH_BASE,
+	    RPMH_SIZE) == 1, "the RpmhDxe FFS GUID is accepted");
+	(void)kebab_filter_note_event(kebab_ebs_group_guid, RPMH_CB, EV1);
+	CHECK(kebab_filter_should_skip(KEBAB_FILTER_SKIP_RPMH_CALLBACK,
+	    kebab_ebs_group_guid, RPMH_CB, EV1) == 1, "callback now identified");
+	CHECK(kebab_filter_should_skip(KEBAB_FILTER_SKIP_RPMH_CALLBACK,
+	    kebab_ebs_group_guid, RPMH_CB + RPMH_SIZE, EV1) == 0,
+	    "an address past the image is not matched");
+
+	printf("T8 the image table reports capacity instead of wrapping\n");
+	kebab_filter_reset();
+	{
+		int i, added = 0;
+
+		for (i = 0; i < KEBAB_FILTER_MAX_IMAGES + 4; i++) {
+			added += kebab_filter_add_image(0x10000000ull +
+			    (uint64_t)i * 0x1000, 0x1000, 1);
+		}
+		CHECK(added == KEBAB_FILTER_MAX_IMAGES, "table stops at capacity");
+		CHECK(kebab_filter_capacity_hit() == 1, "capacity hit is flagged");
+	}
+
 	printf("\n%d checks, %d failure(s)\n", checks, failures);
 	return failures == 0 ? 0 : 1;
 }

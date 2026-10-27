@@ -33,6 +33,11 @@ typedef struct {
 	uint32_t is_rpmh;
 } kebab_filter_image;
 
+/* The RpmhDxe FFS GUID from the unpacked image: cb29f4d1-7f37-4692-a416-
+ * 93e82e219766.  Loaded images are matched by this GUID, never by a
+ * DevicePath string and never by a hard-coded RVA. */
+extern const uint8_t kebab_rpmh_ffs_guid[16];
+
 typedef struct {
 	uint8_t  group[16];
 	uint64_t notify;
@@ -41,6 +46,11 @@ typedef struct {
 
 void kebab_filter_reset(void);
 int kebab_filter_add_image(uint64_t base, uint64_t size, int is_rpmh);
+/* Register only the target image, identified by its FFS GUID. */
+int kebab_filter_add_rpmh_image(const uint8_t ffs_guid[16], uint64_t base,
+    uint64_t size);
+/* 1 when the image table filled up and a registration was dropped. */
+int kebab_filter_capacity_hit(void);
 /* Called from the CreateEventEx hook; only EBS-group registrations matter. */
 int kebab_filter_note_event(const uint8_t group[16], uint64_t notify,
     uint64_t event);
