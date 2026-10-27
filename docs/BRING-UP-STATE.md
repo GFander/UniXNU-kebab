@@ -4608,3 +4608,85 @@ E1/E2/E5 需要改 `Mu_Basecore`（可控源码）；E3/E4/E7 可以在 RpmhDxe 
 
 下一步：C6-E3 的剩余部分（实际协议打开记录与 `Stop()` 行为）与 C6-E4 的离线探针
 实现；真实 RPMh 写入继续 NO-GO。
+
+## 五十三、O3-C6-E3b/E4a：OpenList 也会释放内存，探针设计
+
+### 1. Mu 源码：卸载路径里不止一次内存操作
+
+`CoreDisconnectControllersUsingProtocolInterface()`（Handle.c:727）实际做三件事：
+
+1. 只对 `EFI_OPEN_PROTOCOL_BY_DRIVER` 的记录调用
+   `CoreDisconnectController()`——也就是说，**只有存在驱动使用者时才会执行第三方
+   驱动的 `Stop()`**；
+2. 成功之后，对 `BY_HANDLE_PROTOCOL`/`GET_PROTOCOL`/`TEST_PROTOCOL` 的记录执行
+   `RemoveEntryList` + `CoreFreePool (OpenData)`；
+3. 若仍有未释放的打开记录或断开失败，调用 `CoreConnectController(...)` 重新连接，
+   返回 `EFI_ACCESS_DENIED`。
+
+因此即使最终没有走到 `CoreFreePool(Prot)`，这条路径也可能已经：
+- 执行了第三方驱动的 `Stop()`；
+- 释放了 `OPEN_PROTOCOL_DATA`；
+- 通过 `CoreConnectController` 重新分配/连接。
+
+这三项都发生在 EBS 通知之后，与“EBS 回调不得依赖内存服务”的约束冲突。
+
+### 2. 探针（E4a）设计要点
+
+记录区：
+
+```c
+typedef struct {
+    uint32_t magic;        /* 'KRSC' */
+    uint32_t last_stage;   /* E1..E8 */
+    uint64_t stamp[16];    /* 每次阶段切换的时间戳/序号 */
+    uint64_t arg[8];       /* handle/guid/interface/prot 等 */
+} kebab_ebs_record;
+```
+
+- 在 DXE 早期（`CoreInitializeEventServices` 之后、最后一次 `GetMemoryMap` 之前）
+  用 `AllocatePages` 分配，内存类型 `EfiReservedMemoryType`，并在 `gBS->Exit`
+  之前不再分配；
+- 通过 `InstallConfigurationTable`（在正常 Boot Services 阶段）登记一个 GUID 指向
+  该记录，供 XNU 启动后读取；
+- 阶段写入只做 `volatile` 写，不调用 `Print()`、`Allocate*`、`Free*`、`GOP`。
+
+插桩点（Mu_Basecore，均可控源码）：
+
+| 阶段 | 位置 | 记录内容 |
+| --- | --- | --- |
+| E1 | `CoreExitBootServices` 中 `CoreTerminateMemoryMap` 返回处 | 返回值 |
+| E2 | `CoreNotifySignalList(&gEfiEventExitBootServicesGuid)` 之前 | 事件组 |
+| E3 | 事件分发器调用 NotifyFunction 之前 | 回调地址（重定位后）、Event |
+| E4 | `CoreUninstallProtocolInterface` 入口 | handle、GUID、interface |
+| E4a | `CoreFindProtocolInterface` 之后 | 是否找到 Prot 指针 |
+| E4b | `CoreDisconnectControllersUsingProtocolInterface` 前后 | 返回值、是否进入 Stop |
+| E4c | `CoreFreePool(OpenData)` 前后 | OpenData 指针 |
+| E5/E6 | `CoreFreePool(Prot)` 前后 | Prot 指针 |
+| E7 | 事件分发器返回后 | 回调是否返回 |
+| E8 | DarwinBoot 拿到 EBS 成功返回后 | 完整退出 |
+
+上下文归属：E5/E6 不能只记“调用了 CoreFreePool”，必须记录 `Prot` 指针并与 E4
+的接口指针比对，否则其他驱动的释放会被误判。
+
+显示通道：预取 framebuffer 基址（此前已确认 `0x9C000000` 这条路径存在），在
+EBS 之后直接写像素表示 `last_stage`，不调用 GOP。
+
+### 3. 探针的边界
+
+- 需要修改 Mu_Basecore 并重新构建 UEFI，属于固件改动，必须先离线构建与静态核对，
+  再决定是否刷机；
+- E3/E7 在 DXE Core 的事件分发器里记录，不改闭源 RpmhDxe；
+- 记录区分配必须在最后一次 `GetMemoryMap` 之前完成，EBS 之后只写不分配。
+
+### 4. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| OpenList 清理会 `CoreFreePool(OpenData)` | DIRECT（Mu 源码） |
+| 失败路径会 `CoreConnectController` | DIRECT（Mu 源码） |
+| 只有 BY_DRIVER 才执行 `Stop()` | DIRECT（Mu 源码） |
+| 探针设计 | 已完成离线设计，未实现 |
+| 历史挂死根因 | 仍未证实 |
+| TCS1 所有权 | UNKNOWN |
+
+真实 RPMh 写入继续 NO-GO。
