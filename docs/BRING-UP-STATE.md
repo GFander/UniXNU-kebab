@@ -3998,3 +3998,68 @@ APRIORI 列出的驱动按列表顺序调度，**DEPEX 条件不参与调度判�
 - 引导器是否调用 EBS 仍未在镜像级闭环（FV 里的 DarwinBoot 模块未按名字找到，
   可能在 payload 或另一个 FV）；
 - 因此 TCS1 所有权仍是 UNKNOWN，真实写入继续 NO-GO。
+
+## 四十四、O3-C3 初步：RpmhDxe 的静态指纹
+
+### 1. 基准
+
+`RpmhDxe.efi`（65,536 字节，SHA-256 `166f49bd…`）与镜像 FV 内的 PE32 逐字节一致，
+本节所有偏移都以这份文件为准。
+
+### 2. PE 结构
+
+| 项 | 值 |
+| --- | --- |
+| Machine | `0xaa64` |
+| EntryPoint RVA | `0x1000` |
+| `.text` | RVA `0x1000`，`0xd000` 字节 |
+| `.data` | RVA `0xe000`，`0x1000` |
+| `.reloc` | RVA `0xf000` |
+
+### 3. 字符串证据（文件偏移 = RVA，均在 .text 内）
+
+| RVA | 字符串 |
+| --- | --- |
+| `0xbe5b` | `configuring TCS (DRV_ID: %d)(TCS_ID: %d)(AMC?: %d)` |
+| `0xbeaa` | `TCS SENT (TCS INDEX: %d) (TCS_ID: %d)` |
+| `0xbe44` | `TCS IDLE (TCS_ID: %d)` |
+| `0xbe31` | `!!!!TCS STUCK!!!!` |
+| `0xbfc4` | `Invalid BaseAdresss/numcmdspertcs for drv, %d, passed to rscHalGetNumC…` |
+| `0xc364` | `Invalid TCS Id, %d, in RscHalTriggerTCS` |
+| `0xc3ff` | `Invalid TCS Id, %d, in RscHalConvertTCStoAMC` |
+| `0xc491` | `Invalid TCS Id, %d, in RscHalConvertAMCtoTCS` |
+| `0xbc01` | `rpmh_exit_sleep, flushing wake AMCs (DRV_ID: 0x%08x)` |
+| `0xbba3` | `flushing sleep AMCs` |
+
+这些名字说明驱动内部有一层 RSC HAL：TCS 触发（`RscHalTriggerTCS`）、TCS 与 AMC
+互转、每 DRV 的基址与每 TCS 命令数配置、以及一个 `rpmh_exit_sleep` 退出路径。
+
+### 4. 基址不是硬编码在指令里
+
+扫描 `.text` 里的 `ADRP+ADD`，没有任何目标落在 `0x18xxxxxx`；而文件偏移 `0xe22c`
+（`.data` 内）出现小端常量 `00 00 20 18`，即 `0x18200000`。也就是说 RSC 基址来自
+数据表/配置结构，代码通过指针访问——这与“只搜 `0x18220000` 找不到写入者”的
+预期一致。
+
+### 5. 当前能回答到什么程度
+
+| 问题 | 结论 | 证据等级 |
+| --- | --- | --- |
+| RpmhDxe 是否初始化 drv-2 | 未知 | 有 HAL 代码与基址表，但没有调用链 |
+| 是否分配/使用 TCS1 | 未知 | 存在 TCS/AMC 转换与触发函数 |
+| 是否有退出时完成/回收 | 存在 `rpmh_exit_sleep` 与 flush 字符串 | 函数存在，可达性未证 |
+| 进入 XNU 前 TCS1 是否已不归固件管理 | 不能证明 | — |
+
+同时修正一处表述：APRIORI 只证明该驱动被列为优先调度、DEPEX 不作为调度阻塞，
+不等于入口已执行、更不等于 RPMh 初始化成功。镜像层面的结论应保持
+“包含指定版本并列入 APRIORI”。
+
+### 6. 下一步的逆向目标（按优先级）
+
+1. 从 `RscHalTriggerTCS` 字符串反向找引用它的函数，建立“初始化 → 配置 TCS →
+   触发 → 等待完成”的调用图；
+2. 找到 `.data` 里基址表的引用者，确认它对应哪个 DRV 与 TCS 数量；
+3. 找到 `rpmh_exit_sleep` 的调用点，判断是否注册了 EBS 或 Exit 事件；
+4. 只有在调用图能连到“进入内核前”这条路径上，才谈得上 TCS1 的交接证据。
+
+真实写入仍 NO-GO。
