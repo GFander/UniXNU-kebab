@@ -1,0 +1,13 @@
+diff --git a/osfmk/arm64/status.c b/osfmk/arm64/status.c
+index b595c56..eea2dbf 100644
+--- a/osfmk/arm64/status.c
++++ b/osfmk/arm64/status.c
+@@ -1851,7 +1851,7 @@ thread_userstack(__unused thread_t  thread,
+ 			return KERN_INVALID_ARGUMENT;
+ 		}
+ 
+-		sp = ((arm_thread_state32_t *)tstate)->sp;
++		sp = ((arm_thread_state64_t *)tstate)->sp;
+ 		break;
+ #endif
+ 	default:
