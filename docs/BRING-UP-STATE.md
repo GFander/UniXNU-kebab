@@ -5712,3 +5712,56 @@ DMA 池从一页 4 KiB 变成连续的 68 KiB（`UD_SIZE 0x11000`），新增
    正常上下文里复测一次吞吐。
 4. **压缩默认值的真机复核**：35.1% 是主机 zlib 量的；设备侧 inflate 的 CPU
    开销和 HFS+ 写谁先到瓶颈，要等卷够大跑完整流才知道。
+
+### 9. 已知缺陷：`CS_KILLED` 的 panic 会把控制台留在死状态
+
+这一轮踩到一个和安装通道无关、但会挡住所有真机实验的缺陷，记在这里。
+
+**现象。**
+
+* `kebab_cs=0` 的启动：`load_init_program` 之后 panic，控制台在 panic 之后仍然
+  应答 `IMEM?` / `PSCI?` / `INST?` 数分钟——本节的 1.4 MiB 真写、`SKIP` 复验、
+  592 MB 尝试全都是在 panic 自旋里跑完的。
+* `kebab_cs=15` 的启动：panic 文本是
+  `unexpected SIGKILL of launchd (CS_KILLED) … namespace 9 code 0x6`
+  （0087 在 `kern_sig.c` 里把 pid 1 的意外 SIGKILL 变成 `panic_plain`）。
+  此后 CDC-ACM **仍然枚举**（`VID 0x1209 / PID 0x0001`），但：
+
+  - bulk-OUT 的每一次写都超时（`Write timeout`），`IMEM?` / `PSCI?` / `INST?`
+    全部没有回应；
+  - `fastboot devices` 看不到设备，20 分钟没有看门狗复位；
+  - 主机的 PnP 禁用/启用（需要管理员）拿不到权限，做不到 USB 重新枚举；
+  - 只能物理断电。
+
+**代码位置与推断。** `ud_panic_takeover()` 只有在
+
+```c
+	uint32_t old = os_atomic_load(&ud.owner, acquire);
+	if (old) {
+		bool stopped = old == cpu;
+		if (!stopped && old <= MAX_CPUS)
+			stopped = ml_dbgwrap_cpu_is_halted((int)old - 1);
+		if (!stopped) return false;      /* 不抢，永远不抢 */
+		...
+	}
+```
+
+时才接管发送门：owner 是自己，或者 `ml_dbgwrap_cpu_is_halted()` 认为那个 CPU
+已经停了。后者是**调试器语义**的"CPU 已停"，而 panic 路径停其它 CPU 用的是
+另一套机制，两者不重合时，只要 console 事件线程在 panic 那一刻正好持有发送门
+（它在每 1 ms 的循环里都会短暂持有一会儿），panic 自旋就永远拿不到门，
+`panic_spin_forever()` 的循环里也就不会再服务控制器——端口从此静默。
+
+`kebab_cs=0` 那几次"能用"是运气：panic 恰好发生在门空闲的时候。所以这不是
+"cs=15 引入的 bug"，而是一个一直在的竞态，只是 CS 杀 pid 1 的 panic 更容易
+撞上（panic 前一刻内核正在密集打印 CS/exec 相关的日志，事件线程更可能在泵）。
+
+**规避（本轮采用）。** 把 `/sbin/launchd` 换成一个 16,419 字节的静态桩：
+写一行 `kebab: idle init, console stays up`，然后 `b .` 自旋。pid 1 永不退出，
+也就不会有 `CS_KILLED` 的 panic，控制台一直可用。桩由
+`scripts/make-init.py` 生成，只把 `write(2)` 之后的三条指令（`x0=0`、
+`x16=1`、`svc`）换成 `b .; nop; nop`。
+
+**正确修法（未做）。** panic 路径在 owner 是"本机已被 panic 停掉的 CPU"时
+强制 `ud_controller_restart()` 再接管；或者 `ud_enter` 在 `panic_active()` 时
+直接放弃门、让 panic 自旋无条件接管。两条都需要真机验证，属于下一轮。
