@@ -1,0 +1,1407 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 2f71ed4..76153d5 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -113,6 +113,8 @@ bsd/dev/kebab_spmi.c			standard
+ bsd/dev/kebab_rpmh_vrm.c		standard
+ bsd/dev/kebab_touch.c			standard
+ bsd/dev/kebab_touch_tcm.c		standard
++bsd/dev/kebab_keys.c			standard
++bsd/dev/kebab_keys_core.c		standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/bsd/dev/kebab_keys.c b/bsd/dev/kebab_keys.c
+new file mode 100644
+index 0000000..d312394
+--- /dev/null
++++ b/bsd/dev/kebab_keys.c
+@@ -0,0 +1,607 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/*
++ * /dev/kebab_keys -- the PM8150 power and volume keys as data.
++ *
++ * This is the third P2 input item.  There is no HID stack on this port
++ * (options NO_KERNEL_HID, no kxld), so a key cannot become an IOHIDEvent and
++ * nothing here pretends it can: a kernel thread reads the PMIC key registers,
++ * the host-tested state machine in package/KebabKeys.c debounces them, and
++ * every accepted transition becomes one 24-byte record in a 64-slot ring that
++ * read(2) drains.  A userland consumer is a later item.
++ *
++ * WHERE THE KEYS COME FROM (see KebabKeys.h for the full evidence)
++ *
++ *   power        PM8150 PON, SID 0, RT_STS 0x0810, bit 0 KPDPWR_N_SET
++ *   volume up    PM8150 GPIO6, page 0x0c500, RT_STS 0x0c510, bit 0, active low
++ *   volume down  PM8150 GPIO7, page 0x0c600, RT_STS 0x0c610, bit 0, active low
++ *                and PON RESIN, RT_STS bit 1, which the vendor device tree
++ *                also maps to KEY_VOLUMEDOWN
++ *
++ * The four bytes read per sample are the three status registers plus the
++ * PM8150 GPIO6 type register at 0x0c504 (expected 0x10).  The type byte is
++ * what separates "both active-low volume keys are held" (possible) from "the
++ * bus returned four zeroes" (not a key state), and it is why an all-zero read
++ * cannot turn into every key pressed.
++ *
++ * Off unless boot-arg kebab_keys=1.  kebab_keys_ms=N changes the poll period
++ * (default 16 ms, clamped to 4..1000) and kebab_keys_raw=1 prints a raw line
++ * whenever any of the four bytes changes.  No PMIC register is written, by
++ * this driver or by the SPMI read path it calls.
++ */
++#if defined(KEBAB)
++
++#include <kern/clock.h>
++#include <kern/locks.h>
++#include <kern/thread.h>
++#include <libkern/libkern.h>
++#include <miscfs/devfs/devfs.h>
++#include <pexpert/pexpert.h>
++#include <sys/conf.h>
++#include <sys/errno.h>
++#include <sys/fcntl.h>
++#include <sys/param.h>
++#include <sys/proc.h>
++#include <sys/systm.h>
++#include <sys/uio.h>
++#include <sys/vnode.h>
++
++#define KEBAB_KEYS_KERNEL 1
++#include "kebab_keys_core.h"
++
++/*
++ * bsd/dev/kebab_spmi.c: read 0x0810, 0x0c510, 0x0c610 and 0x0c504 through the
++ * observer channel.  Returns 0 only when all four reads completed, and fills
++ * raw[] only then.  The SPMI file owns the arbiter and the addresses; this
++ * driver owns none of them.
++ */
++extern int kebab_spmi_keys_sample(uint8_t raw[4]);
++extern int kebab_spmi_keys_config(uint8_t gpio6[3], uint8_t gpio7[3]);
++
++/* bsd/kern/bsd_init.c calls this; the polling thread never returns. */
++int kebab_keys_start(void);
++static void kk_thread(void *arg, wait_result_t result) __dead2;
++
++/* ---------------------------------------------------------------- record */
++
++/*
++ * The record /dev/kebab_keys returns.  magic lets a reader reject a buffer
++ * that was never filled; seq is the record's position in the event stream;
++ * timestamp_ns is nanoseconds since boot; the four raw bytes are the exact
++ * registers that produced the transition, so a wrong bit layout is visible in
++ * the record and not only in the kernel log.
++ */
++#define KK_EVENT_MAGIC          0x4b4b4556u     /* 'KKEV' */
++#define KK_QUEUE_LEN            64
++
++struct kk_record {
++	uint32_t magic;
++	uint32_t seq;
++	uint64_t timestamp_ns;
++	uint8_t  key;                   /* KEBAB_KEYS_KEY_* */
++	uint8_t  pressed;               /* 1 = press, 0 = release */
++	uint8_t  flags;                 /* KEBAB_KEYS_EVENT_RESIN */
++	uint8_t  raw_pon;
++	uint8_t  raw_gpio_up;
++	uint8_t  raw_gpio_down;
++	uint8_t  raw_ident;
++	uint8_t  pad;
++};
++_Static_assert(sizeof(struct kk_record) == 24, "kebab key record layout");
++
++/* ---------------------------------------------------------------- state */
++
++static struct {
++	uint32_t    poll_ms;
++	bool        verbose;            /* kebab_keys_raw=1 */
++	bool        dev_ready;
++	uint32_t    errors;
++	uint32_t    last_error_report;
++	uint32_t    zero_count;
++	uint32_t    ident_count;
++	uint8_t     last_raw[4];
++	bool        have_raw;
++	bool        stuck_said[KEBAB_KEYS_KEY_COUNT];
++	int         cmajor;
++	kebab_keys_state keys;
++} kk;
++
++/*
++ * Single-producer/single-consumer ring, the same shape as /dev/kebab_touch:
++ * the poll thread is the only producer, read(2) is the consumer, both take the
++ * mutex (which also gives msleep() a lock to drop), an absent reader loses the
++ * oldest record instead of allocating, and the loss is counted.
++ */
++static struct {
++	struct kk_record rec[KK_QUEUE_LEN];
++	uint32_t head;
++	uint32_t tail;
++	uint32_t count;
++	uint32_t opens;
++	uint64_t pushed;
++	uint64_t dropped;
++	lck_grp_t *lock_group;
++	lck_mtx_t *lock;
++} kkq;
++
++/* --------------------------------------------------------------- helpers */
++
++static uint64_t
++kk_now_ns(void)
++{
++	uint64_t ns;
++
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns;
++}
++
++static void
++kkq_push(const struct kk_record *rec)
++{
++	lck_mtx_lock(kkq.lock);
++	if (kkq.count == KK_QUEUE_LEN) {
++		kkq.tail = (kkq.tail + 1) % KK_QUEUE_LEN;
++		kkq.count--;
++		kkq.dropped++;
++	}
++	kkq.rec[kkq.head] = *rec;
++	kkq.head = (kkq.head + 1) % KK_QUEUE_LEN;
++	kkq.count++;
++	kkq.pushed++;
++	wakeup(&kkq);
++	lck_mtx_unlock(kkq.lock);
++}
++
++static int
++kkq_pop(struct kk_record *rec)
++{
++	int got = 0;
++
++	lck_mtx_lock(kkq.lock);
++	if (kkq.count != 0) {
++		*rec = kkq.rec[kkq.tail];
++		kkq.tail = (kkq.tail + 1) % KK_QUEUE_LEN;
++		kkq.count--;
++		got = 1;
++	}
++	lck_mtx_unlock(kkq.lock);
++	return got;
++}
++
++/*
++ * Fill the ring three times with nobody reading, then drain it.  This proves
++ * the two properties the interface depends on before the device node exists:
++ * the ring never grows past KK_QUEUE_LEN and a missing reader loses the oldest
++ * records (counted) while the storage stays a static array.
++ */
++static bool
++kkq_selftest(void)
++{
++	struct kk_record rec;
++	struct kk_record out;
++	uint32_t i;
++	uint32_t drained = 0;
++	bool ok = true;
++
++	bzero(&rec, sizeof(rec));
++	rec.magic = KK_EVENT_MAGIC;
++	for (i = 0; i < KK_QUEUE_LEN * 3; i++) {
++		rec.seq = i;
++		kkq_push(&rec);
++	}
++	if (kkq.count != KK_QUEUE_LEN ||
++	    kkq.dropped != 2 * (uint64_t)KK_QUEUE_LEN) {
++		ok = false;
++	}
++	for (i = 0; i < KK_QUEUE_LEN; i++) {
++		if (!kkq_pop(&out) || out.seq != 2 * KK_QUEUE_LEN + i) {
++			ok = false;
++			break;
++		}
++		drained++;
++	}
++	if (kkq_pop(&out)) {
++		ok = false;
++	}
++	if (kkq.count != 0) {
++		ok = false;
++	}
++
++	printf("KEBAB KEYS: queue selftest: %u slots, %u pushed, %llu dropped "
++	    "without a reader, %u drained: %s\n", (unsigned)KK_QUEUE_LEN,
++	    (unsigned)(KK_QUEUE_LEN * 3), (unsigned long long)kkq.dropped,
++	    drained, ok ? "ok" : "FAILED");
++
++	kkq.head = 0;
++	kkq.tail = 0;
++	kkq.count = 0;
++	kkq.opens = 0;
++	kkq.pushed = 0;
++	kkq.dropped = 0;
++	return ok;
++}
++
++static void
++kk_post(const kebab_keys_event *event)
++{
++	struct kk_record rec;
++
++	bzero(&rec, sizeof(rec));
++	rec.magic = KK_EVENT_MAGIC;
++	rec.seq = event->seq;
++	rec.timestamp_ns = event->timestamp_ns;
++	rec.key = event->key;
++	rec.pressed = event->pressed;
++	rec.flags = event->flags;
++	rec.raw_pon = event->raw_pon;
++	rec.raw_gpio_up = event->raw_gpio_up;
++	rec.raw_gpio_down = event->raw_gpio_down;
++	rec.raw_ident = event->raw_ident;
++	kkq_push(&rec);
++}
++
++/* ---------------------------------------------------------------- cdev */
++
++static int
++kebab_keys_open(__unused dev_t dev, __unused int flags,
++    __unused int devtype, __unused struct proc *p)
++{
++	bool first;
++
++	lck_mtx_lock(kkq.lock);
++	first = (kkq.opens++ == 0);
++	lck_mtx_unlock(kkq.lock);
++	if (first) {
++		printf("KEBAB KEYS: /dev/kebab_keys opened\n");
++	}
++	return 0;
++}
++
++static int
++kebab_keys_close(__unused dev_t dev, __unused int flags,
++    __unused int mode, __unused struct proc *p)
++{
++	lck_mtx_lock(kkq.lock);
++	if (kkq.opens != 0) {
++		kkq.opens--;
++	}
++	lck_mtx_unlock(kkq.lock);
++	return 0;
++}
++
++/*
++ * read(2) returns whole 24-byte records, oldest first.  It blocks until one is
++ * available unless O_NONBLOCK is set.  Several readers split the stream; there
++ * is one tail, not one per open, exactly as /dev/kebab_touch does it.
++ */
++static int
++kebab_keys_read(__unused dev_t dev, struct uio *uio, int ioflag)
++{
++	int error;
++
++	while (uio_resid(uio) >= (int)sizeof(struct kk_record)) {
++		struct kk_record rec;
++
++		lck_mtx_lock(kkq.lock);
++		while (kkq.count == 0) {
++			if (ioflag & IO_NDELAY) {
++				lck_mtx_unlock(kkq.lock);
++				return EAGAIN;
++			}
++			error = msleep(&kkq, kkq.lock, PRIBIO | PCATCH,
++			    "kebabkeys", NULL);
++			if (error != 0) {
++				lck_mtx_unlock(kkq.lock);
++				return error;
++			}
++		}
++		rec = kkq.rec[kkq.tail];
++		kkq.tail = (kkq.tail + 1) % KK_QUEUE_LEN;
++		kkq.count--;
++		lck_mtx_unlock(kkq.lock);
++
++		error = uiomove((const char *)&rec, (int)sizeof(rec), uio);
++		if (error != 0) {
++			return error;
++		}
++	}
++	return 0;
++}
++
++static const struct cdevsw kebab_keys_cdevsw = {
++	.d_open     = kebab_keys_open,
++	.d_close    = kebab_keys_close,
++	.d_read     = kebab_keys_read,
++	.d_write    = eno_rdwrt,
++	.d_ioctl    = eno_ioctl,
++	.d_stop     = eno_stop,
++	.d_reset    = eno_reset,
++	.d_select   = eno_select,
++	.d_mmap     = eno_mmap,
++	.d_strategy = eno_strat,
++	.d_type     = 0,        /* a record stream, not a tty or a disk */
++};
++
++static void
++kk_dev_register(void)
++{
++	void *node;
++
++	kk.cmajor = cdevsw_add(-1, &kebab_keys_cdevsw);
++	if (kk.cmajor < 0) {
++		printf("KEBAB KEYS: no cdevsw slot for /dev/kebab_keys\n");
++		return;
++	}
++	node = devfs_make_node(makedev(kk.cmajor, 0), DEVFS_CHAR, UID_ROOT,
++	    GID_OPERATOR, 0440, "kebab_keys");
++	if (node == NULL) {
++		printf("KEBAB KEYS: cdev major %d, but no /dev node\n", kk.cmajor);
++		cdevsw_remove(kk.cmajor, &kebab_keys_cdevsw);
++		kk.cmajor = -1;
++		return;
++	}
++	kk.dev_ready = true;
++	printf("KEBAB KEYS: /dev/kebab_keys major %d, %u-byte records, "
++	    "%u slots\n", kk.cmajor, (unsigned)sizeof(struct kk_record),
++	    (unsigned)KK_QUEUE_LEN);
++}
++
++/* ---------------------------------------------------------------- poll */
++
++/*
++ * One look at the four registers.  A failed transfer is counted and fed as an
++ * invalid sample, which the state machine ignores: it is "no observation", not
++ * a release.  All-zero and wrong-identity samples are also fed as invalid; the
++ * warning is rate-limited because a silent bus would otherwise be 60 lines a
++ * second on the only readable console this port has.
++ */
++static void
++kk_poll(void)
++{
++	uint8_t raw[4] = { 0, 0, 0, 0 };
++	kebab_keys_sample sample;
++	kebab_keys_sample_status status;
++	kebab_keys_event events[KEBAB_KEYS_MAX_EVENTS];
++	uint64_t now_ns;
++	size_t count;
++	size_t i;
++	unsigned k;
++
++	if (kebab_spmi_keys_sample(raw) != 0) {
++		kk.errors++;
++		if (kk.errors == 1 ||
++		    (kk.errors - kk.last_error_report) >= 250) {
++			kk.last_error_report = kk.errors;
++			printf("KEBAB KEYS: SPMI read error %u (0x0810/0x0c510/"
++			    "0x0c610/0x0c504); sample discarded, no key state "
++			    "changed\n", kk.errors);
++		}
++		bzero(&sample, sizeof(sample));
++		sample.read_ok = 0;
++		(void)kebab_keys_feed(&kk.keys, &sample, kk_now_ns(), events);
++		return;
++	}
++
++	sample.pon_rt = raw[0];
++	sample.gpio_up_rt = raw[1];
++	sample.gpio_down_rt = raw[2];
++	sample.gpio_ident = raw[3];
++	sample.read_ok = 1;
++	status = kebab_keys_classify(&sample);
++	if (status == KEBAB_KEYS_SAMPLE_ZERO) {
++		kk.zero_count++;
++		if (kk.zero_count == 1 || (kk.zero_count % 250) == 0) {
++			printf("KEBAB KEYS: four zero bytes read (count %u): "
++			    "treated as no key, not as every key held\n",
++			    kk.zero_count);
++		}
++	} else {
++		kk.zero_count = 0;
++	}
++	if (status == KEBAB_KEYS_SAMPLE_BAD_IDENTITY) {
++		kk.ident_count++;
++		if (kk.ident_count == 1 || (kk.ident_count % 250) == 0) {
++			printf("KEBAB KEYS: GPIO type 0x%02x at 0x0c504 is not "
++			    "0x10 (count %u); sample ignored\n", raw[3],
++			    kk.ident_count);
++		}
++	} else {
++		kk.ident_count = 0;
++	}
++	if (kk.verbose && (!kk.have_raw || memcmp(raw, kk.last_raw, 4) != 0)) {
++		printf("KEBAB KEYS: raw pon=0x%02x gpio6=0x%02x gpio7=0x%02x "
++		    "ident=0x%02x\n", raw[0], raw[1], raw[2], raw[3]);
++		memcpy(kk.last_raw, raw, sizeof(raw));
++		kk.have_raw = true;
++	}
++
++	now_ns = kk_now_ns();
++	count = kebab_keys_feed(&kk.keys, &sample, now_ns, events);
++
++	for (i = 0; i < count; i++) {
++		printf("KEBAB KEYS: %s %s raw pon=0x%02x gpio6=0x%02x "
++		    "gpio7=0x%02x ident=0x%02x%s\n",
++		    kebab_keys_name(events[i].key),
++		    events[i].pressed ? "PRESSED" : "released",
++		    events[i].raw_pon, events[i].raw_gpio_up,
++		    events[i].raw_gpio_down, events[i].raw_ident,
++		    (events[i].flags & KEBAB_KEYS_EVENT_RESIN) != 0 ?
++		    " (via PON RESIN)" : "");
++		kk_post(&events[i]);
++	}
++
++	/* Ten seconds of a continuous hold is reported once, not every poll. */
++	for (k = 0; k < KEBAB_KEYS_KEY_COUNT; k++) {
++		if (kk.keys.key[k].stuck && !kk.stuck_said[k]) {
++			kk.stuck_said[k] = true;
++			printf("KEBAB KEYS: %s STUCK held for 10 s; no repeat "
++			    "press is reported until it is released\n",
++			    kebab_keys_name(k));
++		} else if (!kk.keys.key[k].stuck) {
++			kk.stuck_said[k] = false;
++		}
++	}
++}
++
++static void
++kk_thread(void *arg, wait_result_t result)
++{
++	(void)arg;
++	(void)result;
++	for (;;) {
++		kk_poll();
++		delay_for_interval(kk.poll_ms, NSEC_PER_MSEC);
++	}
++}
++
++/* --------------------------------------------------------------- start */
++
++/*
++ * Off unless kebab_keys=1.  The first sample is read and checked before the
++ * thread or the device node exists, so a missing arbiter mapping, a silent bus
++ * or a page that is not a PM8150 GPIO is a single clear failure at boot rather
++ * than a stream of empty records.  No PMIC write is made at any point.
++ */
++int
++kebab_keys_start(void)
++{
++	kebab_keys_sample first;
++	kebab_keys_sample_status status;
++	uint32_t enabled = 0;
++	uint32_t value = 0;
++	uint8_t raw[4] = { 0, 0, 0, 0 };
++	uint8_t gpio6[3] = { 0, 0, 0 };
++	uint8_t gpio7[3] = { 0, 0, 0 };
++	thread_t thread;
++	int power, up, down;
++	int up_ok = 1;
++	int down_ok = 1;
++	const char *up_text;
++	const char *down_text;
++
++	if (!PE_parse_boot_argn("kebab_keys", &enabled, sizeof(enabled)) ||
++	    enabled == 0) {
++		return 0;
++	}
++	kk.poll_ms = 16;
++	if (PE_parse_boot_argn("kebab_keys_ms", &value, sizeof(value)) &&
++	    value != 0) {
++		kk.poll_ms = value;
++		if (kk.poll_ms < 4) {
++			kk.poll_ms = 4;
++		}
++		if (kk.poll_ms > 1000) {
++			kk.poll_ms = 1000;
++		}
++	}
++	kk.verbose = PE_parse_boot_argn("kebab_keys_raw", &value,
++	    sizeof(value)) && value != 0;
++
++	if (kebab_spmi_keys_sample(raw) != 0) {
++		printf("KEBAB KEYS: the PM8150 key registers could not be read "
++		    "(0x0810 / 0x0c510 / 0x0c610 / 0x0c504); no keys. "
++		    "kebab_pon_verbose=1 shows the arbiter traffic\n");
++		return -1;
++	}
++	first.pon_rt = raw[0];
++	first.gpio_up_rt = raw[1];
++	first.gpio_down_rt = raw[2];
++	first.gpio_ident = raw[3];
++	first.read_ok = 1;
++	status = kebab_keys_classify(&first);
++	if (status != KEBAB_KEYS_SAMPLE_OK) {
++		printf("KEBAB KEYS: first sample pon=0x%02x gpio6=0x%02x "
++		    "gpio7=0x%02x ident=0x%02x is %s; no keys\n",
++		    raw[0], raw[1], raw[2], raw[3],
++		    status == KEBAB_KEYS_SAMPLE_ZERO ? "all zero (silent bus)" :
++		    status == KEBAB_KEYS_SAMPLE_BAD_IDENTITY ?
++		    "not a PM8150 GPIO page" : "unreadable");
++		return -1;
++	}
++
++	/*
++	 * The vendor pinctrl state is an enabled input with a pull-up.  Reading
++	 * it is a diagnosis, not a repair: this driver never writes the PMIC.
++	 * A key whose pin is not configured that way is withheld, because an
++	 * inactive input that reads low would otherwise become a permanent
++	 * press of an active-low key.
++	 */
++	if (kebab_spmi_keys_config(gpio6, gpio7) == 0) {
++		up_ok = (gpio6[0] & 0x03) == 0 && (gpio6[1] & 0x07) < 4 &&
++		    (gpio6[2] & 0x80) != 0;
++		down_ok = (gpio7[0] & 0x03) == 0 && (gpio7[1] & 0x07) < 4 &&
++		    (gpio7[2] & 0x80) != 0;
++		printf("KEBAB KEYS: GPIO6 mode=0x%02x pull=0x%02x en=0x%02x -> "
++		    "%s; GPIO7 mode=0x%02x pull=0x%02x en=0x%02x -> %s\n",
++		    gpio6[0], gpio6[1], gpio6[2],
++		    up_ok ? "enabled input with pull-up" :
++		    "NOT an enabled input with pull-up",
++		    gpio7[0], gpio7[1], gpio7[2],
++		    down_ok ? "enabled input with pull-up" :
++		    "NOT an enabled input with pull-up");
++		if (!up_ok) {
++			printf("KEBAB KEYS: volume-up withheld: PM8150 GPIO6 is "
++			    "not an enabled input with a pull-up, and this "
++			    "driver does not write the PMIC\n");
++		}
++		if (!down_ok) {
++			printf("KEBAB KEYS: volume-down withheld: PM8150 GPIO7 "
++			    "is not an enabled input with a pull-up, and this "
++			    "driver does not write the PMIC\n");
++		}
++	} else {
++		printf("KEBAB KEYS: could not read the GPIO6/GPIO7 pin setup; "
++		    "leaving both volume keys enabled\n");
++	}
++
++	power = (raw[0] & KEBAB_KEYS_PON_KPDPWR) != 0;
++	up = (raw[1] & KEBAB_KEYS_GPIO_LEVEL) == 0;
++	down = ((raw[2] & KEBAB_KEYS_GPIO_LEVEL) == 0) ||
++	    (raw[0] & KEBAB_KEYS_PON_RESIN) != 0;
++	up_text = !up_ok ? "withheld" : up ? "HELD" : "released";
++	down_text = !down_ok ? "withheld" : down ? "HELD" : "released";
++	printf("KEBAB KEYS: sources: PON RT_STS 0x0810, PM8150 GPIO6 RT_STS "
++	    "0x0c510, GPIO7 RT_STS 0x0c610, GPIO type 0x0c504 (expected 0x10)\n");
++	printf("KEBAB KEYS: first sample pon=0x%02x gpio6=0x%02x gpio7=0x%02x "
++	    "ident=0x%02x -> power %s, volume-up %s, volume-down %s%s\n",
++	    raw[0], raw[1], raw[2], raw[3],
++	    power ? "HELD" : "released", up_text, down_text,
++	    (down_ok && (raw[0] & KEBAB_KEYS_PON_RESIN) != 0) ?
++	    " (PON RESIN)" : "");
++
++	kkq.lock_group = lck_grp_alloc_init("kebabkeys", LCK_GRP_ATTR_NULL);
++	kkq.lock = lck_mtx_alloc_init(kkq.lock_group, LCK_ATTR_NULL);
++	if (kkq.lock == NULL) {
++		printf("KEBAB KEYS: no mutex for the record queue\n");
++		return -1;
++	}
++	if (!kkq_selftest()) {
++		printf("KEBAB KEYS: queue selftest failed; no /dev/kebab_keys\n");
++		return -1;
++	}
++
++	kebab_keys_reset(&kk.keys);
++	kebab_keys_enable(&kk.keys, KEBAB_KEYS_KEY_VOLUME_UP, up_ok);
++	kebab_keys_enable(&kk.keys, KEBAB_KEYS_KEY_VOLUME_DOWN, down_ok);
++	if (kk.verbose) {
++		memcpy(kk.last_raw, raw, sizeof(raw));
++		kk.have_raw = true;
++	}
++
++	if (kernel_thread_start((thread_continue_t)kk_thread, NULL,
++	    &thread) != KERN_SUCCESS) {
++		printf("KEBAB KEYS: no polling thread\n");
++		return -1;
++	}
++	thread_deallocate(thread);
++
++	/*
++	 * Publish the node only after the thread exists: the other order would
++	 * leave a device that can be opened and then never receives a record.
++	 */
++	kk_dev_register();
++	printf("KEBAB KEYS: polling every %u ms%s\n", kk.poll_ms,
++	    kk.verbose ? ", raw changes shown" : "");
++	return 0;
++}
++
++#endif /* KEBAB */
+diff --git a/bsd/dev/kebab_keys_core.c b/bsd/dev/kebab_keys_core.c
+new file mode 100644
+index 0000000..36841e8
+--- /dev/null
++++ b/bsd/dev/kebab_keys_core.c
+@@ -0,0 +1,223 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/*
++ * bsd/dev/kebab_keys_core.c -- the PM8150 key decode and debounce, compiled
++ * into the kernel.
++ *
++ * This file is a generated copy of package/KebabKeys.c from the kebab-dev
++ * repository.  That copy is the one KebabKeysHostTests.c drives; this one is
++ * what /dev/kebab_keys calls, and the two are byte-identical apart from this
++ * banner and the two lines below.  Do not edit here: change
++ * package/KebabKeys.c and re-run
++ *
++ *     python scripts/sync-keys.py --out <xnu>/bsd/dev
++ *
++ * so that the kernel cannot drift away from what the host tests prove.
++ */
++#define KEBAB_KEYS_KERNEL 1
++#include "kebab_keys_core.h"
++/*
++ * The PM8150 key decode and debounce state machine.
++ *
++ * The register facts, the GPIO active-low convention and the two possible
++ * volume-down paths (PM8150 GPIO7 and PON RESIN) are documented once in
++ * KebabKeys.h.  This file is deliberately free of MMIO, SPMI and kernel
++ * objects: bsd/dev/kebab_keys.c feeds it four bytes and publishes what it
++ * returns, and KebabKeysHostTests.c drives the same functions.
++ *
++ * Two rules decide most of the behaviour:
++ *
++ *   - a sample that is all zero is a silent bus, not "every key held".  The
++ *     GPIO level bit is inverted (active low), so a naive decoder would read
++ *     0x00 as both volume keys pressed.  The identity byte (0x0c504, always
++ *     0x10 on a live PM8150 GPIO page) is part of the sample for exactly this
++ *     reason: if it is zero as well, nothing was read.
++ *   - a transfer that failed, or a page that is not the expected peripheral,
++ *     changes no state.  A read error is "no observation", not a release.
++ */
++
++void
++kebab_keys_reset(kebab_keys_state *state)
++{
++	unsigned k;
++
++	if (state == NULL) {
++		return;
++	}
++	memset(state, 0, sizeof(*state));
++	for (k = 0; k < KEBAB_KEYS_KEY_COUNT; k++) {
++		state->key[k].usable = 1;
++	}
++}
++
++void
++kebab_keys_enable(kebab_keys_state *state, unsigned key, int usable)
++{
++	kebab_keys_key *k;
++
++	if (state == NULL || key >= KEBAB_KEYS_KEY_COUNT) {
++		return;
++	}
++	k = &state->key[key];
++	k->usable = usable != 0;
++	if (!k->usable) {
++		/* Callers enable before feeding; never leave a reported hold. */
++		k->down = 0;
++		k->candidate = 0;
++		k->candidate_count = 0;
++		k->held_samples = 0;
++		k->pressed_since_ns = 0;
++		k->stuck = 0;
++	}
++}
++
++const char *
++kebab_keys_name(unsigned key)
++{
++	switch (key) {
++	case KEBAB_KEYS_KEY_POWER:
++		return "power";
++	case KEBAB_KEYS_KEY_VOLUME_UP:
++		return "volume-up";
++	case KEBAB_KEYS_KEY_VOLUME_DOWN:
++		return "volume-down";
++	default:
++		return "unknown";
++	}
++}
++
++/*
++ * Decide what one look at the four registers means.  The all-zero test comes
++ * before the identity test so a dead bus is reported as a dead bus, not as a
++ * peripheral that identified itself as zero.
++ */
++kebab_keys_sample_status
++kebab_keys_classify(const kebab_keys_sample *sample)
++{
++	if (sample == NULL || !sample->read_ok) {
++		return KEBAB_KEYS_SAMPLE_READ_ERROR;
++	}
++	if (sample->pon_rt == 0 && sample->gpio_up_rt == 0 &&
++	    sample->gpio_down_rt == 0 && sample->gpio_ident == 0) {
++		return KEBAB_KEYS_SAMPLE_ZERO;
++	}
++	if (sample->gpio_ident != KEBAB_KEYS_GPIO_TYPE) {
++		return KEBAB_KEYS_SAMPLE_BAD_IDENTITY;
++	}
++	return KEBAB_KEYS_SAMPLE_OK;
++}
++
++/*
++ * Feed one sample.  Returns the number of accepted transitions (0 to 3) and
++ * fills events in key order.  The state does not change on an invalid sample.
++ *
++ * Debounce is two consecutive agreeing samples, which is 32 ms at the default
++ * 16 ms poll: longer than the vendor gpio-keys debounce-interval of 15 ms and
++ * than the PON block's 15.6 ms hardware debounce.  A bouncy line therefore
++ * produces no event at all until it settles.
++ *
++ * The reported state starts released.  A key already held on the first
++ * believed sample is reported pressed after the same two samples, and then
++ * once more only when it is released; the stuck flag fires after ten seconds
++ * of a continuous hold so the log can say that the key is not coming back.
++ */
++size_t
++kebab_keys_feed(kebab_keys_state *state, const kebab_keys_sample *sample,
++    uint64_t now_ns, kebab_keys_event events[KEBAB_KEYS_MAX_EVENTS])
++{
++	uint8_t raw[KEBAB_KEYS_KEY_COUNT];
++	int resin;
++	size_t count = 0;
++	unsigned k;
++
++	if (state == NULL || sample == NULL || events == NULL) {
++		return 0;
++	}
++	if (kebab_keys_classify(sample) != KEBAB_KEYS_SAMPLE_OK) {
++		state->invalid++;
++		return 0;
++	}
++	state->samples++;
++
++	/*
++	 * PON RT_STS bits are already asserted-high.  PM8150 GPIO RT_STS bit 0
++	 * is the pin level and the vendor gpio_keys node marks both GPIOs
++	 * GPIO_ACTIVE_LOW, so a clear level bit is a press.
++	 */
++	resin = (sample->pon_rt & KEBAB_KEYS_PON_RESIN) != 0;
++	raw[KEBAB_KEYS_KEY_POWER] =
++	    (sample->pon_rt & KEBAB_KEYS_PON_KPDPWR) != 0;
++	raw[KEBAB_KEYS_KEY_VOLUME_UP] =
++	    (sample->gpio_up_rt & KEBAB_KEYS_GPIO_LEVEL) == 0;
++	raw[KEBAB_KEYS_KEY_VOLUME_DOWN] =
++	    ((sample->gpio_down_rt & KEBAB_KEYS_GPIO_LEVEL) == 0) || resin;
++
++	for (k = 0; k < KEBAB_KEYS_KEY_COUNT; k++) {
++		kebab_keys_key *key = &state->key[k];
++		kebab_keys_event *event;
++
++		if (!key->usable) {
++			continue;
++		}
++		if (raw[k]) {
++			key->held_samples++;
++			if (key->held_samples == 1) {
++				key->pressed_since_ns = now_ns;
++			}
++			if (!key->stuck && now_ns >= key->pressed_since_ns &&
++			    now_ns - key->pressed_since_ns >=
++			    KEBAB_KEYS_STUCK_NS) {
++				key->stuck = 1;
++			}
++		} else {
++			key->held_samples = 0;
++			key->pressed_since_ns = 0;
++			key->stuck = 0;
++		}
++
++		if (raw[k] == key->down) {
++			key->candidate = key->down;
++			key->candidate_count = 0;
++			continue;
++		}
++		if (key->candidate_count != 0 && key->candidate == raw[k]) {
++			key->candidate_count++;
++		} else {
++			key->candidate = raw[k];
++			key->candidate_count = 1;
++		}
++		if (key->candidate_count < KEBAB_KEYS_DEBOUNCE_SAMPLES) {
++			continue;
++		}
++
++		key->down = raw[k];
++		key->candidate = key->down;
++		key->candidate_count = 0;
++		if (key->down) {
++			key->presses++;
++		} else {
++			key->releases++;
++		}
++
++		event = &events[count++];
++		event->key = (uint8_t)k;
++		event->pressed = key->down ? 1 : 0;
++		event->flags = (k == KEBAB_KEYS_KEY_VOLUME_DOWN && resin) ?
++		    KEBAB_KEYS_EVENT_RESIN : 0;
++		event->raw_pon = sample->pon_rt;
++		event->raw_gpio_up = sample->gpio_up_rt;
++		event->raw_gpio_down = sample->gpio_down_rt;
++		event->raw_ident = sample->gpio_ident;
++		event->seq = state->seq++;
++		event->timestamp_ns = now_ns;
++	}
++	return count;
++}
++
++int
++kebab_keys_pressed(const kebab_keys_state *state, unsigned key)
++{
++	if (state == NULL || key >= KEBAB_KEYS_KEY_COUNT) {
++		return 0;
++	}
++	return state->key[key].usable && state->key[key].down;
++}
+diff --git a/bsd/dev/kebab_keys_core.h b/bsd/dev/kebab_keys_core.h
+new file mode 100644
+index 0000000..9e46e8d
+--- /dev/null
++++ b/bsd/dev/kebab_keys_core.h
+@@ -0,0 +1,180 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/*
++ * bsd/dev/kebab_keys_core.h -- header of the PM8150 key decode.
++ *
++ * Generated copy of package/KebabKeys.h from the kebab-dev repository; see
++ * bsd/dev/kebab_keys_core.c.  With KEBAB_KEYS_KERNEL set it selects the kernel
++ * headers instead of the host ones.  Do not edit: re-run
++ * scripts/sync-keys.py.
++ */
++/*
++ * The PM8150 key sources of the OnePlus 8T (kebab) and the press/release
++ * state machine on top of them.
++ *
++ * WHERE THE KEYS ARE (vendor device tree and vendor drivers, not guessed)
++ *
++ * Power is the PM8150 power-on block ("PON"), SID 0, base 0x0800:
++ *
++ *   qcom,power-on@800 in arch/arm64/boot/dts/vendor/qcom/pm8150.dtsi,
++ *   qcom,pon_1 { qcom,pon-type = <PON_POWER_ON_TYPE_KPDPWR>;
++ *                linux,code = <KEY_POWER>; }
++ *
++ * Volume up and volume down are NOT TLMM pins and are not PON RESIN.  They
++ * are two inputs of the PM8150 GPIO block, active low, pulled up:
++ *
++ *   &pm8150_gpios key_vol_up  { pins = "gpio6"; input-enable; bias-pull-up; }
++ *   &pm8150_gpios key_vol_down{ pins = "gpio7"; input-enable; bias-pull-up; }
++ *   gpio_keys vol_up  { gpios = <&pm8150_gpios 6 GPIO_ACTIVE_LOW>; code KEY_VOLUMEUP; }
++ *   gpio_keys vol_down{ gpios = <&pm8150_gpios 7 GPIO_ACTIVE_LOW>; code KEY_VOLUMEDOWN; }
++ *
++ * The first two stanzas are in kona-pmic-overlay.dtsi and kebab-oem.dtsi;
++ * the gpio_keys node is in kona-mtp.dtsi and kebab-oem.dtsi.  The final
++ * decompiled device tree (kebab-vendor.dts) has the same two entries with
++ * phandle 0x625, which resolves to qcom,pm8150@0/pinctrl@c000.
++ *
++ * The vendor PON driver also configures RESIN as KEY_VOLUMEDOWN:
++ *
++ *   qcom,pon_2 { qcom,pon-type = <PON_POWER_ON_TYPE_RESIN>;
++ *                linux,code = <KEY_VOLUMEDOWN>; }
++ *
++ * so the vendor tree contains two possible report paths for volume down.
++ * This decoder ORs them into one logical key and keeps the PON RESIN bit in
++ * the event flags and the raw bytes, so a hardware run shows which path the
++ * board actually wires instead of hiding the question.
++ *
++ * REGISTER LAYOUTS
++ *
++ *   PON RT_STS        base 0x0800 + 0x10 = 0x0810
++ *     bit 0  KPDPWR_N_SET   qpnp-power-on.c: QPNP_PON_KPDPWR_N_SET = BIT(0)
++ *     bit 1  RESIN_N_SET    qpnp-power-on.c: QPNP_PON_RESIN_N_SET  = BIT(1)
++ *     A set bit means the key is held (qpnp_pon_input_dispatch() reports the
++ *     masked value as the key state).
++ *
++ *   PM8150 GPIO block  SID 0, base 0x0c00, one 0x100-byte page per GPIO
++ *     (pinctrl-spmi-gpio.c: PMIC_GPIO_ADDRESS_RANGE = 0x100, pad->base =
++ *      start + i * 0x100, PMIC_GPIO_PHYSICAL_OFFSET = 1)
++ *     GPIO6 page 0x0c00 + 5 * 0x100 = 0x0c500
++ *     GPIO7 page 0x0c00 + 6 * 0x100 = 0x0c600
++ *     page + 0x10 = RT_STS, bit 0 = pin level (1 high, 0 low)
++ *     page + 0x04 = type, expected 0x10 (PMIC_GPIO_TYPE)
++ *     page + 0x05 = subtype (0x10 low voltage, 0x11 medium voltage)
++ *     page + 0x40 = mode, bits [1:0] (0 = input)
++ *     page + 0x42 = pull, bits [2:0] (0..3 = up, 4 = down, 5 = none)
++ *     page + 0x46 = enable, bit 7
++ *
++ *   So the two GPIO status bytes this module decodes are 0x0c510 and
++ *   0x0c610, and the identity byte read with them is 0x0c504 (GPIO6 type).
++ *   gpio_keys treats the line as GPIO_ACTIVE_LOW, so a low level (bit 0
++ *   clear) is a press; this module applies that inversion once, here.
++ *
++ * The module owns no MMIO, no SPMI transfer and no kernel object.  The host
++ * tests drive it directly; bsd/dev/kebab_keys.c feeds it the four bytes from
++ * the observer reads and owns the thread, the log and /dev/kebab_keys.
++ */
++#ifndef KEBAB_KEYS_H
++#define KEBAB_KEYS_H
++
++#ifdef KEBAB_KEYS_KERNEL
++#include <sys/types.h>
++#include <libkern/libkern.h>
++#else
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++#endif
++
++/* ------------------------------------------------------------- sources */
++
++#define KEBAB_KEYS_PON_RT_STS          0x0810u
++#define KEBAB_KEYS_GPIO_UP_RT_STS      0xc510u  /* PM8150 GPIO6 page + 0x10 */
++#define KEBAB_KEYS_GPIO_DOWN_RT_STS    0xc610u  /* PM8150 GPIO7 page + 0x10 */
++#define KEBAB_KEYS_GPIO_IDENT          0xc504u  /* PM8150 GPIO6 page + 0x04 */
++
++#define KEBAB_KEYS_GPIO_TYPE           0x10u
++#define KEBAB_KEYS_GPIO_LEVEL          0x01u
++#define KEBAB_KEYS_PON_KPDPWR          0x01u
++#define KEBAB_KEYS_PON_RESIN           0x02u
++
++/* --------------------------------------------------------------- keys */
++
++enum {
++	KEBAB_KEYS_KEY_POWER = 0,
++	KEBAB_KEYS_KEY_VOLUME_UP = 1,
++	KEBAB_KEYS_KEY_VOLUME_DOWN = 2,
++	KEBAB_KEYS_KEY_COUNT = 3
++};
++
++#define KEBAB_KEYS_MAX_EVENTS           3u
++#define KEBAB_KEYS_DEBOUNCE_SAMPLES     2u
++/* Ten seconds of one key held, independent of the poll interval. */
++#define KEBAB_KEYS_STUCK_NS             10000000000ull
++
++#define KEBAB_KEYS_EVENT_RESIN          0x01u
++
++/* -------------------------------------------------------------- sample */
++
++/*
++ * One look at all four registers.  read_ok is the transport's answer: the
++ * decoder never turns a failed transfer into a key state.
++ */
++typedef struct {
++	uint8_t pon_rt;         /* 0x0810 */
++	uint8_t gpio_up_rt;     /* 0xc510 */
++	uint8_t gpio_down_rt;   /* 0xc610 */
++	uint8_t gpio_ident;     /* 0xc504, expected 0x10 */
++	int     read_ok;
++} kebab_keys_sample;
++
++typedef enum {
++	KEBAB_KEYS_SAMPLE_OK = 0,
++	KEBAB_KEYS_SAMPLE_ZERO,         /* every byte zero: bus silent, no key */
++	KEBAB_KEYS_SAMPLE_BAD_IDENTITY, /* not a PM8150 GPIO page */
++	KEBAB_KEYS_SAMPLE_READ_ERROR    /* transport failed */
++} kebab_keys_sample_status;
++
++/* --------------------------------------------------------------- event */
++
++typedef struct {
++	uint8_t  key;           /* KEBAB_KEYS_KEY_* */
++	uint8_t  pressed;       /* 1 = press, 0 = release */
++	uint8_t  flags;         /* KEBAB_KEYS_EVENT_RESIN */
++	uint8_t  raw_pon;
++	uint8_t  raw_gpio_up;
++	uint8_t  raw_gpio_down;
++	uint8_t  raw_ident;
++	uint32_t seq;           /* per-state event sequence, starts at 0 */
++	uint64_t timestamp_ns;
++} kebab_keys_event;
++
++/* --------------------------------------------------------------- state */
++
++typedef struct {
++	int      usable;        /* the caller has a reason to believe the source */
++	int      down;          /* the debounced, reported state */
++	int      candidate;     /* the state the last sample agreed on */
++	uint8_t  candidate_count;
++	uint64_t held_samples;  /* valid samples this press has been held */
++	uint64_t pressed_since_ns;
++	int      stuck;         /* held for KEBAB_KEYS_STUCK_NS */
++	uint32_t presses;
++	uint32_t releases;
++} kebab_keys_key;
++
++typedef struct {
++	kebab_keys_key key[KEBAB_KEYS_KEY_COUNT];
++	uint64_t samples;       /* valid samples fed */
++	uint64_t invalid;       /* rejected samples (zero/identity/transport) */
++	uint32_t seq;
++} kebab_keys_state;
++
++/* ------------------------------------------------------------- calls */
++
++void kebab_keys_reset(kebab_keys_state *state);
++void kebab_keys_enable(kebab_keys_state *state, unsigned key, int usable);
++const char *kebab_keys_name(unsigned key);
++kebab_keys_sample_status kebab_keys_classify(const kebab_keys_sample *sample);
++size_t kebab_keys_feed(kebab_keys_state *state, const kebab_keys_sample *sample,
++    uint64_t now_ns, kebab_keys_event events[KEBAB_KEYS_MAX_EVENTS]);
++int kebab_keys_pressed(const kebab_keys_state *state, unsigned key);
++
++#endif /* KEBAB_KEYS_H */
+diff --git a/bsd/dev/kebab_spmi.c b/bsd/dev/kebab_spmi.c
+index 30ad72d..992cf90 100644
+--- a/bsd/dev/kebab_spmi.c
++++ b/bsd/dev/kebab_spmi.c
+@@ -86,6 +86,9 @@ extern void kebab_usb_log_flush(void);
+  */
+ bool kebab_spmi_pon_writes_enabled(void);
+ int kebab_spmi_pon_reason_write(void);
++/* bsd/dev/kebab_keys.c reads its four key bytes through this file. */
++int kebab_spmi_keys_sample(uint8_t raw[4]);
++int kebab_spmi_keys_config(uint8_t gpio6[3], uint8_t gpio7[3]);
+ 
+ /* bsd/dev/kebab_usb.c: VROMON, gated by kebab_vrm_write; TCS? is read-only. */
+ bool kebab_spmi_vrm_writes_enabled(void);
+@@ -138,6 +141,37 @@ void kebab_tcs_report(void);
+ #define KEBAB_SPMI_PON_SUBTYPE  0x0805u
+ #define KEBAB_SPMI_PON_SPARE    0x088fu
+ 
++/*
++ * The PM8150 key sources read by bsd/dev/kebab_keys.c.  Power is the PON's
++ * real-time status at 0x0810 (base 0x0800 + 0x10).  The volume keys are
++ * PM8150 GPIO6 and GPIO7, whose pages start at 0x0c500 and 0x0c600
++ * (0x0c000 + (n - 1) * 0x100); each page's real-time status is +0x10 and its
++ * type register is +0x04.  The type byte is part of every sample so an
++ * all-zero bus read cannot be mistaken for both active-low volume keys.
++ *
++ * Vendor evidence is in package/KebabKeys.h and docs/BRING-UP-STATE.md
++ * section 71: pm8150.dtsi, kona-pmic-overlay.dtsi, kebab-oem.dtsi,
++ * qpnp-power-on.c and pinctrl-spmi-gpio.c.
++ */
++#define KEBAB_SPMI_KEYS_PON_RT      0x0810u
++#define KEBAB_SPMI_KEYS_GPIO6_RT    0x0c510u
++#define KEBAB_SPMI_KEYS_GPIO7_RT    0x0c610u
++#define KEBAB_SPMI_KEYS_GPIO6_TYPE  0x0c504u
++
++/*
++ * The pin setup of the same two pages, read once at start-up: mode 0x40,
++ * pull 0x42, enable 0x46 (pinctrl-spmi-gpio.c).  The vendor state is an
++ * enabled input with a pull-up; this kernel never writes the PMIC, so the
++ * keys driver reports the registers and withholds a key whose pin is not
++ * configured that way.
++ */
++#define KEBAB_SPMI_KEYS_GPIO6_MODE  0x0c540u
++#define KEBAB_SPMI_KEYS_GPIO6_PULL  0x0c542u
++#define KEBAB_SPMI_KEYS_GPIO6_EN    0x0c546u
++#define KEBAB_SPMI_KEYS_GPIO7_MODE  0x0c640u
++#define KEBAB_SPMI_KEYS_GPIO7_PULL  0x0c642u
++#define KEBAB_SPMI_KEYS_GPIO7_EN    0x0c646u
++
+ /* qpnp_pon_set_restart_reason(), Gen2 layout. */
+ #define KEBAB_SPMI_PON_REASON_MASK   0xfeu
+ #define KEBAB_SPMI_PON_REASON_BOOTLOADER 0x02u
+@@ -161,11 +195,21 @@ struct kebab_spmi_match {
+ 	uint32_t irq_ee;
+ };
+ 
++/* A PPID-to-observer-APID answer kept across polls (see kebab_spmi_reader). */
++struct kebab_spmi_reader {
++	uint32_t ppid;
++	uint32_t apid;
++	bool     valid;
++};
++
++#define KEBAB_SPMI_READERS      4u
++
+ static struct {
+ 	vm_offset_t core;
+ 	vm_offset_t obsrvr;
+ 	vm_offset_t cnfg;
+ 	vm_offset_t chnl;              /* one 4 KiB read/write channel slice */
++	uint32_t    version;           /* arbiter version read once in init */
+ 	uint32_t    chnl_apid;
+ 	uint32_t    read_attempt;
+ 	bool        mapped;
+@@ -174,6 +218,7 @@ static struct {
+ 	bool        write_gate_parsed;
+ 	bool        verbose;            /* kebab_pon_verbose: raw register traffic */
+ 	bool        chnl_mapped;
++	struct kebab_spmi_reader readers[KEBAB_SPMI_READERS];
+ } spmi;
+ 
+ static uint32_t kebab_spmi_nonzero;
+@@ -382,6 +427,75 @@ kebab_spmi_pon_apid(uint32_t *apid_out)
+ 	return -1;
+ }
+ 
++/*
++ * The observer APID for one PPID, remembered across polls.  The keys driver
++ * reads three peripherals about sixty times a second; walking the 512-entry
++ * mapping table for every sample would be most of the work.  The mapping
++ * register is still re-read by kebab_spmi_obs_read_ex() for every transfer, so
++ * a stale cached APID cannot silently become a read of another peripheral: the
++ * transfer is refused and the caller drops the entry.
++ *
++ * A read does not need channel ownership; the observer path is available for
++ * every mapped PPID.  When several APIDs map one PPID, the one owned by this
++ * EE is preferred only so the answer matches what a write would use.
++ */
++static int
++kebab_spmi_reader(uint32_t ppid, uint32_t *apid_out)
++{
++	struct kebab_spmi_match matches[4];
++	struct kebab_spmi_reader *slot = NULL;
++	uint32_t count, i, chosen = 0;
++	bool owned = false;
++
++	for (i = 0; i < KEBAB_SPMI_READERS; i++) {
++		if (spmi.readers[i].valid && spmi.readers[i].ppid == ppid) {
++			*apid_out = spmi.readers[i].apid;
++			return 0;
++		}
++		if (slot == NULL && !spmi.readers[i].valid) {
++			slot = &spmi.readers[i];
++		}
++	}
++	if (slot == NULL) {
++		/* Only three PPIDs are used; recycle the first slot if one leaks. */
++		slot = &spmi.readers[0];
++	}
++
++	count = kebab_spmi_scan(ppid, matches, 4);
++	if (count == 0) {
++		return -1;
++	}
++	for (i = 0; i < count && i < 4; i++) {
++		if (matches[i].write_ee == KEBAB_SPMI_EE) {
++			chosen = matches[i].apid;
++			owned = true;
++			break;
++		}
++	}
++	if (!owned) {
++		chosen = matches[0].apid;
++	}
++	slot->ppid = ppid;
++	slot->apid = chosen;
++	slot->valid = true;
++	printf("KEBAB SPMI: key source PPID 0x%03x -> observer APID 0x%03x%s\n",
++	    ppid, chosen, owned ? " (owned by this EE)" : " (first mapping)");
++	*apid_out = chosen;
++	return 0;
++}
++
++static void
++kebab_spmi_reader_forget(uint32_t ppid)
++{
++	uint32_t i;
++
++	for (i = 0; i < KEBAB_SPMI_READERS; i++) {
++		if (spmi.readers[i].valid && spmi.readers[i].ppid == ppid) {
++			spmi.readers[i].valid = false;
++		}
++	}
++}
++
+ /* ---------------------------------------------------------- observer reads */
+ 
+ /*
+@@ -392,11 +506,12 @@ kebab_spmi_pon_apid(uint32_t *apid_out)
+  * The APID is re-checked against the PPID derived from sid/addr, so a stale
+  * or wrong match cannot silently become a read of a different peripheral.
+  * The success line is raw register traffic and is printed only when the
+- * caller asks for it; failures always print.
++ * caller asks for it; failures print unless the caller is a poll that has its
++ * own rate-limited error line (the keys driver).
+  */
+ static int
+ kebab_spmi_obs_read_ex(uint32_t apid, uint32_t sid, uint32_t addr,
+-    uint32_t attempt, bool verbose, uint8_t *value)
++    uint32_t attempt, bool verbose, bool quiet, uint8_t *value)
+ {
+ 	uint32_t ppid = (sid << 8) | (addr >> 8);
+ 	uint32_t map, map_ppid, offset, cmd, status = 0;
+@@ -432,17 +547,21 @@ kebab_spmi_obs_read_ex(uint32_t apid, uint32_t sid, uint32_t addr,
+ 		delay(1);
+ 	}
+ 	if (!(status & KEBAB_SPMI_STATUS_DONE)) {
+-		printf("KEBAB SPMI: REG 0x%04x read %u TIMEOUT after %u us: cmd 0x%08x status 0x%08x\n",
+-		    addr, attempt, KEBAB_SPMI_TIMEOUT_US, cmd, status);
++		if (!quiet) {
++			printf("KEBAB SPMI: REG 0x%04x read %u TIMEOUT after %u us: cmd 0x%08x status 0x%08x\n",
++			    addr, attempt, KEBAB_SPMI_TIMEOUT_US, cmd, status);
++		}
+ 		return -1;
+ 	}
+ 	if (status & (KEBAB_SPMI_STATUS_FAILURE | KEBAB_SPMI_STATUS_DENIED |
+ 	    KEBAB_SPMI_STATUS_DROPPED)) {
+-		printf("KEBAB SPMI: REG 0x%04x read %u FAILED: cmd 0x%08x status 0x%08x%s%s%s\n",
+-		    addr, attempt, cmd, status,
+-		    (status & KEBAB_SPMI_STATUS_FAILURE) ? " FAILURE" : "",
+-		    (status & KEBAB_SPMI_STATUS_DENIED) ? " DENIED" : "",
+-		    (status & KEBAB_SPMI_STATUS_DROPPED) ? " DROPPED" : "");
++		if (!quiet) {
++			printf("KEBAB SPMI: REG 0x%04x read %u FAILED: cmd 0x%08x status 0x%08x%s%s%s\n",
++			    addr, attempt, cmd, status,
++			    (status & KEBAB_SPMI_STATUS_FAILURE) ? " FAILURE" : "",
++			    (status & KEBAB_SPMI_STATUS_DENIED) ? " DENIED" : "",
++			    (status & KEBAB_SPMI_STATUS_DROPPED) ? " DROPPED" : "");
++		}
+ 		return -1;
+ 	}
+ 	*value = (uint8_t)(kebab_spmi_rd(spmi.obsrvr, offset + KEBAB_SPMI_RDATA0) & 0xffu);
+@@ -458,7 +577,8 @@ static int
+ kebab_spmi_obs_read(uint32_t apid, uint32_t sid, uint32_t addr,
+     uint32_t attempt, uint8_t *value)
+ {
+-	return kebab_spmi_obs_read_ex(apid, sid, addr, attempt, true, value);
++	return kebab_spmi_obs_read_ex(apid, sid, addr, attempt, true, false,
++	    value);
+ }
+ 
+ /* -------------------------------------------------- read/write PON registers */
+@@ -467,7 +587,112 @@ static int
+ kebab_spmi_pon_read(uint32_t apid, uint32_t addr, uint8_t *value)
+ {
+ 	return kebab_spmi_obs_read_ex(apid, KEBAB_SPMI_PON_SID, addr,
+-	    ++spmi.read_attempt, spmi.verbose, value);
++	    ++spmi.read_attempt, spmi.verbose, false, value);
++}
++
++/* ------------------------------------------------------- key registers */
++
++/*
++ * One look at the four PM8150 key bytes for bsd/dev/kebab_keys.c.  All four
++ * reads must complete; a partial sample is not a key state.  raw[] is filled
++ * only on success, and the caller treats a failure as "no observation".
++ *
++ * This is a read-only path: the only write is the observer command that asks
++ * the arbiter for a transfer.  No PMIC register is changed.
++ */
++int
++kebab_spmi_keys_sample(uint8_t raw[4])
++{
++	static const uint32_t addr[4] = {
++		KEBAB_SPMI_KEYS_PON_RT,
++		KEBAB_SPMI_KEYS_GPIO6_RT,
++		KEBAB_SPMI_KEYS_GPIO7_RT,
++		KEBAB_SPMI_KEYS_GPIO6_TYPE,
++	};
++	uint8_t value[4] = { 0, 0, 0, 0 };
++	uint32_t i;
++
++	if (raw == NULL) {
++		return -1;
++	}
++	raw[0] = 0;
++	raw[1] = 0;
++	raw[2] = 0;
++	raw[3] = 0;
++	if (!spmi.mapped || !kebab_spmi_version_known(spmi.version) ||
++	    spmi.version < 0x50000000u) {
++		return -1;
++	}
++	for (i = 0; i < 4; i++) {
++		uint32_t ppid = (KEBAB_SPMI_PON_SID << 8) | (addr[i] >> 8);
++		uint32_t apid;
++
++		if (kebab_spmi_reader(ppid, &apid) != 0) {
++			if (spmi.verbose) {
++				printf("KEBAB SPMI: keys: no APID maps PPID 0x%03x (register 0x%04x)\n",
++				    ppid, addr[i]);
++			}
++			return -1;
++		}
++		if (kebab_spmi_obs_read_ex(apid, KEBAB_SPMI_PON_SID, addr[i],
++		    ++spmi.read_attempt, spmi.verbose, true, &value[i]) != 0) {
++			kebab_spmi_reader_forget(ppid);
++			return -1;
++		}
++	}
++	memcpy(raw, value, sizeof(value));
++	return 0;
++}
++
++/*
++ * The pin setup of the two volume-key inputs, read once by
++ * bsd/dev/kebab_keys.c before it starts polling.  Each array is
++ * { mode, pull, enable } from the vendor pinctrl registers 0x40, 0x42 and 0x46
++ * inside the GPIO's 0x100-byte page.
++ *
++ * The vendor device tree asks for an enabled input with a pull-up
++ * (input-enable, bias-pull-up, power-source 1).  This kernel never writes the
++ * PMIC, so the state has to come from the boot firmware; the keys driver
++ * reports these bytes and withholds a key whose pin is not configured that
++ * way, instead of turning a disabled input into a permanent press.
++ */
++int
++kebab_spmi_keys_config(uint8_t gpio6[3], uint8_t gpio7[3])
++{
++	static const uint32_t addr[6] = {
++		KEBAB_SPMI_KEYS_GPIO6_MODE,
++		KEBAB_SPMI_KEYS_GPIO6_PULL,
++		KEBAB_SPMI_KEYS_GPIO6_EN,
++		KEBAB_SPMI_KEYS_GPIO7_MODE,
++		KEBAB_SPMI_KEYS_GPIO7_PULL,
++		KEBAB_SPMI_KEYS_GPIO7_EN,
++	};
++	uint8_t value[6] = { 0, 0, 0, 0, 0, 0 };
++	uint32_t i;
++
++	if (gpio6 == NULL || gpio7 == NULL) {
++		return -1;
++	}
++	if (!spmi.mapped || !kebab_spmi_version_known(spmi.version) ||
++	    spmi.version < 0x50000000u) {
++		return -1;
++	}
++	for (i = 0; i < 6; i++) {
++		uint32_t ppid = (KEBAB_SPMI_PON_SID << 8) | (addr[i] >> 8);
++		uint32_t apid;
++
++		if (kebab_spmi_reader(ppid, &apid) != 0) {
++			return -1;
++		}
++		if (kebab_spmi_obs_read_ex(apid, KEBAB_SPMI_PON_SID, addr[i],
++		    ++spmi.read_attempt, spmi.verbose, true, &value[i]) != 0) {
++			kebab_spmi_reader_forget(ppid);
++			return -1;
++		}
++	}
++	memcpy(gpio6, value, 3);
++	memcpy(gpio7, value + 3, 3);
++	return 0;
+ }
+ 
+ /*
+@@ -634,6 +859,7 @@ kebab_spmi_init(void)
+ 	spmi.mapped = true;
+ 
+ 	uint32_t version = kebab_spmi_rd(spmi.core, KEBAB_SPMI_VERSION);
++	spmi.version = version;
+ 	printf("KEBAB SPMI: arbiter core 0x%08x+0x%x obsrvr 0x%08x+0x%x cnfg 0x%08x+0x%x (ee %u channel %u)\n",
+ 	    KEBAB_SPMI_CORE_PA, KEBAB_SPMI_CORE_SIZE, KEBAB_SPMI_OBSRV_PA,
+ 	    KEBAB_SPMI_OBSRV_SIZE, KEBAB_SPMI_CNFG_PA, KEBAB_SPMI_CNFG_SIZE,
+@@ -714,8 +940,8 @@ kebab_spmi_power_read(uint32_t apid, uint32_t sid, uint32_t addr,
+ {
+ 	uint8_t a = 0, b = 0;
+ 
+-	if (kebab_spmi_obs_read_ex(apid, sid, addr, 1, false, &a) != 0 ||
+-	    kebab_spmi_obs_read_ex(apid, sid, addr, 2, false, &b) != 0) {
++	if (kebab_spmi_obs_read_ex(apid, sid, addr, 1, false, false, &a) != 0 ||
++	    kebab_spmi_obs_read_ex(apid, sid, addr, 2, false, false, &b) != 0) {
+ 		printf("KEBAB SPMI: PWR: %s 0x%04x read failed\n", what, addr);
+ 		return -1;
+ 	}
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index dea0ca6..1add725 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -521,6 +521,16 @@ bsd_init(void)
+ 		extern int kebab_touch_start(void);
+ 		(void)kebab_touch_start();
+ 	}
++	/*
++	 * The PM8150 power and volume keys are polled too, through the SPMI
++	 * arbiter that kebab_usb_start() mapped above.  Off unless boot-arg
++	 * kebab_keys=1; nothing consumes the records yet, so the driver's job
++	 * is to prove the register decode and publish /dev/kebab_keys.
++	 */
++	{
++		extern int kebab_keys_start(void);
++		(void)kebab_keys_start();
++	}
+ #endif
+ 
+ #if defined(KEBAB)

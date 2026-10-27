@@ -8425,3 +8425,343 @@ patch 集与 `dfa7d6f` 相同。
 `vnode_getattr` 读回没有在真实 HFS+ 上执行，`skel.kist` 没有走过 USB，卷根
 仍是 `501:20`。0138 现在是“完整链接且二进制含新格式串”的状态，但板子
 stranded，不能把它当作真机通过。
+
+## 七十一、按键驱动
+
+> 目标：把 P2 输入的最后一项——硬件按键——做成内核里的数据，为后续的用户态
+> 消费者准备好。不做 HID 接线，不碰触摸传输、VRM 轨和 panic 路径。
+>
+> 结论：电源键来自 PM8150 PON 的 KPDPWR；两个音量键来自 **PM8150 GPIO6 /
+> GPIO7**，不是 TLMM，也不是 PMIC RESIN。vendor device tree 同时把 PON RESIN
+> 映射成 `KEY_VOLUMEDOWN`，所以驱动把 RESIN 并入音量减、但把原始 PON 字节和
+> `(via PON RESIN)` 标记写进日志和记录，真机上哪条路真的动了会直接看出来。
+>
+> 状态：**主机测试 + 完整内核构建通过，真机未执行**。板子 stranded，无刷写、
+> 无 USB 传输、无按键实测。
+
+### 1. 按键到底接在哪：vendor 证据
+
+这一节的结论全部来自这台机器的 vendor 材料，不是从别的 Qualcomm 板子推的。
+
+| 材料 | 位置 | 说明 |
+| --- | --- | --- |
+| PON 节点 | `arch/arm64/boot/dts/vendor/qcom/pm8150.dtsi`，`qcom,pm8150@0/qcom,power-on@800` | `reg = <0x800 0x100>`；`qcom,pon_1` = `PON_POWER_ON_TYPE_KPDPWR` + `linux,code = <KEY_POWER>`；`qcom,pon_2` = `PON_POWER_ON_TYPE_RESIN` + `linux,code = <KEY_VOLUMEDOWN>` |
+| 音量上 pinctrl | `kona-pmic-overlay.dtsi`，`&pm8150_gpios/key_vol_up` | `pins = "gpio6"; input-enable; bias-pull-up; power-source = <1>` |
+| 音量上 gpio-keys | `kona-mtp.dtsi`，`&soc/gpio_keys/vol_up` | `gpios = <&pm8150_gpios 6 GPIO_ACTIVE_LOW>`；`linux,code = <KEY_VOLUMEUP>`；`debounce-interval = <15>` |
+| 音量下 pinctrl | `kebab-oem.dtsi`，`&pm8150_gpios/key_vol_down` | `pins = "gpio7"; input-enable; bias-pull-up; power-source = <1>` |
+| 音量下 gpio-keys | `kebab-oem.dtsi`，`&soc/gpio_keys/vol_down` | `gpios = <&pm8150_gpios 7 GPIO_ACTIVE_LOW>`；`linux,code = <KEY_VOLUMEDOWN>` |
+| 最终 DT | `kebab-vendor.dts` 的 `gpio_keys` 节点 | `vol_up` phandle `0x625`（= `qcom,pm8150@0/pinctrl@c000`）gpio6，code `0x73`；`vol_down` 同 phandle gpio7，code `0x72`；PON `pon_1` code `0x74`，`pon_2` code `0x72` |
+| PON 驱动 | `drivers/input/misc/qpnp-power-on.c` | `QPNP_PON_RT_STS(pon) = base + 0x10`；`QPNP_PON_KPDPWR_N_SET = BIT(0)`，`QPNP_PON_RESIN_N_SET = BIT(1)`；`qpnp_pon_input_dispatch()` 把 RT_STS 掩码后的值直接作为按键状态 |
+| PMIC GPIO 驱动 | `drivers/pinctrl/qcom/pinctrl-spmi-gpio.c` | `PMIC_GPIO_ADDRESS_RANGE = 0x100`；`pad->base = start + i * 0x100`，`pmic_gpio_get()` 返回 `RT_STS & 1`；`GPIO_REG_MODE_CTL = 0x40`、`DIG_PULL_CTL = 0x42`、`EN_CTL = 0x46`、`REG_TYPE = 0x04`、`REG_SUBTYPE = 0x05`、`PMIC_GPIO_TYPE = 0x10` |
+| gpio-keys 驱动 | `drivers/input/keyboard/gpio_keys.c` | `gpiod_get_value_cansleep()` 返回已经按 `GPIO_ACTIVE_LOW` 取反后的逻辑值；`input_event()` 用这个值 |
+
+`pmic-vibrator` 在这个 vendor 树里**不存在**：`drivers/oneplus/vibrator/`
+只有 `aw8697.c`（I2C 触觉芯片），没有 PON 按键处理。PON 的按键路径就是
+`qpnp-power-on.c` 的 `qpnp_pon_input_dispatch()`。
+
+#### 1.1 地址算术
+
+PM8150 在 SID 0（`qcom,pm8150@0 { reg = <0x0 SPMI_USID>; }`）。SPMI 的 PPID
+是 `(sid << 8) | (addr >> 8)`，所以每个 256 B 页是一个 PPID：
+
+| 外设 | 基址 / 页 | PPID | 用到的寄存器 |
+| --- | --- | --- | --- |
+| PON | `0x0800` | `0x008` | RT_STS `0x0810` |
+| PM8150 GPIO6 | `0x0c000 + 5*0x100 = 0x0c500` | `0x0c5` | RT_STS `0x0c510`、type `0x0c504`、mode `0x0c540`、pull `0x0c542`、enable `0x0c546` |
+| PM8150 GPIO7 | `0x0c000 + 6*0x100 = 0x0c600` | `0x0c6` | RT_STS `0x0c610`、type `0x0c604`、mode `0x0c640`、pull `0x0c642`、enable `0x0c646` |
+
+`pinctrl@c000` 的 `reg = <0xc000 0xa00>` 说明这个 GPIO 块有 10 个 0x100 B 的
+页；vendor 驱动用 `start + i * 0x100`（`i` 从 0 开始）算每一页的基址，所以
+GPIO6 是 `0x0c500`、GPIO7 是 `0x0c600`，不是 `0xc000+6` 或 `0xc000+7`。
+
+#### 1.2 每个键的结论
+
+| 键 | 来源 | 寄存器 | 位 | 极性 | vendor 键码 |
+| --- | --- | --- | --- | --- | --- |
+| 电源 | PM8150 PON KPDPWR | `0x0810` | bit0 `KPDPWR_N_SET` | 1 = 按住 | `KEY_POWER` = 116 (`0x74`) |
+| 音量上 | PM8150 GPIO6 | `0x0c510` | bit0 = 引脚电平 | 0 = 按住（`GPIO_ACTIVE_LOW`） | `KEY_VOLUMEUP` = 115 (`0x73`) |
+| 音量下 | PM8150 GPIO7 | `0x0c610` | bit0 = 引脚电平 | 0 = 按住（`GPIO_ACTIVE_LOW`） | `KEY_VOLUMEDOWN` = 114 (`0x72`) |
+| 音量下（备用路径） | PM8150 PON RESIN | `0x0810` | bit1 `RESIN_N_SET` | 1 = 按住 | 同一个 `KEY_VOLUMEDOWN` |
+
+**不是 TLMM。** `gpio_keys` 的两个 `gpios` 都指向 `&pm8150_gpios`，最终 DT 的
+phandle `0x625` 也落在 `qcom,pm8150@0/pinctrl@c000`。TLMM 上唯一的按键类节点是
+`oneplus,hall_tri_state_key`（三段式静音拨杆），和音量键无关。
+
+**RESIN 的歧义是故意保留的。** vendor DT 的 `qcom,pon_2` 把 RESIN 也映射成
+`KEY_VOLUMEDOWN`，但同一块板又把音量下放在 GPIO7。两种可能都存在：RESIN 和
+GPIO7 并到同一个物理键，或者 RESIN 根本没接、`pon_2` 只是 Qualcomm 参考设计
+的遗留。驱动不猜：音量减 = GPIO7 低 **或** RESIN 置位，事件里保留
+`raw_pon`，并且 RESIN 参与时带 `(via PON RESIN)`。真机上按一下音量下，日志会
+直接回答“RESIN 是否也动”。
+
+### 2. 解码和去抖
+
+#### 2.1 每次采样四个字节
+
+```text
+raw[0] = 0x0810  PON RT_STS
+raw[1] = 0x0c510 PM8150 GPIO6 RT_STS
+raw[2] = 0x0c610 PM8150 GPIO7 RT_STS
+raw[3] = 0x0c504 PM8150 GPIO6 type
+```
+
+第四个字节不是按键状态，是**身份字节**。PM8150 GPIO 页的 type 固定是 `0x10`；
+四个字节全零时，总线/APID 已经不可信，而不是“两个 active-low 音量键都按住”。
+没有这个字节，`0x00` 的去抖结果就是“两个音量键一直按住”，这是这一项最容易
+写错的地方。`kebab_keys_classify()` 的判定顺序是：
+
+1. `read_ok == 0` → `READ_ERROR`，不改状态；
+2. 四字节全零 → `ZERO`，不改状态；
+3. `ident != 0x10` → `BAD_IDENTITY`，不改状态；
+4. 否则 `OK`，进入解码。
+
+读失败、全零、身份不对都只增加 `invalid` 计数，**不产生 release**。总线短暂
+静音时按住的键仍然保持按住；总线恢复后如果键已经松开，去抖会正常给出 release。
+
+#### 2.2 逻辑值和 RESIN
+
+```text
+power      = (pon_rt & 0x01) != 0
+volume_up  = (gpio6_rt & 0x01) == 0
+volume_down = ((gpio7_rt & 0x01) == 0) || ((pon_rt & 0x02) != 0)
+```
+
+PON 的 RT_STS 位是“已断言”，GPIO 的 bit0 是引脚电平，所以只有 GPIO 需要取反。
+RESIN 位只并入音量减；`power` 不会被 RESIN 影响。
+
+#### 2.3 去抖、stuck 和初始状态
+
+* **去抖**：同一个逻辑值连续 **2 次**采样才接受。默认轮询 16 ms，所以
+  32 ms 的去抖窗口比 vendor `gpio-keys` 的 15 ms 和 PON 的 15.6 ms 硬件去抖
+  都长；抖动线不会产生事件。
+* **每个键独立**：电源在抖、音量上稳定时，音量上仍然能正常出事件。
+* **初始按住**：第一个相信的采样如果是按住，经过同样的 2 次去抖后报一次
+  press；之后只在松开时报 release，不会每个 poll 重复。
+* **stuck**：连续按住 10 s（`KEBAB_KEYS_STUCK_NS`，与轮询周期无关）置
+  `stuck`，内核日志打一行 `STUCK held for 10 s`，但**不重复发 press**；松开
+  后清掉，再按住可以重新计时。这样既能看见“键卡住了”，又不会刷屏。
+* **release 一定来自一次有效采样**：读失败/全零/身份错都不会伪造 release。
+
+### 3. 设备：为什么新开 `/dev/kebab_keys`
+
+选了**新设备**，没有扩展 `/dev/kebab_touch` 的 48 字节记录：
+
+1. 任务明确要求不碰触摸传输。触摸的 48 字节记录、64 槽队列、三套坐标和
+   `KT_EVENT_MAGIC` 都是已经工作、被用户态依赖的 ABI；往里加一个“记录类型”
+   会让触摸的消费者必须理解按键，也会把两个无关的采样率绑在一个队列上。
+2. 触摸的队列/read 语义已经验证过；新设备**照抄**这套语义，不引入第二种
+   队列行为：单生产者/单消费者、64 槽、无读者时覆盖最旧并计数、`read(2)`
+   返回整条记录、默认阻塞、`O_NONBLOCK` 返回 `EAGAIN`、多个读者共享一个
+   tail、`0440 root:operator`。
+3. 两个设备可以独立开关：`kebab_touch=1` 不自动打开按键，`kebab_keys=1` 也
+   不依赖触摸是否 probe 成功。按键驱动只依赖 `kebab_spmi_init()` 已经映射
+   arbiter，而它在 `kebab_usb_start()` 里比触摸更早执行。
+
+记录格式（24 B，`_Static_assert` 固定）：
+
+| 偏移 | 字段 | 含义 |
+| --- | --- | --- |
+| 0 | `magic` | `'KKEV'` = `0x4b4b4556`，拒绝没填过的缓冲 |
+| 4 | `seq` | 事件序号，从 0 开始 |
+| 8 | `timestamp_ns` | 开机以来的纳秒数（`mach_absolute_time` 转换） |
+| 16 | `key` | 0 电源、1 音量上、2 音量下 |
+| 17 | `pressed` | 1 press、0 release |
+| 18 | `flags` | bit0 = 这次音量减来自 PON RESIN |
+| 19 | `raw_pon` | 触发这次转换的 `0x0810` 原值 |
+| 20 | `raw_gpio_up` | `0x0c510` 原值 |
+| 21 | `raw_gpio_down` | `0x0c610` 原值 |
+| 22 | `raw_ident` | `0x0c504` 原值 |
+| 23 | `pad` | 0 |
+
+队列在创建线程和 `/dev` 节点之前先做一次自检（填满三圈、验证只保留 64 条、
+丢最旧、按序 drain），日志里的 `queue selftest: ... ok` 就是它。
+
+### 4. 主机测试
+
+`package/KebabKeys.c` 和 `.h` 是纯解码/去抖模块，没有 MMIO、SPMI 或内核对象；
+`package/KebabKeysHostTests.c` 直接驱动它。内核里的
+`bsd/dev/kebab_keys_core.c/.h` 是 `scripts/sync-keys.py` 生成的逐字节副本，
+和触摸的 `KebabTouchTcm` + `sync-touch-tcm.py` 是同一个模式。
+
+编译/运行：
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -O2 \
+    -o /tmp/kebab-keys-test package/KebabKeys.c package/KebabKeysHostTests.c
+/tmp/kebab-keys-test
+```
+
+用例和断言点：
+
+| 组 | 场景 | 关键断言 |
+| --- | --- | --- |
+| K1 | classify | 正常采样 OK；四字节全零 = ZERO；`ident != 0x10` = BAD_IDENTITY；`read_ok=0` = READ_ERROR |
+| K2 | 电源 clean press/release | 一次 press、一次 release；raw 四字节、seq 0/1、无重复 |
+| K3 | 音量上 clean press/release | GPIO6 `0x01 → 0x00` 是 press，`0x00 → 0x01` 是 release |
+| K4 | 音量下 clean press/release | GPIO7 同上；单独 GPIO7 不带 RESIN 标记 |
+| K5 | 抖动 | 20 次交替采样 0 事件；稳定 2 次后 1 次 press；按住时再抖 20 次无 release；稳定 2 次后 1 次 release |
+| K6 | 两个音量键同时按住 | 键字节全零但 `ident=0x10`：同一采样返回 2 个 press（音量上、音量下），seq 连续；同时松开返回 2 个 release |
+| K7 | 全零采样 | 5 次全零 0 事件、`samples=0`、`invalid=5`，不是“每个键都按住”；按住时全零不产生 release；之后真实 release 仍能解码 |
+| K8 | 卡住不松 | 700 次按住只产生 1 个 press；10 s 后 `stuck=1`；松开 1 个 release 并清 stuck |
+| K9 | 读失败/错页 | 10 次 `read_ok=0` + 10 次 `ident=0x11` 都不改状态；之后正常 press 仍能解码 |
+| K10 | RESIN | PON bit1 两次 → 音量减 press，带 RESIN flag，raw_pon 可见 bit1；GPIO7 单独仍能工作 |
+| K11 | 启动前已按住 | 第一次有效采样就按住，2 次后报一次 press，松开报一次 release |
+| K12 | 不可用源 | `kebab_keys_enable(..., 0)` 后该键永不报；重新 enable 后恢复 |
+
+实跑输出（`-std=c11 -Wall -Wextra -Werror`，0 warning）：
+
+```text
+K1 classify: live, all-zero, wrong identity and failed reads
+  PASS  a released PM8150 page is a valid sample
+  PASS  all four bytes zero is ZERO, not both volume keys held
+  ...
+K7 all-zero: no key, and no state change
+  PASS  five all-zero samples: no event
+  PASS  all-zero samples are invalid, not five held keys
+  PASS  all-zero is no key rather than every key
+  ...
+K8 stuck: one press, no repeats, flagged after ten seconds
+  PASS  700 held samples produce exactly one press
+  PASS  the stuck flag is set after ten seconds
+  ...
+K12 an unusable source never reports and can be turned back on
+  PASS  a disabled volume-up produces no event
+  PASS  re-enabled volume-up decodes again
+
+89 checks, 0 failure(s)
+```
+
+（`...` 是省略的中间 PASS 行，不是跳过；完整输出见本轮会话记录和
+`package/KebabKeysHostTests.c`。）
+
+同一套用例在 `-fsanitize=address,undefined`（不传 `-O2`）下也跑出 89/0，
+没有越界、未定义行为或泄漏报告。
+
+### 5. 内核构建
+
+补丁：`patches/xnu-8796-kebab/0139-kebab-keys.patch`。它只做四件事：
+
+1. 新增 `bsd/dev/kebab_keys.c`（线程、SPMI 采样入口、队列、`/dev/kebab_keys`）；
+2. 新增 `bsd/dev/kebab_keys_core.c/.h`（`sync-keys.py` 生成的测试模块副本）；
+3. 在 `bsd/dev/kebab_spmi.c` 增加只读的 `kebab_spmi_keys_sample()` /
+   `kebab_spmi_keys_config()` 和 PPID→APID 缓存；现有 PON/PWR/VROMON 路径不变；
+4. 在 `bsd/conf/files` 加两行、在 `bsd/kern/bsd_init.c` 的 `kebab_touch_start()`
+   之后加一个 `kebab_keys_start()` 调用。
+
+在 `albertlee@192.168.30.165:~/kebab-build` 上用 `./build-local.sh` 完整构建
+（没有 sudo）：
+
+| 项 | 结果 |
+| --- | --- |
+| 仓库 patch 序列 | **118** 个（117 + 0139） |
+| `build.sh` staged | 126 个 = 118 仓库 patch + 8 个上游 helper |
+| 跳过 | 6 个，和 0138 基线逐项相同（`0001`、`0002`、`TrustCache`、`iobuffermemd`、`skywalk_sonoma`、`syntax_checker_sonoma`） |
+| 编译/链接 | `XNU Build Done`；`kebab_keys.o`、`kebab_keys_core.o`、`kebab_spmi.o`、`bsd_init.o` 都重新编译并参与链接 |
+| 新文件 warning | 0 条（`kebab_keys.c`、`kebab_keys_core.c/.h` 没有 `文件:行:列: warning`） |
+| `kebab_spmi.c` | warning 集合与 0138 基线相同（7 shadow / 3 format / 2 declaration-after-statement / 6 missing-prototype），没有新增 |
+| 内核 | `kernel.development.kebab`，Mach-O 64-bit arm64，17,191,928 B |
+| 符号/字符串 | `_kebab_keys_start`、`_kebab_spmi_keys_sample`、`_kebab_keys_feed` 在 `nm` 里；`strings` 命中 `/dev/kebab_keys`、`KEBAB KEYS: first sample ...`、`KEBAB SPMI: key source PPID ...` |
+
+`scripts/sync-keys.py --check` 在生成目录上通过（构建树里的
+`kebab_keys_core.c/.h` 和重新生成的逐字节一致）。
+
+没有改触摸传输、VRM 轨、panic 路径，也没有改 P1 依赖的文件；`kebab_spmi.c`
+的现有函数只增加了 `quiet` 参数（见下），`PON?`/`PWR?`/`VROMON`/FASTBOOT
+的行为不变。
+
+### 6. 真机上怎么确认每个键
+
+启动参数：
+
+```text
+kebab_keys=1            # 总开关，默认关
+kebab_keys_ms=16        # 可选，轮询周期 4..1000 ms
+kebab_keys_raw=1        # 可选，四个原始字节变化时打一行
+```
+
+启动后先看这几行（数值是示例）：
+
+```text
+KEBAB SPMI: key source PPID 0x008 -> observer APID 0x...
+KEBAB SPMI: key source PPID 0x0c5 -> observer APID 0x...
+KEBAB SPMI: key source PPID 0x0c6 -> observer APID 0x...
+KEBAB KEYS: GPIO6 mode=0x00 pull=0x01 en=0x80 -> enabled input with pull-up; GPIO7 ...
+KEBAB KEYS: sources: PON RT_STS 0x0810, PM8150 GPIO6 RT_STS 0x0c510, GPIO7 RT_STS 0x0c610, GPIO type 0x0c504 (expected 0x10)
+KEBAB KEYS: first sample pon=0x00 gpio6=0x01 gpio7=0x01 ident=0x10 -> power released, volume-up released, volume-down released
+KEBAB KEYS: queue selftest: 64 slots, 192 pushed, 128 dropped without a reader, 64 drained: ok
+KEBAB KEYS: /dev/kebab_keys major N, 24-byte records, 64 slots
+KEBAB KEYS: polling every 16 ms
+```
+
+逐个键：
+
+| 操作 | 期望日志 | 期望 raw |
+| --- | --- | --- |
+| 按电源 | `power PRESSED` | `pon` bit0 `0 → 1` |
+| 松电源 | `power released` | `pon` bit0 `1 → 0` |
+| 按音量上 | `volume-up PRESSED` | `gpio6` bit0 `1 → 0`（`0x01 → 0x00`） |
+| 松音量上 | `volume-up released` | `gpio6` bit0 `0 → 1` |
+| 按音量下 | `volume-down PRESSED`，如果 RESIN 也动会带 `(via PON RESIN)` | `gpio7` bit0 `1 → 0`；`pon` bit1 可能同时 `0 → 1` |
+| 松音量下 | `volume-down released` | 相反方向 |
+| 两个音量键一起按 | 同一行/相邻两行两个 `PRESSED`，各自 raw 可见 | `gpio6=0x00 gpio7=0x00`，`ident=0x10` |
+
+**电源键**：`pon=0x01` 表示 KPDPWR 按住；如果 `pon=0x03`，说明 RESIN 也断言，
+但电源只看 bit0。
+
+**音量上的位布局**：如果按音量上时变的是 `gpio7` 而不是 `gpio6`，或者
+`gpio6` 的 bit 除了 0 以外在动，日志里的 `raw` 会直接暴露；这时对照第 1 节的
+页地址检查 PPID/页偏移，而不是改掩码。
+
+**音量下和 RESIN**：如果按音量下只看到 `gpio7` 变、`pon` bit1 不动，说明
+RESIN 没有并到这个键；如果两者一起动，`(via PON RESIN)` 会打出来，说明
+vendor DT 的 `pon_2` 是实际接线。两种都不影响逻辑音量减，因为驱动是 OR。
+
+**全零**：第一次采样如果四字节全零，驱动直接打印
+`first sample ... is all zero (silent bus); no keys` 并且不建 `/dev`；运行中
+全零会打印 `four zero bytes read ... treated as no key`，但不会产生 release
+或“全键按住”。如果 `ident` 不是 `0x10`，会打印 `GPIO type 0x.. at 0x0c504
+is not 0x10 ... sample ignored`，说明读到的是别的页/别的外设。
+
+**读 `/dev/kebab_keys`**：等用户态有 shell 之后，root 可以按 24 B 读：
+
+```sh
+dd if=/dev/kebab_keys bs=24 count=8 2>/dev/null | hexdump -Cv
+```
+
+每条记录的 `magic` 是 `56 45 4b 4b`（小端 `'KKEV'`），`seq` 连续；`raw_pon`
+字节在偏移 19，`raw_gpio_up` 在 20，`raw_gpio_down` 在 21，`raw_ident` 在 22。
+读之前先看内核日志里的 `queue selftest ... ok` 和 `/dev/kebab_keys major N`。
+
+**没有事件时先看什么**：
+
+1. `KEBAB KEYS: GPIO6 ... -> NOT an enabled input with pull-up`：说明 boot
+   firmware 没有把 vendor pinctrl 的 `key_vol_up_default`/`key_vol_down_default`
+   应用到 PM8150 GPIO6/7。这个驱动是只读的，不会写 PMIC GPIO 配置；需要时
+   另开一项做 gated 的 GPIO 配置写（本轮不做）。
+2. `volume-up withheld` / `volume-down withheld`：同上，驱动主动压住了这个键，
+   避免把未使能的输入当成永久按住。
+3. `SPMI read error`：加 `kebab_pon_verbose=1` 看 observer 的原始
+   CMD/STATUS/RDATA；先确认 APID 映射和 PON? 的读数。
+4. 全零/身份错：按上面的 `raw` 行对照第 1 节的地址。
+
+### 7. 仍未验证 / 风险
+
+* **真机没跑**：板子 stranded，本轮只有主机测试和完整构建。所有“按一下会
+  打印什么”都是代码路径的预期，不是实测。
+* **RESIN 接线未知**：驱动按 vendor DT 把 RESIN 并入音量减，并保留原始位和
+  标记；真机日志会第一次给出答案。如果 RESIN 实际是独立复位线而不是音量键，
+  需要把 `kebab_keys_feed()` 里的 OR 拆开（主机测试 K10 已覆盖当前语义）。
+* **GPIO 引脚配置依赖 boot firmware**：vendor pinctrl 状态由 Linux 驱动在
+  probe 时写入；本内核没有 pinctrl 驱动，也不写 PMIC。启动日志会打印
+  `mode/pull/en` 并压住配置不对的键，但不会修复。若真机上两个音量键都被
+  withheld，下一步是加一个 gated 的 PM8150 GPIO 配置写，而不是改解码。
+* **没有 HID、没有用户态消费者**：`/dev/kebab_keys` 只是数据出口；没有
+  `IOHIDEvent`，也没有进程在读它。这与 P2 的“先把数据做出来”目标一致。
+* **PON? 与轮询共享 PON observer 通道**：两个上下文同时读同一个 APID 时，
+  arbiter 可能丢掉一次传输。按键驱动把这次采样当作无效（不改状态），下一
+  个周期重试；没有 PMIC 写，也不会把一次丢弃变成按键事件。正常启动下
+  `PON?` 是人工命令，碰撞窗口远小于 1%。
+* **队列语义只有内核自检**：64 槽覆盖最旧、丢计数、阻塞读、`O_NONBLOCK`
+  都和 `/dev/kebab_touch` 同构，但还没有用户态 reader 实测。
+* **默认关**：不传 `kebab_keys=1` 时 `kebab_keys_start()` 在解析参数后直接
+  返回，不读 PMIC、不建线程、不建 `/dev`；普通启动的行为和 0138 一致。
