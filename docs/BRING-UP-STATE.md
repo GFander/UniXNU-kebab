@@ -3419,3 +3419,73 @@ PWR: pm8150a_l1: enable 0x00 (bit7 0), range 0x08, set 0x07
 - 实测：`PWR?` 的完整输出（两次读取一致）、启动与 COM7 正常；
 - 未做：任何 PMIC 写、任何 RPMh 命令、任何 I²C 事务；
 - 未证实：LDO 使能位为 0 只说明控制状态；输出端电压没有测量，也没有 ADC 路径。
+
+## 三十二、RPMh 只读发现：Command DB 与 drv-2 TCS（0123）
+
+### 1. 静态核对
+
+`kona.dtsi` 与实际一致：
+
+| 项 | 值 |
+| --- | --- |
+| Command DB | `0x80860000`，`0x20000`（128 KiB），`compatible = "qcom,cmd-db"`，`no-map` |
+| APPS RSC | `0x18200000`，窗口 `drv-0/1/2` 各 `0x10000`，`drv-id = 2` |
+| drv-2 窗口 | `0x18220000` |
+| TCS | `qcom,tcs-offset = <0xd00>`，ACTIVE 2、SLEEP 3、WAKE 3、CONTROL 1 |
+
+布局取自厂商 `cmd-db.c`（`cmd_db_header` 144 字节、`rsc_hdr` 16 字节、
+`entry_header` 24 字节、魔数 `db 30 03 0c`）与 `rpmh-rsc.c`
+（TCS 步进 672、命令步进 20，`CMD_ENABLE 0x1c`、`MSGID 0x30`、`ADDR 0x34`、
+`DATA 0x38`、`STATUS 0x3c`）。
+
+### 2. `RPMH?` 只读探针
+
+新增命令 `RPMH?`：映射 cmd-db 与 drv-2，先校验魔数，再按 slave 槽遍历条目，
+只打印 `ldoa13`/`ldoc1` 两条；随后打印 drv-2 公共寄存器与两个 active TCS 的
+`enable/msgid/addr/data/status`。全程只读，每个偏移都先做窗口边界检查。
+
+### 3. 实测
+
+```text
+KEBAB RPMH: cmd-db 0x80860000+0x20000: version 0x00000001 magic 0x0c0330db (match)
+KEBAB RPMH: slave 3: 22 entries at +0x0
+KEBAB RPMH: slave 3: 10 entries at +0x350
+KEBAB RPMH: slave 5: 37 entries at +0x458
+KEBAB RPMH: slave 4: 67 entries at +0x8f8
+KEBAB RPMH: ldoa13: addr 0x00040c00 len 4 offset 104
+KEBAB RPMH: ldoc1: addr 0x00042f00 len 4 offset 192
+KEBAB RPMH: drv-2 0x18220000, tcs_base +0xd00
+KEBAB RPMH: common irq_en 0x00000001 irq_status 0x00000000 control 0x01010000 status 0x00000001 cmd_enable 0x00000003
+KEBAB RPMH: tcs 0: enable 0x00000003 msgid 0x00010108 addr 0x00030000 data 0x00000005 status 0x00010101
+KEBAB RPMH: tcs 1: enable 0x00000000 msgid 0x00000000 addr 0x00000000 data 0x00000000 status 0x00000000
+```
+
+### 4. 资源地址怎么读
+
+`addr` 的 bit 19:16 是加速器类型（`ACCL_TYPE`），`4` = VREG；低 16 位是 VRM
+资源基址。所以：
+
+| 资源 | cmd-db addr | VRM 基址 | ENABLE（`+0x4`） |
+| --- | --- | --- | --- |
+| `ldoa13` | `0x00040c00` | `0x0c00` | `0x0c04` |
+| `ldoc1` | `0x00042f00` | `0x2f00` | `0x2f04` |
+
+这与 VRM 资源内偏移 `VOLTAGE 0x0 / ENABLE 0x4 / MODE 0x8` 对得上。
+
+### 5. 第一次跑的一个边界 bug
+
+第一次把条目数上限写成 64，而 VREG slave 有 67 条，正好被当成“不可信”跳过，
+所以没打印出两条地址。改成 1024，并保留逐条窗口检查（`offset + 24 > 0x20000`
+即停止），第二次才得到上面的结果。
+
+### 6. TCS 状态
+
+`common irq_en = 1`、`status = 1`、`cmd_enable = 3`（两个 active TCS 均可用）；
+TCS0 里残留一条已完成请求（`msgid 0x00010108`、`addr 0x00030000`、`data 5`，
+type 3 = CLK），TCS1 全零空闲。这条残留不是本内核发的，读它不影响任何状态。
+
+### 7. 验证边界
+
+- 实测：`RPMH?` 的完整输出、cmd-db 魔数与版本、两个资源地址、drv-2 与 TCS 状态；
+- 未做：任何 RSC/TCS 写、任何 VRM 请求、任何 PMIC 写；
+- R4（请求编码与离线测试）尚未实现，等这一步的日志确认后再做。
