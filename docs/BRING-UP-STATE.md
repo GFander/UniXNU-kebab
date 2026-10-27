@@ -4788,3 +4788,55 @@ EBS 之后直接写像素表示 `last_stage`，不调用 GOP。
 | TCS1 所有权 | UNKNOWN |
 
 真实 RPMh 写入继续 NO-GO。
+
+## 五十六、O3-C6-E4b-F2：并发计数、阶段一致性与入口拆分
+
+### 1. 修复
+
+| 问题 | 处理 |
+| --- | --- |
+| `committed` 可倒退 | 删除共享计数；槽位以 release 发布的 `seq` 为准，读者逐槽检查 `seq != 0` |
+| 阶段字段数据竞争 | 用一个 64 位原子 `newest = (seq << 32) | stage`，晚提交的旧槽不会让显示回退，阶段与序号不会错配 |
+| 全零目标测试假阳性 | 测试先 `test_reset()` 再以全零目标 init，单独断言 `target_valid() == 0`、`claimed == 0` |
+| GUID 只比指针 | 目标可保存 16 字节 GUID；有值时按内容比较，指针只作快速关联 |
+| 全局/目标事件混用 | 拆成 `event_add_global()`（仅 E1/E2/E7/E8）与 `event_add_target()`（需完整身份） |
+| `lost` 含义混杂 | 拆成 `overflow`（容量耗尽）与 `rejected`（身份不符） |
+
+### 2. 可复现的乱序提交测试
+
+新增测试钩子 `test_delay_slot(slot, spins)`：让先领取 slot 0 的线程在发布前停留，
+另一个线程先提交 slot 1。测试断言：
+
+- `ev[0].seq == 1`、`ev[1].seq == 2`（两者都提交）；
+- `newest >> 32 == 2`（不是 1，说明旧槽晚提交没有让阶段/序号倒退）。
+
+### 3. 测试
+
+```text
+24 checks, 0 failure(s)
+```
+
+覆盖全局/目标入口互斥、全零目标、接口/GUID 指针/GUID 内容三种身份拒绝、
+ENTER/RETURN 顺序、乱序提交、溢出与拒绝分开计数。
+
+### 4. 仍未做
+
+- `ProbeWrite()` 的屏障与 Cache 维护；
+- ConfigurationTable → DarwinBoot → ADT/boot_args → XNU 交接；
+- Mu_Basecore 插桩与隔离编译；
+- `newest` 的读者侧约定要写进 XNU 读取代码（acquire load + 逐槽 `seq`）。
+
+### 5. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| 原子领取唯一槽位 | 通过 |
+| 提交计数并发正确性 | 已改为逐槽 `seq`，乱序测试通过 |
+| 最新阶段一致性 | 单 64 位原子 |
+| 身份（含 GUID 内容） | 已实现并测试 |
+| 全局/目标归属 | 已拆分 |
+| 固件集成 | 未开始 |
+| 历史挂死根因 | UNKNOWN |
+| TCS1 所有权 | UNKNOWN |
+
+真实 RPMh 写入继续 NO-GO。

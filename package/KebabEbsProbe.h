@@ -1,17 +1,20 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
 /*
- * Kebab EBS probe record (E4b-F revision).
+ * Kebab EBS probe record (E4b-F2 revision).
  *
  * Fixed, pre-allocated record written without allocation or UEFI services.
- * Three properties are enforced here rather than left to callers:
+ * Rules this revision enforces:
  *
- *   - identity: only events matching the recorded handle/GUID/interface are
- *     written, and the check lives inside the event entry point;
- *   - reentry: a slot is claimed with an atomic fetch_add, so concurrent
- *     writers never share an index, and a full record sets a loss flag;
- *   - commit: last_attempted_stage is set before the write and
- *     last_committed_stage only after the slot is published, so a hang tells
- *     "entered" apart from "committed".
+ *   - a slot index is claimed with an atomic fetch_add, but a slot only counts
+ *     as committed once its seq is released; readers must look at seq, not at
+ *     a shared count that can regress when commits finish out of order;
+ *   - the newest stage is tracked as (seq, stage) in one 64-bit atomic, so the
+ *     display cannot go backwards or pair a stage with someone else's seq;
+ *   - global lifecycle events (E1/E2/E7/E8) and target events (E3..E6) have
+ *     separate entry points, so a global event never needs a fake protocol
+ *     identity and a foreign driver still cannot fake a target event;
+ *   - identity compares handle, GUID pointer and, when available, the 128-bit
+ *     GUID value plus the interface pointer.
  */
 #ifndef KEBAB_EBS_PROBE_H
 #define KEBAB_EBS_PROBE_H
@@ -19,9 +22,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Bytes K R S C in memory (little endian), not the old 0x4b525343. */
+/* Bytes K R S C in memory (little endian). */
 #define KEBAB_EBS_MAGIC   0x4353524bu
-#define KEBAB_EBS_VERSION 2u
+#define KEBAB_EBS_VERSION 3u
 #define KEBAB_EBS_EVENTS  64u
 
 typedef enum {
@@ -41,7 +44,7 @@ typedef enum {
 } kebab_ebs_stage;
 
 typedef struct {
-	uint32_t seq;              /* 1-based; 0 means the slot is not committed */
+	uint32_t seq;              /* 0 = claimed but not committed */
 	uint32_t stage;
 	uint32_t context;
 	uint32_t status;
@@ -53,45 +56,46 @@ typedef struct {
 	uint32_t version;
 	uint32_t record_size;
 	uint32_t capacity;
-	uint32_t claimed;          /* slots claimed, may include unfinished */
-	uint32_t committed;        /* slots fully published */
-	uint32_t lost;             /* record full or identity rejected */
-	uint32_t last_attempted_stage;
-	uint32_t last_committed_stage;
+	uint32_t claimed;
+	uint32_t overflow;         /* capacity exhausted */
+	uint32_t rejected;         /* identity refused */
+	uint32_t pad;
+	uint64_t newest;           /* (seq << 32) | stage, atomic */
 	kebab_ebs_event ev[KEBAB_EBS_EVENTS];
 } kebab_ebs_record;
 
 typedef struct {
 	uint64_t handle;
 	uint64_t guid_ptr;
-	uint64_t guid_lo;
-	uint64_t guid_hi;
+	uint8_t  guid[16];
+	uint32_t have_guid;
 	uint64_t interface;
 	uint32_t valid;
 } kebab_ebs_target;
 
 typedef void (*kebab_ebs_mirror)(uint32_t stage, void *ctx);
 
-/* One record and one mirror for the boot; re-init after EBS is refused. */
 void kebab_ebs_init(kebab_ebs_record *rec, kebab_ebs_target *target,
     kebab_ebs_mirror mirror, void *ctx);
-int kebab_ebs_sealed(void);
-
-#ifdef KEBAB_EBS_TESTING
-/* Host tests only; never linked into firmware. */
-void kebab_ebs_test_reset(void);
-#endif
-
 void kebab_ebs_target_set(kebab_ebs_target *t, uint64_t handle,
-    uint64_t guid_ptr, uint64_t guid_lo, uint64_t guid_hi, uint64_t interface);
+    uint64_t guid_ptr, uint64_t interface);
+void kebab_ebs_target_set_guid(kebab_ebs_target *t, const uint8_t guid[16]);
 int kebab_ebs_target_valid(const kebab_ebs_target *t);
 int kebab_ebs_target_matches(const kebab_ebs_target *t, uint64_t handle,
-    uint64_t guid_ptr, uint64_t prot_interface);
+    uint64_t guid_ptr, const uint8_t guid[16], uint64_t prot_interface);
 
-/* Returns 1 when the event was committed, 0 when it was refused (identity,
- * uninitialised record) or lost to a full record. */
-int kebab_ebs_event_add(kebab_ebs_stage stage, uint64_t handle,
-    uint64_t guid_ptr, uint64_t prot_interface, uint32_t context,
-    uint64_t object, uint32_t status);
+/* Global lifecycle events: only E1, E2, E7 and E8 are accepted. */
+int kebab_ebs_event_add_global(kebab_ebs_stage stage, uint64_t object,
+    uint32_t status);
+/* Target events: full identity required. */
+int kebab_ebs_event_add_target(kebab_ebs_stage stage, uint64_t handle,
+    uint64_t guid_ptr, const uint8_t guid[16], uint64_t prot_interface,
+    uint32_t context, uint64_t object, uint32_t status);
+
+#ifdef KEBAB_EBS_TESTING
+void kebab_ebs_test_reset(void);
+/* Hold a claimed slot for a while, to force out-of-order commits. */
+void kebab_ebs_test_delay_slot(uint32_t slot, uint32_t spins);
+#endif
 
 #endif /* KEBAB_EBS_PROBE_H */
