@@ -10,7 +10,7 @@
  *     a shared count that can regress when commits finish out of order;
  *   - the newest stage is tracked as (seq, stage) in one 64-bit atomic, so the
  *     display cannot go backwards or pair a stage with someone else's seq;
- *   - global lifecycle events (E1/E2/E7/E8) and target events (E3..E6) have
+ *   - global lifecycle events (E1/E2/E8) and target events (E3..E7) have
  *     separate entry points, so a global event never needs a fake protocol
  *     identity and a foreign driver still cannot fake a target event;
  *   - identity compares handle, GUID pointer and, when available, the 128-bit
@@ -88,6 +88,12 @@ typedef struct {
 } kebab_ebs_callback;
 void kebab_ebs_set_callback(kebab_ebs_callback *cb, uint64_t notify,
     uint64_t event);
+/* One-shot bindings: the first successful call wins, later calls are refused
+ * so a later driver cannot hijack the identity. */
+int kebab_ebs_bind_callback(kebab_ebs_callback *cb, uint64_t notify,
+    uint64_t event);
+int kebab_ebs_bind_target(kebab_ebs_target *t, uint64_t handle,
+    uint64_t guid_ptr, const uint8_t guid[16], uint64_t interface);
 
 void kebab_ebs_init(kebab_ebs_record *rec, kebab_ebs_target *target,
     kebab_ebs_mirror mirror, void *ctx);
@@ -98,7 +104,8 @@ int kebab_ebs_target_valid(const kebab_ebs_target *t);
 int kebab_ebs_target_matches(const kebab_ebs_target *t, uint64_t handle,
     uint64_t guid_ptr, const uint8_t guid[16], uint64_t prot_interface);
 
-/* Global lifecycle events: only E1, E2 and E8 are accepted. */
+/* Global lifecycle events: only E1, E2 and E8 are accepted.  E7 is the
+ * callback-return counterpart of E3 and goes through the callback entry. */
 int kebab_ebs_event_add_global(kebab_ebs_stage stage, uint64_t object,
     uint32_t status);
 /* Target events: full identity required. */
@@ -115,8 +122,6 @@ void kebab_ebs_test_reset(void);
 /* Block the commit of one slot until kebab_ebs_test_release_slot(). */
 void kebab_ebs_test_block_slot(uint32_t slot);
 void kebab_ebs_test_release_slot(void);
-/* Hold a claimed slot for a while, to force out-of-order commits. */
-void kebab_ebs_test_delay_slot(uint32_t slot, uint32_t spins);
 #endif
 
 #endif /* KEBAB_EBS_PROBE_H */

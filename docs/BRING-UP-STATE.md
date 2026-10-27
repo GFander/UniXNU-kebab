@@ -4881,3 +4881,49 @@ ENTER/RETURN 顺序、乱序提交、溢出与拒绝分开计数。
 | TCS1 所有权 | UNKNOWN |
 
 真实 RPMh 写入继续 NO-GO。
+
+## 五十八、O3-C6-E4c：一次性身份绑定与接口清理
+
+### 1. 本轮改动
+
+- 新增一次性绑定：`kebab_ebs_bind_callback()` 与 `kebab_ebs_bind_target()`，
+  首次成功后 `g_cb_bound`/`g_target_bound` 置位，后续绑定一律拒绝，防止后来者
+  改写已记录的身份；
+- 绑定目标时同时写入 16 字节 GUID（有则按内容比较）；
+- 清理头文件：删除已无实现的 `kebab_ebs_test_delay_slot()` 声明与重复 `#endif`；
+- 修正注释：E7 是 E3 的返回侧，走回调入口，不属于全局白名单。
+
+### 2. 测试 32 项
+
+新增 6 项：第一次绑定成功、第二次拒绝、身份字段保持不变；目标绑定同样一次性，
+且 GUID 内容被保存。
+
+```text
+32 checks, 0 failure(s)
+```
+
+### 3. framebuffer 的定位
+
+按评审意见，framebuffer 只作 **best-effort 故障显示**：`mirror` 收到的是已发布的
+`newest`，显示端自己再做单调保护；权威证据始终是逐槽 `seq` 的内存记录。真正接入
+Mu 时若事件记录与显示都在同一执行上下文串行完成，就不需要额外的锁。
+
+### 4. 仍未做（E4c 剩余）
+
+- `ProbeWrite()` 的 AArch64 后端：`dsb` 与按内存属性决定的 `dc cvac`；
+- 记录页属性检查（MAIR/页表），不能只看 `EfiReservedMemoryType`；
+- `ConfigurationTable → DarwinBoot → ADT/boot_args → XNU` 交接与读取侧校验；
+- Mu_Basecore 插桩与五类故障注入。
+
+### 5. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| 一次性身份绑定 | 已实现并测试 |
+| 头文件清理 | 完成 |
+| ProbeWrite / Cache 可见性 | 未实现 |
+| 交接链 | 未实现 |
+| 历史挂死根因 | UNKNOWN |
+| TCS1 所有权 | UNKNOWN |
+
+真实 RPMh 写入继续 NO-GO。

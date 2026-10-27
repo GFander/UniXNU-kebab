@@ -3,6 +3,8 @@
 
 #include <string.h>
 
+static int g_cb_bound;
+static int g_target_bound;
 static kebab_ebs_record *g_rec;
 static kebab_ebs_target *g_target;
 static kebab_ebs_callback *g_cb;
@@ -249,6 +251,8 @@ kebab_ebs_test_reset(void)
 	g_sealed = 0;
 	g_block_slot = UINT32_MAX;
 	g_released = 0;
+	g_cb_bound = 0;
+	g_target_bound = 0;
 }
 
 void
@@ -264,3 +268,33 @@ kebab_ebs_test_release_slot(void)
 	__atomic_store_n(&g_released, 1u, __ATOMIC_RELEASE);
 }
 #endif
+
+/* One-shot bindings: the first valid call wins; a second attempt is refused
+ * so a later driver cannot replace the recorded identity. */
+
+int
+kebab_ebs_bind_callback(kebab_ebs_callback *cb, uint64_t notify, uint64_t event)
+{
+	if (g_cb_bound != 0 || cb == NULL || notify == 0 || event == 0) {
+		return 0;
+	}
+	kebab_ebs_set_callback(cb, notify, event);
+	g_cb_bound = 1;
+	return 1;
+}
+
+int
+kebab_ebs_bind_target(kebab_ebs_target *t, uint64_t handle, uint64_t guid_ptr,
+    const uint8_t guid[16], uint64_t interface)
+{
+	if (g_target_bound != 0 || t == NULL || handle == 0 ||
+	    interface == 0) {
+		return 0;
+	}
+	kebab_ebs_target_set(t, handle, guid_ptr, interface);
+	if (guid != NULL) {
+		kebab_ebs_target_set_guid(t, guid);
+	}
+	g_target_bound = 1;
+	return 1;
+}

@@ -171,6 +171,28 @@ int main(void)
 		    "overflow flagged, rejection untouched");
 	}
 
+	printf("B1 one-shot identity bindings\n");
+	kebab_ebs_test_reset();
+	memset(&cb, 0, sizeof(cb));
+	memset(&tgt, 0, sizeof(tgt));
+	CHECK(kebab_ebs_bind_callback(&cb, 0xd000, 0xe000) == 1,
+	    "first callback bind wins");
+	CHECK(kebab_ebs_bind_callback(&cb, 0xdead, 0xbeef) == 0,
+	    "second callback bind refused");
+	CHECK(cb.notify == 0xd000 && cb.event == 0xe000, "identity unchanged");
+	{
+		uint8_t g[16];
+
+		memset(g, 0x33, sizeof(g));
+		CHECK(kebab_ebs_bind_target(&tgt, 0xa000, 0xb000, g, 0xc000) == 1,
+		    "first target bind wins");
+		CHECK(kebab_ebs_bind_target(&tgt, 0x1, 0x2, g, 0x3) == 0,
+		    "second target bind refused");
+		CHECK(tgt.handle == 0xa000 && tgt.have_guid == 1,
+		    "target identity and GUID kept");
+	}
+	kebab_ebs_test_reset();
+
 	printf("\n%d checks, %d failure(s)\n", checks, failures);
 	return failures == 0 ? 0 : 1;
 }
