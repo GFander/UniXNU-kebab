@@ -4738,3 +4738,53 @@ EBS 之后直接写像素表示 `last_stage`，不调用 GOP。
 | TCS1 所有权 | UNKNOWN |
 
 真实 RPMh 写入继续 NO-GO；本轮没有修改固件或设备镜像。
+
+## 五十五、O3-C6-E4b-F：记录器的六项收紧
+
+### 1. 改动
+
+| 编号 | 问题 | 处理 |
+| --- | --- | --- |
+| F1 | 身份匹配与写入分离 | `kebab_ebs_event_add()` 内部先比较 handle/GUID/接口指针，不匹配直接返回 0，**不碰 `last_attempted_stage`、不调 mirror** |
+| F1b | GUID 只有指针 | 目标结构拆成 `guid_ptr` 与 `guid_lo/hi`，目前比较指针，16 字节值比较留给接入时使用 |
+| F2 | 重入无保护 | 用 `__atomic_fetch_add(&claimed, 1)` 领取槽位，两个线程不会拿到同一槽；越界只置 `lost`，不覆盖 |
+| F3 | 进入与提交不分 | `last_attempted_stage` 在写前设置，`last_committed_stage` 在 `seq` 用 release 存储发布后才设置；未提交槽的 `seq == 0` |
+| F4 | 记录区与 mirror 生命周期不一致 | 单一全局记录区 + 单一 mirror，`g_sealed` 保证一次启动只能 init 一次 |
+| F5 | E4b/E4c 进入返回同码 | 拆成 `E4B_ENTER/E4B_RETURN`、`E4C_ENTER/E4C_RETURN`、`E5_ENTER/E6_RETURN` |
+| F6 | magic 字节序 | 改为 `0x4353524b`（内存里是 `4b 52 53 43` = “KRSC”），结构加 `version`、`record_size`、`capacity` |
+
+### 2. 测试 24 项
+
+新增/改写的用例：
+
+- 错误接口、错误 GUID 指针：返回 0，`committed == 0`，`last_attempted_stage` 不变，
+  `lost == 1`；
+- 全零目标：拒绝一切写入；
+- ENTER/RETURN 顺序、`seq` 从 1 开始、`last_committed_stage` 跟随最后一次成功写入；
+- 未使用槽 `seq == 0`（“进入但未提交”可与“已提交”区分）；
+- **两个线程各写 33 次**：64 条全部唯一序号，第 65 次置 `lost`；
+- init 之后 `sealed`，第二次 init 不触碰别的记录区。
+
+```text
+24 checks, 0 failure(s)
+```
+
+### 3. 仍未做
+
+- `ProbeWrite()` 的屏障与 Cache 维护；
+- ConfigurationTable → DarwinBoot → ADT/boot_args → XNU 的交接验证；
+- Mu_Basecore 内的插桩与隔离编译。
+
+### 4. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| 身份过滤内聚 | 已实现并测试 |
+| 原子槽位与丢失标记 | 已实现并测试 |
+| 进入/提交/返回区分 | 已实现并测试 |
+| 记录区生命周期 | 单实例、一次性初始化 |
+| 固件集成 | 未开始 |
+| 历史挂死根因 | UNKNOWN |
+| TCS1 所有权 | UNKNOWN |
+
+真实 RPMh 写入继续 NO-GO。

@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: BSD-2-Clause-Patent */
-/* Host tests for the EBS probe record: ordering, overflow, identity match. */
+/* Host tests for the EBS probe record (E4b-F revision). */
 #include "KebabEbsProbe.h"
 
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -28,82 +29,119 @@ static void mirror(uint32_t stage, void *ctx)
 	mirror_calls++;
 }
 
+static kebab_ebs_record rec;
+static kebab_ebs_target tgt;
+
+static void fresh(void)
+{
+	kebab_ebs_test_reset();
+	memset(&rec, 0, sizeof(rec));
+	memset(&tgt, 0, sizeof(tgt));
+	kebab_ebs_target_set(&tgt, 0xa000, 0xb000, 0x1111, 0x2222, 0xc000);
+	kebab_ebs_init(&rec, &tgt, mirror, NULL);
+}
+
+static int add_ok(kebab_ebs_stage s, uint32_t ctx)
+{
+	return kebab_ebs_event_add(s, 0xa000, 0xb000, 0xc000, ctx, 0x1234, 0);
+}
+
+static void *writer(void *arg)
+{
+	int i;
+	(void)arg;
+
+	for (i = 0; i < 33; i++) {
+		(void)add_ok(KEBAB_EBS_E1, 1);
+	}
+	return NULL;
+}
+
 int main(void)
 {
-	kebab_ebs_record rec;
-	kebab_ebs_record *heap = &rec;
-	kebab_ebs_target t;
-	uint32_t i;
 
-	printf("P1 record init and ordering\n");
-	memset(&rec, 0, sizeof(rec));
-	kebab_ebs_init(heap, mirror, NULL);
+	printf("F1 identity is enforced inside the entry point\n");
+	{
+		uint32_t attempted;
+
+		fresh();
+		attempted = rec.last_attempted_stage;
+		CHECK(kebab_ebs_event_add(KEBAB_EBS_E4, 0xa000, 0xb000, 0xdead, 1,
+		    0, 0) == 0, "wrong interface refused");
+		CHECK(rec.committed == 0 && rec.last_attempted_stage == attempted,
+		    "nothing written on refusal");
+		CHECK(rec.lost == 1, "refusal is recorded as lost");
+		CHECK(kebab_ebs_event_add(KEBAB_EBS_E4, 0xa000, 0xbeef, 0xc000, 1,
+		    0, 0) == 0, "wrong GUID pointer refused");
+	}
+
+	printf("F1b an invalid target refuses everything\n");
+	{
+		memset(&rec, 0, sizeof(rec));
+		memset(&tgt, 0, sizeof(tgt));
+		kebab_ebs_init(&rec, &tgt, NULL, NULL);
+		CHECK(kebab_ebs_event_add(KEBAB_EBS_E1, 0, 0, 0, 0, 0, 0) == 0,
+		    "all-zero target refuses");
+		CHECK(rec.committed == 0 && rec.last_attempted_stage == 0,
+		    "no write with an invalid target");
+	}
+
+	printf("F2 ordering, enter/return and commit fields\n");
+	fresh();
 	mirror_calls = 0;
-	kebab_ebs_event_add(heap, KEBAB_EBS_E1, 1, 0, 0);
-	kebab_ebs_event_add(heap, KEBAB_EBS_E2, 1, 0, 0);
-	CHECK(rec.magic == KEBAB_EBS_MAGIC, "magic set");
-	CHECK(rec.count == 2, "two events recorded");
-	CHECK(rec.ev[0].seq == 0 && rec.ev[1].seq == 1, "sequence is monotonic");
-	CHECK(rec.ev[0].stage == KEBAB_EBS_E1 && rec.ev[1].stage == KEBAB_EBS_E2,
-	    "stages stored in order");
-	CHECK(rec.last_stage == KEBAB_EBS_E2, "last stage mirrored");
-	CHECK(mirror_calls == 2 && mirror_stage == KEBAB_EBS_E2,
-	    "mirror saw both writes");
+	CHECK(add_ok(KEBAB_EBS_E4, 7) == 1, "E4 committed");
+	CHECK(add_ok(KEBAB_EBS_E4B_ENTER, 7) == 1, "E4B_ENTER committed");
+	CHECK(add_ok(KEBAB_EBS_E4B_RETURN, 7) == 1, "E4B_RETURN committed");
+	CHECK(add_ok(KEBAB_EBS_E4C_ENTER, 7) == 1, "E4C_ENTER committed");
+	CHECK(add_ok(KEBAB_EBS_E4C_RETURN, 7) == 1, "E4C_RETURN committed");
+	CHECK(add_ok(KEBAB_EBS_E5_ENTER, 7) == 1, "E5_ENTER committed");
+	CHECK(add_ok(KEBAB_EBS_E6_RETURN, 7) == 1, "E6_RETURN committed");
+	CHECK(rec.committed == 7 && rec.claimed == 7, "counts agree");
+	CHECK(rec.ev[0].seq == 1 && rec.ev[6].seq == 7, "sequence is 1-based");
+	CHECK(rec.ev[2].stage == KEBAB_EBS_E4B_RETURN, "return stage distinct");
+	CHECK(rec.last_committed_stage == KEBAB_EBS_E6_RETURN,
+	    "last committed stage tracks the write");
+	CHECK(mirror_calls == 7, "mirror called per committed event");
 
-	printf("P2 nested uninstall keeps history\n");
-	memset(&rec, 0, sizeof(rec));
-	kebab_ebs_init(heap, NULL, NULL);
+	printf("F3 uncommitted slots are visible as seq == 0\n");
+	CHECK(rec.ev[7].seq == 0, "slot past the last write is empty");
+
+	printf("F4 real reentry: two threads, no shared slot\n");
+	fresh();
 	{
-		kebab_ebs_stage seq[] = {
-			KEBAB_EBS_E4, KEBAB_EBS_E4A, KEBAB_EBS_E4B,
-			KEBAB_EBS_E4C, KEBAB_EBS_E4B, KEBAB_EBS_E5,
-			KEBAB_EBS_E6
-		};
+		pthread_t a, b;
 
-		for (i = 0; i < sizeof(seq)/sizeof(seq[0]); i++) {
-			kebab_ebs_event_add(heap, seq[i], 7, 0x1000 + i, 0);
+		pthread_create(&a, NULL, writer, NULL);
+		pthread_create(&b, NULL, writer, NULL);
+		pthread_join(a, NULL);
+		pthread_join(b, NULL);
+	}
+	{
+		int ok = 1, seen[KEBAB_EBS_EVENTS + 1];
+		uint32_t k;
+
+		memset(seen, 0, sizeof(seen));
+		for (k = 0; k < rec.committed && k < KEBAB_EBS_EVENTS; k++) {
+			if (rec.ev[k].seq != k + 1) {
+				ok = 0;
+			}
+			seen[rec.ev[k].seq % 65]++;
 		}
+		CHECK(rec.committed == 64, "both threads filled the record");
+		CHECK(rec.lost == 1, "overflow of the 65th write is flagged");
+		CHECK(ok == 1, "every committed slot has a unique sequence");
 	}
-	CHECK(rec.count == 7, "all seven stages kept");
-	CHECK(rec.ev[3].stage == KEBAB_EBS_E4C, "OpenData free visible");
-	CHECK(rec.ev[4].stage == KEBAB_EBS_E4B, "second disconnect visible");
 
-	printf("P3 overflow is flagged, not silently dropped\n");
-	memset(&rec, 0, sizeof(rec));
-	kebab_ebs_init(heap, NULL, NULL);
-	for (i = 0; i < KEBAB_EBS_EVENTS + 5; i++) {
-		kebab_ebs_event_add(heap, KEBAB_EBS_E1, 1, i, 0);
-	}
-	CHECK(rec.count == KEBAB_EBS_EVENTS, "count capped at capacity");
-	CHECK(rec.overflow == 1, "overflow flag set");
-	CHECK(rec.ev[KEBAB_EBS_EVENTS - 1].object == KEBAB_EBS_EVENTS - 1,
-	    "last stored event intact");
-
-	printf("P4 identity match uses the interface pointer\n");
-	kebab_ebs_target_set(&t, 0xaaaa, 0xbbbb, 0xcccc);
-	CHECK(kebab_ebs_target_matches(&t, 0xaaaa, 0xbbbb, 0xcccc) == 1,
-	    "exact handle/guid/interface matches");
-	CHECK(kebab_ebs_target_matches(&t, 0xaaaa, 0xbbbb, 0xdddd) == 0,
-	    "another interface does not match");
-	CHECK(kebab_ebs_target_matches(&t, 0xaaaa, 0xeeee, 0xcccc) == 0,
-	    "another GUID does not match");
-	CHECK(kebab_ebs_target_matches(&t, 0xffff, 0xbbbb, 0xcccc) == 0,
-	    "another handle does not match");
+	printf("F5 the record is sealed after init\n");
+	fresh();
 	{
-		/* A PROTOCOL_INTERFACE pointer is never the interface value. */
-		uint64_t prot_object = 0x9999;
+		kebab_ebs_record other;
 
-		CHECK(kebab_ebs_target_matches(&t, 0xaaaa, 0xbbbb,
-		    prot_object) == 0, "the Prot object address is rejected");
-	}
-
-	printf("P5 unknown record refuses writes\n");
-	{
-		kebab_ebs_record bad;
-
-		memset(&bad, 0, sizeof(bad));
-		kebab_ebs_event_add(&bad, KEBAB_EBS_E1, 1, 0, 0);
-		CHECK(bad.count == 0, "record without magic is not written");
+		memset(&other, 0, sizeof(other));
+		kebab_ebs_init(&other, &tgt, NULL, NULL);
+		CHECK(kebab_ebs_sealed() == 1, "sealed flag set");
+		CHECK(other.magic == 0 && other.capacity == 0,
+		    "second init did not touch the other record");
 	}
 
 	printf("\n%d checks, %d failure(s)\n", checks, failures);
