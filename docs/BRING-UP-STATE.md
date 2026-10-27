@@ -3066,3 +3066,54 @@ fastboot 3.37 秒，`fastboot reboot` 回串口 20.0 秒；触摸追踪输出与
 
 - 实测：刷机、串口抓到整段启动、上表每一行日志。
 - 推断：总线被拉低的原因是供电或控制器状态；没有量电压，也没有抓 I2C 波形。
+
+## 二十五、触摸改为只读探针与控制台门控（0116）
+
+### 1. 上一轮真正停在哪
+
+QUPv3 那一轮的日志停在 `reset pulse done`。按 `kebab_touch_start()` 的顺序，之后
+下一步是 `kt_se_init()`，它要写 `SE_GENI_M_IRQ_CLEAR` 等 GENI 寄存器。所以失败点
+在“第一次 GENI 写”，不是 I²C 事务；之前把它说成“卡在第一次 I²C 传输”不准确。
+
+### 2. 0116 的改动
+
+- 启动路径只映射 MMIO，不再自动碰硬件；要跑旧路径需显式 `kebab_touch_boot=1`，
+  要只读探针需 `kebab_touch_probe=1`；
+- 控制台新增 `TOUCH?`（只读探针）与 `TOUCHINIT`（引脚、复位、`kt_se_init`、识别）；
+- 新增只读 GCC 探针：SE13 的三路时钟（`GCC_QUPV3_WRAP1_S5_CLK`、
+  `GCC_QUPV3_WRAP_1_M_AHB_CLK`、`GCC_QUPV3_WRAP_1_S_AHB_CLK`），只映射两个
+  4 KiB 页，不映射 2 MiB 的 GCC 块；
+- 新增 GENI/TLMM 只读转储与 `kt_se_init()` 每组写之前的 trace。
+
+### 3. 实测：TOUCH?
+
+```text
+KEBAB TOUCH: GCC 0x52008 = 0x063c83c0: wrap1_s5 0 m_ahb 1 s_ahb 1
+KEBAB TOUCH: GCC halt m_ahb 0x00000000 s_ahb 0x80000002 wrap1_s5 0x80004220
+KEBAB TOUCH: probe wrapper QUP_HW_VER 0x20050000
+KEBAB TOUCH: probe GENI_FW_REVISION_RO 0x00000303 protocol 3
+KEBAB TOUCH: probe GENI_STATUS 0x00000000 M_IRQ_STATUS 0x00000000 S_IRQ_STATUS 0x00000000
+KEBAB TOUCH: probe DMA_MODE_EN 0x00000000 CGC_CTRL 0x0000007f
+KEBAB TOUCH: probe SER_M_CLK_CFG 0x00000011 SCL_COUNTERS 0x00000000
+KEBAB TOUCH: probe TX_FIFO_STATUS 0x00000000 RX_FIFO_STATUS 0x00000000
+KEBAB TOUCH: probe pin 36 ctl 0x00000001 io 0x00000000
+KEBAB TOUCH: probe pin 37 ctl 0x00000001 io 0x00000000
+KEBAB TOUCH: probe pin 38 ctl 0x00000001 io 0x00000000
+KEBAB TOUCH: probe pin 39 ctl 0x00000001 io 0x00000000
+```
+
+### 4. 结论
+
+SE13 的两路 AHB 时钟是开的，**核心时钟 `WRAP1_S5` 没开**（`0x52008` 的 bit 27 为 0）。
+GENI 寄存器能通过 AHB 读，但 GENI 状态机没有核心时钟就不会推进；这与“读完
+`FW_REVISION_RO` 之后第一次写 GENI 就失去可观测性”相吻合。
+
+`GENI_STATUS`、主从中断状态、`DMA_MODE_EN` 全为 0，`SCL_COUNTERS` 也是 0，
+说明这个 SE 从来没有被配置过 I²C 时序，之前能读到的协议号来自固件寄存器本身。
+
+### 5. 验证边界
+
+- 实测：构建 0 error；`TOUCH?` 的完整输出；启动路径不再碰硬件。
+- 推断：核心时钟缺失是 GENI 写失败的原因；尚未置位验证，也没有量过时钟。
+- 下一步（0117）：先只读 S5 的 RCG（`0x18600` 一带），再单独置位 `0x52008`
+  bit 27，回读 halt 寄存器；确认时钟真的跑起来之后，才用 `TOUCHINIT` 去写 GENI。
