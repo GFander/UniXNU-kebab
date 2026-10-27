@@ -27,9 +27,15 @@ KebabFwLogDxeEntry (
   Status  = gBS->AllocatePages (AllocateAddress, EfiReservedMemoryType,
                   KEBAB_FWLOG_PAGES, &Address);
   if (EFI_ERROR (Status)) {
+    //
+    // Expected: MemoryMapLib describes this range as EfiReservedMemoryType
+    // ("Kebab FwLog"), so the page already belongs to us and AllocatePages
+    // cannot hand it out.  The descriptor is the contract; carrying on is what
+    // makes the ring visible (bailing out here is the 0x9FF00000 bug).
+    //
     DEBUG ((DEBUG_ERROR,
-      "[KFLG] reserve %lx failed: %r\n", (UINT64)KEBAB_FWLOG_PA, Status));
-    return EFI_SUCCESS;
+      "[KFLG] %lx already reserved by the memory map (%r); using it\n",
+      (UINT64)KEBAB_FWLOG_PA, Status));
   }
 
   Log = (KEBAB_FWLOG *)(UINTN)Address;

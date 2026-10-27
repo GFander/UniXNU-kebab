@@ -30,7 +30,7 @@
 | --- | --- |
 | `KebabFwLog.h` | 固定物理页、`KFLG` 头和 256 KiB 环的布局；拷到 `SiliciumPkg/Include/` |
 | `KebabFwLog.c` | `KebabFwLogAppend()` 的独立实现（参考实现，当前集成里不被任何 `.inf` 编译） |
-| `KebabFwLogDxe.c` / `.inf` | 保留 `0x9FF00000` 的 64 页并写入 magic 的 DXE 驱动 |
+| `KebabFwLogDxe.c` / `.inf` | 往 `0xF44C0000` 的 64 页写入 magic 的 DXE 驱动；页面由 `MemoryMapLib` 的 `Kebab FwLog` 描述符保留 |
 | `KebabRpmhProbeDxe.c` / `.inf` | 只读 RPMh 探针：`t5` 与 `eod` 两次转储 |
 
 `KebabFwLog.h` 必须放在包的公共 include 目录 `SiliciumPkg/Include/`，因为
@@ -134,7 +134,7 @@ KRP: probe armed: t5 in 5 s, eod on EndOfDxe
 
 ### 5.1 KFLG 环
 
-固定物理地址 `0x9FF00000`，64 页 = `0x40000`（256 KiB），头部 16 字节：
+固定物理地址 `0xF44C0000`，64 页 = `0x40000`（256 KiB），头部 16 字节：
 
 ```text
 偏移    类型   含义
@@ -144,11 +144,13 @@ KRP: probe armed: t5 in 5 s, eod on EndOfDxe
 +0x10   u8[]   data  = 环；绝对偏移 p 的字节在 data[p % size]
 ```
 
-`KebabFwLogDxe` 用 `AllocatePages(AllocateAddress, EfiReservedMemoryType, 64)` 保留
-这一页，依次写 `Magic=0`、`Size`、`Head=0`、fence、`Magic='KFLG'`。成功后这一页在
-UEFI 内存图里是 reserved，内核能按固定物理地址找到它；失败时它只打一行
-`[KFLG] reserve ... failed`，magic 不会写，串口库的 append 一直是 no-op，内核会
-报 `no 'KFLG' magic`。
+这一页的归属由 `kebabPkg` 的 `MemoryMapLib` 描述符 `{"Kebab FwLog", 0xF44C0000,
+0x00040000, ..., Reserv, ...}` 决定：PEI 阶段就把它标成 `EfiReservedMemoryType`，
+所以 DXE 的 `AllocatePages()` 必然失败（`EFI_NOT_FOUND`），`KebabFwLogDxe` 只把失败
+当提示，照常写 `Magic=0`、`Size`、`Head=0`、fence、`Magic='KFLG'`。描述符才是契约；
+第一次真机测试的 `0x9FF00000` 其实是 `SEC Heap`（`0x9FF00000 + 0x8C000`，BsData），
+`AllocatePages` 失败后驱动直接返回，magic 从未写入，内核读到 SEC 堆里的数据并报
+`no firmware log attached`。
 
 生产者是 `FrameBufferSerialPortLib` 的 `SerialPortWrite()`：它在把字节画到 GOP 之前
 调用 `KebabFwLogAppend(Buffer, NumberOfBytes)`。所以固件屏幕上的文本同时进了环；
@@ -156,10 +158,11 @@ UEFI 内存图里是 reserved，内核能按固定物理地址找到它；失败
 
 注意两点：
 
-* `0x9FF00000` 正好在 FD 结束处（`0x9FC00000 + 0x300000`）。保留失败通常说明这段
-  地址已被别的描述符占用；不要改内核单方面地址，三处必须一致：
-  `KebabFwLog.h` 的 `KEBAB_FWLOG_PA`、串口库里的副本、内核 0129 的
-  `KEBAB_FWLOG_PA`。
+* `0xF44C0000` 是从原 `DXE Heap`（`0xB0000000 + 0x04500000`）顶部切出的 256 KiB，
+  `DXE Heap` 相应缩短为 `0x044C0000`。它在交给内核的 `0xA0000000..0xB0000000`
+  之外，也不与 `SEC Heap`、`CPU Vectors`、`MMU PageTables`、`UEFI Stack`、
+  `Log Buffer`、`Info Blk` 重叠。三处地址必须一致：`KebabFwLog.h` 的
+  `KEBAB_FWLOG_PA`、串口库里的副本、内核 0129 的 `KEBAB_FWLOG_PA`。
 * 驱动跑起来之前串口库的输出不会被记录（magic 还是 0）。这是有意的：DXE core
   还拥有那页内存时，不能往里写。
 

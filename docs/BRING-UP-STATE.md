@@ -4940,7 +4940,7 @@ UEFI 侧在固定物理地址留一个 256 KiB 的环，内核只读地把它映
 
 | 项 | 值 |
 | --- | --- |
-| 物理地址 | `0x9FF00000` |
+| 物理地址 | `0xF44C0000` |
 | 大小 | 64 页 = `0x40000`（256 KiB） |
 | 头部 | 16 字节：`u32 magic`、`u32 size`、`u64 head` |
 | magic | `0x474c464b`（小端字节 `'K' 'F' 'L' 'G'`） |
@@ -4948,19 +4948,23 @@ UEFI 侧在固定物理地址留一个 256 KiB 的环，内核只读地把它映
 | head | 历史累计写入字节数（单调），release store |
 | data | 从 `+0x10` 开始；绝对偏移 `p` 的字节在 `data[p % size]` |
 
-`KebabFwLogDxe` 用 `AllocatePages(AllocateAddress, EfiReservedMemoryType, 64)`
-保留这一页，然后依次写 `Magic = 0`、`Size`、`Head = 0`、fence、
-`Magic = 'KFLG'`。成功后这一页在 UEFI 内存图里是 reserved，内核按固定物理地址
-找得到。保留失败时只打一行 `[KFLG] reserve ... failed`，magic 永远不写，
-`KebabFwLogAppend()` 一直是 no-op，内核会明确报告 absent，而不是读一页垃圾。
+这一页的归属由 `kebabPkg` 的 `MemoryMapLib` 描述符 `{"Kebab FwLog", 0xF44C0000,
+0x00040000, ..., Reserv, ...}` 决定：PEI 阶段就把它标成 `EfiReservedMemoryType`，
+DXE 的 `AllocatePages()` 必然拿不到（`EFI_NOT_FOUND`），`KebabFwLogDxe` 只把失败
+当提示，照常写 `Magic = 0`、`Size`、`Head = 0`、fence、`Magic = 'KFLG'`。描述符
+才是契约。第一次真机测试用的 `0x9FF00000` 恰好是 `SEC Heap`（`0x9FF00000` +
+`0x8C000`，`BsData`），`AllocatePages` 失败后驱动直接返回，magic 从未写入；内核
+读到的是 SEC 堆里的 `0x00380001`，于是报 `no firmware log attached`。
 
 生产者是 `FrameBufferSerialPortLib` 的 `SerialPortWrite()`：它在把字节画到 GOP
 之前调用 `KebabFwLogAppend(Buffer, NumberOfBytes)`，所以屏幕上的固件文本同时进了
 环。`KebabFwLogAppend()` 不分配、不调用 UEFI 服务：magic 未置位时直接返回；写了
 就按 64 位取模推进，最后用 release store 发布 `head`。
 
-`0x9FF00000` 正好在 FD 结束处（`0x9FC00000 + 0x300000`）。如果它已被别的描述符
-占用，保留会失败；地址在三处必须一致：`KebabFwLog.h` 的 `KEBAB_FWLOG_PA`、串口库
+`0xF44C0000` 是从原 `DXE Heap`（`0xB0000000 + 0x04500000`）顶部切出的 256 KiB，
+`DXE Heap` 相应缩短为 `0x044C0000`；它在交给内核的 `0xA0000000..0xB0000000` 之外，
+也不与 `SEC Heap`、`CPU Vectors`、`MMU PageTables`、`UEFI Stack`、`Log Buffer`、
+`Info Blk` 重叠。地址在三处必须一致：`KebabFwLog.h` 的 `KEBAB_FWLOG_PA`、串口库
 里的副本、内核 0129 的 `KEBAB_FWLOG_PA`。
 
 ### 2. 内核侧：`bsd/dev/kebab_fwlog.c`（0129）
@@ -4968,7 +4972,7 @@ UEFI 侧在固定物理地址留一个 256 KiB 的环，内核只读地把它映
 新增 `bsd/dev/kebab_fwlog.c` 并在 `bsd/conf/files` 登记，不再往
 `kebab_spmi.c` 末尾追加代码；SPMI/RPMh 驱动保持原样。
 
-* `kebab_fwlog_attach()`：`ml_io_map(0x9ff00000, 0x40000)` 只做一次，校验 magic
+* `kebab_fwlog_attach()`：`ml_io_map(0xf44c0000, 0x40000)` 只做一次，校验 magic
   和 size 后缓存映射；`io_map` 子图只有 8 MiB，所以即使 header 非法也不第二次
   映射。缺失、magic 不对、size 不在范围内，各打一行带地址和读到的值的日志。
 * `kebab_fwlog_report(max_bytes)`：从最新处往回取 `max_bytes`，按 oldest-first

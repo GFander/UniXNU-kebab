@@ -1,6 +1,6 @@
 feat(fwlog): read the firmware KFLG ring from a dedicated driver
 
-The firmware keeps a 256 KiB ring at the fixed physical address 0x9FF00000:
+The firmware keeps a 256 KiB ring at the fixed physical address 0xF44C0000:
 KebabFwLogDxe reserves the region as EfiReservedMemoryType, writes the 'KFLG'
 header and the framebuffer serial library appends every byte it renders.  The
 kernel could already see the page but the only reader was a function appended
@@ -57,7 +57,7 @@ index 0000000..014ab6b
 +/*
 + * KEBAB FWLOG: read the firmware's ring buffer from the kernel.
 + *
-+ * The UEFI side reserves one fixed physical region at 0x9FF00000 (64 pages,
++ * The UEFI side reserves one fixed physical region at 0xF44C0000 (64 pages,
 + * 256 KiB) and appends every byte its framebuffer serial port renders to a
 + * byte ring behind a 16-byte header:
 + *
@@ -84,7 +84,7 @@ index 0000000..014ab6b
 + * satisfy; the other kebab drivers spell it out for the same reason. */
 +extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 +
-+#define KEBAB_FWLOG_PA          0x9ff00000ull
++#define KEBAB_FWLOG_PA          0xf44c0000ull
 +#define KEBAB_FWLOG_MAP_SIZE    0x40000u
 +#define KEBAB_FWLOG_MAGIC       0x474c464bu
 +#define KEBAB_FWLOG_HEADER      16u

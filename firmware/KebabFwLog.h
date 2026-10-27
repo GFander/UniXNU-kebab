@@ -3,16 +3,16 @@
 
   The framebuffer serial port library appends every byte it renders to the
   ring buffer, so the log the user sees on screen is also kept in memory and
-  survives into the kernel.  The page is reserved by KebabFwLogDxe; until the
-  magic is set the append is a no-op, so nothing writes into memory that is
-  still owned by the DXE core.
+  survives into the kernel.  The range is declared EfiReservedMemoryType by the
+  "Kebab FwLog" descriptor in kebabPkg's MemoryMapLib and the header is written
+  by KebabFwLogDxe; until the magic is set the append is a no-op.
 **/
 #ifndef KEBAB_FW_LOG_H
 #define KEBAB_FW_LOG_H
 
 #include <Uefi.h>
 
-#define KEBAB_FWLOG_PA      0x9FF00000ULL
+#define KEBAB_FWLOG_PA      0xF44C0000ULL
 #define KEBAB_FWLOG_PAGES   64u          /* 256 KiB */
 #define KEBAB_FWLOG_SIZE    (KEBAB_FWLOG_PAGES * 0x1000u)
 #define KEBAB_FWLOG_MAGIC   0x474C464Bu  /* 'KFLG' */
