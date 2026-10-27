@@ -1,0 +1,401 @@
+feat(console): add REBOOT and FASTBOOT recovery commands
+
+The USB debug console is the only way into a machine whose test loop ends in
+a panic, but until now it could only watch.  Two newline-terminated commands
+give the host a way to restart the board without touching it:
+
+  REBOOT     requests the platform restart path, PEHaltRestart(kPERestartCPU)
+  FASTBOOT   writes the Qualcomm restart_reason cookie in IMEM and then asks
+             for the same restart
+
+Both are matched inside one bulk-OUT completion, because the CDC-ACM driver
+only sees the bytes of that transfer; a command split across two writes is
+not a command.  The panic pump records the request while it owns the
+transport and executes it only after ud_leave(), since the restart path
+prints through the same console and must be able to flush.  The normal event
+thread uses the same deferred path.
+
+A restart requested by the console must not pass through the panic-spin
+interception in KebabPlatformExpert::haltRestart(): that would call
+kebab_usb_panic_spin() a second time, which refuses a nested spinner and
+waits forever.  The driver exports kebab_usb_restart_armed() so the platform
+expert can tell the host request apart from a panic stop and let the restart
+through.
+
+PEHaltRestart() had no backend on this port: nothing installs
+PE_halt_restart, so IODTPlatformExpert::haltRestart() returned -1 without
+touching the hardware.  The platform expert now implements kPERestartCPU
+with PSCI SYSTEM_RESET, the same firmware interface KebabCPU already uses
+for CPU_ON.  That keeps PEHaltRestart as the entry point and avoids a
+driver-private reset register.
+
+FASTBOOT maps the IMEM page once at start-up, in normal context, and logs the
+old and new restart_reason before writing.  The address and offset come from
+the device DTB (qcom,msm-imem@146bf000 / restart_reason@65c).  The cookie
+value is a hypothesis, not a measured fact: kebab_fastboot_cookie=<hex>
+overrides the default 0x77665501 without a rebuild.  A wrong value can land
+the board in recovery or EDL; EDL needs firehose tooling this project does
+not have.  If the restart call returns, the old value is restored so a later
+manual reset does not inherit an undelivered fastboot request.
+
+diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
+index e829772..8c32da3 100644
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -28,6 +28,10 @@
+ #include <vm/pmap.h>
+ #include <vm/vm_kern.h>
+ 
++/* PEHaltRestart() and kPERestartCPU: the platform restart path, not a
++ * driver-private reset register. */
++#include <IOKit/IOPlatformExpert.h>
++
+ #include <arm/machine_routines.h>
+ #include <arm/cpu_number.h>
+ #include <arm/dbgwrap.h>
+@@ -43,6 +47,7 @@ void kebab_usb_log_flush(void);
+ void kebab_usb_start(void);
+ int kebab_usb_getc(bool wait);
+ bool kebab_usb_console_ready(void);
++bool kebab_usb_restart_armed(void);
+ void kebab_usb_panic_spin(void) __dead2;
+ static void ud_thread(void *, wait_result_t) __dead2;
+ bool kebab_usb_kdp_enabled(void);
+@@ -171,6 +176,21 @@ static uint32_t ud_log_take(char *out, uint32_t max);
+ #define DATA_EP_MASK    ((1u << EP_BULK_OUT) | (1u << EP_BULK_IN) | (1u << EP_NOTIFY))
+ #define LOG_RING_SIZE  16384
+ 
++/*
++ * The SM8250 IMEM page that ABL reads on the next boot.  The address and the
++ * field offset come from the device's own DTB:
++ *   /soc/qcom,msm-imem@146bf000  reg = <0x146bf000 0x1000>
++ *   /soc/.../restart_reason@65c  reg = <0x65c 0x04>
++ * The cookie value is not verified on this device; see the boot argument.
++ */
++#define KEBAB_IMEM_PA           0x146bf000u
++#define KEBAB_IMEM_SIZE         0x1000u
++#define KEBAB_IMEM_RESTART      0x65cu
++#define KEBAB_FASTBOOT_COOKIE   0x77665501u
++
++#define UD_REBOOT_PLAIN         1u
++#define UD_REBOOT_FASTBOOT      2u
++
+ struct ud_endpoint {
+ 	uint32_t trb, length, ctl, resource;
+ 	unsigned end_polls;
+@@ -181,6 +201,7 @@ struct ud_endpoint {
+ static struct {
+ 	vm_offset_t dwc;
+ 	vm_offset_t qs;
++	vm_offset_t imem;              /* KEBAB_IMEM_PA, mapped once at start */
+ 	vm_offset_t dma;
+ 	uint64_t    dma_pa;
+ 	uint32_t    evt_pos;
+@@ -220,6 +241,14 @@ static struct {
+ 	bool        console_input;
+ 	bool        panic_hook;
+ 	bool        want_panic;
++	/*
++	 * Recovery commands are matched while bulk OUT is serviced, but they are
++	 * executed only after the transport gate has been released: the restart
++	 * path prints and must be able to flush, and the panic loop must not call
++	 * it with ud.owner held.
++	 */
++	volatile uint32_t reboot_command;   /* UD_REBOOT_* or zero */
++	volatile bool     restart_armed;    /* console asked for the restart */
+ 	uint32_t    tx_bytes;
+ 	uint32_t    rx_bytes;          /* bulk-OUT bytes accepted into in_ring */
+ 	uint32_t    rx_dropped;        /* bulk-OUT bytes lost to a full in_ring */
+@@ -1019,12 +1048,137 @@ ud_service(void)
+ 	}
+ }
+ 
++/* ------------------------------------------------------ recovery commands */
++
++/*
++ * A command only fires when all of its bytes arrive in one bulk-OUT transfer:
++ * the caller passes exactly the bytes of this completion, and the match is
++ * made inside that window.
++ */
++static bool
++ud_command_seen(const char *buf, uint32_t received, const char *command,
++    uint32_t length)
++{
++	if (received < length) return false;
++	for (uint32_t i = 0; i + length <= received; i++) {
++		if (!memcmp(buf + i, command, length)) return true;
++	}
++	return false;
++}
++
++/*
++ * While serial KDP owns the byte stream, a KDP frame always starts with 0xFA,
++ * so a command anchored at the first byte cannot be confused with debugger
++ * traffic.  Without KDP the console is a normal serial port and the bytes may
++ * follow earlier typing in the same transfer, so scan the whole completion
++ * the way the PANIC! probe does.
++ */
++static uint32_t
++ud_reboot_command(const char *buf, uint32_t received)
++{
++	if (!kebab_usb_kdp_enabled()) {
++		if (ud_command_seen(buf, received, "REBOOT\n", sizeof("REBOOT\n") - 1)) {
++			return UD_REBOOT_PLAIN;
++		}
++		if (ud_command_seen(buf, received, "FASTBOOT\n", sizeof("FASTBOOT\n") - 1)) {
++			return UD_REBOOT_FASTBOOT;
++		}
++		return 0;
++	}
++	if (received >= sizeof("REBOOT\n") - 1 &&
++	    !memcmp(buf, "REBOOT\n", sizeof("REBOOT\n") - 1)) {
++		return UD_REBOOT_PLAIN;
++	}
++	if (received >= sizeof("FASTBOOT\n") - 1 &&
++	    !memcmp(buf, "FASTBOOT\n", sizeof("FASTBOOT\n") - 1)) {
++		return UD_REBOOT_FASTBOOT;
++	}
++	return 0;
++}
++
++static uint32_t
++ud_fastboot_cookie(void)
++{
++	uint32_t cookie = KEBAB_FASTBOOT_COOKIE;
++
++	if (PE_parse_boot_argn("kebab_fastboot_cookie", &cookie, sizeof(cookie))) {
++		printf("KEBAB FASTBOOT: cookie 0x%08x from kebab_fastboot_cookie\n", cookie);
++	} else {
++		printf("KEBAB FASTBOOT: cookie 0x%08x (default)\n", cookie);
++	}
++	return cookie;
++}
++
++/*
++ * PEHaltRestart() is the platform restart entry point.  KebabPlatformExpert
++ * implements kPERestartCPU with the firmware's PSCI SYSTEM_RESET call; this
++ * port never installed PE_halt_restart, so the stock IODTPlatformExpert path
++ * would otherwise return -1 without resetting anything.
++ *
++ * The restart is requested only after the transport gate has been released.
++ * If the call returns, the machine did not reset: report that instead of
++ * claiming success, and disarm the panic-spin bypass.
++ */
++static int
++ud_platform_restart(void)
++{
++	int rc;
++
++	ud.restart_armed = true;
++	printf("KEBAB REBOOT: PEHaltRestart(kPERestartCPU)\n");
++	rc = PEHaltRestart(kPERestartCPU);
++	ud.restart_armed = false;
++	printf("KEBAB REBOOT: PEHaltRestart returned %d, the machine did not reset\n", rc);
++	return rc;
++}
++
++static void
++ud_fastboot_restart(void)
++{
++	volatile uint32_t *reason;
++	uint32_t previous, cookie;
++	int rc;
++
++	if (ud.imem == 0) {
++		printf("KEBAB FASTBOOT: cannot map IMEM at 0x%x; falling back to a plain restart\n",
++		    KEBAB_IMEM_PA);
++		(void)ud_platform_restart();
++		return;
++	}
++	reason = (volatile uint32_t *)(ud.imem + KEBAB_IMEM_RESTART);
++	previous = *reason;
++	cookie = ud_fastboot_cookie();
++	printf("KEBAB FASTBOOT: IMEM restart_reason at 0x%x+0x%x is 0x%08x; writing 0x%08x\n",
++	    KEBAB_IMEM_PA, KEBAB_IMEM_RESTART, previous, cookie);
++	*reason = cookie;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	rc = ud_platform_restart();
++	if (rc != 0) {
++		/* The machine is still here, so a later reset must not inherit a
++		 * fastboot request that was never delivered. */
++		*reason = previous;
++		__asm__ volatile ("dsb sy" ::: "memory");
++		printf("KEBAB FASTBOOT: restored restart_reason to 0x%08x\n", previous);
++	}
++}
++
++static void
++ud_run_reboot_command(uint32_t command)
++{
++	if (command == UD_REBOOT_FASTBOOT) {
++		ud_fastboot_restart();
++	} else if (command == UD_REBOOT_PLAIN) {
++		(void)ud_platform_restart();
++	}
++}
++
+ /* ---------------------------------------------------------------- events */
+ 
+ static void
+ ud_bulk_out_done(uint32_t received)
+ {
+ 	const char *buf = (const char *)(ud.dma + UD_BULKOUT);
++	uint32_t command;
+ 	ud_from_dev(UD_BULKOUT, ud.mps);
+ 	/*
+ 	 * The pre-rewrite driver echoed host bytes to printf() here.  This state
+@@ -1060,6 +1214,10 @@ ud_bulk_out_done(uint32_t received)
+ 			}
+ 		}
+ 	}
++	if (ud.reboot_command == 0) {
++		command = ud_reboot_command(buf, received);
++		if (command != 0) ud.reboot_command = command;
++	}
+ }
+ 
+ static void
+@@ -1250,6 +1408,7 @@ ud_thread(void *arg __unused, wait_result_t wr __unused)
+ 	for (;;) {
+ 		boolean_t irq;
+ 		bool trigger = false;
++		uint32_t command = 0;
+ 		if (ud_enter(&irq)) {
+ 			if (ud_rx_enter()) {
+ 				ud_poll_locked();
+@@ -1257,10 +1416,13 @@ ud_thread(void *arg __unused, wait_result_t wr __unused)
+ 			}
+ 			trigger = ud.want_panic;
+ 			ud.want_panic = false;
++			command = ud.reboot_command;
++			ud.reboot_command = 0;
+ 			ud_leave(irq);
+ 		}
+-		/* Panic only after releasing the transport and acknowledging events. */
++		/* Panic/restart only after releasing the transport and acknowledging events. */
+ 		if (trigger) panic("kebab usb console test");
++		if (command != 0) ud_run_reboot_command(command);
+ 		ud_sleep_ms(1);
+ 	}
+ }
+@@ -1479,6 +1641,19 @@ kebab_usb_start(void)
+ 		return;
+ 	}
+ 	ud.qs = ml_io_map(QSCRATCH_PA, 0x100);
++	/*
++	 * Map IMEM now, in normal context.  The panic loop cannot safely allocate
++	 * or take VM locks, and FASTBOOT has to read and write this page there.
++	 * A failed mapping is not fatal: the command falls back to REBOOT.
++	 */
++	ud.imem = ml_io_map(KEBAB_IMEM_PA, KEBAB_IMEM_SIZE);
++	if (ud.imem == 0) {
++		printf("KEBAB USB: cannot map IMEM at 0x%x; FASTBOOT will fall back\n",
++		    KEBAB_IMEM_PA);
++	} else {
++		printf("KEBAB USB: IMEM mapped at 0x%x (restart_reason +0x%x)\n",
++		    KEBAB_IMEM_PA, KEBAB_IMEM_RESTART);
++	}
+ 	/* wired pages need a real tag: VM_KERN_MEMORY_NONE trips an assertion */
+ 	if (kmem_alloc(kernel_map, &ud.dma, UD_SIZE, KMA_DATA | KMA_NOFAIL,
+ 	    VM_KERN_MEMORY_BSD) != KERN_SUCCESS) {
+@@ -1683,6 +1858,18 @@ kebab_usb_console_ready(void)
+ 	return ud.running && !ud.dead;
+ }
+ 
++/*
++ * True while the console itself is calling PEHaltRestart().  The platform
++ * expert uses this to distinguish a host-requested restart from the panic
++ * path's final stop: without it, haltRestart() would call
++ * kebab_usb_panic_spin() again and the machine would never reset.
++ */
++bool
++kebab_usb_restart_armed(void)
++{
++	return ud.restart_armed;
++}
++
+ /*
+  * KDP over this port is opt-in: kebabusb=1 gives a console, kebabkdp=1 says
+  * the debugger owns its input and output as well.  Parsed once; this is
+@@ -1892,6 +2079,7 @@ kebab_usb_panic_spin(void)
+ 	}
+ 	bool taken = false;
+ 	for (;;) {
++		uint32_t command = 0;
+ 		if (!taken) {
+ 			taken = ud_panic_takeover();
+ 			if (!taken) { delay(1000); continue; }
+@@ -1904,8 +2092,16 @@ kebab_usb_panic_spin(void)
+ 			}
+ 			if (ud.probe_requested && ud.configured && !ud.dead)
+ 				kebab_usb_ep0_probe_send();
++			command = ud.reboot_command;
++			ud.reboot_command = 0;
+ 			ud_leave(irq);
+ 		}
++		/*
++		 * A host command is answered outside the transport gate: the restart
++		 * path prints through the same console, and it must not run with
++		 * ud.owner held or with the panic-CPU fence still in the way.
++		 */
++		if (command != 0) ud_run_reboot_command(command);
+ 		/*
+ 		 * Keep the KDP hand-back from 0099: a debugger that reconnects after
+ 		 * the panic parks here must not have its 0xFA CONNECT frame eaten as
+diff --git a/iokit/Kernel/arm/KebabPlatformExpert.cpp b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+index a35ec32..d6a30a7 100644
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -20,6 +20,7 @@ extern "C" int kebab_display_start(IOService *provider);
+ 
+ /* the driver is C; these have to be declared before use */
+ extern "C" bool kebab_usb_console_ready(void);
++extern "C" bool kebab_usb_restart_armed(void);
+ extern "C" void kebab_usb_panic_spin(void);
+ 
+ class KebabPlatformExpert : public IODTPlatformExpert {
+@@ -102,6 +103,25 @@ KebabPlatformExpert::getProductName(char *name, int maxLength)
+ #endif /* KEBAB */
+ 
+ 
++/*
++ * PEHaltRestart() eventually reaches IOPlatformExpert::haltRestart(), which
++ * calls PE_halt_restart if one is installed.  Nothing on this port installs
++ * it, so the stock path returns -1 without touching the hardware.  PSCI is
++ * already the firmware interface used for CPU_ON (KebabCPU.cpp), so use its
++ * SYSTEM_RESET function here.  On success the call does not return; a return
++ * value is a PSCI error for the caller to report.
++ */
++static int
++kebab_psci_system_reset(void)
++{
++	register uint64_t x0 __asm__("x0") = 0x84000009ULL; /* SYSTEM_RESET */
++
++	__asm__ volatile("smc #0" : "+r"(x0) : :
++	    "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10",
++	    "x11", "x12", "x13", "x14", "x15", "x16", "x17", "cc", "memory");
++	return (int32_t)x0;
++}
++
+ /*
+  * A panic ends in a halt or a restart request. Halting leaves the USB controller
+  * orphaned and the host loses the port, so when the panic report has been produced
+@@ -117,11 +137,18 @@ KebabPlatformExpert::haltRestart(unsigned int type)
+ 	 * haltRestart also carries panic lifecycle notifications, and kPEPanicBegin
+ 	 * arrives before the report has been written - spinning on that would swallow
+ 	 * the panic output. Only take over the final stop.
++	 *
++	 * A restart requested by the console itself must not re-enter that loop:
++	 * kebab_usb_panic_spin() refuses a second spinner and would wait forever.
+ 	 */
+ 	if (panic_active() && kebab_usb_console_ready() &&
++	    !kebab_usb_restart_armed() &&
+ 	    (type == kPEHaltCPU || type == kPERestartCPU ||
+ 	    type == kPEPanicRestartCPU || type == kPEPanicRestartCPUNoCallouts)) {
+ 		kebab_usb_panic_spin();          /* does not return */
+ 	}
++	if (type == kPERestartCPU) {
++		return kebab_psci_system_reset();
++	}
+ 	return IODTPlatformExpert::haltRestart(type);
+ }

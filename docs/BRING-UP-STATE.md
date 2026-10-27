@@ -1906,3 +1906,159 @@ lldb -o "kdp-remote <bridge-host>:41139" -o "register read" -o "continue" -o "qu
 
 本轮没有真机，本节所有结论都来自源码、`84/84` 的补丁应用和一次内核编译，不能
 替代上面这次握手。
+
+## 十八、控制台的重启命令
+
+本节记录给 CDC-ACM 调试控制台加的两条恢复命令，以及为它们补上的平台重启后端。
+代码是 `patches/xnu-8796-kebab/0105-kebab-console-reboot.patch`；没有重生成
+`0091`，因为 `0104` 已经示范了在 `0091` 创建的 `bsd/dev/kebab_usb.c` 上追加
+补丁的写法。
+
+### 1. 命令与匹配方式
+
+| 命令 | 一次 bulk OUT 里的字节 | 作用 |
+| --- | --- | --- |
+| `REBOOT` | `REBOOT\n`（7 字节） | 走平台重启路径重启机器 |
+| `FASTBOOT` | `FASTBOOT\n`（9 字节） | 写 IMEM 的 `restart_reason`，再走同一条重启路径 |
+
+两条命令都在 `ud_bulk_out_done()` 里匹配，匹配窗口就是**这一次** bulk OUT
+完成的 `received` 字节，命令被拆成两次写入不会触发。普通控制台会扫描整个
+完成窗口（和 `PANIC!` 的写法一致）；`kebabkdp=1` 时字节流属于调试器，只认
+从传输首字节开始的命令，因为 KDP 帧固定以 `0xFA` 开头，不会和 `REBOOT` 的
+首字母 `R` 混淆。
+
+命令只记录在 `ud.reboot_command`，执行点不在匹配函数里：`ud_thread()` 和
+`kebab_usb_panic_spin()` 都在 `ud_leave()` 之后才调用 `ud_run_reboot_command()`。
+这样重启路径里的 `printf` 可以正常冲刷日志，也不会在还握着 `ud.owner` 时
+调用 `PEHaltRestart()`。`EP0?` 和 `PANIC!` 的原有路径没有改动。
+
+### 2. REBOOT：平台入口原来没有后端
+
+`REBOOT` 调用 `PEHaltRestart(kPERestartCPU)`，没有直接写复位寄存器。但检查
+这棵树后发现，平台入口本身是空的：
+
+* `iokit/Kernel/IOPlatformExpert.cpp` 里只有
+  `int (*PE_halt_restart)(unsigned int type) = NULL;`，全树没有任何地方给
+  它赋值；
+* `IOPlatformExpert::haltRestart()` 在 `PE_halt_restart == NULL` 时直接
+  `return -1;`
+* `IODTPlatformExpert::haltRestart()` 只是 `return super::haltRestart(type);`
+* `KebabPlatformExpert` 原来的 `haltRestart()` 只处理 panic 停留，最后仍然
+  落到这条空路径。
+
+也就是说，只加 `PEHaltRestart(kPERestartCPU)` 会返回 -1，机器不会重启。
+`0105` 因此在 `KebabPlatformExpert::haltRestart()` 里补了
+`kPERestartCPU` 的后端：用 `smc #0` 调 PSCI 的 `SYSTEM_RESET`
+（`0x84000009`），和 `KebabCPU.cpp` 里 `PSCI CPU_ON` 用的是同一个固件接口。
+入口仍然是 `PEHaltRestart()`，不是驱动自己的复位寄存器；PSCI 成功时调用
+不返回，返回的值是错误码，由驱动打印。
+
+panic 循环里还有第二个坑：`haltRestart()` 看到 `panic_active()` 且控制台
+ready 时会调用 `kebab_usb_panic_spin()`。如果控制台自己请求重启，这会第二次
+进入 panic 循环；新循环在 `ud.panic_cpu` 的 `cmpxchg` 失败后永远等下去，机器
+仍然不会重启。驱动因此导出 `kebab_usb_restart_armed()`，平台专家在
+`haltRestart()` 的 panic 停留判断里排除“控制台已经请求重启”这一种情况。
+
+### 3. FASTBOOT 的 IMEM 地址与证据
+
+地址不是猜的，来自设备自己的 DTB。本机缓存的
+`/home/albert/tmpwork/uefisheng/Resources/DTBs/kebab.dtb` 解出的节点是：
+
+```text
+/soc/qcom,msm-imem@146bf000
+        compatible = "qcom,msm-imem"
+        reg = <0x146bf000 0x1000>
+        ranges = <0x00 0x146bf000 0x1000>
+
+/soc/qcom,msm-imem@146bf000/restart_reason@65c
+        compatible = "qcom,msm-imem-restart_reason"
+        reg = <0x65c 0x04>
+```
+
+同一代 SM8250 的 `alioth.dts` 里也是同样的 `<0x146bf000 0x1000>` 和
+`<0x65c 0x04>`。驱动在 `kebab_usb_start()` 里用 `ml_io_map()` 把这一页
+**预先映射**好（正常上下文，不在 panic 里分配 VM），`FASTBOOT` 时直接对
+`imem + 0x65c` 做 4 字节读写。这样 panic 循环不需要临时 `kmem_alloc()`，
+也就不会在 panic 上下文里等 VM 锁。
+
+### 4. cookie 值只是假设
+
+* 默认值 `0x77665501` 是社区资料里“bootloader/fastboot”的值，**没有在本机
+  真机上验证过**。
+* 启动参数 `kebab_fastboot_cookie=<hex>` 可以在不重编内核的情况下换值；例如
+  `kebab_fastboot_cookie=0x77665501`。不写这个参数时用默认值。解析用
+  `PE_parse_boot_argn()`，支持 `0x` 前缀。
+* 写之前先读旧值，日志会同时打印旧值、新值和字段地址；写完执行 `dsb sy`，
+  再调用 `PEHaltRestart()`。
+* 如果启动时 IMEM 映射失败，日志会明确打印“cannot map IMEM”，然后回退到
+  普通的 `REBOOT`，不会假装已经写了 cookie。
+* 如果 `PEHaltRestart()` 返回（说明没有重启成功），驱动会把旧值写回去并打印，
+  避免下一次手动重启意外进入 fastboot。
+
+**风险要写清楚**：cookie 不对时，机器可能进入 recovery，也可能进入 EDL。进入
+recovery 还可以再重启；进入 EDL 需要 firehose/QFIL 这一类工具，本项目没有，
+恢复成本高。因此在真机上应先只验证 `REBOOT`，确认平台重启路径真的能复位之后，
+再单独试 `FASTBOOT`；测试循环的日常重启应当用 `REBOOT`。
+
+### 5. 启动参数与主机侧用法
+
+控制台仍然需要 `kebabusb=1`；panic 后发命令还需要 `kebabpanic=1`（`PANIC!`
+钩子）。`kebabkdp=1` 时字节流是 KDP 的，文本命令只认传输首字节开始的形式；
+如果要在 panic 后用文本命令，建议这一轮不要加 `kebabkdp=1`。
+
+主机一次写入整条命令，例如：
+
+```python
+import serial
+ser = serial.Serial("COM7", 115200, timeout=0.2)
+ser.write(b"REBOOT\n")     # 一次 write，不能逐键敲
+ser.flush()
+```
+
+`FASTBOOT` 同理：
+
+```python
+ser.write(b"FASTBOOT\n")
+```
+
+### 6. 设备落到意外位置时怎么恢复
+
+* 停在 fastboot 界面：主机执行 `fastboot reboot`（或 `fastboot continue`），
+  不要继续刷未知镜像。
+* 停在 recovery：直接重启，或按现有流程回 Android。
+* 停在 EDL（9008）：需要 firehose/QFIL，本项目没有这套工具；这是
+  `FASTBOOT` 最坏的结果，也是先验证 `REBOOT` 的原因。
+* 完全没有 USB 响应：长按电源键约 10 秒强制重启；仍然不行时按 README 的
+  刷机流程处理。`boot_a` 的 Android 镜像在测试期间不要动，这是既有的回退约定。
+
+### 7. 本轮的证明与未验证项
+
+* 在 `xnu-8796.141.3` 的 `1b191cb` 上，独立 worktree 先
+  `git reset --hard 1b191cb`、`git clean -fdx`，再按文件名顺序应用
+  `0000`–`0104` 和 `0105`：**85 / 85 成功，0 失败**。
+* 构建机 `~/kebab-build/build-local.sh`（`MACHINE_CONFIG=KEBAB`、
+  `KERNEL_CONFIG=DEVELOPMENT`、macOS 13.5 + `KDK_13.5_22G74`）产出
+  `build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab`，
+  **17,086,064 字节（16.29 MiB）**，Mach-O 64-bit arm64，SHA-256
+  `77a8e4610009b1b2e21250cd82a6e2dd0f467338f83efff5e2a7485f119a15b1`。
+* 镜像字符串里有 `KEBAB REBOOT: PEHaltRestart(kPERestartCPU)`、
+  `KEBAB FASTBOOT: IMEM restart_reason ...`、`kebab_fastboot_cookie` 等格式串；
+  符号表里有 `_kebab_usb_restart_armed` 和 `_PEHaltRestart`。
+* `kebab_usb.c` 本轮 **45 条 warning，全部是同一类
+  `-Wdeclaration-after-statement`**（这个文件本来就是 C99 风格，构建配置用
+  `-Wno-error=declaration-after-statement` 放行），0 error；
+  `KebabPlatformExpert.cpp` 只有 1 条既有的 `-Wshadow-field`
+  （`processTopLevel` 的 `root` 参数），不是新代码引入的。
+
+没有真机，以下都还没有验证：
+
+* `PEHaltRestart(kPERestartCPU)` → PSCI `SYSTEM_RESET` 是否真的复位；
+  PSCI 的 SMC conduit 和函数号来自同树的 `CPU_ON` 用法，但没有在 kebab 上
+  单独调用过 `SYSTEM_RESET`。
+* ABL 是否真的读取 `restart_reason@65c` 并识别 `0x77665501`；cookie 的语义
+  目前只是假设。
+* IMEM 写入是否在 PSCI 复位后仍然保留（按 IMEM 的定位应当保留，但未实测）。
+* 普通控制台路径和 panic 循环路径都只做了编译与补丁应用验证，没有在硬件上
+  分别发过 `REBOOT\n` / `FASTBOOT\n`。
+* `kebabkdp=1` 时的首字节匹配、以及 PM 关闭通知对 USB 事件线程的影响，都
+  需要真机会话确认。
