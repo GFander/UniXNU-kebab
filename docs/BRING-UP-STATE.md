@@ -3040,7 +3040,24 @@ SDA 和 SCL 在释放后仍读 0。两条线同时为低更像总线被外部拉
 - 若要一次读数就区分“没供电”和“被拉低”，先只做电源使能加一次 `TLMM_IO` 读取，
   不碰 I2C。
 
-### 5. 验证边界
+### 5. 0115 上的 FASTBOOT 复验
+
+把 0115 内核按开门的参数重打成 `XNU-0115-fb.img`（`kebab_pon_write=1`、
+`kebab_pon_verbose=1`，不带触摸参数），刷入 `boot_b` 后从串口发 `FASTBOOT`：
+
+```text
+KEBAB SPMI: write REG 0x088f: APID 0x00d chnls-slice+0xd0000 cmd 0x000008f0 wdata 0x04
+KEBAB PON: restart reason verified: read back 0x04, field 0x04, bit 0 unchanged 0x0
+KEBAB FASTBOOT: IMEM read back 0x77665500 (MATCH)
+KEBAB REBOOT: PEHaltRestart(kPERestartCPU)
+```
+
+- 发出命令到 `fastboot devices` 出现设备：3.35 秒；
+- `fastboot reboot` 到串口重新出现：19.9 秒；
+- 门控关掉时同一条命令只回 `disabled because kebab_pon_write=0`，不写任何寄存器，
+  这一点在换镜像之前先测过。
+
+### 6. 验证边界
 
 - 实测：刷机、串口抓到整段启动、上表每一行日志。
 - 推断：总线被拉低的原因是供电或控制器状态；没有量电压，也没有抓 I2C 波形。
