@@ -2762,3 +2762,174 @@ bit-bang TCM identify）尚未进行；因此本节只记录到"已定位并修�
 * TLMM 的地址不是平坦的：`0109` 只修了尺寸，`0112` 才修 tile 基址。两次
   都是"地址/尺寸假设"错误，与 PMIC、触屏芯片本身无关；先读后写、把原始
   值打进日志的做法在这里直接给出了证据。
+
+## 二十二、PMIC PON 重启原因与 fastboot 进入
+
+### 1. 结论
+
+**这块板子的 ABL 认的是 PMIC PON 里的重启原因，不是 IMEM 里的
+`restart_reason`。** 两者一起写入、再用已证明可靠的 PSCI `SYSTEM_RESET`
+复位，控制台命令 `FASTBOOT` 可以在约 2～3.3 秒内把板子带进 bootloader 的
+fastboot 模式（`fastboot devices` 返回 `c073a488`，`getvar product` 为
+`kona`）。这是本轮之前一直缺的那一块：IMEM 的 `0x77665500` 单独写入从未
+生效，因为每次复位后 IMEM 都是新的随机值，ABL 根本读不到它；而 PON 的
+`SOFT_RB_SPARE` 能跨复位存活，ABL 消费后才清零。
+
+最终形态只有一条受支持的入口：`kebab_pon_write=1` 启动参数打开写门控，
+控制台输入 `FASTBOOT`，它先写 PON 原因、再写 IMEM cookie，最后走 PSCI
+复位。门控关闭时 `FASTBOOT` 直接拒绝并提示改用 `REBOOT`，不写任何
+PMIC 寄存器，也不写 IMEM。`REBOOT` 仍然只是普通 PSCI 复位。
+
+本节补的是第二十一节 5.4 计划里的 SPMI-4 写路径；实现与当时的草案有两处
+不同，以代码为准：单字节写用 `PMIC_ARB_OP_EXT_WRITEL`（opcode 0、byte
+count 0，vendor `pmic_arb_fmt_cmd_v2()` 的编码），不是
+`PMIC_ARB_OP_WRITE`（0xE）；命令字因此是 `0x000008F0`，不是
+`0x700008F0`。
+
+### 2. 源码语义（不是猜的）
+
+来自 vendor 树 `drivers/input/misc/qpnp-power-on.c`、
+`drivers/power/reset/msm-poweroff.c`、`include/dt-bindings/input/qcom,qpnp-power-on.h`
+和 `kona.dtsi`：
+
+* `pm8150.dtsi` 的 PON 节点带 `qcom,store-hard-reset-reason`，所以
+  `qpnp_pon_set_restart_reason()` 不会像没有该属性时那样直接返回 0。
+* Gen2（本板 PON subtype `0x04`）写 `SOFT_RB_SPARE`（PON 基址 `0x800`，
+  寄存器 `0x88F`）：mask `GENMASK(7,1)` = `0xFE`，值为 `reason << 1`。
+  `PON_RESTART_REASON_BOOTLOADER` 是 `0x02`，因此字段值是 `0x04`，bit 0
+  不在 mask 内、必须保持不变。
+* `msm_restart_prepare("bootloader")` 的顺序是：
+  1. `qpnp_pon_check_hard_reset_stored()` 为真（本板为真），且命令不是
+     `edl`/dload，所以 `need_warm_reset = false`；
+  2. `qpnp_pon_system_pwr_off(PON_POWER_OFF_HARD_RESET)`；
+  3. `qpnp_pon_set_restart_reason(PON_RESTART_REASON_BOOTLOADER)`；
+  4. `__raw_writel(0x77665500, restart_reason)`（IMEM `+0x65C`）；
+  5. `deassert_ps_hold()`，其兜底路径是向 TCSR `0x0C264000` 写 0。
+* `qpnp_pon_reset_config()`（Gen2）配置的是
+  `PS_HOLD_RST_CTL2`（`0x85B`）的 bit 7 `QPNP_PON_RESET_EN` 和
+  `PS_HOLD_RST_CTL`（`0x85A`）低四位的掉电类型；
+  `PON_POWER_OFF_TYPE_WARM_RESET = 0x01`、
+  `PON_POWER_OFF_TYPE_HARD_RESET = 0x07`。
+* PON 寄存器和 PON subtype 同在 PPID `0x008`；本板映射到 APID `0x00d`，
+  `write_ee = 0`，与本地 EE 0 一致。
+
+本轮没有使用 PMIC 掉电路径。PSCI 复位已经足够把板子带进 fastboot，而
+`deassert_ps_hold()` 一旦触发就没有撤销手段，因此最终补丁只保留原因写入，
+不把未验证的掉电复位路径放进内核。
+
+### 3. SPMI 写路径
+
+只读部分见第二十一节。写路径补的是 v5 的 read/write channel：
+
+* 只映射一个 4 KiB 切片：`chnls + 0x10000*apid`，PON 的 APID `0x00d`
+  对应 `0x0C6D0000`。整个 `chnls` 是 32 MiB，装不进内核 8 MiB 的
+  `io_map` 子映射。
+* 单字节写用 `PMIC_ARB_OP_EXT_WRITEL`（opcode 0）编码成
+  `((addr & 0xff) << 4) | 0`，数据放 `WDATA0`，然后轮询 `STATUS` 的
+  DONE/FAILURE/DENIED/DROPPED，超时 1000 µs。
+* 每次写之前重新读 APID mapping 和 cnfg ownership，要求该 APID 仍映射
+  PPID `0x008` 且 `write_ee == 0`；否则拒绝。这和
+  `pmic_arb_offset_v5()` 对 read/write channel 的检查一致。
+* 写后通过 observer 读回（最多 20 次、每次间隔 1 ms），同时校验目标字段
+  和 mask 之外的 bit 0。
+* 通道切片在 `kebab_spmi_init()` 里、与 IMEM 一起在正常上下文映射；命令
+  可能从 panic 循环执行，那里不能调用 `ml_io_map()`。
+
+真机第一次读-改-写（`PON-RB`，当时还是独立诊断命令）：
+
+```text
+KEBAB SPMI: PON write APID 0x00d, write_ee 0x0 (this EE); chnls slice 0x0c6d0000
+KEBAB SPMI: REG 0x088f read 1: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x00
+KEBAB PON: SOFT_RB_SPARE 0x088f old 0x00; mask 0xfe; reason 0x02 << 1 = 0x04; new 0x04
+KEBAB SPMI: write REG 0x088f: APID 0x00d chnls-slice+0xd0000 cmd 0x000008f0 wdata 0x04
+KEBAB SPMI: write REG 0x088f status 0x00000001 DONE
+KEBAB SPMI: REG 0x088f read 2: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x04
+KEBAB PON: read back 0x04, expected 0x04
+KEBAB PON: PASS: SOFT_RB_SPARE 0x00 -> 0x04, field 0x04, bit 0 unchanged 0x0
+```
+
+旧值 `0x00`，写入 `0x04`，读回 `0x04`，mask 外的 bit 0 保持 `0`。
+最终补丁的输出压缩成摘要行，原始寄存器行由 `kebab_pon_verbose=1` 打开。
+
+### 4. 真机结果
+
+所有尝试都在同一块 kebab（SM8250）上，镜像经 `fastboot flash boot_b`
+写入，固件固定从 `boot_b` 读载荷。门控关闭的镜像用于先证明"不写 PMIC 也
+能正常启动、`REBOOT` 仍工作"；门控打开的镜像用于写原因并复位。
+
+| # | 镜像 / 门控 | PON 原因（写前 → 写后，读回） | IMEM 写入 | 复位方式 | 45 s 内出现 fastboot | 下次启动看到的 PON / IMEM |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | `XNU-pon-off.img`，`kebab_pon_write` 未设置 | 未写；`PON-RB` 输出 `kebab_pon_write is off; refusing to write SOFT_RB_SPARE`，`PON?` 读到 `0x00` | 未写 | `REBOOT`（PSCI） | — | 启动正常；`IMEM?` = `0x0939992c`（随机） |
+| 1 | `XNU-pon-on.img`，`kebab_pon_write=1` | `0x00` → `0x04`，读回 `0x04`，bit 0 不变 | `0x77665500`，读回 MATCH | `FASTBOOT`（PSCI SYSTEM_RESET） | **是，约 2 s**；`c073a488`，`product: kona` | `PON?` = `0x00`；`IMEM?` = `0x836991fc`（随机） |
+| 2 | 同上，从普通启动再来一次 | `0x00` → `0x04`，读回 `0x04` | `0x77665500`，读回 MATCH | `FASTBOOT`（PSCI） | **是，3.33 s** | `PON?` = `0x00`；`IMEM?` = `0x016999fc`（随机） |
+| 3 | 同上，第三次 | `0x00` → `0x04`，读回 `0x04` | `0x77665500`，读回 MATCH | `FASTBOOT`（PSCI） | **是，3.33 s** | — |
+
+关键观察：
+
+* 表 0–3 使用的是中间构建的镜像（95 个补丁文件，含当时的诊断命令 `PON-RB`、
+  `PON-RST`、`FASTBOOT-PMIC`）。最终补丁删除了这些诊断命令，只保留
+  `FASTBOOT`，并把 PON 写入和 IMEM 写入一起放到门控后面；`FASTBOOT`
+  的写入与复位行为与表中完全一致，差异只在日志行数。
+* 每次进入 fastboot 后再 `fastboot reboot` 回内核，PON 原因都已经是
+  `0x00`，IMEM 都是新的随机值。说明 ABL 在消费 fastboot 请求时把 PON
+  原因清掉了；IMEM 的 cookie 在复位/启动过程中没有被保留下来。既然 ABL
+  自己会清，内核启动时不需要、也没有任何代码去清 `SOFT_RB_SPARE`。
+* 因此不存在"`fastboot reboot` 又回到 fastboot"的循环：原因被消费后，
+  下一次普通启动就是正常内核启动。实测两次从 fastboot 回内核分别用了
+  23.6 s 和 21.5 s（含固件与内核启动）。
+* 三条成功路径的差别只有启动次数，PON 旧值都是 `0x00`，写入和校验都
+  一样；fastboot 出现时间在 2～3.33 s。
+* 归因：IMEM 的 `0x77665500` 在每次复位后都不存在（本轮之前六次启动也
+  都是随机值），所以此前"写了 IMEM 却仍然普通启动"不是写失败，而是
+  ABL 根本不使用它。真正起作用的是 PON `SOFT_RB_SPARE` 的
+  `PON_RESTART_REASON_BOOTLOADER`。
+
+### 5. 使用方式
+
+启动参数（payload 的 TOML `args`，实测使用的那一行）：
+
+```text
+-v -enable_kprintf_spam startup_debug=1 serial=3 debug=0x14e cpus=1 rd=ufsroot0 ufsroot=userdata ufsrw=1 rootrw=1 kebabusb=1 kebabpanic=1 kebab_pon_write=1 kebab_fastboot_cookie=0x77665500 keepsyms=1
+```
+
+其中与本节直接相关的是 `kebabusb=1`（USB 控制台）、`kebab_pon_write=1`
+（PMIC 写门控）和 `kebab_fastboot_cookie=0x77665500`（IMEM 值；默认就是
+这个值，可以不写）。最小集是 `kebabusb=1 kebab_pon_write=1`。
+
+可选：`kebab_pon_verbose=1` 打开 SPMI 原始寄存器读写行，默认关闭。
+
+控制台命令：
+
+```text
+FASTBOOT     写 PON 原因（0x00 -> 0x04，读回校验）和 IMEM
+             0x77665500，然后 PSCI SYSTEM_RESET；约 2～3.3 秒进入 fastboot
+REBOOT       普通 PSCI 复位，不写任何原因
+PON?         只读检查：PON subtype、SOFT_RB_SPARE、APID 归属
+```
+
+`FASTBOOT` 在 `kebab_pon_write` 未设置时输出
+`KEBAB FASTBOOT: disabled because kebab_pon_write=0; use REBOOT for a plain restart`
+并直接返回。门控打开时，正常输出是：原因写入行、原因校验行、IMEM 写入行、
+IMEM 回读行、复位行。
+
+### 6. 补丁范围与构建
+
+| 项 | 值 |
+| --- | --- |
+| 内核补丁 | `0114-kebab-pon-reason-write.patch` |
+| 改动文件 | `bsd/dev/kebab_spmi.c`（写路径）、`bsd/dev/kebab_usb.c`（`FASTBOOT` 门控与 PON 调用） |
+| 不需要改动 | `bsd/conf/files` 和 `bsd/kern/bsd_init.c`：`0108` 已把 `kebab_spmi.c` 加进 `files`，并已从 `kebab_usb_start()` 调用 `kebab_spmi_init()`；IMEM 也是在同一函数里映射的 |
+| 系列 | `verify-all.sh`：`94/94` 个补丁文件按文件名顺序应用到 `1b191cb`（`xnu-8796.141.3`）；编号补丁 `0001`–`0114` 共 93 个 |
+| 构建 | 本地 macOS 14.6.1 VM（Xcode 15.4、KDK 13.5）：`kernel.development.kebab` sha256 `54d4a0addcb12b447681796d22b4e7d7959dc3a39350e2acc834a26822f811d1`，17,136,232 字节；0 error。`kebab_spmi.c`/`kebab_usb.c` 共 60 条 warning，其中 4 条是 `0114` 新增的 prototype/格式 warning，均不阻断构建（详见提交说明） |
+
+### 7. 仍未闭合的部分
+
+* PMIC 的 `PS_HOLD` 掉电复位路径（`0x85A/0x85B` + `0x0C264000`）按
+  vendor 语义实现过，但没有在真机上执行；PSCI 路径已经达成目标，而这条
+  路径一旦触发就没有撤销手段，所以补丁不携带它。若以后 PSCI 路径失效，
+  再按 `qpnp_pon_system_pwr_off()` + `deassert_ps_hold()` 的顺序单独验证。
+* ABL 具体在什么时刻清掉 `SOFT_RB_SPARE` 还没有直接观测：内核只能在
+  fastboot 之后的下一次启动里看到 `0x00`。要看到"ABL 读取后立即清零"的
+  瞬间，需要 ABL/XBL 侧日志或 SPMI 抓包。
+* IMEM 的 `restart_reason` 是否被复位清掉、还是被 ABL 改写，仍无法区分；
+  但已经不影响结论——PON 原因才是 ABL 使用的信号。
