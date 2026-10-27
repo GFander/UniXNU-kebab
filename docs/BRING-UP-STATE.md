@@ -7746,10 +7746,10 @@ python scripts/bring-up.py --from vol
 | C-VOL-MOUNT | `vol.mount` | `KEBAB HFS: KebabRoot: ... total blocks 4194304` |
 | C-INST-GEOM | `install.geometry` | `INST? root rw`，`space ... of 17179869184`，`bsize 4096 blocks 4194304 free > 0` |
 | C-BASE-PRECHECK | `precheck.base` | 5 条 `INST CHECK` 全部 same，或列出 missing/different |
-| C-SEND-BASE | `send.base` | `INST BEGIN ... write`、`INST ACK`、`INST DONE entries 5 ... fail 0` |
+| C-SEND-BASE | `send.base` | `INST BEGIN ... write`、`INST ACK`、`INST DONE entries 5 ...`（不能出现 `INST DONE with ... failure(s)`） |
 | C-VERIFY-BASE | `verify.base` | 抽样 `INST CHECK` 的大小和 SHA-256 与 KIST 头一致 |
 | C-CACHE-PRECHECK | `precheck.cache` | 44 条 `INST CHECK` 全部 same，或列出 missing/different |
-| C-SEND-CACHE | `send.cache` | `INST DONE entries 44 ... fail 0`，并记录耗时 |
+| C-SEND-CACHE | `send.cache` | `INST DONE entries 44 ...`（无 failure 行），并记录耗时 |
 | C-VERIFY-CACHE | `verify.cache` | 抽样（含最大 `.symbols`）大小和 SHA-256 一致 |
 | C-FINAL | `final.launchd` | 无 CS_KILLED/initproc/DSC 失败；出现 `launchd logging initialized` 或 zprint 的 `zone name`/`ZONE TOTALS` |
 
@@ -8019,6 +8019,7 @@ checkpoint/phase 记录。退出码：0 完成，2 前置失败，3 检查点/�
 
 ```
 $ python3 scripts/test-bring-up.py --kernel-source .../kebab_usb.c
+PASS kist-compressed-size
 PASS dry-run            rc=0 expected=0
 PASS happy-path         rc=0 expected=0
 PASS resume             rc=0 expected=0
