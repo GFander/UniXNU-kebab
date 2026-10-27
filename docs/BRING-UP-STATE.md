@@ -3541,3 +3541,46 @@ cmd-db 缺失/坏魔数/重复/越界、TCS 占用与重复提交、超时与错
 - 只有主机测试：没有编译进内核、没有刷机、没有 MMIO 访问；
 - 真实 TCS 的所有权判断、完成回收策略和“是否存在可到达的硬件写入口”仍是 R5 的
   审核内容；本轮没有新增内核侧入口。
+
+## 三十四、R4.1 加固与 R5-A 只读审计（0125）
+
+### 1. R4.1：审核提出的两处修复
+
+- 编码器不再接受调用者构造的资源结构：`kebab_rpmh_encode_enable/voltage` 改为按
+  名字查表，地址与电压都由表决定，伪造结构没有入口；
+- 新增 `kebab_rpmh_cmd_allowed()`：通道只接受编码器可能产出的四条命令
+  （两个资源 × ENABLE/VOLTAGE），伪造地址、错误数据、错误 msgid 一律
+  `KEBAB_RPMH_ERR_NOT_ALLOWED`；
+- `kebab_tcs_submit()` 在调用 sink 之前进入 `INFLIGHT`，sink 返回失败则进入
+  `ERROR`；`complete/timeout/fail` 只从 `INFLIGHT` 迁移，sink 内同步完成不会再被
+  覆盖回 in-flight；
+- cmd-db 解析要求 name→addr 与表一致，且条目必须位于 VREG slave（id 4）；
+  交叉映射（`ldoa13` 条目带 `ldoc1` 的合法地址）与错误 slave 都拒绝。
+
+### 2. R4.1 主机测试
+
+57 项断言全部 PASS，新增覆盖：伪造 3300 mV 命令、enable data=0、错误 msgid、
+交叉映射、错误 slave、重复完成、sink 内同步完成、sink 内失败、拒绝型 sink。
+
+### 3. R5-A：drv-2 全槽只读审计
+
+探针扩展到 common 的 `cmd_wait` 与 TCS 0–8 的
+`enable/msgid/addr/data/status/resp`：
+
+```text
+common irq_en 0x00000001 irq_status 0x00000000 cmd_wait 0x00000000 control 0x01010000 status 0x00000001 cmd_enable 0x00000003
+tcs 0: enable 0x00000003 msgid 0x00010108 addr 0x00030000 data 0x00000005 status 0x00010101 resp 0x00000000
+tcs 1..8: enable 0x00000000 msgid 0x00000000 addr 0x00000000 data 0x00000000 status 0x00000000 resp 0x00000000
+```
+
+- TCS1–8 完全为零，睡眠/唤醒/控制槽没有持有者痕迹；
+- TCS0 还留着一条 CLK 类请求（`addr 0x00030000`、`data 5`、`status 0x010101`），
+  common `control = 0x01010000` 含 AMC 位。这条残留不是本内核发的，但在没有
+  明确回收策略前，TCS0 不能当作可用通道；
+- 因此第一次真实发送若要做，只能考虑 TCS1，并且仍需要所有权与完成回收的判断，
+  这两项是 R5-C 的内容。
+
+### 4. 验证边界
+
+- 实测：上述只读输出、57 项主机测试；
+- 未做：任何 TCS/VRM/PMIC 写、任何 RPMh 命令；没有新增内核侧写入口。

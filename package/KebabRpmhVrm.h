@@ -2,15 +2,15 @@
 /*
  * RPMh VRM encoding for the two rails the kebab touch part needs.
  *
- * This module is deliberately free of MMIO and of any kernel dependency: it
- * turns a validated command DB resource into the {msgid, addr, data} triple a
- * TCS would carry, and nothing else.  The host tests link it directly; the
- * kernel port will reuse the same encoding rules.
+ * The module is free of MMIO and of kernel dependencies.  It never trusts a
+ * caller-supplied resource structure: the encoder takes a name, looks it up in
+ * its own read-only table, and checks the address and the voltage against that
+ * table.  A struct with a valid address and an invented voltage therefore has
+ * no path through this API.
  *
  * The address is the full 32-bit command DB word.  Bits 19:16 are the
- * accelerator type (4 = VREG) and are part of the address a TCS must carry;
- * adding the register offset keeps them.  Truncating to the low 16 bits is a
- * bug this file refuses on purpose.
+ * accelerator type (4 = VREG) and are part of what a TCS must carry; adding
+ * the register offset keeps them.
  */
 #ifndef KEBAB_RPMH_VRM_H
 #define KEBAB_RPMH_VRM_H
@@ -39,6 +39,7 @@ typedef enum {
 	KEBAB_RPMH_ERR_TCS_STATE,
 	KEBAB_RPMH_ERR_NO_SINK,
 	KEBAB_RPMH_ERR_SINK_FAILED,
+	KEBAB_RPMH_ERR_NOT_ALLOWED,
 } kebab_rpmh_status;
 
 typedef struct {
@@ -53,8 +54,7 @@ typedef struct {
 	uint32_t data;
 } kebab_rpmh_cmd;
 
-/* A sink is the only place a command could ever reach hardware.  Tests pass
- * NULL or a recorder; no other code path exists. */
+/* A sink is the only place a command could ever reach hardware. */
 typedef kebab_rpmh_status (*kebab_rpmh_sink)(const kebab_rpmh_cmd *cmd,
     void *ctx);
 
@@ -74,23 +74,21 @@ typedef struct {
 	kebab_rpmh_cmd  inflight;
 } kebab_tcs;
 
-/* Fixed table: ldoa13 (PM8150 L13, 3.008 V) and ldoc1 (PM8150L L1, 1.800 V).
- * Returns NULL for any other name, which is what keeps a console from
- * becoming an arbitrary-address interface. */
+/* Read-only table of the two allowed rails. */
 const kebab_rpmh_resource *kebab_rpmh_resource_by_name(const char *name);
-
-/* True only for the two addresses above; a truncated 0x0c00/0x2f00 or any
- * other value is false. */
 int kebab_rpmh_address_known(uint32_t addr);
 
-kebab_rpmh_status kebab_rpmh_encode_enable(const kebab_rpmh_resource *res,
+/* Encode by name; the table, not the caller, decides address and voltage. */
+kebab_rpmh_status kebab_rpmh_encode_enable(const char *name,
     kebab_rpmh_cmd *out);
-kebab_rpmh_status kebab_rpmh_encode_voltage(const kebab_rpmh_resource *res,
-    uint32_t mv, kebab_rpmh_cmd *out);
+kebab_rpmh_status kebab_rpmh_encode_voltage(const char *name, uint32_t mv,
+    kebab_rpmh_cmd *out);
 
-/* Minimal read-only parse of a command DB snapshot, mirroring the kernel
- * probe: magic, bounds, duplicate ids.  Used by the tests to prove the
- * rejection paths. */
+/* True only for a command this module could itself have produced. */
+int kebab_rpmh_cmd_allowed(const kebab_rpmh_cmd *cmd);
+
+/* Read-only parse of a command DB snapshot; name, address and VREG slave id
+ * are all checked against the table. */
 kebab_rpmh_status kebab_rpmh_cmd_db_lookup(const uint8_t *db, size_t len,
     const char *name, uint32_t *addr_out);
 

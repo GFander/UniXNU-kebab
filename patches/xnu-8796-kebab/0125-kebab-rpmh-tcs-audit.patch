@@ -1,0 +1,56 @@
+feat(rpmh): dump every TCS slot in the read-only probe
+
+The 0123 probe printed only the two active TCS slots. CMD_ENABLE = 0 does not
+prove a slot is free, so the probe now prints cmd_wait from the common block
+and enable/msgid/addr/data/status/resp for TCS 0..8, covering the sleep, wake
+and control slots too. Still read-only: no register is written.
+
+Measured: TCS1..8 are all zero; TCS0 still carries a CLK request
+(addr 0x00030000, data 5, status 0x010101) and the common control register
+reads 0x01010000, so TCS0 is not a candidate for a first request.
+
+--- a/bsd/dev/kebab_spmi.c
++++ b/bsd/dev/kebab_spmi.c
+@@ -833,6 +833,9 @@
+ #define KEBAB_RSC_TCS_STRIDE    672u
+ #define KEBAB_RSC_CMD_STRIDE    20u
+ #define KEBAB_RSC_ACTIVE_TCS    2u
++#define KEBAB_RSC_TCS_TOTAL     9u      /* 2 active + 3 sleep + 3 wake + 1 control */
++#define KEBAB_RSC_CMD_WAIT      0x10u
++#define KEBAB_RSC_RESP_DATA     0x40u
+ 
+ #define KEBAB_RSC_IRQ_ENABLE    0x00u
+ #define KEBAB_RSC_IRQ_STATUS    0x04u
+@@ -929,21 +932,28 @@
+ 	base = drv + KEBAB_RSC_TCS_OFF;
+ 	printf("KEBAB RPMH: drv-2 0x%08x, tcs_base +0x%x -> 0x%llx\n",
+ 	    KEBAB_RSC_DRV2_PA, KEBAB_RSC_TCS_OFF, (unsigned long long)base);
+-	printf("KEBAB RPMH: common irq_en 0x%08x irq_status 0x%08x control 0x%08x status 0x%08x cmd_enable 0x%08x\n",
++	printf("KEBAB RPMH: common irq_en 0x%08x irq_status 0x%08x cmd_wait 0x%08x control 0x%08x status 0x%08x cmd_enable 0x%08x\n",
+ 	    kebab_spmi_rd(base, KEBAB_RSC_IRQ_ENABLE),
+ 	    kebab_spmi_rd(base, KEBAB_RSC_IRQ_STATUS),
++	    kebab_spmi_rd(base, KEBAB_RSC_CMD_WAIT),
+ 	    kebab_spmi_rd(base, KEBAB_RSC_CONTROL),
+ 	    kebab_spmi_rd(base, KEBAB_RSC_STATUS),
+ 	    kebab_spmi_rd(base, KEBAB_RSC_CMD_ENABLE));
+-	for (i = 0; i < KEBAB_RSC_ACTIVE_TCS; i++) {
++	/*
++	 * Read every TCS slot, not just the two active ones: CMD_ENABLE = 0
++	 * alone does not prove a slot is free, and the sleep/wake/control
++	 * slots show whether something else is holding the RSC.
++	 */
++	for (i = 0; i < KEBAB_RSC_TCS_TOTAL; i++) {
+ 		vm_offset_t t = base + i * KEBAB_RSC_TCS_STRIDE;
+ 
+-		printf("KEBAB RPMH: tcs %u: enable 0x%08x msgid 0x%08x addr 0x%08x data 0x%08x status 0x%08x\n",
++		printf("KEBAB RPMH: tcs %u: enable 0x%08x msgid 0x%08x addr 0x%08x data 0x%08x status 0x%08x resp 0x%08x\n",
+ 		    i, kebab_spmi_rd(t, KEBAB_RSC_CMD_ENABLE),
+ 		    kebab_spmi_rd(t, KEBAB_RSC_CMD_MSGID),
+ 		    kebab_spmi_rd(t, KEBAB_RSC_CMD_ADDR),
+ 		    kebab_spmi_rd(t, KEBAB_RSC_CMD_DATA),
+-		    kebab_spmi_rd(t, KEBAB_RSC_CMD_STATUS));
++		    kebab_spmi_rd(t, KEBAB_RSC_CMD_STATUS),
++		    kebab_spmi_rd(t, KEBAB_RSC_RESP_DATA));
+ 	}
+ }
+ 
