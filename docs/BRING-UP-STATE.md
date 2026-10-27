@@ -2265,3 +2265,273 @@ Stage A 没有成功，所以按计划做 Stage B。Stage B 的第一件事是�
 所有命令都是主机侧一次 `write()` 发出的完整一行（`FASTBOOT\n` 9 字节、
 `REBOOT\n` 7 字节、`PSCI?\n` 6 字节、`IMEM?\n` 6 字节），没有逐字符输入。
 整个过程手机没有落入 recovery / fastboot / EDL：每次复位后都回到 XNU 控制台。
+
+## 二十、SYSTEM_RESET2 与 PSCI 特性探测的更正
+
+本节更正第十九节的两处结论：`PSCI_FEATURES` 返回 `0` 的含义，以及 IMEM 证据
+能证明的范围。代码是 `0107-kebab-psci-reset2.patch`（提交 `560b3aa`），
+镜像 `XNU-0107.img` 由 CI run 40452530585 构建；内核 17,119,032 字节，
+SHA-256 `b68bb4bbdf59ddcd893c4c6ce8f6919bb06cc1a9947a5eef4deaa590c1ee7997`。
+
+### 1. 更正的 PSCI_FEATURES 语义
+
+PSCI 规范对 `PSCI_FEATURES`（`0x8400000A`）的返回值规定如下：
+
+| 返回值 | 含义 |
+| --- | --- |
+| `0xFFFFFFFF`（`PSCI_RET_NOT_SUPPORTED`） | 该 FID 不支持 |
+| `0` | 支持，没有 feature flags |
+| 其它非负值 | 支持，返回值是 feature flags |
+
+Linux 的 `drivers/firmware/psci.c` 只判断 `!= PSCI_RET_NOT_SUPPORTED`：
+
+```c
+feature = psci_features(psci_fn_ids[i].fn);
+if (feature == PSCI_RET_NOT_SUPPORTED)
+	continue;
+```
+
+第十九节把 `0` 读成"not supported"，于是把 `SYSTEM_RESET2` 记成
+`NOT_SUPPORTED`；同一节"这颗固件的 `PSCI_FEATURES` 是桩"的结论也来自同一个
+错误：`SYSTEM_RESET` 返回 `0` 不是桩，而是"支持、无 flags"的正常回答，和它
+实测能复位完全一致。
+
+`0107` 因此改了实现：
+
+* `kebab_psci_features()` 返回原始 `uint32_t`，不再转成 `int` 再由调用者猜；
+* 判定统一为 `value != 0xFFFFFFFF`；
+* `PSCI?` / `PSCINEG?` 打印原始值，不在内核里改写语义；
+* `FASTBOOT2` 只在"负控通过 + `FEATURES(0xC4000012) != 0xFFFFFFFF`"时执行。
+
+### 2. 负控与两个真实 FID 的原始读数
+
+`PSCI?` 先调一个不可能存在的 FID `0x8400FFFF` 作负控，再读两个真实 FID。
+负控的作用是证明探针不是"对任何输入都回答 0"的桩：如果负控返回 `0`，后续
+任何"支持"的结论都不成立，`FASTBOOT2` 会拒绝执行。
+
+**负控结果：`PSCI_FEATURES(0x8400FFFF) = 0xFFFFFFFF`，探针可用。**
+
+| FID | 功能 | 原始返回 | 按更正后的规则 |
+| --- | --- | --- | --- |
+| `0x8400FFFF` | 负控（不存在的 FID） | `0xFFFFFFFF` | 必须是 `PSCI_RET_NOT_SUPPORTED` |
+| `0x84000009` | `SYSTEM_RESET` | `0x00000000` | **支持**（无 flags） |
+| `0xC4000012` | `SYSTEM_RESET2` | `0x00000000` | **支持**（无 flags） |
+
+同一次启动的完整控制台记录（`PSCI?` 与 `PSCINEG?` 的读数一致）：
+
+```text
+KEBAB PSCI: version 0x00010001
+KEBAB PSCI: FEATURES(0x8400ffff)=0xffffffff negative control OK
+KEBAB PSCI: FEATURES(0x84000009)=0x00000000 SYSTEM_RESET supported
+KEBAB PSCI: FEATURES(0xc4000012)=0x00000000 SYSTEM_RESET2 supported
+```
+
+这只说明 `SYSTEM_RESET2` 这个 FID 存在，不保证它接受 `reset_type = 0`
+（架构 warm reset）；下一节的实测正好把这两件事分开。
+
+### 3. FASTBOOT2 实验
+
+`FASTBOOT2` 的执行顺序（`0107`）：
+
+1. 打印当前 IMEM `restart_reason`（物理 `0x146BF000 + 0x65C`）；
+2. 写 cookie `0x77665500`（`kebab_fastboot_cookie` 可覆盖）；
+3. 回读并打印 MATCH/MISMATCH；
+4. 执行 `dsb sy`；
+5. 调用 `SYSTEM_RESET2(0xC4000012)`，`x1 = 0`（架构 warm reset），
+   `x2 = 0`（cookie）；
+6. 如果调用返回：打印完整 64 位 `x0`，恢复旧 IMEM 值，然后**停止**，
+   不自动落到 `SYSTEM_RESET`。
+
+门控条件：负控必须为 `0xFFFFFFFF`，且
+`FEATURES(0xC4000012) != 0xFFFFFFFF`；否则只打印原因，不复位。
+
+**实测**：命令发出后端口没有消失，`SYSTEM_RESET2` 返回
+`0xFFFFFFFFFFFFFFFE`，板子仍停在同一个 XNU 启动里。
+
+```text
+KEBAB FASTBOOT: cookie 0x77665500 from kebab_fastboot_cookie
+KEBAB FASTBOOT: IMEM restart_reason at 0x146bf000+0x65c is 0x012999ec; writing 0x77665500
+KEBAB FASTBOOT: read back 0x77665500 (MATCH)
+KEBAB REBOOT: PSCI SYSTEM_RESET2(reset_type=0, cookie=0)
+KEBAB REBOOT: SYSTEM_RESET2 returned 0xfffffffffffffffe, the machine did not reset
+KEBAB FASTBOOT: restored restart_reason to 0x012999ec
+```
+
+| 项 | 读数 |
+| --- | --- |
+| 写前 IMEM | `0x012999ec` |
+| 写入 | `0x77665500`（来自 `kebab_fastboot_cookie`） |
+| 回读 | `0x77665500` MATCH |
+| PSCI 调用 | `SYSTEM_RESET2(0xC4000012, x1=0, x2=0)` |
+| 调用返回 | `0xFFFFFFFFFFFFFFFE` = `PSCI_RET_INVALID_PARAMETERS`（`-2`） |
+| 是否进 fastboot | 否（没有发生复位） |
+| 是否正常启动 | 不适用（同一启动继续，没有重启） |
+| crash dump | 无（没有出现 `VID_05C6` 设备） |
+| 下次启动 IMEM | 不适用；同一启动内恢复后为 `0x012999ec` |
+| 控制台是否回来 | 没有离开（0 s） |
+| 10 s 后板子状态 | XNU 控制台，`/dev/cu.usbmodem00011` |
+
+**解释**：`FEATURES(0xC4000012) = 0` 说明这个 FID 在固件里存在，但
+`reset_type = 0` 被固件以 `PSCI_RET_INVALID_PARAMETERS` 拒绝。也就是说上一节
+的 `NOT_SUPPORTED` 是错的，但"`SYSTEM_RESET2` 能进入 fastboot"同样不成立：
+架构 warm reset 这条路在这颗固件上走不通。按本轮"一次只改一个变量"的约定，
+没有改用 vendor 私有的 `reset_type`（那会再引入一个未经验证的变量），也没有
+在返回后补一次 `SYSTEM_RESET`。
+
+### 4. REBOOT 回归
+
+在 `SYSTEM_RESET2` 返回、IMEM 恢复之后，收尾验证原来的 `REBOOT` 路径：
+
+| 项 | 读数 |
+| --- | --- |
+| 命令 | `REBOOT\n` |
+| 复位调用 | `PEHaltRestart(kPERestartCPU)` → PSCI `SYSTEM_RESET` |
+| 端口消失 | 0.45 s |
+| 控制台回来 | 20.2 s，可继续读写 |
+| 是否进 fastboot | 否 |
+| 是否正常启动 | 是 |
+| crash dump | 无 |
+| 下次启动 IMEM | `0x8929b17c` |
+
+`REBOOT` 仍然工作，说明这次失败的 `SYSTEM_RESET2` 和 IMEM 恢复没有破坏平台
+复位路径。
+
+### 5. IMEM 证据能证明什么、不能证明什么
+
+把本轮和上一轮的所有启动读数放在一起（`REBOOT` 不写 IMEM）：
+
+| 启动 | 触发 | 下一次内核启动读到的 `0x65C` |
+| --- | --- | --- |
+| 1 | 刷机后第一次启动 | `0x0b39bda4` |
+| 2 | `FASTBOOT`（写 cookie + `SYSTEM_RESET`） | `0x836999ac` |
+| 3 | `REBOOT`（未写） | `0x532989ac` |
+| 4 | `REBOOT`（未写） | `0x616998ac` |
+| 5 | 本轮刷机后第一次启动 | `0x012999ec` |
+| 6 | 本轮 `REBOOT` 后 | `0x8929b17c` |
+
+**能证明的**：
+
+1. `0x146BF65C` 的映射、写、回读都成立（`FASTBOOT` 回读 MATCH；本轮
+   `FASTBOOT2` 也回读 MATCH）。
+2. OS 写的 cookie 在**下一次内核启动后**读不到；六次启动六个不同的值。
+3. `REBOOT` 根本不写这个单元，值也会变——每次启动都有比内核更早的环节
+   （XBL / ABL / UEFI 之一或多个）在重写它，而且这发生在下一次内核读它之前。
+
+**不能证明的**：
+
+* 不能证明 ABL 在**做 fastboot 判断的那一刻**没有看到 cookie。下一次内核
+  读到的值晚于 ABL 的判断；ABL 完全可能读到了、消费了或重写了它。
+* 不能证明是复位销毁了 cookie，也不能证明不是复位销毁的。
+* 不能区分下面两个（还可以有第三个）假设。
+
+**仍然开放的假设**：
+
+* **H1（复位破坏）**：`SYSTEM_RESET` 或更早的复位/启动环节在 ABL 读取之前
+  清掉或覆盖了 IMEM，cookie 没有到达判断点。
+* **H2（ABL 消费/重写）**：ABL 读到了（或消费了）cookie，但 vendor 路径还要求
+  PMIC PON 的 `PON_RESTART_REASON_BOOTLOADER`；OS 只写了 IMEM，PMIC 侧没有
+  这个 reason，所以 ABL 仍然正常启动，并在启动过程中重写 `0x65C`。
+* 还可以有 **H3**：这条启动链根本不把 `0x65C` 当作 fastboot 的判断依据，
+  只看 PMIC PON。只要没有读到 ABL 的代码或 PMIC 寄存器，H3 也不能排除。
+
+本轮的 `FASTBOOT2` **没有关闭任何一个假设**：`SYSTEM_RESET2` 在复位发生前
+就返回了 `-2`，所以没有产生"复位后 IMEM 是否保留"的新数据。它只证明了
+架构 warm reset 这条复位路径不可用，不能用来判断 H1/H2。
+
+因此，上一节"ABL 做判断时看到的不是 OS 写的值"应改成：
+**"下一次内核启动时看到的不是 OS 写的值；ABL 判断时看到什么，现有数据不能
+确定。"** 要关闭 H1/H2，需要 (a) PMIC PON 的实际读数/写入，或 (b) 在 ABL
+读取 IMEM 的时刻观察它；两点都不是当前内核能做的。
+
+### 6. PMIC PON 路线的实现规格（本轮不写驱动）
+
+因为 `SYSTEM_RESET2` 没有进入 fastboot，按本轮约定**不开始写 SPMI 驱动**。
+下面是补上这一段所需的精确规格；它是实现清单，不是已完成的代码。
+
+#### 6.1 目标与顺序
+
+vendor 的 fastboot 路径不是只写 IMEM：
+
+1. `qpnp_pon_set_restart_reason(PON_RESTART_REASON_BOOTLOADER)` 写 PMIC PON；
+2. `__raw_writel(0x77665500, restart_reason)` 写 IMEM；
+3. 复位。
+
+本内核只有第 2 步。补第 1 步必须严格按"先只读、再单次写"的顺序：
+
+1. **只读 subtype 探测**：SID 0，PON 基址 `0x0800`，寄存器 `0x0805`；
+   读到 `0x04`/`0x05` 才是 Gen2；
+2. **单次 masked RMW**：仅当 subtype 为 Gen2，读 `0x088F`，写回
+   `(old & 0x01) | 0x04`，回读校验；
+3. 只有在第 1、2 步都成功且回读正确后，才允许 `SYSTEM_RESET`。
+
+#### 6.2 当前缺失的 SPMI 基础设施
+
+* XNU 树里没有 SPMI 控制器驱动：`grep -ri spmi` 只命中
+  `EXTERNAL_HEADERS/acpi/Acpi_v1.h` 的一个无关词；`bsd/conf/files`、
+  `iokit/conf/files*`、`configs/kebab_defconfig` 都没有 SPMI 项。
+* 没有 `qcom,spmi-pmic-arb` 驱动：kona 的 arbiter 是
+  `qcom,spmi@c440000`，`reg-names = "core","chnls","obsrvr","intr","cnfg"`，
+  对应 `0xC440000` / `0xC600000` / `0xE600000` / `0xE700000` / `0xC40A000`，
+  `qcom,ee = <0>`；还需要从 DT 读 `qcom,channel`（Linux 要求该属性）。
+* 没有 APID 映射/ownership 处理、没有命令编码和超时轮询、没有 PMIC 子设备
+  模型，也没有 `qpnp-power-on` 的等价物。
+* KDK 里的 `AppleSPMI.kext` 是 Apple Silicon 的二进制，不参与这棵树的构建，
+  也不匹配 kona 的 DT。
+* `package/BootReset.c` 是 sheng（SM8550）的另一套地址（`0xC400000` 等），
+  没有编进 kebab 内核，不能当作"已经有 SPMI"。
+* 没有任何驱动占用 arbiter，也就没有 APID/EE 的 ownership 声明；反过来说，
+  EE0 是否真的拥有 PON 的 APID，必须靠下面的 ownership 表读出来确认。
+
+#### 6.3 只读 subtype 探测（第一步）
+
+1. `ml_io_map()` 映射 core / chnls / obsrvr / cnfg 五段。
+2. 读 `core + 0x0000`（`PMIC_ARB_VERSION`）。kona 预期是 v5
+   （`0x50000000 <= ver < 0x70000000`）；不是 v5 就停下重新推导，不能套用
+   v5 的偏移。
+3. 读 `core + 0x0004`（`PMIC_ARB_FEATURES`，APID 数量低 11 位），
+   上限 `PMIC_ARB_MAX_PERIPHS`。
+4. 建 APID→PPID 表：v5 的映射表在 `core + 0x900 + 4*apid`，
+   `ppid = (regval >> 8) & 0xFFF`，bit24 是 IRQ owner；
+   ownership 在 `cnfg + 0x700 + 4*apid`，低 3 位是 write EE。
+5. 目标外设：SID 0，PON 的 PPID 是 `(0 << 8) | (0x0800 >> 8) = 0x0008`。
+   找到 `ppid == 0x0008` 且 `write_ee == 0` 的 APID；找不到就停，不猜 APID。
+6. 事务寄存器：v5 的 RW 通道基址是 `chnls + 0x10000*apid`；
+   命令 `+0x00`、状态 `+0x08`、写数据 `+0x10`、读数据 `+0x18`。
+   命令格式（v5/v2）：
+   `cmd = (opc << 27) | ((addr & 0xFF) << 4) | (len - 1)`；
+   读 `opc = 0xF`，写 `opc = 0xE`，1 字节时 `len - 1 = 0`。
+7. 写事务先把数据写到 `WDATA0`，再写 `CMD`；轮询 `STATUS` 的 bit0
+   （DONE），超时按 1000 µs；bit1 = FAIL、bit2 = DENIED、bit3 = DROPPED，
+   任一置位都要中止并打印原始 `STATUS`。读事务在 DONE 后从 `RDATA0`
+   取低字节。
+8. 只读 `addr = 0x0805`（PON base `0x0800` + subtype `0x05`）一次：
+   * `0x04`（GEN2_PRIMARY）或 `0x05`（GEN2_SECONDARY）：Gen2，继续；
+   * `0x01`/`0x02`/`0x03`：Gen1/1REG，掩码和移位不同，**停止**；
+   * 其它值、超时、DENIED：**停止**，不写任何 PMIC 寄存器。
+
+#### 6.4 单次 masked RMW（第二步，仅 Gen2）
+
+1. 读 `addr = 0x088F`（`QPNP_PON_SOFT_RB_SPARE`）1 字节，得到 `old`。
+2. 计算 `new = (old & 0x01) | (0x02 << 1)`，即 `new = (old & 0x01) | 0x04`；
+   只改 bit7:1，bit0 原样保留。
+3. 写 `addr = 0x088F`，值 `new`，长度 1。
+4. 立即回读 `0x088F`，要求 `(readback & 0xFE) == 0x04` 且
+   `(readback & 0x01) == (old & 0x01)`；不满足就报告失败，**不要再写第二次**。
+5. 成功后才调用 `SYSTEM_RESET`（`0x84000009`），仍然走
+   `PEHaltRestart(kPERestartCPU)`，不要用刚被证明不可用的
+   `SYSTEM_RESET2(reset_type=0)`。
+
+#### 6.5 接线、门控与验收
+
+* 建议把 arbiter/PMIC 访问放在新的 `KebabSPMI.cpp`（或
+  `KebabPlatformExpert.cpp` 的独立函数）里，只做轮询、不开中断；不要在 USB
+  驱动里直接碰 PMIC。
+* 用启动参数（例如 `kebabpon=1`）门控写路径；默认只做只读 subtype 探测，
+  日志打印 version、APID、PPID、ownership、subtype 的原始值。
+* 写路径只允许单次；失败后不清零、不重试、不换 reset type，避免把 PMIC
+  带进未知状态。
+* 验收标准：subtype 读到 `0x04`/`0x05`；`0x088F` 回读
+  `(x & 0xFE) == 0x04`；随后 `SYSTEM_RESET` 后板子进入 fastboot（主机
+  `fastboot devices` 能看到序列号），而不是正常启动或 EDL。
+* 如果仍正常启动：记录下一次启动的 IMEM、PON `0x088F` 回读值和 USB 状态，
+  再判断是 ABL 不认这个 reason，还是复位路径又清掉了它。
