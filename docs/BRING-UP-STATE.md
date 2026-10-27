@@ -4927,3 +4927,188 @@ Mu 时若事件记录与显示都在同一执行上下文串行完成，就不�
 | TCS1 所有权 | UNKNOWN |
 
 真实 RPMh 写入继续 NO-GO。
+
+## 五十九、固件日志与 RPMh 探针
+
+> 本节原计划编号“二十三”，但任务下发后文档已经扩展到五十八节，编号冲突，故顺延
+> 为五十九。内容对应设备仓库新增的 `firmware/` 目录（两个 DXE 驱动与集成说明）
+> 和内核补丁 `0129-kebab-fwlog-reader.patch`。
+
+### 1. 固件日志环的布局
+
+UEFI 侧在固定物理地址留一个 256 KiB 的环，内核只读地把它映射进来：
+
+| 项 | 值 |
+| --- | --- |
+| 物理地址 | `0x9FF00000` |
+| 大小 | 64 页 = `0x40000`（256 KiB） |
+| 头部 | 16 字节：`u32 magic`、`u32 size`、`u64 head` |
+| magic | `0x474c464b`（小端字节 `'K' 'F' 'L' 'G'`） |
+| size | 数据区字节数，合法范围 `1 .. 0x40000-16`；正常值 `0x3FFF0` |
+| head | 历史累计写入字节数（单调），release store |
+| data | 从 `+0x10` 开始；绝对偏移 `p` 的字节在 `data[p % size]` |
+
+`KebabFwLogDxe` 用 `AllocatePages(AllocateAddress, EfiReservedMemoryType, 64)`
+保留这一页，然后依次写 `Magic = 0`、`Size`、`Head = 0`、fence、
+`Magic = 'KFLG'`。成功后这一页在 UEFI 内存图里是 reserved，内核按固定物理地址
+找得到。保留失败时只打一行 `[KFLG] reserve ... failed`，magic 永远不写，
+`KebabFwLogAppend()` 一直是 no-op，内核会明确报告 absent，而不是读一页垃圾。
+
+生产者是 `FrameBufferSerialPortLib` 的 `SerialPortWrite()`：它在把字节画到 GOP
+之前调用 `KebabFwLogAppend(Buffer, NumberOfBytes)`，所以屏幕上的固件文本同时进了
+环。`KebabFwLogAppend()` 不分配、不调用 UEFI 服务：magic 未置位时直接返回；写了
+就按 64 位取模推进，最后用 release store 发布 `head`。
+
+`0x9FF00000` 正好在 FD 结束处（`0x9FC00000 + 0x300000`）。如果它已被别的描述符
+占用，保留会失败；地址在三处必须一致：`KebabFwLog.h` 的 `KEBAB_FWLOG_PA`、串口库
+里的副本、内核 0129 的 `KEBAB_FWLOG_PA`。
+
+### 2. 内核侧：`bsd/dev/kebab_fwlog.c`（0129）
+
+新增 `bsd/dev/kebab_fwlog.c` 并在 `bsd/conf/files` 登记，不再往
+`kebab_spmi.c` 末尾追加代码；SPMI/RPMh 驱动保持原样。
+
+* `kebab_fwlog_attach()`：`ml_io_map(0x9ff00000, 0x40000)` 只做一次，校验 magic
+  和 size 后缓存映射；`io_map` 子图只有 8 MiB，所以即使 header 非法也不第二次
+  映射。缺失、magic 不对、size 不在范围内，各打一行带地址和读到的值的日志。
+* `kebab_fwlog_report(max_bytes)`：从最新处往回取 `max_bytes`，按 oldest-first
+  输出。起点在窗口**前半段**内找 `'\n'` 对齐（`n/2` 的界限保证不会把整段跳
+  过去），跳过 `'\r'`，每约 192 字节批量 `printf` 一次，避免逐字符 flush。头行
+  打印 `ring=` 和 `written=`，尾行打印实际输出的字节数。
+* `kebab_fwlog_boot_summary()`：`bsd_init` 在 `kebab_usb_start()` 之后调用，只打
+  一行 `ring N bytes, written M bytes`；attach 失败时不重复，原因已经由 attach
+  打过。
+* 控制台命令沿用 `SPMI?`/`PON?` 的写法：`FWLOG?` 输出 4096 字节，`FWLOG? all`
+  请求整环。两者都要求在**一次 bulk-OUT 完成**内到达；KDP 接管字节流时按首字节
+  锚定，和 `REBOOT`/`SPMI?` 一致。
+
+整环请求有一个明确的截断：USB 控制台环是 `16384` 字节（可用 `16383`），把
+`0x3FFF0` 字节直接灌进去会静默丢字节。因此 `max_bytes == 0` 在实现里截到
+`12288`，并在头行写 `(whole ring capped at 12288 for the 16384-byte console
+ring)`；尾行仍然是实际输出的字节数。
+
+输出格式示例（数值为占位）：
+
+```text
+KEBAB FWLOG: ring=262128 written=812345 dump=4096
+...固件文本...
+KEBAB FWLOG: ---- end (4096 bytes) ----
+
+KEBAB FWLOG: ring=262128 written=812345 dump=12288 (whole ring capped at 12288 for the 16384-byte console ring)
+...固件文本...
+KEBAB FWLOG: ---- end (12288 bytes) ----
+```
+
+### 3. RPMh 探针：从“问对了问题”到“能回答”
+
+旧探针（`firmware/KebabRpmhProbeDxe.c` 的前身）有三个问题：`LocateProtocol`
+失败时只打一句 `protocol not found`，看不到 status 和 interface；默认 interface
+本身就是函数表；每个指针都重新枚举一遍 loaded image handle。
+
+新的 `firmware/KebabRpmhProbeDxe.c`：
+
+* 每次转储都打印 GUID、`LocateProtocol` 的 status 和 interface 指针，失败也打；
+* 第一次成功定位后解析 interface 所属的 loaded image，缓存 base 和 size，之后
+  所有指针分类只用缓存，不再枚举 handle；
+* 打印 interface 处 8 个原始 64 位字，逐个给 `rva=` 或 `not-code`；
+* 把 interface 当表，最多打印 64 项（靠近镜像末尾时按剩余字节截断）；
+* 对 `raw[0]`、`raw[1]`，只有落在镜像内才继续当候选表打印；
+* 5 秒一次性定时器（`t5`）和 `gEfiEndOfDxeEventGroupGuid`（`eod`）各转储一次，
+  两次输出逐行可比；
+* 只读：除了 `LocateProtocol` 不调用协议函数，不写 RPMh/RSC 寄存器。
+
+输出格式示例（地址为占位）：
+
+```text
+KRP: t5 guid=e1d0b573-f29f-495d-9352-ca0dd42a0a74 status=Success (0x0) iface=0x9f123450
+KRP: t5 image base=0x9f100000 size=0x40000
+KRP: t5 iface rva=0x123450
+KRP: t5 raw words (8)
+KRP: t5 raw[0] 0x9f1a1234 rva=0xa1234
+KRP: t5 raw[1] 0x0 not-code
+...
+KRP: t5 iface as table, 64 entries
+KRP: t5 iface[0] 0x9f1a1234 rva=0xa1234
+...
+KRP: t5 cand[0] table=0x9f1a1234 rva=0xa1234 entries=64
+KRP: t5 cand[0][0] 0x9f1b0000 rva=0xb0000
+...
+KRP: t5 cand[1] 0x0 not-code, skipped
+
+KRP: eod guid=... status=Success (0x0) iface=0x9f123450
+...
+```
+
+读法：如果 `iface` 本身就是函数表，`iface[i]` 应是一串 `rva=`；如果 `raw[0]`
+和 `iface[0]` 相同且是 `rva=`，说明第一层是**指针**，真正的函数表在 `cand[0]`
+里；如果 `raw[0]` 是 `not-code`，它指向镜像外（MMIO、另一个 image，或根本不是
+指针）。旧探针把 interface 直接当表读，这层间接就被淹没了。
+
+`eod` 发生在 BDS 连接控制台之前，可能根本到不了屏/串口；`t5` 在 5 秒后通常会。
+只看到 `t5` 不代表 `eod` 没执行，只代表那次输出没有可用的控制台。
+
+### 4. 固件集成（不在本仓库）
+
+固件源码来自 `board.toml` 的 `{uefi}`（Mu-Silicium），不在设备仓库里。要让
+`KRP:` 和 `KFLG` 真的进镜像，固件树必须做四件事：
+
+1. 拿到两个目录和公共头文件：
+   `Silicon/Silicium/SiliciumPkg/Drivers/KebabFwLogDxe/`、
+   `Silicon/Silicium/SiliciumPkg/Drivers/KebabRpmhProbeDxe/`，以及
+   `Silicon/Silicium/SiliciumPkg/Include/KebabFwLog.h`（串口库用尖括号包含它）；
+2. 在 `kebab.dsc` 的 `[Components]` 里列出两个 `.inf`；
+3. 在 `kebab.fdf` 的 `[FV.FvMain]` 里把两个模块放进 FV；
+4. 构建后 `strings Build/kebabPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd | grep -E
+   "KRP:|KFLG"`；搜不到就说明驱动不在镜像里，任何日志都不会包含它们。
+
+写这份说明时检查到的 Mu-Silicium 检出（`/home/albert/Codex/UEFI/Mu-Silicium`，
+不在本仓库）已经有一部分集成：`KebabFwLogDxe` 的目录、头文件、`.dsc` 和 `.fdf`
+条目都在，`FrameBufferSerialPortLib.c` 也已经在渲染前调用
+`KebabFwLogAppend()`；但探针的目录里还是旧源码，`.dsc`/`.fdf` 里**没有**探针，
+所以当前构建不会包含 `KRP:`。从干净 `{uefi}` 开始时四步都要做；用这个检出时
+只需补探针的两行，并用本仓库的 `KebabRpmhProbeDxe.c/.inf` 覆盖旧文件。
+
+`FvMain` 是 3 MiB（`FD_BASE=0x9fc00000`、`FD_SIZE=0x300000`）。两个模块都很小；
+如果 FV 溢出，要同时改 `FD_SIZE`/`FD_BLOCKS` 和 boot 头，不能让
+`repack-firmware.py` 硬塞一个更大的 FV。
+
+完整的集成说明、环布局、输出读法和“哪些没编译”的边界写在
+`firmware/README.md`（中文）。
+
+### 5. 验证
+
+* **补丁系列**：`scripts/verify-all.sh` 在 pristine `1b191cb`
+  （xnu-8796.141.3）上按文件名顺序应用，结果
+  `108/108 patches apply in filename order to 1b191cb (xnu-8796.141.3)`。
+  0129 的 diff 以当前 `ios16`（含 0128）为基线生成；0128 只改
+  `bsd/dev/kebab_spmi.c`，与 0129 改的四个文件不重叠，所以顺序应用无冲突。
+* **内核构建**：macOS 14.6.1 构建机（Xcode 15.4、KDK 13.5），
+  `MACHINE_CONFIG=KEBAB`、`KERNEL_CONFIG=DEVELOPMENT`，产物
+  `build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab`，
+  17,169,928 字节，sha256
+  `544265fae709a920ef0cb6554c22caa0215fdf9ff010a66d76fcfc9bbdbd2a42`，0 error。
+* **符号与字符串**：`nm` 能看到
+  `_kebab_fwlog_attach`、`_kebab_fwlog_report`、`_kebab_fwlog_boot_summary`
+  （`__TEXT_EXEC,__text`）；`strings` 能看到 `FWLOG?`、`FWLOG? all`、
+  `KEBAB FWLOG: ring %u bytes, written %llu bytes`、`no 'KFLG' magic ...` 等
+  全部新增格式串。
+* **固件源码语法检查（不是构建）**：三个 `.c`（`KebabFwLog.c`、
+  `KebabFwLogDxe.c`、`KebabRpmhProbeDxe.c`）用 Mu_Basecore 的
+  MdePkg/MdeModulePkg 头、aarch64 target 跑过
+  `clang -fsyntax-only -Wall -Wextra`，全部通过；没有链接，没有 `.dsc`/`.fdf`
+  的 EDK2 构建。
+* **未验证**：没有产出 `SILICIUM_UEFI.fd`，没有刷机；环在真机上的内容、`head`
+  回绕、RPMh 协议的真实地址和表布局，都要等固件构建、刷入并在内核里执行
+  `FWLOG?` 后才能确认。
+
+### 6. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| 0129 在 `1b191cb` 上随全集应用 | 108/108，PASS |
+| 内核编译 | 通过，0 error |
+| `kebab_fwlog_*` 符号 / 新增字符串 | 已确认 |
+| 固件驱动源码与集成说明 | 已写入 `firmware/` |
+| 固件源码单文件语法检查 | 通过（非 EDK2 构建） |
+| 固件 EDK2 构建与 `KRP:`/`KFLG` 字符串 | **未做**，需要完整构建 |
+| 真机 `FWLOG?` / RPMh 探针输出 | **未做**，需要刷机 |

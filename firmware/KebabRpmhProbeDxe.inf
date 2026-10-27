@@ -1,0 +1,41 @@
+## @file
+#  Kebab RPMh probe (read-only).
+#
+#  Prints the RPMh protocol GUID, LocateProtocol status and interface pointer,
+#  resolves the owning loaded image once (base and size), dumps the first
+#  eight raw 64-bit words and up to 64 table entries as rva=/not-code, then
+#  dumps word[0]/word[1] as candidate tables when they resolve inside the
+#  image.  Runs twice: a 5 s timer ("t5") and EndOfDxe ("eod").
+#
+#  Calls no protocol function and writes no RPMh/RSC register.
+##
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = KebabRpmhProbeDxe
+  FILE_GUID                      = 7f1e2d34-5a6b-4c8d-9e0f-1a2b3c4d5e6f
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = KebabRpmhProbeEntry
+
+[Sources]
+  KebabRpmhProbeDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+
+[LibraryClasses]
+  UefiDriverEntryPoint
+  UefiBootServicesTableLib
+  UefiLib
+  MemoryAllocationLib
+  DebugLib
+
+[Protocols]
+  gEfiLoadedImageProtocolGuid
+
+[Guids]
+  gEfiEndOfDxeEventGroupGuid
+
+[Depex]
+  TRUE
