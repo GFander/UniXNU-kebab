@@ -9519,7 +9519,7 @@ kebab 的 provider（`bsd/kern/kebab_amfi.c:114`）在 `kebab_cs` 有
 
 | 路径 | 缺失后果 | 建议 |
 | --- | --- | --- |
-| `/usr/libexec/xpcproxy` | **所有 job 无法 spawn**（硬 blocker） | 必须加；同时把 `/usr/libexec/` 加进 `kebab_install.c` 的 `ki_alloc[]` 前缀表，或改走 boot task |
+| `/usr/libexec/xpcproxy` | **所有 job 无法 spawn**（硬 blocker） | 必须加；同时把 `/usr/libexec/` 加进 `kebab_install.c` 的 `ki_allow[]` 前缀表，或改走 boot task |
 | `/private/var/db/com.apple.xpc.launchd` | `disabled.plist`/`overrides.plist` 迁移读不到；单 job 仍可跑 | 加进 `SKELETON_DIRS`（0755）；`config` 子目录可选 |
 | `/private/var/log/com.apple.xpc.launchd` | launchd 自己会 `mkdir` | 可不加；加了少一次 `mkdir` |
 | `/System/Library/xpc/launchd.plist` | 普通首启只多一行 `Unable to open` | 若要“boot task 直跑”这条备用路线，必须加（且要加 `/System/Library/xpc/` 前缀或 skel 允许清单） |
