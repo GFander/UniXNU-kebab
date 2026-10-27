@@ -4254,3 +4254,63 @@ TCS 组数），但这只是结构猜测，尚未证明代码如何索引它。
   `blr` 或结构被传递的证据。
 
 TCS1 所有权仍 UNRESOLVED，真实写入 NO-GO。
+
+## 四十八、O3-C4-B2：入口图闭环与 Boot Services 用法
+
+### 1. 入口到初始化
+
+- `0x1194` 处 `bl 0x123c`，即前一节那个保存 `gImageHandle/gST/gBS/gRT` 的
+  初始化函数；
+- `0x1000` 起是 DXE 入口（检查 `x0 != 0`、`x1` 的 `EFI_SYSTEM_TABLE` 签名
+  `IBI`、读 `+0x68/+0x70`），控制流在入口函数内延伸到 `0x1194`；
+- 因此 `0x1000 → 0x1194 → 0x123c → 0x1c2c` 这条链可以标为 DIRECT。
+
+签名检查只比较了前三个字节（`0x49 0x42 0x49`），不是完整的八字节 `IBI SYST`；
+这不影响语义判断，但严格说这是“部分签名检查”。
+
+### 2. Boot Services 的实际用法（taint 跟踪 gBS）
+
+| 偏移 | UEFI 字段 | 使用点 |
+| --- | --- | --- |
+| `0x30` | `FreePages` | `0x2488` |
+| `0x98` | `HandleProtocol` | `0x11bc`（随后 `blr x9`） |
+| `0x150` | `InstallConfigurationTable` | `0x14d4`（随后 `blr x4`） |
+| `0x170` | `UnloadImage` | `0x1514` |
+
+**没有**出现 `0x178`（`ExitBootServices`），也没有 `0x50`（`CreateEvent`）或
+`0x70`（`CloseEvent`）。
+
+### 3. 这意味着什么
+
+- RpmhDxe 自身既不调用 `ExitBootServices`，也没有通过 `gBS->CreateEvent` 注册
+  EBS 事件；它的 TCS 事务不会在 EBS 回调里被回收；
+- 它在 `0x14d4` 调用了 `InstallConfigurationTable`，参数里的表指针是 `0xe0d8`；
+- `0xe0d0` 一带的数据是：
+  ```text
+  0x0e0d0: a0003f8e 3b7269c9 00010001 00000000
+  0x0e0e0: 000015a4 000015bc 000015f8 00001634
+  ```
+  前 16 字节像 GUID 加版本，后面是四个指向 `.text` 的函数指针
+  （`0x15a4/0x15bc/0x15f8/0x1634`）。这更像一张“发布给 OS 的表”，而不是
+  驱动退出路径。
+
+### 4. 对所有权问题的影响
+
+- “固件在 EBS 时回收 TCS”这一假设，在这个驱动上不成立：它没有 EBS 回调；
+- 因此 TCS0/TCS1 的残留如果要被清理，只可能发生在别处（ABL、其他 DXE 驱动或
+  根本没人清理）；
+- `InstallConfigurationTable` 发布的那张表值得后续分析：它可能是 RPMh 相关状态
+  交给 OS 的通道，也可能是 RSC 配置的来源之一。
+
+### 5. 证据等级
+
+| 项 | 等级 |
+| --- | --- |
+| `0x1194 → 0x123c` | DIRECT |
+| `0x123c` 保存四个 UEFI 全局 | HIGH CONFIDENCE |
+| gBS 偏移 0x30/0x98/0x150/0x170 的使用 | DIRECT |
+| 无 `ExitBootServices`/`CreateEvent` 调用 | HIGH CONFIDENCE（taint 窗口内） |
+| 配置表 `0xe0d0/0xe0d8` 的内容与用途 | UNRESOLVED |
+| TCS1 所有权 | UNKNOWN |
+
+真实写入继续 NO-GO。
