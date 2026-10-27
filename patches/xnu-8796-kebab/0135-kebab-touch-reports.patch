@@ -1,0 +1,2206 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index f38b521..2f71ed4 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -112,6 +112,7 @@ bsd/dev/kebab_vol.c			standard
+ bsd/dev/kebab_spmi.c			standard
+ bsd/dev/kebab_rpmh_vrm.c		standard
+ bsd/dev/kebab_touch.c			standard
++bsd/dev/kebab_touch_tcm.c		standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/bsd/dev/kebab_touch.c b/bsd/dev/kebab_touch.c
+index e92c6a7..9a34311 100644
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -153,6 +153,14 @@
+ #include <sys/uio.h>
+ #include <sys/vnode.h>
+ 
++/*
++ * The wire format and the report decoder.  This is the generated kernel copy of
++ * package/KebabTouchTcm.h (scripts/sync-touch-tcm.py); the host tests drive the
++ * same source, so a layout this driver sends is a layout something has already
++ * decoded.
++ */
++#include "kebab_touch_tcm.h"
++
+ /* arm/machine_routines.h declares this behind a guard this build does not
+  * satisfy; the kebab UFS and USB drivers spell it out for the same reason. */
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -361,36 +369,15 @@ int kebab_touch_start(void);
+ 
+ /* ------------------------------------------------------------ TCM protocol */
+ 
+-#define TCM_MARKER              0xa5
+-#define TCM_HDR_SIZE            4
+-#define TCM_PADDING             0x5a
+-
+ /*
+- * The two code ranges separate the two kinds of message the chip sends.  An
+- * answer to a command carries a status code below 0x10; a report carries an id
+- * from 0x10 up.  Identify is the one command answered with a report, which is
+- * what makes the part identifiable before any application firmware runs.
+- */
+-#define TCM_REPORT_IDENTIFY     0x10
+-#define TCM_REPORT_TOUCH        0x11
+-#define TCM_REPORT_STATUS       0x1b
+-#define TCM_STATUS_OK           0x01
+-
+-/*
+- * The mode byte is the second byte of the identify payload.  These values are
+- * from the Synaptics TCM headers the vendor driver for this part compiles
+- * against ("synaptics-s3908" -> synaptics_tcm): 0x02 is not a bootloader but
+- * "host download", the chip asking the host for firmware, and 0x0b/0x0c are
+- * the two bootloaders.  Every value except 0x01 means the touch application
+- * firmware is not running.
++ * The protocol itself -- framing, command codes, report ids, boot modes, the
++ * report program and the report decoder -- lives in bsd/dev/kebab_touch_tcm.h,
++ * which is the host-tested copy of package/KebabTouchTcm.h.  This file owns the
++ * transport and the order of the bring-up; it owns no wire format.
++ *
++ * Boot status is the second byte of the get-boot-info payload and belongs to the
++ * one command that is only answered from the bootloader, so it stays here.
+  */
+-#define TCM_MODE_APPLICATION     0x01
+-#define TCM_MODE_HOST_DOWNLOAD   0x02
+-#define TCM_MODE_BOOTLOADER      0x0b
+-#define TCM_MODE_TDDI_BOOTLOADER 0x0c
+-#define TCM_MODE_PRODUCTION_TEST 0x0e
+-
+-/* Boot status: the second byte of the get-boot-info payload. */
+ #define TCM_BOOT_STATUS_OK             0x00
+ #define TCM_BOOT_STATUS_BOOTING        0x01
+ #define TCM_BOOT_STATUS_APP_BAD_CRC    0xfc
+@@ -398,42 +385,6 @@ int kebab_touch_start(void);
+ #define TCM_BOOT_STATUS_BAD_APP_FW     0xfe
+ #define TCM_BOOT_STATUS_WARM_BOOT      0xff
+ 
+-#define TCM_CMD_IDENTIFY        0x02
+-#define TCM_CMD_GET_BOOT_INFO   0x10
+-#define TCM_CMD_GET_APP_INFO    0x20
+-#define TCM_CMD_SET_REPORT_CFG  0x26
+-
+-/* Touch report program codes (enum touch_report_code). */
+-#define TCM_TOUCH_END                    0
+-#define TCM_TOUCH_FOREACH_ACTIVE_OBJECT  1
+-#define TCM_TOUCH_FOREACH_END            3
+-#define TCM_TOUCH_OBJECT_N_INDEX         6
+-#define TCM_TOUCH_OBJECT_N_CLASSIFICATION 7
+-#define TCM_TOUCH_OBJECT_N_X_POSITION    8
+-#define TCM_TOUCH_OBJECT_N_Y_POSITION    9
+-#define TCM_TOUCH_OBJECT_N_Z             10
+-
+-/*
+- * The report program this driver asks for. Each active object then occupies
+- * 4 + 4 + 12 + 12 + 8 = 40 bits, five bytes, which is what lets the decoder
+- * below walk the payload five bytes at a time. Asking for the program
+- * explicitly is what makes the decode honest: the firmware default layout is
+- * whatever the last OS left behind and is not documented here.
+- */
+-static const uint8_t kt_report_config[] = {
+-	TCM_TOUCH_FOREACH_ACTIVE_OBJECT,
+-	TCM_TOUCH_OBJECT_N_INDEX, 4,
+-	TCM_TOUCH_OBJECT_N_CLASSIFICATION, 4,
+-	TCM_TOUCH_OBJECT_N_X_POSITION, 12,
+-	TCM_TOUCH_OBJECT_N_Y_POSITION, 12,
+-	TCM_TOUCH_OBJECT_N_Z, 8,
+-	TCM_TOUCH_FOREACH_END,
+-	TCM_TOUCH_END,
+-};
+-
+-#define KT_OBJECT_BITS          40
+-#define KT_MAX_OBJECTS          10      /* touchpanel,max-num-support */
+-
+ /* --------------------------------------------------------- input plumbing */
+ 
+ /*
+@@ -467,15 +418,11 @@ _Static_assert(sizeof(struct kt_event) == 48, "kebab touch event layout");
+ /* 64 records: 3 KiB of BSS, never allocated. */
+ #define KT_QUEUE_LEN            64
+ 
+-#define KT_PANEL_W              1080
+-#define KT_PANEL_H              2400
+-#define KT_LOGICAL_W            1125
+-#define KT_LOGICAL_H            2436
+-#define KT_LOGICAL_ORIGIN_X     22      /* (1125 - 1080) / 2, truncated */
+-#define KT_LOGICAL_ORIGIN_Y     18      /* (2436 - 2400) / 2 */
+-#define KT_SENSOR_MAX_X         1079    /* touchpanel,panel-coords */
+-#define KT_SENSOR_MAX_Y         2399
+-#define KT_SENSOR_LIMIT         0x0fffu /* the report field is 12 bits */
++/*
++ * The sensor, panel and logical geometry, the transform between them and the
++ * ten-slot limit all live in kebab_touch_tcm.h: kt_transform() is the only
++ * caller and the host tests own the arithmetic.
++ */
+ 
+ /* ---------------------------------------------------------------- state */
+ 
+@@ -503,15 +450,19 @@ static struct {
+ 	uint32_t    unknown;
+ 	uint32_t    move_ms;
+ 	uint32_t    seq;
+-	uint16_t    active;             /* bit per contact index, last report */
+-	uint32_t    last_x[KT_MAX_OBJECTS];
+-	uint32_t    last_y[KT_MAX_OBJECTS];
++	kebab_tcm_tracker tracker;      /* previous report: slots, last x/y */
+ 	uint64_t    last_move_ns;
+ 	int         cmajor;
+ 	bool        rails_on;           /* kebab_touch_power brought both up */
+ 	bool        unavailable;        /* bring-up failed; no transfer this boot */
+ 	bool        mode_known;         /* identify returned a mode byte */
+-	uint8_t     mode;               /* TCM_MODE_* from the identify payload */
++	uint8_t     mode;               /* KEBAB_TCM_MODE_* from the identify payload */
++	bool        app_valid;          /* application info parsed */
++	kebab_tcm_app_info app;         /* geometry and the two report sizes */
++	uint8_t     program[KEBAB_TCM_PROGRAM_MAX]; /* accepted report program */
++	uint32_t    program_len;
++	uint32_t    object_bits;        /* bits per contact in that program */
++	uint32_t    truncated;          /* reports dropped mid-contact */
+ } kt;
+ 
+ /*
+@@ -626,8 +577,10 @@ struct kt_point {
+ };
+ 
+ /*
+- * Convert one sensor sample into panel and logical coordinates. This is the
+- * only place where the three spaces meet.
++ * Convert one sensor sample into panel and logical coordinates.  The three
++ * spaces and the arithmetic are documented once, in kebab_tcm_transform(), and
++ * that is the function the host tests exercise; this wrapper only feeds it the
++ * geometry the application info reported.
+  *
+  *   sensor   raw_x/raw_y, the 12-bit fields of the touch report. kt.max_x and
+  *            kt.max_y are the largest values the chip advertises (its app
+@@ -636,66 +589,27 @@ struct kt_point {
+  *            0..1079 - 1080 positions - and 0..2399 - 2400 positions.
+  *
+  *   panel    the physical 1080x2400 panel, the same space as the boot
+- *            framebuffer and IOMobileFramebuffer's default surface. Sensor
+- *            1079 is panel 1079, i.e. the sensor covers the panel one to one.
+- *            The scale is written out rather than assumed to be 1 so firmware
+- *            that advertises another range is mapped over the whole panel
+- *            instead of off it.
++ *            framebuffer and IOMobileFramebuffer's default surface.
+  *
+- *   logical  the 1125x2436 display userland draws in. The display presents
+- *            logical (22,18) at panel (0,0), so logical = panel + (22,18).
+- *            This lands panel points in [22,1101] x [18,2417]: the outer
+- *            22/23 columns and 18 rows of the logical display have no panel
+- *            beneath them and are not touchable.
++ *   logical  the 1125x2436 display userland draws in, which presents logical
++ *            (22,18) at panel (0,0).
+  *
+- * Edge behaviour is conservative and one-sided. The field cannot be negative;
+- * a value above the advertised maximum (0xfff from a finger that lifted
++ * A value above the advertised maximum (0xfff from a finger that lifted
+  * mid-transfer is the common case) is clamped to the panel edge and flagged,
+  * never extrapolated past the panel.
+  */
+ static struct kt_point
+ kt_transform(uint32_t raw_x, uint32_t raw_y)
+ {
++	kebab_tcm_point in = kebab_tcm_transform(raw_x, raw_y, kt.max_x,
++	    kt.max_y);
+ 	struct kt_point p;
+-	uint32_t max_x = kt.max_x;
+-	uint32_t max_y = kt.max_y;
+ 
+-	if (max_x == 0 || max_x > KT_SENSOR_LIMIT) {
+-		max_x = KT_SENSOR_MAX_X;
+-	}
+-	if (max_y == 0 || max_y > KT_SENSOR_LIMIT) {
+-		max_y = KT_SENSOR_MAX_Y;
+-	}
+-
+-	p.clamped = false;
+-	if (raw_x > max_x) {
+-		raw_x = max_x;
+-		p.clamped = true;
+-	}
+-	if (raw_y > max_y) {
+-		raw_y = max_y;
+-		p.clamped = true;
+-	}
+-
+-	/* sensor -> panel: round to the nearest pixel of the panel's range. */
+-	p.panel_x = (int32_t)(((uint64_t)raw_x * (KT_PANEL_W - 1) +
+-	    max_x / 2) / max_x);
+-	p.panel_y = (int32_t)(((uint64_t)raw_y * (KT_PANEL_H - 1) +
+-	    max_y / 2) / max_y);
+-
+-	/* panel -> logical: add the presentation origin. */
+-	p.logical_x = p.panel_x + KT_LOGICAL_ORIGIN_X;
+-	p.logical_y = p.panel_y + KT_LOGICAL_ORIGIN_Y;
+-
+-	/* Defensive only: with the origin above these cannot fire. */
+-	if (p.logical_x >= KT_LOGICAL_W) {
+-		p.logical_x = KT_LOGICAL_W - 1;
+-		p.clamped = true;
+-	}
+-	if (p.logical_y >= KT_LOGICAL_H) {
+-		p.logical_y = KT_LOGICAL_H - 1;
+-		p.clamped = true;
+-	}
++	p.panel_x = in.panel_x;
++	p.panel_y = in.panel_y;
++	p.logical_x = in.logical_x;
++	p.logical_y = in.logical_y;
++	p.clamped = in.clamped != 0;
+ 	return p;
+ }
+ 
+@@ -1160,6 +1074,7 @@ kt_se_init(uint32_t hz)
+ /* Defined with the TCM layer below; TOUCHINIT reaches it after se_init. */
+ static int kt_identify(void);
+ static const char *kt_mode_name(uint32_t mode);
++static const char *kt_status_name(uint32_t status);
+ 
+ /*
+  * The vendor DTS (kona-qupv3.dtsi, i2c@a94000) gives SE13 three GCC clocks,
+@@ -1780,6 +1695,56 @@ kt_i2c_read(uint8_t *buf, uint32_t len)
+ 
+ /* -------------------------------------------------------------- TCM layer */
+ 
++/*
++ * Read and validate one message header.  The four bytes are printed whenever
++ * they are rejected, and the window slides one byte at a time because the
++ * failure this bring-up actually saw was a stream one byte out of phase: after
++ * the identify payload came a 0x00, and the next four bytes read as a 0x5a00
++ * payload length (23040) instead of a status message.  A wrong marker is the
++ * same class of problem, so both slide.
++ *
++ * The slide is bounded at four bytes: a stream that needs more than that is not
++ * one byte out of phase, it is not a TCM stream, and the caller's retry loop
++ * will try again after a delay.
++ */
++static int
++kt_tcm_read_header(uint8_t cmd, kebab_tcm_header *header)
++{
++	uint8_t win[KEBAB_TCM_HEADER_SIZE];
++	uint8_t next;
++	uint32_t slid;
++	int err;
++
++	err = kt_i2c_read(win, KEBAB_TCM_HEADER_SIZE);
++	if (err != 0) {
++		return -1;
++	}
++	for (slid = 0; slid < 4; slid++) {
++		kebab_tcm_status st = kebab_tcm_header_parse(win, header);
++
++		if (st == KEBAB_TCM_OK) {
++			if (slid != 0) {
++				kt_trace("KEBAB TOUCH: command 0x%02x: resynchronised after %u byte(s)\n",
++				    cmd, slid);
++			}
++			return 0;
++		}
++		if (slid == 0) {
++			kt_trace("KEBAB TOUCH: command 0x%02x: header %02x %02x %02x %02x rejected (%s), sliding\n",
++			    cmd, win[0], win[1], win[2], win[3],
++			    kebab_tcm_status_name(st));
++		}
++		if (kt_i2c_read(&next, 1) != 0) {
++			return -1;
++		}
++		win[0] = win[1];
++		win[1] = win[2];
++		win[2] = win[3];
++		win[3] = next;
++	}
++	return -1;
++}
++
+ /*
+  * One TCM command: write {command, length_lo, length_hi, payload...}, wait for
+  * a message header, then read its payload. Returns -1 when no valid message
+@@ -1787,36 +1752,38 @@ kt_i2c_read(uint8_t *buf, uint32_t len)
+  *
+  * want_report is the report id the answer is expected to carry, or 0 when the
+  * answer is a status response.  Identify is answered with REPORT_IDENTIFY
+- * (0x10) and every other command with a status code below 0x10, so a message
+- * from the wrong range is not an answer: it is read out of the stream and the
+- * wait continues.  Without that, a report the chip queued on its own -- an
+- * identify report right after a reset, for instance -- would be decoded as the
+- * answer to whatever command happens to be next.
++ * (0x10) and every other command with a status code below 0x10.  A message from
++ * the wrong range is read out of the stream, printed, and the wait continues:
++ * a report the chip queued on its own must not be decoded as the answer to
++ * whatever command happens to be next, and a status where a report was expected
++ * is a failed command rather than a wrong decode.
++ *
++ * Every answer is printed raw before anything is decoded from it.  That is the
++ * whole point of this layer: the measured bring-up could not tell a layout
++ * mistake from a framing mistake, and the next run has to be able to.
+  */
+ static int
+ kt_tcm_command(uint8_t cmd, const uint8_t *payload, uint32_t len,
+     uint8_t *resp, uint32_t resp_size, uint32_t *resp_len, uint8_t *resp_code,
+     uint8_t want_report)
+ {
+-	uint8_t out[40];
+-	uint8_t hdr[TCM_HDR_SIZE] = { 0 };
+-	uint8_t scratch[96];
++	uint8_t out[KEBAB_TCM_REPORT_CONFIG_MAX + 3];
++	uint8_t scratch[KEBAB_TCM_MAX_PAYLOAD + 1];
++	kebab_tcm_header header;
++	uint32_t written;
+ 	uint32_t i;
+-	uint32_t payload_len = 0;
++	uint32_t pad;
+ 	int err;
+ 
+-	if (len > sizeof(out) - 3) {
++	written = kebab_tcm_build_command(out, sizeof(out), cmd, payload, len);
++	if (written == 0) {
++		printf("KEBAB TOUCH: command 0x%02x: a %u-byte payload does not fit the write buffer\n",
++		    cmd, len);
+ 		return -1;
+ 	}
+-	out[0] = cmd;
+-	out[1] = (uint8_t)len;
+-	out[2] = (uint8_t)(len >> 8);
+-	if (len != 0 && payload != NULL) {
+-		memcpy(&out[3], payload, len);
+-	}
+ 	kt_trace("KEBAB TOUCH: TCM command 0x%02x, %u payload byte(s)\n", cmd,
+ 	    len);
+-	err = kt_i2c_write(out, len + 3);
++	err = kt_i2c_write(out, written);
+ 	if (err != 0) {
+ 		printf("KEBAB TOUCH: command 0x%02x was not written\n", cmd);
+ 		return -1;
+@@ -1832,84 +1799,89 @@ kt_tcm_command(uint8_t cmd, const uint8_t *payload, uint32_t len,
+ 	 * the first) and keeps a dead bus bounded.
+ 	 */
+ 	for (i = 0; i < 20; i++) {
+-		err = kt_i2c_read(hdr, TCM_HDR_SIZE);
+-		if (err != 0 || hdr[0] != TCM_MARKER) {
++		kebab_tcm_status st;
++
++		if (kt_tcm_read_header(cmd, &header) != 0) {
+ 			if (i < 4) {
+-				kt_trace("KEBAB TOUCH: no TCM header yet, attempt %u (err %d marker 0x%02x)\n",
+-				    i + 1, err, hdr[0]);
++				kt_trace("KEBAB TOUCH: no usable TCM header yet, attempt %u\n",
++				    i + 1);
+ 			}
+ 			delay(1000);
+ 			continue;
+ 		}
+-		payload_len = (uint32_t)hdr[2] | ((uint32_t)hdr[3] << 8);
+-		if (hdr[1] < TCM_REPORT_IDENTIFY || hdr[1] == want_report) {
+-			break;
+-		}
+-		/*
+-		 * A report that is not this command's answer.  Read its payload
+-		 * and padding so the stream is back at a header, print what the
+-		 * chip volunteered, and keep waiting.
+-		 */
+-		kt_trace("KEBAB TOUCH: report 0x%02x (%u bytes) arrived while waiting for command 0x%02x; read out\n",
+-		    hdr[1], payload_len, cmd);
+-		if (payload_len + 1 > sizeof(scratch) ||
+-		    kt_i2c_read(scratch, payload_len + 1) != 0) {
+-			printf("KEBAB TOUCH: command 0x%02x: report 0x%02x could not be read out\n",
+-			    cmd, hdr[1]);
+-			return -1;
+-		}
+-		kt_hexdump("report", scratch, payload_len);
+-		delay(1000);
+-	}
+-	if (i == 20) {
+-		printf("KEBAB TOUCH: command 0x%02x: no TCM response after %u attempts (marker 0x%02x)\n",
+-		    cmd, i, hdr[0]);
+-		if (kt.raw) {
+-			kt_hexdump("header", hdr, TCM_HDR_SIZE);
+-		}
+-		return -1;
+-	}
+-
+-	kt.tcm_seen = true;
+-	*resp_code = hdr[1];
+-	{
+-		/*
+-		 * The message is header, payload and one padding byte: the
+-		 * vendor driver reads payload_length + 1 after the header and
+-		 * checks that last byte against MESSAGE_PADDING.  Leaving it in
+-		 * the stream would put 0x5a in front of the next header and
+-		 * desynchronise us.  The whole payload is read even when the
+-		 * caller's buffer is smaller, so a truncating decode cannot
+-		 * leave bytes behind either.
+-		 */
+-		uint32_t copy = payload_len;
+-
+-		if (payload_len + 1 > sizeof(scratch)) {
+-			printf("KEBAB TOUCH: command 0x%02x: payload %u too large\n",
+-			    cmd, payload_len);
++		pad = header.payload_len;
++		err = kt_i2c_read(scratch, header.payload_len + 1);
++		if (err != 0) {
++			printf("KEBAB TOUCH: command 0x%02x: answer 0x%02x could not be read\n",
++			    cmd, header.code);
+ 			return -1;
+ 		}
+-		if (copy > resp_size) {
+-			printf("KEBAB TOUCH: command 0x%02x: payload %u does not fit %u, truncating\n",
+-			    cmd, payload_len, resp_size);
+-			copy = resp_size;
++		printf("KEBAB TOUCH: command 0x%02x answer: code 0x%02x, %u payload byte(s), trailing byte 0x%02x\n",
++		    cmd, header.code, header.payload_len, scratch[pad]);
++		if (header.payload_len != 0) {
++			kt_hexdump("answer", scratch, header.payload_len);
+ 		}
+-		err = kt_i2c_read(scratch, payload_len + 1);
+-		if (err != 0) {
+-			return -1;
++		if (scratch[pad] != KEBAB_TCM_PADDING) {
++			printf("KEBAB TOUCH: command 0x%02x: the trailing byte is not the vendor padding 0x%02x; the stream and this driver disagree about where the message ends\n",
++			    cmd, KEBAB_TCM_PADDING);
+ 		}
+-		if (scratch[payload_len] != TCM_PADDING) {
+-			kt_trace("KEBAB TOUCH: command 0x%02x: trailing byte 0x%02x, vendor padding is 0x%02x\n",
+-			    cmd, (unsigned)scratch[payload_len], TCM_PADDING);
++
++		if (want_report != 0) {
++			/*
++			 * A status where a report was expected is the chip
++			 * refusing the command, not a message to skip: identify
++			 * needs the report to carry the mode.
++			 */
++			if (header.code < KEBAB_TCM_REPORT_IDENTIFY) {
++				printf("KEBAB TOUCH: command 0x%02x was answered with status 0x%02x (%s), not with report 0x%02x\n",
++				    cmd, header.code, kt_status_name(header.code),
++				    want_report);
++				return -1;
++			}
++			st = kebab_tcm_expect_report(&header, want_report);
++		} else {
++			if (header.code >= KEBAB_TCM_REPORT_IDENTIFY) {
++				printf("KEBAB TOUCH: report 0x%02x arrived while waiting for command 0x%02x; read out\n",
++				    header.code, cmd);
++				delay(1000);
++				continue;
++			}
++			st = kebab_tcm_expect_status(&header);
+ 		}
+-		if (copy != 0 && resp != NULL) {
+-			memcpy(resp, scratch, copy);
++		if (st != KEBAB_TCM_OK) {
++			printf("KEBAB TOUCH: command 0x%02x: code 0x%02x is not the answer (%s); read out and waiting\n",
++			    cmd, header.code, kebab_tcm_status_name(st));
++			delay(1000);
++			continue;
+ 		}
+-		if (resp_len != NULL) {
+-			*resp_len = copy;
++
++		kt.tcm_seen = true;
++		*resp_code = header.code;
++		{
++			/*
++			 * The whole payload was read even when the caller's
++			 * buffer is smaller, so a truncating decode cannot leave
++			 * bytes behind either.
++			 */
++			uint32_t copy = header.payload_len;
++
++			if (copy > resp_size) {
++				printf("KEBAB TOUCH: command 0x%02x: payload %u does not fit %u, truncating\n",
++				    cmd, header.payload_len, resp_size);
++				copy = resp_size;
++			}
++			if (copy != 0 && resp != NULL) {
++				memcpy(resp, scratch, copy);
++			}
++			if (resp_len != NULL) {
++				*resp_len = copy;
++			}
+ 		}
++		return 0;
+ 	}
+-	return 0;
++	printf("KEBAB TOUCH: command 0x%02x: no usable answer after %u attempts\n",
++	    cmd, i);
++	return -1;
+ }
+ 
+ static uint32_t
+@@ -1923,15 +1895,15 @@ static const char *
+ kt_mode_name(uint32_t mode)
+ {
+ 	switch (mode) {
+-	case TCM_MODE_APPLICATION:
++	case KEBAB_TCM_MODE_APPLICATION:
+ 		return "application";
+-	case TCM_MODE_HOST_DOWNLOAD:
++	case KEBAB_TCM_MODE_HOST_DOWNLOAD:
+ 		return "host download";
+-	case TCM_MODE_BOOTLOADER:
++	case KEBAB_TCM_MODE_BOOTLOADER:
+ 		return "bootloader";
+-	case TCM_MODE_TDDI_BOOTLOADER:
++	case KEBAB_TCM_MODE_TDDI_BOOTLOADER:
+ 		return "TDDI bootloader";
+-	case TCM_MODE_PRODUCTION_TEST:
++	case KEBAB_TCM_MODE_PRODUCTION_TEST:
+ 		return "production test";
+ 	default:
+ 		return "unknown";
+@@ -1944,7 +1916,7 @@ kt_status_name(uint32_t status)
+ 	switch (status) {
+ 	case 0x00:
+ 		return "idle";
+-	case TCM_STATUS_OK:
++	case KEBAB_TCM_STATUS_OK:
+ 		return "OK";
+ 	case 0x02:
+ 		return "busy";
+@@ -1990,93 +1962,55 @@ kt_boot_status_name(uint32_t status)
+  * Identify.  The payload is the vendor driver's syna_tcm_identification, which
+  * the S3908 firmware implements:
+  *
+- *   [0]      TouchComm version
+- *   [1]      mode           TCM_MODE_*
+- *   [2..17]  part number    ASCII, NUL padded
+- *   [18..21] build id       little endian packrat number
+- *   [22..23] max write size little endian
++ *   vendor     [0] version, [1] mode, [2..17] part number, [18..21] build id
++ *   measured   a5 03, then the same fields from offset 2: version 0x01,
++ *              mode 0x01, "s3908-15.0.0", build 0x003cbab9 -- 24 bytes
+  *
+  * There is no status byte in this payload: identify is answered with a
+  * REPORT_IDENTIFY report, not with a command status.  The bytes are printed
+- * before the decode, so a part that answers with a different layout says so in
+- * the raw dump instead of the decode quietly inventing a part number.
++ * before the decode, and the decode itself anchors on the part number
++ * (kebab_tcm_parse_identify) instead of indexing a fixed offset, so a firmware
++ * that puts something in front of the version says so rather than shifting the
++ * part name into the prefix.
+  */
+ static int
+ kt_identify(void)
+ {
+-	uint8_t resp[32];
++	uint8_t resp[KEBAB_TCM_MAX_PAYLOAD];
+ 	uint32_t len = 0;
+ 	uint8_t code = 0;
+-	char part[17];
+-	uint32_t part_off;
+-	uint32_t i;
++	kebab_tcm_identify id;
+ 
+-	if (kt_tcm_command(TCM_CMD_IDENTIFY, NULL, 0, resp, sizeof(resp), &len,
+-	    &code, TCM_REPORT_IDENTIFY) != 0) {
++	if (kt_tcm_command(KEBAB_TCM_CMD_IDENTIFY, NULL, 0, resp, sizeof(resp),
++	    &len, &code, KEBAB_TCM_REPORT_IDENTIFY) != 0) {
+ 		kt.mode_known = false;
+ 		return -1;
+ 	}
+ 	printf("KEBAB TOUCH: identify: message 0x%02x, %u payload byte(s)\n",
+ 	    (unsigned)code, len);
+ 	kt_hexdump("identify payload", resp, len);
+-	if (len < 2) {
+-		printf("KEBAB TOUCH: identify: %u byte(s) cannot carry a mode byte; no identity decoded\n",
++	if (kebab_tcm_parse_identify(resp, len, &id) != KEBAB_TCM_OK) {
++		printf("KEBAB TOUCH: identify: %u byte(s) carry no printable part number with version and mode in front; no identity decoded\n",
+ 		    len);
+ 		kt.mode_known = false;
+ 		return -1;
+ 	}
+-	/*
+-	 * The part number is the only field whose position is self-evident, and
+-	 * version and mode are the two bytes in front of it in the vendor
+-	 * struct.  Anchoring on it keeps the decode honest when the firmware
+-	 * prepends something this driver does not know about: the bytes are
+-	 * printed and the prefix is reported instead of being shifted into the
+-	 * part name.
+-	 */
+-	part_off = len;
+-	for (i = 0; i + 4 <= len; i++) {
+-		if (resp[i] >= 0x20 && resp[i] < 0x7f &&
+-		    resp[i + 1] >= 0x20 && resp[i + 1] < 0x7f &&
+-		    resp[i + 2] >= 0x20 && resp[i + 2] < 0x7f &&
+-		    resp[i + 3] >= 0x20 && resp[i + 3] < 0x7f) {
+-			part_off = i;
+-			break;
+-		}
+-	}
+-	if (part_off == len) {
+-		printf("KEBAB TOUCH: identify: no printable part number in the payload; the mode byte cannot be placed\n");
+-		kt.mode_known = false;
+-		return -1;
+-	}
+-	for (i = 0; i < 16 && part_off + i < len; i++) {
+-		uint8_t c = resp[part_off + i];
++	printf("KEBAB TOUCH: identify: part \"%s\", version 0x%02x, mode 0x%02x (%s)\n",
++	    id.part, (unsigned)id.version, (unsigned)id.mode,
++	    kt_mode_name(id.mode));
++	if (id.prefix_len != 0) {
++		uint32_t show = id.prefix_len < sizeof(id.prefix) ?
++		    id.prefix_len : (uint32_t)sizeof(id.prefix);
+ 
+-		part[i] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+-	}
+-	part[i] = '\0';
+-	printf("KEBAB TOUCH: identify: part \"%s\" at payload offset %u\n", part,
+-	    part_off);
+-	if (part_off < 2) {
+-		printf("KEBAB TOUCH: identify: the part number is at offset %u, so there are no version/mode bytes in front of it\n",
+-		    part_off);
+-		kt.mode_known = false;
+-		return -1;
+-	}
+-	kt.mode = resp[part_off - 1];
+-	kt.mode_known = true;
+-	printf("KEBAB TOUCH: identify: version 0x%02x mode 0x%02x (%s), the two bytes in front of the part number\n",
+-	    (unsigned)resp[part_off - 2], (unsigned)kt.mode,
+-	    kt_mode_name(kt.mode));
+-	if (part_off > 2) {
+ 		printf("KEBAB TOUCH: identify: %u byte(s) in front of those are left uninterpreted\n",
+-		    part_off - 2);
+-		kt_hexdump("identify prefix", resp, part_off - 2);
++		    id.prefix_len);
++		kt_hexdump("identify prefix", id.prefix, show);
+ 	}
+-	if (len >= part_off + 20) {
+-		printf("KEBAB TOUCH: identify: build 0x%08x\n",
+-		    kt_le16(&resp[part_off + 16]) |
+-		    (kt_le16(&resp[part_off + 18]) << 16));
++	if (id.build_known) {
++		printf("KEBAB TOUCH: identify: build 0x%08x\n", id.build);
+ 	}
++	kt.mode = id.mode;
++	kt.mode_known = true;
+ 	return 0;
+ }
+ 
+@@ -2094,7 +2028,7 @@ kt_boot_info(void)
+ 	uint32_t len = 0;
+ 	uint8_t code = 0;
+ 
+-	if (kt_tcm_command(TCM_CMD_GET_BOOT_INFO, NULL, 0, resp, sizeof(resp),
++	if (kt_tcm_command(KEBAB_TCM_CMD_GET_BOOT_INFO, NULL, 0, resp, sizeof(resp),
+ 	    &len, &code, 0) != 0) {
+ 		printf("KEBAB TOUCH: boot status: the chip did not answer the get-boot-info command\n");
+ 		return;
+@@ -2122,229 +2056,332 @@ kt_boot_info(void)
+ 	printf("\n");
+ }
+ 
++/*
++ * Application info: the vendor's syna_tcm_app_info, 46 bytes of little-endian
++ * 16-bit fields.  Three of them matter before a report can be asked for:
++ * max_touch_report_config_size (how many bytes the report program buffer is),
++ * max_touch_report_payload_size (how big a report can get) and max_x/max_y
++ * (the sensor geometry the transform maps onto the panel).
++ *
++ * Printed raw first and then field by field: the previous bring-up could not
++ * read this answer at all ("payload 23040 too large" was a framing error, not a
++ * layout one), so the next run has to show the bytes next to the decode.
++ */
+ static void
+ kt_app_info(void)
+ {
+-	uint8_t resp[64];
++	uint8_t resp[KEBAB_TCM_MAX_PAYLOAD];
+ 	uint32_t len = 0;
+ 	uint8_t code = 0;
+-	uint32_t status;
++	kebab_tcm_app_info app;
+ 
+-	if (kt_tcm_command(TCM_CMD_GET_APP_INFO, NULL, 0, resp, sizeof(resp),
+-	    &len, &code, 0) != 0) {
++	kt.app_valid = false;
++	if (kt_tcm_command(KEBAB_TCM_CMD_GET_APP_INFO, NULL, 0, resp,
++	    sizeof(resp), &len, &code, 0) != 0) {
++		printf("KEBAB TOUCH: app info: command 0x%02x did not answer; the report sizes stay unknown and max_x/max_y fall back to the device tree\n",
++		    KEBAB_TCM_CMD_GET_APP_INFO);
+ 		return;
+ 	}
+-	if (len < 46) {
+-		printf("KEBAB TOUCH: app info returned %u bytes, message 0x%02x\n",
+-		    len, (unsigned)code);
++	printf("KEBAB TOUCH: app info: message 0x%02x, %u payload byte(s)\n",
++	    (unsigned)code, len);
++	kt_hexdump("app info payload", resp, len);
++	if (kebab_tcm_parse_app_info(resp, len, &app) != KEBAB_TCM_OK) {
++		printf("KEBAB TOUCH: app info: %u byte(s) is short of the 46 the vendor struct has; the geometry and the report sizes stay unknown\n",
++		    len);
+ 		return;
+ 	}
+-	status = kt_le16(&resp[2]);
+-	kt.max_x = kt_le16(&resp[32]);
+-	kt.max_y = kt_le16(&resp[34]);
+-	kt.max_objects = kt_le16(&resp[36]);
+-	printf("KEBAB TOUCH: app info: version 0x%04x status 0x%04x\n",
+-	    kt_le16(&resp[0]), status);
+-	printf("KEBAB TOUCH:   max_x %u max_y %u objects %u buttons %u rows %u "
+-	    "cols %u\n", kt.max_x, kt.max_y, kt.max_objects,
+-	    kt_le16(&resp[38]), kt_le16(&resp[40]), kt_le16(&resp[42]));
+-	if (status != 0) {
+-		printf("KEBAB TOUCH: application status 0x%04x is not OK; the chip "
+-		    "may still be in its bootloader\n", status);
++	printf("KEBAB TOUCH: app info: version 0x%04x status 0x%04x, max_x %u max_y %u objects %u buttons %u rows %u cols %u hybrid %u\n",
++	    app.version, app.status, app.max_x, app.max_y, app.max_objects,
++	    app.num_of_buttons, app.num_of_image_rows, app.num_of_image_cols,
++	    app.has_hybrid_data);
++	printf("KEBAB TOUCH: app info: static config %u bytes, dynamic config %u bytes, app config %u bytes at block %u\n",
++	    app.static_config_size, app.dynamic_config_size, app.app_config_size,
++	    app.app_config_start_write_block);
++	printf("KEBAB TOUCH: app info: max touch report config %u bytes, max touch report payload %u bytes\n",
++	    app.max_touch_report_config_size, app.max_touch_report_payload_size);
++	kt.app = app;
++	kt.app_valid = true;
++	kt.max_x = app.max_x;
++	kt.max_y = app.max_y;
++	kt.max_objects = app.max_objects;
++	if (app.status != 0) {
++		printf("KEBAB TOUCH: application status 0x%04x is not OK; the chip may still be booting\n",
++		    app.status);
+ 	}
+ }
+ 
+ /*
+- * Ask the firmware for a known report layout. It answers with a status
+- * message and no payload when it accepts; if it does not, the driver still
+- * polls but does not try to decode object data it cannot interpret.
++ * Ask the firmware for a known report layout and keep the program that was
++ * accepted, because the decoder walks that program rather than a hardcoded
++ * stride.
++ *
++ * The first attempt includes z, which is the only pressure proxy a touch report
++ * carries.  If the firmware refuses it, the second attempt is the vendor
++ * driver's own program: index, classification, x and y, no z.  The decoder does
++ * not need a special case for that -- it reads whichever program the chip took.
++ *
++ * The payload is the program zero padded to max_touch_report_config_size when
++ * the application info gave a usable size, which is what the vendor driver
++ * sends; otherwise the program alone.  Sending the padded buffer is not
++ * cosmetic: the firmware's program parser stops at TOUCH_END, which is a zero
++ * byte, so the padding is the terminator's room.
+  */
+ static bool
+ kt_set_report_config(void)
+ {
++	uint8_t payload[KEBAB_TCM_REPORT_CONFIG_MAX];
+ 	uint8_t resp[8];
++	uint32_t firmware_max = 0;
++	uint32_t program_len;
++	uint32_t payload_len;
+ 	uint32_t len = 0;
+ 	uint8_t code = 0;
+-
+-	if (kt_tcm_command(TCM_CMD_SET_REPORT_CFG, kt_report_config,
+-	    sizeof(kt_report_config), resp, sizeof(resp), &len, &code,
+-	    0) != 0) {
+-		return false;
++	int attempt;
++
++	if (kt.app_valid) {
++		firmware_max = kt.app.max_touch_report_config_size;
++		if (firmware_max > KEBAB_TCM_REPORT_CONFIG_MAX) {
++			printf("KEBAB TOUCH: app info allows a %u-byte report program; this driver carries %u, so the program is sent unpadded\n",
++			    firmware_max, KEBAB_TCM_REPORT_CONFIG_MAX);
++			firmware_max = 0;
++		}
+ 	}
+-	if (code != TCM_STATUS_OK) {
+-		printf("KEBAB TOUCH: report config answered 0x%02x, reports stay "
+-		    "raw\n", (unsigned)code);
+-		return false;
++	for (attempt = 0; attempt < 2; attempt++) {
++		program_len = kebab_tcm_program_build(kt.program,
++		    sizeof(kt.program), attempt == 0);
++		if (program_len == 0) {
++			printf("KEBAB TOUCH: the report program does not fit its buffer\n");
++			return false;
++		}
++		payload_len = kebab_tcm_report_payload_build(payload,
++		    sizeof(payload), kt.program, program_len, firmware_max);
++		if (payload_len == 0) {
++			printf("KEBAB TOUCH: the %u-byte program does not fit the firmware's %u-byte report config buffer%s\n",
++			    program_len, firmware_max,
++			    attempt == 0 ? "; retrying with the vendor program" : "");
++			continue;
++		}
++		printf("KEBAB TOUCH: report program: %u bytes, %u bits per contact, %u bytes sent\n",
++		    program_len,
++		    kebab_tcm_program_object_bits(kt.program, program_len),
++		    payload_len);
++		kt_hexdump("report program", kt.program, program_len);
++		if (kt_tcm_command(KEBAB_TCM_CMD_SET_REPORT_CONFIG, payload,
++		    payload_len, resp, sizeof(resp), &len, &code, 0) != 0) {
++			printf("KEBAB TOUCH: report config: the command did not complete\n");
++			return false;
++		}
++		printf("KEBAB TOUCH: report config: answered code 0x%02x (%s), %u payload byte(s)\n",
++		    (unsigned)code, kt_status_name(code), len);
++		if (code == KEBAB_TCM_STATUS_OK) {
++			kt.program_len = program_len;
++			kt.object_bits = kebab_tcm_program_object_bits(kt.program,
++			    program_len);
++			printf("KEBAB TOUCH: report config accepted: %u bits per contact, %s\n",
++			    kt.object_bits, attempt == 0 ? "z included" :
++			    "vendor program without z");
++			return true;
++		}
++		if (attempt == 0) {
++			printf("KEBAB TOUCH: the chip did not accept the z program; retrying with the vendor program\n");
++		}
++		/*
++		 * 0x0d is "previous command pending": a short pause is the only
++		 * thing that clears it, and one retry is the whole budget.
++		 */
++		kt_sleep_ms(10);
+ 	}
+-	printf("KEBAB TOUCH: report config accepted (%u bytes)\n",
+-	    (uint32_t)sizeof(kt_report_config));
+-	return true;
+-}
+-
+-/* Bit reader matching touch_get_report_data(): LSB first inside a byte. */
+-static uint32_t
+-kt_bits(const uint8_t *data, uint32_t offset, uint32_t bits)
+-{
+-	uint32_t out = 0;
+-	uint32_t remaining = bits;
+-	uint32_t bit_offset = offset & 7u;
+-	uint32_t byte = offset >> 3;
+-
+-	while (remaining != 0) {
+-		uint32_t available = 8 - bit_offset;
+-		uint32_t take = (available < remaining) ? available : remaining;
+-		uint32_t mask = (1u << take) - 1u;
+-		uint32_t v = ((uint32_t)data[byte] >> bit_offset) & mask;
+-
+-		out |= v << (bits - remaining);
+-		bit_offset = 0;
+-		byte++;
+-		remaining -= take;
+-	}
+-	return out;
++	printf("KEBAB TOUCH: the chip accepted neither report program; there is no layout to decode\n");
++	return false;
+ }
+ 
++/*
++ * One touch report.  The decoder walks kt.program -- the program the firmware
++ * accepted -- so the layout is the one that was negotiated, not a guess; the
++ * tracker turns the contacts into down/move/up against the previous report.
++ *
++ * Two things are refused rather than decoded:
++ *   - a program the payload does not fit, or a field that runs past the end
++ *     (a truncated report): decoding it would read a contact out of whatever
++ *     follows;
++ *   - a tail after the last whole contact that is not zero bits: that is a cut
++ *     contact, and turning it into an up would lift every held finger.
++ */
+ static void
+ kt_touch_report(const uint8_t *data, uint32_t len)
+ {
+-	struct kt_object {
+-		uint32_t index;
+-		uint32_t cls;
+-		uint32_t x;
+-		uint32_t y;
+-		uint32_t z;
+-	} obj[KT_MAX_OBJECTS];
+-	uint32_t offset = 0;
+-	uint32_t object = 0;
+-	uint16_t seen = 0;
++	kebab_tcm_report report;
++	kebab_tcm_event events[2 * KEBAB_TCM_MAX_OBJECTS];
++	kebab_tcm_status st;
+ 	uint64_t now_ns;
++	uint32_t nev;
+ 	uint32_t seq;
+ 	uint32_t i;
+ 	bool down_seen = false;
+ 
+-	while (offset + KT_OBJECT_BITS <= len * 8 && object < KT_MAX_OBJECTS) {
+-		uint32_t obj_index = kt_bits(data, offset, 4);
+-		uint32_t obj_class = kt_bits(data, offset + 4, 4);
+-		uint32_t x = kt_bits(data, offset + 8, 12);
+-		uint32_t y = kt_bits(data, offset + 20, 12);
+-		uint32_t z = kt_bits(data, offset + 32, 8);
+-
+-		if (kt.raw && kt.raw_dumps < 16) {
+-			printf("KEBAB TOUCH: object %u idx %u class %u x %u y %u "
+-			    "z %u\n", object, obj_index, obj_class, x, y, z);
++	if (kt.program_len == 0) {
++		return;
++	}
++	st = kebab_tcm_decode_report(kt.program, kt.program_len, data, len,
++	    kt.max_objects, &report);
++	if (st != KEBAB_TCM_OK) {
++		if (kt.truncated++ < 8) {
++			printf("KEBAB TOUCH: report of %u byte(s) discarded: the payload and the program disagree (%s)\n",
++			    len, kebab_tcm_status_name(st));
++		}
++		return;
++	}
++	if (report.truncated_nonzero != 0) {
++		if (kt.truncated++ < 8) {
++			printf("KEBAB TOUCH: report of %u byte(s) discarded: %u bit(s) left after %u contact(s), too short for another\n",
++			    len, report.truncated_bits, report.objects);
++		}
++		return;
++	}
++	if (kt.raw && kt.raw_dumps < 16) {
++		kt.raw_dumps++;
++		for (i = 0; i < report.objects; i++) {
++			printf("KEBAB TOUCH: contact %u idx %u class %u x %u y %u z %u\n",
++			    i, report.object[i].index,
++			    report.object[i].classification, report.object[i].x,
++			    report.object[i].y, report.object[i].z);
+ 		}
+-		obj[object].index = obj_index;
+-		obj[object].cls = obj_class;
+-		obj[object].x = x;
+-		obj[object].y = y;
+-		obj[object].z = z;
+-		offset += KT_OBJECT_BITS;
+-		object++;
+ 	}
+ 
+ 	absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
+ 	seq = ++kt.seq;
+ 
+-	/*
+-	 * Publish a down or move for every finger in this report. The active
+-	 * mask still describes the previous report, which is what makes the
+-	 * down/move decision and the up pass below consistent.
+-	 */
+-	for (i = 0; i < object; i++) {
+-		uint32_t index = obj[i].index;
++	nev = kebab_tcm_track(&kt.tracker, &report, events,
++	    2 * KEBAB_TCM_MAX_OBJECTS);
++	for (i = 0; i < nev; i++) {
++		const kebab_tcm_event *ev = &events[i];
+ 		struct kt_point p;
++		uint32_t phase;
++		uint32_t pressure;
+ 
+-		if (obj[i].cls != 1 || index >= KT_MAX_OBJECTS) {
+-			continue;
++		switch (ev->phase) {
++		case KEBAB_TCM_PHASE_DOWN:
++			phase = KT_EVENT_DOWN;
++			pressure = ev->pressure;
++			break;
++		case KEBAB_TCM_PHASE_MOVE:
++			phase = KT_EVENT_MOVE;
++			pressure = ev->pressure;
++			break;
++		default:
++			phase = KT_EVENT_UP;
++			pressure = 0;
++			break;
+ 		}
+-		seen |= (uint16_t)(1u << index);
+-		p = kt_emit((kt.active & (1u << index)) ? KT_EVENT_MOVE :
+-		    KT_EVENT_DOWN, (uint8_t)index, obj[i].x, obj[i].y,
+-		    obj[i].z, now_ns, seq);
+-		if (!(kt.active & (1u << index))) {
+-			kt_print_event("down", (uint8_t)index, obj[i].x,
+-			    obj[i].y, obj[i].z, &p);
++		p = kt_emit(phase, ev->slot, ev->raw_x, ev->raw_y, pressure,
++		    now_ns, seq);
++		if (phase == KT_EVENT_DOWN) {
++			kt_print_event("down", ev->slot, ev->raw_x, ev->raw_y,
++			    pressure, &p);
+ 			down_seen = true;
+ 			kt.last_move_ns = now_ns;
+-		} else if (kt.move_ms != 0 && now_ns - kt.last_move_ns >=
+-		    (uint64_t)kt.move_ms * 1000000ull) {
+-			kt_print_event("move", (uint8_t)index, obj[i].x,
+-			    obj[i].y, obj[i].z, &p);
+-			kt.last_move_ns = now_ns;
+-		}
+-		kt.last_x[index] = obj[i].x;
+-		kt.last_y[index] = obj[i].y;
+-	}
+-
+-	/* A slot that was active and is missing from this report has lifted. */
+-	for (i = 0; i < KT_MAX_OBJECTS; i++) {
+-		struct kt_point p;
+-
+-		if (!(kt.active & (1u << i)) || (seen & (1u << i))) {
+-			continue;
++		} else if (phase == KT_EVENT_MOVE) {
++			/*
++			 * The rate limit is on the printed line only; the record
++			 * is queued for every move so a reader sees all of them.
++			 */
++			if (kt.move_ms != 0 && now_ns - kt.last_move_ns >=
++			    (uint64_t)kt.move_ms * 1000000ull) {
++				kt_print_event("move", ev->slot, ev->raw_x,
++				    ev->raw_y, pressure, &p);
++				kt.last_move_ns = now_ns;
++			}
++		} else {
++			kt_print_event("up", ev->slot, ev->raw_x, ev->raw_y, 0,
++			    &p);
+ 		}
+-		p = kt_emit(KT_EVENT_UP, (uint8_t)i, kt.last_x[i],
+-		    kt.last_y[i], 0, now_ns, seq);
+-		kt_print_event("up", (uint8_t)i, kt.last_x[i], kt.last_y[i],
+-		    0, &p);
+ 	}
+-	kt.active = seen;
+ 
+ 	/* kebab_touch_dump=1: the decoded report behind a touch-down. */
+ 	if (kt.dump && down_seen) {
+-		printf("KEBAB TOUCH: report seq %u: %u objects\n", seq, object);
+-		for (i = 0; i < object; i++) {
+-			printf("KEBAB TOUCH:   obj %u idx %u class %u x %u y %u "
+-			    "z %u\n", i, obj[i].index, obj[i].cls, obj[i].x,
+-			    obj[i].y, obj[i].z);
++		printf("KEBAB TOUCH: report seq %u: %u contact(s), %u of %u payload bits\n",
++		    seq, report.objects, report.bits, report.payload_bits);
++		for (i = 0; i < report.objects; i++) {
++			printf("KEBAB TOUCH:   obj %u idx %u class %u x %u y %u z %u\n",
++			    i, report.object[i].index,
++			    report.object[i].classification, report.object[i].x,
++			    report.object[i].y, report.object[i].z);
+ 		}
+ 	}
+ }
+ 
+-/* Read one queued TCM message, if any. */
++/*
++ * Read one queued TCM message, if any.  The framing is the module's: four
++ * header bytes, payload, one 0x5a.  A header whose declared length is not
++ * plausible is not a header, and a message whose last byte is not the padding
++ * is not necessarily in phase either -- both are counted and printed, and only
++ * a message that passes is decoded.  That is the check the previous bring-up
++ * lacked, where a 0x5a00 length turned into "payload 23040 too large" and then
++ * into a framing error on every poll.
++ */
+ static int
+ kt_poll_once(void)
+ {
+-	uint8_t hdr[TCM_HDR_SIZE];
+-	uint8_t payload[128 + 1];       /* payload plus the TCM padding byte */
++	uint8_t hdr[KEBAB_TCM_HEADER_SIZE];
++	uint8_t payload[KEBAB_TCM_MAX_PAYLOAD + 1]; /* payload plus padding */
++	kebab_tcm_header header;
++	kebab_tcm_status st;
+ 	uint32_t len;
+ 	int err;
+ 
+-	err = kt_i2c_read(hdr, TCM_HDR_SIZE);
++	err = kt_i2c_read(hdr, KEBAB_TCM_HEADER_SIZE);
+ 	if (err != 0) {
+ 		return -1;
+ 	}
+-	if (hdr[0] != TCM_MARKER) {
++	st = kebab_tcm_header_parse(hdr, &header);
++	if (st == KEBAB_TCM_ERR_MARKER) {
++		/*
++		 * An idle bus reads back bytes that are not a message.  That is
++		 * the normal "nothing there" answer, not a polling error.
++		 */
+ 		return 0;
+ 	}
+-	len = (uint32_t)hdr[2] | ((uint32_t)hdr[3] << 8);
+-	if (len + 1 > sizeof(payload)) {
+-		printf("KEBAB TOUCH: report length %u out of range\n", len);
++	if (st != KEBAB_TCM_OK) {
++		if (kt.padding++ < 8) {
++			printf("KEBAB TOUCH: message header %02x %02x %02x %02x rejected (%s); not decoded\n",
++			    hdr[0], hdr[1], hdr[2], hdr[3],
++			    kebab_tcm_status_name(st));
++		}
+ 		return -1;
+ 	}
++	len = header.payload_len;
+ 	err = kt_i2c_read(payload, len + 1);
+ 	if (err != 0) {
+ 		return -1;
+ 	}
+-	if (payload[len] != TCM_PADDING && kt.padding++ < 8) {
+-		printf("KEBAB TOUCH: report padding 0x%02x, not 0x%02x\n",
+-		    (unsigned)payload[len], TCM_PADDING);
++	if (payload[len] != KEBAB_TCM_PADDING && kt.padding++ < 8) {
++		/*
++		 * A header that passed the marker and length checks is strong
++		 * evidence of phase, so one wrong padding byte is more likely a
++		 * firmware that pads with something else than a lost byte.  It is
++		 * printed loudly and the message is still decoded; a run that
++		 * shows this line on every report says the firmware pads with
++		 * 0x%02x and nothing else is wrong.
++		 */
++		printf("KEBAB TOUCH: message 0x%02x: padding 0x%02x, not the vendor 0x%02x; decoding anyway\n",
++		    (unsigned)header.code, (unsigned)payload[len],
++		    KEBAB_TCM_PADDING);
+ 	}
+ 	if (kt.raw && kt.raw_dumps < 16) {
+ 		kt.raw_dumps++;
+ 		printf("KEBAB TOUCH: message code 0x%02x len %u\n",
+-		    (unsigned)hdr[1], len);
++		    (unsigned)header.code, len);
+ 		kt_hexdump("report", payload, len);
+ 	}
+-	if (hdr[1] == TCM_REPORT_TOUCH) {
++	if (header.code == KEBAB_TCM_REPORT_TOUCH) {
+ 		if (kt.decode) {
+ 			kt_touch_report(payload, len);
+ 		}
+-	} else if (hdr[1] == TCM_REPORT_STATUS) {
++	} else if (header.code == KEBAB_TCM_REPORT_STATUS) {
+ 		printf("KEBAB TOUCH: status report, %u bytes\n", len);
+-	} else if (hdr[1] > 0x0f && kt.unknown++ < 8) {
++	} else if (header.code > 0x0f && kt.unknown++ < 8) {
+ 		printf("KEBAB TOUCH: message code 0x%02x len %u\n",
+-		    (unsigned)hdr[1], len);
++		    (unsigned)header.code, len);
+ 	}
+ 	return 1;
+ }
+@@ -2711,7 +2748,7 @@ kebab_touch_start(void)
+ 	 * what it is doing.
+ 	 */
+ 	kt_boot_info();
+-	if (kt.mode != TCM_MODE_APPLICATION) {
++	if (kt.mode != KEBAB_TCM_MODE_APPLICATION) {
+ 		kt.unavailable = true;
+ 		printf("KEBAB TOUCH: touch unavailable: the controller is in %s "
+ 		    "mode (0x%02x), not application mode, so the touch firmware "
+diff --git a/bsd/dev/kebab_touch_tcm.c b/bsd/dev/kebab_touch_tcm.c
+new file mode 100644
+index 0000000..c54fd97
+--- /dev/null
++++ b/bsd/dev/kebab_touch_tcm.c
+@@ -0,0 +1,660 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/*
++ * bsd/dev/kebab_touch_tcm.c -- the TCM protocol and report decoder, compiled
++ * into the kernel.
++ *
++ * This file is a generated copy of package/KebabTouchTcm.c from the kebab-dev
++ * repository.  That copy is the one KebabTouchTcmHostTests.c drives; this one is
++ * what the touch driver calls, and the two are byte-identical apart from this
++ * banner and the two lines below.  Do not edit here: change
++ * package/KebabTouchTcm.c and re-run
++ *
++ *     python scripts/sync-touch-tcm.py --out <xnu>/bsd/dev
++ *
++ * so that the kernel cannot drift away from what the host tests prove.
++ */
++#define KEBAB_TOUCH_KERNEL 1
++#include "kebab_touch_tcm.h"
++/*
++ * The TCM framing, payload layouts, report program and report decoder.
++ *
++ * The protocol facts are from the vendor headers this part's driver compiles
++ * against (synaptics_tcm_core.h, synaptics_tcm_touch.c): MESSAGE_HEADER_SIZE 4,
++ * MESSAGE_MARKER 0xa5, MESSAGE_PADDING 0x5a, enum command, enum status_code,
++ * enum report_type, enum touch_report_code, struct syna_tcm_identification,
++ * struct syna_tcm_app_info, and touch_get_report_data()'s LSB-first bit order.
++ * Where this firmware differs from the vendor struct (the two bytes before the
++ * identify part number) the decoder anchors on the part string instead of
++ * assuming the vendor offset, and says so in the prefix it keeps.
++ */
++
++const char *
++kebab_tcm_status_name(kebab_tcm_status status)
++{
++	switch (status) {
++	case KEBAB_TCM_OK:
++		return "ok";
++	case KEBAB_TCM_ERR_SHORT:
++		return "short";
++	case KEBAB_TCM_ERR_MARKER:
++		return "no marker";
++	case KEBAB_TCM_ERR_LENGTH:
++		return "bad length";
++	case KEBAB_TCM_ERR_PADDING:
++		return "bad padding";
++	case KEBAB_TCM_ERR_CODE:
++		return "unexpected code";
++	case KEBAB_TCM_ERR_LAYOUT:
++		return "bad layout";
++	case KEBAB_TCM_ERR_PROGRAM:
++		return "program does not fit";
++	case KEBAB_TCM_ERR_ARGUMENT:
++		return "bad argument";
++	default:
++		return "unknown";
++	}
++}
++
++/* --------------------------------------------------------------- framing */
++
++kebab_tcm_status
++kebab_tcm_header_parse(const uint8_t raw[KEBAB_TCM_HEADER_SIZE],
++    kebab_tcm_header *out)
++{
++	if (raw == NULL || out == NULL) {
++		return KEBAB_TCM_ERR_ARGUMENT;
++	}
++	out->code = 0;
++	out->payload_len = 0;
++	if (raw[0] != KEBAB_TCM_MARKER) {
++		return KEBAB_TCM_ERR_MARKER;
++	}
++	out->payload_len = (uint16_t)kebab_tcm_le16(&raw[2]);
++	out->code = raw[1];
++	if (out->payload_len > KEBAB_TCM_MAX_PAYLOAD) {
++		return KEBAB_TCM_ERR_LENGTH;
++	}
++	return KEBAB_TCM_OK;
++}
++
++uint32_t
++kebab_tcm_message_bytes(const kebab_tcm_header *header)
++{
++	if (header == NULL) {
++		return 0;
++	}
++	return KEBAB_TCM_HEADER_SIZE + (uint32_t)header->payload_len + 1u;
++}
++
++kebab_tcm_status
++kebab_tcm_message_parse(const uint8_t *buf, uint32_t len,
++    kebab_tcm_header *header, uint32_t *consumed)
++{
++	kebab_tcm_header h;
++	kebab_tcm_status status;
++	uint32_t total;
++
++	if (buf == NULL || header == NULL || consumed == NULL) {
++		return KEBAB_TCM_ERR_ARGUMENT;
++	}
++	*consumed = 0;
++	if (len < KEBAB_TCM_HEADER_SIZE) {
++		return KEBAB_TCM_ERR_SHORT;
++	}
++	status = kebab_tcm_header_parse(buf, &h);
++	if (status != KEBAB_TCM_OK) {
++		return status;
++	}
++	total = kebab_tcm_message_bytes(&h);
++	if (len < total) {
++		return KEBAB_TCM_ERR_SHORT;
++	}
++	if (buf[total - 1] != KEBAB_TCM_PADDING) {
++		return KEBAB_TCM_ERR_PADDING;
++	}
++	*header = h;
++	*consumed = total;
++	return KEBAB_TCM_OK;
++}
++
++uint32_t
++kebab_tcm_find_marker(const uint8_t *buf, uint32_t len, uint32_t from)
++{
++	uint32_t i;
++
++	if (buf == NULL) {
++		return len;
++	}
++	for (i = from; i < len; i++) {
++		if (buf[i] == KEBAB_TCM_MARKER) {
++			return i;
++		}
++	}
++	return len;
++}
++
++uint32_t
++kebab_tcm_build_command(uint8_t *out, uint32_t cap, uint8_t command,
++    const uint8_t *payload, uint32_t len)
++{
++	if (out == NULL || cap < len + 3u || len > 0xffffu) {
++		return 0;
++	}
++	if (len != 0 && payload == NULL) {
++		return 0;
++	}
++	out[0] = command;
++	out[1] = (uint8_t)(len & 0xffu);
++	out[2] = (uint8_t)((len >> 8) & 0xffu);
++	if (len != 0) {
++		memcpy(&out[3], payload, len);
++	}
++	return len + 3u;
++}
++
++kebab_tcm_status
++kebab_tcm_expect_report(const kebab_tcm_header *header, uint8_t id)
++{
++	if (header == NULL) {
++		return KEBAB_TCM_ERR_ARGUMENT;
++	}
++	if (header->code != id) {
++		return KEBAB_TCM_ERR_CODE;
++	}
++	return KEBAB_TCM_OK;
++}
++
++kebab_tcm_status
++kebab_tcm_expect_status(const kebab_tcm_header *header)
++{
++	if (header == NULL) {
++		return KEBAB_TCM_ERR_ARGUMENT;
++	}
++	/*
++	 * A command answer carries a status below 0x10.  A code from 0x10 up is a
++	 * report, and a code that merely echoes the command byte (0x20, 0x26) is
++	 * neither: it must not be read as "OK".
++	 */
++	if (header->code >= KEBAB_TCM_REPORT_IDENTIFY) {
++		return KEBAB_TCM_ERR_CODE;
++	}
++	return KEBAB_TCM_OK;
++}
++
++/* -------------------------------------------------------- payload layouts */
++
++kebab_tcm_status
++kebab_tcm_parse_identify(const uint8_t *payload, uint32_t len,
++    kebab_tcm_identify *out)
++{
++	uint32_t anchor;
++	uint32_t i;
++
++	if (payload == NULL || out == NULL) {
++		return KEBAB_TCM_ERR_ARGUMENT;
++	}
++	memset(out, 0, sizeof(*out));
++
++	/*
++	 * Anchor on four printable bytes: the part number is the only field in
++	 * this payload whose position is self-evident.  On the vendor struct that
++	 * lands at 2; on the measured S3908 payload it lands at 4.
++	 */
++	anchor = len;
++	for (i = 0; i + 4u <= len; i++) {
++		if (payload[i] >= 0x20u && payload[i] < 0x7fu &&
++		    payload[i + 1] >= 0x20u && payload[i + 1] < 0x7fu &&
++		    payload[i + 2] >= 0x20u && payload[i + 2] < 0x7fu &&
++		    payload[i + 3] >= 0x20u && payload[i + 3] < 0x7fu) {
++			anchor = i;
++			break;
++		}
++	}
++	if (anchor == len) {
++		return KEBAB_TCM_ERR_LAYOUT;
++	}
++	if (anchor < 2u) {
++		/* No room for version and mode in front of the part number. */
++		return KEBAB_TCM_ERR_LAYOUT;
++	}
++	out->version = payload[anchor - 2u];
++	out->mode = payload[anchor - 1u];
++	out->prefix_len = anchor - 2u;
++	for (i = 0; i < out->prefix_len && i < sizeof(out->prefix); i++) {
++		out->prefix[i] = payload[i];
++	}
++	for (i = 0; i < 16u && anchor + i < len; i++) {
++		uint8_t c = payload[anchor + i];
++
++		if (c == 0) {
++			/* The vendor part_number is NUL padded; the string ends here. */
++			break;
++		}
++		out->part[i] = (c >= 0x20u && c < 0x7fu) ? (char)c : '.';
++	}
++	out->part[i] = '\0';
++	if (len >= anchor + 20u) {
++		out->build = kebab_tcm_le32(&payload[anchor + 16u]);
++		out->build_known = 1;
++	}
++	return KEBAB_TCM_OK;
++}
++
++kebab_tcm_status
++kebab_tcm_parse_app_info(const uint8_t *payload, uint32_t len,
++    kebab_tcm_app_info *out)
++{
++	if (payload == NULL || out == NULL) {
++		return KEBAB_TCM_ERR_ARGUMENT;
++	}
++	if (len < KEBAB_TCM_APP_INFO_SIZE) {
++		return KEBAB_TCM_ERR_LAYOUT;
++	}
++	memset(out, 0, sizeof(*out));
++	out->version = (uint16_t)kebab_tcm_le16(&payload[0]);
++	out->status = (uint16_t)kebab_tcm_le16(&payload[2]);
++	out->static_config_size = (uint16_t)kebab_tcm_le16(&payload[4]);
++	out->dynamic_config_size = (uint16_t)kebab_tcm_le16(&payload[6]);
++	out->app_config_start_write_block = (uint16_t)kebab_tcm_le16(&payload[8]);
++	out->app_config_size = (uint16_t)kebab_tcm_le16(&payload[10]);
++	out->max_touch_report_config_size = (uint16_t)kebab_tcm_le16(&payload[12]);
++	out->max_touch_report_payload_size = (uint16_t)kebab_tcm_le16(&payload[14]);
++	memcpy(out->customer_config_id, &payload[16], 16);
++	out->max_x = (uint16_t)kebab_tcm_le16(&payload[32]);
++	out->max_y = (uint16_t)kebab_tcm_le16(&payload[34]);
++	out->max_objects = (uint16_t)kebab_tcm_le16(&payload[36]);
++	out->num_of_buttons = (uint16_t)kebab_tcm_le16(&payload[38]);
++	out->num_of_image_rows = (uint16_t)kebab_tcm_le16(&payload[40]);
++	out->num_of_image_cols = (uint16_t)kebab_tcm_le16(&payload[42]);
++	out->has_hybrid_data = (uint16_t)kebab_tcm_le16(&payload[44]);
++	return KEBAB_TCM_OK;
++}
++
++/* --------------------------------------------------------- report program */
++
++uint32_t
++kebab_tcm_program_build(uint8_t *out, uint32_t cap, int pressure)
++{
++	uint32_t n = 0;
++
++	if (out == NULL) {
++		return 0;
++	}
++	/* FOREACH_END + END, plus the fields below; 13 with pressure, 11 without. */
++	if (cap < (pressure ? 13u : 11u)) {
++		return 0;
++	}
++	out[n++] = KEBAB_TCM_TOUCH_FOREACH_ACTIVE_OBJECT;
++	out[n++] = KEBAB_TCM_TOUCH_OBJECT_N_INDEX;
++	out[n++] = 4;
++	out[n++] = KEBAB_TCM_TOUCH_OBJECT_N_CLASSIFICATION;
++	out[n++] = 4;
++	out[n++] = KEBAB_TCM_TOUCH_OBJECT_N_X_POSITION;
++	out[n++] = 12;
++	out[n++] = KEBAB_TCM_TOUCH_OBJECT_N_Y_POSITION;
++	out[n++] = 12;
++	if (pressure) {
++		out[n++] = KEBAB_TCM_TOUCH_OBJECT_N_Z;
++		out[n++] = 8;
++	}
++	out[n++] = KEBAB_TCM_TOUCH_FOREACH_END;
++	out[n++] = KEBAB_TCM_TOUCH_END;
++	return n;
++}
++
++/*
++ * Find the foreach body and add up the field widths inside it.  The decoder
++ * only implements the program this driver writes, and the body has to be a flat
++ * sequence of object fields for the "bits per contact" to be a constant; a
++ * program that is anything else is rejected here rather than misread later.
++ */
++static kebab_tcm_status
++kebab_tcm_program_scan(const uint8_t *program, uint32_t len, uint32_t *body_out,
++    uint32_t *bits_out)
++{
++	uint32_t idx = 0;
++	uint32_t body;
++	uint32_t bits = 0;
++
++	if (program == NULL || body_out == NULL || bits_out == NULL) {
++		return KEBAB_TCM_ERR_ARGUMENT;
++	}
++	while (idx < len) {
++		uint8_t code = program[idx++];
++
++		if (code == KEBAB_TCM_TOUCH_END) {
++			return KEBAB_TCM_ERR_LAYOUT;   /* no foreach at all */
++		}
++		if (code != KEBAB_TCM_TOUCH_FOREACH_ACTIVE_OBJECT &&
++		    code != KEBAB_TCM_TOUCH_FOREACH_OBJECT) {
++			return KEBAB_TCM_ERR_LAYOUT;   /* top-level field not supported */
++		}
++		body = idx;
++		while (idx < len) {
++			uint8_t field = program[idx++];
++			uint32_t width;
++
++			if (field == KEBAB_TCM_TOUCH_FOREACH_END) {
++				*body_out = body;
++				*bits_out = bits;
++				return bits == 0 ? KEBAB_TCM_ERR_LAYOUT :
++				    KEBAB_TCM_OK;
++			}
++			if (field == KEBAB_TCM_TOUCH_END || idx >= len) {
++				return KEBAB_TCM_ERR_LAYOUT;
++			}
++			width = program[idx++];
++			switch (field) {
++			case KEBAB_TCM_TOUCH_OBJECT_N_INDEX:
++			case KEBAB_TCM_TOUCH_OBJECT_N_CLASSIFICATION:
++				if (width > 8u) {
++					return KEBAB_TCM_ERR_LAYOUT;
++				}
++				break;
++			case KEBAB_TCM_TOUCH_OBJECT_N_X_POSITION:
++			case KEBAB_TCM_TOUCH_OBJECT_N_Y_POSITION:
++				if (width > 16u) {
++					return KEBAB_TCM_ERR_LAYOUT;
++				}
++				break;
++			case KEBAB_TCM_TOUCH_OBJECT_N_Z:
++				if (width > 8u) {
++					return KEBAB_TCM_ERR_LAYOUT;
++				}
++				break;
++			default:
++				return KEBAB_TCM_ERR_LAYOUT;
++			}
++			bits += width;
++			if (bits > 64u) {
++				return KEBAB_TCM_ERR_LAYOUT;
++			}
++		}
++		return KEBAB_TCM_ERR_LAYOUT;           /* missing FOREACH_END */
++	}
++	return KEBAB_TCM_ERR_LAYOUT;
++}
++
++uint32_t
++kebab_tcm_program_object_bits(const uint8_t *program, uint32_t len)
++{
++	uint32_t body = 0;
++	uint32_t bits = 0;
++
++	if (kebab_tcm_program_scan(program, len, &body, &bits) != KEBAB_TCM_OK) {
++		return 0;
++	}
++	return bits;
++}
++
++uint32_t
++kebab_tcm_report_payload_build(uint8_t *out, uint32_t cap,
++    const uint8_t *program, uint32_t program_len, uint32_t firmware_max)
++{
++	uint32_t total;
++
++	if (out == NULL || program == NULL || program_len == 0) {
++		return 0;
++	}
++	if (firmware_max > KEBAB_TCM_REPORT_CONFIG_MAX) {
++		/* Not a size this driver carries a buffer for; send the program. */
++		firmware_max = 0;
++	}
++	if (firmware_max != 0 && firmware_max < program_len) {
++		/*
++		 * The firmware says its report program buffer is smaller than the
++		 * program: sending the program anyway would overrun the very
++		 * buffer the app info just described.  The caller has to fall
++		 * back to a shorter program or report the mismatch.
++		 */
++		return 0;
++	}
++	total = (firmware_max != 0) ? firmware_max : program_len;
++	if (total > cap) {
++		return 0;
++	}
++	/*
++	 * Zero padding is not filler: the vendor driver sends the whole
++	 * max_touch_report_config_size buffer and the firmware's program parser
++	 * stops at TOUCH_END, which is a zero byte.
++	 */
++	memset(out, 0, total);
++	memcpy(out, program, program_len);
++	return total;
++}
++
++/* --------------------------------------------------------------- decoding */
++
++uint32_t
++kebab_tcm_bits(const uint8_t *data, uint32_t offset, uint32_t bits)
++{
++	uint32_t out = 0;
++	uint32_t remaining = bits;
++	uint32_t bit_offset = offset & 7u;
++	uint32_t byte = offset >> 3;
++
++	while (remaining != 0) {
++		uint32_t available = 8u - bit_offset;
++		uint32_t take = (available < remaining) ? available : remaining;
++		uint32_t mask = (1u << take) - 1u;
++		uint32_t v = ((uint32_t)data[byte] >> bit_offset) & mask;
++
++		out |= v << (bits - remaining);
++		bit_offset = 0;
++		byte++;
++		remaining -= take;
++	}
++	return out;
++}
++
++static kebab_tcm_status
++kebab_tcm_walk_object(const uint8_t *program, uint32_t len, uint32_t body,
++    const uint8_t *payload, uint32_t payload_bits, uint32_t *offset,
++    kebab_tcm_object *object)
++{
++	uint32_t idx = body;
++
++	memset(object, 0, sizeof(*object));
++	while (idx < len) {
++		uint8_t field = program[idx++];
++		uint32_t width;
++
++		if (field == KEBAB_TCM_TOUCH_FOREACH_END) {
++			return KEBAB_TCM_OK;
++		}
++		if (idx >= len) {
++			return KEBAB_TCM_ERR_LAYOUT;
++		}
++		width = program[idx++];
++		if (*offset + width > payload_bits) {
++			return KEBAB_TCM_ERR_SHORT;
++		}
++		switch (field) {
++		case KEBAB_TCM_TOUCH_OBJECT_N_INDEX:
++			object->index = (uint8_t)kebab_tcm_bits(payload, *offset,
++			    width);
++			break;
++		case KEBAB_TCM_TOUCH_OBJECT_N_CLASSIFICATION:
++			object->classification = (uint8_t)kebab_tcm_bits(payload,
++			    *offset, width);
++			break;
++		case KEBAB_TCM_TOUCH_OBJECT_N_X_POSITION:
++			object->x = (uint16_t)kebab_tcm_bits(payload, *offset,
++			    width);
++			break;
++		case KEBAB_TCM_TOUCH_OBJECT_N_Y_POSITION:
++			object->y = (uint16_t)kebab_tcm_bits(payload, *offset,
++			    width);
++			break;
++		case KEBAB_TCM_TOUCH_OBJECT_N_Z:
++			object->z = (uint8_t)kebab_tcm_bits(payload, *offset,
++			    width);
++			break;
++		default:
++			return KEBAB_TCM_ERR_LAYOUT;
++		}
++		*offset += width;
++	}
++	return KEBAB_TCM_ERR_LAYOUT;
++}
++
++kebab_tcm_status
++kebab_tcm_decode_report(const uint8_t *program, uint32_t program_len,
++    const uint8_t *payload, uint32_t payload_len, uint32_t max_objects,
++    kebab_tcm_report *out)
++{
++	uint32_t body = 0;
++	uint32_t object_bits = 0;
++	uint32_t offset = 0;
++	kebab_tcm_status status;
++
++	if (program == NULL || payload == NULL || out == NULL) {
++		return KEBAB_TCM_ERR_ARGUMENT;
++	}
++	status = kebab_tcm_program_scan(program, program_len, &body,
++	    &object_bits);
++	if (status != KEBAB_TCM_OK) {
++		return status;
++	}
++	memset(out, 0, sizeof(*out));
++	out->payload_bits = payload_len * 8u;
++	if (max_objects == 0 || max_objects > KEBAB_TCM_MAX_OBJECTS) {
++		max_objects = KEBAB_TCM_MAX_OBJECTS;
++	}
++
++	/*
++	 * A contact is decoded only when all of its bits are there.  A tail that
++	 * is too short for another contact is counted, not decoded: decoding it
++	 * would read a contact out of the next message's bytes.
++	 */
++	while (out->objects < max_objects &&
++	    offset + object_bits <= out->payload_bits) {
++		kebab_tcm_object object;
++
++		status = kebab_tcm_walk_object(program, program_len, body, payload,
++		    out->payload_bits, &offset, &object);
++		if (status != KEBAB_TCM_OK) {
++			return status;
++		}
++		out->object[out->objects++] = object;
++	}
++	out->bits = offset;
++	out->truncated_bits = out->payload_bits - offset;
++	if (out->truncated_bits != 0) {
++		/*
++		 * All-zero tails are byte padding, not a cut contact: a report
++		 * that ends on a zero byte boundary must not lift every finger.
++		 * A non-zero tail is a truncated contact and the caller drops the
++		 * whole report.
++		 */
++		uint32_t bit;
++
++		for (bit = offset; bit < out->payload_bits; bit++) {
++			if (((payload[bit >> 3] >> (bit & 7u)) & 1u) != 0) {
++				out->truncated_nonzero = 1;
++				break;
++			}
++		}
++	}
++	return KEBAB_TCM_OK;
++}
++
++/* --------------------------------------------------------------- tracking */
++
++uint32_t
++kebab_tcm_track(kebab_tcm_tracker *tracker, const kebab_tcm_report *report,
++    kebab_tcm_event *events, uint32_t max_events)
++{
++	uint16_t seen = 0;
++	uint32_t stored = 0;
++	uint32_t i;
++
++	if (tracker == NULL || report == NULL) {
++		return 0;
++	}
++	for (i = 0; i < report->objects; i++) {
++		const kebab_tcm_object *object = &report->object[i];
++		kebab_tcm_event event;
++		uint8_t phase;
++
++		if (object->classification != KEBAB_TCM_CLASS_FINGER &&
++		    object->classification != KEBAB_TCM_CLASS_GLOVED_FINGER) {
++			continue;
++		}
++		if (object->index >= KEBAB_TCM_MAX_OBJECTS) {
++			continue;
++		}
++		phase = (tracker->active & (1u << object->index)) ?
++		    KEBAB_TCM_PHASE_MOVE : KEBAB_TCM_PHASE_DOWN;
++		seen |= (uint16_t)(1u << object->index);
++		tracker->last_x[object->index] = object->x;
++		tracker->last_y[object->index] = object->y;
++		event.phase = phase;
++		event.slot = object->index;
++		event.raw_x = object->x;
++		event.raw_y = object->y;
++		event.pressure = object->z;
++		if (events != NULL && stored < max_events) {
++			events[stored++] = event;
++		}
++	}
++	/* A slot that was active and is missing from this report has lifted. */
++	for (i = 0; i < KEBAB_TCM_MAX_OBJECTS; i++) {
++		kebab_tcm_event event;
++
++		if (!(tracker->active & (1u << i)) || (seen & (1u << i))) {
++			continue;
++		}
++		event.phase = KEBAB_TCM_PHASE_UP;
++		event.slot = (uint8_t)i;
++		event.raw_x = tracker->last_x[i];
++		event.raw_y = tracker->last_y[i];
++		event.pressure = 0;
++		if (events != NULL && stored < max_events) {
++			events[stored++] = event;
++		}
++	}
++	tracker->active = seen;
++	return stored;
++}
++
++/* -------------------------------------------------------------- transform */
++
++kebab_tcm_point
++kebab_tcm_transform(uint32_t raw_x, uint32_t raw_y, uint32_t max_x,
++    uint32_t max_y)
++{
++	kebab_tcm_point p;
++
++	if (max_x == 0 || max_x > KEBAB_TCM_SENSOR_LIMIT) {
++		max_x = KEBAB_TCM_SENSOR_MAX_X;
++	}
++	if (max_y == 0 || max_y > KEBAB_TCM_SENSOR_LIMIT) {
++		max_y = KEBAB_TCM_SENSOR_MAX_Y;
++	}
++	memset(&p, 0, sizeof(p));
++	if (raw_x > max_x) {
++		raw_x = max_x;
++		p.clamped = 1;
++	}
++	if (raw_y > max_y) {
++		raw_y = max_y;
++		p.clamped = 1;
++	}
++	p.panel_x = (int32_t)(((uint64_t)raw_x * (KEBAB_TCM_PANEL_W - 1) +
++	    max_x / 2u) / max_x);
++	p.panel_y = (int32_t)(((uint64_t)raw_y * (KEBAB_TCM_PANEL_H - 1) +
++	    max_y / 2u) / max_y);
++	p.logical_x = p.panel_x + KEBAB_TCM_LOGICAL_ORIGIN_X;
++	p.logical_y = p.panel_y + KEBAB_TCM_LOGICAL_ORIGIN_Y;
++	/* Defensive only: with the origin above these cannot fire. */
++	if (p.logical_x >= KEBAB_TCM_LOGICAL_W) {
++		p.logical_x = KEBAB_TCM_LOGICAL_W - 1;
++		p.clamped = 1;
++	}
++	if (p.logical_y >= KEBAB_TCM_LOGICAL_H) {
++		p.logical_y = KEBAB_TCM_LOGICAL_H - 1;
++		p.clamped = 1;
++	}
++	return p;
++}
+diff --git a/bsd/dev/kebab_touch_tcm.h b/bsd/dev/kebab_touch_tcm.h
+new file mode 100644
+index 0000000..b560378
+--- /dev/null
++++ b/bsd/dev/kebab_touch_tcm.h
+@@ -0,0 +1,362 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/*
++ * bsd/dev/kebab_touch_tcm.h -- header of the TCM protocol and report decoder.
++ *
++ * Generated copy of package/KebabTouchTcm.h from the kebab-dev repository; see
++ * bsd/dev/kebab_touch_tcm.c.  With KEBAB_TOUCH_KERNEL set it selects the kernel
++ * headers instead of the host ones.  Do not edit: re-run
++ * scripts/sync-touch-tcm.py.
++ */
++/*
++ * The Synaptics TCM protocol the S3908 on SE13 speaks, and the touch report
++ * decoder on top of it.
++ *
++ * The module is free of I2C, of MMIO and of kernel dependencies.  It owns three
++ * things the driver used to spell out inline:
++ *
++ *   - the message framing: marker, code, 16-bit length, payload, padding;
++ *   - the two application-mode commands whose payloads are laid out by the
++ *     vendor headers (identify, application info) and the report program whose
++ *     layout the driver itself chooses (SET_TOUCH_REPORT_CONFIG);
++ *   - the bitfield walk that turns a report into contacts, the contact state
++ *     machine that turns a stream of reports into down/move/up, and the
++ *     sensor -> panel -> logical transform.
++ *
++ * The bitfield walk is driven by the report program, not by a fixed 5-byte
++ * stride: the same bytes the driver sends to the chip are the bytes the decoder
++ * reads, so a program the firmware accepted is a layout the decoder knows.
++ *
++ * Every length that comes off the wire is checked against the buffer before it
++ * is used.  A message whose declared length is implausible is rejected with the
++ * four header bytes intact so the caller can print them; nothing is decoded
++ * from a message that did not pass the framing checks.
++ */
++#ifndef KEBAB_TOUCH_TCM_H
++#define KEBAB_TOUCH_TCM_H
++
++#ifdef KEBAB_TOUCH_KERNEL
++#include <sys/types.h>
++#include <libkern/libkern.h>
++#else
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++#endif
++
++/* ------------------------------------------------------------ framing */
++
++#define KEBAB_TCM_MARKER       0xa5u
++#define KEBAB_TCM_PADDING      0x5au
++#define KEBAB_TCM_HEADER_SIZE  4u
++
++/*
++ * The largest payload this decoder will look at.  The touch report is the only
++ * message that can be large: ten objects of five bytes is 50 bytes, and the
++ * application info is 46.  A header that claims more than this is not a header
++ * this driver can trust, which is exactly the check the measured 0x5a00 needed.
++ */
++#define KEBAB_TCM_MAX_PAYLOAD  128u
++
++/* Command set (enum command in syna_tcm_core.h). */
++#define KEBAB_TCM_CMD_IDENTIFY          0x02u
++#define KEBAB_TCM_CMD_GET_BOOT_INFO     0x10u
++#define KEBAB_TCM_CMD_GET_APP_INFO      0x20u
++#define KEBAB_TCM_CMD_SET_REPORT_CONFIG 0x26u
++
++/* Report ids and status codes (enum report_type, enum status_code). */
++#define KEBAB_TCM_REPORT_IDENTIFY 0x10u
++#define KEBAB_TCM_REPORT_TOUCH    0x11u
++#define KEBAB_TCM_REPORT_STATUS   0x1bu
++#define KEBAB_TCM_STATUS_OK       0x01u
++
++/* Boot modes (enum boot_mode). */
++#define KEBAB_TCM_MODE_APPLICATION      0x01u
++#define KEBAB_TCM_MODE_HOST_DOWNLOAD    0x02u
++#define KEBAB_TCM_MODE_BOOTLOADER       0x0bu
++#define KEBAB_TCM_MODE_TDDI_BOOTLOADER  0x0cu
++#define KEBAB_TCM_MODE_PRODUCTION_TEST  0x0eu
++
++/* Touch report program codes (enum touch_report_code). */
++#define KEBAB_TCM_TOUCH_END                    0u
++#define KEBAB_TCM_TOUCH_FOREACH_ACTIVE_OBJECT  1u
++#define KEBAB_TCM_TOUCH_FOREACH_OBJECT         2u
++#define KEBAB_TCM_TOUCH_FOREACH_END            3u
++#define KEBAB_TCM_TOUCH_PAD_TO_NEXT_BYTE       4u
++#define KEBAB_TCM_TOUCH_TIMESTAMP              5u
++#define KEBAB_TCM_TOUCH_OBJECT_N_INDEX         6u
++#define KEBAB_TCM_TOUCH_OBJECT_N_CLASSIFICATION 7u
++#define KEBAB_TCM_TOUCH_OBJECT_N_X_POSITION    8u
++#define KEBAB_TCM_TOUCH_OBJECT_N_Y_POSITION    9u
++#define KEBAB_TCM_TOUCH_OBJECT_N_Z             10u
++
++/* Object classification (enum touch_status). */
++#define KEBAB_TCM_CLASS_LIFT         0u
++#define KEBAB_TCM_CLASS_FINGER       1u
++#define KEBAB_TCM_CLASS_GLOVED_FINGER 2u
++
++/* ------------------------------------------------------------- geometry */
++
++#define KEBAB_TCM_PANEL_W          1080
++#define KEBAB_TCM_PANEL_H          2400
++#define KEBAB_TCM_LOGICAL_W        1125
++#define KEBAB_TCM_LOGICAL_H        2436
++#define KEBAB_TCM_LOGICAL_ORIGIN_X 22   /* (1125 - 1080) / 2, truncated */
++#define KEBAB_TCM_LOGICAL_ORIGIN_Y 18   /* (2436 - 2400) / 2 */
++
++/* The two fallbacks the device tree fixes when the app info has no answer. */
++#define KEBAB_TCM_SENSOR_MAX_X     1079
++#define KEBAB_TCM_SENSOR_MAX_Y     2399
++#define KEBAB_TCM_SENSOR_LIMIT     0x0fffu  /* the report field is 12 bits */
++
++/* The device tree's touchpanel,max-num-support. */
++#define KEBAB_TCM_MAX_OBJECTS      10u
++
++/* --------------------------------------------------------------- types */
++
++typedef enum {
++	KEBAB_TCM_OK = 0,
++	KEBAB_TCM_ERR_SHORT,    /* fewer bytes than the header claims */
++	KEBAB_TCM_ERR_MARKER,   /* no 0xa5 where a message should start */
++	KEBAB_TCM_ERR_LENGTH,   /* declared payload length is not plausible */
++	KEBAB_TCM_ERR_PADDING,  /* trailing byte is not 0x5a */
++	KEBAB_TCM_ERR_CODE,     /* message code is not the one expected */
++	KEBAB_TCM_ERR_LAYOUT,   /* payload too short, or a program code not known */
++	KEBAB_TCM_ERR_PROGRAM,  /* report program does not fit the buffer */
++	KEBAB_TCM_ERR_ARGUMENT, /* caller handed in a null or a bad size */
++} kebab_tcm_status;
++
++const char *kebab_tcm_status_name(kebab_tcm_status status);
++
++typedef struct {
++	uint8_t  code;
++	uint16_t payload_len;
++} kebab_tcm_header;
++
++/* The vendor struct syna_tcm_identification, plus what the firmware prepends.
++ *
++ * The measured S3908 payload is 24 bytes with the part number at offset 4, so
++ * version and mode sit at 2 and 3 and two bytes are left over in front of them.
++ * The two bytes are kept and printed rather than interpreted: on a payload that
++ * matches the vendor struct they are simply the version and the mode, and on
++ * this firmware they are not. */
++typedef struct {
++	uint8_t  version;
++	uint8_t  mode;
++	char     part[17];      /* NUL terminated, always */
++	uint32_t build;         /* little endian packrat number, when present */
++	int      build_known;
++	uint32_t prefix_len;    /* bytes in front of the version/mode pair */
++	uint8_t  prefix[8];     /* first eight of them, for the log */
++} kebab_tcm_identify;
++
++/* The vendor struct syna_tcm_app_info: 46 bytes, every field a 16-bit
++ * little-endian value.  The two report sizes are what the report program has to
++ * fit; max_x/max_y are the sensor geometry the transform uses. */
++#define KEBAB_TCM_APP_INFO_SIZE 46u
++typedef struct {
++	uint16_t version;
++	uint16_t status;
++	uint16_t static_config_size;
++	uint16_t dynamic_config_size;
++	uint16_t app_config_start_write_block;
++	uint16_t app_config_size;
++	uint16_t max_touch_report_config_size;
++	uint16_t max_touch_report_payload_size;
++	uint8_t  customer_config_id[16];
++	uint16_t max_x;
++	uint16_t max_y;
++	uint16_t max_objects;
++	uint16_t num_of_buttons;
++	uint16_t num_of_image_rows;
++	uint16_t num_of_image_cols;
++	uint16_t has_hybrid_data;
++} kebab_tcm_app_info;
++
++/* One contact as the report program describes it. */
++typedef struct {
++	uint8_t  index;
++	uint8_t  classification;
++	uint16_t x;
++	uint16_t y;
++	uint8_t  z;             /* pressure proxy: 0..255, 0 when not reported */
++} kebab_tcm_object;
++
++typedef struct {
++	uint32_t objects;
++	uint32_t bits;             /* payload bits consumed by whole contacts */
++	uint32_t payload_bits;
++	uint32_t truncated_bits;   /* tail that could not form another contact */
++	int      truncated_nonzero;
++	kebab_tcm_object object[KEBAB_TCM_MAX_OBJECTS];
++} kebab_tcm_report;
++
++typedef enum {
++	KEBAB_TCM_PHASE_DOWN = 1,
++	KEBAB_TCM_PHASE_MOVE = 2,
++	KEBAB_TCM_PHASE_UP   = 3,
++} kebab_tcm_phase;
++
++typedef struct {
++	uint8_t  phase;         /* kebab_tcm_phase */
++	uint8_t  slot;
++	uint16_t raw_x;
++	uint16_t raw_y;
++	uint8_t  pressure;
++} kebab_tcm_event;
++
++typedef struct {
++	uint16_t active;        /* one bit per contact index, previous report */
++	uint16_t last_x[KEBAB_TCM_MAX_OBJECTS];
++	uint16_t last_y[KEBAB_TCM_MAX_OBJECTS];
++} kebab_tcm_tracker;
++
++typedef struct {
++	int32_t panel_x;
++	int32_t panel_y;
++	int32_t logical_x;
++	int32_t logical_y;
++	int     clamped;
++} kebab_tcm_point;
++
++/* ------------------------------------------------------------- helpers */
++
++static inline uint32_t
++kebab_tcm_le16(const uint8_t *p)
++{
++	return (uint32_t)p[0] | ((uint32_t)p[1] << 8);
++}
++
++static inline uint32_t
++kebab_tcm_le32(const uint8_t *p)
++{
++	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
++	    ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++}
++
++/* ------------------------------------------------------------- framing */
++
++/*
++ * Validate four bytes as a message header.  A wrong marker and a length that no
++ * message this driver can read would have are both rejected here, before
++ * anything is read for them.
++ */
++kebab_tcm_status kebab_tcm_header_parse(
++    const uint8_t raw[KEBAB_TCM_HEADER_SIZE], kebab_tcm_header *out);
++
++/* Header, payload and padding: 4 + payload_len + 1. */
++uint32_t kebab_tcm_message_bytes(const kebab_tcm_header *header);
++
++/*
++ * Parse one complete message out of a buffer.  buf[0] must be the marker.  On
++ * success *consumed is the whole message including the padding byte, so the
++ * caller can advance.  A trailing byte that is not 0x5a is an error: a stream
++ * without it is one byte out of phase and nothing after it can be trusted.
++ */
++kebab_tcm_status kebab_tcm_message_parse(const uint8_t *buf, uint32_t len,
++    kebab_tcm_header *header, uint32_t *consumed);
++
++/* Offset of the next 0xa5 at or after from, or len when there is none. */
++uint32_t kebab_tcm_find_marker(const uint8_t *buf, uint32_t len, uint32_t from);
++
++/*
++ * Build the bytes of one command: {command, length_lo, length_hi, payload}.
++ * Returns the byte count, or 0 when it does not fit.  This is the write side of
++ * the framing, and the only place the little-endian length is assembled.
++ */
++uint32_t kebab_tcm_build_command(uint8_t *out, uint32_t cap, uint8_t command,
++    const uint8_t *payload, uint32_t len);
++
++/* Is this the answer the caller is waiting for?  Reports arrive with a code
++ * from 0x10 up; command answers carry a status below 0x10. */
++kebab_tcm_status kebab_tcm_expect_report(const kebab_tcm_header *header,
++    uint8_t id);
++kebab_tcm_status kebab_tcm_expect_status(const kebab_tcm_header *header);
++
++/* ------------------------------------------------------- payload layouts */
++
++/*
++ * Decode the identify payload.  The part number is the only field whose offset
++ * is self-evident (printable ASCII), so the decoder anchors on it and takes the
++ * version and mode as the two bytes in front, exactly as the vendor struct
++ * orders them.  Anything before those two is kept as an uninterpreted prefix.
++ */
++kebab_tcm_status kebab_tcm_parse_identify(const uint8_t *payload,
++    uint32_t len, kebab_tcm_identify *out);
++
++/* Decode the 46-byte application info at the vendor struct's offsets. */
++kebab_tcm_status kebab_tcm_parse_app_info(const uint8_t *payload, uint32_t len,
++    kebab_tcm_app_info *out);
++
++/* ------------------------------------------------------- report program */
++
++/*
++ * The program this driver asks the firmware for.  With pressure set the layout
++ * is, per active object:
++ *
++ *   index 4, classification 4, x 12, y 12, z 8   -> 40 bits, five bytes
++ *
++ * and without it the vendor's own default, four bits less z:
++ *
++ *   index 4, classification 4, x 12, y 12        -> 32 bits, four bytes
++ *
++ * Returns the program length, or 0 when cap is too small.
++ */
++#define KEBAB_TCM_PROGRAM_MAX 32u
++uint32_t kebab_tcm_program_build(uint8_t *out, uint32_t cap, int pressure);
++
++/* Bits one object occupies in this program, or 0 when it is not a program this
++ * decoder can walk. */
++uint32_t kebab_tcm_program_object_bits(const uint8_t *program, uint32_t len);
++
++/*
++ * The SET_TOUCH_REPORT_CONFIG payload.  The vendor driver sends
++ * max_touch_report_config_size bytes, not the program length: the buffer is
++ * zero padded and the firmware's program parser stops at TOUCH_END.  When the
++ * application info did not provide a usable size, firmware_max is 0 and the
++ * program alone is returned.  Returns the byte count, or 0 when it does not fit.
++ */
++#define KEBAB_TCM_REPORT_CONFIG_MAX 128u
++uint32_t kebab_tcm_report_payload_build(uint8_t *out, uint32_t cap,
++    const uint8_t *program, uint32_t program_len, uint32_t firmware_max);
++
++/* ------------------------------------------------------------- decoding */
++
++/*
++ * LSB-first bit reader, matching touch_get_report_data(): inside a byte the
++ * first field bit is bit 0, and the first chunk of a multi-byte field is its
++ * least significant byte.  The caller must keep offset + bits inside the
++ * buffer; the decoder below does.
++ */
++uint32_t kebab_tcm_bits(const uint8_t *data, uint32_t offset, uint32_t bits);
++
++/*
++ * Walk the report program over one payload.  Contacts are emitted until the
++ * payload runs out, at most max_objects of them.  A tail too short to hold
++ * another contact is reported in truncated_bits instead of being decoded: a
++ * report cut mid-contact must not turn into a contact at the wrong offset, and
++ * a report that is all fingers up (an empty payload) must stay distinguishable
++ * from a truncated one.
++ */
++kebab_tcm_status kebab_tcm_decode_report(const uint8_t *program,
++    uint32_t program_len, const uint8_t *payload, uint32_t payload_len,
++    uint32_t max_objects, kebab_tcm_report *out);
++
++/* ------------------------------------------------------------- tracking */
++
++/*
++ * Compare one decoded report with the previous one.  A contact that was not
++ * active is a down, one that was is a move, and a slot that was active and is
++ * missing from this report is an up, reported at the last coordinates it had.
++ * The tracker is updated whether or not the caller's event array had room.
++ */
++uint32_t kebab_tcm_track(kebab_tcm_tracker *tracker,
++    const kebab_tcm_report *report, kebab_tcm_event *events,
++    uint32_t max_events);
++
++/* Sensor -> panel -> logical, with the panel-edge clamp.  max_x/max_y are the
++ * largest sensor values the chip advertises; an implausible one falls back to
++ * the device tree's 1079/2399 rather than dividing by it. */
++kebab_tcm_point kebab_tcm_transform(uint32_t raw_x, uint32_t raw_y,
++    uint32_t max_x, uint32_t max_y);
++
++#endif /* KEBAB_TOUCH_TCM_H */

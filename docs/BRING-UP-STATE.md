@@ -6382,3 +6382,266 @@ KEBAB USB: panic reboot returned; the machine did not reset
    把 `kebab_usb_start()` 的入口关掉）；预期 C 的
    `KEBAB PANIC: no console to service; ...` + 从头启动。
 4. 只有看到 D 才说明固件复位也失败了，需要另行处理 PSCI 路径。
+
+## 六十五、触摸报告解码
+
+> 目标：把 S3908 从"读得出身份"推到"解得出触点"。这一节记录五件事：应用的 TCM
+> 命令序列与每一步的理由、报告程序与报告布局、位域抽取（用一条合成报告逐位走
+> 一遍）、主机测试清单，以及真机日志里到底看哪几行才能判断解码是对的。
+> 补丁 0135。
+
+### 1. 为什么先读 application info，再写报告程序
+
+应用信息（`CMD_GET_APPLICATION_INFO`，0x20）的 payload 是厂商的
+`struct syna_tcm_app_info`，46 字节，全部是 16 位小端：
+
+| 偏移 | 字段 | 本驱动怎么用 |
+| --- | --- | --- |
+| 0 | version | 打印 |
+| 2 | status | 非 0 只警告（可能还在启动） |
+| 4 / 6 | static / dynamic config 大小 | 打印 |
+| 8 / 10 | app config 起始块 / 大小 | 打印 |
+| **12** | **max_touch_report_config_size** | **报告程序缓冲区多大**：决定 `SET_TOUCH_REPORT_CONFIG` 发多少字节 |
+| **14** | **max_touch_report_payload_size** | **一条报告最大多少字节**：打印，并用来判断 128 字节的接收上限够不够 |
+| 16 | customer_config_id[16] | 打印 |
+| **32 / 34** | **max_x / max_y** | **传感器几何**，三空间变换的输入 |
+| **36** | **max_objects** | 解码时最多解几个触点 |
+| 38 / 40 / 42 / 44 | buttons / rows / cols / hybrid | 打印 |
+
+关键在顺序：报告程序的**长度**由 12 号字段决定，报告里 x/y 的**量程**由 32/34 号
+字段决定。厂商驱动也是先读 app info 再设报告程序，并且把
+`max_touch_report_config_size < 128` 当成错误——那 128 是它自己的缓冲区大小，不是
+协议常量。本驱动没有 128 的硬要求：app info 给出的值在 13..128 之间就按厂商的做法
+把程序零填充到那么长（程序解析器读到 `TOUCH_END`=0 就停，所以零填充是给终止符留
+位置）；给不出（没读到、为 0、大于 128）就只发程序本身，并打印原因。
+
+app info 读不到不是致命错误：`max_x/max_y` 回退到设备树的 1079/2399，`max_objects`
+回退到 10，报告程序按未填充发送。**但报告程序本身必须被接受**，否则没有布局可解，
+驱动不启动轮询线程，也不建 `/dev/kebab_touch`。
+
+### 2. TCM 命令序列
+
+```text
+identify            0x02  -> 报告 0x10（24 字节）   读 part/version/mode/build
+get-boot-info       0x10  -> 状态（本固件 0x0e）     application 模式不实现，正常
+get-app-info        0x20  -> 状态 0x01 + 46 字节    几何、对象数、两个报告尺寸
+set-report-config   0x26  -> 状态 0x01              报告程序（带 z，13 字节）
+```
+
+报文格式是厂商的：`0xa5, code, len_lo, len_hi` + payload + `0x5a`。两条规则决定了
+这次能和不能信什么：
+
+* **代码范围**。命令应答的 code < 0x10（`STATUS_OK` 是 0x01）；报告 code >= 0x10
+  （identify 是 0x10，触摸是 0x11，status report 是 0x1b）。identify 要的是报告
+  0x10，不是状态；其它命令要的是状态。等错东西的消息会被读出来、打印、继续等，
+  不会被当成答案解。
+* **长度必须先校验再读**。header 里的长度大于 128 就不是本驱动能读的报文，四个
+  字节原样打印后**逐字节滑窗重同步**（最多 4 字节）。这不是防御性编程，是实测：
+  0132 那次 bring-up 里，identify 的 payload 后面跟了一个 `0x00`，接着读到的四个
+  字节是 `a5 01 00 5a`，被当成"长度 0x5a00 = 23040"的报文，于是 app info 报
+  `payload 23040 too large`，后面的 report config 收到 0x0d（上一条命令未完成）。
+  新代码对这四个字节的回答是
+  `header a5 01 00 5a rejected (bad length), sliding`，然后继续找真正的报文头。
+
+**每个应答都原样打印**，不只 `kebab_touch_raw=1` 时：命令号、code、payload 长度、
+尾字节、payload 的十六进制。这样"布局不对"和"框架不对"在日志里是两种不同的
+现象，而不是一个静默的错误解析。
+
+### 3. 报告程序与报告布局
+
+`SET_TOUCH_REPORT_CONFIG`（0x26）的 payload 就是一段小程序，本驱动发的是：
+
+```text
+01 06 04 07 04 08 0c 09 0c 0a 08 03 00
+```
+
+| 字节 | 值 | 含义 |
+| --- | --- | --- |
+| 0 | 0x01 | `TOUCH_FOREACH_ACTIVE_OBJECT` |
+| 1,2 | 0x06, 4 | `TOUCH_OBJECT_N_INDEX`，4 位 |
+| 3,4 | 0x07, 4 | `TOUCH_OBJECT_N_CLASSIFICATION`，4 位 |
+| 5,6 | 0x08, 12 | `TOUCH_OBJECT_N_X_POSITION`，12 位 |
+| 7,8 | 0x09, 12 | `TOUCH_OBJECT_N_Y_POSITION`，12 位 |
+| 9,10 | 0x0a, 8 | `TOUCH_OBJECT_N_Z`，8 位 |
+| 11 | 0x03 | `TOUCH_FOREACH_END` |
+| 12 | 0x00 | `TOUCH_END` |
+
+每个活动触点 4+4+12+12+8 = **40 位 = 5 字节**，触点之间没有填充，所以一条报告
+的 payload 长度是 5 的整数倍（一根手指 5，两根 10，全抬起 0）。厂商默认程序没有
+z（32 位，4 字节）；如果固件拒绝带 z 的程序，驱动会退回那个默认程序，解码器读
+哪个程序就按哪个布局解——z 字段不存在时压力恒为 0，其它字段一位不差。
+
+程序不是写死在解码器里的：`kebab_tcm_decode_report()` 先扫程序，找
+`FOREACH_ACTIVE_OBJECT` 的循环体、累加循环体里每个字段的宽度（得到"每个触点多少
+位"），再按同一段程序逐字段解码。报告程序被接受，等于布局被协商过；解码器读的
+就是这份协商结果。
+
+### 4. 位域抽取
+
+规则与厂商 `touch_get_report_data()` 一致：**字节内从 bit 0 开始，跨字节时先读到
+的是低位**（小端位序）。合成样例（测试里用的那条）：
+
+```text
+payload: 13 c4 02 5a 7f      触点 3，class 1，x 708，y 1440，z 127
+```
+
+逐字段走一遍：
+
+| 字段 | 位区间 | 宽度 | 取自 | 计算 | 结果 |
+| --- | --- | --- | --- | --- | --- |
+| index | 0..3 | 4 | byte0 低半字节 | 0x13 & 0xf | **3** |
+| classification | 4..7 | 4 | byte0 高半字节 | 0x13 >> 4 | **1** |
+| x 低 8 位 | 8..15 | 8 | byte1 | 0xc4 = 196 | |
+| x 高 4 位 | 16..19 | 4 | byte2 低半字节 | 0x02 & 0xf = 2 | x = 196 + 2×256 = **708** |
+| y 低 4 位 | 20..23 | 4 | byte2 高半字节 | 0x02 >> 4 = 0 | |
+| y 高 8 位 | 24..31 | 8 | byte3 | 0x5a = 90 | y = 0 + 90×16 = **1440** |
+| z | 32..39 | 8 | byte4 | 0x7f | **127** |
+
+两个最容易错的地方正好都在这条样例里：
+
+* **x 跨字节**：x 的 12 位横跨 byte1 和 byte2 的低半字节。把 x 当成 8 位，或者从
+  bit 9 开始读，得到的是 0x162 = 354（正好是 708 >> 1）——测试里两个值都断言了。
+* **y 从半字节中间开始**：y 的 12 位从 byte2 的**高**半字节开始，先取 4 位再取
+  byte3 的 8 位。少读一位、多读一位都不会得到 1440：把 y 的宽度改成 13 位，会
+  把 z 的最低位并进来，得到 1440 + 4096 = 5536（测试断言了这个值）。
+
+解码器对报告长度也是保守的：只有当一个触点的 40 位全都还在 payload 里才解它；
+剩下的位不够一个触点时，算作 `truncated_bits`，**不**解成触点。全零的尾巴是字节
+填充（解出来对象数不变，不产生 up）；非零的尾巴说明报告被截断，整条丢弃并计数
+打印。这样"手指还按着但报告被截断"不会变成"所有手指抬起"。
+
+### 5. 触点状态机与事件
+
+`kebab_tcm_track()` 拿上一条报告的活动掩码比较：
+
+* 这一条里有、上一条没有 → **down**；
+* 这一条里有、上一条也有 → **move**（记录每条都进队列，打印受 `kebab_touch_move_ms`
+  限速，默认 200 ms）；
+* 上一条有、这一条没有 → **up**，坐标用该槽位最后一次的 x/y，压力 0。
+
+class 1（finger）和 class 2（gloved finger）算触点；class 0（lift）不算，它所在的
+槽位会按"消失了"产生 up；index 超过 10 的对象被忽略。压力就是 z 字段（0..255），
+这是这颗固件在报告里给出的唯一压力代理。
+
+事件进 `/dev/kebab_touch` 的 48 字节记录不变（raw / panel / logical 三套坐标 +
+z + phase + slot + timestamp），三空间变换仍然只有一处
+（`kebab_tcm_transform()`）：
+
+```c
+panel_x   = (raw_x * (1080 - 1) + max_x / 2) / max_x;
+panel_y   = (raw_y * (2400 - 1) + max_y / 2) / max_y;
+logical_x = panel_x + 22;
+logical_y = panel_y + 18;
+```
+
+`max` 取 app info 的 32/34 号字段；为 0 或大于 0xfff 时用设备树的 1079/2399（12 位
+字段的 0xfff 是手指抬起时的常见值，先夹到面板边缘并置 `KT_EVENT_FLAG_CLAMPED`，
+不向面板外推算）。启动时的队列自检（64 槽、推 192 条、丢 128 条、收 64 条）没有改。
+
+### 6. 主机测试
+
+`package/KebabTouchTcmHostTests.c` 驱动 `package/KebabTouchTcm.c`，不碰 I2C、不碰
+内核、不碰板子，16 组合成报文流共 **193 项断言全部 PASS**：
+
+```text
+$ gcc -std=c11 -Wall -Wextra -Werror -o t KebabTouchTcm.c KebabTouchTcmHostTests.c && ./t
+KebabTouchTcm host tests: framing, payloads, program, decode, tracking, transform
+...
+193 checks, 0 failure(s)
+```
+
+| 组 | 覆盖 |
+| --- | --- |
+| C1 | 命令写入 `{cmd, len_lo, len_hi, payload}`；缓冲区不够时拒绝而不是截断 |
+| C2 | 报文 = 头 + payload + 一个 0x5a；长度、消费字节数、padding 错、截断、空指针 |
+| C3 | **实测的 23040**：`a5 01 00 5a` 被 `bad length` 拒绝且四个字节不被改写；缺 marker 是另一种错误；前导杂字节能被滑窗跳过 |
+| C4 | **实测的 identify 应答**：`a5 03 01 01 "s3908-15.0.0" b9 ba 3c 00` → mode 0x01 application、version 1、build 0x003cbab9、前缀 2 字节原样保留 |
+| C5 | 厂商布局（无前缀）的 identify；无位置放 version/mode、无 part 串、part 提前结束 |
+| C6 | app info 46 字节**逐字段**偏移（每字段值不同，错一位就失败）；45 字节拒绝 |
+| C7 | 报告程序字节逐一比对（带 z / 厂商默认）；每触点 40 / 32 位；未知字段码、缺 `FOREACH_END` 拒绝 |
+| C8 | 报告配置 payload 零填充到固件尺寸；固件尺寸为 0 发程序本身；小于程序时拒绝 |
+| C9 | 单触点解码：五个字段 + 直接调位读取器的 5 个断言；**从 bit 9 读 x 得 0x162**；跨半字节的触点 |
+| C10 | 一条手指的 down → move（x 709）→ up（用最后坐标、压力 0）；重复空报告不再产生事件 |
+| C11 | 两触点：两个 down、活跃掩码 0x3；下一帧只有第二个 → move(slot1) 在前、up(slot0) 在后 |
+| C12 | **截断**：32 位载荷解出 0 个触点、尾巴 32 位非零；1 个触点 + 32 位尾巴；8 位零尾巴算填充；报文层截断是 `short` |
+| C13 | **命令回显**：code=0x02 不是 identify 报告；0x26 既不是状态也不是报告；0x11 在状态槽被拒；0x01 不是触摸报告 |
+| C14 | 布局由程序决定：x 宽 11 位 → y 变 2880；y 宽 13 位 → y 变 5536；整条流错 1 位一定解出不同触点；无 z 程序解出的 z 恒 0 |
+| C15 | tracker：class 2 算按下、class 0 触发 up、index 12 被忽略、事件数组不够时状态仍然更新 |
+| C16 | 三空间变换：0→(0,0)/(22,18)、1079/2399→(1079,2399)/(1101,2417)、中间点、0xfff 夹紧、max=0 回退、2000 量程按比例缩放、16 位量程不被采用 |
+
+测试第一次跑就抓到两个真问题，都是"在板子上很难看出来"的那种：
+
+1. `kebab_tcm_parse_identify()` 把 part 串里 NUL 填充的字节替换成了 `.`，于是
+   `s3908-15.0.0` 打印成 `s3908-15.0.0....`——字符串比较立刻失败。改为遇到 NUL
+   结束。
+2. y 宽度 13 位的用例一开始只有 5 字节载荷：40 位装不下 41 位的触点，解出 0 个
+   对象，断言"y == 5536"失败。这条失败本身证明"载荷不够就不解触点"是对的；测试
+   改成 6 字节载荷后通过。
+
+### 7. 真机上要看什么
+
+镜像带 `kebab_touch=1 kebab_touch_boot=1 kebab_touch_power=1
+kebab_vrm_write=1 kebab_pon_write=1`，正常启动后按顺序看这几段：
+
+**(1) 四个命令都有应答，且 app info 有 46 字节：**
+
+```text
+KEBAB TOUCH: command 0x20 answer: code 0x01, 46 payload byte(s), trailing byte 0x5a
+KEBAB TOUCH: app info payload[0] ...
+KEBAB TOUCH: app info: version 0x.... status 0x0000, max_x 1079 max_y 2399 objects 10 ...
+KEBAB TOUCH: app info: max touch report config 128 bytes, max touch report payload 50 bytes
+```
+
+判据：`max touch report config` 至少 13（程序长度），`max touch report payload` 至少
+5×max_objects；`max_x`/`max_y` 与设备树的 `touchpanel,panel-coords = <0x437 0x95f>`
+（1079/2399）一致。对不上就先记下实际值，不要改代码去迁就。
+
+**(2) 报告程序被接受：**
+
+```text
+KEBAB TOUCH: report program: 13 bytes, 40 bits per contact, 128 bytes sent
+KEBAB TOUCH: report program[0] 01 06 04 07 04 08 0c 09 0c 0a 08 03 00
+KEBAB TOUCH: command 0x26 answer: code 0x01, 0 payload byte(s), trailing byte 0x5a
+KEBAB TOUCH: report config accepted: 40 bits per contact, z included
+```
+
+如果这里是 `answered code 0x0d (previous command pending)` 或 `0x0e`，看第 (1) 步
+是否也失败：0x0d 通常是上一条命令的应答没读干净，新框架会把四个字节和 code 打进
+日志。若退回 `vendor program without z`，说明带 z 的程序被拒，功能仍然可用但压力
+恒为 0。
+
+**(3) 第一条报告的长度是 5 的倍数：**
+
+```text
+KEBAB TOUCH: message code 0x11 len 5
+KEBAB TOUCH: down obj 0 raw 540 1200 panel 540 1200 logical 562 1218 z 41
+```
+
+判据（这就是"数字对不对"）：
+
+* `raw` 与 `panel` 完全相等（因为 max_x/max_y = 1079/2399，比例是 1:1）；如果是
+  `1079 -> 540` 这种一半的关系，说明 app info 的 max 是 2158 之类，不是错；
+* `logical = panel + (22,18)`，永远；
+* 手指向右移动时 `raw x` 增大、`raw y` 基本不变；上下移动相反。**若左右移动改变
+  的是 y，就是 x/y 的位偏移错了**；
+* `z` 随按压力度变化（轻按小、重按大），抬起时 up 行 `z 0`；
+* 两指时 `len 10`、两行 down；抬起一根时先 move 后 up，up 的坐标是它最后的坐标；
+* 若出现 `report of N byte(s) discarded: ... too short for another`，说明实际布局
+  与程序不符（常见：固件按 4 字节触点发、或 max_objects 比实际小）；若出现
+  `report discarded: the payload and the program disagree`，是报文本身坏了（长度不是
+  5 的倍数）。
+
+**(4) 没有持续的错误行。** 正常触摸时不应反复出现 `padding ... not the vendor
+0x5a`（偶尔一次说明固件用 0x00 填充，无害；每条都打印说明确实如此，把它记下来）、
+`message header ... rejected`（流错位）、`no usable answer`（命令无应答）。
+
+### 8. 边界与没有做的事
+
+* **传输和电源序列一行没改**：`kebab_spmi_vrm_boot_power()`、TCS 状态机、时钟、
+  复位、GENI 初始化、I2C 读写全部原样。补丁只改 TCM 层、报告解码和两条记录路径，
+  因为那两处是实测过的。
+* **没有 HID**。事件仍然只进 `/dev/kebab_touch` 的 48 字节记录，队列与自检不变。
+* identify 的 payload 里那两个字节（`a5 03`）仍然不解释；解码器只保证 part 串不被
+  错位。
+* 本节的所有数字（193 项断言、合成样例、程序字节）都是主机上的结果。**板子上的
+  验收还没做**：stranded，无法烧写。第 (1)–(4) 步就是板子回来后的验收清单。
