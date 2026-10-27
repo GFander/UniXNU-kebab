@@ -3191,3 +3191,60 @@ pin 36 ctl 0x00000004  pin 37 ctl 0x00000004
 - 实测：时钟置位与 halt 变化、`TOUCHINIT` 全程不丢失控制台、`TOUCH?` 的寄存器读数；
 - 推断：命令不完成是因为从机不响应；芯片型号与地址尚未在本机确认；
 - 没有做：供电使能、I2C 实际读写、协议层。
+
+## 二十七、触摸芯片定为 S3908，GENI FIFO 握手修复（0118、0119）
+
+### 1. 身份结论：S3908，地址 0x4B
+
+从本机保留的 kebab 厂商镜像里取出 DTB（`Mu-kebab-debug-6c675501.img`，
+FDT 在偏移 `0x10d191`，长 912,906 字节），用 dtc 反编译后，
+`i2c@a94000` 下有两个互斥的触摸节点：
+
+| 节点 | 地址 | chip-name | project-name | panel 列表 |
+| --- | --- | --- | --- | --- |
+| `sec-s6sy761@48` | `0x48` | `SY771` | `19821` | 0x6b9、0x6ba、0x6bb、0x699 |
+| `synaptics-s3908@4B` | `0x4B` | `S3908` | `19805` | `0x698`、`0x699`、`0x69a` |
+
+panel phandle 解析：
+
+| phandle | 面板 |
+| --- | --- |
+| `0x698` | BOE |
+| `0x699` | Samsung DD305 |
+| `0x69a` | Samsung AMB655X |
+| `0x6b9` | Samsung 通用 |
+| `0x6ba` | Samsung ANA6705 |
+| `0x6bb` | Samsung ANA6706 |
+
+本机面板是 Samsung AMB655X，只出现在 S3908 的列表里；同一份 DTB 的
+bootargs 里还有 `androidboot.project_name=19805`。所以这台机器的触摸芯片是
+**Synaptics S3908，I²C 地址 0x4B**，此前“S6SY761 / 0x48”的记录是错的。
+
+供电两个节点一致：`vdd_2v8 = pm8150_l13`（3,008,000 µV）、
+`vcc_1v8 = pm8150a_l1`（1,800,000 µV），reset 都是 GPIO 38、中断都是 GPIO 39。
+
+### 2. 0118：GENI FIFO 握手与中断位
+
+| 项 | 0117 之前 | Qualcomm Linux | 0118 之后 |
+| --- | --- | --- | --- |
+| TX watermark | 从不在发命令后置位 | 命令后写 1 | 命令后写 1 |
+| NACK 位 | bit 9 | `M_GP_IRQ_1_EN` = bit 10 | bit 10 |
+| 超时后的命令 | 只打印，保持 active | cancel 后 abort | 新增 `kt_se_abort()` |
+| 只读探针 | 无 watermark/IRQ_EN | — | 增加两项 |
+
+`kt_se_abort()` 写 `M_CMD_ABORT_EN` 到 `SE_GENI_M_CMD_CTRL_REG`，有界轮询
+abort/done/failure 状态，然后清中断与 TX watermark，与
+`geni_cancel_m_cmd()`/`geni_abort_m_cmd()` 的顺序一致。
+
+### 3. 0119：地址与命名
+
+`KT_I2C_ADDR` 改为 `0x4b`，驱动标题、启动横幅、两处注释一并改成 S3908；
+TCM 命令族保留（厂商对 S3908 用的就是 Synaptics 自己的 TCM 风格驱动）。
+
+### 4. 验证边界
+
+- 实测：DTB 反编译结果、panel phandle 映射、两份 DTB 供电一致；
+- 编译：整树构建 0 error，`kebab_touch.c` 只剩两条既有警告
+  （`-Wformat-nonliteral`、`-Wdeclaration-after-statement`）；
+- 未做：这一版没有刷机，也没有发送新的 I²C 事务；`TOUCHINIT` 与
+  `TOUCHCLK` 的下一次实机验证要等镜像刷入。

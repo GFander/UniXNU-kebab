@@ -1,0 +1,95 @@
+fix(touch): the touch part is a Synaptics S3908 at 0x4B, not an S6SY761 at 0x48
+
+The kebab vendor DTB (decompiled from the kebab image kept on the build
+host) has two mutually exclusive touch nodes under i2c@a94000:
+
+  sec-s6sy761@48      reg 0x48, chip-name SY771, project-name 19821,
+                      panel = <generic Samsung, ANA6705, ANA6706, DD305>
+  synaptics-s3908@4B  reg 0x4B, chip-name S3908, project-name 19805,
+                      panel = <BOE, DD305, AMB655X>
+
+This unit's panel is the Samsung AMB655X, and that phandle appears only in
+the S3908 list; the DTB's own bootargs also carry project_name=19805.  The
+earlier note that took the first node for the board was wrong.
+
+Change KT_I2C_ADDR to 0x4B, retitle the driver and its boot banner, and
+rewrite the two comments that justified the old address and the old
+"vendor uses Samsung sec_ts" claim: the vendor drives this node with its
+Synaptics TCM-style driver, so the command family already matches and the
+open question is the firmware's exact opcode set, not the protocol family.
+
+No I/O behaviour changes beyond the slave address.
+
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -1,5 +1,5 @@
+ /*
+- * KEBAB TOUCH: Synaptics S6SY761 on QUPv3 SE13, I2C address 0x48.
++ * KEBAB TOUCH: Synaptics S3908 on QUPv3 SE13, I2C address 0x4B.
+  *
+  * The panel is 1080x2400; the sensor reports 1079x2399 with a 16x36
+  * transmit/receive grid. Nothing is registered in the IORegistry: this is a
+@@ -14,13 +14,22 @@
+  *
+  *   SE13            0x00a94000, 0x4000 bytes. The board device tree node
+  *                   /soc/i2c@a94000 has reg = <0xa94000 0x4000>,
+- *                   compatible = "qcom,i2c-geni", status = "ok", and its child
+- *                   /soc/i2c@a94000/sec-s6sy761@48 has reg = <0x48>,
+- *                   chip-name = "SY771", touchpanel,tx-rx-num = <0x10 0x24>
+- *                   and touchpanel,panel-coords = <0x437 0x95f> (1079x2399).
+- *                   That tree is the kebab one: it is the unchanged vendor DTB
+- *                   out of the LineageOS boot image kept on the build host,
+- *                   kebab-repodtb-losramdisk.img.
++ *                   compatible = "qcom,i2c-geni", status = "ok", and it holds
++ *                   two mutually exclusive touch nodes, told apart by panel:
++ *
++ *                     sec-s6sy761@48      reg 0x48, chip-name SY771,
++ *                                         project-name 19821, panel =
++ *                                         <generic Samsung, ANA6705,
++ *                                          ANA6706, DD305>
++ *                     synaptics-s3908@4B  reg 0x4B, chip-name S3908,
++ *                                         project-name 19805, panel =
++ *                                         <BOE, DD305, AMB655X>
++ *
++ *                   This unit's panel is the Samsung AMB655X, which appears
++ *                   only in the S3908 list, so the touch part is the S3908 at
++ *                   0x4B; 19805 is also the project_name in that DTB's own
++ *                   bootargs.  The tree is the vendor DTB out of the kebab
++ *                   image kept on the build host, decompiled with dtc.
+  *   QUPv3_1 wrapper 0x00ac0000, 0x2000 bytes. The i2c node points at it with
+  *                   qcom,wrapper-core = <phandle>; that phandle resolves to
+  *                   /soc/qcom,qupv3_1_geni_se@ac0000, reg = <0xac0000 0x2000>.
+@@ -78,10 +87,11 @@
+  *      If the wrapper hardware version reads 0 or 0xffffffff the block is not
+  *      clocked, and no amount of register poking here helps: the GCC branch
+  *      clocks for QUPv3_1 are not programmed by this driver.
+- *   2. That the part answers TCM at all. The vendor tree drives this node with
+- *      Samsung's sec_ts driver (compatible "sec-s6sy761"), which uses a
+- *      different command set; TCM is what this driver speaks. kebab_touch_raw=1
+- *      dumps the raw response bytes so the first hardware run settles it.
++ *   2. That the part answers TCM at all. The vendor tree drives the S3908
++ *      node with Synaptics' own driver (compatible "synaptics-s3908"), whose
++ *      command framing is TCM, so the family matches; the exact identify
++ *      opcodes still have to agree with the firmware revision, and
++ *      kebab_touch_raw=1 keeps the raw bytes for the first hardware run.
+  *   3. The reset pulse polarity (kebab_touch_reset=2 drives the opposite one)
+  *      and whether the TLMM mux/pull/drive values taken from the device tree
+  *      are what the chip needs (kebab_touch_pins=0 skips that step).
+@@ -180,7 +190,7 @@
+  */
+ #define KT_TLMM_SIZE            0x00040000u
+ 
+-#define KT_I2C_ADDR             0x48    /* sec-s6sy761@48 in the device tree */
++#define KT_I2C_ADDR             0x4b    /* synaptics-s3908@4B; see the DT note */
+ #define KT_PIN_SDA              36      /* qupv3_se13_i2c_active: gpio36 */
+ #define KT_PIN_SCL              37      /* qupv3_se13_i2c_active: gpio37 */
+ #define KT_PIN_RESET            38      /* reset-gpio */
+@@ -2223,7 +2233,7 @@
+ 
+ 	if (!kt.bb) {
+ 		kt_trace("KEBAB TOUCH: reading wrapper/SE revision registers\n");
+-		printf("KEBAB TOUCH: S6SY761 on QUPv3 SE13 at 0x%08x (I2C 0x%02x, %u Hz)"
++		printf("KEBAB TOUCH: S3908 on QUPv3 SE13 at 0x%08x (I2C 0x%02x, %u Hz)"
+ 		    ", wrapper 0x%08x\n", se_pa, KT_I2C_ADDR, hz,
+ 		    KT_WRAP_PA_DEFAULT);
+ 		printf("KEBAB TOUCH: wrapper QUP_HW_VER 0x%08x, SE13 GENI_FW_REVISION_RO "
