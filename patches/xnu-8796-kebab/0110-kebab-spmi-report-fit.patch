@@ -1,0 +1,118 @@
+fix(spmi): keep the SPMI? report inside the 16 KiB console ring
+
+The first SPMI? run on hardware measured the right values but produced more
+output than the USB console can hold: kebab_spmi_report() printed every
+non-zero APID mapping entry, the 16 KiB log ring filled, and the capture was
+exactly 16383 bytes, cut in the middle of a line.  The command's own summary
+and its match list fell off the end; the gate-2 answer was only recoverable
+because PON? prints the same three matches first.
+
+The console ring is a hard limit: one command's output is queued in full
+before the event thread can drain it, so a report that does not fit is a
+report that loses its tail.  SPMI? now prints the scan bounds, the negative
+control, the number of entries scanned, the number of non-zero mappings, the
+full raw mapping/ownership rows for every APID that maps PPID 0x008, and the
+gate result.  That is a few hundred bytes and cannot truncate.  A full table
+dump was never needed for the gate and would not fit at any useful size.
+
+The three counts stay in the report so a short capture is self-diagnosing:
+scanned entries, non-zero mappings, and matches must all be present, and a
+missing tail is visible as a missing gate line rather than silently shorter
+output.  No register access changes; SPMI-1/2/3 read exactly the same
+registers as 0108.
+diff --git a/bsd/dev/kebab_spmi.c b/bsd/dev/kebab_spmi.c
+--- a/bsd/dev/kebab_spmi.c
++++ b/bsd/dev/kebab_spmi.c
+@@ -89,9 +89,6 @@
+ #define KEBAB_SPMI_PON_SUBTYPE  0x0805u
+ #define KEBAB_SPMI_PON_SPARE    0x088fu
+ 
+-/* Upper bound on mapping lines in one report; the log ring is 16 KiB. */
+-#define KEBAB_SPMI_TABLE_LINES  160u
+-
+ /*
+  * A PPID that belongs to the AP block rather than to a PMIC, used as a
+  * negative control for the mapping walk.  No PMIC on this board has SID 0x0F,
+@@ -178,10 +175,16 @@
+ /* -------------------------------------------------------------- mapping walk */
+ 
+ /*
+- * Walk the v5 APID table for one PPID.  Every non-zero mapping register that
+- * is not a match is printed in compact form (up to KEBAB_SPMI_TABLE_LINES),
+- * and up to max matches are returned with their raw registers.  A caller that
+- * only needs the APID may pass dump_table=false.
++ * Walk the v5 APID table for one PPID.  Up to max matches are returned with
++ * their raw mapping and ownership registers; the caller prints them.  The
++ * total number of non-zero mapping registers seen is left in the file-scope
++ * kebab_spmi_nonzero, and the return value is the full match count even when
++ * it exceeds max_matches, so the report can state how much it covered.
++ *
++ * No per-entry table is printed: one SPMI? report has to fit the console log
++ * ring (16 KiB), and a full dump of the populated APIDs does not.  The three
++ * numbers the report prints (entries scanned, non-zero mappings, matches) are
++ * what make a short capture distinguishable from a truncated one.
+  *
+  * The loop bound comes from the "core" resource size, exactly as the vendor
+  * driver bounds pmic_arb_read_apid_map_v5(); the ownership read is bounded by
+@@ -189,9 +192,9 @@
+  */
+ static uint32_t
+ kebab_spmi_scan(uint32_t ppid, struct kebab_spmi_match *matches,
+-    uint32_t max_matches, bool dump_table)
++    uint32_t max_matches)
+ {
+-	uint32_t entries, apid, found = 0, printed = 0, suppressed = 0;
++	uint32_t entries, apid, found = 0;
+ 
+ 	if ((KEBAB_SPMI_CORE_SIZE - KEBAB_SPMI_APID_MAP) / 4u < KEBAB_SPMI_APID_MAX) {
+ 		entries = (KEBAB_SPMI_CORE_SIZE - KEBAB_SPMI_APID_MAP) / 4u;
+@@ -238,22 +241,9 @@
+ 				matches[found].irq_ee = irq_ee;
+ 			}
+ 			found++;
+-		} else if (dump_table) {
+-			if (printed < KEBAB_SPMI_TABLE_LINES) {
+-				printf("KEBAB SPMI:   APID 0x%03x map[core+0x%03x]=0x%08x PPID 0x%03x own[cnfg+0x%03x]=0x%08x write_ee 0x%x irq_owner %u\n",
+-				    apid, map_offset, map, this_ppid, own_offset, own,
+-				    write_ee, irq_owner);
+-				printed++;
+-			} else {
+-				suppressed++;
+-			}
+ 		}
+ 	}
+ 
+-	if (suppressed != 0) {
+-		printf("KEBAB SPMI: %u further non-matching mapping entries not printed (log ring); matches below are complete\n",
+-		    suppressed);
+-	}
+ 	return found;
+ }
+ 
+@@ -406,7 +396,7 @@
+ 	    entries - 1u, KEBAB_SPMI_APID_MAP, entries, KEBAB_SPMI_CORE_SIZE);
+ 
+ 	/* Negative control first: a PPID that cannot exist must not resolve. */
+-	count = kebab_spmi_scan(KEBAB_SPMI_NEGATIVE_PPID, matches, 8, false);
++	count = kebab_spmi_scan(KEBAB_SPMI_NEGATIVE_PPID, matches, 8);
+ 	printf("KEBAB SPMI: negative control PPID 0x%03x -> %u APID(s)%s\n",
+ 	    KEBAB_SPMI_NEGATIVE_PPID, count, count == 0 ? " (expected 0)" : " (UNEXPECTED)");
+ 	if (count != 0) {
+@@ -414,7 +404,7 @@
+ 		return;
+ 	}
+ 
+-	count = kebab_spmi_scan(KEBAB_SPMI_PON_PPID, matches, 8, true);
++	count = kebab_spmi_scan(KEBAB_SPMI_PON_PPID, matches, 8);
+ 	total = count;
+ 	printf("KEBAB SPMI: scanned %u entries: %u non-zero mapping(s), %u map PPID 0x%03x\n",
+ 	    entries, kebab_spmi_nonzero, count, KEBAB_SPMI_PON_PPID);
+@@ -468,7 +458,7 @@
+ 	}
+ 
+ 	printf("KEBAB SPMI: === SPMI-3: PON registers through the observer ===\n");
+-	count = kebab_spmi_scan(KEBAB_SPMI_PON_PPID, matches, 8, false);
++	count = kebab_spmi_scan(KEBAB_SPMI_PON_PPID, matches, 8);
+ 	if (count == 0) {
+ 		printf("KEBAB SPMI: SPMI-3 FAIL: PPID 0x%03x has no APID\n",
+ 		    KEBAB_SPMI_PON_PPID);
