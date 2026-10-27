@@ -451,6 +451,48 @@ int main(void)
 		CHECK(tcs.lock == g1 && tcs2.lock == g1, "init_global wired it through");
 	}
 
+	printf("C23 one command per rail, in two steps, each exactly once\n");
+	{
+		kebab_rpmh_cmd cmd2;
+		uint32_t before;
+
+		memset(&lock, 0, sizeof(lock));
+		fake_init(&f, KEBAB_TCS_AMC_ENABLE);
+		kebab_rpmh_tcs_init(&tcs, fake_io(&f), &lock);
+		CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) == KEBAB_RPMH_OK,
+		    "ldoa13 enable sent");
+		CHECK(lock.dead == 0 && lock.used == 1,
+		    "the channel stays open for the second rail");
+		CHECK(lock.used_mask == 0x1u, "only ldoa13's ENABLE is marked");
+		CHECK(kebab_rpmh_encode_enable("ldoc1", &cmd2) == KEBAB_RPMH_OK,
+		    "ldoc1 encodes");
+		CHECK(kebab_rpmh_tcs_send(&tcs, &cmd2) == KEBAB_RPMH_OK,
+		    "ldoc1 enable sent in a second step");
+		CHECK(lock.used_mask == 0x5u, "both ENABLE addresses are marked");
+		before = f.wr_count;
+		CHECK(kebab_rpmh_tcs_send(&tcs, &cmd2) ==
+		    KEBAB_RPMH_ERR_TCS_STATE, "a second ldoc1 command is refused");
+		CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) ==
+		    KEBAB_RPMH_ERR_TCS_STATE, "a second ldoa13 command is refused");
+		CHECK(f.wr_count == before, "no writes for either refused repeat");
+	}
+
+	printf("C24 a rail that fails keeps the other rail shut\n");
+	{
+		kebab_rpmh_cmd cmd2;
+
+		memset(&lock, 0, sizeof(lock));
+		fake_init(&f, KEBAB_TCS_AMC_ENABLE);
+		f.compl_after = -1;
+		kebab_rpmh_tcs_init(&tcs, fake_io(&f), &lock);
+		CHECK(kebab_rpmh_tcs_send(&tcs, &cmd) == KEBAB_RPMH_ERR_TIMEOUT,
+		    "ldoa13 timed out after the trigger");
+		CHECK(lock.dead == 1, "channel closed");
+		kebab_rpmh_encode_enable("ldoc1", &cmd2);
+		CHECK(kebab_rpmh_tcs_send(&tcs, &cmd2) == KEBAB_RPMH_ERR_TCS_STATE,
+		    "ldoc1 refused after ldoa13 failed");
+	}
+
 	printf("\n%d checks, %d failure(s)\n", checks, failures);
 	return failures == 0 ? 0 : 1;
 }

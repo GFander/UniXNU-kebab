@@ -126,7 +126,34 @@ int kebab_rpmh_cmd_allowed(const kebab_rpmh_cmd *cmd)
 	return 0;
 }
 
-static int id_matches(const uint8_t *id, const char *name)
+/*
+ * The used_mask bit this command claims: one bit per (resource, register)
+ * pair, so ldoa13 ENABLE is 0x1, its voltage 0x2, ldoc1 ENABLE 0x4 and its
+ * voltage 0x8.  Zero means the table cannot produce this command, so an
+ * unknown command can never claim a slot.
+ */
+uint32_t
+kebab_rpmh_cmd_bit(const kebab_rpmh_cmd *cmd)
+{
+	size_t i;
+
+	if (cmd == NULL || cmd->msgid != KEBAB_RPMH_MSGID_WRITE_ACK) {
+		return 0;
+	}
+	for (i = 0; i < sizeof(kebab_resources) / sizeof(kebab_resources[0]);
+	    i++) {
+		if (cmd->addr == kebab_resources[i].addr + KEBAB_RPMH_REG_ENABLE) {
+			return 1u << (i * 2u);
+		}
+		if (cmd->addr == kebab_resources[i].addr + KEBAB_RPMH_REG_VOLTAGE) {
+			return 1u << (i * 2u + 1u);
+		}
+	}
+	return 0;
+}
+
+static int
+id_matches(const uint8_t *id, const char *name)
 {
 	size_t i, len = strlen(name);
 
@@ -438,7 +465,7 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 {
 	kebab_rpmh_lock *lock;
 	uint32_t control = 0, enable = 0, wait = 0, status = 0, i;
-	uint32_t confirmed = 0, attempted = 0;
+	uint32_t confirmed = 0, attempted = 0, bit;
 	uint64_t start = 0;
 	int have_time = 0;
 
@@ -446,6 +473,15 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 		return KEBAB_RPMH_ERR_ARGUMENT;
 	}
 	if (!kebab_rpmh_cmd_allowed(cmd)) {
+		return KEBAB_RPMH_ERR_NOT_ALLOWED;
+	}
+	/*
+	 * The slot this command claims.  allowed() and the bit table are built
+	 * from the same resource list, so a zero here means the two disagree
+	 * about what the encoder can produce; refuse rather than send.
+	 */
+	bit = kebab_rpmh_cmd_bit(cmd);
+	if (bit == 0) {
 		return KEBAB_RPMH_ERR_NOT_ALLOWED;
 	}
 	if (t->tcs != 1) {
@@ -468,14 +504,14 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 	 * pass the checks and then both write busy.
 	 */
 	if (__atomic_load_n(&lock->dead, __ATOMIC_ACQUIRE) != 0 ||
-	    __atomic_load_n(&lock->used, __ATOMIC_ACQUIRE) != 0) {
+	    (__atomic_load_n(&lock->used_mask, __ATOMIC_ACQUIRE) & bit) != 0) {
 		return KEBAB_RPMH_ERR_TCS_STATE;
 	}
 	if (__atomic_exchange_n(&lock->busy, 1, __ATOMIC_ACQ_REL) != 0) {
 		return KEBAB_RPMH_ERR_TCS_STATE;
 	}
 	if (__atomic_load_n(&lock->dead, __ATOMIC_ACQUIRE) != 0 ||
-	    __atomic_load_n(&lock->used, __ATOMIC_ACQUIRE) != 0) {
+	    (__atomic_load_n(&lock->used_mask, __ATOMIC_ACQUIRE) & bit) != 0) {
 		__atomic_store_n(&lock->busy, 0, __ATOMIC_RELEASE);
 		return KEBAB_RPMH_ERR_TCS_STATE;
 	}
@@ -575,14 +611,20 @@ kebab_rpmh_tcs_send(kebab_rpmh_tcs *t, const kebab_rpmh_cmd *cmd)
 	    tcs_write_sync(t, KEBAB_TCS_CMD_ENABLE, 0) != 0 ||
 	    tcs_write_sync(t, KEBAB_TCS_CMD_WAIT, 0) != 0) {
 		t->phase = KEBAB_TCS_PHASE_COMPLETE_UNCLEAN;
+		__atomic_fetch_or(&lock->used_mask, bit, __ATOMIC_RELEASE);
 		__atomic_store_n(&lock->dead, 1, __ATOMIC_RELEASE);
 		__atomic_store_n(&lock->used, 1, __ATOMIC_RELEASE);
 		__atomic_store_n(&lock->busy, 0, __ATOMIC_RELEASE);
 		return KEBAB_RPMH_ERR_RECLAIM;
 	}
+	/*
+	 * The channel released cleanly, so it stays usable for the other rail:
+	 * that command has its own slot in used_mask, and the next send repeats
+	 * the full preflight read that proves the channel is still empty.
+	 */
 	t->phase = KEBAB_TCS_PHASE_COMPLETE;
+	__atomic_fetch_or(&lock->used_mask, bit, __ATOMIC_RELEASE);
 	__atomic_store_n(&lock->used, 1, __ATOMIC_RELEASE);
-	__atomic_store_n(&lock->dead, 1, __ATOMIC_RELEASE);
 	__atomic_store_n(&lock->busy, 0, __ATOMIC_RELEASE);
 	return KEBAB_RPMH_OK;
 

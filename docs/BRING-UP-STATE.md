@@ -5116,3 +5116,200 @@ KRP: eod guid=... status=Success (0x0) iface=0x9f123450
 | 固件源码单文件语法检查 | 通过（非 EDK2 构建） |
 | 固件 EDK2 构建与 `KRP:`/`KFLG` 字符串 | **未做**，需要完整构建 |
 | 真机 `FWLOG?` / RPMh 探针输出 | **未做**，需要刷机 |
+
+## 六十、VRM 上电命令
+
+> 目标：让 QUPv3 SE13 上 I2C `0x4b` 的 Synaptics S3908 可被探测。它由两颗
+> RPMh 拥有的 LDO 供电：`pm8150_l13`（ldoa13，SID1 `0x4c00`）与
+> `pm8150a_l1`（ldoc1，SID5 `0x4000`）。两颗的 `write_ee` 都是 `0x4`，EE0
+> 不能走 SPMI 写，只能按 RPMh VREG 的方式让 RSC 的代发通道（TCS）发一条
+> ENABLE。本节记录三件事：后端到底还剩什么、补丁 0130 补了什么、真机每一步
+> 量到的寄存器值与目标是否应答。
+
+### 1. 后端核查：0128 之后内核里没有写路径
+
+先把“树上已有什么”查清楚，结论是**生产镜像里没有任何 TCS 写路径**：
+
+* `0127` 在 `bsd/dev/kebab_spmi.c` 里加过一版 `#if KEBAB_RPMH_WRITES` 草稿
+  （`kebab_rpmh_tcs_wr_wait()`、`kebab_rpmh_tcs_send()`），编译期关闭。
+* `0128` 把整块草稿删掉，只留下注释“状态机在 `package/KebabRpmhVrm.c`，
+  MMIO 端口等矩阵通过后再做”，并把 `KEBAB_RPMH_WRITES` 一起删除。
+* 在打完 108 个补丁的 xnu 树里 grep `kebab_tcs_io`、`kebab_rpmh_tcs_send`、
+  `kebab_rpmh_encode_enable`、`KEBAB_RPMH_WRITES`，唯一命中就是那条注释
+  （`bsd/dev/kebab_spmi.c:996`）。没有 `kebab_tcs_io` 实现，没有调用者。
+* `bsd/conf/files` 只登记 `kebab_ufs/usb/fwlog/spmi/touch`；`package/` 下的
+  任何模块都不进内核构建（本仓库没有这种机制），`package/KebabRpmhVrm.c`
+  只被两台主机测试驱动。
+
+也就是说：**只剩测试注入**（`KebabRpmhTcsHostTests.c` 里的假寄存器文件），
+真机上没有任何命令能碰到 TCS。要补的是“状态机的内核端口”，不是“再写一版
+状态机”。
+
+### 2. 补丁 0130：把测过的状态机编进内核，并补上 MMIO 绑定
+
+`KebabRpmhVrm.h` 本来就是为这个端口写的（`KEBAB_RPMH_KERNEL` 选内核头文件，
+`kebab_rpmh_tcs_init_global()` 只给内核用），所以 0130 不再手抄一版：
+
+* 新增 `bsd/dev/kebab_rpmh_vrm.{c,h}`，由 `scripts/sync-rpmh-vrm.py` 从
+  `package/KebabRpmhVrm.{c,h}` 生成：除横幅、`#define KEBAB_RPMH_KERNEL 1`
+  和头文件名外**逐字节相同**，脚本的 `--check` 用来证明这一点。这样内核跑的
+  就是 70 条主机断言驱动的那份代码，不会出现“第二版草稿慢慢漂移”。
+* `bsd/conf/files` 登记 `bsd/dev/kebab_rpmh_vrm.c standard`。
+* `bsd/dev/kebab_spmi.c` 补上 `kebab_tcs_io` 的生产绑定，几何全部取自 0127
+  的实测而非记忆：
+
+| 项 | 值 |
+| --- | --- |
+| drv-2 窗口 | `0x18220000`，映射 `0x10000` |
+| tcs_base | `drv + 0xd00` = `0x18220d00` |
+| TCS 间距 | 672 字节 |
+| TCS1 | `tcs_base + 1*672` = `0x18220fa0` |
+| 用到的偏移 | `0x10` CMD_WAIT、`0x14` CONTROL、`0x18` STATUS、`0x1c` CMD_ENABLE、`0x30/0x34/0x38/0x3c` 槽、`0x40` RESP_DATA |
+| IRQ 三件套 | `tcs_base + 0x0/0x4/0x8`（0127 修正后的位置） |
+
+  io 只做三件事：`kebab_spmi_rd/wr()` 加 `mach_absolute_time()` 换算的微秒
+  时钟；任何越过一个 TCS 窗口（`off + 4 > 672`）的访问直接返回失败，坏偏移
+  不可能读到隔壁 TCS。窗口在 `kebab_spmi_init()` 里映射一次（控制台命令可能
+  从 panic 路径跑，那里不能再 `ml_io_map`）。
+
+* **一次性门限从“每次启动一条”改成“每条命令一次”**：两颗 LDO 是两个
+  ENABLE 寄存器，控制台要分两步走，原来的 `dead=1` 会把第二步挡死。现在用
+  `used_mask`（每对 (资源, 寄存器) 一位）记录：ldoa13 ENABLE 是 `0x1`，
+  ldoc1 ENABLE 是 `0x4`，同一颗第二次发送仍然被拒；任何失败仍然把整条通道
+  标死（`dead=1`），失败之后连另一颗也不许发。主机测试从 58 条增到 70 条，
+  新增 C23（两颗按顺序各发一次，重复被拒）与 C24（第一颗失败后第二颗被拒）。
+
+### 3. 命令与启动参数
+
+| 命令 | 作用 | 备注 |
+| --- | --- | --- |
+| `VROMON` | 只给 ldoa13 发 ENABLE | 一次启动只允许一次；重复会打印“…already attempted this boot…” |
+| `VRMON ldoc1` | 只给 ldoc1 发 ENABLE | 要求 ldoa13 已经 COMPLETE，否则拒绝并提示先 `VROMON` + `PWR?` |
+| `TCS?` | 只读转储 TCS0/TCS1 的 CONTROL、CMD_ENABLE、CMD_WAIT、CMD_STATUS 与 IRQ 三件套 | 不写、不清、不恢复 |
+| `PWR?` | 走 SPMI observer 读两颗 LDO 的 `EN`（`base+0x46`） | 0122 已有，本次未改 |
+
+* 启动参数 **`kebab_vrm_write`**，默认 `0`；只有 `kebab_vrm_write=1` 时
+  `kebab_spmi_init()` 才映射 TCS1 窗口，`VROMON` 才可能发出命令。未设置时
+  命令只打印 `kebab_vrm_write is off; refusing to send ldoa13`，无人值守的
+  启动永远不会给任何一颗供电。
+* 命令必须在**一次 bulk-OUT 完成**内到达，匹配方式与 `SPMI?`/`PON?`/`FWLOG?`
+  完全一致；KDP 接管字节流时按首字节锚定。
+* 白名单之外的形式（如 `VRMON ldoa12`）不会静默忽略，会打印白名单并声明
+  没有发送；`VROMON` 只认识 `ldoa13`（裸命令）与 `ldoc1` 两种。
+* 编码器与白名单本身没有改：`kebab_rpmh_encode_enable()` 只从自己的表里取
+  `{"ldoa13", 0x00040c00}`、`{"ldoc1", 0x00042f00}`，`kebab_rpmh_cmd_allowed()`
+  只放行 `WRITE_ACK` 到对应 ENABLE 寄存器（`data == 1`）。
+
+### 4. 真机结果
+
+镜像 `XNU-vrm.img`（0130 + `kebab_vrm_write=1` + `kebab_touch=1`），`boot_b`。
+下列是同一套步骤的两次完整记录（第一次 02:2x、第二次重启后重跑），两次
+数值一致；下面贴第二次的原文。
+
+**第一步：`TCS?`（任何写之前）与 `PWR?` 基线**
+
+```text
+KEBAB TCS: === read-only TCS dump, APPS RSC drv-2 ===
+KEBAB TCS: drv-2 0x18220000, tcs_base = drv + 0xd00 = 0xfffffe8ff76ccd00, stride 672
+KEBAB TCS: rsc irq: enable[tcs_base+0x0] 0x00000001 status[+0x4] 0x00000000 clear[+0x8] 0x00000000
+KEBAB TCS: tcs 0 at 0xfffffe8ff76ccd00: CONTROL[+0x14] 0x01010000 (AMC_ENABLE 1, AMC_TRIGGER 1) CMD_ENABLE[+0x1c] 0x00000003 CMD_WAIT[+0x10] 0x00000000 CMD_STATUS[+0x3c] 0x00010101 (ISSUED 1, COMPL 1)
+KEBAB TCS: tcs 1 at 0xfffffe8ff76ccfa0: CONTROL[+0x14] 0x00010000 (AMC_ENABLE 1, AMC_TRIGGER 0) CMD_ENABLE[+0x1c] 0x00000000 CMD_WAIT[+0x10] 0x00000000 CMD_STATUS[+0x3c] 0x00000000 (ISSUED 0, COMPL 0)
+KEBAB TCS: VERDICT: TCS1 is idle and clean; a kernel-side send is plausible
+KEBAB TCS: done; no register was written, cleared or recovered
+
+KEBAB SPMI: PWR: pm8150_l13: APID 0x0c9 write_ee 0x4 irq_owner 1
+KEBAB SPMI: PWR: pm8150_l13: type 0x04 subtype 0x7b
+KEBAB SPMI: PWR: pm8150_l13: enable 0x00 (bit7 0), range 0xc0, set 0x0b
+KEBAB SPMI: PWR: pm8150a_l1: APID 0x11b write_ee 0x4 irq_owner 1
+KEBAB SPMI: PWR: pm8150a_l1: type 0x04 subtype 0x71
+KEBAB SPMI: PWR: pm8150a_l1: enable 0x00 (bit7 0), range 0x08, set 0x07
+```
+
+`TCS0` 是**别的执行环境留下的残局**（`AMC_TRIGGER=1`、`CMD_ENABLE=0x3`、
+`CMD_STATUS=0x00010101`），与 0127 当时的判断一致；`TCS1` 干净。`TCS?` 只看
+不碰，也不清理 TCS0——它可能承载别的子系统的资源票。
+
+**第二步：`VROMON`（ldoa13），然后 `PWR?`**
+
+```text
+KEBAB VRM: encode ldoa13 ENABLE -> OK msgid 0x00010108 addr 0x00040c04 data 0x00000001
+KEBAB VRM: whitelist: WRITE_ACK to the ENABLE register of ldoa13 only, slot 0x1
+KEBAB VRM: send ldoa13 -> OK (0)
+KEBAB VRM: phase COMPLETE, CMD_STATUS 0x00010101 (ISSUED 1, COMPL 1)
+KEBAB VRM: ldoa13 ENABLE acknowledged by RPMh; confirm the rail with PWR? before the next step
+
+KEBAB SPMI: PWR: pm8150_l13: enable 0x80 (bit7 1), range 0xc0, set 0x0b
+KEBAB SPMI: PWR: pm8150a_l1: enable 0x00 (bit7 0), range 0x08, set 0x07
+```
+
+**第三步：`VROMON ldoc1`，然后 `PWR?`**
+
+```text
+KEBAB VRM: encode ldoc1 ENABLE -> OK msgid 0x00010108 addr 0x00042f04 data 0x00000001
+KEBAB VRM: whitelist: WRITE_ACK to the ENABLE register of ldoc1 only, slot 0x4
+KEBAB VRM: send ldoc1 -> OK (0)
+KEBAB VRM: phase COMPLETE, CMD_STATUS 0x00010101 (ISSUED 1, COMPL 1)
+KEBAB VRM: ldoc1 ENABLE acknowledged by RPMh; confirm the rail with PWR? before the next step
+
+KEBAB SPMI: PWR: pm8150_l13: enable 0x80 (bit7 1), range 0xc0, set 0x0b
+KEBAB SPMI: PWR: pm8150a_l1: enable 0x80 (bit7 1), range 0x08, set 0x07
+```
+
+汇总：
+
+| 步骤 | `pm8150_l13` EN | `pm8150a_l1` EN |
+| --- | --- | --- |
+| 写之前 | `0x00` | `0x00` |
+| `VROMON` 之后 | **`0x80`** | `0x00` |
+| `VROMON ldoc1` 之后 | `0x80` | **`0x80`** |
+
+两颗都按预期变化，且每次只变一颗：命令确实是一步一颗，`PWR?` 的位置就是
+两步之间的验证点。
+
+**第四步：触摸传输**
+
+`TOUCHCLK` → `TOUCHSE` → `TOUCHPING`（这条树里现成的传输命令，目标就是
+`0x4b`）：
+
+```text
+KEBAB TOUCH: ping 0x4b: one byte, FIFO path
+KEBAB TOUCH: ping 0x4b: rc 0 GENI_STATUS 0x00000000
+KEBAB TOUCH: ping: ACK, one-byte write completed
+```
+
+上电之前同一条一字节写在 `0x4b` 上是以 `state 0x21` + `ABORT` 结束、且没有
+NACK 的；现在 `rc 0`、`GENI_STATUS` 全零、打印 `ACK`。**ABORT 变成了 ACK**，
+说明目标已经供电并应答。
+
+### 5. 拒绝路径与运维注意
+
+* 重复 `VROMON`：`KEBAB VRM: ldoa13 was already attempted this boot (it
+  completed); not retried`。
+* 白名单之外：`KEBAB VRM: (no argument) is not a rail this command may power;
+  the whitelist is ldoa13 (VROMON) and ldoc1 (VROMON ldoc1), nothing sent`。
+  括号里的 `(no argument)` 是控制台匹配层传给驱动的哨兵值（它只告诉驱动
+  “这条不在白名单里”，不传用户原文），白名单本身就在同一行里。
+* **`FASTBOOT` 需要 `kebab_pon_write=1`**：本次第一版镜像只带了
+  `kebab_vrm_write=1`，重启后想再刷机时内核回答
+  `KEBAB FASTBOOT: disabled because kebab_pon_write=0; use REBOOT for a plain
+  restart`，于是这块板子只能靠手动进 fastboot 才能换镜像。这条与 VRM 无关，
+  是既有设计的连带后果；下一次做镜像时把 `kebab_pon_write=1` 一起写进 toml。
+* 本节所有写操作都发生在 `kebab_vrm_write=1` 的镜像上；默认镜像里
+  `VROMON` 只打印拒绝，`PWR?`/`TCS?`/`RPMH?` 仍然可用。
+
+### 6. 如果通道被固件占住（本次未发生）与固件侧后备
+
+`TCS?` 的意义是把“通道坏了”和“电没上来”分开。判读规则：全零 = 空闲可发；
+`AMC_TRIGGER=1` 或 `CMD_ENABLE!=0` = 有命令在飞或卡住；`COMPL` 已置位 =
+脏通道（可能是别人留下的完成位），状态机会拒绝而不是把陈旧完成当成自己的。
+本次 `TCS1` 全零，所以内核侧发送是可行的；`TCS0` 的残局属于别的 EE，没有
+清理。
+
+如果将来 `TCS1` 也是卡死/脏的，正确处理是：报告寄存器值、判定这两颗轨从
+内核侧不可达、**停在那里**，不要换地址重试、不要复位 RSC、更不要清别人的
+TCS（它可能承载另一个子系统的资源票）。
+
+那条路上的后备在固件侧：在 `ExitBootServices` 之前用 `RpmhDxe` 协议发 VRM
+请求。该协议的函数表已经拿到：entry `[4]` = `0x1634`（commit），entry
+`[1]` = `0x15A4`（flush）。本节只把这个方向记下来，不启动它——内核侧的路
+已经通了，没有必要再动固件。

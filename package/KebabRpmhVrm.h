@@ -86,6 +86,8 @@ kebab_rpmh_status kebab_rpmh_encode_enable(const char *name,
 kebab_rpmh_status kebab_rpmh_encode_voltage(const char *name, uint32_t mv,
     kebab_rpmh_cmd *out);
 int kebab_rpmh_cmd_allowed(const kebab_rpmh_cmd *cmd);
+/* The used_mask bit for this command, or 0 if the table cannot produce it. */
+uint32_t kebab_rpmh_cmd_bit(const kebab_rpmh_cmd *cmd);
 kebab_rpmh_status kebab_rpmh_cmd_db_lookup(const uint8_t *db, size_t len,
     const char *name, uint32_t *addr_out);
 
@@ -119,11 +121,19 @@ typedef enum {
  * One-shot and dead state live outside the channel structure, in an object the
  * caller owns for the life of the boot: re-initialising a channel must not be
  * able to unlock another attempt.
+ *
+ * The one-shot is per command address, not per boot.  The two touch rails are
+ * two different ENABLE registers and the console enables them in two separate
+ * steps with a verification in between, so a per-boot gate would forbid the
+ * second rail.  used_mask has one bit per (resource, register) pair from
+ * kebab_rpmh_cmd_bit(): either rail may be commanded once, and a repeat of
+ * either rail -- or of a voltage write -- is refused for the life of the boot.
  */
 typedef struct {
-	int dead;
-	int used;
-	int busy;      /* in-flight claim; a second caller is refused */
+	int      dead;
+	int      used;         /* at least one command has been sent */
+	uint32_t used_mask;    /* one bit per command address actually used */
+	int      busy;         /* in-flight claim; a second caller is refused */
 } kebab_rpmh_lock;
 
 typedef struct {
