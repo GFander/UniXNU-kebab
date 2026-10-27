@@ -1678,3 +1678,231 @@ kebab_dsc=1 kebab_dsc_map=1 kebab_dsc_slide=0x1000000
 
 本节的所有 slide 结论都来自源码、真实 cache 文件、host checker 和一次成功
 编译，不能替代真机结论。
+
+## 十七、KDP 的接收路径
+
+第十节把 serial KDP 接到了 CDC-ACM 上，真机结果是：panic 报告能出来，日志停在
+`Using serial KDP.` / `Waiting for remote debugger connection.`，而 LLDB 的
+`kdp-remote` 报 `error: KDP_REATTACH failed`，桥一个字节都没打印。本节先把调用
+链和门的归属查清楚，再说改了什么。
+
+### 1. 两个方向的真实调用链
+
+接收（调试器 → 内核），全部在 `osfmk/kdp/kdp_udp.c` 的
+`kdp_connection_wait()` 里循环：
+
+```c
+static void
+kdp_serial_receive(void *rpkt, unsigned int *rpkt_len, unsigned int timeout)
+{
+	...
+	for (clock_get_uptime(&now); now < deadline; clock_get_uptime(&now)) {
+		readkar = pal_serial_getc();
+		if (readkar >= 0) {
+			if ((packet = kdp_unserialize_packet((unsigned char)readkar, rpkt_len))) {
+```
+
+`pal_serial_getc()` 在 `0099` 之后改走 USB（`osfmk/arm/pal_routines.c`）：
+
+```c
+	if (kebab_usb_kdp_selected() && kebab_usb_console_ready()) {
+		return kebab_usb_getc(false);
+	}
+	return serial_getc();
+```
+
+`kebab_usb_getc()` 是唯一把主机字节从 `ud.in_ring` 里取出来的函数，它在改写后长
+这样：
+
+```c
+	if (ud_enter(&irq)) {
+		ud.console_input = true;
+		ud_poll_locked();
+		if (ud.in_tail != ud.in_head) {
+			c = (unsigned char)ud.in_ring[ud.in_tail];
+```
+
+`ud_poll_locked()` 才是真正服务控制器的地方：读 `GEVNTCOUNT`、逐条派发事件、
+在 `ud_service()` 里重新装填 bulk OUT、在 `ud_pump_log()` 里发 bulk IN。也就是
+说，**接收的每一步都以拿到 `ud.owner` 为前提**。
+
+发送（内核 → 调试器）走另一条路，但门是同一把：
+
+```c
+void
+kdp_serialize_packet(unsigned char *packet, unsigned int len, void (*outFunc)(char))
+```
+
+`outFunc` 是 `pal_serial_putc_nocr()`，它按 `0xFB` 攒整帧，然后
+`kebab_usb_log_flush()` → `ud_enter()` → `ud_flush_from_panic()` →
+`ud_poll_locked()` → `ud_pump_log()` → `ud_start(UD_TRB_BULKIN, EP_BULK_IN, ...)`。
+panic 报告之所以能整篇出来，就是因为 `kebab_usb_log()` 里有这一句：
+
+```c
+	if (panic_active()) kebab_usb_log_flush();
+```
+
+### 2. panic 期间门到底在谁手里
+
+`kebab_usb_panic_spin()`（`panic_spin_forever()` 的终端循环）确实是“拿走整条传输”
+的那一方：它先 `os_atomic_cmpxchg(&ud.panic_cpu, 0u, cpu, acq_rel)`，再由
+`ud_panic_takeover()` 接管。但它**没有**把门带进 KDP：
+
+```c
+		if (ud.running && ud_enter(&irq)) {
+			ud_poll_locked();
+			if (ud.probe_requested && ud.configured && !ud.dead)
+				kebab_usb_ep0_probe_send();
+			ud_leave(irq);
+		}
+		if (kebab_usb_kdp_enabled() && kebab_usb_kdp_pending()) {
+			...
+			(void)kdp_serial_panic_reenter();
+```
+
+`ud_leave()` 在 `kdp_serial_panic_reenter()` 之前，交还 KDP 时门是空的。而且本次
+实测连这一步都没到：panic 报告之后是 `debugger_collect_diagnostics()` 里的
+`kdp_raise_exception()` 直接进的 KDP，`ud.panic_cpu` 还是 0，连 panic CPU 栅栏
+都不存在。
+
+再看一个反证：`Using serial KDP.` / `Waiting for remote debugger connection.`
+是 `handle_debugger_trap()` 里 `DebuggerHaltOtherCores()` **之后**打印的，而这两行
+只可能通过 `kebab_usb_log()` → `kebab_usb_log_flush()` → `ud_enter()` 出来。它们
+出现在主机上，就说明那一刻门是拿得到的。
+
+所以最初的假设——“panic/KDP 路径一直握着门，`kebab_usb_getc()` 进不去”——**在
+这次真机会话里不成立**。代码能证明的是另一件事：`ud_enter()` 是**不可重入**的，
+而且拿不到就立刻返回，`kebab_usb_getc()` 于是**静默返回 -1、连一次 poll 都不做**：
+
+```c
+	if ((terminal && terminal != cpu) ||
+	    !os_atomic_cmpxchg(&ud.owner, 0u, cpu, acquire)) {
+		ml_set_interrupts_enabled(*irq);
+		return false;
+	}
+```
+
+谁握着门都可能让一次读失败：panic 泵、任何一次 console 冲刷、事件线程，或者
+`ud.panic_cpu` 这道永久栅栏（它一旦设置，除 panic CPU 外的任何 CPU 都进不来）。
+从外面看，这跟“主机没发数据”完全一样——这正是上一轮无法判断的原因。
+
+### 3. 这次收不到应答的真正原因
+
+请求没有变成“KDP 包”。`kdp_poll()` 只接受完整的 Ethernet/IPv4/UDP 信封：
+
+```c
+	if (pkt.len < (sizeof(struct kdp_ether_header) + sizeof(struct kdp_udpiphdr))) {
+		return;
+	}
+	pkt.off += (unsigned int)sizeof(struct kdp_ether_header);
+	if (ntohs(eh->ether_type) != ETHERTYPE_IP) {
+		return;
+	}
+	...
+	if (ntohs(ui->ui_dport) != KDP_REMOTE_PORT) {
+```
+
+三个 `return` 都不打印、不计数。串行帧本身是透明的（`kdp_serial.c` 只管
+`0xFA`/`0xFB` 定界和 CRC），所以只要桥把 LLDB 的裸 KDP 数据报原样塞进帧里，
+`kdp_poll()` 就会在解析成 KDP 请求之前把它丢掉：内核不会回任何东西，桥（只在
+成功解出一帧时才打印）也就一个字节都不显示。这解释了全部现象，而且和“`EP0?`
+能用”不矛盾——`EP0?` 是驱动自己在 `ud_bulk_out_done()` 里匹配的文本，根本不经过
+KDP。
+
+主机侧桥现在会把裸 KDP 数据报补上信封再发（见 `scripts/kdp-cdc-bridge.py`），
+本节的内核侧改动解决的是另一件事：让这类失败不再无声。
+
+### 4. 改了什么
+
+`bsd/dev/kebab_usb.c`（`0104-kebab-kdp-receive.patch`）：
+
+* **接收锁与发送门分开**。新增 `ud_rx_enter()` / `ud_rx_leave()`，只保护“排空事件
+  缓冲 + 重新装填 bulk OUT”，`kebab_usb_getc()` 只用它，不再碰 `ud.owner`。接收
+  因此不依赖发送归谁：panic 泵、console 冲刷、事件线程谁握着发送都不影响读。
+* **接收锁不对 CPU 设栅栏**。它不看 `ud.panic_cpu`，任何正在运行的 CPU 都能取；
+  取不到就返回，不等待，不睡眠（调试器本来就是轮询）。
+* **两把锁都可重入**。同一 CPU 再次进入只加深度计数，所以“panic 泵在临界区里
+  再交还 KDP”这种同一栈上的嵌套不会自锁。顺序是单向的：持发送锁时可以取接收
+  锁，反过来不允许，因此不会成环。
+* **发送仍然单所有者**。bulk IN 的提交点只有 `ud_poll_locked()` 和
+  `ud_flush_from_panic()` 的循环，两者都持有接收锁，所以 `tx_pending`/`ep[].busy`
+  仍然一次只有一个写者；`ud.owner` 的语义（panic 之后只有 panic CPU 能驱动冲刷）
+  没有变，只是它的持有者可以重入。
+* **接管时也处理被卡住的接收锁**。`ud_panic_takeover()` 原来只对 `ud.owner` 做
+  “CPU 确实已停机 → 控制器复位 → 清锁”，现在对 `ud.rx_owner` 用同一条规则：事件
+  派发停在半路和传输停在半路一样，都不能靠猜。
+* **panic 泵的 KDP 交还条件改成“环里有 `0xFA`”**。原来是只看队首字节
+  （`in_ring[in_tail] == 0xfa`），一个残留的 console 字节或半截帧会让交还永远不发生，
+  这些字节又没人消费，调试器整轮都连不上。序列化器会把帧内所有 `0xFA` 转义，所以
+  环里出现 `0xFA` 只可能是帧头；KDP 的反序列化器本来就会丢弃它之前的字节。
+
+### 5. 新的可观测计数
+
+`KEBAB EP0 STATE:` 那一行**没有改**（`events * 4 == acked`、`discarded`、行编码
+的既有判定规则都不变），在它后面加一行：
+
+```text
+KEBAB KDP STATE: host_in=%u in_drop=%u kdp_in=%u kdp_frames=%u kdp_out=%u tx_bytes=%u owners=%u/%u/%u depths=%u/%u
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `host_in` | 从 bulk OUT 收进 `in_ring` 的字节数 |
+| `in_drop` | 因为 `in_ring` 满而丢掉的字节数 |
+| `kdp_in` | 交给字节流读者（`pal_serial_getc`）的字节数 |
+| `kdp_frames` / `kdp_out` | 交给发送的调试器帧数 / 这些帧的线上字节数 |
+| `tx_bytes` | bulk IN 实际完成的字节数 |
+| `owners` | `ud.owner` / `ud.rx_owner` / `ud.panic_cpu`，都是 CPU+1，0 表示空 |
+| `depths` | 两把锁的重入计数 |
+
+判读方法就是这一节存在的理由：`host_in` 一直是 0 → 一个字节都没到设备；
+`host_in` 涨而 `kdp_in` 不涨 → 字节到了、读者没跑（锁/上下文问题）；
+`kdp_in` 涨而 `kdp_frames` 一直是 0 → 内核读到了却没打算回答（信封/协议层）；
+`kdp_frames` 涨而主机看不到帧 → 发送侧问题。`owners` 里出现非 0 的第三方 CPU 就是
+锁被卡住的直接证据。
+
+### 6. 真机验证
+
+启动参数不变（`debug=0x14e serial=3 kebabusb=1 kebabpanic=1 kebabkdp=1`，不要加
+`0x200`），主机上先起桥再让内核 panic：
+
+```text
+python3 scripts/kdp-cdc-bridge.py /dev/ttyACM0 --udp-port 41139 --verbose
+```
+
+看到 panic 报告和 `Waiting for remote debugger connection.` 之后，在另一台机器上：
+
+```text
+lldb -o "kdp-remote <bridge-host>:41139" -o "register read" -o "continue" -o "quit"
+```
+
+判定顺序：
+
+1. `register read` 能打出 `x0..x30`/`pc`/`cpsr`，说明 REATTACH、READREGS 两个来回
+   都通了，接收路径成立。
+2. 若仍失败，让内核再 panic 一次并在 panic 循环里发一次 `PANIC!`，然后重新打开
+   端口、发 `EP0?` 取快照，读新增的 `KEBAB KDP STATE:` 一行，按第 5 节的四种情形
+   定位：0 字节 / 到了没读 / 读了没答 / 答了没出去。
+3. 回归项照旧：整篇 panic 报告、panic 后关端口再打开、`EP0?` 有应答、
+   `events * 4 == acked`、`discarded == 0`、`line=` 保持主机设置的行编码。
+
+### 7. 本轮的证明
+
+* `0104` 加入后整串 **84 / 84** 按文件名顺序应用到 `1b191cb`（独立 worktree，
+  `reset --hard 1b191cb` + `clean -fdx`，逐个 `git apply`）。
+* `~/kebab-build/build-local.sh` 同一套 `dxb/build.sh`（`MACHINE_CONFIG=KEBAB`、
+  `KERNEL_CONFIG=DEVELOPMENT`、macOS 13.5 + `KDK_13.5_22G74`）产出
+  `build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab`，
+  **17,085,984 字节（16.29 MiB）**，SHA-256
+  `a1bd7e3f86e33503d9fff22901a2539056a3436e235c627a071dbbd1468df070`
+  （加 `0104` 之前是 17,069,536 字节）。镜像里有
+  `KEBAB EP0 STATE:` 和新的 `KEBAB KDP STATE: host_in=%u ...` 两条格式串，
+  `_kebab_usb_kdp_tx_frame`、`_kebab_usb_getc`、`_kebab_usb_log_flush`、
+  `_kebab_usb_panic_spin` 都在符号表里。
+* `kebab_usb.c`：38 条 warning，全部是既有的
+  `-Wdeclaration-after-statement`（改前 35 条；这个文件一直是 C99 风格，构建配置
+  本来就用 `-Wno-error=declaration-after-statement` 放行），**0 error**；
+  `pal_routines.c` 0 warning。
+
+本轮没有真机，本节所有结论都来自源码、`84/84` 的补丁应用和一次内核编译，不能
+替代上面这次握手。
