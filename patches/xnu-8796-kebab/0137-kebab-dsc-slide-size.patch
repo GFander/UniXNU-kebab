@@ -1,0 +1,37 @@
+fix(dsc): give the shared-region pager the slide-info blob size
+
+kebab_dsc_read_mappings() recorded where each mapping's dyld slide-info
+blob lives (sms_slide_start) but never recorded how large it is
+(sms_slide_size).  kebab_dsc_apply_slide() uses sms_slide_size to decide
+whether a mapping carries slide info, so in a non-zero slide run it left
+VM_PROT_SLIDE clear on all four data mappings.  vm_shared_region_map_file()
+then installed plain file mappings, sr_slide still held the requested
+slide, and no lazy rebase pager was created: dyld would see a slid base
+whose pointer chains had never been rebased.
+
+Set sms_slide_size from the same mapping-and-slide entry as the start
+address.  The kernel still copyin()s the cache's own v2 blob in
+vm_shared_region_slide() and builds nothing new; this only makes the plan
+describe the blob that scripts/verify-shared-cache-plan.py validates
+(0xa788/0xbc08 in .27.dylddata, 0x5350/0x6f58 in .41.dylddata).
+
+The one-line assignment compiles in the KEBAB arm64 tree; no hardware.
+diff --git a/bsd/kern/kebab_dyldcache.c b/bsd/kern/kebab_dyldcache.c
+index 2e3c51b..f0f1a82 100644
+--- a/bsd/kern/kebab_dyldcache.c
++++ b/bsd/kern/kebab_dyldcache.c
+@@ -966,6 +966,14 @@
+ 		file->mappings[i].sms_slide_start =
+ 		    file->mappings[found].sms_address +
+ 		    (offset - file->mappings[found].sms_file_offset);
++		/*
++		 * vm_shared_region_slide() treats a non-zero start with a
++		 * zero size as nothing to do, and kebab_dsc_apply_slide()
++		 * uses sms_slide_size to decide whether to set VM_PROT_SLIDE.
++		 * Set both fields from the same mapping-and-slide entry, or
++		 * the slide path silently degrades to a plain mapping.
++		 */
++		file->mappings[i].sms_slide_size = size;
+ 		error = kebab_dsc_validate_slide_info(vp, name, i, offset, size,
+ 		    file->mappings[i].sms_size);
+ 		if (error != 0) {
