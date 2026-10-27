@@ -3057,6 +3057,11 @@ KEBAB REBOOT: PEHaltRestart(kPERestartCPU)
 - 门控关掉时同一条命令只回 `disabled because kebab_pon_write=0`，不写任何寄存器，
   这一点在换镜像之前先测过。
 
+之后把触摸参数并进同一个镜像（`XNU-0115-touch-fb.img`，`kebab_pon_write=1` 加
+`kebab_touch=1 kebab_touch_dump=1 kebab_touch_bb=1`），刷入后复测：`FASTBOOT` 到
+fastboot 3.37 秒，`fastboot reboot` 回串口 20.0 秒；触摸追踪输出与第 2 节逐行相同。
+`boot_b` 现在是这个镜像。
+
 ### 6. 验证边界
 
 - 实测：刷机、串口抓到整段启动、上表每一行日志。
