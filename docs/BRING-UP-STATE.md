@@ -8831,14 +8831,17 @@ KEBAB EXEC: copyout checks user_eq_alloc=1 str_eq_user=1 argc_ge_guard=1
   `current_thread()->map`；`alloc` 是 `create_unix_stack()` 记录下来的
   `map` 参数（调用点是 `get_task_map(task)`）；`same` 是两者指针相等；
   `pid`/`recpid` 是当前进程和记录里的进程。记录只有一格，**`recpid != pid`
-  时前两行和最后一行属于另一次 exec**，此时 `same` 没有意义。
+  时 map 行和 checks 行里的几何字段属于另一次 exec**，此时 `same` 没有意义；
+  fault 行和 pmap 行仍然描述本次失败（它们按线程/地址取，不来自那个记录）。
 - **fault**：由 `handle_kernel_abort()` 在“有 copyio 恢复点、且
   `arm_fast_fault()`/`vm_fault()` 没解决”时写入。`far`/`esr` 就是该异常的
   `FAR_EL1`/`ESR_EL1`；`dfsc = esr & 0x3f`；`wnr = (esr >> 6) & 1`（1 = 写）。
   `fast` 是 `arm_fast_fault()` 的返回值，`vm` 是 `vm_fault()` 的返回值，`-1`
-  表示该函数没有被调用（`fast` 返回 `KERN_PROTECTION_FAILURE` 时不再调
-  `vm_fault`；本机 `XNU_MONITOR=0`，`arm_fast_fault()` 不会返回 2，所以实际
-  只会看到 `fast=-1`）。没记录到 fault 时打印 `copyout fault none`。
+  表示该函数没有被调用。translation fault 不进 `arm_fast_fault()`，所以
+  `fast=-1`；access flag / permission fault 会进，pmap 层不处理时返回
+  `KERN_FAILURE=5`。`vm` 只在 `fast` 返回 `KERN_PROTECTION_FAILURE` 时才不赋值，
+  而本机 `XNU_MONITOR=0`，`arm_fast_fault()` 不会返回 2，所以 `vm` 总会是
+  `vm_fault()` 的真实结果。没记录到 fault 时打印 `copyout fault none`。
 - **pmap**：新增的 `kebab_pmap_probe_log()`（`osfmk/arm/pmap/pmap.c`），沿
   `pmap_ttne()` 从 root 走到 leaf，不取锁、不触发 fault，并自己打印这一行。
   解码放在 pmap.c 里，是因为 bsd 看不到 `osfmk/arm/pmap/pmap.h`：`vm/pmap.h`
@@ -8872,8 +8875,8 @@ KEBAB EXEC: copyout checks user_eq_alloc=1 str_eq_user=1 argc_ge_guard=1
 | 全 1 | `same=0` | — | — | — | **map 不对**：copyout 跑在别的 map 上，栈的分配不在这里 |
 | 全 1 | `fault none` | — | — | — | **没碰到页表**：`EFAULT` 来自 `copy_validate()` 的范围检查（目标不在 `current_thread()->map` 的 `[min,max]` 内，或该 map 是 kernel map 走了 `is_kernel_to_kernel_copy()`）。通常伴随 `same=0`；先查 map，不要查页表 |
 | 全 1 | `same=1` | `valid=0` | `0x4`–`0x7` | `vm=1` | **翻译缺失**：map 里有分配，但这个 pmap 没建表项（`mach_vm_allocate_kernel()` → `pmap_enter()` 这一段） |
-| 全 1 | `same=1` | `valid=1, af=0` | `0x9`–`0xB` | `vm=0` 或 `1` | **AF 没置**：表项在，但 access flag 是 0。属于“权限”一类，不是缺页 |
-| 全 1 | `same=1` | `valid=1, af=1, ap=0/2/3` | `0xD`–`0xF` | `fast=-1` | **权限**：`ap` 的 bit0=0 表示 EL0 不可访问（0/2），`ap=3` 是 EL0 只读而本路径是写。guard 区（`VM_PROT_NONE`）或写保护映射是典型 |
+| 全 1 | `same=1` | `valid=1, af=0` | `0x9`–`0xB` | `fast=5`，`vm=1/2` | **AF 没置**：表项在，但 access flag 是 0。属于“权限”一类，不是缺页；`vm_fault()` 也没能把它补上 |
+| 全 1 | `same=1` | `valid=1, af=1, ap=0/2/3` | `0xD`–`0xF` | `fast=5`，`vm=2` | **权限**：`ap` 的 bit0=0 表示 EL0 不可访问（0/2），`ap=3` 是 EL0 只读而本路径是写。guard 区（`VM_PROT_NONE`）或写保护映射是典型 |
 | 全 1 | `same=1` | `valid=1, af=1, ap=1` | 任意 | `vm=1/3/5/9` | **取页失败**：表项看起来允许 EL0 读写，但 VM 层没解决。`1` = `KERN_INVALID_ADDRESS`（map 里没有覆盖该地址的 entry），`3` = `KERN_NO_SPACE`，`5` = `KERN_FAILURE`，`9` = `KERN_MEMORY_FAILURE` |
 
 `ap` 的取值按 `osfmk/arm64/proc_reg.h:1137`：`0` = EL1 读写、EL0 不可访问，
