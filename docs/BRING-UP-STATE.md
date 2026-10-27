@@ -2535,3 +2535,224 @@ vendor 的 fastboot 路径不是只写 IMEM：
   `fastboot devices` 能看到序列号），而不是正常启动或 EDL。
 * 如果仍正常启动：记录下一次启动的 IMEM、PON `0x088F` 回读值和 USB 状态，
   再判断是 ABL 不认这个 reason，还是复位路径又清掉了它。
+
+## 二十一、SPMI Arbiter 只读探测
+
+本节实现并验证第二十节 6.3 的只读部分。补丁 `0108` 增加 `bsd/dev/kebab_spmi.c`
+与两个控制台命令；`0110` 把 `SPMI?` 的输出压回 16 KiB 控制台环；`0109`/`0111`
+是同一轮真机中触屏驱动的两个独立修复（见第 7 节）。**本节没有写任何 PMIC
+寄存器**：`SPMI?`/`PON?` 只读版本、映射表、ownership 表和 observer 数据，
+SPMI-4 的 masked RMW 仍未实现。
+
+### 1. 代码与门控
+
+| 项 | 值 |
+| --- | --- |
+| 内核补丁 | `0108-kebab-spmi-readonly.patch`（只读探测）、`0110-kebab-spmi-report-fit.patch`（输出长度） |
+| 文件 | `bsd/dev/kebab_spmi.c`（新）、`bsd/conf/files`、`bsd/dev/kebab_usb.c` |
+| CI | run `40455214113`，`kernel_sha256 d9061e8a2cc7f37f3063089fbeae3d6841a2e4e67ef7fc93f692d181d51dc3d1`，17,103,000 字节 |
+| 映射 | core `0x0C440000+0x1100`、obsrvr `0x0E600000+0x100000`、cnfg `0x0C40A000+0x26000` |
+| 未映射 | chnls `0x0C600000+0x2000000`、intr `0x0E700000+0xA0000` |
+| EE / channel | 0 / 0（`kona.dtsi` 的 `qcom,ee` / `qcom,channel`） |
+| 命令 | `SPMI?\n`（SPMI-1+2）、`PON?\n`（SPMI-3），必须一次 bulk OUT 到达 |
+
+`chnls`/`intr` 不映射的原因见第 5 节：内核 `io_map` 的 submap 只有 8 MiB
+（`osfmk/arm/io_map.c`，`IO_MAP_SIZE`），而 chnls 资源是 32 MiB；只读路径
+不使用读写通道。命令匹配沿用 `ud_bulk_out_done()` 的单次传输规则。
+
+### 2. SPMI-1：arbiter 版本
+
+```text
+KEBAB SPMI: === SPMI-1: arbiter version ===
+KEBAB SPMI: core 0x0c440000+0x1100 mapped; core+0x0000 = 0x50010000
+KEBAB SPMI: version family v5
+KEBAB SPMI: SPMI-1 PASS
+```
+
+| 项 | 原始值 | 结论 |
+| --- | --- | --- |
+| `core + 0x0000` | `0x50010000` | v5（`>= 0x50000000`） |
+| 版本族 | v5 | 与 vendor `spmi-pmic-arb.c` 的 v5 分支一致 |
+
+**SPMI-1：PASS（真实读）。**
+
+`0111` 触屏内核上复测（`SPMI?` 输出 915 字节，不再截断）：
+
+```text
+KEBAB SPMI: core 0x0c440000+0x1100 mapped; core+0x0000 = 0x50010000
+KEBAB SPMI: version family v5
+KEBAB SPMI: SPMI-1 PASS
+```
+
+### 3. SPMI-2：PPID `0x008` 的 APID 映射
+
+PPID 公式是 `(sid << 8) | (addr >> 8)`；PM8150 PON 在 SID 0、peripheral
+`0x08`，所以目标 PPID 是 `0x008`。v5 的映射表在 `core + 0x900 + 4*apid`，
+ownership 表在 `cnfg + 0x700 + 4*apid`，扫描上限由 core 资源大小
+`0x1100` 决定（512 项，APID `0x000..0x1ff`）。
+
+负控：PPID `0xf00`（SID `0x0f`，板上没有这个 PMIC）必须解析不到 APID。
+实测 `0 APID(s) (expected 0)`，说明扫描确实读的是映射表，而不是一个
+"对任何输入都给答案"的桩。
+
+目标 PPID 找到三个 APID：
+
+```text
+KEBAB SPMI: PPID 0x008 APID 0x001 map[core+0x904]=0x00000800 own[cnfg+0x704]=0x00000001 -> write_ee 0x1 irq_owner 0 irq_ee 0xff
+KEBAB SPMI: PPID 0x008 APID 0x00d map[core+0x934]=0x01000800 own[cnfg+0x734]=0x00000000 -> write_ee 0x0 irq_owner 1 irq_ee 0x0 (owned by this EE)
+KEBAB SPMI: PPID 0x008 APID 0x075 map[core+0xad4]=0x00000800 own[cnfg+0x8d4]=0x00000004 -> write_ee 0x4 irq_owner 0 irq_ee 0xff
+```
+
+| APID | mapping 寄存器 | PPID | ownership 寄存器 | `write_ee` | `irq_owner` | `irq_ee` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `0x001` | `0x00000800` | `0x008` | `0x00000001` | 1 | 0 | `0xff` |
+| `0x00d` | `0x01000800` | `0x008` | `0x00000000` | **0** | 1 | **0** |
+| `0x075` | `0x00000800` | `0x008` | `0x00000004` | 4 | 0 | `0xff` |
+
+**SPMI-2：PASS（真实读）。** 关键点是 APID `0x00d` 的 `write_ee = 0`，
+正好是内核运行的 EE 0；`pmic_arb_offset_v5()` 的写权限检查会接受它。
+另外两个 APID 分别属于 EE 1 和 EE 4，不能用来写。
+
+`0111` 内核上的干净输出（915 字节，扫描计数完整）：
+
+```text
+KEBAB SPMI: scan APID 0x000..0x1ff: core+0x900 + 4*apid, 512 entries bounded by core size 0x1100
+KEBAB SPMI: negative control PPID 0xf00 -> 0 APID(s) (expected 0)
+KEBAB SPMI: scanned 512 entries: 352 non-zero mapping(s), 3 map PPID 0x008
+...（三行 APID 明细同上）...
+KEBAB SPMI: SPMI-2 PASS: 3 APID(s) map PPID 0x008
+```
+
+> 说明：`SPMI?` 最初还打印整张非零映射表，输出超过 16 KiB 控制台环，
+> 真机捕获在 16383 字节处被截断，丢掉了 `SPMI-2 PASS` 行和匹配明细；
+> 上表来自同一次扫描的 `PON?` 输出。`0110` 删掉整表打印，只保留扫描上下界、
+> 负控、三个计数（扫描项数、非零映射数、匹配数）、匹配明细和门结果，
+> 使一次报告不可能超过环容量。
+
+### 4. SPMI-3：通过 observer 读 PON 寄存器
+
+v5 的 observer 地址算术与读写通道不同：
+
+```text
+observer = obsrvr + 0x10000 * ee + 0x80 * apid
+         = 0x0E600000 + 0x10000*0 + 0x80*0x00d
+         = 0x0E600680
+```
+
+命令格式 `(opc << 27) | ((addr & 0xff) << 4) | (len - 1)`，读 `opc = 0xF`。
+两次独立读的结果：
+
+```text
+KEBAB SPMI: REG 0x0805 read 1: APID 0x00d obsrvr+0x680 cmd 0x78000050 status 0x00000001 -> 0x04
+KEBAB SPMI: REG 0x0805 read 2: APID 0x00d obsrvr+0x680 cmd 0x78000050 status 0x00000001 -> 0x04
+KEBAB SPMI: PON subtype 0x0805 reads 0x04 / 0x04 -> STABLE
+KEBAB SPMI: REG 0x088f read 1: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x00
+KEBAB SPMI: REG 0x088f read 2: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x00
+KEBAB SPMI: SOFT_RB_SPARE 0x088f reads 0x00 / 0x00 -> STABLE
+KEBAB SPMI: PON generation: Gen2 (subtype 0x04); the Gen2 SOFT_RB_SPARE layout would apply
+KEBAB SPMI: SPMI-3 PASS
+```
+
+| 寄存器 | 读 1 | 读 2 | 稳定性 | 含义 |
+| --- | --- | --- | --- | --- |
+| PON subtype `0x0805` | `0x04` | `0x04` | STABLE | Gen2（Gen2 定义值 `0x04`/`0x05`） |
+| `SOFT_RB_SPARE` `0x088f` | `0x00` | `0x00` | STABLE | 写前旧值；masked 写得到 `0x04`（bit0 保持 0，bit7:1 写 `0x02`） |
+
+两次读的 status 都是 `0x00000001`（DONE，无 FAILURE/DENIED/DROPPED）。
+
+**SPMI-3：PASS（真实读）。**
+
+### 5. 对 SPMI-4 的意义与新约束
+
+1. **写权限已经确认**：PPID `0x008` 存在 `write_ee = 0` 的 APID `0x00d`，
+   所以 vendor 驱动在 `pmic_arb_offset_v5()` 里的 `-EPERM` 检查不会阻止
+   一次 EE 0 的写。这消除了上一节 6.2 中"EE0 是否真的拥有 PON APID"的
+   不确定性。
+2. **Gen2 已直接确认**：subtype `0x04`，`SOFT_RB_SPARE` 旧值 `0x00`。
+   按第二十节 6.4 的规格，`new = (old & 0x01) | (0x02 << 1) = 0x04`。
+3. **写通道不能整块映射**：chnls 是 32 MiB，`io_map` submap 只有 8 MiB，
+   整块 `ml_io_map` 会像触屏驱动的 16 MiB TLMM 一样在 `kmem_alloc` 里
+   panic。SPMI-4 必须只映射目标 APID 的一个 4 KiB 窗口：
+   `chnls + 0x10000 * apid = 0x0C600000 + 0x10000 * 0x00d = 0x0C6D0000`，
+   大小 `0x1000`。寄存器在窗口内：`CMD +0x00`、`STATUS +0x08`、
+   `WDATA0 +0x10`、`RDATA0 +0x18`。
+4. **写命令格式**：`opc = 0xE`（`PMIC_ARB_OP_WRITE`），
+   `cmd = (0xE << 27) | ((0x8f & 0xff) << 4) | 0 = 0x700008F0`；把新值写到
+   `WDATA0`，再写 `CMD`，轮询 `STATUS` 的 DONE，然后通过 observer 回读
+   `0x088F` 校验 `(readback & 0xFE) == 0x04` 且 `(readback & 0x01) == 0`。
+5. **SPMI-4 必须是独立补丁、独立刷机、启动参数默认关闭**。写之前重新确认
+   subtype 与两次读稳定；只写一次，不回读失败后重试，不换 reset 类型；
+   写成功后仍走 `PEHaltRestart(kPERestartCPU)`（PSCI `SYSTEM_RESET`），
+   不用已经被证明不接受 `reset_type=0` 的 `SYSTEM_RESET2`。
+
+### 6. 仍然未知
+
+* ABL 是否真的读取 PMIC PON 的 `PON_RESTART_REASON_BOOTLOADER` 作为
+  fastboot 判断的一部分。本节只证明内核能读到 PON；不能证明 ABL 会看它。
+* 复位路径（XBL/ABL/UEFI）是否在 ABL 读取前清掉或重写 PON reason。
+  `SOFT_RB_SPARE` 现在是 `0x00`，但这是本次启动的读数，不是复位后的读数。
+* 即使 ownership 允许，arbiter 硬件是否接受这次写（status 是否 DENIED）
+  只能在 SPMI-4 真机上回答。
+* `SOFT_RB_SPARE` 其它位的语义没有文档；本节只按第二十节的 mask `0xFE`
+  准备，不改 bit0。
+
+### 7. 组合镜像中的触屏首启与三个独立修复
+
+第一次组合镜像使用 `kebab_touch=1 kebab_touch_dump=1`（内核 `0108`），
+内核在 `kebab_touch_start()` 里 panic：
+
+```text
+panic(cpu 0 caller 0xfffffe0006ab3810): kmem_alloc(..., 16777216, 0x100021): failed with 3 @vm_kern.c:178
+```
+
+符号化后是 `kebab_touch_start -> io_map -> kmem_alloc`：TLMM 节点在
+`kona-pinctrl.dtsi` 里是 `0x0F000000+0x1000000`（16 MiB），但 `ml_io_map()`
+从 8 MiB 的 `io_submap` 分配并带 `KMA_NOFAIL`，超限请求在 `kmem_alloc`
+里直接 panic。`0109` 把 `KT_TLMM_SIZE` 改成 `0x40000` 并在注释里记录原因；
+这个尺寸本身仍是对的，错的是下面的基址。
+
+`0111` 增加一条可选的 bit-banged GPIO I2C 传输（`kebab_touch_bb=1`），
+用同一 TCM 命令层绕开 QUPv3/SE13；QUPv3 仍是默认。bit-bang 路径在改 mux
+之前先打印 GPIO 36/37/38/39 的 `TLMM_CTL`/`TLMM_IO` 原始值，然后把
+SDA/SCL 设为 mux 0（plain GPIO）、pull-up、输出关闭，开漏时序约 5 µs
+半周期。
+
+**第一次 bit-bang 真机启动（`0111`）没有 panic，但也没有碰到任何引脚。**
+四个引脚的读数全部是零，写 mux 也没有粘住：
+
+```text
+KEBAB TOUCH: bit-bang pin 36 ctl 0x00000000 (mux 0 pull 0 drive 0 oe 0) io 0x00000000
+KEBAB TOUCH: bit-bang pin 37 ctl 0x00000000 (mux 0 pull 0 drive 0 oe 0) io 0x00000000
+KEBAB TOUCH: bit-bang pin 38 ctl 0x00000000 (mux 0 pull 0 drive 0 oe 0) io 0x00000000
+KEBAB TOUCH: bit-bang pin 39 ctl 0x00000000 (mux 0 pull 0 drive 0 oe 0) io 0x00000000
+KEBAB TOUCH: bit-bang pin 36 ctl 0x00000000 -> 0x00000000 (mux 0 GPIO, pull-up, released)
+KEBAB TOUCH: bit-bang start failed at phase 0 (SDA 0 SCL 0)
+```
+
+对照 vendor `drivers/pinctrl/qcom/pinctrl-kona.c` 后找到根因：**Kona 的
+TLMM 是分 tile 的**。该文件定义 `NORTH 0x900000`、`SOUTH 0x500000`、
+`WEST 0x100000`、`EAST 0`，每个引脚地址是 `tile + 0x1000 * pin`；
+GPIO 36..39 在 SOUTH tile，所以真实地址是
+`0x0F000000 + 0x500000 + 0x1000*pin`，而驱动原来算的是
+`0x0F000000 + 0x1000*pin`。后者落在 tile 之间的空洞里：读恒为 0，
+写被忽略。`0112` 改为映射 `KT_TLMM_PA + 0x500000`（`0x40000`，仍覆盖
+SOUTH tile 的 pin 0..63），每引脚偏移相对 tile 基址。
+
+这同时解释了 QUPv3 路径：它的 `kt_pins_config()` 和复位脉冲一直在写
+同一批错误地址，所以**两条传输在 0112 之前都没有真正配置过引脚**。
+截至本节写入时，`0112` 已通过 92/92 补丁应用检查并在 CI 构建，
+真机复测（引脚真实读数、bit-bang TCM identify）尚未进行；因此本节
+只记录到"已定位并修复基址"，不把触屏写成已打通。
+
+### 8. 工具缺陷记录
+
+* 控制台环固定 16 KiB，单条命令的输出在命令返回前全部入环；超过就会
+  静默丢尾。`SPMI?` 的整表打印正好撞上这一点（捕获 16383 字节），`0110`
+  改为有界报告。
+* `ml_io_map()` 的 `KMA_NOFAIL` 会把"映射太大"变成 panic，而不是返回 0；
+  `bsd/dev/kebab_*.c` 的尺寸常量因此是硬约束。已审计的调用：UFS `0x30000`、
+  USB `0xD000+0x100+0x1000+0x10000`、touch SE `0x4000`+wrap `0x2000`、
+  SPMI `0x1100+0x100000+0x26000`；TLMM 的 16 MiB 是唯一的超限请求。
+* TLMM 的地址不是平坦的：`0109` 只修了尺寸，`0112` 才修 tile 基址。两次
+  都是"地址/尺寸假设"错误，与 PMIC、触屏芯片本身无关；先读后写、把原始
+  值打进日志的做法在这里直接给出了证据。
