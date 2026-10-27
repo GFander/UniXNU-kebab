@@ -2920,7 +2920,7 @@ IMEM 回读行、复位行。
 | 改动文件 | `bsd/dev/kebab_spmi.c`（写路径）、`bsd/dev/kebab_usb.c`（`FASTBOOT` 门控与 PON 调用） |
 | 不需要改动 | `bsd/conf/files` 和 `bsd/kern/bsd_init.c`：`0108` 已把 `kebab_spmi.c` 加进 `files`，并已从 `kebab_usb_start()` 调用 `kebab_spmi_init()`；IMEM 也是在同一函数里映射的 |
 | 系列 | `verify-all.sh`：`94/94` 个补丁文件按文件名顺序应用到 `1b191cb`（`xnu-8796.141.3`）；编号补丁 `0001`–`0114` 共 93 个 |
-| 构建 | 本地 macOS 14.6.1 VM（Xcode 15.4、KDK 13.5）：`kernel.development.kebab` sha256 `54d4a0addcb12b447681796d22b4e7d7959dc3a39350e2acc834a26822f811d1`，17,136,232 字节；0 error。`kebab_spmi.c`/`kebab_usb.c` 共 60 条 warning，其中 4 条是 `0114` 新增的 prototype/格式 warning，均不阻断构建（详见提交说明） |
+| 构建 | 本地 macOS 14.6.1 VM（Xcode 15.4、KDK 13.5）：`kernel.development.kebab` sha256 `54d4a0addcb12b447681796d22b4e7d7959dc3a39350e2acc834a26822f811d1`，17,136,232 字节；0 error。`kebab_spmi.c`/`kebab_usb.c` 共 60 条 warning，其中 4 条是 `0114` 新增的 prototype/格式 warning，均不阻断构建（这 4 条已由 `0115` 清除，见第二十三章） |
 
 ### 7. 仍未闭合的部分
 
@@ -2933,3 +2933,59 @@ IMEM 回读行、复位行。
   瞬间，需要 ABL/XBL 侧日志或 SPMI 抓包。
 * IMEM 的 `restart_reason` 是否被复位清掉、还是被 ABL 改写，仍无法区分；
   但已经不影响结论——PON 原因才是 ABL 使用的信号。
+
+## 二十三、0114 的构建警告清理（0115）
+
+### 1. 四条新增警告的来源
+
+0114 引入的警告里有四条此前不存在，全部落在它自己的新代码上：
+
+| 类型 | 位置 | 说明 |
+| --- | --- | --- |
+| `-Wmissing-prototypes` | `kebab_spmi_pon_writes_enabled()` 的定义 | 函数非 static；`kebab_usb.c` 里有 extern 声明，但定义所在文件没有原型 |
+| `-Wmissing-prototypes` | `kebab_spmi_pon_reason_write()` 的定义 | 同上 |
+| `-Wformat` | `kebab_spmi_init()` 里 chnls 切片映射成功的那条打印 | `%08x` 打印 `vm_offset_t`（`unsigned long`） |
+| `-Wformat` | 同一函数里映射失败的那条打印 | 同上 |
+
+### 2. 0115 的改法
+
+- 在 `kebab_spmi.c` 顶部、`extern void kebab_usb_log_flush(void);` 之后补上两个原型，
+  与 `kebab_usb.c` 里的声明一致，定义于是有声明可对照；
+- 两处 `%08x` 改成 `%08lx`，并把 `slice` 显式转换成 `unsigned long`；
+- 行为不变：映射的仍是同一个 4 KiB 切片，门控仍是 `kebab_pon_write`，
+  两个值打印出的数字也相同。
+
+### 3. 实测：A/B 编译
+
+用构建日志里 `kebab_spmi.c` 自己那条 clang 命令，在 `bsd` 的对象目录下
+（`-include meta_features.h` 需要这个 cwd），对同一文件跑两遍：一遍 0114 的代码，
+一遍应用 0115 之后的代码。
+
+| 版本 | 警告总数 | `kebab_spmi.c` 内 | 其中属于本次四条的 |
+| --- | --- | --- | --- |
+| 0114 代码 | 17 | 14 | 4（`181`、`524` 两条缺原型；`637`、`640` 两条格式） |
+| 0115 代码 | 13 | 10 | 0 |
+
+剩下的 13 条与本补丁无关：3 条来自 `kcdata.h`、`vm_param.h`、`KEBAB.h` 三个头文件，
+10 条在文件内（`kebab_spmi_init`、`kebab_spmi_report`、`kebab_spmi_pon_report`
+的缺原型，6 条 `-Wshadow`，1 条 `-Wdeclaration-after-statement`），0108 到 0113
+就一直存在。
+
+### 4. 实测：整树构建
+
+本地 macOS 14.6.1 VM（Xcode 15.4、KDK 13.5），在 0114 的树上应用 0115 后增量构建：
+
+| 项 | 值 |
+| --- | --- |
+| 结果 | 0 error，`XNU Build Done` |
+| 内核 | `kernel.development.kebab` 17,119,848 字节（0114 为 17,136,232 字节） |
+| sha256 | `6d5d436b171ca2176976b5b4d106aa738cf5a59a577e97ec21019a82c81737e5` |
+| 该文件的警告 | 重新编译过，`kebab_spmi.c` 内 10 条，没有本次四条 |
+
+### 5. 验证边界
+
+- 实测：`verify-all.sh` 95/95 个补丁文件按文件名顺序应用到 `1b191cb`，整脚本
+  6 passed、0 failed、4 skipped；A/B 编译的警告清单；整树构建成功。
+- 未实测：这个内核没有刷机。0115 只改函数原型与格式说明符，不碰任何寄存器访问、
+  映射或门控，所以没有需要真机验证的新行为。
+- 同时改了 `README.md` 的补丁计数：`93 个` 改为 `95 个文件`。
