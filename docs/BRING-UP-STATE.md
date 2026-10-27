@@ -3465,12 +3465,14 @@ KEBAB RPMH: tcs 1: enable 0x00000000 msgid 0x00000000 addr 0x00000000 data 0x000
 `addr` 的 bit 19:16 是加速器类型（`ACCL_TYPE`），`4` = VREG；低 16 位是 VRM
 资源基址。所以：
 
-| 资源 | cmd-db addr | VRM 基址 | ENABLE（`+0x4`） |
-| --- | --- | --- | --- |
-| `ldoa13` | `0x00040c00` | `0x0c00` | `0x0c04` |
-| `ldoc1` | `0x00042f00` | `0x2f00` | `0x2f04` |
+| 资源 | cmd-db addr（完整） | ENABLE（`+0x4`） |
+| --- | --- | --- |
+| `ldoa13` | `0x00040c00` | `0x00040c04` |
+| `ldoc1` | `0x00042f00` | `0x00042f04` |
 
-这与 VRM 资源内偏移 `VOLTAGE 0x0 / ENABLE 0x4 / MODE 0x8` 对得上。
+注意这里的地址必须保留完整 32 位：bit 19:16 是加速器类型（4 = VREG），
+它属于 TCS 命令地址的一部分，不能截断成 `0x0c04`/`0x2f04`。早先版本写成截断值，
+已在 0124 这一轮更正；VRM 资源内偏移仍是 `VOLTAGE 0x0 / ENABLE 0x4 / MODE 0x8`。
 
 ### 5. 第一次跑的一个边界 bug
 
@@ -3489,3 +3491,53 @@ type 3 = CLK），TCS1 全零空闲。这条残留不是本内核发的，读它
 - 实测：`RPMH?` 的完整输出、cmd-db 魔数与版本、两个资源地址、drv-2 与 TCS 状态；
 - 未做：任何 RSC/TCS 写、任何 VRM 请求、任何 PMIC 写；
 - R4（请求编码与离线测试）尚未实现，等这一步的日志确认后再做。
+
+## 三十三、RPMh VRM 编码与主机测试（R4，未进内核）
+
+### 1. 地址纠正
+
+上一节把 ENABLE 地址写成 `0x0c04`/`0x2f04`，那是截断后的值。cmd-db 返回的 32 位
+地址整体参与命令，bit 19:16 的加速器类型（4 = VREG）不能被去掉；`qcom-rpmh-regulator.c`
+也是把完整 `vreg->addr` 加上寄存器偏移。正确值是 `0x00040c04` 与 `0x00042f04`，
+上一节的表已改。
+
+### 2. 模块
+
+`package/KebabRpmhVrm.{h,c}`：纯逻辑，不访问 MMIO、不依赖内核。
+
+- 固定资源表只有 `ldoa13`（`0x00040c00`，3008 mV）与 `ldoc1`（`0x00042f00`，1800 mV）；
+- 编码只产生 `{msgid 0x00010108, addr, data}`；ENABLE 数据固定 1，电压只接受表里的值；
+- `kebab_rpmh_address_known()` 只认两个完整地址，截断值一律拒绝；
+- cmd-db 快照解析：魔数 `0x0c0330db`、版本 1、8 个 slave 槽、每条 24 字节、
+  越界即错、同名重复即错；
+- TCS 状态机：`FREE → BUSY →(submit)→ INFLIGHT → DONE/TIMEOUT/ERROR`，
+  timeout 与 error 都是终态，`release` 只把 `DONE` 放回 `FREE`；
+- 唯一可能的硬件出口是调用者传入的 `kebab_rpmh_sink` 函数指针，测试里传的是记录器。
+
+### 3. 主机测试
+
+`package/KebabRpmhVrmHostTests.c`，42 项断言，全部 PASS：
+
+```text
+$ TMPDIR=$PWD/tmp gcc -std=c11 -Wall -Wextra -Werror -o t \
+      KebabRpmhVrm.c KebabRpmhVrmHostTests.c && ./t
+...
+42 checks, 0 failure(s)
+```
+
+覆盖面：完整地址保留、截断地址/伪造资源拒绝、只允许两条资源、电压只接受 DTS 值、
+cmd-db 缺失/坏魔数/重复/越界、TCS 占用与重复提交、超时与错误后禁止重试、
+负路径上 sink 一次都不被调用。
+
+### 4. 第一次跑暴露的两个问题
+
+- 模块：`submit` 成功后没有进入 in-flight 状态，同一通道可以连续提交两次。
+  新增 `KEBAB_TCS_INFLIGHT`，`complete/timeout/fail` 只从 in-flight 迁移；
+- 测试：越界用例的长度选错（200 字节仍装得下两条），改成 180 并查 `ldoc1`
+  才真正触发越界检查。
+
+### 5. 验证边界
+
+- 只有主机测试：没有编译进内核、没有刷机、没有 MMIO 访问；
+- 真实 TCS 的所有权判断、完成回收策略和“是否存在可到达的硬件写入口”仍是 R5 的
+  审核内容；本轮没有新增内核侧入口。
