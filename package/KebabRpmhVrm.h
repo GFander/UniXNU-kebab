@@ -40,6 +40,7 @@ typedef enum {
 	KEBAB_RPMH_ERR_NO_SINK,
 	KEBAB_RPMH_ERR_SINK_FAILED,
 	KEBAB_RPMH_ERR_NOT_ALLOWED,
+	KEBAB_RPMH_PENDING,
 } kebab_rpmh_status;
 
 typedef struct {

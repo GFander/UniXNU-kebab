@@ -249,7 +249,20 @@ kebab_rpmh_status kebab_tcs_submit(kebab_tcs *tcs, const kebab_rpmh_cmd *cmd,
 		tcs->state = KEBAB_TCS_ERROR;
 		return KEBAB_RPMH_ERR_SINK_FAILED;
 	}
-	return KEBAB_RPMH_OK;
+	/*
+	 * The return value now describes the channel, not the call: a sink
+	 * that completed synchronously leaves DONE, one that failed it leaves
+	 * ERROR, and only a still-running command reports PENDING.  A caller
+	 * must not treat PENDING as "the rail is up".
+	 */
+	if (tcs->state == KEBAB_TCS_DONE) {
+		return KEBAB_RPMH_OK;
+	}
+	if (tcs->state == KEBAB_TCS_ERROR ||
+	    tcs->state == KEBAB_TCS_TIMEOUT) {
+		return KEBAB_RPMH_ERR_SINK_FAILED;
+	}
+	return KEBAB_RPMH_PENDING;
 }
 
 void kebab_tcs_complete(kebab_tcs *tcs)

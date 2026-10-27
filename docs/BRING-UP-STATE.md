@@ -3584,3 +3584,54 @@ tcs 1..8: enable 0x00000000 msgid 0x00000000 addr 0x00000000 data 0x00000000 sta
 
 - 实测：上述只读输出、57 项主机测试；
 - 未做：任何 TCS/VRM/PMIC 写、任何 RPMh 命令；没有新增内核侧写入口。
+
+## 三十五、R4.2 返回值语义与 R5-A2 逐槽审计（0126）
+
+### 1. R4.2：submit 的返回值不再等于“成功”
+
+`kebab_tcs_submit()` 现在按 sink 返回后的最终状态返回：
+
+| 最终状态 | 返回值 |
+| --- | --- |
+| `DONE`（sink 内同步完成） | `KEBAB_RPMH_OK` |
+| `ERROR` / `TIMEOUT` | `KEBAB_RPMH_ERR_SINK_FAILED` |
+| `INFLIGHT`（仍在等硬件） | `KEBAB_RPMH_PENDING` |
+
+调用者不能再把 PENDING 当成“电源已就绪”。主机测试 57 项全部通过，其中同步失败的
+用例现在断言返回错误而不是成功。
+
+### 2. R5-A2：逐槽只读审计
+
+探针把 drv 级寄存器（`+0x00/0x04/0x08/0x0C`）与每个 TCS 的
+`wait/control/status/enable` 分开打印，并遍历每条命令槽（步进 20）。
+
+```text
+drv irq_en 0x00020000 irq_status 0x04010100 irq_clear 0x04800414 prnt_chld 0x800c8104
+tcs 0: wait 0x00000000 control 0x01010000 status 0x00000001 enable 0x00000003
+tcs 0 slot 0: msgid 0x00010108 addr 0x00030000 data 0x5 status 0x00010101 resp 0
+tcs 0 slot 1: msgid 0x00010108 addr 0x00030010 data 0x5 status 0x00010101 resp 0
+tcs 1: wait 0x00000000 control 0x00010000 status 0x00000001 enable 0x00000000
+tcs 2..7: wait 0 control 0x00000000 status 0x00000001 enable 0
+tcs 8: 全零
+```
+
+### 3. 解读
+
+- 上一轮打印的 `common control 0x01010000` 其实是 **TCS0 的窗口**（`tcs_base + 0x14`），
+  不是全局寄存器；真正的 drv 级寄存器是 `+0x00/0x04/0x08/0x0C`；
+- `prnt_chld = 0x800c8104`，按 `DRV_NUM_TCS_MASK/SHIFT` 取 drv-2 的
+  `max_tcs = (config >> 12) & 0x3F = 8`：硬件只有 8 个 TCS，TCS8 不存在。
+  设备树里的 `2+3+3+1` 必须按 Linux 的规则把 CONTROL_TCS 排除在连续数组之外理解；
+- TCS0 两个命令槽都被使能，且都留着 CLK 类请求（`0x30000`、`0x30010`），
+  状态 `0x010101`；继续把 TCS0 排除；
+- TCS1 的 `control` 是 `0x00010000`，与 TCS2..7 的 `0` 不同，说明它不是“完全未配置”；
+  `enable = 0`、没有命令残留，但还不能据此认定可以安全触发，需要确认 bit16 的
+  AMC 语义；
+- `irq_en = 0x00020000`：TCS1 的完成中断没有使能，所以第一次真实发送只能用轮询，
+  不能等中断。
+
+### 4. R5-C1 没有在本轮实现
+
+AMC trigger 的 `CONTROL` 位定义还需要对着 `rpmh-rsc.c` 的触发路径逐项确认；
+在把“已触发”和“已完成”分开之前写 sink，风险大于收益。下一轮先补这段静态分析，
+再按批准的条件实现编译期不可达的写路径。

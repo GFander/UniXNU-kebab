@@ -206,8 +206,8 @@ int main(void)
 	CHECK(sink_calls == 0, "no sink call on that path");
 	memset(&cmd, 0, sizeof(cmd));
 	kebab_rpmh_encode_enable("ldoa13", &cmd);
-	CHECK(kebab_tcs_submit(&tcs, &cmd, recorder, NULL) == KEBAB_RPMH_OK,
-	    "submit to the recorder");
+	CHECK(kebab_tcs_submit(&tcs, &cmd, recorder, NULL) ==
+	    KEBAB_RPMH_PENDING, "async submit reports pending");
 	CHECK(sink_calls == 1 && tcs.submits == 1, "exactly one sink call");
 	CHECK(tcs.state == KEBAB_TCS_INFLIGHT, "state is in flight");
 	CHECK(kebab_tcs_submit(&tcs, &cmd, recorder, NULL) ==
@@ -238,7 +238,7 @@ int main(void)
 	sync_tcs = &tcs;
 	kebab_tcs_acquire(&tcs, 7);
 	CHECK(kebab_tcs_submit(&tcs, &cmd, sync_complete_sink, NULL) ==
-	    KEBAB_RPMH_OK, "synchronous sink returns success");
+	    KEBAB_RPMH_OK, "synchronous completion reports success");
 	CHECK(tcs.state == KEBAB_TCS_DONE,
 	    "state is DONE, not overwritten to INFLIGHT");
 	CHECK(sink_calls == 1, "one sink call");
@@ -246,7 +246,8 @@ int main(void)
 	sink_calls = 0;
 	kebab_tcs_acquire(&tcs, 7);
 	CHECK(kebab_tcs_submit(&tcs, &cmd, sync_fail_sink, NULL) ==
-	    KEBAB_RPMH_OK, "sink that fails the channel returns success");
+	    KEBAB_RPMH_ERR_SINK_FAILED,
+	    "sink that fails the channel is not reported as success");
 	CHECK(tcs.state == KEBAB_TCS_ERROR, "channel is in error");
 	CHECK(kebab_tcs_submit(&tcs, &cmd, recorder, NULL) ==
 	    KEBAB_RPMH_ERR_TCS_STATE, "no retry after in-sink failure");
