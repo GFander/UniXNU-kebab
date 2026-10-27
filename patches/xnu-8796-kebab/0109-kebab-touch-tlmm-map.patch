@@ -1,0 +1,39 @@
+fix(touch): map only the TLMM pins the driver uses
+
+The first hardware boot of the S6SY761 driver panicked in kebab_touch_start:
+
+  panic(cpu 0 caller 0xfffffe0006ab3810):
+      kmem_alloc(..., 16777216, 0x100021): failed with 3 @vm_kern.c:178
+
+kebab_touch_start maps the whole 16 MiB TLMM block, but ml_io_map() allocates
+from the kernel's 8 MiB io_submap (osfmk/arm/io_map.c, IO_MAP_SIZE) and passes
+KMA_NOFAIL, so the allocation failed and kmem_alloc panicked instead of
+returning 0.  The driver only accesses TLMM_CTL(pin) = 0x1000 * pin for the
+four pins it owns (SDA 36, SCL 37, reset 38, IRQ 39), so 0x40000 (GPIO 0..63)
+is enough; the comment records the bound so it is not widened again.
+
+Audit of the other ml_io_map callers in this port: UFS 0x30000, USB DWC3
+0xD000 + QSCRATCH 0x100 + IMEM 0x1000 + SMMU 0x10000, touch SE 0x4000 + wrap
+0x2000, SPMI 0x1100 + 1 MiB + 0x26000.  All are small relative to the 8 MiB
+submap; TLMM was the only over-size request.
+diff --git a/bsd/dev/kebab_touch.c b/bsd/dev/kebab_touch.c
+index 4bb0f3b..3b78da4 100644
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -133,7 +133,15 @@ void kebab_touch_start(void);
+ #define KT_WRAP_PA_DEFAULT      0x00ac0000u
+ #define KT_WRAP_SIZE            0x00002000u
+ #define KT_TLMM_PA              0x0f000000u
+-#define KT_TLMM_SIZE            0x01000000u
++/*
++ * The TLMM block is 16 MiB in the device tree, but ml_io_map() allocates from
++ * the kernel's 8 MiB io_submap and passes KMA_NOFAIL, so an over-size request
++ * panics in kmem_alloc instead of returning 0.  This driver touches only the
++ * per-pin configuration registers, at TLMM_CTL(pin) = 0x1000 * pin; the
++ * highest pin used is GPIO 39 (IRQ), and 0x40000 covers up to GPIO 63.
++ * Do not widen this back to the full block.
++ */
++#define KT_TLMM_SIZE            0x00040000u
+ 
+ #define KT_I2C_ADDR             0x48    /* sec-s6sy761@48 in the device tree */
+ #define KT_PIN_SDA              36      /* qupv3_se13_i2c_active: gpio36 */
