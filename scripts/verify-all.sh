@@ -290,6 +290,32 @@ check_shared_cache() {
 	fi
 }
 
+# Deeper, arithmetic-only proof: every mapping, every Mach-O segment fileoff
+# and every local-symbol value is checked against the plan.  The .symbols
+# nlist scan is the slow part, so require the complete 44-file cache.
+check_shared_cache_plan() {
+	local name=shared-cache-plan
+	local dir=${KEBAB_CACHE:-${KEBAB_USERLAND:-$HOME/ios-userland}/cryptex-cache}
+	local rc n
+
+	if [ ! -d "$dir" ]; then
+		skip $name "no split cache at $dir"
+		return
+	fi
+	n=$(find "$dir" -maxdepth 1 -type f -name dyld_shared_cache_arm64* 2>/dev/null | wc -l)
+	if [ "$n" -ne 44 ]; then
+		skip $name "cache has $n/44 files; deep proof needs the complete extraction"
+		return
+	fi
+	run $name "$python" "$repo/scripts/verify-shared-cache-plan.py" "$dir"
+	rc=$?
+	if [ $rc -eq 0 ]; then
+		pass $name "51 mappings, 2710 images/12603 segments, 8705811 nlist values, slides 0..maxSlide"
+	else
+		fail $name "$(why "$logdir/$name.log" $rc)"
+	fi
+}
+
 # ---------------------------------------------------------------------------
 # 5. the dependency closure
 
@@ -444,6 +470,7 @@ fi
 check_panel
 check_selftest ep0 decode-ep0-probe.py
 check_shared_cache
+check_shared_cache_plan
 check_selftest kdp kdp-cdc-bridge.py
 check_ios_deps
 check_ipsw_list

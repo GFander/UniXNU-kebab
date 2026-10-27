@@ -6878,3 +6878,286 @@ initproc exited -- exit reason namespace 6 subcode 0x1 description: ...
    `proc_platform(p)` 的值。
 5. 只有 panic 文本里出现 `CS_KILLED`，或者 `load_cs`/`imgp_cs` 带
    `CS_HARD`/`CS_KILL`，才回到签名线。
+
+## 六十七、共享缓存映射的算术验证
+
+本节回答一个问题：当 `exec` 真正走到 `kebab_dsc_map_plan()` 时，内核算出来的地址会不会落在磁盘上这 44 个文件说它们该在的地方？结论先写在这里：
+
+* **44 个真实文件上的地址算术是正确的**：`base + cacheVMOffset`、每条 mapping 的 `address/size`、以及 slide 后的地址，全部落在 16 KiB 对齐、互不重叠、且被 `SHARED_REGION_SIZE_ARM64` 覆盖的范围内。
+* **发现并修复了一个 slide 交接 bug**：`kebab_dsc_read_mappings()` 记录了 `sms_slide_start`，却没有记录 `sms_slide_size`；`kebab_dsc_apply_slide()` 又用 `sms_slide_size` 决定是否设置 `VM_PROT_SLIDE`。结果非零 slide 时四条数据 mapping 都不会被 rebase pager 接管。补丁 `0137-kebab-dsc-slide-size.patch` 补上这一行（详见第 4 小节）。这不是地址算术错误，而是把算好的地址交给 VM 时少交了一个长度。
+* 本节所有数字来自 `scripts/verify-shared-cache-plan.py` 对 `/home/albert/ios-userland/cryptex-cache` 的实跑，以及 `bsd/kern/kebab_dyldcache.c`、`osfmk/vm/vm_shared_region.c` 的源码对照。**没有真机启动日志**。
+
+### 1. 窗口：实际需要多少，内核保留多少
+
+先把几个容易混淆的量分开：
+
+| 量 | 值 | 含义 |
+| --- | ---: | --- |
+| `SHARED_REGION_BASE_ARM64` | `0x180000000` | 共享区固定基址；cache 头的 `sharedRegionStart` 也是这个值 |
+| `SHARED_REGION_SIZE_ARM64` | `0x100000000`（4 GiB） | 内核在 `vm_shared_region_lookup()` 里实际保留/创建的窗口 |
+| cache 头 `sharedRegionSize` | `0xaade8000` | 缓存自己声明的 unslid 窗口，不是 slide 的硬边界 |
+| 最高 mapping 结束 - 基址（extent） | `0xaade4000` | 本计划实际需要的 VA 跨度 |
+| 51 条 mapping 的 size 总和 | `0xa2de4000` | 真正有文件内容的 payload |
+| `maxSlide` | `0x55214000` | 缓存允许的最大 slide（严格小于） |
+
+换算成字节：
+
+* 实际需要：`0xaade4000` = 2,866,692,096 B（约 2.67 GiB）。
+* 内核保留：`0x100000000` = 4,294,967,296 B（4 GiB）。
+* 文件 payload：`0xa2de4000` = 2,732,474,368 B。
+* 两者相差 `0x8000000`（128 MiB），不是碎片，而是 **4 个 32 MiB 的洞**：两个 `.dylddata` 文件各在 `__DATA_CONST` 与 `__DATA` 之间、`__DATA` 与尾部 slide-info 页之间留了 32 MiB；具体是 `.27` 和 `.41` 各两个洞。`highest_end - base` 仍然是 `0xaade4000`，因为最后一个洞之后还有 `.27`/`.41` 的尾部 r-- 页。
+
+因此：
+
+* **需要的窗口**（unslid）：`0xaade4000`。
+* **缓存头声明的窗口**：`0xaade8000`，比 extent 多 `0x4000`（一页）。
+* **内核保留的窗口**：`0x100000000`，比 extent 多 `0x5521c000`。
+* 如果只看“文件 payload 总和”，会得到 `0xa2de4000`；它比 extent 少 128 MiB，不能拿它当窗口大小。
+
+`mappingOffset` 这里要特别说明：44 个文件的头里都是 `0x200`，但它是 **mapping 表在文件内的字节偏移**，不是 VA。VA 的基址来自 main 缓存 `subCacheArray` 里的 `cacheVMOffset`，且必须同时等于子缓存头的 `sharedRegionStart` 和该子缓存第一条 mapping 的 `address`。42/42 个子缓存三者全部相等；表里的 `cacheVMOffset` 就是这个值。`.symbols` 不在 `subCacheArray` 里，表中给的是它自己头的 `sharedRegionStart - base`，仅用于说明它落在计划之外。
+
+#### 44 个文件的完整表
+
+`holes` 列 = 文件第一条 mapping 到最后一个 mapping 结束的跨度减去 `mapped bytes`；它只对 `.27`/`.41` 非零（各 `0x4000000`，即两个 32 MiB 洞）。`gap after` 是到下一条**被映射**地址的距离；`.42` 后面的 `0x4000` 是到 `.symbols` 头页的空隙，而 `.symbols` 本身不映射。`overlap` 列由排序后的 51 条 mapping 两两比较得出。
+
+| # | file | cacheVMOffset | first mapping | mapped bytes | holes | maps | end | gap after | overlap |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---|
+| 0 | `dyld_shared_cache_arm64` | 0x0 | 0x180000000 | 0x5c000 | 0x0 | 1 | 0x18005c000 | 0x0 | no |
+| 1 | `dyld_shared_cache_arm64.01` | 0x5c000 | 0x18005c000 | 0x6d1c000 | 0x0 | 1 | 0x186d78000 | 0x0 | no |
+| 2 | `dyld_shared_cache_arm64.02` | 0x6d78000 | 0x186d78000 | 0x14000 | 0x0 | 1 | 0x186d8c000 | 0x0 | no |
+| 3 | `dyld_shared_cache_arm64.03` | 0x6d8c000 | 0x186d8c000 | 0x6e30000 | 0x0 | 1 | 0x18dbbc000 | 0x0 | no |
+| 4 | `dyld_shared_cache_arm64.04` | 0xdbbc000 | 0x18dbbc000 | 0x28000 | 0x0 | 1 | 0x18dbe4000 | 0x0 | no |
+| 5 | `dyld_shared_cache_arm64.05` | 0xdbe4000 | 0x18dbe4000 | 0x6d04000 | 0x0 | 1 | 0x1948e8000 | 0x0 | no |
+| 6 | `dyld_shared_cache_arm64.06` | 0x148e8000 | 0x1948e8000 | 0x58000 | 0x0 | 1 | 0x194940000 | 0x0 | no |
+| 7 | `dyld_shared_cache_arm64.07` | 0x14940000 | 0x194940000 | 0x6dd8000 | 0x0 | 1 | 0x19b718000 | 0x0 | no |
+| 8 | `dyld_shared_cache_arm64.08` | 0x1b718000 | 0x19b718000 | 0x40000 | 0x0 | 1 | 0x19b758000 | 0x0 | no |
+| 9 | `dyld_shared_cache_arm64.09` | 0x1b758000 | 0x19b758000 | 0x6e2c000 | 0x0 | 1 | 0x1a2584000 | 0x0 | no |
+| 10 | `dyld_shared_cache_arm64.10` | 0x22584000 | 0x1a2584000 | 0x60000 | 0x0 | 1 | 0x1a25e4000 | 0x0 | no |
+| 11 | `dyld_shared_cache_arm64.11` | 0x225e4000 | 0x1a25e4000 | 0x6e3c000 | 0x0 | 1 | 0x1a9420000 | 0x0 | no |
+| 12 | `dyld_shared_cache_arm64.12` | 0x29420000 | 0x1a9420000 | 0x5c000 | 0x0 | 1 | 0x1a947c000 | 0x0 | no |
+| 13 | `dyld_shared_cache_arm64.13` | 0x2947c000 | 0x1a947c000 | 0x66c4000 | 0x0 | 1 | 0x1afb40000 | 0x0 | no |
+| 14 | `dyld_shared_cache_arm64.14` | 0x2fb40000 | 0x1afb40000 | 0x60000 | 0x0 | 1 | 0x1afba0000 | 0x0 | no |
+| 15 | `dyld_shared_cache_arm64.15` | 0x2fba0000 | 0x1afba0000 | 0x6d8c000 | 0x0 | 1 | 0x1b692c000 | 0x0 | no |
+| 16 | `dyld_shared_cache_arm64.16` | 0x3692c000 | 0x1b692c000 | 0x6c000 | 0x0 | 1 | 0x1b6998000 | 0x0 | no |
+| 17 | `dyld_shared_cache_arm64.17` | 0x36998000 | 0x1b6998000 | 0x5cb8000 | 0x0 | 1 | 0x1bc650000 | 0x0 | no |
+| 18 | `dyld_shared_cache_arm64.18` | 0x3c650000 | 0x1bc650000 | 0x58000 | 0x0 | 1 | 0x1bc6a8000 | 0x0 | no |
+| 19 | `dyld_shared_cache_arm64.19` | 0x3c6a8000 | 0x1bc6a8000 | 0x666c000 | 0x0 | 1 | 0x1c2d14000 | 0x0 | no |
+| 20 | `dyld_shared_cache_arm64.20` | 0x42d14000 | 0x1c2d14000 | 0x3c000 | 0x0 | 1 | 0x1c2d50000 | 0x0 | no |
+| 21 | `dyld_shared_cache_arm64.21` | 0x42d50000 | 0x1c2d50000 | 0x6d94000 | 0x0 | 1 | 0x1c9ae4000 | 0x0 | no |
+| 22 | `dyld_shared_cache_arm64.22` | 0x49ae4000 | 0x1c9ae4000 | 0x68000 | 0x0 | 1 | 0x1c9b4c000 | 0x0 | no |
+| 23 | `dyld_shared_cache_arm64.23` | 0x49b4c000 | 0x1c9b4c000 | 0x6d78000 | 0x0 | 1 | 0x1d08c4000 | 0x0 | no |
+| 24 | `dyld_shared_cache_arm64.24` | 0x508c4000 | 0x1d08c4000 | 0x78000 | 0x0 | 1 | 0x1d093c000 | 0x0 | no |
+| 25 | `dyld_shared_cache_arm64.25` | 0x5093c000 | 0x1d093c000 | 0x4f94000 | 0x0 | 1 | 0x1d58d0000 | 0x0 | no |
+| 26 | `dyld_shared_cache_arm64.26` | 0x558d0000 | 0x1d58d0000 | 0x38000 | 0x0 | 1 | 0x1d5908000 | 0x0 | no |
+| 27 | `dyld_shared_cache_arm64.27.dylddata` | 0x55908000 | 0x1d5908000 | 0xb214000 | 0x4000000 | 4 | 0x1e4b1c000 | 0x0 | no |
+| 28 | `dyld_shared_cache_arm64.28.dyldlinkedit` | 0x64b1c000 | 0x1e4b1c000 | 0x12f4000 | 0x0 | 2 | 0x1e5e10000 | 0x0 | no |
+| 29 | `dyld_shared_cache_arm64.29` | 0x65e10000 | 0x1e5e10000 | 0x6df8000 | 0x0 | 1 | 0x1ecc08000 | 0x0 | no |
+| 30 | `dyld_shared_cache_arm64.30` | 0x6cc08000 | 0x1ecc08000 | 0x78000 | 0x0 | 1 | 0x1ecc80000 | 0x0 | no |
+| 31 | `dyld_shared_cache_arm64.31` | 0x6cc80000 | 0x1ecc80000 | 0x62ac000 | 0x0 | 1 | 0x1f2f2c000 | 0x0 | no |
+| 32 | `dyld_shared_cache_arm64.32` | 0x72f2c000 | 0x1f2f2c000 | 0x88000 | 0x0 | 1 | 0x1f2fb4000 | 0x0 | no |
+| 33 | `dyld_shared_cache_arm64.33` | 0x72fb4000 | 0x1f2fb4000 | 0x6e34000 | 0x0 | 1 | 0x1f9de8000 | 0x0 | no |
+| 34 | `dyld_shared_cache_arm64.34` | 0x79de8000 | 0x1f9de8000 | 0x98000 | 0x0 | 1 | 0x1f9e80000 | 0x0 | no |
+| 35 | `dyld_shared_cache_arm64.35` | 0x79e80000 | 0x1f9e80000 | 0x6e30000 | 0x0 | 1 | 0x200cb0000 | 0x0 | no |
+| 36 | `dyld_shared_cache_arm64.36` | 0x80cb0000 | 0x200cb0000 | 0x74000 | 0x0 | 1 | 0x200d24000 | 0x0 | no |
+| 37 | `dyld_shared_cache_arm64.37` | 0x80d24000 | 0x200d24000 | 0x6d60000 | 0x0 | 1 | 0x207a84000 | 0x0 | no |
+| 38 | `dyld_shared_cache_arm64.38` | 0x87a84000 | 0x207a84000 | 0x88000 | 0x0 | 1 | 0x207b0c000 | 0x0 | no |
+| 39 | `dyld_shared_cache_arm64.39` | 0x87b0c000 | 0x207b0c000 | 0x52bc000 | 0x0 | 1 | 0x20cdc8000 | 0x0 | no |
+| 40 | `dyld_shared_cache_arm64.40` | 0x8cdc8000 | 0x20cdc8000 | 0x84000 | 0x0 | 1 | 0x20ce4c000 | 0x0 | no |
+| 41 | `dyld_shared_cache_arm64.41.dylddata` | 0x8ce4c000 | 0x20ce4c000 | 0x6198000 | 0x4000000 | 4 | 0x216fe4000 | 0x0 | no |
+| 42 | `dyld_shared_cache_arm64.42.dyldlinkedit` | 0x96fe4000 | 0x216fe4000 | 0x13e00000 | 0x0 | 2 | 0x22ade4000 | 0x4000 | no |
+| 43 | `dyld_shared_cache_arm64.symbols` | 0xaade8000 | 0x22ade8000 | 0 | 0 | 0 | — | — | no (excluded) |
+
+把 51 条 mapping 按地址排序后，前一条的 `end` 都小于等于后一条的 `address`，没有 overlap；只有 4 个 32 MiB 洞和 `.42` 到 `.symbols` 的 `0x4000` 空隙。最低地址是 `0x180000000`（主缓存），最高结束是 `0x22ade4000`（`.42` 的最后一条 `__LINKEDIT`）。
+
+### 2. slide：16 KiB 对齐是硬要求，不是保守选择
+
+`kebab_dsc_apply_slide()` 的顺序是：
+
+1. `slide == 0` 直接返回；
+2. `slide & (KEBAB_DSC_PAGE_SIZE - 1)` 非零 → 拒绝；`KEBAB_DSC_PAGE_SIZE` 是 `0x4000`；
+3. `maxSlide == 0 || slide >= maxSlide` → 拒绝；
+4. `slide > 0xffffffff` → 拒绝（`srfmp->slide` 是 32 位）；
+5. 没有 mapping 带 slide info → 拒绝；
+6. 逐条 mapping 检查 `slide` 后仍在 `[SHARED_REGION_BASE_ARM64, SHARED_REGION_END)` 内，slide-info 地址也不越界。
+
+这里第 2 条和 `vm_shared_region_map_file()` 是重复的：后者在 arm64 上还有
+
+```text
+FOURK_COMPAT: rejecting mis-aligned slide 0x...
+```
+
+因为 `shared_file_mapping_slide_np.sms_address/sms_size` 和 cache 的 mapping 都是 16 KiB 对齐的；加一个 4 KiB 或 8 KiB 的 slide 会让固定地址 `vm_map_enter(..., vmkf_already=TRUE)` 落在非 16 KiB 边界上，必然失败或与相邻 mapping 重叠。**所以 4 KiB/8 KiB slide 必须拒绝，不能“容忍”**。slide-info blob 自己的页是 4 KiB（`PAGE_SIZE_FOR_SR_SLIDE`），但 16 KiB 是 4 KiB 的整数倍，16 KiB slide 同时保持 slide-info 页对齐；两者不矛盾。
+
+实跑结果：
+
+| slide | 结果 | slide 后 extent 结束 | 距 4 GiB 末尾 |
+| ---: | --- | ---: | ---: |
+| `0x0` | ALLOW | `0x22ade4000` | `0x5521c000` |
+| `0x4000` | ALLOW | `0x22ade8000` | `0x55218000` |
+| `0x100000` | ALLOW | `0x22aee4000` | `0x5511c000` |
+| `0x400000` | ALLOW | `0x22b1e4000` | `0x54e1c000` |
+| `0x1000000` | ALLOW | `0x22bde4000` | `0x5421c000` |
+| `0x40000000` | ALLOW（1 GiB 级 ASLR） | `0x26ade4000` | `0x1521c000` |
+| `0x55210000` | ALLOW（`maxSlide - 16 KiB`，最大接受值） | `0x27fff4000` | `0xc000` |
+| `0x55214000` | REJECT（`slide >= maxSlide`） | — | — |
+| `0x55218000` | REJECT（`slide >= maxSlide`） | — | — |
+| `0x1000` / `0x2000` / `0x1234` / `0x1000001` | REJECT（非 16 KiB 对齐） | — | — |
+| `0x100000000` | REJECT（先被 `maxSlide` 拒绝，也不进 32 位字段） | — | — |
+
+对所有 ALLOW 的 slide，验证器还检查了：
+
+* 每个 `address` 都变成 `address + slide`，且仍 16 KiB 对齐；
+* 任意两条 mapping 的相对差不变（顺序也不变）；
+* 4 个 slide-info 地址也统一加 `slide`，不越出 4 GiB；
+* 需要窗口 = `extent + slide`，最大接受 slide 时为 `0xffff4000`，仍比 4 GiB 少 `0xc000`。
+
+注意 `sharedRegionSize` 不能拿来当 slide 的边界：slide `0x4000` 时 mapping 结束正好等于头窗口 `0x22ade8000`，更大的 slide 会超过 `sharedRegionSize`，但仍在 4 GiB 内核窗口内。内核检查的是 `SHARED_REGION_END` 和 `maxSlide`，不是 `sharedRegionSize`。`maxSlide = 0x55214000` 本身也正好等于 `0x100000000 - 0xaade8000 - 0x4000`。
+
+### 3. 跨文件引用：load command 和 plan 的逐段对照
+
+验证器对全部 2,710 个 image 做了下面的检查，而不只是抽两个 dylib：
+
+1. 从 image record 的 `address` 找到包含它的 mapping，计算它在 cache 文件里的偏移：`mapping.fileOffset + (address - mapping.address)`，读 32 字节 `mach_header_64`，检查 magic `0xfeedfacf`、`cputype == CPU_TYPE_ARM64`。
+2. 解析全部 12,603 个 `LC_SEGMENT_64`。对每个非 `__PAGEZERO` 段，要求：
+   * `segment.vmaddr` 在某个 mapping 内；
+   * `segment.vmaddr + segment.vmsize` 不越过该 mapping；
+   * **`segment.fileoff == mapping.fileOffset + (segment.vmaddr - mapping.address)`**；
+   * `segment.fileoff + segment.filesize` 在该文件内，且 `filesize <= vmsize`。
+3. 每个 image 的 `__TEXT.vmaddr` 必须等于 image record 的 `address`；`LC_ID_DYLIB`（dylib 才有）必须等于 image record 的路径。
+4. `imagesText` 的 2,710 项逐项和 image record 对照：`loadAddress`、`pathOffset`、`textSegmentSize` 全部一致。
+5. 全部 46,959 条 `LC_LOAD_DYLIB` / `LC_LOAD_WEAK_DYLIB` / `LC_REEXPORT_DYLIB` / `LC_LAZY_LOAD_DYLIB` / `LC_LOAD_UPWARD_DYLIB` 引用：目标路径必须能在这个 cache 的 image 表里找到，且目标 `address` 在某个 mapping 内。其中 22 条是 weak/lazy 且目标不在 cache 里（例如 libobjc 的 `/usr/local/lib/libobjc-env.dylib`），这是合法的；**required 引用 0 条缺失**。
+
+第 2 条的等式是这次验证里最强的 off-by-one 检查：mapping 的 `fileOffset` 或 `address` 只要错一页，`segment.fileoff` 就对不上，2,710 个 image 里必然有一批立刻报错。实际结果是 **12,603/12,603 全部相等，0 个不匹配**。
+
+抽取两个 dylib 和 dyld 的结果：
+
+| image | 段 | `vmaddr` | `fileoff` | plan |
+| --- | --- | ---: | ---: | --- |
+| `libobjc.A.dylib` | `__TEXT` | `0x1800b8000` | `0x5c000` | `.01[0] + 0x5c000` |
+| `libobjc.A.dylib` | `__DATA_CONST` | `0x1d5964000` | `0x5c000` | `.27[1] + 0x0` |
+| `libobjc.A.dylib` | `__DATA` | `0x1dcd14000` | `0x540c000` | `.27[2] + 0x0` |
+| `libobjc.A.dylib` | `__OBJC_RO` | `0x181db5000` | `0x1d59000` | `.01[0] + 0x1d59000` |
+| `libobjc.A.dylib` | `__LINKEDIT` | `0x217040000` | `0x5c000` | `.42[1] + 0x0` |
+| `libSystem.B.dylib` | `__TEXT` | `0x1d1c2c000` | `0x12f0000` | `.25[0] + 0x12f0000` |
+| `libSystem.B.dylib` | `__DATA_CONST` | `0x1dab664a0` | `0x525e4a0` | `.27[1] + 0x52024a0` |
+| `libSystem.B.dylib` | `__DATA` | `0x1dee7c668` | `0x7574668` | `.27[2] + 0x2168668` |
+| `libSystem.B.dylib` | `__LINKEDIT` | `0x217040000` | `0x5c000` | `.42[1] + 0x0` |
+| `dyld` | `__TEXT` | `0x1a4610000` | `0x202c000` | `.11[0] + 0x202c000` |
+
+子框架的例子（全部目标地址都在 plan 内）：
+
+| 父 image | load | 目标地址 |
+| --- | --- | ---: |
+| `libobjc.A.dylib` | `/usr/lib/libc++abi.dylib` | `0x1d1acb000` |
+| `libobjc.A.dylib` | `/usr/lib/libc++.1.dylib` | `0x1946fe000` |
+| `libobjc.A.dylib` | `/usr/lib/libSystem.B.dylib` | `0x1d1c2c000` |
+| `libSystem.B.dylib` | `/usr/lib/system/libdispatch.dylib` | `0x18db34000` |
+| `libSystem.B.dylib` | `/usr/lib/system/libdyld.dylib` | `0x1a6c80000` |
+| `libSystem.B.dylib` | `/usr/lib/system/libsystem_kernel.dylib` | 已解析并在 plan 内 |
+
+`libSystem.B.dylib` 自己的 32 条 required load 全部解析；`libobjc.A.dylib` 的 4 条 load 里 3 条 required 全部解析，1 条 weak（`libobjc-env.dylib`）不在 cache 里。`dyld` 是 `MH_DYLINKER`，没有 `LC_ID_DYLIB`，也没有 load。
+
+### 4. local symbols、optimization/data 和 slide-info
+
+**local symbols。** `.symbols` 文件 592,101,376 B，头里 `localSymbolsOffset=0x4000`、`localSymbolsSize=0x233891cd`。从 0x4000 读 `dyld_cache_local_symbols_info`：
+
+* `nlistOffset=0xa980`，`nlistCount=8,705,811`；
+* `stringsOffset=0x84e1ab0`，`stringsSize=0x1aea771d`；
+* `entriesOffset=0x18`，`entriesCount=2710`（64 位 `dyld_cache_local_symbols_entry_64`，16 B/项）。
+
+验证结果：
+
+* 2,710 个 entry 的 `dylibOffset + base` 全部等于某个 image 的 `address`，nlist 范围全部合法；
+* 8,705,811 个 nlist 的 `n_value` 非零值全部落在 51 条 mapping 的并集内，**0 个在 plan 外**；最小 `0x1800b9c00`，最大 `0x214fd1d90`；所有 `n_strx` 都在 string table 内；
+* entry 区结束于 `0xe978`，nlist 从 `0xe980` 开始，nlist 结束正好是 string table 起点 `0x84e5ab0`，三段没有重叠。
+
+`.symbols` **不在 plan 里**：它的 `symbolFileUUID=51ccba45...` 被主头识别，但内核只打印名字/大小/UUID，不映射。它自己的头声明的 `sharedRegionStart=0x22ade8000`（正好是 cache 头窗口的末尾），第一条 mapping 是 `0x22ade8000+0x4000`，在 plan 窗口之外。这个排除是正确的：`.symbols` 只用于符号化，dyld 运行时不需要它；如果把它塞进 plan，反而会让映射越过 `sharedRegionSize`。
+
+**optimization/data 区。** 主头里非零的元数据地址都在 plan 内：
+
+| 字段 | 范围 | 所在 mapping |
+| --- | --- | --- |
+| `patchInfoAddr/Size` | `[0x21705d510, 0x21bfee4bf)` | `.42[1]` |
+| `dylibsTrieAddr/Size` | `[0x217040000, 0x21705d510)` | `.42[1]` |
+| `programsPblSetPoolAddr/Size` | `[0x21c100518, 0x21dba9518)` | `.42[1]` |
+| `dylibsPblSetAddr` | `0x21bfee4c0` | `.42[1]` |
+| `programTrieAddr` | `0x21dba9518` | `.42[1]` |
+| `dyldInCacheMH` | `0x1a4610000` | `.11[0]` |
+| `dyldInCacheEntry` | `0x1a46251b0` | `.11[0]` |
+
+`progClosures*`、`dylibsImageArray`、`other*`、`rosetta*` 全为 0；`swiftOptsSize=0`。两个 `.dylddata` 的 `__DATA_CONST`/`__DATA` 都在 `.27`/`.41` 的 mapping 1/2，两个 `.dyldlinkedit` 的 `__LINKEDIT` 在 `.28`/`.42` 的 mapping 1；这些 mapping 的保护位也符合预期（`__DATA_CONST` init r--/max rw-，`__DATA` rw-/rw-，`__LINKEDIT` r--/r--）。所以“优化数据 + 可写数据 + linkedit”都已经在 plan 里，内核不需要额外构造数据区。
+
+**slide-info。** 四条数据 mapping 的 `mappingWithSlide` 项各带一个 v2 blob：
+
+| mapping | blob 地址 | 大小 | 页数 |
+| --- | ---: | ---: | ---: |
+| `.27[1]` `__DATA_CONST` | `0x1e4b0fc08` | `0xa788` | 21,424 |
+| `.27[2]` `__DATA` | `0x1e4b04000` | `0xbc08` | 24,048 |
+| `.41[1]` `__DATA_CONST` | `0x216fdaf58` | `0x5350` | 10,644 |
+| `.41[2]` `__DATA` | `0x216fd4000` | `0x6f58` | 14,232 |
+
+四个 blob 都是 `version=2`、`page_size=0x1000`、`page_starts_count * 0x1000 == mapping.size`、`extras=0`、`deltaMask=0xffff0000000000`、`valueAdd=0`，并且都完整落在同文件尾部那条 r-- mapping 内。内核不需要“生成”slide-info：`vm_shared_region_map_file()` 把 `sms_slide_start/sms_slide_size` 传给 `vm_shared_region_slide()`，后者 `copyin()` 的就是这四个盘上 blob；patch 0103 只是把 `mappingWithSlide` 里的文件偏移换算成映射后的地址。
+
+**这里就是发现的 bug。** `kebab_dsc_read_mappings()` 在 0103 里只写了：
+
+```c
+file->mappings[i].sms_slide_start =
+    file->mappings[found].sms_address +
+    (offset - file->mappings[found].sms_file_offset);
+```
+
+没有写 `file->mappings[i].sms_slide_size = size;`。而 `kebab_dsc_apply_slide()` 的两处关键逻辑都以 `sms_slide_size != 0` 为前提：
+
+```c
+if (m->sms_slide_size != 0 &&
+    (m->sms_slide_start + slide + m->sms_slide_size > KEBAB_DSC_REGION_END)) { ... }
+...
+if (m->sms_slide_size != 0) {
+    m->sms_slide_start += slide;
+    m->sms_max_prot |= VM_PROT_SLIDE;
+}
+```
+
+所以非零 slide 时，四条数据 mapping 的 `VM_PROT_SLIDE` 永远不会被设置；`vm_shared_region_map_file()` 的 `vmsr_num_slides` 是 0，不会安装 lazy rebase pager，但 `srfmp->slide` 仍然把 `sr_slide` 设成非零。dyld 会看到一个已经 slid 的基址，而 __DATA 里的指针从未 rebase。patch `0137-kebab-dsc-slide-size.patch` 在 `sms_slide_start` 赋值之后补上 `sms_slide_size = size`，字段来自同一个 `mappingWithSlide` 项；修改后 4 条 mapping 都会带 `VM_PROT_SLIDE`，`vm_shared_region_map_file()` 的计数和 `mappings_to_slide_cnt` 都是 4，`vm_shared_region_slide()` 才会拿到非零的 blob 长度。
+
+### 5. harness：它是什么、证明了什么、不能证明什么
+
+`scripts/verify-shared-cache-plan.py` 是这次新增的独立验证器。**它不是内核 C 代码的编译产物，也不是 `kebab_dsc_build_plan()` 的拷贝**：内核的 plan builder 依赖 `vnode_t`、UBC、`vm_map_t` 和 `vm_shared_region_map_file()`，没有内核 shim 无法在 host 链接；脚本是按 `bsd/kern/kebab_dyldcache.c` 的规则逐条重写的独立实现，再拿真实 cache 的 Mach-O / nlist 数据反过来交叉验证。因此它不能证明“内核 C 一定按这个规则执行”——`sms_slide_size` 的漏填就是读 C 才发现的，脚本本身看不见这个字段。这一点必须说清楚。
+
+它做的检查：
+
+* 44 个文件、42 个 subcache、UUID 唯一性、`sharedRegionStart == base + cacheVMOffset`、第一条 mapping 地址一致；
+* 每条 mapping 的 16 KiB 对齐、文件范围、保护位、region 内、全局排序后无 overlap；
+* 14 个 slide 组合（0、16 KiB、1/4/16 MiB、1 GiB、`maxSlide` 边界、4 KiB/8 KiB/非对齐、32 位溢出）；
+* 2,710 个 Mach-O、12,603 个段、46,959 条 load、2,710 个 `imagesText`；
+* 8,705,811 个 local symbol 值；
+* `.symbols` 的排除和四条 slide-info blob 的格式/位置。
+
+它只读每个文件的前 4 KiB、mapping 表、slide-info blob、Mach-O 头和 `.symbols` 的 nlist 区，不读 3.3 GB 正文；完整跑一次约 9 秒。`--table` 输出上面的 44 行表，`--json` 输出机器可读摘要；`--selftest` 是 8 条纯算术断言。`scripts/verify-all.sh` 里新增了 `shared-cache-plan` 一项，要求 44/44 文件齐全；`--fast` 下实测 PASS。
+
+内核侧的编译验证：补丁 0136 应用后，在 `~/kebab-build/dxb` 的 KEBAB arm64 树上强制重编 `kebab_dyldcache.o` 并链接，日志出现 `CC kebab_dyldcache.o`，最终 `kernel.development.kebab` 17,174,704 B、`XNU Build Done!`；源码已恢复原状。这是编译验证，不是运行验证。
+
+### 6. 到真机之前仍然未知的部分
+
+算术和磁盘结构已经不是未知项；下面这些仍然只能在板子上回答：
+
+1. `vm_shared_region_map_file()` 对 43 个文件 / 51 条 mapping 的实际返回值；`vmkf_already=TRUE` 下是否会因为某个 mapping 已存在而走 `KERN_MEMORY_PRESENT` 分支。
+2. `kebab_dsc_exec_hook()` 在 pid 1 第一次 `exec` 时，shared region 是否确实为空、`vm_shared_region_start_address()` 是否返回 `0x180000000 + slide`。
+3. `vm_shared_region_slide()` 的 `copyin()` 能否从新任务的 shared region 读到四个 blob（地址在 plan 内，但“用户 map 里可读”是运行时事实）。
+4. 4 GiB 共享区在这块板子的 pmap 上能否完整保留；`vm_shared_region_trim_and_get()` 的 trim 是否会切掉尾部。
+5. 43 个文件在 HFS+ 根卷上的 `VNOP_READDIR`/`vn_rdwr` 行为、root 拥有/SF_RESTRICTED 检查、以及 3.3 GB 读取的耗时和内存压力。
+6. `.symbols` 不映射是否影响 dyld 的崩溃符号化路径（预期不影响运行时，但没有真机）。
+7. 非零 slide 的 ASLR 值是否落在 `maxSlide` 内、以及 dyld 是否接受内核已经 slid 的 shared region；这依赖 dyld 自己的启动参数，不在本移植的控制范围内。
+8. 任何 `exec` 之后的用户态崩溃是否来自 dyld、launchd 或签名策略，而不是映射地址。
+
+### 7. 复现
+
+```sh
+# 纯 host，不碰板子
+python3 scripts/verify-shared-cache-plan.py ~/ios-userland/cryptex-cache --table
+python3 scripts/verify-shared-cache-plan.py --selftest
+
+# 和现有轻量 checker 一起跑
+python3 scripts/check-shared-cache.py ~/ios-userland/cryptex-cache
+./scripts/verify-all.sh --fast
+```
