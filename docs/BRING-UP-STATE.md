@@ -7161,3 +7161,521 @@ python3 scripts/verify-shared-cache-plan.py --selftest
 python3 scripts/check-shared-cache.py ~/ios-userland/cryptex-cache
 ./scripts/verify-all.sh --fast
 ```
+
+## 六十八、最小用户态树
+
+> 目标：把"内核能 exec `/sbin/launchd`"推进到"launchd 能加载一个 plist 并真的
+> 跑起一个进程"。这一步只做主机侧：确定最小集合、逐条核对 Mach-O 依赖、把流打
+> 出来并在主机上 `--verify`。板子仍然不可用，所以所有"应该看到什么"都写成可
+> 对照的日志，而不是"应该能启动"。
+
+结论先写在这里：
+
+* `base.kist` 只有 **5 条**：`/sbin/launchd`、`/usr/lib/dyld`、静态信任缓存、
+  一个只依赖共享缓存的 `zprint`，以及它的 LaunchDaemon plist。**576.0 KiB**
+  线上字节，装完 1,619,682 字节。
+* `cache.kist` 是 **44 条**：43 个被内核映射的分片加 `.symbols`（内核只报告、
+  不映射）。**1018.44 MiB** 线上字节，装完 3.10 GiB。
+* `base.kist` 里没有 `/dev`、`/var`、`/tmp`，也不应该有：安装器的允许清单只有
+  六个前缀、只能写普通文件，`/tmp` 的 01777 还超出 KIST 头里的 0777 模式字段。
+  这三样由**根卷骨架**提供；内核在 `/dev` 上挂 devfs，节点由 devfs 创建，既不是
+  安装文件，也不是 launchd 创建。
+* 本轮唯一的硬 blocker 是**卷的先后顺序**：如果 16 GiB 卷已经用旧版
+  `make-root-volume.py` 写过而没有骨架，`base.kist` 补不回来，必须重建卷（破坏
+  性）或改内核允许清单。本轮把骨架写进了卷生成器，但板子不在，无法验证 macOS
+  那一步。
+* 依赖层面没有 blocker；但第 66 节记录的 **9/6 `exec_copyout_strings()` 失败**
+  仍可能挡在 launchd main 之前，0136 只加了诊断，没有修它。换文件解决不了这一
+  条，判读时不要把它误认成缓存或签名问题。
+
+### 1. 最小集合：每一条为什么在
+
+`base.kist`（`scripts/make-minimal-userland.py` 生成，KIST v1）：
+
+| 目的路径 | 字节 | 模式 | 来源 | 为什么必须在 |
+| --- | ---: | ---: | --- | --- |
+| `/sbin/launchd` | 541,600 | 0755 | `extracted/sbin/launchd` | `load_init_program()` 无条件 exec 这个路径；它是 PID 1，没有替代品 |
+| `/usr/lib/dyld` | 922,912 | 0755 | `extracted/usr/lib/dyld` | exec 的解释器；内核把共享缓存映射到 shared region 之后由它接管 |
+| `/System/Library/Caches/com.apple.kernelcaches/static.trustcache` | 66,289 | 0644 | `~/ios-userland/static.trustcache` | `kebab_cs=15` 时 `kebab_cs_trustcache_load()` 的默认路径；launchd/dyld/zprint 的 cdhash 都在里面，缺了它们不会被标成 platform binary（0136 的 9/e 平台门是另一条独立判断） |
+| `/usr/lib/zprint` | 88,352 | 0755 | `extracted/usr/bin/zprint` | 证明 launchd 真能 spawn 的载荷；五个依赖全在共享缓存里，且会往 stdout 打一张 zone 表 |
+| `/System/Library/LaunchDaemons/com.kebab.zprint.plist` | 529 | 0644 | 生成 | 唯一一个 boot-time LaunchDaemon；`RunAtLoad` + `zprint -L`，把输出送到 `/dev/console` |
+
+`cache.kist`：`/System/Library/Caches/com.apple.dyld/` 下 44 个文件，模式 0644，
+来源 `~/ios-userland/cryptex-cache/`。逐条大小见该目录的 `MANIFEST.txt`；这 44 个
+不是"可选库"，是内核 `kebab_dsc` 计划要解析的整个拆分缓存：
+
+* `dyld_shared_cache_arm64`（393,216 B）是主缓存，只有头和 2,710 条 image 记录；
+* `.01`–`.40`（去掉 `.27`/`.28`/`.41`/`.42` 的特殊后缀）是 text/rodata 分片；
+* `.27.dylddata`、`.41.dylddata` 是两个 `__DATA_CONST`/`__DATA`；
+* `.28.dyldlinkedit`、`.42.dyldlinkedit` 是两个 `__LINKEDIT`；
+* `.symbols`（592,101,376 B）**不被内核映射**，只用于符号化。为了满足"44 个
+  缓存文件"的要求仍在流里；`--no-symbols` 可以打成 43 条的最小版本。
+
+没有进 `base.kist` 的，以及为什么：
+
+| 东西 | 不进的 reason |
+| --- | --- |
+| `/System/Library/CoreServices/SystemVersion.plist` | launchd 不靠它启动；574 B 也不能证明任何东西 |
+| `fileproviderctl`（259,248 B） | 16 个依赖也全在缓存里，但它比 zprint 大、会碰 MobileKeyBag/FileProvider，作为第一个 job 只会引入噪声 |
+| `/usr/libexec/launchd_cache_loader` | 可执行文件不在共享缓存（缓存里只有 dylib），且 `/usr/libexec/` 不在允许清单；它的 boot task 带 `PerformAfterUserspaceReboot`，普通首启被过滤掉 |
+| `/sbin/mount`、`/sbin/fsck`、`/usr/libexec/prng_seedctl` 等 boot task | 同样不在缓存/不允许；普通首启不执行（见第 2.1 节），只有 userspace reboot/restore 才需要 |
+| `/bin/sh`、`/usr/bin/*` 工具 | 第一个 job 不需要 shell；需要时再按同一方法核对依赖 |
+| `/dev` 节点 | 不能作为普通文件安装，见第 3 节 |
+
+### 2. 依赖判定：逐条读 load command
+
+方法：`scripts/ios-deps.py` 读每个 Mach-O 的 `LC_LOAD_DYLIB` / weak / reexport /
+upward，拿主缓存 `imagesText` 的 2,710 条路径做名字解析。判定只有三种：
+**in-cache**（在共享缓存里）、**must-install**（必须是卷上的文件）、**blocker**
+（两边都没有）。
+
+| 可执行文件 | `LC_LOAD_DYLIB` | 判定 |
+| --- | --- | --- |
+| `/sbin/launchd` | `/usr/lib/libSystem.B.dylib` @0x1d1c2c000；`/usr/lib/libobjc.A.dylib` @0x1800b8000 | 两条都 **in-cache**；launchd 本身 **must-install** |
+| `/usr/lib/dyld` | 无任何 `LC_LOAD_DYLIB` | 自包含；**must-install**，不能从缓存取 |
+| `/usr/lib/zprint` | IOKit @0x18e550000；CoreSymbolication @0x1ae49e000；CoreFoundation @0x186de8000；libutil @0x1d1fe1000；libSystem.B @0x1d1c2c000 | 五条都 **in-cache**；zprint 本身 **must-install** |
+| 静态信任缓存 / plist | 不是 Mach-O | 无依赖 |
+
+直接依赖之外，`libSystem.B` 和 `libobjc.A` 自己的依赖闭包也必须在缓存里。本轮
+逐条核对的是上表的直接 `LC_LOAD_DYLIB`；缓存内 dylib 的再导出链没有递归解析
+（那需要把子缓存映射进来读 Mach-O），但主缓存的 `imagesText` 里能找到常用的
+`/usr/lib/system/libsystem_kernel.dylib`、`libsystem_platform.dylib`、
+`libsystem_c.dylib`、`libdispatch.dylib`、`libxpc.dylib` 等条目，且
+`libSystem.B`/`libobjc.A` 两条本身就在 2,710 条 image 记录里。**上表的直接依赖
+没有一条 NOWHERE。**
+
+#### 2.1 `launchd_cache_loader` 与 boot task：为什么不是 blocker
+
+launchd 二进制里带一份 boot task 表（`/System/Library/xpc/launchd.plist` 的编译
+内默认值），其中有 `mount-phase-1/2`、`fsck`、`fips`、`data-protection`、
+`launchd_cache_loader` 等。只看名字会以为最小树必须带 `/sbin/mount`、
+`/sbin/fsck`、`/usr/libexec/*`；但过滤函数（launchd 内 0x10003f868）的规则是：
+
+1. `PerformAlways` 直接运行；
+2. 否则只有对应的 boot 模式标志为真时才运行（`PerformAfterUserspaceReboot`、
+   `PerformInRestore`、`PerformInLeanTestEnvironment`、`PerformInBaseSystem`）；
+3. 没有任何 `Perform*` 标志、也不是 `PerformAlways` 的项，普通首启直接
+   `Skipping boot-task`。
+
+普通首启（不是 userspace reboot、不是 restore）只有 `commit-boot-mode` 和
+`init-with-data-volume` 两个 `PerformAlways` 的 **Block** 项在 launchd 进程内
+处理。`launchd_cache_loader` 带 `PerformAfterUserspaceReboot`，被跳过；
+`mount-phase-1/2`、`fsck` 没有标志，也被跳过。因此最小树不需要这些可执行文件。
+反过来说：**如果以后做 userspace reboot，它们会变成 blocker**，因为
+`/usr/libexec/` 不在允许清单、可执行文件也不在缓存里。
+
+`/System/Library/xpc/launchd.plist` 本身缺了不致命：`open()` 失败只打一行
+`Unable to open /System/Library/xpc/launchd.plist [2:No such file or directory]`，
+然后跳过给 cache loader 准备共享内存那一步。普通首启不跑 cache loader，所以这
+行是良性的；要消掉它，可以把该文件放进卷骨架。
+
+### 3. `/dev`：不是安装文件，也不是 launchd 创建
+
+先看三条硬约束：
+
+1. **安装器不能造设备节点。** `kebab_install.c` 的落盘路径是
+   `namei(CREATE)+vn_create` 建目录、`vnode_open(O_CREAT|O_TRUNC)` 建文件，
+   类型只有 `VREG`。没有 `mknod`，也没有 `VCHR`/`VBLK` 分支。
+2. **`/dev` 不在允许清单里。** 六个前缀是 `/sbin/`、`/usr/lib/`、
+   `/usr/standalone/`、`/System/Library/Caches/com.apple.dyld/`、
+   `/System/Library/Caches/com.apple.kernelcaches/`、`/System/Library/LaunchDaemons/`。
+   在 `/dev/null` 下写一个普通文件也会被在建目录之前拒绝。
+3. **launchd 不创建 `/dev`。** 它的导入表里没有 `mknod`，也没有 `mount`；整个
+   二进制只有一处 `_mkdir` 调用，参数是 `/var/run`、模式 0700。它只假设
+   `/dev/null` 和 `/dev/console` 已经存在。
+
+真正提供节点的是内核：`bsd_init()` 在 root mount 之后调用
+`devfs_kernel_mount("/dev")`；`kernel_mount()` 对 `/dev` 做 `namei`，所以
+**`/dev` 这个目录必须已经在根卷上**。存在时 devfs 自动创建：
+
+| 节点 | 主/次 | 模式 | 谁创建 | 作用 |
+| --- | --- | ---: | --- | --- |
+| `/dev/console` | 0,0 | 0622 | devfs_init | launchd 的日志 fd；job 的 `StandardOutPath` |
+| `/dev/tty` | 2,0 | 0666 | devfs_init | 终端语义 |
+| `/dev/null` | 3,2 | 0666 | devfs_init | launchd 的 `posix_spawn` 文件动作；缺了每个 job 都 spawn 失败 |
+| `/dev/zero` | 3,3 | 0666 | devfs_init | libc/框架的零页 |
+| `/dev/random`、`/dev/urandom` | randomdev | 0666 | random_init | 随机数；dyld/CF 可能用 |
+| `/dev/klog` | 6,0 | 0600 | devfs_init | 内核日志 |
+| `/dev/oslog`、`/dev/oslog_stream` | 7,0 / 8,0 | 0600 | devfs_init | 日志系统；没有 logd 时不用 |
+| `/dev/kebabcon` | UFS 驱动 | 0666 | kebab_ufs_init | 面板控制台的直写通道（备用） |
+| `/dev/ufsroot0`、`/dev/rufsroot0` | UFS 驱动 | 0440 | kebab_ufs_init | 根块设备/字符设备 |
+
+结论：**不要把任何节点当文件装进去**；只在卷上建一个 0755 的 `/dev` 目录，让
+devfs 覆盖它。普通文件即使写进 `/dev/null`，也会遮住 devfs 的节点，语义完全错。
+
+如果 `/dev` 缺失，首启日志会先出现：
+
+```
+devfs_kernel_mount: kernel_mount failed: 2
+```
+
+之后 launchd 仍可能被 exec（它不依赖 `/dev` 才能加载），但它打不开
+`/dev/console`，每个 job 的 `posix_spawn` 都会因为 `/dev/null` 的 `open` 失败而
+失败；见第 8.2 节。
+
+### 4. 权限与所有权
+
+**模式**：KIST 条目头的 `mode` 是 16 位，但打包器和内核都只取 `& 0777`。这意味着
+setuid、setgid、sticky 位**根本进不了这条流**。因此：
+
+| 路径 | 模式 | 理由 |
+| --- | ---: | --- |
+| `/sbin/launchd` | 0755 | Apple 的 root:wheel 可执行文件；PID 1 要可执行 |
+| `/usr/lib/dyld` | 0755 | 同上；解释器必须可执行 |
+| `/usr/lib/zprint` | 0755 | job 的 `Program`；launchd 以 root 执行 |
+| 静态信任缓存 | 0644 | 内核只读；不能是 0600 之外的花样 |
+| LaunchDaemon plist | 0644 | launchd 读；Apple 的 daemon plist 就是 0644 |
+| 44 个缓存文件 | 0644 | 内核/dyld 只读 |
+
+安装器给父目录固定 0755（`ki_mkdirs()` 里写死）。`/tmp` 的 01777 和
+`/private/var/tmp` 的 01777 不可能由 KIST 表达，这也是它们必须在卷骨架里的原因
+之一。
+
+**所有权**：安装器没有 `chown` 路径，条目头也没有 uid/gid 字段。文件由内核里的
+安装器用当前 `vfs_context` 创建，当前路径是 USB 事件线程（内核线程，uid/gid
+0:0），所以最终是 **root:wheel**，恰好与 Apple 的这几个路径一致。但这是"恰好"，
+不是"可指定"：
+
+* 需要 501:501 的 `/var/mobile`、需要其他组的文件，安装器做不了；
+* 需要 setuid 的二进制，模式位被 0777 掩掉，也做不了；
+* 如果安装器将来在非 root 进程上下文里跑，文件会属于那个用户，launchd 对
+  plist 的 root 所有权检查就可能拒绝它。
+
+**plist 要 root 时 launchd 做什么**：如果 plist 写 `UserName=root`，launchd 会
+走 `getpwnam_r("root")`；如果写 `UserName=mobile` 就走 `getpwnam_r("mobile")`。
+这条路径要求 `/etc/passwd`（或目录服务）里有对应条目。没有条目时 job 不 spawn，
+日志是：
+
+```
+Could not find user/group associated with service: ... root/...
+```
+
+即使 plist **不写** `UserName`，launchd 在给 job 建凭据/环境时仍会调用
+`getpwuid_r(0)`；没有 `/etc/passwd` 时同样会失败，日志是：
+
+```
+Could not find uid associated with service: 0: ... 0
+```
+
+所以最小树不能只靠"省略 UserName 就默认 root"：卷骨架里必须有一个 root 的
+passwd 条目。本轮在卷骨架里放：
+
+```
+/etc/passwd       root:*:0:0:System Administrator:/var/root:/bin/sh
+/etc/master.passwd root:*:0:0::0:0:System Administrator:/var/root:/bin/sh
+/etc/group        wheel:*:0:root
+```
+
+（`/etc` 是指向 `private/etc` 的符号链接。）plist 本身不写 `UserName`，这样
+launchd 用自己已解析的 uid 0，不再依赖目录服务里的其他用户；如果写
+`UserName=mobile`，既没有 passwd 条目，安装器也不能把文件 chown 成 501，必然
+失败。
+
+**恢复（SKIP）不会重设模式**：`kebab_install.c` 的 SKIP 判据只有大小和 SHA-256；
+模式不对但内容对的文件会被跳过，旧模式留着。第一次装到空卷没有这个问题；如果
+曾经用错模式装过，先删掉那个文件再重发，或者重建卷。
+
+### 5. 卷骨架：为什么必须改 `make-root-volume.py`
+
+安装器能到的地方只有六个前缀，`/dev`、`/var`、`/tmp`、`/private/etc` 都不在
+里面；它也不能建 sticky 目录、不能建符号链接、不能 mknod。因此这些必须在
+**卷生成**时写进去。`scripts/make-root-volume.py` 现在在 `newfs_hfs` 之后：
+
+1. 以 `hdiutil attach -owners on -mountpoint <tmp>` 挂上新卷；
+2. 建目录：`/dev`、`/private`、`/private/etc`、`/private/tmp`(01777)、
+   `/private/var`、`/private/var/db`、`/private/var/db/com.apple.xpc.launchd`、
+   `.../config`、`/private/var/log`、`/private/var/log/com.apple.xpc.launchd`、
+   `/private/var/root`(0700)、`/private/var/run`、`/private/var/tmp`(01777)；
+3. 写 `/private/etc/passwd`、`/private/etc/master.passwd`、`/private/etc/group`；
+4. 建 `/etc -> private/etc`、`/tmp -> private/tmp`、`/var -> private/var`；
+5. 全部 `chown 0:0`（符号链接用 `lchown`），然后 detach。
+
+这一步需要 root（`hdiutil -owners on` 和 chown），所以脚本在非 root 时直接拒绝，
+并提示 `--skip-skeleton`。VEXT 流只送位图标记为已分配的块，因此骨架的 catalog
+记录会自然进入流，增量是几 KiB 量级。**如果卷已经按旧脚本写过，骨架不在卷上，
+base.kist 补不了**；见第 10 节。
+
+### 6. 两条流与离线校验
+
+生成命令：
+
+```sh
+scripts/make-minimal-userland.py \
+    --out /path/with/2.2GiB/free
+```
+
+它先做三组检查，再调用 `pack-userland.py`，最后调用 `--verify`：
+
+* 每个可执行文件的 `LC_LOAD_DYLIB` 闭包必须在主缓存的 `imagesText` 里；
+* 每个可执行文件的 cdhash 必须在 `static.trustcache` 里；
+* 44 个缓存文件的 size/SHA-256 必须与 `MANIFEST.txt` 一致。
+
+实测（KIST v1，`--compress auto`，64 KiB chunk）：
+
+| 流 | 条目 | 安装字节 | 线上字节 | 压缩比 | 填充 | 最大条目（安装/线上） |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `base.kist` | 5 | 1,619,682 | 589,824（576.0 KiB，9 chunk） | 36.4% | 3,007 B | `/usr/lib/dyld` 922,912 / `/sbin/launchd` 196,822 |
+| `cache.kist` | 44 | 3,330,359,296（3.10 GiB） | 1,067,909,120（1018.44 MiB，16,295 chunk） | 32.1% | 42,289 B | `.symbols` 592,101,376 / 96,448,609 |
+
+两条流合计线上 **1,068,498,944 B**，安装 **3,331,978,978 B**。16 GiB 根卷是
+17,179,869,184 B：装完还剩约 **12.9 GiB**，最大的单个文件 592,101,376 B 只占
+卷的 3.4%，没有任何一条接近 16 GiB。`--verify` 的结论分别是：
+
+```
+base.kist: v1, 5 entries, 1.5 MiB installed, 576.0 KiB on the wire
+verify: 5 entries, all digests match
+
+cache.kist: v1, 44 entries, 3.10 GiB installed, 1018.44 MiB on the wire
+verify: 44 entries, all digests match
+```
+
+`check-shared-cache.py` 对同一目录的主机侧计划：**43 个映射文件、51 条映射、
+0xa2de4000（2,732,474,368）字节**，42/42 个子缓存按 UUID 找到，dylddata=2、
+dyldlinkedit=2，`.symbols` 只报告不映射，区域
+`0x180000000 + 0xaade8000`，最高映射末端 `0x22ade4000`，slack `0x4000`。这些
+数字就是内核 `KEBAB DSC: plan ...` 行应当给出的值。
+
+发送顺序建议：先 `base.kist`（先有 launchd/dyld/trustcache），再 `cache.kist`；
+两者都只写文件，顺序不影响最终内容，但先 base 可以在 cache 传到一半时仍然保留
+一个可诊断的 launchd。每条流都可以先 `INST DRY` 过一遍，真写按
+`send-userland.py` 的 ACK 流控走。
+
+### 7. 成功时控制台应该看到什么
+
+启动参数（首启验证）：
+
+```
+debug=0x14e serial=3 kebabusb=1 rootrw=1 kebab_cs=15 \
+kebab_dsc=1 kebab_dsc_map=1
+```
+
+安装那一轮额外带 `kebab_install=1`，并且为了不在传输中 panic 带
+`kebab_noinit=1`；装完重启时**去掉** `kebab_noinit`。卷写入那一轮另带
+`kebab_vol=1` 和 `CONFIRM`。
+
+成功路径的内核日志按顺序应包含（同一行里的数字应与上面一致）：
+
+```
+KEBAB CS: policy 0xf unsigned trustcache-platform entitlements unsealed-shared-cache
+KEBAB CS: static trust cache v2: 2760 entries x 24 bytes (66264 used, residual 0 bytes), hash types sha1=2 sha256=2758 sha256-trunc=0 sha384=0, sorted
+KEBAB DSC: enabled for "/System/Library/Caches/com.apple.dyld"; kebab_dsc_map=1
+KEBAB DSC: main dyld_shared_cache_arm64: 393216 bytes, uuid 8f970452c9e33e88b114feb1864bc9e0
+KEBAB DSC: region start=0x180000000 size=0xaade8000 end=0x22ade8000 maxSlide=0x55214000
+KEBAB DSC: resolved 42/42 subcaches by uuid; dylddata=2 dyldlinkedit=2
+KEBAB DSC: symbols dyld_shared_cache_arm64.symbols: 592101376 bytes, uuid 51ccba451fc23f19aed047050bdf009a, NOT mapped
+KEBAB DSC: plan 43 files / 51 mappings / 0xa2de4000 bytes (2732474368)
+KEBAB DSC: highest mapped end 0x22ade4000, region slack 0x4000
+KEBAB DSC: map: no shared region at boot (kernel task); deferred to first exec (ENODEV)
+load_init_program: attempting to load /sbin/launchd
+KEBAB CS: exec cdhash b65c36c9f5b287a6a8f5ca83d9427fb55ef04f4e cd=0x7e124+4398 hash=2 slice=0x0 tc=hit platform=1
+KEBAB DSC: first exec (pid 1): attempting the deferred mapping
+KEBAB DSC: map: mapping 43 files / 51 mappings into shared region at 0x180000000
+KEBAB DSC: map: mapped 0xa2de4000 bytes at 0x180000000
+KEBAB DSC: mapping complete; dyld will find the cache already in the shared region
+```
+
+`plan` 之前还有 `validate magic/formatVersion/cacheType/platform`、`validate images
+... == imagesTextOffset`、`validate subcache array ... <= codeSignatureOffset` 等
+校验行；`plan` 之后还有每个文件的 `file NN ...`/`map ...` 行（43 个文件约 100
+行）。它们都应当出现，且最后不能出现 `rejected`、`NO FILE WITH THIS UUID`、
+`NOT mapped`（`.symbols` 那行除外）。
+
+`exec cdhash` 和 `first exec` 之间还会出现几行 `KEBAB EXEC: pid 1
+pre-copyout ...`、`KEBAB EXEC: stack map=...`（0136 加的状态行）；只要没有
+`KEBAB EXEC: copyout-failed` / `copyout stage=...`，它们就是正常的。注意
+`exec cdhash` 在 `first exec` **之前**：CodeDirectory 是装载 launchd 时读的，
+共享缓存映射是 exec 末尾的 hook 才做的。dyld 自己也会有一行
+`KEBAB CS: exec cdhash 684d847c... tc=hit platform=1`，它先于或紧邻 launchd
+那行出现，同样正常。
+
+之后如果 `/dev/console` 的 tty 路径在这块板子上可用，应看到 launchd 自己的一行：
+
+```
+launchd logging initialized. name: launchd pid: 1
+```
+
+再之后是 zprint 的 zone 表（由 launchd 的 `StandardOutPath` 重定向到
+`/dev/console`）。可对照的标志行是表头 `zone name` 和表尾 `ZONE TOTALS`，中间是
+内核 zone 名字和数字。**这张表是"launchd 真的 spawn 了一个 job"的最硬证据**；
+launchd 自己的成功日志可能是 info 级、不一定上控制台，zone 表则一定来自 zprint
+的 stdout。
+
+如果 `/System/Library/xpc/launchd.plist` 不在卷上，成功路径里还会多一行良性的：
+
+```
+Unable to open /System/Library/xpc/launchd.plist [2:No such file or directory]
+```
+
+它不影响首启；要消掉就把该文件放进卷骨架。
+
+### 8. 三种失败：用日志区分
+
+#### 8.1 launchd 找不到缓存
+
+前提是 `kebab_dsc=1 kebab_dsc_map=1` 已给，但缓存目录缺文件/坏文件。首启会在
+`bsd_init` 阶段打印以下之一：
+
+```
+KEBAB DSC: directory /System/Library/Caches/com.apple.dyld has no dyld_shared_cache_arm64* files
+KEBAB DSC: subcache 07 suffix ".06" uuid ...: NO FILE WITH THIS UUID
+KEBAB DSC: plan rejected (error 2); shared cache NOT mapped
+```
+
+因为 `kebab_dsc_plan == NULL`，`kebab_dsc_exec_hook()` 直接返回，**不会**出现
+`first exec (pid 1): attempting the deferred mapping`，也不会出现
+`map: mapped ...`。接着 dyld 起来但找不到 `libSystem`，用户态打印：
+
+```
+dyld[1]: Library not loaded: /usr/lib/libSystem.B.dylib
+  Referenced from: <...> /sbin/launchd
+  Reason: image not found
+```
+
+dyld 走 `abort_with_payload()`，退出原因是 **namespace 6（`OS_REASON_DYLD`）
+code 1**，不是签名；内核 panic 的稳定前缀是：
+
+```
+initproc failed to start -- exit reason namespace 6 subcode 0x1 description: ...
+```
+
+注意这里是 `failed to start` 而不是 `initproc exited`：launchd 在 `LC_MAIN`
+入口（`entryoff=0x169b4`）的第一段代码才写 `kern.initproc_spawned`，dyld 在
+那之前就 abort 了，`initproc_spawned` 仍然是 0，`kern_exit.c` 选
+`prefix_str = "initproc failed to start"`。第 66 节把它写成 `initproc exited`
+是笔误；以 `kern.initproc_spawned` 的置位时机为准。
+
+（如果 exec 在装载 dyld/launchd 时就失败，则是 `Process 1 exec of
+/sbin/launchd failed, errno N`。如果日志停在 9/6 的 `copyout stage=...`，那是
+0136 记录的另一条路径，exec 根本没到 dyld，不要把它读成"缓存缺失"；如果停在
+9/e，是平台门，见 8.3。）**区分点：DSC 的 `NOT mapped` + dyld 的
+`Library not loaded` + namespace 6，且没有 `mapped 0xa2de4000`。**
+
+#### 8.2 launchd 起来了，但每个 job 都 spawn 失败
+
+内核已经打印 `load_init_program: attempting to load /sbin/launchd`，DSC 的
+`mapping complete` 也在；没有 PID 1 的 panic，但 zprint 的 `zone name` 表永远不
+出现。常见子原因和对应的 launchd 行：
+
+| 子原因 | 日志 |
+| --- | --- |
+| `/dev` 缺失，devfs 没挂上 | 首启先有 `devfs_kernel_mount: kernel_mount failed: 2`；launchd 侧是 `Could not spawn process com.kebab.zprint: ...`（`posix_spawn` 打不开 `/dev/null`） |
+| `/etc/passwd` 缺失 | `Could not find uid associated with service: 0: ... 0`，job 不 spawn |
+| plist 解析失败 | `Could not parse plist: path = /System/Library/LaunchDaemons/com.kebab.zprint.plist, error = ...` |
+| plist 权限/所有权不对 | `Caller specified a plist with bad ownership/permissions: path = ...` |
+| `Program` 不存在或不可执行 | `Could not find and/or execute program specified by service: ...` |
+| `StandardOutPath` 打不开 | `Could not spawn process com.kebab.zprint: ...` |
+
+这些是 launchd 的日志，走它打开的 `/dev/console`；如果 `/dev/console` 本身打不开
+（8.2 的第一行），它们也不会出现在 USB 控制台上，只能看到
+`kernel_mount failed: 2` 和此后的沉默。**区分点：没有 `initproc` panic，也没有
+`zone name` 表；如果有 `kernel_mount failed: 2`，先修 `/dev` 骨架，不要怀疑
+launchd。**
+
+#### 8.3 launchd 退出
+
+这里的"退出"要分三种，日志完全不同；**不要一看到 `CS_KILLED` 就归到签名**。
+第 66 节已经纠正过这个误判：
+
+**(a) 9/6：`exec_copyout_strings()` 失败。** 它发生在 exec 已经装载完
+launchd/dyld、正在往新用户栈拷贝字符串/指针/argc 的时候，和 CodeDirectory 无
+关。日志先有 0136 的：
+
+```
+KEBAB EXEC: copyout stage=strings error=14 ptr_size=8 strspace_mod=0 string_size=280 string=0x... ptr=0x... argc=0x...
+```
+
+然后 `kern_sig.c` 对 PID 1 的 SIGKILL 打印：
+
+```
+unexpected SIGKILL of launchd with reason -- namespace 9 code 0x6 description ... (exec L...)
+```
+
+（`(CS_KILLED)` 只有在 `CS_KILLED` 标志真的置位时才会出现；9/6 本身不是签名
+失败。）这一条**不是本树能修的**：0136 只加了诊断，没有改 copyout 逻辑；看到
+它就先按 stage/字段查 exec 的字符串区，而不是怀疑缓存或 plist。
+
+**(b) 9/e：`process_signature()` 的 `PLATFORM_IOS` 平台门。** 0136 把
+`unentitled_ios_sim_launch` 在 KEBAB 下的默认值改成 `true`，这条门应当消失；
+如果还出现 `namespace 9 code 0xe`，检查命令行是否显式写了
+`unentitled_ios_sim_launch=0`，以及 `proc_platform(p)`。它同样不是缓存/签名
+问题。
+
+**(c) 正常/异常退出。** launchd 跑到 main 之后退出，内核先打印 `pid 1 exited`，
+再 panic：
+
+```
+pid 1 exited -- exit reason namespace ... subcode 0x... description ...
+initproc exited -- exit reason namespace ... subcode 0x... description: ...
+```
+
+如果它在到达 main 之前就死（例如 dyld 的 namespace 6），前缀是
+`initproc failed to start`。**区分点：9/6 看 `copyout stage`，9/e 看平台门，
+namespace 6 看共享缓存；三者都有 `pid 1 exited`/`initproc ...` 但原因不同。**
+`CS_KILLED` 只是标志，不是原因分类。
+
+把三种失败并排看：
+
+| 失败 | 首启最早的不同行 | PID 1 panic | zprint 表 |
+| --- | --- | --- | --- |
+| 缓存缺失 | `KEBAB DSC: ... NOT mapped` / `dyld[1]: Library not loaded` | `initproc failed to start -- ... namespace 6 subcode 0x1` | 无 |
+| job 全失败 | `devfs_kernel_mount: kernel_mount failed: 2` 或 launchd 的 `Could not ...` | 无 | 无 |
+| launchd 退出（9/6） | `KEBAB EXEC: copyout stage=...` | `unexpected SIGKILL ... namespace 9 code 0x6` | 无 |
+| launchd 退出（9/e） | 平台门 | `... namespace 9 code 0xe` | 无 |
+| 成功 | `mapping complete` + `exec cdhash ... tc=hit platform=1` | 无 | 有 `zone name`/`ZONE TOTALS` |
+
+### 9. 还没有做的事与边界
+
+1. **卷骨架未在真机/真 macOS 上跑过。** 本节只改了
+   `scripts/make-root-volume.py` 并在 Linux 上做了语法检查；`hdiutil` 那一步
+   需要 macOS + root，板子不在，无法验收。卷生成后应当用
+   `send-volume.py --dry` 和 `VOL?` 先确认大小/空闲块，再真写。
+2. **`/dev/console` 的 tty 输出路径未在板子上验证。** `kmopen -> kmstart ->
+   kmputc -> console_write_char` 这条链在源码上会把字节送进 `_cnputc` 的 USB
+   tee；但补丁 0070 的注释曾说过这条路径"does not complete here yet"。如果实测
+   看不到 launchd/zprint 的输出，把 plist 的 `StandardOutPath`/`StandardErrorPath`
+   改成 `/dev/kebabcon`（只画面板，不走 USB），或者先修 tty 层；这不影响
+   launchd 是否真的 spawn（用 `INST?`/内核日志仍可判断）。
+3. **9/6 的 `exec_copyout_strings()` 失败不是本树能修的。** 0136 只加了
+   `copyout stage=...` 诊断，没有改 copyout 逻辑；如果日志停在那行，先查 exec
+   的字符串区/用户栈，不是缓存、plist 或签名。它和 9/e 的平台门是两条独立的
+   路径（第 66 节）。
+4. **9/e 平台门与信任缓存是两条线，都未在板子上验收。** 0136 把
+   `unentitled_ios_sim_launch` 在 KEBAB 下默认置真；信任缓存则让
+   launchd/dyld/zprint 的 `exec cdhash ... tc=hit platform=1`（cdhash 分别
+   `b65c36c9…`、`684d847c…`、`24c351a1…`）。两者都不该再被概括成
+   `CS_KILLED`。
+5. **`.symbols` 不是启动必需。** 它占 592 MB 安装、96 MB 线上，只用于符号化；
+   最小启动可以 `--no-symbols`。本轮为了"44 个缓存文件"仍保留。
+6. **没有 mobile 用户。** 卷骨架只放 root/wheel；`/var/mobile`、用户域、
+   LaunchAgents 都不在最小树里。任何 `UserName=mobile` 的 plist 都会按 4 节的
+   原因失败。
+7. **本轮提交没有内核补丁。** 改动只有主机脚本和文档；允许清单、devfs、
+   codesign 一行没动（0136/0137 是 origin 上已有的内核补丁，不是这次加的）。
+   如果最终决定不走卷骨架，就必须加 `/dev/`、`/var/`、`/tmp/`、`/private/`
+   到允许清单，并让安装器支持目录 sticky 位/设备节点——那是另一条内核补丁
+   路线。
+
+### 10. blocker：已经写过的 16 GiB 卷
+
+这是本轮唯一会让"流都 verify 通过、但 launchd 仍然起不来"的问题：
+
+* `base.kist` 的 5 条都在六个允许前缀内，能装；
+* 但它**装不出** `/dev`（devfs 的挂载点）、`/private/var`、`/tmp`、
+  `/private/etc/passwd`；
+* 没有 `/dev`，`devfs_kernel_mount` 在 `bsd_init` 就失败，launchd 的每个 job
+  都打不开 `/dev/null`；
+* 没有 `/etc/passwd`，launchd 的 `getpwuid_r(0)` 失败，job 连 uid 都建不起来。
+
+所以顺序必须是：
+
+1. 在 macOS 上用**新版** `scripts/make-root-volume.py` 重建 16 GiB 卷（带骨架），
+   用 `send-volume.py` 写入 `userdata`；写卷时旧根是只读的，写完必须重启，让新
+   卷成为根；
+2. 再发 `base.kist`、`cache.kist`（这一轮带 `kebab_install=1 rootrw=1
+   kebab_noinit=1`）；
+3. 去掉 `kebab_noinit` 重启，按第 7 节观察。
+
+如果板子上的 16 GiB 卷已经用旧脚本写过（没有骨架），`base.kist` 无法补救；
+要么重建卷（会销毁卷上已有内容，`VOL BEGIN` 需要 `CONFIRM`），要么改内核允许
+清单并让安装器支持目录/设备节点。**在卷骨架就位之前，不要用"launchd 起不来"
+去判断签名或共享缓存的问题**——那会是 8.2 的 `/dev` 失败，不是 8.1 或 8.3。
