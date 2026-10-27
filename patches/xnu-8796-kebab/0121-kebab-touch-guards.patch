@@ -1,0 +1,79 @@
+fix(touch): keep a dead SE dead, and gate TOUCHPING on a successful init
+
+Two guards in 0120 were weaker than they read:
+
+  - TOUCHSE cleared kt.se_dead, so re-running it after a failed recovery
+    would hand the same stuck sequencer a fresh set of commands and make the
+    next log unattributable.  A dead SE is now only cleared by a reboot.
+  - TOUCHPING accepted kt.se != 0, but TOUCH? also maps the SE, so a probe
+    alone satisfied the precondition.  Add an explicit se_initialized flag,
+    set only when kt_se_init() returns true (from TOUCHSE and TOUCHINIT), and
+    use it for both TOUCHPING and the state line TOUCH? now prints.
+
+No register behaviour changes; this only tightens when a command may run.
+
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -438,6 +438,7 @@
+ 	bool        raw;
+ 	bool        bb;                 /* kebab_touch_bb=1: GPIO bit-banged I2C */
+ 	bool        se_dead;            /* recovery failed; no more transfers */
++	bool        se_initialized;     /* se_init ran and did not fail */
+ 	vm_offset_t gcc_en;             /* GCC page with the SE13 enable bits */
+ 	vm_offset_t gcc_halt;           /* GCC page with the halt registers */
+ 	bool        tcm_seen;
+@@ -1220,6 +1221,8 @@
+ 		return;
+ 	}
+ 	kt_trace("KEBAB TOUCH: read-only probe begin; no register is written\n");
++	kt_trace("KEBAB TOUCH: state: initialized %u, dead %u\n",
++	    kt.se_initialized, kt.se_dead);
+ 	kt_gcc_probe();
+ 	kt_geni_probe();
+ 	kt_pins_probe();
+@@ -1247,6 +1250,7 @@
+ 	if (!kt_se_init(100000)) {
+ 		return;
+ 	}
++	kt.se_initialized = true;
+ 	kt_identify();
+ 	kt_trace("KEBAB TOUCH: TOUCHINIT end\n");
+ }
+@@ -2159,7 +2163,17 @@
+ 		printf("KEBAB TOUCH: TOUCHSE cannot map SE13 or TLMM\n");
+ 		return;
+ 	}
+-	kt.se_dead = false;
++	/*
++	 * A dead SE is only cleared by a reboot: re-running TOUCHSE into a
++	 * sequencer that failed its own cancel/abort would make the next log
++	 * unattributable, which is exactly what the flag exists to prevent.
++	 */
++	if (kt.se_dead) {
++		printf("KEBAB TOUCH: SE is marked unusable after a failed "
++		    "recovery; reboot before TOUCHSE\n");
++		return;
++	}
++	kt.se_initialized = false;
+ 	kt_trace("KEBAB TOUCH: TOUCHSE begin: pins, reset, se_init\n");
+ 	kt_gcc_probe();
+ 	if (kt.gcc_en != 0 &&
+@@ -2172,6 +2186,7 @@
+ 	if (!kt_se_init(100000)) {
+ 		return;
+ 	}
++	kt.se_initialized = true;
+ 	kt_trace("KEBAB TOUCH: TOUCHSE done; TOUCHPING can be sent\n");
+ }
+ 
+@@ -2181,8 +2196,8 @@
+ 	uint8_t zero = 0;
+ 	int rc;
+ 
+-	if (kt.se == 0) {
+-		printf("KEBAB TOUCH: TOUCHPING needs TOUCHSE first\n");
++	if (!kt.se_initialized) {
++		printf("KEBAB TOUCH: TOUCHPING needs a successful TOUCHSE first\n");
+ 		return;
+ 	}
+ 	if (kt.se_dead) {

@@ -3304,3 +3304,55 @@ KEBAB TOUCH: recovered: GENI_STATUS 0x00000000, last status 0x00000021
 
 - 实测：上述四段日志、恢复路径、`M_IRQ_EN` 前后值；
 - 推断：总线被拉低来自供电；没有量电压，也没有执行任何 PMIC 写。
+
+## 三十、供电只读复核与 RPMh 审核（P1/P2）
+
+### 1. P1 实测：SPMI 与 PON 只读
+
+`SPMI?`：arbiter v5；扫描 512 个 APID，352 个非零映射，其中 3 个映射 PPID
+`0x008`（APID `0x001`/`0x00d`/`0x075`），只有 `0x00d` 的 `write_ee = 0`（本 EE）。
+
+`PON?`：PON subtype `0x0805` 两次读 `0x04`（Gen2），`SOFT_RB_SPARE 0x088f` 两次读
+`0x00`。两条只读通路都正常，用来做后续供电实验前的基线。
+
+### 2. P2 静态：两路触摸电源归 RPMh 管
+
+| 触摸供电 | RPMh 资源 | 目标电压 | DTS 节点 |
+| --- | --- | --- | --- |
+| `pm8150_l13` | `ldoa13` | 3,008,000 µV | `rpmh-regulator-ldoa13` |
+| `pm8150a_l1` | `ldoc1` | 1,800,000 µV | `rpmh-regulator-ldoc1` |
+
+`kona-regulators.dtsi` 里这两路都是 `compatible = "qcom,rpmh-vrm-regulator"`，
+不是 SPMI 寄存器节点。RPMh VRM 的资源内偏移是 VOLTAGE `0x0`、ENABLE `0x4`、
+MODE `0x8`，地址本身来自 SMEM 里的 command DB，不是 PMIC 的 SPMI 地址。
+
+RPMh 的通道是 `/soc/rsc@18200000`（APPS RSC，`drv-id = 2`）的 TCS。也就是说：
+
+- 用 PON 那套 SPMI 写路径直接改 LDO 是错的；
+- 正确做法要么走 RPMh 命令，要么先只读确认状态。
+
+### 3. 对上一轮结论的更正
+
+上一轮把 Gate D 描述成“没有 watermark”，不准确。日志里的
+`write did not complete` 是**第二段等待**（FIFO 写完之后等 CMD_DONE），说明
+watermark 阶段已经通过、数据已经进了 FIFO；之后命令一直 active、没有 NACK、
+没有完成。所以更准确的判断是：FIFO 握手成立，事务卡在总线完成阶段，从机是否
+上电仍未证实。
+
+### 4. P3 的前提（尚未执行）
+
+读 RPMh 状态不是纯 MMIO 读：需要从 SMEM 解析 command DB 得到资源地址，再通过
+TCS 发 READ 命令并等完成，涉及通道所有权与共享状态。开始之前必须先确定哪些
+寄存器读有副作用、驱动的 TCS 占用规则，以及两路 LDO 是否还有别的消费者。
+
+### 5. 0121：门控加固
+
+- 新增独立的 `se_initialized`：只有 `se_init` 成功才置位，`TOUCHPING` 以它为
+  前置条件，不再用“SE 被映射过”当条件；
+- `TOUCHSE` 不再把 `se_dead` 清零：恢复失败的 SE 只能靠重启清除；
+- `TOUCH?` 增加一行 `initialized/dead` 状态。
+
+### 6. 验证边界
+
+- 实测：`SPMI?`、`PON?` 的完整输出；0121 的编译结果见提交说明；
+- 未做：任何 PMIC 或 RPMh 写；0121 未刷机。
