@@ -2539,9 +2539,9 @@ vendor 的 fastboot 路径不是只写 IMEM：
 ## 二十一、SPMI Arbiter 只读探测
 
 本节实现并验证第二十节 6.3 的只读部分。补丁 `0108` 增加 `bsd/dev/kebab_spmi.c`
-与两个控制台命令；`0110` 把 `SPMI?` 的输出压回 16 KiB 控制台环；`0109`/`0111`
-是同一轮真机中触屏驱动的两个独立修复（见第 7 节）。**本节没有写任何 PMIC
-寄存器**：`SPMI?`/`PON?` 只读版本、映射表、ownership 表和 observer 数据，
+与两个控制台命令；`0110` 把 `SPMI?` 的输出压回 16 KiB 控制台环；`0109`/`0111`/
+`0112` 是同一轮真机中触屏驱动的三个独立修复（见第 7 节）。**本节没有写任何
+PMIC 寄存器**：`SPMI?`/`PON?` 只读版本、映射表、ownership 表和 observer 数据，
 SPMI-4 的 masked RMW 仍未实现。
 
 ### 1. 代码与门控
@@ -2549,6 +2549,7 @@ SPMI-4 的 masked RMW 仍未实现。
 | 项 | 值 |
 | --- | --- |
 | 内核补丁 | `0108-kebab-spmi-readonly.patch`（只读探测）、`0110-kebab-spmi-report-fit.patch`（输出长度） |
+| 系列 | 92 个补丁，92/92 按文件名顺序应用到 `1b191cb`（`verify-all.sh` PASS） |
 | 文件 | `bsd/dev/kebab_spmi.c`（新）、`bsd/conf/files`、`bsd/dev/kebab_usb.c` |
 | CI | run `40455214113`，`kernel_sha256 d9061e8a2cc7f37f3063089fbeae3d6841a2e4e67ef7fc93f692d181d51dc3d1`，17,103,000 字节 |
 | 映射 | core `0x0C440000+0x1100`、obsrvr `0x0E600000+0x100000`、cnfg `0x0C40A000+0x26000` |
