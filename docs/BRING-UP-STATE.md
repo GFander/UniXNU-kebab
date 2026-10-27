@@ -6163,3 +6163,222 @@ python send-userland.py --probe big.manifest --skip-list work/vol/logs/have.txt
    `kebab_cs` 的策略位和预期不符，下一步要对比期望/实际 cdhash。
 6. **恢复**：写卷之后先跑 `restore.kist`，再跑 44 个缓存分片；主机上的原件和
    哈希见第 6 节。
+
+## 六十四、panic 不再需要按电源键
+
+> 目标：panic 之后板子要么还有一条能用的控制台，要么自己重启。不能停在
+> `Waiting for remote debugger connection` 里，也不能停在永远拿不到发送门的自旋里
+> 等人按电源键。这一节记三件事：两条死路分别是怎么形成的、补丁 0134 改了什么、
+> 下次在日志里怎么区分"控制台活下来 / 重启了 / 仍然卡住"。
+
+### 1. 两条独立的死路
+
+现场看到的"CDC-ACM 还枚举、每次 bulk-OUT 都超时、没有 fastboot、20 分钟没有
+看门狗复位"可以由两条互不依赖的路径产生。补丁 0134 对两条都做了处理。
+
+**第一条：KDP 等待。** `debug=0x14e` 在 arm64 上带 `DB_NMI`（0x4），
+`panic_init()` 因此把 `panicDebugging` 置为 `TRUE`。panic 走到
+`handle_debugger_trap()` 时，只要 `kdp_explicitly_requested` 为真
+（本板由 `kebabkdp=1` 置位），就会在 `panic_spin_forever()` 之前调用
+`kdp_raise_exception()`；`kdp_connection_wait()` 打印
+
+```
+Using serial KDP.
+Waiting for remote debugger connection.
+```
+
+然后在同一个 CDC-ACM 端口上轮询 KDP 包，直到调试器连上。没有 LLDB 的时候这个
+循环不会退出：端口被 KDP 收走，主机的 `IMEM?` / `PSCI?` / `INST?` 不是控制台
+命令而是被当成 KDP 输入，所以全部没有回应。这是**确定性**的，不需要任何竞态。
+
+**第二条：发送门被 panic 停住的 CPU 留住。** 控制台自己有一套发送门：
+
+* `ud_enter()` 在真正发数据前用 `os_atomic_cmpxchg(&ud.owner, 0, cpu+1)` 记录
+  "哪个 CPU 持有发送门"，并把 IRQ 关掉；`ud_leave()` 在退出时清 `ud.owner`。
+* console 事件线程 `ud_thread()` 没有绑定 CPU，每 1 ms 醒来一次，
+  `ud_enter()` → `ud_poll_locked()` → `ud_leave()`；普通 `printf`、EP0 dump、
+  KDP 回包也都走同一道门。
+* panic 路径用 `DebuggerHaltOtherCores()` → `DebuggerXCallEnter()` 停其它 CPU：
+  先发 `SIGPdebug` IPI，等 `debug_ack_timeout`，超时后再尝试
+  `ml_dbgwrap_halt_cpu()`。如果 panic 恰好撞上事件线程在 `ud_enter()` 里
+  （IRQ 已关，IPI 送不到），那个 CPU 既没有 ack，也没有被正常停住，而
+  `ud.owner` 仍然是它的编号 + 1。
+
+`ud_panic_takeover()` 原来的判据是：
+
+```c
+uint32_t old = os_atomic_load(&ud.owner, acquire);
+if (old) {
+        bool stopped = old == cpu;
+        if (!stopped && old <= MAX_CPUS)
+                stopped = ml_dbgwrap_cpu_is_halted((int)old - 1);
+        if (!stopped) return false;      /* 不抢，永远不抢 */
+        ...
+}
+```
+
+这个判据在本板上不可能为真：
+
+* `ml_dbgwrap_cpu_is_halted()` 只读 Apple CoreSight UTT 窗口里的
+  `DBGWRAP.DBGACK`。KEBAB 的 ADT 由 `scripts/make-kebab-adt.py` 生成，CPU 节点
+  只有 `state` / `reg` / `device_type` / `compatible` / `timebase-frequency` /
+  `bus-frequency`，没有 `coresight-reg` 或 `cpu-IMPL`；于是
+  `configure_coresight_registers()` 不映射 `CORESIGHT_UTT`，
+  `ml_dbgwrap_cpu_is_halted()` 在 `coresight_base[CORESIGHT_UTT] == 0`
+  这一句就返回 `FALSE`。
+* 即使映射了 CoreSight，被 `SIGPdebug` 停住的 CPU 停在 debugger 的等待循环里，
+  也不会置 `DBGACK`；这个 API 表达的是"外部调试器 halt 过"，不是"panic 已经
+  把调度器停了"，两者本来就不重合。
+
+于是接管永远被拒绝，`kebab_usb_panic_spin()` 的旧循环是：
+
+```c
+taken = ud_panic_takeover();
+if (!taken) { delay(1000); continue; }
+```
+
+它既不轮询控制器，也不重启，就停在这两行上。DWC3 的 pull-up 和已经完成的
+枚举还在，所以主机仍然看得到 ttyACM；但没有任何代码再服务端点，每次写都超时。
+这块板没有能把它踢醒的看门狗，于是一停就是几十分钟。
+
+这两条路里，第一条是 `kebabkdp=1` 时必然发生的；第二条是竞态，panic 撞不上
+持有发送门的 CPU 时不会发生（第 62 节里 `kebab_cs=0` 那几次 panic 之后控制台
+还能用，就是门恰好空闲）。所以修复也必须分成两半：**KDP 默认策略**和
+**panic 接管**，缺一不可。
+
+### 2. 修复一：panic 期间无条件接管发送门
+
+`ud_panic_takeover()` 现在先看 `panic_active()`：
+
+* `TRUE`：跳过 `ml_dbgwrap_cpu_is_halted()`。只要 `ud.owner` 或 `ud.rx_owner`
+  非零，就调用 `ud_controller_restart()` 做一次 core reset，把在途的 endpoint
+  command / DMA 全部收回，然后清 `owner` / `owner_depth` / `rx_owner` /
+  `rx_depth`。`ud.log_busy` 也直接清掉（生产者在 panic 里不可能还活着）。
+* `FALSE`：保留原来的"必须证明对方已停"的检查；这条路径不会被 panic 循环
+  调用，只是防御性的。拒绝时打印一行
+  `KEBAB USB: console takeover refused: owner ... is not halted`。
+
+core reset 是必要的：被停住的 CPU 可能留下了未完成的 TRB 或 endpoint command，
+只清软件锁会复用一块所有权还不知道的 DMA 内存。reset 完成后 EP0 重新初始化，
+主机会看到一次断开/重连，重新打开 `/dev/ttyACM0` 即可；panic 日志在 ring 里，
+重连后由 EP0 dump 和 log pump 一起送出。
+
+### 3. 修复二：服务不了就重启
+
+`kebab_usb_panic_spin()` 不再是"接管失败就永远等"：
+
+* 接管失败累计 1000 次（每次 1 ms，约 1 秒）后，打印
+  `KEBAB USB: panic console cannot be serviced (transport takeover refused); rebooting instead of parking`
+  然后走 `ud_platform_restart()` → `PEHaltRestart(kPERestartCPU)` →
+  PSCI `SYSTEM_RESET`。
+* 接管成功但 `ud.dead` 或 `ud.running == 0`（控制器已经 reset 失败 / 端口从未
+  起来）时，同样打印一行，原因分别为 `controller dead` / `console not running`，
+  然后重启。
+* `PEHaltRestart()` 真的返回（固件拒绝 reset）时再打印
+  `KEBAB USB: panic reboot returned; the machine did not reset` 并停在原地；
+  这是唯一还允许"停住"的分支，因为已经没有别的复位手段了。
+
+平台层也补了一个缺口：`KebabPlatformExpert::haltRestart()` 原来只对
+`kPERestartCPU` 做 PSCI reset。panic 的 `kPEPanicRestartCPU` /
+`kPEPanicRestartCPUNoCallouts` 如果没进控制台泵（console 没起来），会落到
+`IODTPlatformExpert::haltRestart()` 返回 -1，随后 `halt_all_cpus()` 把板子
+停死。现在这两个 panic 重启类型也会走 PSCI reset，并打印
+`KEBAB PANIC: no console to service; rebooting via PSCI SYSTEM_RESET`。
+
+### 4. 修复三：默认不再等调试器
+
+`osfmk/kern/debug.c` 的 `panic_init()` 里，KEBAB 现在做：
+
+```c
+if (!kdp_explicitly_requested) {
+        panicDebugging = FALSE;
+}
+```
+
+`kdp_explicitly_requested` 只由两个显式请求置位：`kdp_match_name` 或
+`kebabkdp=1`。因此：
+
+* 普通启动（`debug=0x14e` 但没有 `kebabkdp=1`）：`DB_NMI` 不再把 panic 变成
+  "停在调试器等 KDP"。panic 会正常走到重启决策；如果 USB 控制台可用，
+  平台层把它接成 panic 控制台泵（panic 报告、EP0 dump、端口重开都保留），
+  如果控制台不可用就直接 PSCI 复位。
+* `kebabkdp=1`：`panicDebugging` 保持 `TRUE`，panic 仍然先 trap 到 KDP，
+  `Waiting for remote debugger connection` 和 LLDB attach 的行为不变。
+  这是显式请求，等待调试器是预期行为。
+* `halt_in_debugger` 没有动：`debug=0x14f` 的 `DB_HALT` 仍然在显式
+  `Debugger()` 入口停住；`DB_REBOOT_ALWAYS` 也仍然优先于 KDP。
+
+启动参数与 panic 行为对照：
+
+| 启动参数 | `panicDebugging` | panic 之后 |
+| --- | --- | --- |
+| `debug=0x14e kebabusb=1`（默认） | FALSE | 控制台可用则进 panic 泵；发送门被留住时 reset + 重连；控制台不可用则 PSCI 复位 |
+| 默认 + `kebabkdp=1` | TRUE | 先 trap KDP，打印 `Waiting for remote debugger connection`，等 LLDB；不自动重启（显式请求） |
+| `debug=0x14e` 但无 `kebabusb=1` | FALSE | 没有控制台可服务，panic 重启类型直接 PSCI reset |
+| `debug=0x14f ...` | FALSE（但 `halt_in_debugger=1`） | `DB_HALT` 路径未改；配合 `kebabkdp=1` 时启动/显式 `Debugger()` 仍停在调试器 |
+| 任意 + `DB_REBOOT_ALWAYS` | 不变 | 在 KDP 之前就重启 |
+
+### 5. 日志判据
+
+**A. 控制台活下来，发送门本来是空的。** panic 报告照常从原来的 ttyACM 出来；
+之后 EP0 dump 里：
+
+```
+KEBAB EP0 PROBE: progress 0x........ seq ... req ... phase ... status ...
+KEBAB EP0 STATE: resets=... disconnects=... fences=<不变> ... takeover=0 ...
+KEBAB KDP STATE: host_in=... in_drop=... kdp_in=... kdp_frames=... kdp_out=...
+                 tx_bytes=... owners=0/0/<panic cpu+1> depths=0/0
+```
+
+`fences` 不变（没有 core reset），`owners=0/0/...` 说明发送门和接收锁都已经
+在 panic CPU 手里。端口不用重开，`IMEM?` / `PSCI?` / `INST?` / `REBOOT` 直接
+有回应。
+
+**B. 控制台活下来，但发送门被留住过。** 主机会看到一次 USB 断开/重连
+（同一个 VID/PID，`/dev/ttyACM0` 可能改名）；重新打开端口后，同一组 EP0 dump
+里 `fences` 比 panic 前多 1，`takeover=<非零位图>`（panic 时还 busy 的端点），
+`owners=0/0/<panic cpu+1>`。panic 文本可能在重连后才到，因为它在 ring 里等
+log pump。之后的 `IMEM?` / `REBOOT` 正常。
+
+**C. 重启了（控制台不可服务）。** 如果主机在复位前还读得到，会先看到下列之一：
+
+```
+KEBAB USB: panic console cannot be serviced (transport takeover refused); rebooting instead of parking
+KEBAB USB: panic console cannot be serviced (controller dead); rebooting instead of parking
+KEBAB PANIC: no console to service; rebooting via PSCI SYSTEM_RESET
+```
+
+随后是 `KEBAB REBOOT: PEHaltRestart(kPERestartCPU)`，板子从 boot 重新开始
+（boot 日志、`KEBAB USB: ... running ...` 全部重来）。如果控制器已经 dead，
+上面那行可能根本发不出去；**"没有新日志 + 几秒内重新枚举并从头启动"本身就是
+重启成功的证据**。
+
+**D. 仍然卡住（只应在固件拒绝复位时出现）。** 会看到
+
+```
+KEBAB REBOOT: PEHaltRestart returned <err>, the machine did not reset
+KEBAB USB: panic reboot returned; the machine did not reset
+```
+
+这时才需要物理断电；普通 panic 不应该再走到这里。
+
+**E. `kebabkdp=1` 的预期日志。** `Using serial KDP.` +
+`Waiting for remote debugger connection.`，然后 LLDB attach。没有 attach 时
+停在这里是显式请求的结果，不是本缺陷复发；判断方法是看启动参数里有没有
+`kebabkdp=1`。
+
+### 6. 验证状态与下一步
+
+补丁 0134 只做了代码和编译验证：`kernel.development.kebab` 在
+`MACOS_VERSION=13.5 / KEBAB / DEVELOPMENT` 下构建通过，改动文件没有引入新的
+编译告警（原有的 `-Wdeclaration-after-statement` 误报仍在，属本文件既有风格）。
+板子当前处于 stranded 状态，真机验证要等下一次上电：
+
+1. 默认参数（不带 `kebabkdp`）启动，带 `kebabpanic=1`，在控制台敲 `PANIC!`；
+   预期 A 或 B。重复多次以覆盖发送门竞态。
+2. 带 `kebabkdp=1` 启动再 `PANIC!`；预期 E，LLDB 能 attach，`continue` 后
+   按 KDP 的语义走。
+3. 不带 `kebabusb=1` 启动并制造一次 panic（需要另一个 panic 触发点，或临时
+   把 `kebab_usb_start()` 的入口关掉）；预期 C 的
+   `KEBAB PANIC: no console to service; ...` + 从头启动。
+4. 只有看到 D 才说明固件复位也失败了，需要另行处理 PSCI 路径。
