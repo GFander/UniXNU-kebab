@@ -8765,3 +8765,197 @@ dd if=/dev/kebab_keys bs=24 count=8 2>/dev/null | hexdump -Cv
   都和 `/dev/kebab_touch` 同构，但还没有用户态 reader 实测。
 * **默认关**：不传 `kebab_keys=1` 时 `kebab_keys_start()` 在解析参数后直接
   返回，不读 PMIC、不建线程、不建 `/dev`；普通启动的行为和 0138 一致。
+
+## 七十二、exec 拷贝失败的取页诊断
+
+> 目标：9/6（`EXEC_EXIT_REASON_COPYOUT_STRINGS`）现在只能说明“往新用户栈拷
+> 字符串/指针/argc 时失败了”。第 66 节加的字段能定位到 stage 和三个目标地址，
+> 但回答不了“目标页在当前 map 里到底有没有翻译、是谁把它弄没的”。本节补上
+> 取页层面的四个事实：copyout 跑在哪个 map、失败访问的 FAR/ESR、该页的页表项、
+> 以及审计定义的三条包含关系；另外修掉审计顺手查出的一个 `status.c` 类型 bug。
+>
+> 状态：**完整内核构建通过（DEVELOPMENT_ARM64_KEBAB），真机未执行**。板子
+> stranded，本轮没有刷写、没有硬件日志；下面所有“会看到什么”都是代码路径的
+> 推断。诊断拆成补丁 `0140-kebab-copyout-fault-diag.patch`，`status.c` 的修复
+> 单独放在 `0141-kebab-userstack-sp.patch`（两者无关，回滚/复用互不牵连）。
+
+### 1. 审计结论：几何是对的
+
+第 66 节留下的问题本来有两种可能：栈布局算错，或者布局对但映射/取页不对。
+审计把第一种排除了。
+
+- `USRSTACK64` 在 `bsd/arm/vmparam.h:17` 是 `0x16FE0000`，对 16 KiB 页是对齐
+  的（`0x16FE0000 % 0x4000 == 0`）。默认栈走
+  `thread_userstackdefault()` → `USRSTACK64`，`custom_stack = 0`。
+- `create_unix_stack()`（`bsd/kern/kern_exec.c`）在这条路径上只做两处页运算：
+  `mach_vm_round_page_overflow(load_result->user_stack_alloc_size, &size)` 得到
+  分配长度；`vm_map_trunc_page(load_result->user_stack - size,
+  vm_map_page_mask(map))` 得到分配基址。guard 是
+  `vm_map_trunc_page(size - load_result->user_stack_size,
+  vm_map_page_mask(map))`（`user_stack_size == 0` 时退回 `PAGE_SIZE`），再
+  `mach_vm_protect(map, addr, prot_size, FALSE, VM_PROT_NONE)`。
+- 这里用到的页大小全部来自 map 本身（`vm_map_page_shift(map)` 在 16 KiB 页上
+  是 14），没有残留的 4 KiB 常量：`PAGE_SIZE` 在 `__ARM_16K_PG__` 下是
+  `1 << ARM_PGSHIFT` = `1 << 14`（`osfmk/mach/arm/vm_param.h:72`、
+  `osfmk/arm64/proc_reg.h:1158`）。
+- `exec_copyout_strings()` 的三个目标区间是**纯减法**，不做任何页取整：
+  `string_area = *stackp - string_size`、
+  `ptr_area = string_area - ptr_area_size`、`argc_area = ptr_area - ptr_size`。
+  只要 `*stackp` 等于栈顶，`string_area + string_size == *stackp` 就恒成立。
+
+所以 0136 已经打印的 `stage`、`error`、`ptr_size`、`strspace_mod`、
+`string_size` 和三个目标地址，加上 `create_unix_stack()` 的
+`map/shift/custom/user/alloc/guard`，足以证明算术本身。真正缺的是“这些地址在
+**当前线程的 map** 里有没有翻译”：`copyout()` 的 `copy_validate()`
+（`osfmk/arm64/copyio.c`）只检查 `current_thread()->map` 的
+`vm_map_min()/vm_map_max()`；真正的取页发生在 `_bcopyout` 的
+`COPYIO_RECOVER_RANGE` 触发的 kernel data abort 里，由
+`handle_kernel_abort()`（`osfmk/arm64/sleh.c`）调 `arm_fast_fault()` 或
+`vm_fault()`。这段路径原来什么状态都不留。
+
+### 2. 新增的四个字段（只在失败时打印）
+
+失败时的日志仍以 0136 的 `KEBAB EXEC: copyout stage=...` 开头，后面最多再 4 行。
+下面是一组示意值（`far`/`esr`/`tte` 以真机为准）：
+
+```
+KEBAB EXEC: copyout map cur=0xfffffe9a12345000 alloc=0xfffffe9a12345000 same=1 pid=1 recpid=1
+KEBAB EXEC: copyout fault far=0x16fdfee8 esr=0x96000047 dfsc=0x7 wnr=1 fast=-1 vm=1
+KEBAB EXEC: copyout pmap va=0x16fdfee8 tte=0x0 lvl=3 valid=0 af=0 ap=0 uxn=0 pxn=0
+KEBAB EXEC: copyout checks user_eq_alloc=1 str_eq_user=1 argc_ge_guard=1
+```
+
+四行分别来自：
+
+- **map**：`cur` 是 `current_map()`，也就是 copyio 读的
+  `current_thread()->map`；`alloc` 是 `create_unix_stack()` 记录下来的
+  `map` 参数（调用点是 `get_task_map(task)`）；`same` 是两者指针相等；
+  `pid`/`recpid` 是当前进程和记录里的进程。记录只有一格，**`recpid != pid`
+  时前两行和最后一行属于另一次 exec**，此时 `same` 没有意义。
+- **fault**：由 `handle_kernel_abort()` 在“有 copyio 恢复点、且
+  `arm_fast_fault()`/`vm_fault()` 没解决”时写入。`far`/`esr` 就是该异常的
+  `FAR_EL1`/`ESR_EL1`；`dfsc = esr & 0x3f`；`wnr = (esr >> 6) & 1`（1 = 写）。
+  `fast` 是 `arm_fast_fault()` 的返回值，`vm` 是 `vm_fault()` 的返回值，`-1`
+  表示该函数没有被调用（`fast` 返回 `KERN_PROTECTION_FAILURE` 时不再调
+  `vm_fault`；本机 `XNU_MONITOR=0`，`arm_fast_fault()` 不会返回 2，所以实际
+  只会看到 `fast=-1`）。没记录到 fault 时打印 `copyout fault none`。
+- **pmap**：新增的 `kebab_pmap_probe()`（`osfmk/arm/pmap/pmap.c`），沿
+  `pmap_ttne()` 从 root 走到 leaf，不取锁、不触发 fault。`tte` 是叶级表项
+  原值；`valid` 是表项 bit0（`ARM_TTE_VALID`）；`af` 是 `ARM_PTE_AF`
+  （bit 10）；`ap` 是 `ARM_PTE_AP`（bit 6–7，取值见判定表）；`uxn` 是
+  `ARM_PTE_NX`，`pxn` 是 `ARM_PTE_PNX`；`lvl` 是给出该表项的层级（用户 pmap
+  是 L1–L3，见 `osfmk/arm/pmap/pmap.c:254`，数字表示走到哪一层就断了）。
+  压缩页会显示成 `tte=0x8000...` 且 `valid=0`。
+  不复用 `pmap_get_arm64_prot()` 的原因：它对“没有翻译”和“有翻译但
+  protection 位恰好为 0”都返回 0，并且丢掉 AF——而 AF 正好是区分
+  access flag fault 和缺页的那一位。也不用 `pmap_query_page_info()`：它只给
+  present/compressed 位。
+- **checks**：审计的三条包含关系，直接打印布尔值，读日志的人不用做算术。
+  `user` 是 `p->user_stack`；`alloc_base/alloc_size` 是
+  `create_unix_stack()` 记录的 `addr` 和取整后的 `size`；`guard_base/
+  guard_size` 是 `prot_addr/prot_size`；`string_area`、`string_size`、
+  `argc_area` 是本次 copyout 的实际值。
+
+行数预算：失败路径 1（0136 原有）+ 4 = 5 行，约 400 B；成功路径 0 行。16 KiB
+的 console ring 不会被这个诊断刷爆。
+
+### 3. 字段 → 原因的判定表
+
+先看 `checks`，再看 `same`，最后看 `fault`/`pmap`。三列里任何一列已经能定性
+时，后面的列只用于确认。
+
+| `checks` | `same` / `fault` | `valid` / `af` / `ap` | `dfsc` | `fast` / `vm` | 结论 |
+| --- | --- | --- | --- | --- | --- |
+| 有 0 | — | — | — | — | **几何错**：先修 `USRSTACK64` 对齐、ANYWHERE 回退或 guard 长度，地址都可能没有意义 |
+| 全 1 | `same=0` | — | — | — | **map 不对**：copyout 跑在别的 map 上，栈的分配不在这里 |
+| 全 1 | `fault none` | — | — | — | **没碰到页表**：`EFAULT` 来自 `copy_validate()` 的范围检查（目标不在 `current_thread()->map` 的 `[min,max]` 内，或该 map 是 kernel map 走了 `is_kernel_to_kernel_copy()`）。通常伴随 `same=0`；先查 map，不要查页表 |
+| 全 1 | `same=1` | `valid=0` | `0x4`–`0x7` | `vm=1` | **翻译缺失**：map 里有分配，但这个 pmap 没建表项（`mach_vm_allocate_kernel()` → `pmap_enter()` 这一段） |
+| 全 1 | `same=1` | `valid=1, af=0` | `0x9`–`0xB` | `vm=0` 或 `1` | **AF 没置**：表项在，但 access flag 是 0。属于“权限”一类，不是缺页 |
+| 全 1 | `same=1` | `valid=1, af=1, ap=0/2/3` | `0xD`–`0xF` | `fast=-1` | **权限**：`ap` 的 bit0=0 表示 EL0 不可访问（0/2），`ap=3` 是 EL0 只读而本路径是写。guard 区（`VM_PROT_NONE`）或写保护映射是典型 |
+| 全 1 | `same=1` | `valid=1, af=1, ap=1` | 任意 | `vm=1/3/5/9` | **取页失败**：表项看起来允许 EL0 读写，但 VM 层没解决。`1` = `KERN_INVALID_ADDRESS`（map 里没有覆盖该地址的 entry），`3` = `KERN_NO_SPACE`，`5` = `KERN_FAILURE`，`9` = `KERN_MEMORY_FAILURE` |
+
+`ap` 的取值按 `osfmk/arm64/proc_reg.h:1137`：`0` = EL1 读写、EL0 不可访问，
+`1` = EL1/EL0 读写，`2` = EL1 只读、EL0 不可访问，`3` = EL1/EL0 只读。用户
+可写页必须是 `1`；本路径是写，所以 `3` 也会 fault。`dfsc` 的区间同理：
+`0x4`–`0x7` 是 L0–L3 translation fault，`0x9`–`0xB` 是 L1–L3 access flag
+fault，`0xD`–`0xF` 是 L1–L3 permission fault。
+
+### 4. status.c：用 32 位结构体读 64 位线程状态
+
+`osfmk/arm64/status.c` 的 `thread_userstack()` 在
+`ARM_THREAD_STATE64` 分支里用了 32 位的结构体：
+
+```c
+/* 之前（第 1854 行） */
+sp = ((arm_thread_state32_t *)tstate)->sp;
+```
+
+```c
+/* 之后 */
+sp = ((arm_thread_state64_t *)tstate)->sp;
+```
+
+偏移错在哪里：
+
+| 结构体 | 字段布局 | `sp` 偏移 |
+| --- | --- | --- |
+| `arm_thread_state32_t` | `r[13]`, `sp`, `lr`, `pc`, `cpsr` | `13*4 = 52` (`0x34`) |
+| `arm_thread_state64_t` | `x[29]`, `fp`, `lr`, `sp`, `pc`, `cpsr`, `pad`, `flags` | `31*8 = 248` (`0xF8`) |
+
+所以旧代码读到的是 **x6 的高 32 位**（x6 占 48–55，52 正好是它的上半），再按
+`register_t` 零扩展。真正的 SP 在 248，旧代码从来没读过它。
+
+可见行为：
+
+- `thread_userstack()` 只被 `load_threadstack()`（`bsd/kern/mach_loader.c:2927`）
+  调用，也就是只处理 **`LC_UNIXTHREAD`**；结果决定 `user_stack` 和
+  `custom_stack`，随后交给 `create_unix_stack()`。
+- 正常链接器产出的 `LC_UNIXTHREAD` 里 x6 = 0，旧代码得到 `sp = 0`，走
+  `if (sp)` 的 else 分支 → `USRSTACK64` + `custom_stack = 0`。也就是说这个
+  bug 对典型二进制是**潜伏**的；只有 x6 高半非零时才会把垃圾地址当成用户栈，
+  并把进程标成 custom stack。
+- 一旦命中，进程从错误 SP 起步，调试器随后用 `thread_get_state`/ptrace 读到的
+  SP 就是这个错误值——修复改变的是这条“`LC_UNIXTHREAD` 二进制的初始 SP”，
+  不是运行中线程的状态读取路径。
+- **不影响 launchd**：`/sbin/launchd` 用 `LC_MAIN`，没有 `LC_UNIXTHREAD`，
+  `load_threadstack()` 根本不会被调用，走
+  `thread_userstackdefault()` → `USRSTACK64`。所以 9/6 的症状和这个修复无关，
+  两者是同一轮审计里各自独立的两件事。
+- 这个 bug 来自上游 `xnu-8796.141.3` 本身（`git blame 1b191cb` 指向 Apple
+  的原始提交），不是本移植系列引入的。
+
+同一开关里邻居分支的检查结果：
+
+| 位置 | 检查 | 结论 |
+| --- | --- | --- |
+| `thread_userstack()` `ARM_THREAD_STATE` | 统一结构体按 `is_64bit_data` 取 `ts_64.sp` / `ts_32.sp` | 正确，未改 |
+| `thread_userstack()` `ARM_THREAD_STATE32` | 用 `arm_thread_state32_t`，并拒绝 `is_64bit_data` | 正确，未改 |
+| `thread_entrypoint()` `ARM_THREAD_STATE64` | 用 `struct arm_thread_state64` | 正确，未改 |
+| `machine_thread_get_state/set_state`、`*_to_saved_state`、`thread_set_wq_state32/64` | 32 位路径用 32 位类型，64 位路径用 64 位类型 | 一致，未改 |
+
+即：同一个 switch 里只有 1854 这一处是“32 位类型读 64 位状态”，别的都没有
+这个错误，因此只改这一行，没有顺手改任何其它分支。
+
+### 5. 下一次启动能定什么
+
+按日志自上而下读：
+
+1. `checks` 有 0 → 先回到几何，不要看页表。最可能是 `USRSTACK64` 没对齐、
+   ANYWHERE 回退没更新 `user_stack`，或 guard 长度算错。
+2. `fault none` 或 `same=0` → `EFAULT` 来自 map 选错/地址越界，下一步查
+   `vm_map_switch(get_task_map(task))` 与 `get_task_map()`，不是 pmap。
+3. `same=1` + `valid=0` + `vm=1` → 分配在 VM map 里、pmap 里没有表项。下一步
+   查 `mach_vm_allocate_kernel()` → `vm_map_enter()` → `pmap_enter()` 这条链，
+   以及 16 KiB pmap 的叶级表项是否真的写进了任务的 pmap。
+4. `valid=1` + `af=0` → 表项在但 AF 没置，查 `pmap_enter()` 的 AF 路径。
+5. `valid=1` + `af=1` + `ap=1` + `vm=5/9` → 表项没问题，问题在 VM/pager 更深
+   的一层，按 `vm` 的返回值继续。
+6. 如果 copyout 这次成功了：按第 66 节的推断，接下来应该是 namespace **6**
+   code **1**（dyld 的 `abort_with_payload()`），9/6 这一页就此翻过去，下一个
+   问题是共享缓存映射。
+7. `status.c` 的修复不会改变这次启动的任何一行日志（launchd 走 `LC_MAIN`）。
+   它只在将来 exec 一个带 `LC_UNIXTHREAD` 的用户态二进制时生效，届时应看到
+   正确的初始 SP。
+
+真机没跑之前，这一节的所有“应该”都是代码路径的推断；`far`/`esr`/`tte` 的
+真实值正是下一次启动要补上的证据。
