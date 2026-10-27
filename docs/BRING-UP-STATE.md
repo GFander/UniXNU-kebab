@@ -3356,3 +3356,66 @@ TCS 发 READ 命令并等完成，涉及通道所有权与共享状态。开始�
 
 - 实测：`SPMI?`、`PON?` 的完整输出；0121 的编译结果见提交说明；
 - 未做：任何 PMIC 或 RPMh 写；0121 未刷机。
+
+## 三十一、PWR? 只读电源探针：两路 LDO 都是 Disabled（0122）
+
+### 1. 实现
+
+新增控制台命令 `PWR?`（`bsd/dev/kebab_spmi.c`），全程只读：
+
+- 按 PPID 查 APID 映射，列出命中的 APID 与 `write_ee`；
+- 先读 `+0x04` type、`+0x05` subtype，各读两次要求一致，空设备（0x00/0xff）即停；
+- 通过后才读 `+0x46` enable、`+0x40` range、`+0x41` set，同样两次一致；
+- 另外做一次只读映射表survey：按 SID 统计映射数量，并检查 `0x4000`/`0x4c00`
+  两个 LDO 页在 SID 0–7 上有没有映射；
+- 不写任何 PMIC 寄存器，observer 命令只写 arbiter 自己的 observer 通道。
+
+### 2. 第一次结果：候选 SID 全落空
+
+按最初假设（SID 0 / SID 4）：两个 PPID（`0x04c`、`0x440`）都没有 APID 映射，
+连 type 都读不到。
+
+### 3. 映射表 survey 纠正了 SID
+
+```text
+KEBAB SPMI: PWR: mappings per SID: 0:66 1:51 2:67 3:5 4:43 5:53 6:5 7:0
+KEBAB SPMI: PWR: mapping present for SID 1 base 0x4000 (PPID 0x140)
+KEBAB SPMI: PWR: mapping present for SID 1 base 0x4c00 (PPID 0x14c)
+KEBAB SPMI: PWR: mapping present for SID 2 base 0x4000 (PPID 0x240)
+KEBAB SPMI: PWR: mapping present for SID 5 base 0x4000 (PPID 0x540)
+```
+
+LDO 页挂在 SID 1 和 SID 5 的 USID 上，而不是 0 和 4；SID 2 的 `0x4000` 是
+PM8150B 自己的 LDO1。把目标改成 SID 1 / SID 5 后读取成功。
+
+### 4. 实测：两路都是 Disabled
+
+```text
+PWR: pm8150_l13: SID 1 base 0x4c00 PPID 0x14c
+PWR: pm8150_l13: APID 0x0c9 write_ee 0x4 irq_owner 1
+PWR: pm8150_l13: type 0x04 subtype 0x7b
+PWR: pm8150_l13: enable 0x00 (bit7 0), range 0xc0, set 0x0b
+
+PWR: pm8150a_l1: SID 5 base 0x4000 PPID 0x540
+PWR: pm8150a_l1: APID 0x11b write_ee 0x4 irq_owner 1
+PWR: pm8150a_l1: type 0x04 subtype 0x71
+PWR: pm8150a_l1: enable 0x00 (bit7 0), range 0x08, set 0x07
+```
+
+两路 `enable` 都是 `0x00`，bit7 为 0：**两路 LDO 当前都是关闭状态**。type `0x04`
+是非空外设，subtype `0x7b`/`0x71` 分属不同 LDO 家族（PM8150 与 PM8150L）。
+
+电压没有解码：`range`/`set` 只是原始值，且 enable 为 0 时输出本来就不成立。
+
+### 5. 两个重要附带结论
+
+- 两个 APID 的 `write_ee` 都是 4：这两路 peripheral 在 SPMI 上归 EE4（RPMh 侧）
+  所有，EE0 的写事务会被 arbiter 拒绝；所以即使将来要写，也不该走 SPMI；
+- 读取能成功是因为 observer 通道只读、不需要所有权。这也说明此前“总线被拉低”
+  的猜测与“两路 LDO 关闭”一致：控制器确实没有供电。
+
+### 6. 验证边界
+
+- 实测：`PWR?` 的完整输出（两次读取一致）、启动与 COM7 正常；
+- 未做：任何 PMIC 写、任何 RPMh 命令、任何 I²C 事务；
+- 未证实：LDO 使能位为 0 只说明控制状态；输出端电压没有测量，也没有 ADC 路径。
