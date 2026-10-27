@@ -258,6 +258,22 @@ index 68cadfc..fb904f6 100644
  #endif /* __arm64__ */
  
  /*
+diff --git a/osfmk/arm/pmap/pmap.h b/osfmk/arm/pmap/pmap.h
+index 75f3db0..b50a887 100644
+--- a/osfmk/arm/pmap/pmap.h
++++ b/osfmk/arm/pmap/pmap.h
+@@ -283,6 +283,11 @@ extern void set_mmu_ttb_alternate(uint64_t);
+ extern uint64_t get_tcr(void);
+ extern void set_tcr(uint64_t);
+ extern uint64_t pmap_get_arm64_prot(pmap_t, vm_offset_t);
++
++#if defined(KEBAB)
++/* Kebab bring-up (0140): prints the leaf translation for one user address. */
++extern void kebab_pmap_probe_log(vm_map_t map, vm_map_offset_t va);
++#endif /* KEBAB */
+ #else /* defined(__arm64__) */
+ #error Unsupported architecture
+ #endif /* defined(__arm64__) */
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
 index 4911ff2..dfd54fb 100644
 --- a/osfmk/arm64/sleh.c
