@@ -7679,3 +7679,382 @@ namespace 6 看共享缓存；三者都有 `pid 1 exited`/`initproc ...` 但原�
 要么重建卷（会销毁卷上已有内容，`VOL BEGIN` 需要 `CONFIRM`），要么改内核允许
 清单并让安装器支持目录/设备节点。**在卷骨架就位之前，不要用"launchd 起不来"
 去判断签名或共享缓存的问题**——那会是 8.2 的 `/dev` 失败，不是 8.1 或 8.3。
+
+## 六十九、P1 一键序列
+
+> 目标：把“刷写卷镜像 → 写 16 GiB 根卷 → 刷安装镜像 → 发 base/cache →
+> 不带 `kebab_noinit` 启动并看 launchd”收成一条命令。每个检查点只断言一个
+> 可观察的事实，第一个不符合预期的观察就停止；失败输出必须让刚睡醒的人只看
+> 日志尾部就知道停在哪。
+>
+> 状态：**脚本、离线验证和文档完成，真机未执行**。板子仍处于 stranded 状态，
+> 需要用户物理断电一次；本节所有“预期日志”都来自内核源码、已有真机日志和
+> fake-device 回环，不是这次 P1 的实测记录。
+
+### 1. 入口、产物与默认路径
+
+```sh
+python scripts/bring-up.py --from vol
+```
+
+默认工作目录是 `work/p1/`，全部路径都可以用参数覆盖：
+
+| 默认文件 | 作用 | 关键要求 |
+| --- | --- | --- |
+| `boot-vol.img` | 写卷镜像 | 100,663,296 B；payload TOML 的 `args` 含 `kebab_vol=1` |
+| `boot-inst.img` | 安装镜像 | 同上，但**不含** `kebab_vol=1` |
+| `boot-final.img` | 最终启动镜像 | 不含 `kebab_vol=1`、不含 `kebab_noinit=1`，含 `kebab_dsc=1 kebab_dsc_map=1` |
+| `KebabRoot.vext` | VEXT v1 写卷流 | 1,769,472 B，3 个 extent，内嵌 HFS+ 头 4,194,304 块；必须由**带骨架**的新版 `make-root-volume.py` 生成 |
+| `base.kist` | 最小用户态 | 5 条，`make-minimal-userland.py` 生成 |
+| `cache.kist` | 共享缓存 | 44 条，同一工具生成 |
+
+`KebabRoot.vext` 的 1,769,472 B 是当前三个 extent 的主机实测值；如果卷骨架
+（`/dev`、`/private/var`、`/etc/passwd` 等，见第 68 节）让 catalog 多占了一个
+块，流可能仍然是 1,769,472 B（旧流有 24,496 B padding 可吸收），也可能变成
+下一个 64 KiB 倍数。脚本把大小、extent 数和 data 字节都做成可覆盖参数
+（`--expected-vol-stream`、`--expected-vol-extents`、`--expected-vol-data`）；
+真机前先跑 dry-run，若这三个数字与生成器输出不同，按生成器输出更新，不要
+拿旧数字硬套。
+
+**三张镜像不是可选项。** 启动参数不在 Android boot 头的 `cmdline` 里（那里
+是空的），而是在镜像偏移 `0x800000` 的 payload TOML 的 `args = "..."` 中；
+`fastboot flash boot_b` 只能整张替换，不能改命令行。因此写卷、安装、最终
+启动必须各有一张镜像。脚本在刷写前会读出这张镜像的 `args` 并核对，避免把
+“安装镜像”刷成“写卷镜像”这种一晚回到解放前的事故。
+
+`boot-final.img` 还必须有 `kebab_dsc=1 kebab_dsc_map=1`：没有这两个参数，
+`kebab_dsc_plan` 不会建立，launchd 在 `first exec` 时找不到共享缓存，看到的是
+`KEBAB DSC: ... NOT mapped` 和 `dyld[1]: Library not loaded`，不是签名问题。
+`kebabkdp=1` 默认被拒绝：它是唯一会恢复“panic 停在 KDP 等 LLDB”的参数，
+会破坏 0134 的自动重启语义；确实要调试时加 `--allow-kdp`。
+
+### 2. 检查点清单
+
+| ID | 名字 | 预期观察（失败时就是 expected 字段） |
+| --- | --- | --- |
+| C01 | `precondition.fastboot` | `fastboot devices` 列出板子；否则控制台 `IMEM?` 有回答后发 `FASTBOOT`，40 s 内重新枚举 |
+| C02 | `precondition.slot` | `fastboot getvar current-slot` 为 `b` |
+| C-ARGS | `precondition.args` | 镜像 payload 的 `args` 含本阶段参数、不含禁止参数 |
+| C-BOOT-BANNER | `boot.banner` | 重启后出现 `KEBAB USB: running (DSTS ...)` 且随后 `event thread started` |
+| C-BOOT-NOINIT-* | `boot.noinit` | `KEBAB: kebab_noinit=1: staying in the kernel, no init program` |
+| C-VOL-STREAM | `vol.stream` | VEXT 大小/3 extents/内嵌卷头 `sig 0x482b version 4 bsize 4096 blocks 4194304` |
+| C-VOL-STATUS | `vol.status` | `VOL? gated 1 ... writable 1`，partition 与磁盘卷头 |
+| C-VOL-OLD | `vol.old-header` | 3 行 `VOL OLD vh` + 32 行 `VOL OLD bytes`（512 B 旧卷头） |
+| C-VOL-DRY | `vol.dry` | `VOL PLAN extents 3 bytes 1744896 wire 1769472 volume 17179869184` |
+| C-VOL-WRITE | `vol.write` | `VOL NEW ... bsize 4096 blocks 4194304` 和 `VOL DONE extents 3 ...` |
+| C-VOL-REBOOT | `vol.reboot` | `KEBAB REBOOT: PEHaltRestart(kPERestartCPU)` |
+| C-VOL-MOUNT | `vol.mount` | `KEBAB HFS: KebabRoot: ... total blocks 4194304` |
+| C-INST-GEOM | `install.geometry` | `INST? root rw`，`space ... of 17179869184`，`bsize 4096 blocks 4194304 free > 0` |
+| C-BASE-PRECHECK | `precheck.base` | 5 条 `INST CHECK` 全部 same，或列出 missing/different |
+| C-SEND-BASE | `send.base` | `INST BEGIN ... write`、`INST ACK`、`INST DONE entries 5 ... fail 0` |
+| C-VERIFY-BASE | `verify.base` | 抽样 `INST CHECK` 的大小和 SHA-256 与 KIST 头一致 |
+| C-CACHE-PRECHECK | `precheck.cache` | 44 条 `INST CHECK` 全部 same，或列出 missing/different |
+| C-SEND-CACHE | `send.cache` | `INST DONE entries 44 ... fail 0`，并记录耗时 |
+| C-VERIFY-CACHE | `verify.cache` | 抽样（含最大 `.symbols`）大小和 SHA-256 一致 |
+| C-FINAL | `final.launchd` | 无 CS_KILLED/initproc/DSC 失败；出现 `launchd logging initialized` 或 zprint 的 `zone name`/`ZONE TOTALS` |
+
+脚本的 `checkpoint` 行、`[ OK ]`/`[FAIL]` 行和最终 summary 都带 ID；失败时
+`checkpoint:` 字段就是这里的一行。注意 `C-VOL-OLD` 会出现两次（`VOL DRY` 和
+`VOL BEGIN` 各打印一次旧卷头），这是内核行为，不是重复执行。
+
+### 3. 每阶段的启动参数
+
+基础参数沿用 `board.toml` 的 `[payload]`：`-v -enable_kprintf_spam
+startup_debug=1 serial=3 debug=0x14e cpus=1 rd=ufsroot0 ufsroot=userdata
+ufsrw=1 rootrw=1 kebabusb=1 keepsyms=1`。P1 真正关心的是下面这些：
+
+| 阶段 | 相对基础集的增删 | 为什么 |
+| --- | --- | --- |
+| 写卷 | `+ kebab_vol=1 + kebab_noinit=1 + kebab_install=1 + kebab_pon_write=1 + kebab_cs=15` | 打开 VOL 写门、把 init 停在核内、允许 INST 诊断、写 PON/IMEM、信任缓存策略 |
+| 安装 | `- kebab_vol`，其余同上 | 新卷按 `rootrw=1` 读写挂载；不能带 `kebab_vol`，否则新根又被强制只读 |
+| 最终 | `- kebab_vol - kebab_noinit`，`+ kebab_dsc=1 + kebab_dsc_map=1` | 让 init 真正 exec launchd，并让 DSC 在 first exec 时映射共享缓存 |
+
+两个容易漏掉的点：
+
+1. **`ufsrw=1` 是写路径的门，不是可选项。** 题目里的短参数表只写了
+   `rootrw=1`；实际 `kebab_vol_begin()` 先检查 `kebab_ufs_writable()`，没有
+   `ufsrw=1` 会直接打印 `VOL refused: userdata is read-only; boot with
+   ufsrw=1`，一个字节都不写。安装路径同理。脚本把 `ufsrw=1` 和
+   `kebabusb=1` 一起作为基础要求检查。
+2. **`kebab_cs=15` 不等于签名问题已解决。** 它只打开 trustcache/platform、
+   entitlement 和 unsealed shared cache 四位；launchd 是否 `CS_KILLED` 仍要看
+   cdhash 是否命中静态信任缓存。最终启动把它当失败信号，而不是成功保证。
+
+### 4. 每个阶段具体断言什么
+
+#### 4.1 前置：只信 `fastboot devices`
+
+COM7 的 PnP 项可以在内核 halted 时继续存在，因此“端口能打开”不代表板子活着。
+前置阶段先跑 `fastboot devices`：
+
+* 有设备：直接用，记录 `current-slot`，要求 `b`。
+* 没有设备：用控制台发 `IMEM?`；有回答才发 `FASTBOOT`。`FASTBOOT` 需要
+  `kebab_pon_write=1`，会写 PON 原因和 IMEM cookie，然后 PSCI reset；看到
+  `KEBAB FASTBOOT: IMEM read back ... MATCH` 后 40 s 内轮询 `fastboot devices`。
+* 两者都没有：前置失败，提示需要物理断电；不会去猜端口状态。
+
+如果控制台还能回答，脚本会顺手读一次 `INST?`（失败再读 `VOL?`）记录当前根卷
+几何，供 resume 判断。
+
+#### 4.2 写卷：旧卷头、DRY、BEGIN、重启挂载
+
+1. 刷 `boot-vol.img`，重启，等 `KEBAB USB` 启动行和
+   `KEBAB: kebab_noinit=1`，再发一次 `IMEM?` 证明命令通道真的能收发。
+2. `VOL?`：要求 `gated 1`、`writable 1`、`chunk 65536`，并看到 partition 和
+   磁盘卷头。`writable 0` 就是 `ufsrw=1` 缺失。
+3. `VOL DRY 1769472`：内核先读旧卷头并打印 3 行字段 + 32 行十六进制，然后
+   打印 `VOL BEGIN 1769472 volume 0 dry chunk 65536`。**注意 dry 的 volume 字段
+   是 0**：`ud.vol_size` 在 `VOL DRY` 时没有值，真正的 16 GiB 要等流头解析后
+   才出现在 `VOL PLAN ... volume 17179869184`。把这两个数字混为一谈会让
+   检查点在真机上误报。
+4. 发 27 个 64 KiB 块，每块等 `VOL ACK <累计字节>`；最后要求
+   `VOL PLAN extents 3 bytes 1744896 wire 1769472 volume 17179869184`。
+   dry 的结束行是 **`VOL PLAN`，不是 `VOL DONE`**。
+5. `VOL BEGIN 1769472 17179869184 CONFIRM`：命令必须是两个数字在前、字面量
+   `CONFIRM` 在后，**没有卷名**。KebabRoot 这个名字只在流里的 HFS+ 头中。
+   内核重新打印旧卷头；脚本要求恰好 3 + 32 行，然后发同样的 27 块。
+6. 结束时要求 `VOL NEW vh ... bsize 4096 blocks 4194304` 和
+   `VOL DONE extents 3 ...`。`VOL NEW` 的 512 B 是从设备读回并和流逐字节
+   比较通过后才打印的；这是写卷真正的提交点。
+7. 发 `REBOOT`，要求 `KEBAB REBOOT: PEHaltRestart(kPERestartCPU)`；同一张
+   `boot-vol.img` 再次启动后要求
+   `KEBAB HFS: KebabRoot: block size 4096, total blocks 4194304`。这一行才是
+   “新卷已经替代旧卷”的挂载证据。
+8. **卷里必须有骨架。** 新版 `make-root-volume.py` 会在 `newfs_hfs` 之后写入
+   `/dev`、`/private/var` 及其子目录、`/private/tmp`、`/etc`/`/tmp`/`/var`
+   符号链接和 `root` 的 passwd/group 条目。安装器只能写六个允许前缀下的普通
+   文件，`base.kist` 补不了这些路径；如果用了旧脚本的流，最终启动会在
+   `devfs_kernel_mount: kernel_mount failed: 2` 处失败，而不是 launchd 的
+   签名问题。P1 目前**没有控制台命令能直接检查骨架**（`INST CHECK` 只接受
+   文件且路径必须在允许清单内），所以这条只能靠生成卷时使用新脚本保证；
+   这是本节明确记录的一个可观察性缺口。
+
+#### 4.3 安装镜像：几何与空闲空间
+
+刷 `boot-inst.img` 并重启，等 noinit 行，发 `INST?`，要求：
+
+```
+INST? gated 1 active 0 dry 0 root rw chunk 65536
+INST? space <free> free of 17179869184 bytes
+INST? bsize 4096 blocks 4194304 free <n>
+```
+
+`root ro` 说明 `rootrw=1` 或 `ufsrw=1` 没生效；`blocks 16384` 说明卷还是
+64 MiB 旧卷，脚本会提示先 `--from vol`。`space` 的数字按 `f_bavail × f_bsize`
+报告，允许与卷头 free 略有差异，但必须大于 0 且不超过总字节数。
+
+#### 4.4 base.kist：先查再发，发完抽样复核
+
+* 对 5 条目标逐一 `INST CHECK <path>`；全部 same 则整个流不发，打印
+  `complete; skipped`。
+* 有缺失/不同才发 `INST BEGIN <size>`；每条 64 KiB 块等 `INST ACK`，内核按
+  KIST 头逐条写、逐条回读并打印 `OK <path> ...` 或 `SKIP <path> ...`。
+* 结束要求 `INST DONE entries 5 ok ... skipped ... bytes 1619682 wire ...`；
+  `ok + skipped == 5`。
+* 再抽 5 条（base 全查）`INST CHECK`，大小和 SHA-256 必须与流头一致。
+
+#### 4.5 cache.kist：44 条、同样的预查、记录耗时
+
+与 base 相同的协议；默认要求 44 条（43 个映射分片 + `.symbols`）。44 条
+`INST CHECK` 会真的把 3.3 GB 读一遍，但这是“不重发已完成的流”的唯一可靠
+依据；全部 same 时脚本不会发一个字节。部分完成时仍发完整流，内核用
+`SKIP` 逐条跳过。抽样固定包含第一条、最后一条、最大文件（`.symbols`）和
+均匀间隔的若干条，避免只验证小文件。
+
+发送结束打印 `INST DONE ... ms <内核耗时>` 和主机侧
+`elapsed / MiB/s`；这就是任务要求的 cache 耗时。
+
+#### 4.6 最终启动：读到第一个失败或 launchd
+
+刷 `boot-final.img`，重启，脚本把 panic 检测器 arm 起来，然后一直读到：
+
+* 成功：`launchd logging initialized. name: launchd pid: 1`，或 zprint 的
+  `zone name` / `ZONE TOTALS` 表。后者是“launchd 真的 spawn 了一个 job”的
+  最硬证据。
+* 失败：`unexpected SIGKILL of launchd (CS_KILLED)`、`initproc failed to
+  start`、`initproc exited`、`pid 1 exited`、`dyld[1]: Library not loaded`、
+  `devfs_kernel_mount: kernel_mount failed`、`KEBAB DSC: ... NOT mapped`。
+* 超时/重启：180 s 内两者都没有，或期间出现新的启动 banner / 重新枚举。
+
+无论成功失败，最后都打印最后 100 行控制台和 verdict；失败时退出码 3。
+
+### 5. 失败输出与退出码
+
+失败输出固定四段：
+
+```
+checkpoint: vol.dry
+expected:   VOL PLAN extents 3 bytes 1744896 wire 1769472 volume 17179869184
+seen:       VOL PLAN extents 3 bytes 1744896 wire 1769472 volume 67108864
+hint:       ...
+last 30 console lines:
+  | ...
+run log:     work/p1/logs/run-.../run.log
+console log: work/p1/logs/run-.../console.log
+```
+
+同样的内容写进 `failure.txt`；`--json-summary` 还会写出机器可读的
+checkpoint/phase 记录。退出码：0 完成，2 前置失败，3 检查点/设备拒绝，
+4 panic/重启，5 控制台丢失，6 dry-run 失败，130 中断。
+
+常见“seen”对应的含义：
+
+| seen | 含义 | 下一步 |
+| --- | --- | --- |
+| `VOL disabled: boot with kebab_vol=1` | 刷错镜像 / 参数丢了 | 用 `boot-vol.img` |
+| `VOL refused: userdata is read-only` | `ufsrw=1` 缺失 | 补参数重打镜像 |
+| `VOL refused: a real write needs the confirmation` | 命令不是 `<wire> <volume> CONFIRM` | 检查命令串 |
+| `VOL OLD` 行数不足 3+32 | 旧卷头读不到或被截断 | 先 `VOL?` 看磁盘卷头 |
+| `VOL ABORT ...` | 流头/卷头/分区不一致 | 不要重试同一条流 |
+| `VOL TIMEOUT ...` | 60 s 没有新块 | 传输停了；看是否 panic/重启 |
+| `INST? ... root ro` | `rootrw=1` 或 `ufsrw=1` 没生效 | 重打 install 镜像 |
+| `INST? bsize ... blocks 16384` | 卷还是 64 MiB | `--from vol` |
+| `INST ABORT ...` / `FAIL ...` | 流/文件系统/空间错误 | 保留卷，重跑同阶段 |
+| `INST TIMEOUT ...` | 60 s 没有新块 | 传输停了 |
+| `panic(cpu ...)` | 内核 panic | 0134 会重启；修复首个 panic |
+| 新 `KEBAB USB: running` | 阶段中途重启（panic 恢复） | 按 panic 处理，不是 ACK 慢 |
+| `CS_KILLED` | launchd 被签名策略杀 | 信任缓存/cdhash 问题 |
+| `initproc ...` / `pid 1 exited` | PID 1 没起来或退出 | 看更早的 exec/DSC 行 |
+| `KEBAB DSC: ... NOT mapped` | 共享缓存计划失败 | 先修 44 条缓存 |
+| `devfs_kernel_mount ... failed` | 根卷没有 `/dev` 骨架 | 重建卷，base.kist 补不了 |
+
+### 6. panic 行为与检测
+
+补丁 0134 之后，服务不了控制台的 panic 不再停在
+`Waiting for remote debugger connection`，而是走 PSCI reset。于是“阶段中途
+控制台消失、几秒后同一个 VID/PID 又出现并从头启动”本身就是 panic 的证据，
+不是 `INST ACK` 慢。脚本在阶段进入 ready 之后 arm 检测器，任一条件成立即
+报 `PanicDetected`（退出码 4）：
+
+* 出现新的 `KEBAB USB: running (DSTS ...)`、`event thread started` 或
+  `Darwin Kernel Version`；
+* 出现 `panic(cpu ...)`、`KEBAB USB: panic console cannot be serviced`；
+* 控制台重新枚举（`console reopened`），或消失超过 10 s；
+* `KEBAB REBOOT: PEHaltRestart returned ...`（复位失败，仍是 panic）。
+
+失败输出里的 checkpoint 会被细化到 `vol.dry`、`send.cache`、`final.launchd`
+等，而不是只写 `vol`；最后 30 行里通常能看到 panic 文本和重启后的新 banner。
+带 `kebabkdp=1` 的镜像不进入这条路径（panic 会等 LLDB），所以默认禁止；
+这正是 0134 的边界，不是脚本的遗漏。
+
+### 7. resume 的规则
+
+| 已知状态 | `--from auto` | `--from vol` | `--from install` |
+| --- | --- | --- | --- |
+| 控制台 `INST?`/`VOL?` 报 4,194,304 块 | 跳过 vol，从 install 开始 | 跳过 vol（除非 `--force-vol`） | 从 install 开始 |
+| 报 16,384 块 | 从 vol 开始 | 从 vol 开始 | 直接失败，提示先写卷 |
+| 已在 fastboot，几何未知 | 先刷 install 探测；若仍是小卷则回 vol 再重试 install | 默认执行 vol（破坏性） | 从 install 开始，小卷则失败 |
+| `INST CHECK` 全部 same | 不发送该流 | 同左 | 同左 |
+| 部分 same | 发送完整流，内核逐条 `SKIP` | 同左 | 同左 |
+
+**完整流绝不重发。** precheck 是逐条的，不是抽样：base 5 条、cache 44 条。
+只有全部 same 才跳过；部分完成发完整流是刻意的，因为 KIST 的逐条 SKIP 已经
+在设备侧实现了 resume，主机侧重新打包反而会引入新流。若确实要强制重发，
+用 `--no-precheck`（不推荐）。
+
+`--force-vol` 用于“卷明明是 16 GiB，但我要重新写一遍”的场景；它会跳过
+“已 imprint 则跳过 vol”的保护，执行 `VOL BEGIN`。这是破坏性操作，脚本仍会
+要求 `CONFIRM` 和 512 B 旧卷头先落日志。
+
+### 8. 命令匹配表（对照 `bsd/dev/kebab_usb.c`）
+
+内核的匹配规则是：**一条命令的全部字节必须出现在同一次 bulk-OUT 完成里**；
+`INST`/`VOL` 带参数的命令由各自的扫描器从同一个完成缓冲区里解析参数。
+`ud_command_seen()` 在非 KDP 分支扫描整个完成，KDP 分支只认第一个字节
+（`memcmp(buf, ...)`）。本脚本从不在启动参数里放 `kebabkdp=1`，所以走非 KDP
+分支，但每条命令仍按“一行一次 write”发送。
+
+| 主机实际发送 | 内核匹配代码 | 精确要求 / 备注 |
+| --- | --- | --- |
+| `FASTBOOT\n` | `ud_command_seen(..., "FASTBOOT\n", ...)`；KDP 分支 `memcmp(buf, ...)` | 非 KDP 时可在完成的任意位置；FASTBOOT2 先匹配，避免前缀吞掉；需要 `kebab_pon_write=1` 和 IMEM |
+| `REBOOT\n` | `ud_command_seen(..., "REBOOT\n", ...)`；KDP 分支 `memcmp` | 纯 PSCI reset，不写 PON/IMEM |
+| `IMEM?\n` | `ud_command_seen(..., "IMEM?\n", ...)` | 只读探针；用于证明控制台真的在处理命令 |
+| `INST?\n` | `ud_inst_command()`：`n >= sizeof("INST?\n")-1` 且 `memcmp(p, "INST?\n", ...)` | 必须带换行；`INST?` 与 `INST ...` 共享扫描器 |
+| `INST BEGIN <wire>\n` | `ud_inst_command()`：前缀 `"INST BEGIN "` + `ud_inst_u64()` | `ud_inst_u64()` 只接受十进制数字，且数字后**必须紧跟 `\n`**；`<wire>` 是整个 KIST 文件字节数（含 32 B 头和 padding） |
+| `INST CHECK <path>\n` | `ud_inst_command()`：前缀 `"INST CHECK "`，路径取到 `\n` | 路径长度 `1..127`；必须是绝对路径、无空段/`..`、六个允许前缀之一；`INST CHECK` 命令本身可无参数尾，但路径后要有换行 |
+| `VOL?\n` | `ud_vol_command()`：`n >= sizeof("VOL?\n")-1` 且 `memcmp` | 必须带换行 |
+| `VOL DRY <wire>\n` | `ud_vol_command()`：前缀 `"VOL DRY "` + `ud_u64_span()` + 紧跟 `\n` | 数字后**必须**是 `\n`；不能跟空格或别的字 |
+| `VOL BEGIN <wire> <volume> CONFIRM\n` | `ud_vol_command()`：`"VOL BEGIN "` + wire + `' '` + volume + `' '` + `"CONFIRM\n"` | **没有卷名参数**；KebabRoot 只在流里的 HFS+ 头；`CONFIRM` 是字面量且必须带换行；缺它只打印 refused，不取流 |
+| `<64 KiB 数据块>` | `ud_bulk_out_done()` 根据 `ud.out_stream` 分派 `kebab_inst_bytes()` / `kebab_vol_bytes()` | 一次一块，等 `INST ACK <n>` / `VOL ACK <n>` 等于累计值再发下一块；设备不重新 arm 端点就是流控 |
+
+核对结果：脚本发送的 9 类命令全部能在 `kebab_usb.c` 的
+`ud_command_seen()`、`ud_inst_command()`、`ud_vol_command()` 中找到精确匹配；
+`INST BEGIN`/`VOL BEGIN` 的参数顺序、空格和结尾换行都一致。`INST?`、`VOL?`
+也带换行，不是裸命令。
+
+#### 8.1 这次对照发现的三处“文档/辅助脚本不一致”
+
+1. **`VOL DRY` 的 `VOL BEGIN` 行打印 `volume 0`。** `kebab_vol_begin()` 在
+   `ud.vol_size == 0`（dry 路径）时先打印命令行参数，之后解析流头才把真正的
+   16 GiB 放进 `VOL PLAN ... volume 17179869184`。因此 dry 阶段不能断言
+   `VOL BEGIN ... volume 17179869184`；脚本只对写路径断言这个字段。
+2. **`VOL DRY` 的结束行是 `VOL PLAN`，不是 `VOL DONE`。**
+   `scripts/send-volume.py` 的 `--dry` 路径在发完流后仍然
+   `con.wait(DONE_RE, 60)`（`DONE_RE` 只匹配 `VOL DONE`），按代码会在 dry
+   时等 60 s 后超时；`send-volume.py --status`/真写不受影响。P1 编排器不使用
+   该辅助脚本，自己等 `VOL PLAN`，并把这条列为已知主机侧 bug。
+3. **`VOL?` 的磁盘几何在第三行。** 第一行是 `gated/active/dry/chunk/
+   writable`，第二行是 `partition`，第三行才是
+   `VOL? DISK vh bsize 4096 blocks ... free ...`；把 `bsize/blocks` 的正则
+   套在第一行会永远不匹配。脚本按行分别匹配。
+
+另外确认：`VOL BEGIN` 要的是 `<wire> <volume> CONFIRM`，不是卷名在前；
+`INST CHECK` 的参数是目的路径，不是流里的偏移；`INST?` 在 vol 镜像上会打印
+`INST disabled`，此时只能用 `VOL?` 读几何。
+
+### 9. dry-run 与离线验证
+
+`--dry-run` 不碰板子，执行所有能离线做的检查：
+
+* 三张镜像：存在、恰好 100,663,296 B、`ANDROID!` 魔数、payload 偏移；
+* 从镜像的 TOML 抽出 `args`，逐 token 核对本阶段必需/禁止参数（包括
+  `kebab_vol`、`kebab_noinit`、`kebab_dsc*` 和 `kebabkdp`）；
+* VEXT：大小、魔数、3 个 extent、offset/length 对齐/递增、data_bytes、
+  零 padding、内嵌 HFS+ 头（sig/version/bsize/blocks/journal）；
+* KIST：32 B 流头、每条 192 B 头、路径、模式、store/deflate、逐条
+  SHA-256、总字节、padding、文件大小；
+* 打印完整阶段计划和 resume 提示，不写任何字节。
+
+离线验证结果（本机，非板子）：
+
+```
+$ python3 scripts/test-bring-up.py --kernel-source .../kebab_usb.c
+PASS dry-run            rc=0 expected=0
+PASS happy-path         rc=0 expected=0
+PASS resume             rc=0 expected=0
+PASS segment            rc=0 expected=0
+PASS partial-base       rc=0 expected=0
+PASS from-vol-resume    rc=0 expected=0
+PASS install-small      rc=3 expected=3
+PASS bad-install-args   rc=6 expected=6
+PASS corrupt-stream     rc=6 expected=6
+PASS slot-a             rc=2 expected=2
+PASS cs-killed          rc=3 expected=3
+PASS dsc-missing        rc=3 expected=3
+PASS panic-mid-cache    rc=4 expected=4
+PASS silent-panic       rc=4 expected=4
+PASS command-lint       9 commands in kebab_usb.c
+```
+
+fake board 会真的解析 KIST/VEXT、每块回 ACK、模拟 `VOL DRY/BEGIN`、
+`INST CHECK`、`SKIP`、中途 panic（带/不带 panic 文本）以及错槽位/错参数；
+因此阶段顺序、流控和停止条件是经过代码路径验证的。**没有验证的是真实
+USB 时序、真 HFS+ 卷、真 launchd 和真 3.3 GB 传输**——那要等板子物理上电。
+
+### 10. 已知缺口与下一次真机
+
+1. **三张镜像**：参数在 payload TOML 里，不能像 cmdline 那样一张镜像改参数；
+   需要按第 3 节打 `boot-vol.img`、`boot-inst.img`、`boot-final.img`。
+2. **`boot-final.img` 的 DSC 参数**：没有 `kebab_dsc=1 kebab_dsc_map=1` 时
+   最终启动会停在 launchd 找不到共享缓存，而不是签名失败。
+3. **卷骨架**：`KebabRoot.vext` 必须由新版 `make-root-volume.py` 生成（带
+   `/dev`、`/private/var`、`/etc/passwd` 等）。旧脚本的流即使 HFS+ 几何正确，
+   最终也会死在 `devfs_kernel_mount`；当前没有控制台命令能在写卷阶段验证骨架，
+   只能从生成命令保证。详见第 68 节。
+4. **`ufsrw=1`**：题目的短参数表没写，但 VOL/INST 写路径都必须有；dry-run
+   会在刷写前拒绝缺少它的镜像。
+5. **`send-volume.py --dry` 的超时 bug**：见 8.1；P1 编排器已绕开，辅助脚本
+   本身未改（本轮不动别人的工具）。
+6. **真机未跑**：板子 stranded，需要一次物理断电。下一次上电后的第一条命令
+   仍是 `python scripts/bring-up.py --from vol`；若卡住，先看 `failure.txt`
+   的 checkpoint，再决定物理断电还是重跑。

@@ -1,0 +1,78 @@
+# P1 dry-run output
+# Generated with synthetic fixtures from:
+#   python3 scripts/test-bring-up.py --make-fixtures work/p1-dry
+#   python3 scripts/bring-up.py --dry-run --work-dir work/p1-dry --fastboot /bin/true
+# No board, no image write, no serial port was touched.  The KIST/VEXT
+# parsers, image-argument checks and checkpoint ordering are real; the
+# boot images and streams are the test fixtures.
+
+[    0.00] 
+[    0.00] == phase dry-run: verify every artifact and print the plan
+[    0.08] [ OK ] D-01 dry.image.vol            100663296 bytes, 1 args string(s), kebab_cs=15 kebab_install=1 kebab_noinit=1 kebab_pon_write=1 kebab_vol=1 kebabusb=1 rootrw=1 ufsrw=1
+[    0.16] [ OK ] D-02 dry.image.install        100663296 bytes, 1 args string(s), kebab_cs=15 kebab_install=1 kebab_noinit=1 kebab_pon_write=1 kebabusb=1 rootrw=1 ufsrw=1
+[    0.24] [ OK ] D-03 dry.image.final          100663296 bytes, 1 args string(s), kebab_cs=15 kebab_dsc=1 kebab_dsc_map=1 kebab_pon_write=1 kebabusb=1 rootrw=1 ufsrw=1
+[    0.24] [ OK ] D-04 dry.stream.volume        1769472 bytes, 3 extents, 1.7 MiB data, HFS+ 4194304 blocks, sha256 16b235b53e6a2792b1b1f6437dd6cea946b75230cd3eb4f094dc724d30c765ee
+[    0.24]   verify base [1/5] /sbin/launchd
+[    0.24]   verify base [2/5] /usr/lib/dyld
+[    0.24]   verify base [3/5] /System/Library/Caches/com.apple.kernelcaches/static.trustcache
+[    0.24]   verify base [4/5] /usr/lib/zprint
+[    0.24]   verify base [5/5] /System/Library/LaunchDaemons/com.kebab.zprint.plist
+[    0.24] [ OK ] D-05 dry.stream.base          5 entries, 6.8 KiB installed, 64.0 KiB wire, sha256 d1ed835388fed3ad97e9ff455f6e3cdbd529439fae128470d6d60d0f275f6710
+[    0.24]   verify cache [1/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64
+[    0.24]   verify cache [2/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6401
+[    0.24]   verify cache [3/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6402
+[    0.24]   verify cache [4/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6403
+[    0.24]   verify cache [5/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6404
+[    0.24]   verify cache [6/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6405
+[    0.24]   verify cache [7/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6406
+[    0.24]   verify cache [8/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6407
+[    0.24]   verify cache [9/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6408
+[    0.24]   verify cache [10/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6409
+[    0.24]   verify cache [11/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6410
+[    0.24]   verify cache [12/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6411
+[    0.24]   verify cache [13/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6412
+[    0.24]   verify cache [14/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6413
+[    0.24]   verify cache [15/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6414
+[    0.24]   verify cache [16/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6415
+[    0.24]   verify cache [17/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6416
+[    0.24]   verify cache [18/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6417
+[    0.24]   verify cache [19/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6418
+[    0.24]   verify cache [20/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6419
+[    0.24]   verify cache [21/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6420
+[    0.24]   verify cache [22/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6421
+[    0.24]   verify cache [23/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6422
+[    0.24]   verify cache [24/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6423
+[    0.24]   verify cache [25/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6424
+[    0.24]   verify cache [26/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6425
+[    0.24]   verify cache [27/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6426
+[    0.24]   verify cache [28/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6427
+[    0.24]   verify cache [29/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6428
+[    0.24]   verify cache [30/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6429
+[    0.24]   verify cache [31/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6430
+[    0.24]   verify cache [32/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6431
+[    0.24]   verify cache [33/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6432
+[    0.24]   verify cache [34/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6433
+[    0.24]   verify cache [35/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6434
+[    0.24]   verify cache [36/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6435
+[    0.24]   verify cache [37/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6436
+[    0.24]   verify cache [38/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6437
+[    0.24]   verify cache [39/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6438
+[    0.24]   verify cache [40/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6439
+[    0.24]   verify cache [41/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6440
+[    0.24]   verify cache [42/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6441
+[    0.24]   verify cache [43/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6442
+[    0.24]   verify cache [44/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6443
+[    0.24] [ OK ] D-06 dry.stream.cache         44 entries, 343.8 KiB installed, 256.0 KiB wire, sha256 4eef48db289515f71bacef515635b0ccc064e2f0612bb0b58d27a928c1a2c3ec
+[    0.24] [ OK ] D-07 dry.fastboot             /bin/true
+[    0.24] 
+[    0.24] PLAN (auto -> final):
+[    0.24]   1. precondition fastboot devices; current-slot == b; FASTBOOT through the console only if needed
+[    0.24]   2. vol          flash boot-vol.img; VOL DRY; VOL BEGIN ... CONFIRM; require OLD 512 bytes, VOL DONE and the new HFS+ mount
+[    0.24]   3. install      flash boot-inst.img; require INST? root rw, 4,194,304 blocks, 17,179,869,184 bytes and free space
+[    0.24]   4. base         INST CHECK all 5 entries; send only if incomplete; verify a sample
+[    0.24]   5. cache        INST CHECK all 44 entries; send only if incomplete; verify a sample; report elapsed
+[    0.24]   6. final        flash boot-final.img; capture to the first failure or launchd; print the last 100 lines
+[    0.24] 
+[    0.24] DRY RUN OK: all artifacts and command strings verified; nothing was written
+[    0.24] 
+[    0.24] DRY RUN COMPLETE: nothing was written

@@ -1,0 +1,804 @@
+#!/usr/bin/env python3
+"""Offline validation for scripts/bring-up.py.
+
+Two independent checks run here:
+
+  * a fake kebab board: a KIST/VOL-aware device model, so the whole phase
+    sequence, resume logic, the 64 KiB ACK flow control and panic detection can
+    be exercised without hardware;
+  * a command-lint pass over bsd/dev/kebab_usb.c, when a kernel source tree is
+    supplied with --kernel-source.
+
+The fake board is deliberately strict about the wire format: it only accepts
+the exact command forms the kernel accepts (one completion, newline included),
+and it acknowledges exactly one chunk per write.  A host that pipelines or
+sends a wrong argument form fails the same way it would on the board.
+
+    python3 scripts/test-bring-up.py
+    python3 scripts/test-bring-up.py --kernel-source ~/xnu/bsd/dev/kebab_usb.c
+    python3 scripts/test-bring-up.py --make-fixtures /tmp/p1-fixtures
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import hashlib
+import importlib.util
+import io
+import os
+import re
+import struct
+import sys
+import tempfile
+import traceback
+import zlib
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+BRING_UP = os.path.join(HERE, "bring-up.py")
+
+
+def load_bring_up():
+    spec = importlib.util.spec_from_file_location("kebab_bring_up", BRING_UP)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules["kebab_bring_up"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+bu = load_bring_up()
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+def sha256(data: bytes) -> bytes:
+    return hashlib.sha256(data).digest()
+
+
+def write_kist(path: str, entries: list[tuple[str, bytes, int, bool]]) -> None:
+    """entries: (destination, content, mode, deflate)."""
+    payload = bytearray()
+    body = bytearray()
+    for dest, content, mode, deflate in entries:
+        raw = zlib.compress(content, 9) if deflate else content
+        flags = bu.KIST_F_DEFLATE if deflate else 0
+        bh = dest.encode("utf-8")
+        hdr = struct.pack(
+            "<4sHHHHQQ32s128sI", b"KENT", len(bh), mode, flags, 0,
+            len(raw), len(content), sha256(content), bh, 0)
+        body += hdr
+        body += raw
+        payload += raw
+    pad = (-(32 + len(body))) % bu.CHUNK
+    total_wire = len(body) + pad
+    with open(path, "wb") as f:
+        f.write(struct.pack("<4sHHIIQQ", b"KIST", 1, 0, len(entries), 32,
+                            sum(len(c) for _, c, _, _ in entries), total_wire))
+        f.write(body)
+        f.write(b"\0" * pad)
+
+
+def make_volume_header(blocks: int, free: int) -> bytes:
+    vh = bytearray(512)
+    struct.pack_into(">HH", vh, 0, 0x482B, 4)
+    struct.pack_into(">III", vh, 40, 4096, blocks, free)
+    struct.pack_into(">I", vh, 4, 0x80000100)
+    name = "KebabRoot".encode("utf-16-be")
+    struct.pack_into(">H", vh, 0x70, 9)
+    vh[0x72:0x72 + len(name)] = name
+    return bytes(vh)
+
+
+def write_vext(path: str, blocks: int = 4194304) -> None:
+    """The three-extent 1,769,472-byte shape documented in section 63."""
+    volume = blocks * 4096
+    extents = [
+        (0x0, 0xA9000),
+        (0xF9000, 0x100000),
+        (0x3FFFFF000, 0x1000),
+    ]
+    data = bytearray()
+    for off, length in extents:
+        chunk = bytearray(length)
+        if off == 0:
+            chunk[1024:1536] = make_volume_header(blocks, 4193878)
+        data += chunk
+    assert len(data) == 1744896, len(data)
+    body = bytearray()
+    for (off, length), start in zip(extents, (0, 0xA9000, 0x1A9000)):
+        body += struct.pack("<QII", off, length, 0)
+        body += data[start:start + length]
+    pad = (-(32 + len(body))) % bu.CHUNK
+    assert 32 + len(body) + pad == 1769472, 32 + len(body) + pad
+    with open(path, "wb") as f:
+        f.write(struct.pack("<4sHHQIIQ", b"VEXT", 1, 32, volume, 4096,
+                            len(extents), 1744896))
+        f.write(body)
+        f.write(b"\0" * pad)
+
+
+def write_image(path: str, args: str) -> None:
+    """A 96 MiB Android boot image with the payload TOML args at 0x800000."""
+    size = 96 * 1024 * 1024
+    with open(path, "wb") as f:
+        f.truncate(size)
+        f.seek(0)
+        hdr = bytearray(4096)
+        struct.pack_into("<8sIII", hdr, 0, b"ANDROID!", 0x300000, 0x8000,
+                         0x2BC000)
+        struct.pack_into("<I", hdr, 36, 4096)
+        struct.pack_into("<I", hdr, 40, 2)
+        f.write(hdr)
+        f.seek(0x800000)
+        toml = (
+            '"xnu"\npath = "Payloads/kernel.macho"\nargs = "%s"\n'
+            "[[entry]]\nid = \"reset\"\n" % args
+        ).encode()
+        f.write(toml)
+
+
+class Fixture:
+    def __init__(self, dirpath: str) -> None:
+        self.dir = dirpath
+        os.makedirs(dirpath, exist_ok=True)
+        self.vol_image = os.path.join(dirpath, "boot-vol.img")
+        self.install_image = os.path.join(dirpath, "boot-inst.img")
+        self.final_image = os.path.join(dirpath, "boot-final.img")
+        self.volume_stream = os.path.join(dirpath, "KebabRoot.vext")
+        self.base_stream = os.path.join(dirpath, "base.kist")
+        self.cache_stream = os.path.join(dirpath, "cache.kist")
+        self.bad_install_image = os.path.join(dirpath, "boot-bad.img")
+        self.corrupt_base = os.path.join(dirpath, "base-corrupt.kist")
+        base_args = ("kebabusb=1 ufsrw=1 rootrw=1 kebab_pon_write=1 "
+                     "kebab_cs=15 ufsroot=userdata rd=ufsroot0")
+        write_image(self.vol_image,
+                    base_args + " kebab_vol=1 kebab_noinit=1 kebab_install=1")
+        write_image(self.install_image,
+                    base_args + " kebab_noinit=1 kebab_install=1")
+        write_image(self.final_image,
+                    base_args + " kebab_install=1 kebab_dsc=1 kebab_dsc_map=1")
+        # The same image with kebab_vol=1 is a tempting but wrong install
+        # image; dry-run must reject it before a flash.
+        write_image(self.bad_install_image,
+                    base_args + " kebab_vol=1 kebab_noinit=1 kebab_install=1")
+        write_vext(self.volume_stream)
+
+        base_entries = [
+            ("/sbin/launchd", b"launchd" * 400, 0o755, True),
+            ("/usr/lib/dyld", b"dyld" * 600, 0o755, True),
+            ("/System/Library/Caches/com.apple.kernelcaches/static.trustcache",
+             b"tc" * 300, 0o644, False),
+            ("/usr/lib/zprint", b"zprint" * 200, 0o755, True),
+            ("/System/Library/LaunchDaemons/com.kebab.zprint.plist",
+             b"<plist/>", 0o644, False),
+        ]
+        cache_entries = []
+        for i in range(44):
+            name = ("/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64"
+                    + ("%02d" % i if i else ""))
+            cache_entries.append((name, (("cache-%02d" % i) * 1000).encode(),
+                                  0o644, i % 3 == 0))
+        write_kist(self.base_stream, base_entries)
+        write_kist(self.cache_stream, cache_entries)
+        # A stream whose payload no longer matches its SHA-256 header.
+        st = bu.read_kist(self.base_stream)
+        data = bytearray(open(self.base_stream, "rb").read())
+        data[st.entries[0].offset + 3] ^= 0xFF
+        open(self.corrupt_base, "wb").write(data)
+        self.base_entries = base_entries
+        self.cache_entries = cache_entries
+        self.streams_by_size = {}
+        for path in (self.base_stream, self.cache_stream):
+            st = bu.read_kist(path)
+            self.streams_by_size[st.file_size] = st
+
+
+# ---------------------------------------------------------------------------
+# Fake board
+# ---------------------------------------------------------------------------
+
+
+class FakeConsole(bu.LineChannel):
+    def __init__(self, logger, device):
+        super().__init__(logger)
+        self.device = device
+        self.connected = True
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def send(self, data: bytes):
+        if not self.connected:
+            raise bu.ConsoleLost("console", "a writable console",
+                                 "fake console is down")
+        self.device.receive(data)
+
+
+class FakeFastboot:
+    def __init__(self, board):
+        self.board = board
+        self.serial_no = ""
+        self.flashed = []
+        self.commands = []
+
+    def devices(self):
+        return [self.board.serial] if self.board.mode == "fastboot" else []
+
+    def require_device(self):
+        if self.board.mode != "fastboot":
+            raise bu.PreconditionError("precondition.fastboot",
+                                       "fastboot devices", "not in fastboot")
+        return self.board.serial
+
+    def getvar(self, name):
+        if name == "current-slot":
+            return "current-slot: %s\nFinished. Total time: 0.001s" % self.board.slot
+        if name == "product":
+            return "product: kona\nFinished. Total time: 0.001s"
+        return "Finished. Total time: 0.001s"
+
+    def current_slot(self):
+        return self.board.slot
+
+    def product(self):
+        return "kona"
+
+    def flash(self, partition, image):
+        assert partition == "boot_b"
+        self.flashed.append(image)
+        self.board.pending_image = image
+        self.board.log.append("flash " + os.path.basename(image))
+        return "Sending 'boot_b' OKAY\nWriting 'boot_b' OKAY\nFinished."
+
+    def reboot(self):
+        image = self.board.pending_image
+        self.board.reboot(image)
+        return "Rebooting OKAY"
+
+
+class FakeDevice:
+    def __init__(self, fixture: Fixture, console: FakeConsole, *,
+                 slot: str = "b", volume_blocks: int = 16384,
+                 files: dict | None = None, final: str = "success",
+                 panic_after: int | None = None,
+                 silent_panic: bool = False):
+        self.fx = fixture
+        self.console = console
+        self.serial = "kebab-test"
+        self.slot = slot
+        self.volume_blocks = volume_blocks
+        self.files = dict(files or {})
+        self.final = final
+        self.panic_after = panic_after
+        self.silent_panic = silent_panic
+        self.mode = "kernel"
+        self.pending_image = None
+        self.current_image = None
+        self.log: list[str] = []
+        self.active_kind = ""
+        self.active_size = 0
+        self.active_remaining = 0
+        self.active_data = bytearray()
+        self.active_dry = False
+        self.active_chunks = 0
+        self.sent_log: list[tuple[str, int]] = []
+        self.acks = 0
+        self.panicked = False
+
+    # -- mode transitions --------------------------------------------------
+    def set_fastboot(self):
+        self.mode = "fastboot"
+        self.console.set_connected(False)
+
+    def reboot(self, image: str | None):
+        self.current_image = image
+        args = self.args_for(image)
+        self.mode = "kernel"
+        self.console.set_connected(True)
+        self.console.feed_host("fake boot %s" % os.path.basename(image or "?"))
+        self.console.feed("Darwin Kernel Version 22.1.0: fake")
+        self.console.feed("KEBAB USB: running (DSTS 0x00000003 after 120 ms), "
+                          "DMA at 0x12340000")
+        self.console.feed("KEBAB USB: event thread started, waiting for the host")
+        if "kebab_vol=1" in args:
+            self.console.feed("KEBAB HFS: KebabRoot: block size 4096, total "
+                              "blocks %d (%d MiB), free blocks %d"
+                              % (self.volume_blocks, self.volume_blocks * 4096 >> 20,
+                                 max(0, self.volume_blocks - 426)))
+        if "kebab_noinit=1" in args:
+            self.console.feed("KEBAB: kebab_noinit=1: staying in the kernel, "
+                              "no init program")
+        elif self.final == "success":
+            self.console.feed("load_init_program: attempting to load /sbin/launchd")
+            self.console.feed("KEBAB DSC: mapping complete; dyld will find the "
+                              "cache already in the shared region")
+            self.console.feed("launchd logging initialized. name: launchd pid: 1")
+            self.console.feed("zone name                 size     free")
+            self.console.feed("ZONE TOTALS")
+        elif self.final == "cs_killed":
+            self.console.feed("unexpected SIGKILL of launchd (CS_KILLED) with "
+                              "reason -- namespace 9 code 0x6")
+            self.console.feed("initproc failed to start")
+        elif self.final == "dsc":
+            self.console.feed("KEBAB DSC: plan rejected (error 2); shared cache "
+                              "NOT mapped")
+            self.console.feed("dyld[1]: Library not loaded: "
+                              "/usr/lib/libSystem.B.dylib")
+
+    def args_for(self, image: str | None) -> str:
+        path = image or ""
+        if path == self.fx.vol_image:
+            return "kebab_vol=1 kebab_noinit=1 kebab_install=1"
+        if path == self.fx.install_image:
+            return "kebab_noinit=1 kebab_install=1"
+        if path == self.fx.final_image:
+            return "kebab_install=1 kebab_dsc=1 kebab_dsc_map=1"
+        return ""
+
+    # -- input -------------------------------------------------------------
+    def receive(self, data: bytes):
+        if self.active_kind:
+            self.chunk(data)
+            return
+        try:
+            text = data.decode("ascii")
+        except UnicodeDecodeError:
+            return
+        if not text.endswith("\n"):
+            return
+        self.command(text.rstrip("\n"))
+
+    def command(self, cmd: str):
+        self.log.append("cmd " + cmd)
+        if cmd == "IMEM?":
+            self.console.feed("KEBAB IMEM: restart_reason at 0x%x+0x%x is 0x%08x"
+                              % (0x9300000, 0x10, 0x836991FC))
+        elif cmd == "FASTBOOT":
+            self.console.feed("KEBAB FASTBOOT: writing IMEM restart_reason "
+                              "0x00000000 -> 0x77665500")
+            self.console.feed("KEBAB FASTBOOT: IMEM read back 0x77665500 (MATCH)")
+            self.console.feed("KEBAB REBOOT: PEHaltRestart(kPERestartCPU)")
+            self.set_fastboot()
+        elif cmd == "REBOOT":
+            self.console.feed("KEBAB REBOOT: PEHaltRestart(kPERestartCPU)")
+            self.reboot(self.current_image)
+        elif cmd == "INST?":
+            total = self.volume_blocks * 4096
+            self.console.feed("INST? gated 1 active 0 dry 0 root rw chunk 65536")
+            self.console.feed("INST? wire 0/0 entries 0/0 ok 0 skip 0 fail 0")
+            self.console.feed("INST? space %d free of %d bytes"
+                              % (max(0, total - 426 * 4096), total))
+            self.console.feed("INST? bsize 4096 blocks %d free %d"
+                              % (self.volume_blocks, max(0, self.volume_blocks - 426)))
+        elif cmd == "VOL?":
+            total = self.volume_blocks * 4096
+            self.console.feed("VOL? gated 1 active 0 dry 0 chunk 65536 writable 1")
+            self.console.feed("VOL? partition 245895331840 bytes (234500 MiB)")
+            self.console.feed("VOL? DISK vh sig 0x482b version 4 attributes "
+                              "0x80000100 lastMount 0x0 journal 0x0")
+            self.console.feed("VOL? DISK vh created 0 modified 0 checked 0 "
+                              "files 0 folders 0 nextcnid 16")
+            self.console.feed("VOL? DISK vh bsize 4096 blocks %d free %d "
+                              "freebytes %d volbytes %d"
+                              % (self.volume_blocks,
+                                 max(0, self.volume_blocks - 426),
+                                 max(0, self.volume_blocks - 426) * 4096, total))
+        elif cmd.startswith("VOL DRY "):
+            size = int(cmd.split()[2])
+            self.begin_vol(size, dry=True)
+        elif cmd.startswith("VOL BEGIN "):
+            parts = cmd.split()
+            size, volume = int(parts[2]), int(parts[3])
+            assert parts[4] == "CONFIRM", cmd
+            assert volume == 17179869184, (volume, self.volume_blocks)
+            self.begin_vol(size, dry=False)
+        elif cmd.startswith("INST BEGIN "):
+            size = int(cmd.split()[2])
+            self.begin_inst(size)
+        elif cmd.startswith("INST CHECK "):
+            path = cmd[len("INST CHECK "):]
+            cur = self.files.get(path)
+            if cur is None:
+                self.console.feed("INST CHECK %s MISSING" % path)
+            else:
+                self.console.feed("INST CHECK %s %d %s"
+                                  % (path, cur[0], cur[1]))
+        else:
+            self.log.append("unknown " + cmd)
+
+    # -- VOL stream --------------------------------------------------------
+    def begin_vol(self, size: int, dry: bool):
+        self.active_kind = "vol"
+        self.active_size = size
+        self.active_remaining = size
+        self.active_data = bytearray()
+        self.active_dry = dry
+        self.active_chunks = 0
+        self.console.feed("VOL partition 245895331840 bytes (234500 MiB), writable 1")
+        self.console.feed("VOL OLD vh sig 0x482b version 4 attributes 0x80000100 "
+                          "lastMount 0x0 journal 0x0")
+        self.console.feed("VOL OLD vh created 0 modified 0 checked 0 files 0 "
+                          "folders 0 nextcnid 16")
+        self.console.feed("VOL OLD vh bsize 4096 blocks %d free %d freebytes %d "
+                          "volbytes %d" % (self.volume_blocks,
+                                           max(0, self.volume_blocks - 426), 0,
+                                           self.volume_blocks * 4096))
+        for i in range(32):
+            self.console.feed("VOL OLD bytes %03x %s" % (i * 16, "00 " * 15 + "00"))
+        self.console.feed("VOL BEGIN %d volume %d %s chunk 65536"
+                          % (size, 0 if dry else 17179869184,
+                             "dry" if dry else "write"))
+
+    # -- INST stream -------------------------------------------------------
+    def begin_inst(self, size: int):
+        self.active_kind = "inst"
+        self.active_size = size
+        self.active_remaining = size
+        self.active_data = bytearray()
+        self.active_dry = False
+        self.active_chunks = 0
+        self.console.feed("INST BEGIN %d write chunk 65536" % size)
+
+    def chunk(self, data: bytes):
+        n = len(data)
+        if n > self.active_remaining:
+            n = self.active_remaining
+        self.active_data += data[:n]
+        self.active_remaining -= n
+        self.active_chunks += 1
+        if self.active_kind == "vol":
+            self.console.feed("VOL ACK %d" % (self.active_size - self.active_remaining))
+        else:
+            self.console.feed("INST ACK %d" % (self.active_size - self.active_remaining))
+        if self.panic_after is not None and self.active_chunks >= self.panic_after:
+            self.panic()
+            return
+        if self.active_remaining == 0:
+            self.finish_stream()
+
+    def panic(self):
+        self.panicked = True
+        self.active_kind = ""
+        if not self.silent_panic:
+            self.console.feed("panic(cpu 0 caller 0xfffffff012345678): fake "
+                              "panic during transfer")
+            self.console.feed("KEBAB USB: panic console cannot be serviced "
+                              "(transport takeover refused); rebooting instead "
+                              "of parking")
+        self.console.set_connected(False)
+        self.console.set_connected(True)
+        self.reboot(self.current_image)
+
+    def finish_stream(self):
+        kind = self.active_kind
+        self.active_kind = ""
+        if kind == "vol":
+            if self.active_dry:
+                self.console.feed("VOL PLAN extents 3 bytes 1744896 wire %d "
+                                  "volume 17179869184" % self.active_size)
+            else:
+                self.volume_blocks = 4194304
+                self.console.feed("VOL NEW vh sig 0x482b version 4 attributes "
+                                  "0x80000100 lastMount 0x0 journal 0x0")
+                self.console.feed("VOL NEW vh created 0 modified 0 checked 0 "
+                                  "files 0 folders 0 nextcnid 16")
+                self.console.feed("VOL NEW vh bsize 4096 blocks 4194304 free "
+                                  "4193878 freebytes 0 volbytes 17179869184")
+                self.console.feed("VOL DONE extents 3 bytes 1744896 wire %d "
+                                  "ms 100" % self.active_size)
+            return
+        st = self.fx.streams_by_size.get(self.active_size)
+        if st is None:
+            self.console.feed("INST ABORT bad test stream size")
+            return
+        ok = skipped = 0
+        for e in st.entries:
+            cur = self.files.get(e.path)
+            if cur is not None and cur[0] == e.size and cur[1] == e.sha.hex():
+                skipped += 1
+                self.console.feed("SKIP %s %d" % (e.path, e.size))
+            else:
+                self.files[e.path] = (e.size, e.sha.hex())
+                ok += 1
+                self.console.feed("OK %s %d mode 0%o" % (e.path, e.size, e.mode))
+        self.console.feed("INST DONE entries %d ok %d skipped %d bytes %d "
+                          "wire %d ms 100"
+                          % (st.entry_count, ok, skipped, st.total_usize,
+                             self.active_size))
+        self.sent_log.append((self.active_size, ok + skipped))
+
+
+class FakeBoard:
+    def __init__(self, fixture: Fixture, logger, **kwargs):
+        self.logger = logger
+        self.console = FakeConsole(logger, None)
+        self.device = FakeDevice(fixture, self.console, **kwargs)
+        self.console.device = self.device
+        self.fastboot = FakeFastboot(self.device)
+        # Preload the running image so an initial INST? can be answered.
+        self.device.current_image = (fixture.vol_image
+                                     if self.device.volume_blocks < 1000000
+                                     else fixture.install_image)
+
+    @property
+    def serial(self):
+        return self.device.serial
+
+
+def make_factories(fixture: Fixture, **kwargs):
+    holder = {}
+
+    def ff(opts, log):
+        board = FakeBoard(fixture, log, **kwargs)
+        holder["board"] = board
+        return board.fastboot
+
+    def cf(opts, log):
+        return holder["board"].console
+
+    return ff, cf, holder
+
+
+def check_kist_compressed_large(tmp: str) -> None:
+    """A compressed entry's *file* size may exceed the whole stream size.
+
+    This is the real base.kist shape: /usr/lib/dyld is 922,912 bytes on disk but
+    311,520 bytes on the wire.  A parser that compares file_size with total_wire
+    rejects a perfectly valid Apple userland stream.
+    """
+    path = os.path.join(tmp, "large-compressed.kist")
+    data = b"A" * 200000
+    write_kist(path, [("/sbin/large", data, 0o755, True)])
+    st = bu.read_kist(path)
+    if st.entries[0].size != len(data):
+        raise AssertionError("file size %d" % st.entries[0].size)
+    if st.entries[0].wire >= st.total_wire:
+        raise AssertionError("wire %d total %d" % (st.entries[0].wire, st.total_wire))
+    bu.read_kist(path, deep=True)
+
+
+# ---------------------------------------------------------------------------
+# Test harness
+# ---------------------------------------------------------------------------
+
+
+class Case:
+    def __init__(self, name, argv, fixture, expected=0, **kwargs):
+        self.name = name
+        self.argv = argv
+        self.fixture = fixture
+        self.expected = expected
+        self.kwargs = kwargs
+
+
+def run_case(case: Case, fixture: Fixture):
+    ff, cf, holder = make_factories(fixture, **case.kwargs)
+    out = io.StringIO()
+    err = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = bu.main(case.argv, fastboot_factory=ff, console_factory=cf)
+    return rc, out.getvalue(), err.getvalue(), holder.get("board")
+
+
+def make_fixtures(dirpath: str) -> Fixture:
+    return Fixture(dirpath)
+
+
+# ---------------------------------------------------------------------------
+# Command lint
+# ---------------------------------------------------------------------------
+
+
+COMMAND_TABLE = [
+    (b"FASTBOOT\n", "ud_command_seen(\"FASTBOOT\\n\")"),
+    (b"REBOOT\n", "ud_command_seen(\"REBOOT\\n\")"),
+    (b"IMEM?\n", "ud_command_seen(\"IMEM?\\n\")"),
+    (b"INST?\n", "ud_inst_command(\"INST?\\n\")"),
+    (b"INST BEGIN ", "ud_inst_command prefix, unsigned decimal + newline"),
+    (b"INST CHECK ", "ud_inst_command prefix, path up to newline"),
+    (b"VOL?\n", "ud_vol_command(\"VOL?\\n\")"),
+    (b"VOL DRY ", "ud_vol_command prefix, unsigned decimal + newline"),
+    (b"VOL BEGIN ", "ud_vol_command prefix, wire, space, volume, space, CONFIRM"),
+]
+
+
+def lint_commands(source: str) -> list[str]:
+    errors = []
+    def has(c_literal: str) -> bool:
+        return c_literal in source or c_literal.replace('"', '"') in source
+    for literal, _ in COMMAND_TABLE:
+        text = literal.decode("ascii").replace("\\", "\\\\").replace("\n", "\\n")
+        if ('"%s"' % text) not in source:
+            # INST/VOL prefixes are C strings without the trailing newline in
+            # some comparisons (the argument parser adds it).
+            if literal.endswith(b" ") and ('"%s"' % text.rstrip()).replace(
+                    ' \\"', '"') not in source:
+                errors.append("missing C literal %r" % literal)
+    # The VOL BEGIN order is the subtle one: wire, volume, CONFIRM.  Prove it
+    # from the parser body rather than from a comment.
+    m = re.search(r"ud_vol_command\(.*?\n\}", source, re.S)
+    if not m:
+        errors.append("ud_vol_command() not found")
+    else:
+        body = m.group(0)
+        order = []
+        for tok in ("VOL BEGIN ", "ud_u64_span", "CONFIRM\\n"):
+            order.append(body.find(tok))
+        if any(x < 0 for x in order) or not (order[0] < order[1] < order[2]):
+            errors.append("VOL BEGIN does not parse wire/volume/CONFIRM in "
+                          "that order: %s" % order)
+        if "p[off] != ' '" not in body:
+            errors.append("VOL BEGIN does not require a space between arguments")
+    if "ud_inst_u64" in source:
+        body = re.search(r"ud_inst_u64\(.*?\n\}", source, re.S)
+        if body and "p[i] != '\\n'" not in body.group(0):
+            errors.append("ud_inst_u64 does not require the trailing newline")
+    # The command scanner has to run inside the non-KDP branch too; a panic
+    # console that takes the KDP branch would otherwise eat INST/VOL.
+    if "if (!kebab_usb_kdp_enabled())" not in source:
+        errors.append("the non-KDP command branch is missing")
+    return errors
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--kernel-source", default="",
+                    help="path to bsd/dev/kebab_usb.c for the command lint")
+    ap.add_argument("--make-fixtures", metavar="DIR",
+                    help="write a fixture tree and exit")
+    ap.add_argument("--keep", action="store_true", help="keep the fixture tree")
+    args = ap.parse_args(argv)
+
+    if args.make_fixtures:
+        make_fixtures(args.make_fixtures)
+        print("fixtures written to %s" % args.make_fixtures)
+        return 0
+
+    failures = 0
+    tmp = tempfile.mkdtemp(prefix="kebab-p1-")
+    try:
+        fixture = make_fixtures(os.path.join(tmp, "fixtures"))
+        log_root = os.path.join(tmp, "logs")
+        try:
+            check_kist_compressed_large(tmp)
+            print("PASS kist-compressed-size")
+        except Exception:
+            failures += 1
+            print("FAIL kist-compressed-size")
+            traceback.print_exc()
+
+        cases = [
+            Case("dry-run", ["--dry-run", "--work-dir", fixture.dir,
+                             "--fastboot", sys.executable,
+                             "--log-dir", os.path.join(log_root, "dry")],
+                 fixture, 0),
+            Case("happy-path", ["--from", "vol", "--work-dir", fixture.dir,
+                                "--log-dir", os.path.join(log_root, "happy")],
+                 fixture, 0),
+            Case("resume", ["--from", "auto", "--work-dir", fixture.dir,
+                            "--log-dir", os.path.join(log_root, "resume")],
+                 fixture, 0,
+                 volume_blocks=4194304,
+                 files={e.path: (e.size, e.sha.hex())
+                        for e in bu.read_kist(fixture.base_stream).entries} |
+                       {e.path: (e.size, e.sha.hex())
+                        for e in bu.read_kist(fixture.cache_stream).entries}),
+            Case("segment", ["--from", "base", "--to", "base",
+                             "--work-dir", fixture.dir,
+                             "--log-dir", os.path.join(log_root, "segment")],
+                 fixture, 0, volume_blocks=4194304),
+            Case("partial-base", ["--from", "base", "--to", "base",
+                                  "--work-dir", fixture.dir,
+                                  "--log-dir", os.path.join(log_root, "partial")],
+                 fixture, 0, volume_blocks=4194304,
+                 files={bu.read_kist(fixture.base_stream).entries[1].path:
+                        (bu.read_kist(fixture.base_stream).entries[1].size,
+                         bu.read_kist(fixture.base_stream).entries[1].sha.hex())}),
+            Case("from-vol-resume", ["--from", "vol", "--work-dir", fixture.dir,
+                                     "--log-dir", os.path.join(log_root, "volskip")],
+                 fixture, 0, volume_blocks=4194304),
+            Case("install-small", ["--from", "install", "--to", "install",
+                                   "--work-dir", fixture.dir,
+                                   "--log-dir", os.path.join(log_root, "small")],
+                 fixture, 3, volume_blocks=16384),
+            Case("bad-install-args", ["--dry-run", "--work-dir", fixture.dir,
+                                      "--install-image", fixture.bad_install_image,
+                                      "--log-dir", os.path.join(log_root, "badargs")],
+                 fixture, 6),
+            Case("corrupt-stream", ["--dry-run", "--work-dir", fixture.dir,
+                                    "--base-stream", fixture.corrupt_base,
+                                    "--log-dir", os.path.join(log_root, "corrupt")],
+                 fixture, 6),
+            Case("slot-a", ["--from", "vol", "--work-dir", fixture.dir,
+                            "--log-dir", os.path.join(log_root, "slot")],
+                 fixture, 2, slot="a"),
+            Case("cs-killed", ["--from", "final", "--work-dir", fixture.dir,
+                               "--log-dir", os.path.join(log_root, "cs")],
+                 fixture, 3, volume_blocks=4194304, final="cs_killed"),
+            Case("dsc-missing", ["--from", "final", "--work-dir", fixture.dir,
+                                 "--log-dir", os.path.join(log_root, "dsc")],
+                 fixture, 3, volume_blocks=4194304, final="dsc"),
+            Case("panic-mid-cache", ["--from", "vol", "--work-dir", fixture.dir,
+                                     "--log-dir", os.path.join(log_root, "panic")],
+                 fixture, 4, panic_after=4),
+            Case("silent-panic", ["--from", "vol", "--work-dir", fixture.dir,
+                                  "--log-dir", os.path.join(log_root, "panic2")],
+                 fixture, 4, panic_after=4, silent_panic=True),
+        ]
+        for case in cases:
+            try:
+                rc, out, err, board = run_case(case, fixture)
+                ok = rc == case.expected
+                if not ok:
+                    failures += 1
+                print("%s %-18s rc=%d expected=%d" % (
+                    "PASS" if ok else "FAIL", case.name, rc, case.expected))
+                if not ok:
+                    print(err[-4000:])
+                if case.name == "happy-path" and board is not None:
+                    flashed = [os.path.basename(x) for x in board.fastboot.flashed]
+                    assert os.path.basename(fixture.vol_image) in flashed, flashed
+                    assert os.path.basename(fixture.install_image) in flashed, flashed
+                    assert os.path.basename(fixture.final_image) in flashed
+                    assert flashed.index(os.path.basename(fixture.install_image)) < \
+                        flashed.index(os.path.basename(fixture.final_image)), flashed
+                    assert "phase install: boot-inst.img" in out, out[-3000:]
+                    assert "C-INST-GEOM" in out, out[-3000:]
+                    assert len(board.device.sent_log) == 2, board.device.sent_log
+                    assert board.device.volume_blocks == 4194304
+                if case.name == "resume" and board is not None:
+                    assert os.path.basename(fixture.vol_image) not in \
+                        [os.path.basename(x) for x in board.fastboot.flashed], \
+                        board.fastboot.flashed
+                    assert not board.device.sent_log, board.device.sent_log
+                if case.name == "from-vol-resume" and board is not None:
+                    assert os.path.basename(fixture.vol_image) not in \
+                        [os.path.basename(x) for x in board.fastboot.flashed], \
+                        board.fastboot.flashed
+                if case.name == "partial-base" and board is not None:
+                    assert board.device.sent_log, "partial stream was not sent"
+                    assert "skipped 1" in out, out[-2000:]
+                if case.name == "segment" and board is not None:
+                    assert len(board.device.sent_log) == 1, board.device.sent_log
+            except Exception:
+                failures += 1
+                print("FAIL %-18s exception" % case.name)
+                traceback.print_exc()
+
+        if args.kernel_source:
+            src = open(args.kernel_source, encoding="utf-8", errors="replace").read()
+            errors = lint_commands(src)
+            if errors:
+                failures += 1
+                print("FAIL command-lint")
+                for e in errors:
+                    print("  - " + e)
+            else:
+                print("PASS command-lint      %d commands in %s"
+                      % (len(COMMAND_TABLE), args.kernel_source))
+        else:
+            print("SKIP command-lint      (pass --kernel-source)")
+    finally:
+        if not args.keep:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+        else:
+            print("kept %s" % tmp)
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
