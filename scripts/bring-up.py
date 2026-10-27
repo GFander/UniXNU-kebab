@@ -519,7 +519,8 @@ def read_vext_volume_header(path: str) -> dict[str, int]:
         raise ValueError("%s: cannot read the embedded volume header" % path)
     sig, ver = struct.unpack_from(">HH", vh, 0)
     bsize, blocks, free = struct.unpack_from(">III", vh, 40)
-    attrs, journal = struct.unpack_from(">II", vh, 4)
+    attrs = struct.unpack_from(">I", vh, 4)[0]
+    journal = struct.unpack_from(">I", vh, 12)[0]
     return {"signature": sig, "version": ver, "block_size": bsize,
             "blocks": blocks, "free": free, "attributes": attrs,
             "journal": journal}
