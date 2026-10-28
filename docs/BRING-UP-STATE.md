@@ -7278,8 +7278,9 @@ launchd 二进制里带一份 boot task 表（`/System/Library/xpc/launchd.plist
 1. **安装器不能造设备节点。** `kebab_install.c` 的落盘路径是
    `namei(CREATE)+vn_create` 建目录、`vnode_open(O_CREAT|O_TRUNC)` 建文件，
    类型只有 `VREG`。没有 `mknod`，也没有 `VCHR`/`VBLK` 分支。
-2. **`/dev` 不在允许清单里。** 六个前缀是 `/sbin/`、`/usr/lib/`、
-   `/usr/standalone/`、`/System/Library/Caches/com.apple.dyld/`、
+2. **`/dev` 不在允许清单里。** 七个前缀是 `/sbin/`、`/usr/lib/`、
+   `/usr/libexec/`（0144 起）、`/usr/standalone/`、
+   `/System/Library/Caches/com.apple.dyld/`、
    `/System/Library/Caches/com.apple.kernelcaches/`、`/System/Library/LaunchDaemons/`。
    在 `/dev/null` 下写一个普通文件也会被在建目录之前拒绝。
 3. **launchd 不创建 `/dev`。** 它的导入表里没有 `mknod`，也没有 `mount`；整个
@@ -7384,7 +7385,7 @@ launchd 用自己已解析的 uid 0，不再依赖目录服务里的其他用户
 > `make-root-volume.py` 只生成裸卷；骨架是 `skel.kist`（KIST v2，16 条），
 > 由内核在写卷之后创建。下面的步骤仅作为旧方案存档，不要再执行。
 
-安装器能到的地方只有六个前缀，`/dev`、`/var`、`/tmp`、`/private/etc` 都不在
+安装器能到的地方只有七个前缀（0144 起新增 `/usr/libexec/`），`/dev`、`/var`、`/tmp`、`/private/etc` 都不在
 里面；它也不能建 sticky 目录、不能建符号链接、不能 mknod。因此这些必须在
 **卷生成**时写进去。`scripts/make-root-volume.py` 现在在 `newfs_hfs` 之后：
 
@@ -7871,12 +7872,12 @@ INST? bsize 4096 blocks 4194304 free <n>
 
 #### 4.4 base.kist：先查再发，发完抽样复核
 
-* 对 5 条目标逐一 `INST CHECK <path>`；全部 same 则整个流不发，打印
+* 对 6 条目标逐一 `INST CHECK <path>`；全部 same 则整个流不发，打印
   `complete; skipped`。
 * 有缺失/不同才发 `INST BEGIN <size>`；每条 64 KiB 块等 `INST ACK`，内核按
   KIST 头逐条写、逐条回读并打印 `OK <path> ...` 或 `SKIP <path> ...`。
-* 结束要求 `INST DONE entries 5 ok ... skipped ... bytes 1619682 wire ...`；
-  `ok + skipped == 5`。
+* 结束要求 `INST DONE entries 6 ok ... skipped ... bytes 1716034 wire ...`；
+  `ok + skipped == 6`。
 * 再抽 6 条（base 全查）`INST CHECK`，大小和 SHA-256 必须与流头一致。
 
 #### 4.5 cache.kist：44 条、同样的预查、记录耗时
@@ -8187,7 +8188,7 @@ passwd 的决定不变：launchd 在没有 `UserName` 的 plist 上也会
 - `KI_VERSION 2`，接受 1..2；v1 条目不允许 DIR/LINK；
 - `KI_F_DIR`/`KI_F_SYMLINK`，两者互斥且不允许 deflate；
 - `ki_path_ok()` 对骨架流使用精确路径表（和上面的 16 条一一对应），普通流
-  仍只允许原来的六个前缀；
+  仍只允许七个前缀（0144 起新增 `/usr/libexec/`）；
 - 目录用 `vn_create` 创建后立刻 `vnode_setattr`，显式设 `uid=0/gid=0` 和
   精确 mode（所以 `01777` 不会被 umask 或父目录属主改掉）；
 - 符号链接用 `nameiat(CREATE, OP_SYMLINK)` + `VNOP_SYMLINK` 创建，target
