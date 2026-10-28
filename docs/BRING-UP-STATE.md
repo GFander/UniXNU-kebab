@@ -12503,3 +12503,39 @@ patches/xnu-10063.141.1-sparse-index.patch
 这条路是唯一能让真实 APFS 与 data 卷可读的方案，而且有 sheng 的成功先例。
 但它卡在供体 kernelcache 解密这一条上，其余部分都是有明确做法的工程。
 解密不解决之前，不建议投入时间到内核补丁移植上。
+
+### 八、prelink 链路首次打通
+
+在三项前置都解决之后，工具第一次端到端产出了候选镜像：
+
+```
+供体     kernelcache.release.iphone10b，LZFSE 解压后 50,937,884 字节
+         外层 28 字节 FAT 头剥掉后是 MH_EXECUTE，内含 __PRELINK_INFO
+内核     kernel.development.kebab，17,227,160 字节
+         需要把 __CTF 段的 filesize 与 section size 清零（对应 sheng 的 noctf）
+root     com.apple.filesystems.apfs（依赖闭包 15 个组件）
+slide    -0x1eff1000000（-0x1f001000000 会让组件撞上 __TEXT_EXEC）
+产出     55,013,376 字节候选镜像
+```
+
+过程中解决的三件事：
+
+1. **符号缺口 42 个**。17 个是 IOUnifiedAddressTranslator 的 C++ 成员，
+   25 个是 C 函数，绝大多数属于本移植不运行的 IOMMU/DART。
+   补丁 `0157` 提供它们：`vfs_getvfs_with_vfsops` 是真实实现（APFS 用它），
+   其余是"调用即打印一次"的桩。
+2. **导出表走不通**。xnu 的 `kextsymboltool` 要求导出名出现在导入表里，
+   直接往 `config/BSDKernel.arm64.exports` 加会被拒。
+   改为让 prelink 工具在内核的 `LC_SYMTAB` 里回退查找，不改内核的符号集。
+3. **slide 需要搜索**。组件必须落在内核段之外，用相邻的 256 MiB 步长试探即可。
+
+### 九、尚未验证的部分
+
+```
+early_security_init 未设置      AMFI 不会在早期初始化
+内核侧模块登记                  未在真机看过 sparse-index 的输出
+候选镜像能否启动                未刷入
+APFS 能否真的挂载               未验证
+```
+
+下一步是刷入候选镜像并按第六节的四级判据验证。
