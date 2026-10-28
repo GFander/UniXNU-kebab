@@ -11897,5 +11897,41 @@ panic 路径没有改：`ud_panic_reboot()` 仍然直接调用 `ud_platform_rest
   `INST FREE`、`INST? vh`、orchestrator 的自由块断言。序列总数为 128 个补丁
   （原 126 个加 0148、0149）。
 
-本节的代码已经编译进 `kernel.development.kebab`；真机验证项见第 7 小节，未在硬件
-上执行的部分不写成"已验证"。
+### 9. 2026-10-28 修复后实测
+
+在 128 补丁内核（`kernel-0149.kebab`，sha256
+`e009981f…fcd0fe8`）上重跑了 phase B，镜像参数与旧 `boot-B.img` 逐字节相同。
+只发 `skel.kist` 和 `base.kist`，未发 `cache.kist`：
+
+| 步骤 | 设备卷头 free | delta | expected |
+| --- | ---: | ---: | ---: |
+| 安装前 baseline | 4,193,878 | — | — |
+| skel.kist 后 | 4,193,872 | 6 | 1 |
+| base.kist 后 | 4,193,449 | 423 | 419 |
+| 再次 `SYNC` | 4,193,449 | 0 | — |
+| `REBOOT` 后挂载 | 4,193,449 | — | — |
+
+* 两条流的 `INST SYNC stream end vfs ok device ok` 都在 `INST DONE` 之前出现；
+* `INST VERIFY` 三条 `cold full ok`（skel）和三条 `cold full ok`（base）通过；
+* `INST FREE` 的 delta 分别是 6 和 423，expected 是 1 和 419；多出的 4 块是
+  catalog/extents/bitmap 元数据；
+* `REBOOT` 前打印
+  `KEBAB SYNC: REBOOT: VFS_SYNC + SYNCHRONIZE CACHE ok ms 0`；
+* 重启后 HFS 挂载行直接报
+  `free blocks 4193449`，`INST CHECK /private/etc/passwd`、`/sbin/launchd`、
+  `/usr/libexec/xpcproxy` 的 size/SHA-256 全部与安装时一致；
+* `devfs_kernel_mount` 不再打印 `kernel_mount failed: 2`，`/dev` 正常；
+  `static.trustcache` 从卷上加载成功。
+
+一个需要写进 run book 的细节：**同一个 boot 内 `INST? space` / `INST? bsize` 的
+statfs free 不会随安装变化**，即使 `VFS_SYNC` 已经完成；HFS+ 把 statfs 的 free
+计数缓存在挂载结构里。设备卷头（`INST? vh` / `SYNC VH`）才是安装后立即正确的数字；
+重启后 statfs 才从卷头重算（实测 4,151,935 → 4,151,506，正好 429 块，与
+6 + 423 一致）。orchestrator 的断言因此只用 `INST FREE` 的设备卷头数字，不看
+同一 boot 的 statfs。
+
+这次实测覆盖 skel/base 和一次普通 REBOOT；cache 流、最终镜像和断电测试仍未执行，
+不能据此宣称整条 P1 已完成。
+
+本节的代码已经编译进 `kernel.development.kebab`；第 7 小节中未在硬件上执行的部分
+不写成"已验证"。
