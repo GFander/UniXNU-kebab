@@ -130,6 +130,7 @@ CMD_FASTBOOT = b"FASTBOOT\n"
 CMD_REBOOT = b"REBOOT\n"
 CMD_INST_STATUS = b"INST?\n"
 CMD_VOL_STATUS = b"VOL?\n"
+CMD_SYNC = b"SYNC\n"
 
 # The boot markers the USB console can actually deliver.  This is deliberately
 # narrower than every "a boot happened" line in the kernel:
@@ -181,6 +182,15 @@ INST_DONE_RE = re.compile(
 INST_DONE_FAIL_RE = re.compile(
     r"^INST DONE with (\d+) failure\(s\), entries (\d+) ok (\d+) skipped (\d+)$"
 )
+# The installer's proof that the allocation reached the volume header.  before
+# is read from the device at INST BEGIN, after once VFS_SYNC and SYNCHRONIZE
+# CACHE ran; expected is the block count for the bytes this stream wrote net
+# of the old contents it replaced.
+INST_FREE_RE = re.compile(
+    r"^INST FREE before (\d+) after (\d+) delta (-?\d+) expected (\d+) "
+    r"bsize (\d+) written (\d+) replaced (\d+)$"
+)
+INST_VH_RE = re.compile(r"^INST\? vh bsize (\d+) blocks (\d+) free (\d+)$")
 INST_PLAN_RE = re.compile(r"^INST PLAN entries (\d+) bytes (\d+) wire (\d+)$")
 VOL_DONE_RE = re.compile(
     r"^VOL DONE extents (\d+) bytes (\d+) wire (\d+) ms (\d+)$"
@@ -1378,6 +1388,11 @@ class Orchestrator:
                 info["bsize"] = int(m.group(1))
                 info["blocks"] = int(m.group(2))
                 info["bavail"] = int(m.group(3))
+            m = INST_VH_RE.match(line)
+            if m:
+                info["vh_bsize"] = int(m.group(1))
+                info["vh_blocks"] = int(m.group(2))
+                info["vh_free"] = int(m.group(3))
         if "blocks" not in info:
             return None
         return info
@@ -1719,10 +1734,17 @@ class Orchestrator:
                                   % (sent / (1 << 20), size / (1 << 20), rate,
                                      now - start))
                     last_report = now
+        free_line = ""
+
+        def is_done(l: str) -> bool:
+            nonlocal free_line
+            if l.startswith("INST FREE "):
+                free_line = l
+            return (done_re.match(l) is not None
+                    or l.startswith("INST DONE with"))
+
         try:
-            done = self.wait(lambda l: done_re.match(l) is not None
-                             or l.startswith("INST DONE with"), 600,
-                             "INST DONE")
+            done = self.wait(is_done, 600, "INST DONE")
         except TimeoutError:
             self.fail("send.done", "INST DONE entries %d ..." % stream.entry_count,
                       "no INST DONE after the last chunk",
@@ -1743,6 +1765,8 @@ class Orchestrator:
             self.fail("send.done", "bytes %d" % stream.total_usize, done)
         if wire != size:
             self.fail("send.done", "wire %d" % size, done)
+        if label != "skel":
+            self.check_free_delta(label, free_line, ok)
         self.checkpoint("C-SEND-" + label.upper(), "send." + label,
                         "INST DONE entries %d ok %d skipped %d" % (
                             entries, ok, skipped),
@@ -1750,7 +1774,43 @@ class Orchestrator:
                             done, ok, skipped, elapsed), elapsed=elapsed)
         return {"entries": entries, "ok": ok, "skipped": skipped,
                 "bytes": nbytes, "wire": wire, "ms": ms, "elapsed": elapsed,
-                "done": done}
+                "done": done, "free": free_line}
+
+    def check_free_delta(self, label: str, line: str, ok: int) -> None:
+        """Prove the writes allocated blocks on the volume, not just in the UBC.
+
+        The kernel prints INST FREE from the on-disk HFS+ volume header before
+        and after VFS_SYNC + SYNCHRONIZE CACHE.  A stream that wrote files but
+        left the free-block count unchanged is the 2026-10-28 hardware failure:
+        INST DONE ok=N was a page-cache read-back and a reboot lost everything.
+        """
+        if ok == 0:
+            return
+        if not line:
+            self.fail("send.free", "INST FREE before ... delta ... expected ...",
+                      "no INST FREE line",
+                      hint="the running kernel does not carry 0148; its INST "
+                           "DONE does not prove the allocation reached the "
+                           "volume header")
+        m = INST_FREE_RE.match(line)
+        if not m:
+            self.fail("send.free", "INST FREE before ... delta ... expected ...",
+                      line)
+        before, after, delta, expected, bsize, written, replaced = \
+            (int(x) for x in m.groups())
+        if delta < 0:
+            self.fail("send.free", "the free-block count not to grow", line,
+                      hint="after > before means the volume header gained "
+                           "blocks while files were installed")
+        if expected > 0 and delta * 4 < expected * 3:
+            self.fail("send.free",
+                      "free blocks to fall by about %d (wrote %d, replaced %d)"
+                      % (expected, written, replaced), line,
+                      hint="the volume header's free count barely moved; the "
+                           "allocation bitmap/catalog probably never reached "
+                           "the device, so a reboot will lose these files")
+        self.log.info("free blocks %d -> %d (delta %d, expected %d, bsize %d)"
+                      % (before, after, delta, expected, bsize))
 
     def verify_entries(self, stream: KistStream, label: str,
                        sample: Sequence[KistEntry]) -> None:

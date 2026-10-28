@@ -11643,6 +11643,23 @@ DSC/签名问题、实际是丢失写入的结果——而 DSC 和签名正是�
 dyld、codesign 或 shared cache 错误，而不是"少写了文件"，正好会把这一轮改动最多、
 最没上过真机的两个子系统当成嫌疑人。
 
+### 1.1 2026-10-28 的真机结果：连 64 KiB 都丢
+
+真机在 126 个补丁的内核上（没有本节补丁）给出了比"大传输丢尾部"更糟的结果：
+
+* `skel.kist` 安装 `16/16 OK`，每条属性都对（`/private/tmp` 回读 `01777`，
+  所有 entry `uid 0 gid 0`，符号链接目标正确）；
+* `base.kist` 安装 `6/6 OK`，六条 `INST CHECK` 的 size 和 SHA-256 全部一致；
+* 普通 `REBOOT` 之后，`INST CHECK /private/etc/passwd` 返回 **MISSING**；
+* `INST?` 报的自由块数与安装前完全相同（4,151,935 blocks），卷头仍是
+  4,193,878 free。
+
+也就是说，`INST DONE ok=16` 证明的是 UBC 里的内容，不是卷上的分配：分配位图、
+catalog、extents B-tree 和卷头都还只在内存里，复位就全没了；连 64 KiB 的单 chunk
+安装也 100% 丢失。这正是 `VFS_SYNC` 缺失的直接后果，也说明只对文件数据做 fsync 不够。
+本节的 0148 补上了流末的 `VFS_SYNC` + `SYNCHRONIZE CACHE`，0149 再把"分配到底有没有
+到卷上"变成可观测、可断言的数字。
+
 ### 2. 现在每次流的落盘顺序
 
 普通文件在 `ki_finish_entry()` 里、vnode 还持有的时候先做一次
@@ -11685,6 +11702,56 @@ INST SYNC stream end vfs ok device ok ms <n>
 `FAIL install data: SYNCHRONIZE CACHE ...`，然后走
 `INST DONE with <n> failure(s), ...`，不会出现成功的 `INST DONE`。冷读失败同样是
 `FAIL` 行加失败计数。
+
+### 2.1 让"分配是否到卷上"可观测
+
+VFS 同步是机制，肉眼和主机还需要数字。0149 加了三处观测点：
+
+1. **`SYNC` 控制台命令。** 这个命令和复位路径用同一套 `VFS_SYNC` +
+   `kebab_ufs_sync()`，然后在**同步前后各从设备 raw 读一次 HFS+ 卷头**，打印：
+
+```
+SYNC BEGIN
+SYNC VFS vfs 0 device 0
+SYNC VH before 4151935 after 4151919 delta 16 bsize 4096 blocks 4194304
+SYNC DONE vfs 0 device 0 ms 12
+```
+
+   `before` 是同步前介质上的 `freeBlocks`，`after` 是同步后的值。旧内核上两者
+   相同（因为分配位图根本没写下去）；修复后 `after` 应该比 `before` 少，减少量
+   约等于这次安装占用的块数。命令只依赖 USB 事件线程，不需要 init，所以
+   `kebab_noinit=1` 的安装镜像可以直接用；正常启动也能用。
+2. **`INST FREE` 行。** 每条非 dry 流在 `INST DONE` 之前打印：
+
+```
+INST FREE before 4151935 after 4151919 delta 16 expected 16 bsize 4096 written 65536 replaced 0
+```
+
+   `before` 是 `INST BEGIN` 时从设备卷头读的，`after` 是流末 `VFS_SYNC` +
+   `SYNCHRONIZE CACHE` 之后从同一卷头读的；`delta = before - after`；
+   `expected` 是本次实际写入字节减去被覆盖文件旧大小后，按 `bsize` 折算的块数；
+   `written` / `replaced` 是原始字节数，便于解释 overwrite/resume。
+3. **`INST? vh` 行。** `INST?` 在原来的 `INST? bsize ... free ...`（挂载点 statfs）
+   之外，再加一行设备卷头的数字：
+
+```
+INST? vh bsize 4096 blocks 4194304 free 4151919
+```
+
+   这样同一个 boot 里、安装前后都可以用同一条命令比较"内存里的 statfs"和
+   "设备卷头"。`INST?` 在流活跃时不发 raw read，避免和安装 I/O 交叉。
+
+orchestrator 在 `send_stream()` 里捕获 `INST FREE`（它在 `INST DONE` 前到达）并断言：
+
+* 流写了文件（`ok > 0`）却没有 `INST FREE` 行：失败，提示运行内核没有 0149；
+* `delta < 0`：失败；
+* `expected > 0` 且 `delta * 4 < expected * 3`：失败，提示自由块几乎没动，
+  分配位图/catalog 很可能没有落到设备，重启会丢文件。
+
+`skel` 流不做这个断言：骨架经常是在已有目录上重写很小的文件，净分配可能为 0；
+base/cache 流覆盖了真正的用户态数据。fake board 增加了 `no_free_delta` 注入点，
+用例 `free-stuck` 会输出干净的 `INST DONE` 但 `delta 0`，orchestrator 必须拒绝；
+这条用例就是 2026-10-28 真机结果的回归测试。
 
 ### 3. 仍然由缓存承担的部分
 
@@ -11763,52 +11830,72 @@ panic 路径没有改：`ud_panic_reboot()` 仍然直接调用 `ud_platform_rest
 180 秒的静默等待和"检查 rootrw"这种误导性提示。
 
 `scripts/test-bring-up.py` 的 fake board 增加了 `vol_root`、`inst_busy`、
-`inst_refused` 三个注入点，并新增 `vol-root-rw`、`inst-busy`、`inst-refused`
-三个用例；三者都要求退出码 3，且错误里必须出现对应的 `VOL? root ro` /
-`INST busy` / `INST refused` 行。
+`inst_refused`、`no_free_delta` 四个注入点，并新增 `vol-root-rw`、`inst-busy`、
+`inst-refused`、`free-stuck` 四个用例；四者都要求退出码 3，且错误里必须出现对应的
+`VOL? root ro` / `INST busy` / `INST refused` / `check_free_delta` 证据。
 
 ### 7. 真机还必须确认什么
 
 1. 每条非 dry 流在 `INST DONE` 之前有且只有一行
-   `INST SYNC stream end vfs ok device ok ms <n>`；没有这行就是内核没带 0148。
-2. 至少出现一条 `INST VERIFY ... cold full ok` 或
+   `INST SYNC stream end vfs ok device ok ms <n>`，以及一行 `INST FREE ...`。
+   没有 `INST SYNC` 是内核没带 0148；没有 `INST FREE` 是没带 0149，orchestrator
+   会拒绝这条流。
+2. 先手工验一次 `SYNC`：安装前发 `SYNC`，记下 `SYNC VH ... free <before>`；
+   发送 64 KiB 的 `skel.kist` 和 `base.kist` 后，再发 `SYNC`，确认
+   `SYNC VH ... after <after>` 比 before 小，且 `delta` 约等于两条流实际占用的
+   块数。再发 `INST?`，确认 `INST? vh ... free` 与 `SYNC VH after` 相同，而
+   `INST? space` 的 statfs 也同步变化。
+3. 至少出现一条 `INST VERIFY ... cold full ok` 或
    `INST VERIFY ... cold tail 4096 ok`，且流末没有
    `INST VERIFY ... failed` / `FAIL ... cold ...`。cache.kist 里 592 MB 的
    `.symbols` 应该是"最大文件"样本，确认它的路径和 `cold tail` 行。
-3. `FASTBOOT` 时先看到
+4. 跑完 base 流后，用 `INST CHECK /private/etc/passwd` 和
+   `INST CHECK /usr/lib/libSystem.B.dylib` 记录 size/SHA-256；普通 `REBOOT`
+   后在同一 install 镜像上再查一次，必须与重启前完全一致。2026-10-28 的失败正是
+   这一步返回 `MISSING`。
+5. `FASTBOOT` 时先看到
    `KEBAB SYNC: FASTBOOT: VFS_SYNC + SYNCHRONIZE CACHE ok ms <n>`，再看到
    `KEBAB FASTBOOT: writing IMEM restart_reason ...`。整段必须在主机等
    `KEBAB FASTBOOT: IMEM read back` 的 15 秒窗口内完成；如果超时，日志里会有
    `KEBAB SYNC` 行，可据此判断是同步慢还是复位没发生。
-4. 记录 `INST DONE ... ms <n>` 与旧值比较。每个文件一次 fsync、每条流一次
+6. 记录 `INST DONE ... ms <n>` 与旧值比较。每个文件一次 fsync、每条流一次
    `VFS_SYNC`、四个样本的冷读都会增加时间；7.84 MiB/s、1.04 GB 的 cache 流原来
    约 7 分钟，现在要给 `INST DONE` 的 600 秒等待留出余量。第一次真机跑要先确认
    `send.done` 没有踩 600 秒。
-5. 故意在 install 镜像上连发两次 `INST BEGIN`，确认第二次立刻 `INST busy` 失败并
+7. 故意在 install 镜像上连发两次 `INST BEGIN`，确认第二次立刻 `INST busy` 失败并
    带 60 秒提示，而不是 180 秒后报 `send.begin`。
-6. vol 镜像上确认 `C-VOL-STATUS` 的证据行里有 `root ro`；如果 boot 参数误删
+8. vol 镜像上确认 `C-VOL-STATUS` 的证据行里有 `root ro`；如果 boot 参数误删
    `kebab_vol=1`，这一步必须失败，而不是继续压卷。
-7. 如果条件允许，做一次"`INST DONE` 后立刻断电、再启动 final 镜像"的破坏性验证：
+9. 如果条件允许，做一次"`INST DONE` 后立刻断电、再启动 final 镜像"的破坏性验证：
    用 `INST CHECK` 至少核 `.symbols` 和一个 cache 分片的长度与 SHA-256。这是唯一
-   能把"fsync + SYNCHRONIZE CACHE"从推断变成实测的办法；不做也可以，但要在风险
-   清单里保留这条未验证项。
-8. panic 中途的行为要复核：panic 仍然直接 PSCI 复位，日志里不应出现
-   `KEBAB SYNC`，也不应因为同步而延迟复位。
+   能把"fsync + VFS_SYNC + SYNCHRONIZE CACHE"从推断变成实测的办法；不做也可以，
+   但要在风险清单里保留这条未验证项。
+10. panic 中途的行为要复核：panic 仍然直接 PSCI 复位，日志里不应出现
+    `KEBAB SYNC`，也不应因为同步而延迟复位。
 
 ### 8. 改动位置
 
 * `bsd/dev/kebab_install.c`：`ki_tail_update()`、`ki_sample_add()`、
-  `ki_cold_verify_one()`、`ki_cold_verify()`、`ki_vfs_sync()`、
-  `ki_sync_media()`、`kebab_install_sync_for_reset()`；`ki_finish_entry()` 增加
-  `VNOP_FSYNC`，`ki_finish_stream()` 增加流末同步与冷读。
-* `bsd/dev/kebab_install.h`：`kebab_install_sync_for_reset()` 声明。
+  `ki_cold_verify_one()`、`ki_cold_verify()`、`ki_vfs_sync()`、`ki_read_vh()`、
+  `ki_report_free_delta()`、`ki_sync_media()`、
+  `kebab_install_sync_for_reset()`、`kebab_install_sync_report()`；
+  `ki_finish_entry()` 增加 `VNOP_FSYNC`，`ki_finish_stream()` 增加流末同步、冷读
+  和 `INST FREE`，`kebab_install_status()` 增加 `INST? vh`。
+* `bsd/dev/kebab_install.h`：`kebab_install_sync_for_reset()` /
+  `kebab_install_sync_report()` 声明。
 * `bsd/dev/kebab_usb.c`：`ud_run_reboot_command()` 在三个复位命令前调用同步，
-  panic 路径不变。
+  新增 `SYNC` 命令分发；panic 路径不变。
 * `scripts/bring-up.py`：`VOL_ROOT_RE`、`vol_status()` 的 `root ro` 断言、
-  `FAIL_RE`、busy/refused 提示、`send_stream()` / `vol_send()` 的等待谓词。
-* `scripts/test-bring-up.py`：fake board 的三个注入点和三个新用例。
-* `patches/xnu-8796-kebab/0148-kebab-install-durability.patch`：内核侧 0144 之后的
-  增量补丁，序列总数为 127 个补丁（原 126 个加 0148）。
+  `FAIL_RE`、busy/refused 提示、`INST_FREE_RE` / `INST_VH_RE`、
+  `check_free_delta()`、`send_stream()` / `vol_send()` 的等待谓词。
+* `scripts/test-bring-up.py`：fake board 的 `vol_root` / `inst_busy` /
+  `inst_refused` / `no_free_delta` 注入点，以及 `vol-root-rw`、`inst-busy`、
+  `inst-refused`、`free-stuck` 用例。
+* `patches/xnu-8796-kebab/0148-kebab-install-durability.patch`：流末 fsync、
+  VFS_SYNC、SYNCHRONIZE CACHE、冷读、复位前同步。
+* `patches/xnu-8796-kebab/0149-kebab-install-free-delta.patch`：`SYNC` 命令、
+  `INST FREE`、`INST? vh`、orchestrator 的自由块断言。序列总数为 128 个补丁
+  （原 126 个加 0148、0149）。
 
 本节的代码已经编译进 `kernel.development.kebab`；真机验证项见第 7 小节，未在硬件
 上执行的部分不写成"已验证"。

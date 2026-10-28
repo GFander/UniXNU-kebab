@@ -345,12 +345,14 @@ class FakeDevice:
                  mount_line: bool = True,
                  vol_root: str = "ro",
                  inst_busy: bool = False,
-                 inst_refused: bool = False):
+                 inst_refused: bool = False,
+                 no_free_delta: bool = False):
         self.fx = fixture
         self.console = console
         self.serial = "kebab-test"
         self.slot = slot
         self.volume_blocks = volume_blocks
+        self.free_blocks = max(0, volume_blocks - 426)
         self.files = dict(files or {})
         self.final = final
         self.panic_after = panic_after
@@ -376,6 +378,10 @@ class FakeDevice:
         # the waiter and cost a full phase timeout.
         self.inst_busy = inst_busy
         self.inst_refused = inst_refused
+        # no_free_delta=True reproduces the 2026-10-28 board result: INST DONE
+        # reports ok=N but the volume header's free count never moves, so the
+        # next reboot loses every file.
+        self.no_free_delta = no_free_delta
         self.mode = "kernel"
         self.pending_image = None
         self.current_image = None
@@ -478,14 +484,23 @@ class FakeDevice:
         elif cmd == "REBOOT":
             self.console.feed("KEBAB REBOOT: PEHaltRestart(kPERestartCPU)")
             self.reboot(self.current_image)
+        elif cmd == "SYNC":
+            self.console.feed("SYNC VFS vfs 0 device 0")
+            self.console.feed("SYNC VH before %d after %d delta 0 bsize 4096 "
+                              "blocks %d"
+                              % (self.free_blocks, self.free_blocks,
+                                 self.volume_blocks))
+            self.console.feed("SYNC DONE vfs 0 device 0 ms 1")
         elif cmd == "INST?":
             total = self.volume_blocks * 4096
             self.console.feed("INST? gated 1 active 0 dry 0 root rw chunk 65536")
             self.console.feed("INST? wire 0/0 entries 0/0 ok 0 skip 0 fail 0")
             self.console.feed("INST? space %d free of %d bytes"
-                              % (max(0, total - 426 * 4096), total))
+                              % (self.free_blocks * 4096, total))
             self.console.feed("INST? bsize 4096 blocks %d free %d"
-                              % (self.volume_blocks, max(0, self.volume_blocks - 426)))
+                              % (self.volume_blocks, self.free_blocks))
+            self.console.feed("INST? vh bsize 4096 blocks %d free %d"
+                              % (self.volume_blocks, self.free_blocks))
         elif cmd == "VOL?":
             total = self.volume_blocks * 4096
             self.console.feed("VOL? gated 1 active 0 dry 0 chunk 65536 writable 1")
@@ -567,6 +582,9 @@ class FakeDevice:
         self.active_dry = False
         self.active_chunks = 0
         self.active_stream_printed = False
+        self.inst_free_before = self.free_blocks
+        self.inst_written = 0
+        self.inst_replaced = 0
         self.console.feed("INST BEGIN %d write chunk 65536" % size)
 
     def chunk(self, data: bytes):
@@ -618,6 +636,7 @@ class FakeDevice:
                                   "volume 17179869184" % self.active_size)
             else:
                 self.volume_blocks = 4194304
+                self.free_blocks = 4193878
                 self.console.feed("VOL NEW vh sig 0x482b version 4 attributes "
                                   "0x80000100 lastMount 0x0 journal 0x0")
                 self.console.feed("VOL NEW vh created 0 modified 0 checked 0 "
@@ -651,7 +670,21 @@ class FakeDevice:
                 continue
             self.files[e.path] = (e.size, e.sha.hex())
             ok += 1
+            if e.kind == "file":
+                self.inst_written += e.size
+                if cur is not None and isinstance(cur[0], int):
+                    self.inst_replaced += cur[0]
             self.feed_ok(e)
+        net = max(0, self.inst_written - self.inst_replaced)
+        expected = (net + 4095) // 4096
+        expected = min(expected, self.free_blocks)
+        delta = 0 if self.no_free_delta else expected
+        after = self.free_blocks - delta
+        self.console.feed("INST FREE before %d after %d delta %d expected %d "
+                          "bsize 4096 written %d replaced %d"
+                          % (self.inst_free_before, after, delta, expected,
+                             self.inst_written, self.inst_replaced))
+        self.free_blocks = after
         self.console.feed("INST DONE entries %d ok %d skipped %d bytes %d "
                           "wire %d ms 100"
                           % (st.entry_count, ok, skipped, st.total_usize,
@@ -852,6 +885,7 @@ def make_fixtures(dirpath: str) -> Fixture:
 COMMAND_TABLE = [
     (b"FASTBOOT\n", "ud_command_seen(\"FASTBOOT\\n\")"),
     (b"REBOOT\n", "ud_command_seen(\"REBOOT\\n\")"),
+    (b"SYNC\n", "ud_command_seen(\"SYNC\\n\")"),
     (b"IMEM?\n", "ud_command_seen(\"IMEM?\\n\")"),
     (b"INST?\n", "ud_inst_command(\"INST?\\n\")"),
     (b"INST BEGIN ", "ud_inst_command prefix, unsigned decimal + newline"),
@@ -991,6 +1025,12 @@ def main(argv=None) -> int:
                                   "--work-dir", fixture.dir,
                                   "--log-dir", os.path.join(log_root, "instrefused")],
                  fixture, 3, volume_blocks=4194304, inst_refused=True),
+            # The 2026-10-28 failure: ok=N but no allocation reached the
+            # volume header.  This must fail even though INST DONE is clean.
+            Case("free-stuck", ["--from", "base", "--to", "base",
+                                "--work-dir", fixture.dir,
+                                "--log-dir", os.path.join(log_root, "freestuck")],
+                 fixture, 3, volume_blocks=4194304, no_free_delta=True),
             Case("resume", ["--from", "auto", "--work-dir", fixture.dir,
                             "--log-dir", os.path.join(log_root, "resume")],
                  fixture, 0,
@@ -1123,6 +1163,9 @@ def main(argv=None) -> int:
                     assert "60 s" in err, err[-3000:]
                 if case.name == "inst-refused":
                     assert "INST refused" in err, err[-3000:]
+                if case.name == "free-stuck":
+                    assert "send.free" in err, err[-3000:]
+                    assert "free count barely moved" in err, err[-3000:]
             except Exception:
                 failures += 1
                 print("FAIL %-18s exception" % case.name)
