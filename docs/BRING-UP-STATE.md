@@ -10551,3 +10551,590 @@ Apple 源码里有 `HFS_ALLOC_TEST` / `HFS_EXTENTS_TEST` 的编译开关，但 v
 - **已实测最大完整文件**：922,912 B（`dyld`）；64,028,672 B 是旧 64 MiB 卷
   写满的部分写入。
 - **需要改的代码**：无。0147 只加编译期格式断言，不改写路径。
+
+## 七十八、未上真机改动的风险清单
+
+> 目的：板子下一次上电时，读控制台的人要能回答两个问题——"这一行是谁打的"和
+> "先怀疑哪一个"。本节给 `0131` 之后的全部改动做分类，只把**普通启动上会执行**的
+> 那一类写成"可能弄坏启动"的风险，其余按"需要启动参数"和"只是日志"分开写。
+>
+> 状态：**本节没有真机日志**。板子从本轮开始一直停在 panic 自旋里（需要一次物理
+> 断电），因此所有"应该看到什么"都来自**当前代码里的格式串**（用 `0132`–`0147`
+> 打到 `xnu-0139` 树上逐条读出来的），不是来自记忆，也不是来自第六十八节那份
+> 早期的期望日志——那份已经过期，见第 8 节。
+>
+> 范围：`patches/xnu-8796-kebab/0132` … `0147`，共 16 个补丁。按"一次改动一个
+> 判据"拆成 **20 个原子改动**（`0133`、`0136`、`0146` 各拆成两/三个）。
+
+### 1. 四个分类的定义，以及"普通启动"到底指什么
+
+| 类 | 含义 | 能否弄坏一次普通启动 |
+| --- | --- | --- |
+| **(a)** | 只有启动参数（或某个同样显式的开关）才启用的新功能 | 不能 |
+| **(b)** | 普通启动上就会走到的**行为改动** | **能** |
+| **(c)** | 只增加/减少日志，不改变内核决策 | 不能 |
+| **(d)** | 文档，或只在编译期生效的断言 | 不能 |
+
+"普通启动"在本文里固定指 **P1 最终镜像**的参数集，也就是
+`board.toml [payload] kernel_args` 再加上 `scripts/bring-up.py` 的
+`FINAL_ARGS`：
+
+```
+-v -enable_kprintf_spam startup_debug=1 serial=3 debug=0x14e cpus=1
+rd=ufsroot0 ufsroot=userdata ufsrw=1 rootrw=1 kebabusb=1 keepsyms=1
+kebab_pon_write=1 kebab_cs=15 kebab_dsc=1 kebab_dsc_map=1
+```
+
+不带 `kebab_vol`、`kebab_install`、`kebab_noinit`、`kebab_touch*`、`kebab_keys`、
+`kebabkdp`、`kebab_dsc_verbose`、`kebab_dsc_slide`。任何**会**在这套参数下执行的
+代码路径都算"普通启动"，包括 `kebab_dsc` 的计划与 first-exec 映射——它虽然叫
+`kebab_dsc=1`，但已经在最终镜像里，所以按普通启动对待。
+
+证据等级：**H** = 有真机日志（本文件此前各节）；**B** = 完整内核构建 + 主机侧
+校验/测试；**R** = 只读过代码，连构建记录都没有。
+
+### 2. 分类表
+
+| # | 补丁 | 改动 | 类 | 门 / 触发条件 | 证据 |
+| ---: | --- | --- | --- | --- | --- |
+| 1 | `0132` | 触摸两路 LDO 自动上电、SE13 时钟进启动路径、identify 重写 | (a) | `kebab_touch=1`（+`_boot`/`_power`/`kebab_vrm_write=1`） | **H**（部分） |
+| 2 | `0133` | `kebab_vol.c` + UFS 裸块路径 + `VOL` 命令族 | (a) | `kebab_vol=1` + `ufsrw=1` + `CONFIRM` | B |
+| 3 | `0133` | `kebab_noinit=1`：init 停在核内 | (a) | `kebab_noinit=1` | B |
+| 4 | `0133` | `KEBAB HFS:` 挂载几何日志 | (c) | 每次挂载 | B |
+| 5 | `0133` | `kebab_vol=1` 强制旧根只读 | (a) | `kebab_vol=1`（压过 `rootrw=1`） | B |
+| 6 | `0134` | panic 策略：不再默认等 KDP；panic 失败即 PSCI 复位 | **(b)** | 任何 panic | B |
+| 7 | `0135` | TCM 报告解码：app info / 报告程序 / 触点解码 / 轮询线程 | (a) | `kebab_touch=1 kebab_touch_boot=1` | B |
+| 8 | `0136` | `unentitled_ios_sim_launch` 在 KEBAB 下默认 `true` | **(b)** | 每次 exec | B |
+| 9 | `0136` | exec/CS 诊断行（cdhash、pre-copyout、stack）与信任缓存行改格式 | (c) | 每次启动/exec | B |
+| 10 | `0137` | `sms_slide_size` 赋值（slide 路径） | (a) | `kebab_dsc_slide=<非零>` | R |
+| 11 | `0138` | KIST v2 的 DIR/LINK、每次创建后 chown+读回属性 | (a) | `kebab_install=1` | B |
+| 12 | `0139` | PM8150 按键轮询 + `/dev/kebab_keys` | (a) | `kebab_keys=1` | B |
+| 13 | `0140` | copyout 失败时的 map/fault/PTE/包含关系四行 | (c) | 只在失败路径 | B |
+| 14 | `0141` | `thread_userstack()` 用 64 位结构体读 sp | **(b)** | 只有 `LC_UNIXTHREAD` 的 exec | B |
+| 15 | `0142` | 共享缓存计划追加 dynamic-config 页；基址检查收紧 | **(b)** | 每次 `kebab_dsc=1` | B |
+| 16 | `0143` | 计划日志改为一行摘要，明细转 `kebab_dsc_verbose=1` | (c) | 每次 `kebab_dsc=1` | B |
+| 17 | `0144` | 安装器允许清单加 `/usr/libexec/` | (a) | `kebab_install=1` | B |
+| 18 | `0145` | `/dev/console` 路由到 kebab 字符设备 | **(b)** | 每次启动（UFS 起来之后） | B |
+| 19 | `0146` | 控制台写路径的 `EDEADLK` 守护 + 注释更正 | (c) | 每次 `write(2)`，守护不可达 | B |
+| 20 | `0147` | HFS+ extent 格式常量的编译期断言 | (d) | 只在编译期 | B |
+
+计数：**(a) 9 个，(b) 5 个，(c) 5 个，(d) 1 个**，共 20 个原子改动 / 16 个补丁。
+
+有两处归类需要说明：`0142`/`0143` 的开关是 `kebab_dsc`，而
+`kebab_dsc` 已经在最终镜像里，所以它们是 (b)/(c)，不是 (a)；反过来
+`0138`/`0144` 改的是既有安装器而不是"新函数"，但只有 `kebab_install=1`
+才会走到，因此按门归到 (a)，并在第 4 节注明它们是"既有路径的行为改动"。
+
+### 3. 分类 (b)：普通启动上的行为改动
+
+按"坏起来最贵"排序，编号与第 2 节一致。每一条都给出：改了什么、走哪些路径、
+最可能怎么坏、**控制台判据**。
+
+#### 3.1 `0145` `/dev/console` 路由到 kebab 字符设备
+
+**改了什么。** `cnopen/cnclose/cnread/cnwrite/cnioctl/cnselect` 在
+`constty == NULL && kebab_console_available()`（即 `su.ready && su.conmajor >= 0`）
+时全部转成 `kebab_console_*`：
+
+* open/close 直接返回 0，不碰 tty 锁、不碰 `kmopen`；
+* write 走 `console_write()`（和 `kprintf` 同一条控制台环），因此 `_cnputc()` 的
+  USB tee 和面板绘制都还在；
+* read 返回 0（EOF）；ioctl 返回 `ENOTTY`；select 用 `seltrue()`；
+* `cndev()` 在 `km_tty[0] == NULL` 时返回 `NODEV`，每个 `cn*` 在 fallback 前
+  检查 `NODEV` 并返回 `ENXIO`（以前是直接解引用）。
+
+**跑在哪些路径。** 所有 `open("/dev/console")`：launchd 自己的日志 fallback、
+xpcproxy 给每个 job 硬编码的 fd 0/1/2（第七十四节 §1.3）、以及任何写
+`/dev/kebabcon` 的代码（同一组函数——所以面板直写通道也被这条改动改掉了）。
+
+**最可能怎么坏。**
+
+1. **路由根本没生效，然后掉进未验证的 tty 路径。** 条件是
+   `kebab_console_available()` 为假：`su.ready` 为假，或 `su.conmajor < 0`
+   （`cdevsw_add()` / `devfs_make_node()` 失败）。此时 `cnopen` 走 `cndev()`：若
+   `km_tty[0] != NULL`，就进 `kmopen()`——**这条路径在本移植上从未被观测到返回**。
+   后果是 PID 1 卡在 `open("/dev/console")` 里：没有 launchd 日志、没有 panic、
+   没有新的启动 banner，板子看起来"启动到一半就不动了"，而且不会自己复位（连
+   panic 路径都没进）。
+2. **写路径在错误上下文里 panic，或者 USB 侧丢字节。** 前者是
+   `console_write()` → `console_io_allowed()` 在"关中断且未 suspend"时
+   `panic("Console I/O from interrupt-disabled context")`；`0146` 的守护挡的就是
+   这个，但它只在 `kebab_console_write()` 入口挡，而且 `write(2)` 走不到那个分支。
+   后者是 `kebab_usb_log()` 的 16 KiB 环满即丢（从 `0091` 起就是丢字节语义）：
+   大量 stderr 在 USB 上会截断，面板上仍然完整。**USB 上少了几行不等于内核没打印。**
+3. **`d_type` 仍是 `D_TTY`。** 对 console 做 `EVFILT_READ` 的进程会落到 tty
+   filter（第七十五节 §4.3 已把它记为残余风险，不是本次新发现）。
+4. 环满时 `console_write()` 会睡眠等 `flush_lock`；持有者一定能前进（第七十六节
+   逐条论证过），所以这是延迟而不是死锁。
+
+**控制台判据。**
+
+| 观察 | 含义 | 先怀疑谁 |
+| --- | --- | --- |
+| `KEBAB UFS: /dev/kebabcon ready` | 路由的前置条件成立 | — |
+| `KEBAB UFS: /dev/kebabcon unavailable` | `cdevsw_add`/`devfs_make_node` 失败，**路由一定不生效** | `0145` + UFS 初始化 |
+| `launchd logging initialized. name: launchd pid: 1` | `open("/dev/console")` 成功的最直接证据 | — |
+| `service spawn failed: 6: Device not configured` / `xpcproxy spawn failed: 6` | file action 的 `open` 失败，errno 6 = `ENXIO` | `0145`（路由没生效且 `km_tty[0] == NULL`）或 `kmopen` 返回 ENXIO |
+| 完全没有 launchd 行，也没有 panic / 复位 | PID 1 卡在 open 里（情形 1 的第二半） | `0145` 的 fallback 路径 |
+| 有 `launchd logging initialized`，但 job 的输出永远不出现 | 写路径丢字节（情形 2）或 job 没 spawn | 先看有没有 `service spawn failed`；没有就是写路径 |
+
+#### 3.2 `0134` panic 不再停在 KDP，服务不了就复位
+
+**改了什么。**
+
+1. `osfmk/kern/debug.c` 的 `panic_init()`：KEBAB 下若没有 `kebabkdp=1` 也没有
+   `kdp_match_name`，把 `panicDebugging` 清成 `FALSE`。于是 `panic()` 走
+   `if (!panicDebugging) kdp_machine_reboot_type(kPEPanicRestartCPU, …)`，
+   即 `PEHaltRestart()` → `KebabPlatformExpert::haltRestart()`。
+2. `haltRestart()` 把 `kPERestartCPU`、`kPEPanicRestartCPU`、
+   `kPEPanicRestartCPUNoCallouts` 都接到 `kebab_psci_system_reset()`；控制台可用
+   时先被 panic 泵接走（`kebab_usb_panic_spin()`，不返回）。
+3. `ud_panic_takeover()` 在 `panic_active()` 时不再要求
+   `ml_dbgwrap_cpu_is_halted()`：直接 `ud_controller_restart()` 做所有权栅栏，
+   清 `owner`/`rx_owner`/`log_busy`。
+4. 接管 1000 次（约 1 s）失败，或接管后 `ud.dead || !ud.running`，打印一行然后
+   `ud_platform_restart()` → `PEHaltRestart(kPERestartCPU)` → PSCI 复位。
+
+注意第 4 步的复位**不会**再进 panic 泵：`ud_platform_restart()` 先把
+`ud.restart_armed = true`，`haltRestart()` 的第一个分支要求
+`!kebab_usb_restart_armed()`。这一条是这段代码能成立的关键，读代码时容易漏。
+
+**跑在哪些路径。** 任何 panic（任何启动参数组合）；`REBOOT` 命令的
+`kPERestartCPU` 行为没变。`kebabkdp=1` 时第 1 步不生效，行为与旧版一致。
+
+**最可能怎么坏。**
+
+1. **启动早期 panic 变成重启循环。** 例如根卷挂不上时的
+   `panic("KEBAB: cannot mount root, …")`：以前板子停在 panic 文本上，现在
+   panic 报告打完就走 PSCI 复位。主机看到的是"`KEBAB USB: event thread started`
+   反复出现、每次只多几行"，而不是一条完整的 panic。**这是本节最容易被误读的
+   症状**：它不是"启动很慢"，是 panic 重启循环。
+2. **panic 文本送不出去。** 复位前只有 `ud_platform_restart()` 里的一次
+   `kebab_usb_log_flush()` 加 300 ms 延迟；若控制器已经 dead，那行
+   `panic console cannot be serviced (…)` 本身也可能发不出去。判据变成"没有新
+   日志 + 几秒内重新枚举 + 从头启动"。
+3. **panic 泵接管成功但端口其实不工作。** 板子会停在泵里等主机，`panic_cpu`
+   拦住第二个 spinner，于是既不复位也不响应——仍然要断电。这是"接管成功"与
+   "端口真的能发"之间的缝，代码无法自证，只有主机能看到。
+
+**控制台判据。**
+
+| 行 | 含义 |
+| --- | --- |
+| `KEBAB USB: panic console cannot be serviced (transport takeover refused); rebooting instead of parking` | 1 s 内没抢到发送门/接收锁，走了复位 |
+| `KEBAB USB: panic console cannot be serviced (controller dead); …` | 控制器已死 |
+| `KEBAB USB: panic console cannot be serviced (console not running); …` | 端口从未起来 |
+| `KEBAB PANIC: no console to service; rebooting via PSCI SYSTEM_RESET` | 控制台根本没起来（`kebabusb=0` 或启动太早） |
+| `KEBAB USB: panic reboot returned; the machine did not reset` / `KEBAB REBOOT: PEHaltRestart returned <n>, the machine did not reset` | 固件拒绝复位——**这是唯一还允许停住的分支**，此时才需要断电 |
+| 重复的 `KEBAB USB: event thread started, waiting for the host` 或重复的 `Darwin Kernel Version` | panic 重启循环，不是启动慢 |
+| `Using serial KDP.` + `Waiting for remote debugger connection.` | 镜像带了 `kebabkdp=1`，停在 KDP 是显式请求，不是本缺陷复发 |
+
+#### 3.3 `0142` 共享缓存加一页 dynamic-config，并收紧基址检查
+
+**改了什么。**
+
+* `kebab_dsc_add_dynamic_config()`：在计划里给主缓存追加一条
+  `sharedRegionStart + header.dynamicDataOffset`、`dynamicDataMaxSize` 大小、
+  `init = READ|VM_PROT_ZF`、`max = READ`、无 slide 的映射。`VM_PROT_ZF` 让
+  `vm_shared_region_map_file()` 走匿名零页分支（`vm_shared_region.c` 里按
+  `sms_init_prot & VM_PROT_ZF` 选 `map_port = MACH_PORT_NULL`）。
+* `kebab_dsc_validate_header()` 的 `is_main` 基址检查从"和刚从同一个字段复制
+  出来的 `plan->region_start` 比"改成"和 `SHARED_REGION_BASE_ARM64` 比"——这是
+  **新增的拒绝点**。
+* 四类新拒绝：`dynamicDataOffset == 0`（只告警）、未 16 KiB 对齐、越出
+  `sharedRegionSize`、与已有 mapping 重叠、主缓存 mapping 数组满。
+
+**跑在哪些路径。** 计划在 `bsd_init` 构建（每次 `kebab_dsc=1`），映射在
+`kebab_dsc_exec_hook()`（pid 1 的第一次 exec）。所以它同时挂在"启动"和
+"PID 1 起来"两条路径上：计划被拒 → 根本没有映射；映射失败 → PID 1 的 dyld
+找不到 `libSystem`。
+
+**最可能怎么坏。**
+
+1. **多出来的这一页让一次 `vm_shared_region_map_file()` 失败，整份计划不映射。**
+   `vm_shared_region_map_file()` 对 43 个文件 / 52 条 mapping 是**一次**调用，
+   任何一条失败都可能让整份计划回滚（`region is empty again`）或留下半份
+   （`HALF MAPPED`）。后者更坏：dyld 会接受这个半成品然后踩空。
+2. **这一页映射到了错误的地方。** 例如 `dynamicDataOffset` 与真实缓存不一致，
+   dyld 在 `hasExistingDyldCache()` 里读到的不是零页：它会报
+   `existing shared cache in memory is not compatible`，退回
+   `mapSplitCacheSystemWide()`，而那个 syscall 因为 `sr_first_mapping != -1`
+   失败，最后 dyld 逐个 dylib 从卷上找——表现是**一堆 file not found**，看起来
+   像卷里缺文件。
+3. **基址检查收紧后拒绝了一份以前能过的缓存。** 只有当缓存的
+   `sharedRegionStart != 0x180000000` 时才会发生；真实 20H392 缓存是
+   `0x180000000`，所以这是"换缓存"才会踩到的门。
+
+**控制台判据。**
+
+| 行 | 含义 |
+| --- | --- |
+| `KEBAB DSC: plan 43 files / 52 mappings, 0xa2de8000 mapped, extent 0xaade8000 (end 0x22ade8000), base 0x180000000, slide 0x0, dynamic config page appended` | `0142` + `0143` 都生效（**这是默认启动唯一的一行计划日志**） |
+| `… 51 mappings … dynamic config page absent` | `0142` 没生效：镜像不是最新的，或缓存头 `dynamicDataOffset == 0`（此时另有一行 `KEBAB DSC: dynamicDataOffset is 0; no dynamic config page to map`） |
+| `KEBAB DSC: <main>: sharedRegionStart 0x… is not the kernel shared region base 0x180000000; the cache cannot be placed` | 新的基址拒绝点触发 |
+| `KEBAB DSC: plan rejected (error <n>); shared cache NOT mapped` + `plan detail follows (failure path):` | 计划被拒；明细随后自动打印 |
+| `KEBAB DSC: map: vm_shared_region_map_file failed 0x… (error <n>); region is empty again, shared cache NOT mapped` | 干净回滚，dyld 会试着自己映射 |
+| `… but the region still maps 0x…; shared cache is HALF MAPPED` | 半映射，**必须先修内核**，dyld 会接受它然后踩空 |
+| `KEBAB DSC: mapping complete; dyld will find the cache already in the shared region` | 映射成功 |
+| dyld 自己打 `mapped cache does not contain dynamic config data` | **最强的正向证据**：它证明 `base + 0xaade4000` 这一页可读、没有 crash |
+
+#### 3.4 `0136` `unentitled_ios_sim_launch` 在 KEBAB 下默认打开
+
+**改了什么。** `bsd/kern/kern_exec.c` 顶部那个 `TUNABLE(bool,
+unentitled_ios_sim_launch, …)` 在 `#if defined(KEBAB)` 下默认值从 `false` 改成
+`true`（`#else` 分支保持 `false`）。它只影响 `process_signature()` 里
+`proc_platform(p) == PLATFORM_IOS && imgp->ip_px_sa == NULL` 的那**一个**判断；
+不放宽签名校验，不动 `CS_HARD`/`CS_KILL`，不动 `CS_PLATFORM_BINARY`。
+
+**跑在哪些路径。** 每次 exec：pid 1 的 `/sbin/launchd`、xpcproxy 的
+`POSIX_SPAWN_SETEXEC`、每个 job。命令行里显式写
+`unentitled_ios_sim_launch=0` 仍能把它关回去（`PE_parse_boot_argn()` 在
+`TUNABLE` 之后执行）。
+
+**最可能怎么坏。**
+
+1. **默认值没生效**（镜像没带这个补丁、或参数被显式写成 0）：PID 1 在 9/e 被杀，
+   `kern_sig.c` 对 initproc 的 SIGKILL 直接 panic → 与 `0134` 组合成重启循环。
+2. **它生效了，问题被推到更后面。** 这是**放松**，不是修复：9/e 消失之后，
+   launchd 会死在共享缓存（namespace 6）或签名（`CS_KILLED`）上。读日志的人必须
+   知道"9/e 不见了"不等于"签名没问题"。
+
+**控制台判据。**
+
+| 观察 | 含义 |
+| --- | --- |
+| `unexpected SIGKILL of launchd … namespace 9 code 0xe` | 平台门**没**生效（9/e = `EXEC_EXIT_REASON_WRONG_PLATFORM`） |
+| `initproc failed to start -- exit reason namespace 6 subcode 0x1` | 过了平台门，死在 dyld 的 `abort_with_payload()`（共享缓存） |
+| `… namespace 9 code 0x6` + `KEBAB EXEC: copyout stage=…` | 过了平台门，死在 copyout（另一条线） |
+| `CS_KILLED` | 签名线；与这个开关无关 |
+
+#### 3.5 `0141` `thread_userstack()` 的 sp 偏移
+
+**改了什么。** `osfmk/arm64/status.c` 的 `thread_userstack()` 在
+`ARM_THREAD_STATE64` 分支里把 `((arm_thread_state32_t *)tstate)->sp` 改成
+`((arm_thread_state64_t *)tstate)->sp`。旧代码读的是偏移 52（x6 的高 32 位，
+零扩展），新代码读 248（真正的 SP）。
+
+**跑在哪些路径。** 只被 `load_threadstack()` 调用，也就是只处理
+`LC_UNIXTHREAD`。`/sbin/launchd`、`/usr/lib/dyld`、`zprint`、`xpcproxy` 都是
+`LC_MAIN`，**普通启动的 pid 1 路径根本不会走到**。旧 bug 对典型二进制是潜伏的
+（x6 高半为 0 → `sp = 0` → 走 `USRSTACK64` 默认栈）。
+
+**最可能怎么坏。** 对真的带 `LC_UNIXTHREAD` 的二进制，初始 SP 从"碰巧 0 →
+默认栈"变成"文件里写的值"。如果那个值是垃圾，进程会以 custom stack 起步并立刻
+bad access；如果它是合法的，行为才变正确。
+
+**控制台判据。** 成功路径没有日志。能看到的是 `create_unix_stack()` 那一行
+`KEBAB EXEC: stack map=… shift=14 custom=<0|1> user=0x… alloc=0x…+0x… guard=…`：
+pid 1 的 `custom` 必须是 `0`、`alloc=0x0+0x0`。若某次 exec 出现
+`custom=1` 且 `user` 不像栈地址，就是这条改动在那个二进制上生效了（并且那个
+二进制里写的 sp 就是现在这个值）。
+
+### 4. 分类 (a)：需要启动参数才跑的新功能
+
+每一条给出：启动参数、打开后应出现的行、**缺失的两种含义**（没启用 vs 启用了但
+失败）。这是本节最实用的部分：板子回来时，"没有这一行"必须先分清是哪种。
+
+#### 4.1 `0132` 触摸上电 / SE13 时钟 / identify
+
+* **参数**：`kebab_touch=1`（总开关）；`kebab_touch_boot=1` 才做传输/复位/识别；
+  `kebab_touch_power=1` 才自动上电，且**还需要** `kebab_vrm_write=1`。
+* **应出现**（顺序即代码顺序）：
+  `KEBAB VRM: === boot power: touch rails, one ENABLE each ===` →
+  每轨一行 `KEBAB VRM: boot power: <ldoa13|ldoc1> COMPL, phase COMPLETE, CMD_STATUS 0x… (ISSUED 1, COMPL 1), EN 0x00 -> 0x80` →
+  `KEBAB VRM: boot power: ldoa13 and ldoc1 both read 0x80` →
+  `KEBAB TOUCH: both rails up, waited 15 ms before the reset` →
+  `KEBAB TOUCH: TOUCHCLK: 0x52008 0x… -> 0x…` → `reset pulse (mode 1), …` →
+  `se_init: …` → `identify: part "s3908-15.0.0", version 0x01, mode 0x01 (application)`。
+  最后这一行的格式是 `0135` 重写 TCM 层之后的（`0132` 当时打的是
+  `identify: part "…" at payload offset 4`）。
+* **缺失含义**：
+
+| 观察 | 未启用还是失败 |
+| --- | --- |
+| 一行 `KEBAB TOUCH:` 都没有 | 没启用（`kebab_touch` 不是 1） |
+| `KEBAB TOUCH: MMIO mapped, hardware untouched; …` | 启用了，但没给 `kebab_touch_boot=1` |
+| `KEBAB TOUCH: kebab_touch_power is off; assuming the rails are already powered` | 启用了 boot，没启用 power |
+| `KEBAB VRM: boot power: kebab_vrm_write=0, so no rail may be commanded; touch stays unpowered` | 启用了，被第二道门拒绝，**一个寄存器都没写** |
+| `… <rail> enable unreadable; nothing sent` / `… <rail> is not up; stopping here, the boot continues without touch` | 启用且真失败 |
+| `KEBAB TOUCH: touch unavailable: a rail did not come up, …` | 失败，本次启动触摸不可用（不重试、不 panic） |
+
+* **证据**：这一条**有真机日志**（第六十一节 §3，`boot_b`）。也就是说"0131 之后
+  全部没有上过真机"这个前提对它不成立，见第 8.1 节。它被真机**拒绝**的那一半是
+  `GET_APP_INFO`/`SET_TOUCH_REPORT_CONFIG`（`payload 23040 too large`、
+  `report config answered 0x0d`），`0135` 已经把这一层整体换掉。
+
+#### 4.2 `0133` `VOL` 卷写入（`kebab_vol.c` + UFS 裸块路径）
+
+* **参数**：`kebab_vol=1`（默认关）+ `ufsrw=1`（盘可写）+ 真写还要
+  `VOL BEGIN <wire> <volume> CONFIRM`；只校验收流用 `VOL DRY <wire>`；读几何用 `VOL?`。
+* **应出现**：`VOL? gated 1 active 0 dry 0 chunk 65536 writable 1`；
+  `VOL OLD vh …` 三行字段 + 32 行 `VOL OLD bytes …`；
+  `VOL STREAM volume 17179869184 bytes (16384 MiB), block 4096, extents 3, data 1744896 bytes, wire 1769472`；
+  `VOL EXTENT 1/3 …` …；`VOL NEW vh … bsize 4096 blocks 4194304 …`；
+  `VOL DONE extents 3 …`。dry 的结束行是 **`VOL PLAN`**，不是 `VOL DONE`。
+* **缺失含义**：`VOL disabled: boot with kebab_vol=1 to enable the volume writer`
+  = 没启用；`VOL refused: userdata is read-only` = 启用了但 `ufsrw=1` 缺失/盘只读；
+  `VOL refused: a real write needs the confirmation` = 命令串不对；
+  `VOL ABORT …` = 流被拒（**此时块 0 一个字节都没动**）；
+  `VOL TIMEOUT …` = 60 s 没有新块（传输停了，可能已经 panic/复位）。
+
+#### 4.3 `0133` `kebab_noinit=1`
+
+* **参数**：`kebab_noinit=1`。
+* **应出现**：`KEBAB: kebab_noinit=1: staying in the kernel, no init program`，
+  之后不再有 `load_init_program` 行、也没有 launchd。
+* **缺失含义**：没启用（普通启动本来就不带）；启用了但没这行 → 参数没进命令行
+  （镜像 args 不对）。
+
+#### 4.4 `0133` `kebab_vol=1` 压过 `rootrw=1`
+
+* **参数**：`kebab_vol=1`（同时有 `rootrw=1`）。
+* **应出现**：`KEBAB VOL: kebab_vol=1 keeps the old root read-only`
+  （在 `vfs_mountroot()` 里，HFS 挂载之前）。
+* **缺失含义**：没启用（普通启动不带 `kebab_vol`）；或带了 `kebab_vol=1` 但没有
+  `rootrw=1`（这时旧根本来就只读，这行不打印——不是失败）。这条改动的意义是
+  **防止旧 HFS+ 用缓存的卷头盖掉刚写进去的新卷头**；如果它没生效而卷写又跑了，
+  故障要到下一次启动才出现（新卷头是旧的）。
+
+#### 4.5 `0135` TCM 报告解码
+
+* **参数**：`kebab_touch=1 kebab_touch_boot=1`（power 可选）。
+* **应出现**（第六十五节 §7 的完整清单）：`KEBAB TOUCH: command 0x20 answer: code 0x01, 46 payload byte(s), trailing byte 0x5a`；
+  `KEBAB TOUCH: app info: max touch report config … bytes, max touch report payload … bytes`；
+  `KEBAB TOUCH: report program: … bytes, 40 bits per contact, … bytes sent`；
+  `KEBAB TOUCH: report config accepted: 40 bits per contact, z included`；
+  之后才有 `KEBAB TOUCH: message code 0x11 len 5` 与
+  `KEBAB TOUCH: down obj 0 raw … panel … logical … z …`。
+* **缺失含义**：无 `KEBAB TOUCH:` = 没启用；有 `command 0x20 did not answer` /
+  `app info: … is short of the 46` / `report config: answered code 0x0d` =
+  启用了但 TCM 层失败（**这时不建轮询线程、不建 `/dev/kebab_touch`**，
+  第六十五节 §1 写明了这个条件）；`report config accepted` 之后没有任何
+  `message code 0x11` = 参数对了、程序被接受了，但固件没有报告（摸屏幕也不出）——
+  先看 `report of N byte(s) discarded` / `report discarded: …` 这类解码行。
+
+#### 4.6 `0137` slide 的 `sms_slide_size`
+
+* **参数**：`kebab_dsc_slide=<非零、16 KiB 倍数>`。默认 `slide == 0` 时
+  `kebab_dsc_apply_slide()` 第一步就返回，这行赋值不参与任何决策，因此
+  **默认启动与 0137 之前逐字节等价**。
+* **应出现**：给了 slide 时 `KEBAB DSC: slide 0x…; N mapping(s) carry slide info; …`；
+  非法 slide 会打印 `slide 0x… is not 0x4000-aligned` / `slide >= maxSlide` /
+  `no mapping carries slide info` 之类的拒绝行。
+* **缺失含义**：slide 为 0 = 未启用（不是失败）；给了 slide 却看到
+  `no mapping carries slide info` = 计划里四条数据 mapping 的 slide-info 没读到，
+  这时退回 slide 0 是安全的，但 ASLR 没开。
+
+#### 4.7 `0138` KIST v2 骨架 + 每次创建后 chown/读回
+
+* **参数**：`kebab_install=1`，然后发一条 KIST 流（v1 或 v2；骨架流要 v2 +
+  `F_STREAM_SKELETON`）。`INST DRY <wire>` 可以只走 PLAN。
+* **应出现**：`INST STREAM v2 skeleton entries 16 bytes 153 wire 65536`（骨架）
+  或 `INST STREAM v2 entries 6 bytes … wire …`（base）；每条
+  `OK <path> <bytes> mode 0%o uid 0 gid 0`；目录
+  `OK /dev 0 dir mode 0755 uid 0 gid 0`；链接
+  `OK /etc <n> link -> private/etc mode 0777 uid 0 gid 0`；结束 `INST DONE entries …`。
+* **缺失含义**：`INST disabled: boot with kebab_install=1 …` = 没启用；
+  `INST ABORT …` = 启用了但被拒。**这次新增了两个硬失败点**：
+  `FAIL <path> cannot set attributes (error <n>)`（以前 `vnode_setattr` 的错误被
+  丢弃，现在直接 abort）和 `FAIL <path> attrs uid … gid … mode 0…, wanted 0:0 mode 0…`
+  （读回不一致，`01777` 目录也会被这条卡住）。
+  另外 **`SKIP <path>` 仍然不会重设属主/模式**：内容已对就不再改写，所以
+  一次用错属性装上去的文件，重发同一条流不会修好。
+
+#### 4.8 `0139` 按键驱动
+
+* **参数**：`kebab_keys=1`（可选 `kebab_keys_ms=16`、`kebab_keys_raw=1`）。
+* **应出现**：`KEBAB SPMI: key source PPID 0x008 -> observer APID 0x…`（三条）；
+  `KEBAB KEYS: sources: PON RT_STS 0x0810, …`；`KEBAB KEYS: first sample …`；
+  `KEBAB KEYS: queue selftest: … ok`；`KEBAB KEYS: /dev/kebab_keys major N, …`；
+  `KEBAB KEYS: polling every 16 ms`。
+* **缺失含义**：无 `KEBAB KEYS:` = 没启用（普通启动就是没有）；启用了但
+  `first sample … is all zero (silent bus); no keys` = 总线静默、**不建 `/dev`**；
+  `GPIO6 … NOT an enabled input with pull-up` / `volume-up withheld` = 引脚没被
+  boot firmware 配置成输入上拉（驱动只读，不写 PMIC）。
+
+#### 4.9 `0144` `/usr/libexec/` 进安装器允许清单
+
+* **参数**：`kebab_install=1`；`INST CHECK /usr/libexec/xpcproxy` 现在会被接受
+  （以前打印 `INST CHECK … refused`）。
+* **应出现**：`base.kist` 的第 6 条 `OK /usr/libexec/xpcproxy 96352 mode 0755 uid 0 gid 0`，
+  `INST DONE entries 6 …`。
+* **缺失含义**：`6` 条变成 `5` 条、或 `INST CHECK … refused` = 允许清单没生效；
+  launchd 侧仍然 `service spawn failed: 2: No such file or directory` = 允许了但
+  文件没装上（不是 launchd 的问题）。
+
+### 5. 分类 (c) / (d)：只影响日志，或者根本不进内核
+
+| 改动 | 新增/改变的可见输出 | 读日志时要注意 |
+| --- | --- | --- |
+| `0133` HFS 挂载行 (c) | `KEBAB HFS: KebabRoot: block size 4096, total blocks 4194304 (16384 MiB), free blocks …` | 每次挂载都打；`total blocks` 是"新卷是否生效"的唯一免工具证据。缺失说明没挂上（此时另有 `hfs_mount: hfs_mountfs returned error=` 或 `KEBAB: cannot mount root` panic） |
+| `0136` exec/CS 诊断 (c) | `KEBAB CS: static trust cache v2: 2760 entries x 24 bytes (66264 used, residual 0 bytes), hash types …`、`KEBAB CS: exec cdhash <40 hex> cd=0x…+… hash=2 slice=0x0 tc=hit platform=1`、`KEBAB EXEC: pid N pre-copyout …`、`KEBAB EXEC: stack …`，失败时 `KEBAB EXEC: copyout …` | 旧的 `KEBAB CS: cdhash … is in Apple's static trust cache: platform binary` 已经**不再打印**；`platform=1` 现在是唯一判据。exec 行最多 32 条，之后有一行 `further exec classification lines suppressed` |
+| `0140` copyout 取页诊断 (c) | 失败时 4 行：`copyout map cur=… alloc=… same=…`、`copyout fault far=… esr=…`、`copyout pmap va=… tte=…`、`copyout checks …`；成功时 0 行 | 成功路径没有输出，所以"没看到这四行"**不能**说明 copyout 没问题，只能说明这次没失败 |
+| `0143` 计划日志预算 (c) | 默认 1 行摘要替代 102 行明细；明细、成功侧校验行、slide-info 行、`map: slide …; mapping …` 行全部移到 `kebab_dsc_verbose=1` | 失败时明细**仍会自动打印**（`plan detail follows (failure path):`）。读第六十八节那份旧清单会找不到 43 行 `file NN`，那是 `0143` 的正常结果，不是映射失败 |
+| `0146` 控制台 `EDEADLK` 守护 (c) | 无新日志；`kebab_console_write()` 在关中断时返回 `EDEADLK` 而不是让 `console_write()` panic | `write(2)` 走不到这个分支；如果真看到 `EDEADLK` 从 write 回到用户态，说明有人把 console 写接进了关中断上下文 |
+| `0147` HFS+ 格式断言 (d) | 无运行时输出；`kHFSPlusExtentDensity == 8`、`sizeof(HFSPlusExtentDescriptor) == 8`、`kHFSPlusExtentKeyMaximumLength == 10` 编译期成立 | 它唯一的作用是"换 HFS 源码时构建先失败"，不影响任何启动行为 |
+
+### 6. 风险排序
+
+排序规则：**先能阻止启动的，再能废掉控制台的，最后才是"只是让功能不工作"的**。
+"代价"一列是坏掉之后要不要再断电一次。
+
+| 排名 | 改动 | 为什么排在这里 | 第一证据（控制台） | 代价 |
+| ---: | --- | --- | --- | --- |
+| 1 | `0145` console 路由 | 它是**唯一的观察通道**：launchd 的日志和每个 job 的 0/1/2 都从它走。最坏的形态是 `open` 掉进未验证的 `kmopen()` 挂住——没有日志、没有 panic、也不会复位 | `KEBAB UFS: /dev/kebabcon unavailable`，或 `service spawn failed: 6`，或"什么都没有" | 断电 |
+| 2 | `0134` panic 策略 | 它改的是**所有 panic**的行为，而且把"停住"变成"复位"。启动早期 panic 现在表现为**重启循环**；读错这一条会把 panic 当作启动慢。另一个坏形态是接管成功但端口不工作→停在泵里 | `panic console cannot be serviced (…)` / `no console to service` / 反复的 `event thread started` | 断电（停在泵里时） |
+| 3 | `0142` dynamic-config 页 | 每次 `kebab_dsc_map=1` 的启动都多映射一页，并新增一条拒绝路径；失败会打断 plan→map→dyld 这条链，把 PID 1 送到 namespace 6，再被 `0134` 变成重启循环 | `plan … 52 mappings … appended` 缺失，或 `HALF MAPPED` / `NOT mapped` | 通常不用（会自动重启），但定位要一轮启动 |
+| 4 | `0136` 平台门 | 每个 exec 都过；没生效就是 9/e → PID 1 panic。它是一条**放松**，生效后问题会推到共享缓存/签名，读日志的人容易把"9/e 消失"当成"都好了" | `namespace 9 code 0xe` | 通常不用 |
+| 5 | `0141` user stack sp | 只影响 `LC_UNIXTHREAD`，P1 的 pid 1 路径不经过；坏也只坏一个进程，不会挡启动 | `KEBAB EXEC: stack … custom=1 …` | 不用 |
+
+不进这张表的原因：9 个 (a) 改动全部需要显式参数，普通启动根本不会执行；
+5 个 (c) 和 1 个 (d) 不改变内核决策。
+
+### 7. 首次启动检查清单（按控制台出现顺序）
+
+**先读这一条，否则会找错地方**：`kebab_usb_log()` 在 `!ud.running` 时**直接丢弃**，
+而 `ud.running = true` 是在 `kebab_usb_start()` 的后半段才置的。所以
+
+* 主机 USB 上的**第一行不可能是** `KEBAB USB: running (DSTS …)`——那一行打印时
+  `ud.running` 还是 false，它只上面板。同理 `KEBAB USB: SMMU …`、`reset … after …
+  ms`、`step 1..7`、以及 `KEBAB CS: policy 0xf …`（它在 `kernel_bootstrap_thread()`
+  的 `STARTUP_SUB_EARLY_BOOT` 阶段打印，早于 `bsd_init()`）都只在面板上。
+* USB 上第一行应当是 `KEBAB USB: event thread started, waiting for the host`。
+  如果连它都没有，先查 `kebabusb=1` 与控制器（此时面板上会有
+  `KEBAB USB: cannot map the controller` / `controller did not start` 之类）。
+
+下面每一行都是**当前代码里的格式串**；`<…>` 是变量部分。
+
+| # | 期望行（USB 顺序） | 不符合时先怀疑 |
+| ---: | --- | --- |
+| 1 | `KEBAB USB: event thread started, waiting for the host` | `kebabusb=1` 缺失；控制器没起来（看面板） |
+| 2 | `KEBAB UFS: "userdata" on LUN 0: first block 0x…, <n> MiB, read-write` | UFS 没起来；`ufsrw=1` 缺失则末尾是 `read-only` |
+| 3 | `KEBAB UFS: /dev/kebabcon ready` | **`unavailable` → `0145` 的路由不生效**，此时 PID 1 的 console 会掉进 tty 路径 |
+| 4 | `hfs: mounted KebabRoot on device b(1, 0)` | 根卷没挂上；紧跟其后会有 `KEBAB: cannot mount root, errno = …` panic |
+| 5 | `KEBAB HFS: KebabRoot: block size 4096, total blocks 4194304 (16384 MiB), free blocks …` | `blocks 16384` = 还是 64 MiB 旧卷（P1 没写卷）；这行缺失 = 没走 HFS 挂载 |
+| 6 | `KEBAB DSC: enabled for "/System/Library/Caches/com.apple.dyld"; kebab_dsc_map=1 kebab_dsc_slide=0x0 (default) kebab_dsc_verbose=0` | `kebab_dsc=1` 没进 args；`map=0` 说明 `kebab_dsc_map` 丢了 |
+| 7 | `KEBAB DSC: plan 43 files / 52 mappings, 0xa2de8000 mapped, extent 0xaade8000 (end 0x22ade8000), base 0x180000000, slide 0x0, dynamic config page appended` | `51 mappings` / `absent` = `0142` 没生效；`rejected` = 计划被拒，下一行是 `plan detail follows` |
+| 8 | `KEBAB DSC: map: no shared region at boot (kernel task); deferred to first exec (ENODEV)` | 这行缺失且没有 `map: mapped …` = `kebab_dsc_map=1` 没生效 |
+| 9 | `load_init_program: attempting to load /sbin/launchd` | `/sbin/launchd` 不在卷上，或 init 被 `kebab_noinit` 停住了 |
+| 10 | `KEBAB CS: exec cdhash b65c36c9f5b287a6a8f5ca83d9427fb55ef04f4e cd=0x7e124+4398 hash=2 slice=0x0 tc=hit platform=1` | `tc=miss`/`platform=0` = 信任缓存或 `kebab_cs=15`；这一行缺失 = 根本没到 exec |
+| 11 | `KEBAB EXEC: stack map=0x… shift=14 custom=0 user=0x16fe0000 alloc=0x0+0x0 guard=0x0+0x0 kr=0` | `custom=1`/`kr≠0` = 用户栈这条线（`0141` 或 HFS/USRSTACK64）；`shift=14` 不是 14 = 页大小不对 |
+| 12 | `KEBAB EXEC: pid 1 pre-copyout cs=0x… imgp_cs=0x… load_cs=0x… stack=0x16fe0000` | 这行之后紧跟 `copyout-failed error=…` = 9/6，按 `stage=` 查；没有失败行就是正常 |
+| 13 | `KEBAB DSC: first exec (pid 1): attempting the deferred mapping` | 缺失 = `kebab_dsc_plan` 为空或已经被标记 attempt 过（第一次就缺说明第 7 步已经拒了） |
+| 14 | `KEBAB DSC: map: mapped 0xa2de8000 bytes at 0x180000000, check_np base 0x180000000, dynamic config page 0x22ade4000+0x4000 zero-filled` | `check_np base` ≠ `0x180000000` = `sr_first_mapping` 不是主缓存那条；`HALF MAPPED` = 半映射 |
+| 15 | `KEBAB DSC: mapping complete; dyld will find the cache already in the shared region` | `mapping failed (error …)` = 共享缓存没映射，后面必然是 namespace 6 |
+| 16 | （dyld 自己）`mapped cache does not contain dynamic config data` | **这一行是 `0142` 的正向证据**：它说明那一页可读且 dyld 没有 crash。没有这一行而进程还在跑 = dyld 没走 `reuseExistingCache()` |
+| 17 | `launchd logging initialized. name: launchd pid: 1`（launchd 自己的字符串；第六十八节记作 `launchd`，第七十四/七十五节记作 `com.apple.xpc.launchd`，以实际为准） | 缺失 = `/dev/console` 打不开（`service spawn failed: 6`）或 launchd 没到 main（看第 12/13 步或 9/e/9/6） |
+| 18 | `zone name` / `ZONE TOTALS`（zprint 的表） | 目标达成；缺失说明 job 没 spawn（先看 launchd 的 `Could not …` 行，第六十八节 §8.2 有对照表） |
+
+停下来的规则：**在第一个不符合预期的行停下**，不要继续往下读；每一行已经把
+"下一个该查什么"写在表里。两条例外：第 16 行的 dyld 文本可能因为 dyld 版本措辞
+不同而变（它是 dyld 自己的字符串，不在本树里）；第 18 行的表可能很大，只看
+表头与 `ZONE TOTALS` 就够。
+
+### 8. 这次读代码发现的缺陷与需要更正的地方
+
+**都没有修**：本任务只读不写代码，补丁一个字没动；下面第 8.2、8.3 是文档缺陷，
+更正留给下一次文档提交（或由本节取代）。
+
+#### 8.1 前提更正：`0132` 已经在真机上跑过
+
+任务前提是"`0131` 之后的改动全部没有上过真机"。这对 **`0132` 不成立**：第六十一节
+§3 记录了 `boot_b` 上带 `kebab_touch=1 kebab_touch_boot=1 kebab_touch_power=1
+kebab_vrm_write=1 kebab_pon_write=1` 的真实输出——两路 LDO 的 `EN 0x00 -> 0x80`、
+`TOUCHCLK` 的 `0x063c83c0 -> 0x0e3c83c0`、`identify: … mode 0x01 (application)`，
+都是原样抄下来的日志行，不是推断。所以：
+
+* `0132` 的**上电、时钟、identify** 这一半有真机证据，可以按"已验证"对待；
+* `0132` 的**报告程序 / app info** 那一半被固件拒绝了（`payload 23040 too large`、
+  `report config answered 0x0d`），`0135` 把整层换掉——**`0135` 才是完全没上过
+  真机的那一个**。
+
+这不改变第 2 节的分类（`0132` 仍然是 (a)），但改变了"先怀疑谁"：`0132` 的
+上电/时钟路径比 `0135` **更不可疑**，怀疑顺序应当排在 `0135` 之后。
+
+#### 8.2 文档缺陷：第六十八节 §7 的期望日志已经过期，照它读会误判
+
+第六十八节 §7 列出的"成功路径应包含"是 `0142`/`0143` 之前的形态，现在有三处
+会让人在第 7 步就停下：
+
+1. 它期望 `KEBAB DSC: plan 43 files / 51 mappings / 0xa2de4000 bytes`、
+   `highest mapped end 0x22ade4000, region slack 0x4000`，以及"43 个文件约 100 行"
+   的 `file NN …`/`map …`。当前代码只打**一行**摘要，数字是
+   `52 mappings` / `0xa2de8000` / `extent 0xaade8000 (end 0x22ade8000)`，
+   逐条明细要 `kebab_dsc_verbose=1`。
+2. 它期望 `KEBAB DSC: map: mapped 0xa2de4000 bytes …`。当前是 `0xa2de8000`。
+3. 它把 `KEBAB CS: policy 0xf unsigned trustcache-platform entitlements
+   unsealed-shared-cache` 列在成功日志的第一行。这一行由
+   `STARTUP(CODESIGNING, …)` 在 `kernel_bootstrap_thread()` 的
+   `STARTUP_SUB_EARLY_BOOT` 阶段打印，**早于 `bsd_init()` 里的
+   `kebab_usb_start()`**，而 `kebab_usb_log()` 在 `!ud.running` 时丢字节——所以
+   它只出现在面板上，永远不会出现在 USB 日志里（除非镜像带 `kebabkdp=1`，
+   那时 `kebab_usb_kdp_start()` 会更早把端口带起来）。
+
+结论：第六十八节 §7 那份清单不能直接当作上板检查表；本节第 7 节是它的替代品
+（同样是代码推导，但按 `0143` 之后的实际输出）。
+
+#### 8.3 文档缺陷：第九节的 `C-BOOT-BANNER` 期望一行不可能出现在 USB 上
+
+`scripts/bring-up.py` 的 `C-BOOT-BANNER` 期望"`KEBAB USB: running (DSTS ...)` 且随后
+`event thread started`"。按 `kebab_usb.c` 的顺序，`printf("KEBAB USB: running
+(DSTS ...)")` 在 `ud.running = true` **之前**，所以这一行只到面板；USB 上只有
+`event thread started`。这一条只影响主机的自动检查（fake board 不模拟这个细节），
+不影响内核行为；但如果真拿 `bring-up.py` 跑 vol 阶段，`boot.banner` 检查会在第一
+个 checkpoint 就失败，并给出"没有 banner"的错误提示。
+
+#### 8.4 没有发现（也就没有修的）代码缺陷
+
+读 `0132`–`0147` 时逐条核对过下面这些"看起来可疑但实际成立"的点，记下来是为了
+避免下一个人重复读：
+
+* `0142` 依赖 `VM_PROT_ZF` 来选"匿名零页"分支。本树
+  `vm_shared_region.c` 确实是按 `sms_init_prot & VM_PROT_ZF` 选
+  `map_port = MACH_PORT_NULL`，**不是**按 `fd == -1`；所以把这一页放进主缓存的
+  mapping 数组（`srm[0].fd = 0`）也能得到零页映射，这样写是对的。
+* `0142` 的追加发生在 `build_plan()` 里 `total_mappings` 统计**之前**，所以摘要的
+  52 是准的；`kebab_dsc_apply_slide()` 对**所有** mapping 加 slide，dynamic 页
+  也一起滑，和 dyld 的 `mappings[totalMappings]` 同步。
+* `0143` 在成功路径里用 `kr` 复用了 `vm_shared_region_start_address()` 的返回值。
+  这不会污染返回值（函数返回的是 `error`，早就算好了），但让"`kr` 是
+  map_file 的结果"这个读法变得不成立——读这段代码时容易误会。
+* `0146` 的 `ml_get_interrupts_enabled()` 守护对 `write(2)` 不可达；而
+  panic 路径里 `ud_panic_reboot()` 的 `printf` 不会因此踩到
+  `console_io_allowed()` 的 panic：panic 走
+  `handle_debugger_trap()` → `console_suspend()` 之后才进
+  `debugger_collect_diagnostics()`，此时 `console_write()` 走的是
+  `console_suspended` 的 unbuffered 分支。
+* `0134` 的 `ud_platform_restart()` 在 `PEHaltRestart()` 之前先置
+  `ud.restart_armed = true`，否则 `haltRestart()` 会再把控制台交给
+  `kebab_usb_panic_spin()`，而第二个 spinner 会被 `panic_cpu` 挡成永久等待——
+  这一条是整段 panic 策略能成立的关键，改动它时要一起改。
+
+### 9. 本节不覆盖的部分：`0131` 之前
+
+本文的前提是：`0131` 及之前的改动在项目早期已经上过真机，所以不再重排它们的
+风险。但"验证过"不等于"全部验证过"，所以把**证据边界**写清楚，免得下一次
+出问题时把早期改动也当成嫌疑，或者反过来把从未验证过的东西当成基线：
+
+**有真机日志、仍按"已验证"对待的**：
+
+| 范围 | 证据 |
+| --- | --- |
+| 引导链到 `bsd_init`、USB CDC-ACM 控制台、EP0 探测、控制台命令（`IMEM?`/`REBOOT`/`FASTBOOT`/`PSCI?`） | 第一节（引导路径，已验证）、第六之二、十五～二十节；`KEBAB REBOOT: PEHaltRestart(kPERestartCPU)` 在多次会话里都出现过 |
+| UFS 块设备与 HFS+ 读写路径、64 MiB 旧卷的挂载 | 第六十二节：64 MiB 卷上实测 7.84 MiB/s、`INST DONE`、最大 922,912 B 文件（`dyld`） |
+| SPMI 只读探针、`PWR?`/`PON?`/`VROMON` 的寄存器语义 | 第三十、三十一节：两路 LDO 上电前都读 `enable 0x00`，与 `0132` 真机输出一致 |
+| 触摸到 GENI/SE 初始化、`TOUCHCLK`/`TOUCHSE` 的控制台路径、identify 的报文框架 | 第二十四、二十六、二十七、二十九节，以及第六十一节（`0132`） |
+
+**从那时起就只有主机侧证据、不能算"已验证"的**：
+
+| 范围 | 一直缺的是什么 |
+| --- | --- |
+| RPMh TCS 状态机（`0125`–`0128`） | 只有虚拟 MMIO/模拟器验证（第三十六、三十七节）；真机上只跑过只读发现，没跑过真正的 ENABLE 之外的写 |
+| 固件（O3-C*）一系列分析（第四十四～五十八节） | 全是主机侧源码/镜像分析，没有一条在板子上执行过 |
+| 共享缓存计划、slide、`vm_shared_region_map_file()` 的返回值 | 第六十七、七十三节：只有脚本与源码对照，真机零次 |
+| HFS+ 大文件写入（> 64 MiB） | 第七十七节：最大完整文件仍是 922,912 B；592 MB 只是算术上可行 |
+| `kebab_cs` / 静态信任缓存 / `CS_PLATFORM_BINARY` 的判定 | 主机侧 cdhash 校验（第六十六节 §5），真机没有 `tc=hit platform=1` 的日志 |
+
+换句话说：**下一轮启动如果出现"根卷挂载失败""SPMI 读不到""触摸没有应答"，
+不要先怀疑本节这 20 个改动**——先按第 9 节的证据边界判断它属于哪一层；只有当
+失败点落在第 3 节那五条 (b) 的判断点上时，本节才是第一嫌疑人。
