@@ -13459,3 +13459,75 @@ libignition 打印 preboot: mounting preboot
 四  启动参数加 ufsmedia=1，判据是 IOKit 里出现 IOMedia，
     然后 mount-phase-1 不再退出 66
 ```
+
+## 九十一、IOMedia 这一环的现状与入口
+
+目标：让 `kebab_ufs` 以 IOKit 块设备的身份发布 `IOMedia`，供 APFS 认领。
+
+### 已就绪
+
+```
+驱动         iokit/Kernel/arm/KebabBlockStorageDevice.cpp（补丁 0158，457 行）
+             IOBlockStorageDevice 的子类，几何取自 kebab_ufs_partition_bytes()，
+             传输走 kebab_ufs_raw_read/write，不碰 BSD 接口
+头文件       0158 随补丁带了六个 vendored 头，按 iOS 16.7.16 的 22 槽尾巴裁剪
+构建入口     iokit/conf/files.arm64 里那行默认被注释；测试时改为启用即可
+守卫         bsd/dev/kebab_ufs.c 里两处 `#if defined(KEBAB_BLOCKSTORAGE)`
+             改成 `#if 1` 即可（直接删掉会留下孤立的 #endif）
+反向绑定工具  patches/native-prelink/0001-prelink-kernel-imports.patch
+             支持 --kernel-import SYMBOL=ORIGINAL_VA，会改写 B/BL、ADRP+ADD、
+             ADRP+LDR 和绝对槽位；拒绝超出 ±128 MiB 的直接跳转
+```
+
+### 链接时缺的 11 个符号（实测，一个不多）
+
+```
+IOBlockStorageDevice::gMetaClass                     数据
+vtable for IOBlockStorageDevice                      数据
+IOBlockStorageDevice::IOBlockStorageDevice(OSMetaClass const *)
+IOBlockStorageDevice::~IOBlockStorageDevice()
+IOBlockStorageDevice::setProperties(OSObject *)
+IOBlockStorageDevice::getProperty(OSSymbol const *) const
+IOBlockStorageDevice::doSetPriority(IOBlockStorageDeviceExtent *, unsigned int, unsigned char)
+IOBlockStorageDevice::doLockUnlockMedia(bool)
+IOBlockStorageDevice::getWriteCacheState(bool *)
+IOBlockStorageDevice::setWriteCacheState(bool)
+IOBlockStorageDevice::doGetProvisionStatus(unsigned long long, unsigned long long, unsigned int *, IOBlockStorageProvisionStatus *)
+```
+
+### 为什么不能用 C++ 桩
+
+`gMetaClass` 和 vtable 是数据符号，构造函数要初始化基类，而基类在预链接的 kext 里。
+写 C++ 桩会引出 `IOStorage`、`IOService` 的更多未定义符号。
+
+### 可行的做法：汇编占位
+
+给这 11 个符号定义**全局标签**，函数体放 `brk #0`。因为 emitter 最后会把每一处引用
+改写到预链接块里的真实地址，占位体永远不会执行。注意事项：
+
+```
+vtable 是数据符号，用 .globl 标签即可，本身不带重定位
+但驱动会把自己的 vtable 建立在它之上，链接器会在其中写入对 22 个方法槽的引用
+那些槽同样需要占位，否则会继续报未定义
+建议先把 vtable 之外 10 个函数符号占位，看链接器还缺什么，逐步补齐
+```
+
+### 已知的两个真实地址（从 __mod_init_func 恢复，供体符号表是空的）
+
+```
+IOBlockStorageDevice::gMetaClass   原址 0xfffffff007a091d0
+IOBlockStorageDevice::getMetaClass 原址 0xfffffff0055d9dc4
+```
+
+其余九个需要同样方法恢复：在组件里找 `__mod_init_func` 的注册 thunk，
+或从 vtable 槽位反查。
+
+### 验证顺序
+
+```
+一  链接通过（占位齐全）
+二  emitter 用 --kernel-import 改写成功，跨度与同余仍然通过
+三  真机启动，参数加 ufsmedia=1
+四  日志出现 KEBAB BLOCK: "userdata" ... 与 IOMedia 名
+五  mount-phase-1 不再退出 66
+```
