@@ -5997,6 +5997,11 @@ VOL? partition <bytes> bytes (<MiB> MiB)
 VOL? DISK vh sig 0x482b version 4 attributes 0x... ... bsize 4096 blocks 16384 free <n> ...
 ```
 
+> **更正（2026-10-28，见第七十九节）：** 内核的实际输出没有 `VOL?` 前缀，
+> 而是 `VOL DISK vh ...`（`kv_print_vh("DISK", ...)`，`kebab_vol.c:179-201`），
+> 并且 sig、created、bsize 是**三行**，不是一行。上面这条是当时的记录，保留
+> 原文；现在的预期见第七十九节。
+
 #### 5.2 `VOL DRY`：校验整条流，不写
 
 ```sh
@@ -8077,10 +8082,11 @@ checkpoint/phase 记录。退出码：0 完成，2 前置失败，3 检查点/�
    `con.wait(DONE_RE, 60)`（`DONE_RE` 只匹配 `VOL DONE`），按代码会在 dry
    时等 60 s 后超时；`send-volume.py --status`/真写不受影响。P1 编排器不使用
    该辅助脚本，自己等 `VOL PLAN`，并把这条列为已知主机侧 bug。
-3. **`VOL?` 的磁盘几何在第三行。** 第一行是 `gated/active/dry/chunk/
-   writable`，第二行是 `partition`，第三行才是
-   `VOL? DISK vh bsize 4096 blocks ... free ...`；把 `bsize/blocks` 的正则
-   套在第一行会永远不匹配。脚本按行分别匹配。
+3. **`VOL?` 的磁盘几何在 `VOL DISK vh bsize` 行，不是 `VOL? DISK`。**
+   第一行是 `gated/active/dry/chunk/writable`，第二行是 `partition`，接着
+   是三条 `VOL DISK vh`（sig、created、bsize），几何在第三条。`kv_print_vh("DISK")`
+   不会重复 `VOL?` 命令前缀，所以 `^VOL\? DISK` 的正则会永远不匹配；脚本现在
+   直接匹配 `^VOL DISK vh bsize`。
 
 另外确认：`VOL BEGIN` 要的是 `<wire> <volume> CONFIRM`，不是卷名在前；
 `INST CHECK` 的参数是目的路径，不是流里的偏移；`INST?` 在 vol 镜像上会打印
@@ -8421,7 +8427,8 @@ free after both = 4,193,878 - 813,472 = 3,380,406 blocks
    `DIR` 条目 `wire=size=0`，`LINK` 条目的 payload 是 target，且 `total_usize`
    把 target 长度算进去。
 4. **不要改的协议细节**：`VOL BEGIN <wire> <volume> CONFIRM` 没有卷名；
-   `VOL?` 的磁盘几何在第三条 `VOL? DISK vh` 行；任何写路径都要 `ufsrw=1`；
+   `VOL?` 的磁盘几何在 `VOL DISK vh bsize` 行（`kv_print_vh("DISK")` 的三行
+   之一，没有 `VOL?` 前缀）；任何写路径都要 `ufsrw=1`；
    最终启动必须有 `kebab_dsc=1 kebab_dsc_map=1`；每阶段一张镜像，因为启动
    参数在 payload TOML（镜像偏移 `0x800000`）里，不在 Android boot 头。
 5. **`send-volume.py --dry` 已修**：旧版等 `VOL DONE`，dry run 实际以
@@ -11327,7 +11334,9 @@ python3 scripts/test-bring-up.py \
 * **内核一个字节没改。** 所有问题都在主机侧期望与测试里；不需要新补丁。
 * 文档：本节；第六十八节 §7 顶部加"已被取代"，并新增 7.1 的当前输出；
   第六十九节 §2 的 `C-BOOT-BANNER` 行、§5 的"新 banner"行、§6 的 reboot
-  判据；第七十八节 §8.3 顶部加复核结论（原文保留）。
+  判据；第七十八节 §8.3 顶部加复核结论（原文保留）；第六十三、六十九、七十
+  节里把 `VOL? DISK` 当成实际输出的三处也已更正（历史记录处加注，当前指引
+  直接改）。
 * `scripts/bring-up-README.md` 与 `MIGRATION.md` 的 `C-BOOT-BANNER` 行同步。
 * `scripts/bring-up-dryrun.log` 重新生成，PLAN 末尾新增一行说明
   `C-BOOT-BANNER` 等的是哪一条 USB 行。
