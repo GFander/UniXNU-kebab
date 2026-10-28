@@ -1,0 +1,85 @@
+--- a/osfmk/kern/kalloc.c
++++ b/osfmk/kern/kalloc.c
+@@ -84,6 +84,7 @@
+ #include <san/kasan.h>
+ #include <libkern/section_keywords.h>
+ #include <libkern/prelink.h>
++#include <pexpert/pexpert.h>
+ 
+ SCALABLE_COUNTER_DEFINE(kalloc_large_count);
+ SCALABLE_COUNTER_DEFINE(kalloc_large_total);
+@@ -951,6 +952,30 @@
+ 
+ __attribute__((used)) const uint32_t kalloc_sparse_prelink_index_version = 1;
+ 
++/*
++ * Runtime result of the sparse prelink parse: 1 when the component headers
++ * were walked through the index, 0 when "kebab_prelink_index=0" skipped the
++ * walk.  bsd_init reports it once the USB console exists; anything printed
++ * here is dropped, because the console ring is not running this early.
++ */
++uint32_t kalloc_sparse_prelink_index_active = 1;
++
++/*
++ * The ABI symbol above stays unconditional: the native prelink emitter
++ * requires it in the image.  This switch only controls the runtime parse and
++ * defaults to on, so an ordinary boot is unchanged.
++ */
++static boolean_t
++kalloc_sparse_prelink_index_enabled(void)
++{
++	uint32_t enabled = 1;
++
++	if (PE_parse_boot_argn("kebab_prelink_index", &enabled, sizeof(enabled))) {
++		return enabled != 0;
++	}
++	return TRUE;
++}
++
+ __startup_func
+ static uint64_t
+ kalloc_type_view_parse(const kalloc_type_variant_t type)
+@@ -1010,6 +1035,22 @@
+ 		kalloc_type_view_copy(type,
+ 		    kalloc_type_var(type, sec_start),
+ 		    kalloc_type_var(type, sec_end), &cur_count, false, NULL);
++
++		/*
++		 * The sparse index is the only description of where the prelinked
++		 * component headers are.  Without it the KCGEN walk below would
++		 * read the leading padding of __PRELINK_TEXT as a header and then
++		 * assert that the rest of the segment is zero.  Disabling the
++		 * parse therefore disables the kext traversal as a whole and keeps
++		 * the type views from the kernel's own __kalloc_type section,
++		 * exactly as a kernel built without a prelink does.
++		 */
++		if (!kalloc_sparse_prelink_index_enabled()) {
++			kalloc_sparse_prelink_index_active = 0;
++			printf("kebab: prelink index parse disabled "
++			    "(kebab_prelink_index=0); kext kalloc types skipped\n");
++			return cur_count;
++		}
+ 
+ 		/*
+ 		 * Parse __kalloc_type section for kexts
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1175,6 +1175,18 @@
+ 	kebab_cs_trustcache_load();
+ 
+ 	/*
++	 * The sparse prelink parse runs during startup, long before this console
++	 * exists.  Report the mode it chose here, where the host can read it, so
++	 * a boot log says whether the component walk ran.
++	 */
++	{
++		extern uint32_t kalloc_sparse_prelink_index_active;
++		printf("KEBAB BOOT: prelink index parse %s (%u)\n",
++		    kalloc_sparse_prelink_index_active ? "on" : "off",
++		    kalloc_sparse_prelink_index_active);
++	}
++
++	/*
+ 	 * Parse and validate the split dyld shared cache, log the mapping
+ 	 * plan, and remember it for the first exec.  Inert unless the boot
+ 	 * command line contains kebab_dsc; mapping additionally needs
