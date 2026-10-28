@@ -1,0 +1,69 @@
+fix(codesign): give the exec'd process CS_PLATFORM_BINARY
+
+A platform binary stayed a non-platform process, and launchd panicked with
+
+    userspace panic: boot task is not a platform binary (mount-phase-1, /sbin/mount)
+
+The trust-cache lookup hit and kebab_cs_classify_blob() did set
+CS_PLATFORM_BINARY on the blob (kebab_cs_log_exec() prints platform=1),
+load_code_signature() copied it into load_result.csflags, and
+load_result.platform_binary marked the task (TFRO_PLATFORM).  The process
+never got it: exec_mach_imgact() propagates load_result.csflags through a
+fixed mask that has no CS_PLATFORM_BINARY, because on Apple platforms that
+bit is AMFI's job.  p_csflags therefore never carried it, and
+csops(CS_OPS_STATUS) -- which reports proc_getcsflags() -- told userland that
+a platform binary was not one.
+
+Derive the process bit from load_result.platform_binary, the same decision
+that drives task_set_platform_binary(), so the process flag, the task flag
+and the csops answer cannot disagree.  The policy gate is untouched:
+kebab_cs_classify_blob() still decides whether a cdhash earns platform
+status, and a blob it does not classify leaves the bit clear.
+
+Update the comment in kebab_codesign.h that said the bit is never set by the
+port.
+
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -1410,6 +1410,26 @@
+ 		    CS_EXEC_SET_HARD | CS_EXEC_SET_KILL | CS_EXEC_SET_ENFORCEMENT);
+ 	} else {
+ 		imgp->ip_csflags &= ~CS_VALID;
++	}
++
++	/*
++	 * CS_PLATFORM_BINARY has no producer in xnu itself: AMFI sets it on the
++	 * blob when a trust cache classifies the cdhash as Apple platform code,
++	 * which is why it is deliberately absent from the csb_flags mask above.
++	 * This port replaces AMFI with kebab_cs_classify_blob(), and
++	 * load_result.platform_binary is that decision: it is the same field that
++	 * marks the task (task_set_platform_binary(), above) and the same one
++	 * kebab_cs_log_exec() prints as "platform=1".
++	 *
++	 * Without this the process's p_csflags never carries the bit, so
++	 * csops(CS_OPS_STATUS) -- which reports proc_getcsflags() -- tells
++	 * userland that a platform binary is not one, and launchd refuses to run
++	 * the boot task.  Propagating the decision does not widen the policy:
++	 * kebab_cs still decides, and a blob it does not classify leaves the bit
++	 * clear.
++	 */
++	if (load_result.platform_binary) {
++		imgp->ip_csflags |= CS_PLATFORM_BINARY;
+ 	}
+ 
+ 	if (proc_getcsflags(p) & CS_EXEC_SET_HARD) {
+diff --git a/bsd/kern/kebab_codesign.h b/bsd/kern/kebab_codesign.h
+--- a/bsd/kern/kebab_codesign.h
++++ b/bsd/kern/kebab_codesign.h
+@@ -32,7 +32,9 @@
+  *	Classify a code-signed binary as a platform binary when its cdhash is in
+  *	Apple's static trust cache (the "StaticTrustCache" component of the
+  *	IPSW).  Without this, nothing in the kernel can ever set
+- *	CS_PLATFORM_BINARY, because that bit is set by AMFI.
++ *	CS_PLATFORM_BINARY, because that bit is set by AMFI.  With it the bit is
++ *	set on the blob here and propagated to the exec'd process by kern_exec.c,
++ *	which is what csops(CS_OPS_STATUS) and launchd's boot-task check read.
+  *
+  * KEBAB_CS_GRANT_ENTITLEMENTS
+  *	Make the built-in AMFI provider answer entitlement queries with success

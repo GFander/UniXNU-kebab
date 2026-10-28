@@ -12099,3 +12099,267 @@ KEBAB DSC: plan 38 files / 0 mappings / 0x0 bytes (0)
    再上板；
 3. 同时把 `CS_PLATFORM_BINARY` 落到 boot task 子进程的 `p_csflags`，否则
    `mount-phase-1` 之后无法继续。
+
+## 八十三、缓存目录扫描与平台标志的传播
+
+这一节记两件事：共享缓存的目录扫描漏掉了一个分片，以及平台标志没有从 blob 传到
+进程。两者属于同一类错误——内核已经得出了正确答案，却在最后一步把它丢掉，而且
+都不报错：一个静默少交一个名字，一个静默少置一个 bit。前者的后果是共享缓存不映射，
+后者的后果是 launchd 认为自己的启动任务不是平台二进制。
+
+### 1. 缺陷一：目录扫描丢掉每个窗口的最后一条记录
+
+2026-10-28 的真机日志（129 个补丁的内核，`kebab_dsc=1 kebab_dsc_map=1`）：
+
+```text
+KEBAB DSC: subcache 38 suffix ".38" uuid 0f806d3d90313bab88bccbb44f5b1a04: NO FILE WITH THIS UUID
+KEBAB DSC: plan rejected (error 2); shared cache NOT mapped
+KEBAB DSC: resolved 37/42 subcaches by uuid; dylddata=1 dyldlinkedit=1
+KEBAB DSC: plan 38 files / 0 mappings / 0x0 bytes (0)
+```
+
+`/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.38` 在同一卷上装好并
+且哈希校验过，它自己头里的 UUID 就是 `0f806d3d…`。日志里既没有 `cannot open` 也没
+有 `not a dyld cache header`，所以不是打开失败，也不是头校验失败——这个名字**根本
+没有被交到解析器面前**。那一轮 `plan 38 files` 也说明 `37 + 1`：主缓存加 37 个解析
+成功分片，一个都没多。
+
+目录的真实内容是 44 个条目：主缓存 + 42 个分片（其中 `.27`、`.41` 是 `.dylddata`，
+`.28`、`.42` 是 `.dyldlinkedit`）+ 不映射的 `.symbols`（第四节的分片表逐个列过）。
+
+#### 1.1 两个候选，代码选了哪一个
+
+候选 (a)：3.3 GB 安装把 catalog 记录弄丢了（块被孤立，而空闲块差值仍然正确，所以
+全程静默）。候选 (b)：扫描的边界 `pos + sizeof(struct dirent) <= used` 静默丢掉窗口
+尾部的记录。
+
+**是 (b)**，把三个数字放在一起就没有第二种解释：
+
+* `sizeof(struct dirent)` 是 **1048** 字节（`d_ino` 8 + `d_seekoff` 8 + `d_reclen` 2
+  + `d_namlen` 2 + `d_type` 1 + `d_name[1024]`，8 字节对齐）。这是 HFS+ 能吐出的
+  **最大**记录，不是最小的记录。
+* HFS+ 的标准（非 extended）readdir 写的是**变长**记录：
+  `STD_DIRENT_LEN(namlen) = (sizeof(struct dirent) - 256) + ((namlen + 1 + 3) & ~3)`
+  （`bsd/kebab_hfs/core/hfs.h`）；对这个目录的 44 个名字，实际长度是 816–836 字节。
+* `KEBAB_DSC_DIRBUF` 是 8192 字节，所以一个窗口装 9 条记录，44 条要 **5 个窗口**。
+
+于是 `pos + 1048 <= used` 在剩余不足 1048 字节时停下，而那一刻窗口里通常还留着一条
+完整的 820 字节记录。`pos` 停在它之前，下一轮 `VNOP_READDIR` 用的却是**驱动**回报的
+offset（已经越过那条记录），所以它被永久跳过，且没有任何输出。每个窗口丢一条，5 个
+窗口就是 5 个名字——正好等于解析不到的 5 个分片（42 − 37）。丢的**条数**由窗口数唯一
+决定，不依赖具体是哪几条记录落在窗口尾部。
+
+在主机上按同样的记录长度跑一遍这个循环：44 条 → 5 个窗口 → 只交出 39 条，其中主缓存
+始终在内。这与真机的 37/42 同数同因。
+
+反过来看候选 (a)：如果 catalog 记录真的丢了，`NO FILE WITH THIS UUID` 之前一定先出现
+`cannot open`（按路径查找会 ENOENT），而且 `INST CHECK` 的按路径读回也会失败。日志里
+两者都没有，所以安装没有丢记录，问题纯粹在扫描。
+
+#### 1.2 现在怎么扫
+
+循环边界改成"只要能读到定长头就继续"，并把 `d_reclen` 当作可信值（在越界检查之后）：
+
+```c
+while (pos < used) {
+        /* offsetof(struct dirent, d_name) == 21 */
+        if (used - pos < KEBAB_DSC_DIRENT_MIN) { ...报错... }
+        dp = (struct dirent *)(void *)(buf + pos);
+        reclen = dp->d_reclen;
+        if (reclen < KEBAB_DSC_DIRENT_MIN || reclen > used - pos) { ...报错... }
+        ...
+        entries++;
+        pos += reclen;
+}
+```
+
+另外加了一条 `d_namlen + 1 <= reclen - KEBAB_DSC_DIRENT_MIN`：`d_namlen` 是名字拷贝
+唯一信任的字段，它必须落在刚校验过的那条记录里面。
+
+缓冲区仍是 8192 字节，没有变大：`VNOP_READDIR` 的外层循环本来就是对的（offset 由
+`uio_offset()` 带回，逐窗口推进），窗口小只是多跑几轮，而"每轮都不许丢记录"才是
+正确性的来源。这也顺带保证了单条记录永远装得下（最大 1048 < 8192）。
+
+#### 1.3 部分扫描现在会自己喊出来
+
+以前"装不下"等于 `break`，等于静默停在一个不完整的候选表上——这正是这次丢掉分片的
+形态。现在三种情况都会打印偏移量并把 plan 判为失败（`EIO`），而不是当成成功：
+
+| 情况 | 新输出（`KEBAB DSC: directory scan:` 前缀） |
+| --- | --- |
+| 窗口尾部剩余不足一个定长头 | `%u trailing byte(s) at offset %u of %u are shorter than a dirent header; refusing a partial scan` |
+| `d_reclen` 越界或小于定长头 | `record at offset %u claims d_reclen %u but %u byte(s) remain in the %u-byte window (readdir offset %lld); refusing a partial scan` |
+| 未到 EOF 却一个记录都没返回 | `readdir returned no records at offset %lld without setting EOF; refusing a partial scan` |
+
+"拒绝"意味着 `kebab_dsc_list_dir()` 返回 `EIO`，上层打印
+`KEBAB DSC: reading directory %s failed (error %d)`，共享缓存不映射。宁可整块不映射，
+也不要拿一个缺了分片的 plan 去映射。
+
+#### 1.4 新增的非 verbose 计数器
+
+每轮启动都会打印的那一行（`kebab_dsc_log_plan_summary()`）末尾加了三个数字：
+
+```text
+KEBAB DSC: plan 43 files / 51 mappings, 0xa2de4000 mapped, extent 0xaade4000 (end 0x22ade4000), base 0x180000000, slide 0x0, dynamic config page appended; dir 44 entries, 44 offered, 44 resolved
+```
+
+* `dir N entries`：扫描真正走过的目录记录条数（含非缓存名）；
+* `N offered`：其中名字前缀匹配 `dyld_shared_cache_arm64` 的条数，也就是交给解析器的
+  候选数；
+* `N resolved`：最终进入 plan 的文件数，外加那一个 `.symbols`（它被报告但不映射）。
+
+三者相等（44/44/44）才说明"一个名字都没丢"。如果扫描少走了一部分目录，第一个数字
+就会小于 44；如果有名字交上来却没能解析成文件，第三个数字会小——两种情况都不需要
+`kebab_dsc_verbose=1`。verbose 的明细行同样加了这三个数。
+
+### 2. 缺陷二：`CS_PLATFORM_BINARY` 没有传到进程
+
+同一轮真机日志的第二段：
+
+```text
+KEBAB CS: exec cdhash b6a7272461fce359ceb407594e7aaf4fdf4949f1 cd=0x11a84+904 hash=2 slice=0x0 tc=hit platform=1
+… Allowing spawn of iOS binary … unentitled_ios_sim_launch …
+panic(cpu 0 caller 0xfffffe0006b00a9c): userspace panic: boot task is not a platform binary (mount-phase-1, /sbin/mount)
+```
+
+信任缓存命中，`kebab_cs_classify_blob()` 也确实在 blob 上置了 `CS_PLATFORM_BINARY`
+（`platform=1` 就是它的 `csb_platform_binary`），`load_result.platform_binary` 也把
+**task** 标成了平台（`TFRO_PLATFORM`）。缺的是 **进程**：`p_csflags` 里没有这一位。
+
+原因在 `exec_mach_imgact()`：`load_result.csflags` 是经过一个固定掩码写进
+`imgp->ip_csflags` 的，而那个掩码里没有 `CS_PLATFORM_BINARY`——在 Apple 平台上这一位
+由 AMFI 负责，不属于 xnu 自己传播的那一组。于是：
+
+* `proc_csflags_update(p, imgp->ip_csflags)` 写出的 `p_csflags` 没有这一位；
+* `csops(CS_OPS_STATUS)` 返回的正是 `proc_getcsflags()`，于是用户态看到的"平台进程"
+  是 0；
+* launchd 对自己的启动任务做这个检查，结论是"不是平台二进制"，直接
+  `reboot(RB_PANIC)`。
+
+顺带说明为什么 `CS_OPS_STATUS` 里那句 `if (csproc_get_platform_binary(pt)) retflags |=
+CS_PLATFORM_BINARY;` 救不了它：`csproc_get_blob()` 在 `(proc_getcsflags(p) & CS_SIGNED)
+== 0` 时直接返回 NULL，而 `csb_flags` 来自 `(cd->flags & CS_ALLOWED_MACHO) | CS_VALID`，
+`CS_ALLOWED_MACHO` 不含 `CS_SIGNED`——这一位同样原本由 AMFI 置。这条链在本移植上恒为
+0，所以唯一的出口就是 `p_csflags` 本身。
+
+#### 2.1 改法：只传播已经做出的决定
+
+```c
+if (load_result.platform_binary) {
+        imgp->ip_csflags |= CS_PLATFORM_BINARY;
+}
+```
+
+放在 `exec_mach_imgact()` 里 `load_result.csflags` 那段之后，紧挨着它。之所以用
+`load_result.platform_binary` 而不是把 `CS_PLATFORM_BINARY` 加进通用掩码，是为了让
+**进程标志、task 标志（`task_set_platform_binary()`）、`csops` 的答案**三者由同一个
+值决定，不可能互相矛盾。
+
+策略门没有任何变化：`kebab_cs` 仍然决定一个 cdhash 能不能算平台（
+`KEBAB_CS_TRUSTCACHE_PLATFORM` + 静态信任缓存），`kebab_cs_classify_blob()` 不置位的
+blob 这里也不会置位。这一改动只是把"已经判成平台"这个结论送到用户态能看见的地方。
+
+`kebab_codesign.h` 里那句"这一位由 AMFI 设置、本移植永远不设"同步改成现在的实际情况。
+
+### 3. 真机需要确认什么
+
+1. `kebab_dsc=1 kebab_dsc_map=1` 启动，summary 行必须是
+   `dir 44 entries, 44 offered, 44 resolved`，明细行必须是
+   `resolved 42/42 subcaches by uuid; dylddata=2 dyldlinkedit=2`，plan 是
+   `43 files / 51 mappings / 0xa2de4000`；
+2. 全程不出现 `KEBAB DSC: directory scan:` 开头的任何一行（出现即说明目录窗口仍然
+   装不下，"refusing a partial scan"会同时说明是哪一段偏移）；
+3. 共享缓存映射成功之后，launchd 才能进到 mount-phase-1；`KEBAB CS:` 那行仍是
+   `platform=1`，而这次 panic 的那句 `boot task is not a platform binary` 必须消失
+   ——这是 `CS_PLATFORM_BINARY` 真的进了 `p_csflags` 的唯一证据；
+4. 反向验证（可选但值得）：`kebab_cs=1` 里去不掉 `KEBAB_CS_TRUSTCACHE_PLATFORM`
+   时，同一路径应该回到 panic——用来证明这一位确实来自 `kebab_cs` 的判断，而不是
+   无条件置位。
+
+## 八十四、panic 重启路径上的嵌套 panic
+
+本节记 2026-10-28 的第三个缺陷：用户态 panic 之后板子没有重启，而是打了一个嵌套
+panic，然后把控制台和 fastboot 一起弄丢，只能物理断电。它排在另外两个缺陷之前，
+因为它每次都要一次人工干预。
+
+### 1. 现象
+
+去掉 `kebabkdp=1` 之后，一次用户态 panic 本应经 0134 走到 PSCI 复位，实际是：
+
+```text
+panic(cpu 0 caller 0xfffffe0006b00a9c): userspace panic: boot task is not a platform binary (mount-phase-1, /sbin/mount)
+Nested panic detected … Attempt to take mutex … with preemption disabled @lock_mtx.c:194
+```
+
+之后 COM7 仍然枚举（`VID_1209:0001`，ProblemCode 0）但无法配置（WinError 31），
+也没有 fastboot 设备。
+
+### 2. 是哪一次调用
+
+`panic()` 在 `osfmk/kern/debug.c` 里先 `ml_set_interrupts_enabled(FALSE)` 再
+`disable_preemption()`，此后整条 panic 路径都带着抢占禁用。任何一次
+`lck_mtx_lock()` 在这里都会命中 `osfmk/kern/lock_mtx.c:193` 的
+`Attempt to take mutex … with preemption disabled`，也就是第二个 panic。
+
+调用链全部在树内可查：
+
+1. `panic()` 末尾 `if (!panicDebugging) kdp_machine_reboot_type(kPEPanicRestartCPU, …)`
+   ——0134 在没有 `kebabkdp=1` / `kdp_match_name` 时会把 `panicDebugging` 清掉，所以
+   走的正是这一支；
+2. `PEHaltRestart()` → `PEHaltRestartInternal()` → `gIOPlatform->haltRestart()` →
+   `KebabPlatformExpert::haltRestart()`；控制台还活着时它把 CPU 交给
+   `kebab_usb_panic_spin()`（`bsd/dev/kebab_usb.c`），也就是那个不返回的 panic 泵；
+3. panic 泵里有一句 `if (command != 0) ud_run_reboot_command(command);`——它和普通
+   控制台线程**共用**同一个命令分发器；
+4. `ud_run_reboot_command()` 对 `REBOOT` / `FASTBOOT` / `FASTBOOT2` 调用 0148 的
+   `kebab_install_sync_for_reset()`；
+5. 那个函数先 `VFS_SYNC(rootvnode->v_mount, MNT_WAIT, vfs_context_current())`，
+   再 `kebab_ufs_sync()` → `lck_mtx_lock(&kebab_ufs_lock)`。
+
+`MNT_WAIT` 会在 HFS+/UBC/mount 锁上睡眠，`kebab_ufs_sync()` 直接拿互斥量，所以第一个
+被走到的就会在抢占禁用下 panic。
+
+要点是：这条路径**本该不可达**。`kebab_install.c` 的注释写着"The panic path does not
+call this: a panic must not wait for a filesystem sync"，`kebab_usb.c` 的注释写着
+"The panic path calls ud_platform_restart() directly … so a panic still resets without
+waiting for a filesystem sync"——两句话都不成立，因为分发器是共用的，没有任何检查把
+panic 上下文挡在外面。同一个分发器还会把 `KEBAB_TOUCH_*`（`ktq.lock` 是互斥量）、
+RPMH/TCS/SPMI/VRM 报告和 FWLOG 暴露给 panic 上下文，所以就算没有 VFS_SYNC，那里也
+不止一个会睡的命令。
+
+### 3. 改法：panic 重启只做不会阻塞的事
+
+规则写成代码，而不是注释：
+
+* `ud_run_reboot_command(uint32_t command, boolean_t panicking)` 多一个参数。panic
+  态下，复位类命令**降级为纯 PSCI SYSTEM_RESET**，并且明说跳过了什么：
+
+  ```text
+  KEBAB PANIC: reset requested (REBOOT); skipping the install flush (VFS_SYNC and kebab_ufs_lock cannot run with preemption disabled) and resetting via PSCI SYSTEM_RESET
+  ```
+
+  其余命令一律拒绝一行 `KEBAB PANIC: command 0x%x refused while panicking; …`，泵继续
+  跑。这里的选择是明确的：**放弃一次还没落盘的写，好过永远不重启**。
+* `kebab_install_sync_for_reset()` 在 `panic_active()` 时直接拒绝（打印一行、返回
+  false），这样"panic 不同步文件系统"就从注释变成任何未来调用者也绕不过去的约束。
+* `KebabPlatformExpert::haltRestart()` 在 panic 里连 `kPEHaltCPU` 也直接走 PSCI，
+  不再落到 `IODTPlatformExpert::haltRestart()` 的关机通知分支
+  （`thread_call_allocate()`、`IORegistryEntry::fromPath()`、PM 客户端），那条分支会
+  分配内存、会拿互斥量；今天只是碰巧因为先收到过 `kPEPanicBegin` 才被
+  `PEHaltRestartInternal()` 跳过，而 panic 重启不该依赖这个巧合。
+
+panic 泵本身没有改动，仍然是纯原子量的无锁循环。非 panic 路径的行为完全不变：
+控制台线程的 `REBOOT` / `FASTBOOT` 依旧先做 `VFS_SYNC` + `SYNCHRONIZE CACHE` 再复位。
+
+### 4. 真机需要确认什么
+
+1. 制造一次用户态 panic（例如 `kebab_dsc` 路径上故意不满足平台标志的那种场景），
+   控制台必须停在 panic 泵里、仍然可读；
+2. 从主机发 `REBOOT`，只应看到**一行**
+   `KEBAB PANIC: reset requested (REBOOT); skipping the install flush …`，然后板子
+   复位；不得再出现 `Nested panic detected` 或 `Attempt to take mutex … with
+   preemption disabled`；
+3. 再测一次"没有控制台"的 panic（`kebabusb=0` 或控制器已死），应当是
+   `KEBAB PANIC: no console to service; rebooting via PSCI SYSTEM_RESET` 后复位；
+4. 发一个诊断类命令（如 `KEBAB_TOUCH_*`、`RPMH`），应当被拒绝一行且泵继续存活，
+   这证明拒绝路径本身不会把板子弄丢。
