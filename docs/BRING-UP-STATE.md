@@ -7171,13 +7171,13 @@ python3 scripts/check-shared-cache.py ~/ios-userland/cryptex-cache
 
 结论先写在这里：
 
-* `base.kist` 只有 **5 条**：`/sbin/launchd`、`/usr/lib/dyld`、静态信任缓存、
-  一个只依赖共享缓存的 `zprint`，以及它的 LaunchDaemon plist。**576.0 KiB**
-  线上字节，装完 1,619,682 字节。
+* `base.kist` 现在有 **6 条**（0144 起）：`/sbin/launchd`、`/usr/lib/dyld`、
+  静态信任缓存、`/usr/libexec/xpcproxy`、一个只依赖共享缓存的 `zprint`，以及
+  它的 LaunchDaemon plist。**640.0 KiB** 线上字节，装完 1,716,034 字节。
 * `cache.kist` 是 **44 条**：43 个被内核映射的分片加 `.symbols`（内核只报告、
   不映射）。**1018.44 MiB** 线上字节，装完 3.10 GiB。
 * `base.kist` 里没有 `/dev`、`/var`、`/tmp`，也不应该有：安装器的允许清单只有
-  六个前缀、只能写普通文件，`/tmp` 的 01777 还超出 KIST 头里的 0777 模式字段。
+  七个前缀、只能写普通文件，`/tmp` 的 01777 还超出 KIST 头里的 0777 模式字段。
   这三样由**根卷骨架**提供；内核在 `/dev` 上挂 devfs，节点由 devfs 创建，既不是
   安装文件，也不是 launchd 创建。
 * 本轮唯一的硬 blocker 是**卷的先后顺序**：如果 16 GiB 卷已经用旧版
@@ -7190,14 +7190,15 @@ python3 scripts/check-shared-cache.py ~/ios-userland/cryptex-cache
 
 ### 1. 最小集合：每一条为什么在
 
-`base.kist`（`scripts/make-minimal-userland.py` 生成，KIST v1）：
+`base.kist`（`scripts/make-minimal-userland.py` 生成，KIST v2）：
 
 | 目的路径 | 字节 | 模式 | 来源 | 为什么必须在 |
 | --- | ---: | ---: | --- | --- |
 | `/sbin/launchd` | 541,600 | 0755 | `extracted/sbin/launchd` | `load_init_program()` 无条件 exec 这个路径；它是 PID 1，没有替代品 |
 | `/usr/lib/dyld` | 922,912 | 0755 | `extracted/usr/lib/dyld` | exec 的解释器；内核把共享缓存映射到 shared region 之后由它接管 |
-| `/System/Library/Caches/com.apple.kernelcaches/static.trustcache` | 66,289 | 0644 | `~/ios-userland/static.trustcache` | `kebab_cs=15` 时 `kebab_cs_trustcache_load()` 的默认路径；launchd/dyld/zprint 的 cdhash 都在里面，缺了它们不会被标成 platform binary（0136 的 9/e 平台门是另一条独立判断） |
+| `/System/Library/Caches/com.apple.kernelcaches/static.trustcache` | 66,289 | 0644 | `~/ios-userland/static.trustcache` | `kebab_cs=15` 时 `kebab_cs_trustcache_load()` 的默认路径；launchd/dyld/zprint/xpcproxy 的 cdhash 都在里面，缺了它们不会被标成 platform binary（0136 的 9/e 平台门是另一条独立判断） |
 | `/usr/lib/zprint` | 88,352 | 0755 | `extracted/usr/bin/zprint` | 证明 launchd 真能 spawn 的载荷；五个依赖全在共享缓存里，且会往 stdout 打一张 zone 表 |
+| `/usr/libexec/xpcproxy` | 96,352 | 0755 | `extracted/usr/libexec/xpcproxy` | launchd 每个 job 的唯一 spawn 入口（`posix_spawnp` at `0x100024abc`）；三条依赖全在共享缓存，cdhash 命中静态 TC（0144）|
 | `/System/Library/LaunchDaemons/com.kebab.zprint.plist` | 529 | 0644 | 生成 | 唯一一个 boot-time LaunchDaemon；`RunAtLoad` + `zprint -L`，把输出送到 `/dev/console` |
 
 `cache.kist`：`/System/Library/Caches/com.apple.dyld/` 下 44 个文件，模式 0644，
@@ -7217,7 +7218,7 @@ python3 scripts/check-shared-cache.py ~/ios-userland/cryptex-cache
 | --- | --- |
 | `/System/Library/CoreServices/SystemVersion.plist` | launchd 不靠它启动；574 B 也不能证明任何东西 |
 | `fileproviderctl`（259,248 B） | 16 个依赖也全在缓存里，但它比 zprint 大、会碰 MobileKeyBag/FileProvider，作为第一个 job 只会引入噪声 |
-| `/usr/libexec/launchd_cache_loader` | 可执行文件不在共享缓存（缓存里只有 dylib），且 `/usr/libexec/` 不在允许清单；它的 boot task 带 `PerformAfterUserspaceReboot`，普通首启被过滤掉 |
+| `/usr/libexec/launchd_cache_loader` | 可执行文件不在共享缓存（缓存里只有 dylib）；`/usr/libexec/` 现在虽已允许，但它的 boot task 带 `PerformAfterUserspaceReboot`，普通首启被过滤掉，本轮不装 |
 | `/sbin/mount`、`/sbin/fsck`、`/usr/libexec/prng_seedctl` 等 boot task | 同样不在缓存/不允许；普通首启不执行（见第 2.1 节），只有 userspace reboot/restore 才需要 |
 | `/bin/sh`、`/usr/bin/*` 工具 | 第一个 job 不需要 shell；需要时再按同一方法核对依赖 |
 | `/dev` 节点 | 不能作为普通文件安装，见第 3 节 |
@@ -7234,6 +7235,7 @@ upward，拿主缓存 `imagesText` 的 2,710 条路径做名字解析。判定�
 | `/sbin/launchd` | `/usr/lib/libSystem.B.dylib` @0x1d1c2c000；`/usr/lib/libobjc.A.dylib` @0x1800b8000 | 两条都 **in-cache**；launchd 本身 **must-install** |
 | `/usr/lib/dyld` | 无任何 `LC_LOAD_DYLIB` | 自包含；**must-install**，不能从缓存取 |
 | `/usr/lib/zprint` | IOKit @0x18e550000；CoreSymbolication @0x1ae49e000；CoreFoundation @0x186de8000；libutil @0x1d1fe1000；libSystem.B @0x1d1c2c000 | 五条都 **in-cache**；zprint 本身 **must-install** |
+| `/usr/libexec/xpcproxy` | libSystem.B @0x1d1c2c000；libobjc.A @0x1800b8000；weak libcryptex_trampoline @0x20cd82000；`LC_LOAD_DYLINKER` `/usr/lib/dyld` | 三条 dylib 都 **in-cache**；dylinker 由 `base.kist` 提供；xpcproxy 本身 **must-install** |
 | 静态信任缓存 / plist | 不是 Mach-O | 无依赖 |
 
 直接依赖之外，`libSystem.B` 和 `libobjc.A` 自己的依赖闭包也必须在缓存里。本轮
@@ -7416,24 +7418,27 @@ scripts/make-minimal-userland.py \
 * 每个可执行文件的 cdhash 必须在 `static.trustcache` 里；
 * 44 个缓存文件的 size/SHA-256 必须与 `MANIFEST.txt` 一致。
 
-实测（KIST v1，`--compress auto`，64 KiB chunk）：
+实测（KIST v2，`--compress auto`，64 KiB chunk）：
 
 | 流 | 条目 | 安装字节 | 线上字节 | 压缩比 | 填充 | 最大条目（安装/线上） |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| `base.kist` | 5 | 1,619,682 | 589,824（576.0 KiB，9 chunk） | 36.4% | 3,007 B | `/usr/lib/dyld` 922,912 / `/sbin/launchd` 196,822 |
+| `base.kist` | 6 | 1,716,034 | 655,360（640.0 KiB，10 chunk） | 38.2% | 53,517 B | `/usr/lib/dyld` 922,912 / `/sbin/launchd` 196,822 |
 | `cache.kist` | 44 | 3,330,359,296（3.10 GiB） | 1,067,909,120（1018.44 MiB，16,295 chunk） | 32.1% | 42,289 B | `.symbols` 592,101,376 / 96,448,609 |
 
-两条流合计线上 **1,068,498,944 B**，安装 **3,331,978,978 B**。16 GiB 根卷是
+两条流合计线上 **1,068,564,480 B**，安装 **3,332,075,330 B**。16 GiB 根卷是
 17,179,869,184 B：装完还剩约 **12.9 GiB**，最大的单个文件 592,101,376 B 只占
 卷的 3.4%，没有任何一条接近 16 GiB。`--verify` 的结论分别是：
 
 ```
-base.kist: v1, 5 entries, 1.5 MiB installed, 576.0 KiB on the wire
-verify: 5 entries, all digests match
+base.kist: v2, 6 entries, 1.6 MiB installed, 640.0 KiB on the wire
+verify: 6 entries (6 files, 0 dirs, 0 symlinks), all digests match
 
-cache.kist: v1, 44 entries, 3.10 GiB installed, 1018.44 MiB on the wire
+cache.kist: v2, 44 entries, 3.10 GiB installed, 1018.44 MiB on the wire
 verify: 44 entries, all digests match
 ```
+
+`base.kist` 的 SHA-256 是
+`eec6cbefbb52a671275fef924f088c5ffded10dbeda829438d98e53bb28aa5dc`。
 
 `check-shared-cache.py` 对同一目录的主机侧计划：**43 个映射文件、51 条映射、
 0xa2de4000（2,732,474,368）字节**，42/42 个子缓存按 UUID 找到，dylddata=2、
@@ -7671,7 +7676,7 @@ namespace 6 看共享缓存；三者都有 `pid 1 exited`/`initproc ...` 但原�
 
 这是本轮唯一会让"流都 verify 通过、但 launchd 仍然起不来"的问题：
 
-* `base.kist` 的 5 条都在六个允许前缀内，能装；
+* `base.kist` 的 6 条都在七个允许前缀内，能装；
 * 但它**装不出** `/dev`（devfs 的挂载点）、`/private/var`、`/tmp`、
   `/private/etc/passwd`；
 * 没有 `/dev`，`devfs_kernel_mount` 在 `bsd_init` 就失败，launchd 的每个 job
@@ -7725,7 +7730,7 @@ python scripts/bring-up.py --from vol
 | `boot-final.img` | 最终启动镜像 | 不含 `kebab_vol=1`、不含 `kebab_noinit=1`，含 `kebab_dsc=1 kebab_dsc_map=1` |
 | `KebabRoot.vext` | VEXT v1 写卷流 | 1,769,472 B，3 个 extent，内嵌 HFS+ 头 4,194,304 块；**裸卷**（骨架见 `skel.kist`，第七十节） |
 | `skel.kist` | 根卷骨架 | 16 条（10 dir + 3 link + 3 file），KIST v2，64 KiB；写卷后、`base.kist` 前发送 |
-| `base.kist` | 最小用户态 | 5 条，`make-minimal-userland.py` 生成；内核接受 v1/v2 |
+| `base.kist` | 最小用户态 | 6 条，`make-minimal-userland.py` 生成；内核接受 v1/v2 |
 | `cache.kist` | 共享缓存 | 44 条，同一工具生成；内核接受 v1/v2 |
 
 `KebabRoot.vext` 的 1,769,472 B / 3 extents / 426 allocated blocks 是**裸卷**的
@@ -7766,8 +7771,8 @@ extent 数和 data 字节做成可覆盖参数（`--expected-vol-stream`、
 | C-VOL-REBOOT | `vol.reboot` | `KEBAB REBOOT: PEHaltRestart(kPERestartCPU)` |
 | C-VOL-MOUNT | `vol.mount` | `KEBAB HFS: KebabRoot: ... total blocks 4194304` |
 | C-INST-GEOM | `install.geometry` | `INST? root rw`，`space ... of 17179869184`，`bsize 4096 blocks 4194304 free > 0` |
-| C-BASE-PRECHECK | `precheck.base` | 5 条 `INST CHECK` 全部 same，或列出 missing/different |
-| C-SEND-BASE | `send.base` | `INST BEGIN ... write`、`INST ACK`、`INST DONE entries 5 ...`（不能出现 `INST DONE with ... failure(s)`） |
+| C-BASE-PRECHECK | `precheck.base` | 6 条 `INST CHECK` 全部 same，或列出 missing/different |
+| C-SEND-BASE | `send.base` | `INST BEGIN ... write`、`INST ACK`、`INST DONE entries 6 ...`（不能出现 `INST DONE with ... failure(s)`） |
 | C-VERIFY-BASE | `verify.base` | 抽样 `INST CHECK` 的大小和 SHA-256 与 KIST 头一致 |
 | C-CACHE-PRECHECK | `precheck.cache` | 44 条 `INST CHECK` 全部 same，或列出 missing/different |
 | C-SEND-CACHE | `send.cache` | `INST DONE entries 44 ...`（无 failure 行），并记录耗时 |
@@ -7872,7 +7877,7 @@ INST? bsize 4096 blocks 4194304 free <n>
   KIST 头逐条写、逐条回读并打印 `OK <path> ...` 或 `SKIP <path> ...`。
 * 结束要求 `INST DONE entries 5 ok ... skipped ... bytes 1619682 wire ...`；
   `ok + skipped == 5`。
-* 再抽 5 条（base 全查）`INST CHECK`，大小和 SHA-256 必须与流头一致。
+* 再抽 6 条（base 全查）`INST CHECK`，大小和 SHA-256 必须与流头一致。
 
 #### 4.5 cache.kist：44 条、同样的预查、记录耗时
 
@@ -7968,7 +7973,7 @@ checkpoint/phase 记录。退出码：0 完成，2 前置失败，3 检查点/�
 | `INST CHECK` 全部 same | 不发送该流 | 同左 | 同左 |
 | 部分 same | 发送完整流，内核逐条 `SKIP` | 同左 | 同左 |
 
-**完整流绝不重发。** precheck 是逐条的，不是抽样：base 5 条、cache 44 条。
+**完整流绝不重发。** precheck 是逐条的，不是抽样：base 6 条、cache 44 条。
 只有全部 same 才跳过；部分完成发完整流是刻意的，因为 KIST 的逐条 SKIP 已经
 在设备侧实现了 resume，主机侧重新打包反而会引入新流。若确实要强制重发，
 用 `--no-precheck`（不推荐）。
@@ -9220,6 +9225,10 @@ KEBAB DSC: plan 43 files / 52 mappings, 0xa2de8000 mapped, extent 0xaade8000 (en
 
 ## 七十四、launchd 起步所需的支持
 
+> 2026-10-28 更新：本节排在第 1、2 位的两个硬 blocker（xpcproxy 缺失、
+> `/dev/console` 打不开）已由 `0144`、`0145` 修掉；下面的排位和“下一次启动
+> 最小改动”保留为当时的审计记录，当前状态见第七十五节。
+
 > 目标：把“exec 成功之后 launchd 会走到哪里、还需要什么”变成一张可以在下一次
 > 启动日志里逐行核对的表，而不是等真机一个门一个门地撞。
 >
@@ -9598,3 +9607,320 @@ kebab 的 provider（`bsd/kern/kebab_amfi.c:114`）在 `kebab_cs` 有
 
 两条路都要求 console 先通；如果下一次启动没有
 `launchd logging initialized`，先修 console，不要先动 xpcproxy。
+
+## 七十五、让 launchd 能真正启动作业
+
+> 写于 2026-10-28。第七十四节列出的两个“与硬件无关、但一定挡在 spawn 前面”的
+> blocker 在这一节修掉。板子仍然 stranded，所以下面区分“离线已证”和“只有真机能定”。
+
+结论先写在这里：
+
+* **Blocker 1 已修（`0144`）**：`/usr/libexec/` 进入安装器允许清单，
+  `base.kist` 增加 `/usr/libexec/xpcproxy`（96,352 字节）。它的三条 dylib 依赖
+  全部在拆分共享缓存里，cdhash `f7f090b0…` 命中 OS 卷的 2,760 条静态 TC。
+* **Blocker 2 已修（`0145`）**：`/dev/console` 在 UFS 设备起来后直接路由到已有的
+  kebab 字符设备；open/close 不碰 tty，write 走 `console_write()`（USB + 面板），
+  read 返回 EOF。这是第七十四节第 5 小节的选项 (b)。
+* **位置纠正**：`xpcproxy` **不在** `Cryptex1,SystemOS`，在 OS 根卷。cryptex 的
+  `/usr` 下只有 `lib/`，`--apfs-find /usr/libexec/xpcproxy` 返回
+  `ABSENT (resolved /usr, no entry 'libexec')`。
+* 系列从 122 个补丁变成 **124 个**，在 pristine `1b191cb` 上按文件名顺序
+  `124/124` 应用。全量构建通过，见第 5 小节。
+
+### 1. 为什么拆成两个补丁
+
+两个 blocker 位于不同子系统，失败方式也不同：一个在安装器的路径白名单和
+`base.kist` 内容，一个在 VFS/设备层。拆开的好处是：
+
+* `0144` 只改安装器和用户态清单，可以单独 revert，不会把 console 的行为一起
+  回退；
+* `0145` 只改 `bsd/dev/arm/cons.c`、`bsd/dev/kebab_ufs.c` 和它的头文件，失败时
+  能直接判断是“console 路由”还是“xpcproxy 没装”；
+* 两个补丁都各自带主机侧验证，提交历史读起来就是“先让 launchd 找得到 spawn
+  入口，再让它有 stdio”。
+
+第七十四节的排位表保留为当时的审计记录；本节是它之后的状态。
+
+### 2. Blocker 1：xpcproxy
+
+#### 2.1 位置：不在 cryptex，在 OS 卷
+
+先把 `Cryptex1,SystemOS` 解到磁盘（`087-86593-047.dmg`，deflate，解开
+2,743,074,816 字节，裸 APFS 容器，块大小 4096、669,696 块）。用现有的
+`extract-ios-userland.py --dmg-file` 直接查：
+
+```
+container superblock at offset 0: block size 4096, 669,696 blocks
+  uuid 07490cba83ee4f50a4153de222723455
+volume superblock ...: 'SydneyUpdate20H392.D22D221SystemCryptex',
+  1,094 files, 634 dirs, 2 symlinks
+/usr/libexec/xpcproxy: ABSENT (resolved /usr, no entry 'libexec')
+```
+
+再遍历整卷：`/usr` 下只有一个 `lib`，没有 `libexec`；全卷也没有一个叫
+`xpcproxy` 的文件。它实际在 **OS 根卷** 的 mtree 清单里：
+
+```
+307672:file  -  -  1152921500312217273  authapfs.1152921500312217274  /usr/libexec/xpcproxy
+```
+
+所以“从 Cryptex1,SystemOS 提取 xpcproxy”这个前提是错的；改的是 OS 卷这一份。
+提取仍然用现有工具：
+
+```sh
+~/ios-userland/venv/bin/python scripts/apfs-get.py \
+    --ipsw ~/ios-work/iPhoneX-16.7.16.ipsw \
+    --get /usr/libexec/xpcproxy --out ~/ios-userland/extracted
+```
+
+结果（`apfs-get.py` 的原始输出）：
+
+```
+/usr/libexec/xpcproxy
+  inode=1152921500312217273 mode=0100755 bsd=0x20 compressed=True type=4
+  size=96352 declared=96352 ok=True
+  sha256=a97bc59d024c3b7fcf293aa6ef2fa75b60ef7220b2546ab4382adcbe78ddbfec
+  Mach-O 64-bit arm64 filetype=executable ncmds=20
+  uuid=24bf6465-21ba-30a3-a438-a7534c81ee16
+  LC_BUILD_VERSION platform=2 minos=16.7.0 sdk=16.7.3
+```
+
+| 项 | 值 |
+| --- | --- |
+| 来源 | OS 卷 `/usr/libexec/xpcproxy`，inode `1152921500312217273` |
+| 安装大小 | 96,352 字节 |
+| SHA-256 | `a97bc59d024c3b7fcf293aa6ef2fa75b60ef7220b2546ab4382adcbe78ddbfec` |
+| Mach-O | thin arm64 executable，20 条 load command，platform 2（iOS），minos 16.7.0，sdk 16.7.3 |
+| 代码签名 | `LC_CODE_SIGNATURE` 19,904 字节；`LC_DYLD_CHAINED_FIXUPS` 3,856 字节；无 `LC_ENCRYPTION_INFO_64` |
+| 入口 | `LC_MAIN` entryoff `0x4ffc`；无 `LC_RPATH` |
+| 信任缓存 | OS 卷 `static.trustcache` 命中（见 2.3） |
+
+#### 2.2 依赖表：3/3 在缓存，0 个在卷，0 个 NOWHERE
+
+`scripts/ios-deps.py` 用主缓存的 2,710 条 `imagesText` 做名字解析：
+
+| `LC_LOAD_DYLIB` / weak | 类型 | 解析结果 |
+| --- | --- | --- |
+| `/usr/lib/libSystem.B.dylib` | load | shared cache @ `0x1d1c2c000` |
+| `/usr/lib/libobjc.A.dylib` | load | shared cache @ `0x1800b8000` |
+| `/usr/lib/libcryptex_trampoline.dylib` | **weak** | shared cache @ `0x20cd82000` |
+| `/usr/lib/dyld`（`LC_LOAD_DYLINKER`，不是 dylib）| dylinker | `base.kist` 的 `/usr/lib/dyld`（922,912 字节）|
+
+`ios-deps.py` 的结论行：
+
+```
+closure: 3 dependencies -- 3 from cache, 0 from volume, 0 NOWHERE
+```
+
+`libcryptex_trampoline` 虽然是 weak，但名字在缓存里，不需要额外装文件。
+**没有一条依赖落到卷上，也没有一条是 NOWHERE**，所以 xpcproxy 本身是
+`must-install`，依赖侧不是 blocker。
+
+#### 2.3 cdhash 与静态信任缓存
+
+用 `scripts/verify-trustcache-cdhash.py` 按内核 `cs_validate_csblob()` 的规则重算
+（`hash_rank()` 选 SHA-256，CodeDirectory 整体 SHA-256 取前 20 字节）：
+
+```
+trust cache  /home/albert/ios-userland/static.trustcache (66289 bytes)
+  IM4P       25-byte DER wrapper, 66264-byte payload
+  module     v2, 2760 entries x 24 bytes, 66264 used, 0 residual, sorted
+  hash types sha1=2, sha256=2758
+
+binary        slice  cd off    cd len  hash          page  slots     trust cache
+xpcproxy      0x0    0x12ad4   940     sha256(2)     12     19/19    hit
+              cdhash f7f090b0a9b94dc944026136fc6154372763c846
+PASS xpcproxy cdhash, CodeDirectory, 19/19 slots and trust cache all match
+```
+
+逐项：
+
+| 项 | 值 |
+| --- | --- |
+| cdhash | `f7f090b0a9b94dc944026136fc6154372763c846` |
+| CodeDirectory | 文件偏移 `0x12ad4`，940 字节，hash type 2（SHA-256），page shift 12 |
+| 代码页 | 19/19 槽全部匹配（`check_slots()` 逐页 SHA-256） |
+| TC 条目 | v2，24 字节条目，hash type 2，flags 0，constraint category 3 |
+| 结论 | **命中**；内核的 `kebab_tc_lookup()` 会把它标成 platform |
+
+`static.trustcache` 的 2,760 条与 IPSW 的 `087-86698-044.dmg.trustcache` 一致，
+不是重新生成的。xpcproxy 的 cdhash 不在 cryptex 的 TC 里是预期行为——它是 OS
+卷的二进制，用 OS 卷的 TC。
+
+#### 2.4 安装侧改了什么
+
+* `bsd/dev/kebab_install.c` 的 `ki_allow[]` 从 6 个前缀变成 7 个，新增
+  `"/usr/libexec/"`；这是普通流（`base.kist`）的检查，`ki_skel_allow[]` 不动。
+* `scripts/make-minimal-userland.py` 的 `ALLOW` 表同步新增；`base` 列表增加
+  `(/usr/libexec/xpcproxy, 0o755)`，并把它加进 trust-cache 与 dependency 检查。
+* `scripts/bring-up.py` 的 `BASE_ENTRIES` 从 5 改成 6；`scripts/test-bring-up.py`
+  的假板 fixture 也增加一条 1,600 字节的 xpcproxy，保持 6 条。
+* `scripts/verify-trustcache-cdhash.py` 新增 `--xpcproxy`（默认
+  `~/ios-userland/extracted/usr/libexec/xpcproxy`）和它的 EXPECTED 表；现在一次
+  检查 launchd、dyld、xpcproxy 三个。
+* `docs/IOS-USERLAND.md` 的 SystemOS 一节增加“xpcproxy 不在 cryptex”的更正和
+  上面的提取命令；`README.md` 的用户态清单补上 96,352 这一行。
+
+`/usr/libexec/` 是后缀带斜杠的前缀，不会误匹配 `/usr/libexec2/...` 这种路径；
+安装器原有的 `..`/绝对路径检查不变。
+
+### 3. 新的 base.kist
+
+`scripts/make-minimal-userland.py --only base` 重新生成，`--verify` 重读：
+
+```
+base.kist: v2, 6 entries, 1.6 MiB installed, 640.0 KiB on the wire
+verify: 6 entries (6 files, 0 dirs, 0 symlinks), all digests match
+```
+
+| 条 | 字节 | 线上字节 | 压缩 |
+| --- | ---: | ---: | --- |
+| `/sbin/launchd` | 541,600 | 196,822 | deflate |
+| `/usr/lib/dyld` | 922,912 | 311,520 | deflate |
+| `/System/Library/Caches/com.apple.kernelcaches/static.trustcache` | 66,289 | 66,289 | store |
+| `/usr/lib/zprint` | 88,352 | 10,899 | deflate |
+| `/usr/libexec/xpcproxy` | 96,352 | 14,834 | deflate |
+| `/System/Library/LaunchDaemons/com.kebab.zprint.plist` | 529 | 295 | deflate |
+| **合计** | **1,716,034** | **601,811**（payload+头）| |
+
+流级数字：
+
+| 项 | 值 |
+| --- | --- |
+| 文件大小 | 655,360 字节（640.0 KiB，10 个 64 KiB chunk）|
+| 安装字节 | 1,716,034 字节（1.64 MiB）|
+| 线上字节（含头）| 655,328 字节；加 32 字节 stream header 为 655,360 |
+| 填充 | 53,517 字节 |
+| 压缩比 | 38.2% |
+| 条目 | 6（6 file，0 dir，0 link；KIST v2）|
+| SHA-256 | `eec6cbefbb52a671275fef924f088c5ffded10dbeda829438d98e53bb28aa5dc` |
+
+`skel.kist` 没有变（16 条：10 dir + 3 link + 3 file，153 字节安装，64 KiB
+线上，SHA-256 `b0b22fad2086de1f3d7eb3c054822c4746633ebd2439dad384f73aee9dad2bc2`）；
+`cache.kist` 的 44 个文件也没有变，所以本轮没有重建 cache 流。硬件上安装
+`base.kist` 后应看到 `INST DONE entries 6 ok 6 skipped 0 ...`，而不是 5。
+
+### 4. Blocker 2：/dev/console
+
+#### 4.1 选择：选项 (b)
+
+选 **(b) 把 console 路由到已有的 kebabcon 字符设备**，理由是它最贴合现有代码，
+而且不依赖任何未经验证的 tty 初始化：
+
+* 现有 `bsd/dev/kebab_ufs.c` 已经在 `kebab_ufs_init()` 里注册了
+  `kebabcon_cdevsw` 和 `/dev/kebabcon` 节点，`kebab_ufs_init()` 在 root mount
+  阶段就跑过；console 的 open 发生在 PID 1，设备一定已经存在。
+* 选项 (a) 要证明 `kmopen()` 会返回。它要拿 `tty_lock`、进 `linesw[0].l_open`、
+  调 `PE_current_console`，任何一步阻塞都发生在 VFS 的 open 里面；当前没有任何
+  真机证据表明它在 kebab 上完成过。板子 stranded，无法补这个证据。
+* 选项 (c) 只是“返回一个能用的设备并打印一行说这是替代品”，除了多一行日志，
+  和 (b) 的实际行为一样，没有额外价值。
+
+因此 `0145` 让 `cnopen/cnclose/cnread/cnwrite/cnioctl/cnselect` 在 UFS 设备可用
+时变成 `kebab_console_*` 的薄封装；generic arm 路径保留，`cndev()` 也不再
+无条件解引用 `km_tty[0]`。
+
+#### 4.2 从 open 到 USB 的完整路径
+
+```
+open("/dev/console")
+  -> devfs vnode (0,0)
+  -> spec_open() -> cdevsw[0].d_open = cnopen()          bsd/dev/arm/cons.c
+  -> kebab_console_route():
+       constty == NULL && kebab_console_available()
+  -> kebab_console_open() -> 0                            bsd/dev/kebab_ufs.c
+
+write(fd, buf, n)
+  -> cnwrite() -> kebab_console_write()
+  -> uiomove() 64 B 一块
+  -> console_write(buf, n)                                 osfmk/console/serial_console.c
+  -> _cnputc() 逐字符
+       -> kebab_usb_log(&c, 1)                             bsd/dev/kebab_usb.c
+            -> bulk IN 环 -> 主机 USB console
+       -> cons_ops[VC_CONS_OPS].putc = kebab_console_putc
+            -> kebab_early_putc() -> 面板
+
+read(fd, buf, n)
+  -> cnread() -> kebab_console_read() -> 0（EOF）
+
+ioctl(fd, TIOCGETA, ...) -> ENOTTY
+select()/poll() -> seltrue()（可写，不报告可读）
+```
+
+关键点：
+
+* **没有 `tty_lock`、没有 `linesw`、没有 `kmopen`、没有 `PE_current_console`。**
+  open/close 直接返回 0，所以不可能在这条路径上睡眠或等锁。
+* 写走内核自己的 `console_write()`，也就是 `kprintf` 的那条路。`_cnputc()` 先
+  `kebab_usb_log()` 再 `kebab_early_putc()`，所以用户态字节同时到 USB 和面板；
+  不需要在 console 驱动里再复制一份 USB 逻辑。
+* `cndev()` 在 `km_tty[0] == NULL` 时返回 `NODEV`，每个 `cn*` 在 fallback 前检查
+  `NODEV` 并返回 `ENXIO`。这样即使 UFS 还没起来、又没有 km tty，也只会得到
+  `ENXIO`，不会空指针 panic。
+* `/dev/kebabcon` 和 `/dev/console` 现在共用同一组函数；`/dev/kebabcon` 的写也
+  从原来的“只画面板”升级为“USB + 面板”。
+
+#### 4.3 语义边界
+
+* `/dev/console` **不是 tty**：`isatty()` 为假，`tcgetattr()`/`TIOCGETA` 返回
+  `ENOTTY`，`select()` 只报告可写。launchd 在已分析的路径里只用它做日志 fallback
+  和子进程的 fd 0/1/2，不要求 tty 语义；如果真机日志显示 launchd 在这里要求
+  termios，那才是下一步要补的 shim。
+* `read()` 返回 0（EOF），不阻塞。PID 1 或子进程如果循环读 console，会立即拿到
+  EOF 而不是挂住；这是有意的，和“没有键盘输入”一致。
+* `console_write()` 会在 `\n` 前补 `\r`（`_cnputc` 的既有行为），所以用户态写
+  `\n` 在串口终端上表现为 CRLF；不要在两个方向各补一次。
+* `cdevsw[0].d_type` 仍然是 `D_TTY`。本轮没有改它，因为 open/read/write 不走
+  tty 分支；唯一的残余是 `kevent(EVFILT_READ)` 会落到 tty filter。launchd 的
+  已分析路径没有对 console 做 kqueue；真机若出现 tty filter 相关 panic，再把
+  `cdevsw[0].d_type` 在 KEBAB 下改成 0 即可（这是一行改动，不影响本次的
+  open/write 结论）。
+
+### 5. 离线验证
+
+1. **补丁系列**：124 个补丁按文件名顺序应用到 pristine `1b191cb`
+   （`xnu-8796.141.3`）；`scripts/verify-all.sh` 的 patches 项为 `124/124`。
+2. **语法检查**：用真实构建命令（`-DKEBAB`、同样的 `-I` 和 SDK）对
+   `bsd/dev/kebab_ufs.c`、`bsd/dev/arm/cons.c`、`bsd/dev/kebab_install.c` 做
+   `-fsyntax-only`。`kebab_ufs.c` 的 13 条 `-Wdeclaration-after-statement` 与
+   改动前同文件逐条相同（都是既有函数），新加的 `kebab_console_*` 块 0 条；
+   `cons.c`、`kebab_install.c` 0 条。
+3. **主机测试**：`scripts/test-bring-up.py` 18 PASS + 1 SKIP（`command-lint`
+   需要内核源文件，本机没有），KIST v2、6 条 base、dry-run、resume、skel、
+   坏流、panic 等路径都过。
+4. **流校验**：`pack-userland.py --verify` 重读 6 条，SHA-256 全对；
+   `verify-trustcache-cdhash.py` 三个二进制全 PASS。
+5. **全量构建**：`DEVELOPMENT/ARM64/KEBAB`，从 reset 后的干净树重新应用全部
+   124 个补丁，链接出 `kernel.development.kebab`，大小 17,209,120 字节，
+   SHA-256 `231a577f66834dfbde1d3f34212aae50cc140d8cdb7e10b242def83a857f5302`。
+   构建日志里 `cons.c`/`kebab_install.c` 0 warning，`kebab_ufs.c` 13 条既有
+   warning，没有新增。**没有链接错误，没有 `.dsc`/`.fdf` 之外的产物变化。**
+6. **没有真机**：板子 stranded，以上全部是 host 侧证据；下面第 6 小节列的
+   项目仍然只能上板确认。
+
+### 6. 真机必须回答的问题
+
+按应该在 USB console 上出现的顺序：
+
+1. `launchd logging initialized. name: com.apple.xpc.launchd pid: 1` 是否出现。
+   这是 `/dev/console` open 成功的最直接证据；如果不出现，先看 `open1` 是否
+   还有别的 errno，而不是怀疑 launchd。
+2. `service spawn failed` 的 errno 是否从 6 变成 2。6 是 console，2 是
+   `/usr/libexec/xpcproxy`；`0144` 之后应该不再有 2，理想情况是这一行完全不出现。
+3. xpcproxy 是否真的起来，以及它的第二次 exec（`POSIX_SPAWN_SETEXEC`，
+   `kern_exec.c:3722`）是否过。失败特征：`xpcproxy could not exec: 85: Bad
+   executable`、namespace 9 code 0x6、`unexpected exec of non-platform binary`。
+   cdhash/TC 已经在 host 侧验过；这条只剩内核的 `SETEXEC` 路径和 `kebab_cs`
+   平台位。
+4. `getpwuid_r(0)` 在没有 opendirectoryd 时是否回退到 `/etc/master.passwd`。
+   失败行是 `Could not find uid associated with service: 0`。
+5. `kqueue`/`EVFILT_TIMER` 是否工作。首次 `RunAtLoad` 不依赖它，但 throttle 重试
+   依赖；失败会以 `__os_assumes_log` 出现，不要把“10 秒没重试”当成 launchd 死了。
+6. `os_log` 在没有 logd 时是否可见；不可见是正常的，console 上的
+   `launchd logging initialized` 和 job 输出才是判据。
+7. `/dev/console` 的写是否在 USB 和面板上都出现、CRLF 是否只补一次；以及
+   `read()` 的 EOF 是否让任何子进程空转（如果出现，再决定是否给 console 加
+   一个阻塞读的输入环）。
+8. 如果 launchd 对 console 调 `tcgetattr`/`isatty` 并在失败后降级或退出，日志会
+   直接告诉我们；必要时再把 `cdevsw[0].d_type` 改成 0，或补一个最小的 termios
+   shim。
