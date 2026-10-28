@@ -12588,3 +12588,27 @@ kext 的生命周期是 `KLDBootstrap::readStartupExtensions()`
 `dynamic_memory_begin - gVirtBase`，即**物理内存跨度**，不是内核镜像大小；
 而且它拿页数去比字节数，实际上不可能触发。内核段走的是按 Mach-O 段表逐段映射的
 另一条路径，所以 55 MB 的候选镜像不受这条限制。
+
+### 十三、prelink 之后的下一个缺口：没有 IOMedia
+
+查 `kebab_ufs.c` 的对外形态：它是 BSD 块设备，通过 `cdevsw`/`bdevsw` 注册，
+`kebab_ufs_strategy()` 是 buf 例程，另有 `kebab_ufs_raw_read/raw_write/sync`
+直接对分区做偏移读写。它**没有注册成 IOKit 服务**。
+
+而 APFS 是 IOKit 驱动，它通过 `IOMedia` 找盘；`IOStorageFamily` 提供的是基类，
+不是实例。内核里目前没有任何东西发布 `IOMedia`。
+
+所以完整链条是五环，现在只完成了第一环：
+
+```
+一  prelink 把 APFS 链进来          已就绪（候选镜像 55,111,680 字节）
+二  APFS 注册到 IOKit                待真机验证
+三  提供一个 IOMedia                 缺
+四  APFS 挂载卷                      依赖三
+五  mount-phase-1 通过               依赖四
+```
+
+第三环的形态：把 `kebab_ufs` 包成 `IOBlockStorageDevice` 的子类并发布 `IOMedia`，
+让 `IOStorageFamily` 的匹配链能把它交到 APFS 手里。这需要 IOKit C++（本内核已开
+`IOKITCPP`），规模约两百行。它必须在第二环验证之后再做，因为要先确认 prelink
+真的能把驱动加载起来。
