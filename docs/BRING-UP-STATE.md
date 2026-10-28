@@ -12754,10 +12754,11 @@ dispatch 会落到别的函数。对本驱动而言，`IOStorageFamily` 的
 vendored 头已经把 22 槽尾部对齐；padding=0 时 `doEjectMedia` 正好落在 170，
 和 donor 一致（用同一份头编译探针验证）。也就是说**尾部不是问题，基址才是**。
 
-padding=0 原型（未提交）：在 `OSMetaClass.h` 里对 KEBAB 强制 0，并删掉
-`config/*.exports` 里 825 个 `_RESERVED*` 名字（arm64 构建用到其中 5 个文件；
-否则 config 阶段报 `exported name not in import list`），内核构建通过，
-重建后 `__ZTV9IOService` = **170**。42 个头文件里的 C++ 类受影响
+padding=0 原型（已由 `0159`/`0160` 正式化，见第八十八节）：在 `OSMetaClass.h`
+里对 KEBAB 强制 0，并删掉 `config/*.exports` 里那些 `_RESERVED*` 名字（arm64
+构建消费其中 5 个文件、共 438 个；全树 825 个，其余在 x86_64 表里。否则
+symbolset 阶段报 `exported name not in import list`），内核构建通过，
+重建后 `__ZTV9IOService` = **170**。40 个头文件里的 C++ 类受影响
 （`IOService` 46 个 reserved 声明、`IORegistryEntry` 32、`IOMemoryDescriptor`
 23、`IOPlatformExpert` 21、`IOUserClient` 20、`IOMedia` 16、`IOStorage` 9 等），
 `KebabPlatformExpert`/`KebabCPU`/`ArmDTPlatform` 这些内核内子类的基类布局全部
@@ -12789,3 +12790,243 @@ padding=0 原型构建                      通过，__ZTV9IOService = 170
 IOKit 类注册正常；再决定 kext 还是源码内置 `IOStorageFamily`；最后才打开
 `KEBAB_BLOCKSTORAGE` 和 `ufsmedia=1` 看 `IOMedia`。当前驱动只做到
 "编译可验证、代码就位"，还不能在未解决前两项的情况下宣称能挂载 APFS。
+
+## 八十八、C++ vtable padding 与 prelink 的 ABI 统一
+
+写于 2026-10-28。第八十七节把 prelink 链路的阻塞项定位到 `APPLE_KEXT_VTABLE_PADDING`：
+donor 的 `__ZTV9IOService` 是 170 个字，我们的是 274，任何 prelinked C++ kext 都
+不可能正确 dispatch。本节把这个原型做成正式补丁（`0159`、`0160`），在 pristine
+`1b191cb` 上重建，并据此产出新的 prelink 候选镜像。核心结果：padding=0 后
+`__ZTV9IOService` = **170**，与 donor 一致；候选镜像的映射跨度 **64.7 MiB**
+（沿用上一版的 slide 则是 191.8 MiB），四条 loader 检查全过。
+
+### 一、padding 是什么
+
+`libkern/libkern/c++/OSMetaClass.h` 里每个 IOKit 类都用
+`OSMetaClassDeclareReservedUnused(Class, n)` 预留若干虚函数槽，供 Apple 在不破坏
+二进制兼容的前提下增加虚函数。展开与否由这个宏决定：
+
+```c
+#ifdef XNU_KERNEL_PRIVATE
+
+#if !XNU_TARGET_OS_OSX
+#define APPLE_KEXT_VTABLE_PADDING   0
+#else /* !XNU_TARGET_OS_OSX */
+#define APPLE_KEXT_VTABLE_PADDING   1
+#endif /* !XNU_TARGET_OS_OSX */
+
+#else /* XNU_KERNEL_PRIVATE */
+/* 非内核私有分支按 TARGET_OS_IPHONE 判断 */
+#endif
+```
+
+内核私有分支只看 `XNU_TARGET_OS_OSX`：iOS 构建是 0，macOS 构建是 1。本移植用
+macOS SDK 构建内核，这个宏恒为 1，于是**每个** reserved 声明都变成真实槽位。
+
+一个 C++ vtable 的形状是 2 个头部字（offset-to-top、typeinfo）加每槽 8 字节。
+实测三份镜像：
+
+| 镜像 | `__ZTV9IOService` 起点 | 总字数 | 头部 | 虚函数槽 |
+| --- | --- | --- | --- | --- |
+| iOS 16.7.16 donor kernelcache | `0xfffffff0071977f0` | 170 | 2 | 168 |
+| 本移植 padding=1（`0157` 内核） | `0xfffffe000624e618` | 274 | 2 | 272 |
+| 本移植 padding=0（本节内核） | `0xfffffe000624b338` | **170** | 2 | 168 |
+
+差的 104 个字不是"多几个方法"，而是**整段错位**：kext 侧的对象按 170 的布局排
+vtable，内核按 274 的布局取槽，`probe`/`start`/`attach` 之外的每一次虚调用都会
+落到别的函数上。这也解释了为什么 `IOStorageFamily` 和 AMFI 之前在真机上不可能
+正常 attach——不是配置问题，是 ABI 问题。
+
+### 二、为什么发现它花了这么久
+
+顺序是反的：先怀疑"尾部对不齐"，后才发现"基址对不齐"。
+
+1. `IOBlockStorageDevice.h` 的 macOS 14.5 版本比 iOS 16.7.16 多四个方法
+   （`doSynchronizeCache`、`reportLockability`、`reportPollRequirements`、
+   `doDiscard`）和 32 个 `OSMetaClass` reserved 槽，于是把 vendored 头按 donor
+   实测的 22 槽尾部裁掉，让 `doEjectMedia` 落在 170。
+2. 裁完仍然对不上，因为**每个类的 vtable 都多了 reserved 槽**，尾部对齐只解决了
+   `IOBlockStorageDevice` 自己的 22 个槽，解决不了前面 104 个槽的整体平移。
+3. 直到把 padding 强制 0，`__ZTV9IOService` 才从 274 掉到 170——同一份头文件、
+   同一套编译参数，唯一变量是这个宏。
+
+代价是两次整机构建加一轮 vtable 实测。教训：**先量基类 vtable 的总字数，再谈
+派生类的尾部布局**；顺序反过来会把 22 个槽的局部问题当成全部问题。
+
+### 三、补丁 `0159`：对 KEBAB 强制 padding=0
+
+```c
+#if defined(KEBAB) || !XNU_TARGET_OS_OSX
+#define APPLE_KEXT_VTABLE_PADDING   0
+#else /* defined(KEBAB) || !XNU_TARGET_OS_OSX */
+#define APPLE_KEXT_VTABLE_PADDING   1
+#endif /* defined(KEBAB) || !XNU_TARGET_OS_OSX */
+```
+
+保留 `XNU_TARGET_OS_OSX`：SDK 头、`Availability` 宏和一批 `#if` 分支都靠它选
+macOS 形态，去掉会引出另一批编译错误。KEBAB 只在这一个宏上选择 iOS 的 ABI。
+`KEBAB` 由 `MACHINE_FLAGS_ARM64_KEBAB` 的 `-DKEBAB` 传入，不是新加的开关。
+
+影响的规模（pristine 树实测）：
+
+```
+40 个头文件出现 OSMetaClassDeclareReservedUnused，共 446 处
+（其中 OSMetaClass.h 的两处是宏定义本身，8 处是 OSMetaClass 自己的槽）
+
+IOService.h            46        IOUserClient.h         20
+IORegistryEntry.h      32        OSMetaClass.h           8
+IOMemoryDescriptor.h   23        IOMedia.h              16
+IOPlatformExpert.h     21        IOStorage.h             9
+```
+
+内核内子类（`KebabPlatformExpert`、`KebabCPU`、`ArmDTPlatform` 等）的基类布局
+随之改变；它们和内核一起重编，所以自洽。**构建通过仍然不等于能启动**：真机若
+失败，第一嫌疑仍是 IOKit 早期类注册，而不是本次 prelink。
+
+### 四、补丁 `0160`：导出表过滤，不是可选的
+
+padding=0 之后 reserved 声明展开为空，那些符号就不存在了；arm64 的 symbolset
+阶段会立刻拒绝：
+
+```
+exported name not in import list: __ZN18IOMemoryDescriptor28_RESERVEDIOMemoryDescriptor2Ev
+```
+
+删除的规模（只动 arm64 构建消费的五个文件）：
+
+| 文件 | 删除 |
+| --- | --- |
+| `config/IOKit.arm64.MacOSX.exports` | 258 |
+| `config/Libkern.arm64.MacOSX.exports` | 132 |
+| `config/Unsupported.arm64.MacOSX.exports` | 36 |
+| `config/IOKit.arm64.hibernation.MacOSX.exports` | 8 |
+| `config/Private.arm64.MacOSX.exports` | 4 |
+| 合计 | **438** |
+
+树里一共有 825 个 `_RESERVED...` 名字，其余在 x86_64 的导出表里；本移植不构建
+x86_64，那些文件不动。这一点容易记错：**438 是这五个文件里的数量，825 是全树
+总数**。
+
+为什么说它不可选：删除发生在 symbolset 生成阶段，早于链接。留着它，内核根本产
+不出来；把它当"清理"放到后面的补丁里，`0159` 单独就不可构建。两个补丁必须在同
+一个系列里、按这个顺序。
+
+### 五、端到端验证（离线）
+
+```
+pristine 树                    1b191cb（xnu-8796.141.3）
+系列                           139 个补丁，逐条 git apply --check + apply
+                               139/139 通过
+                               dxb 自带的 4 个非本移植补丁照旧跳过
+                               （0001/0002 由 build.sh 的 sed 取代，属预期）
+干净构建                       删除 build/ 与 fakeroot/ 后全量重建
+                               "🎉 XNU Build Done!"，无编译/链接错误
+                               "not in import list" 0 次
+内核                           16,969,016 字节
+                               sha256 706f4280f83e3777d1ab89ace24b2978
+                                      7e1d0c109ba2600c0b648ae56e393a3a
+__ZTV9IOService                170 字（2 头部 + 168 槽），donor 170
+内核自身映射                   0xfffffe0006004000 - 0xfffffe0007090000
+```
+
+符号普查（同一份内核，解析 `LC_SYMTAB` 的 `N_SECT` 定义）：
+
+```
+_kebab_* 已定义                        326 个
+_vfs_getvfs_with_vfsops                0xfffffe000694aa78
+_kalloc_sparse_prelink_index_version   0xfffffe0006009998
+_native_prelink_security_init_version  0xfffffe0006028900
+```
+
+`_kalloc_sparse_prelink_index_version` 与 `_native_prelink_security_init_version`
+是 `0155`/`0156` 的 ABI 标记，`_vfs_getvfs_with_vfsops` 是 `0157` 里唯一真实实现
+的符号（APFS 会调）。三个都在，说明 padding 与导出表改动没有误删 prelink 依赖的
+符号。`kebab_*` 比上一版内核多一个 `_kebab_ufs_block_size`，那是 `0158` 新增的
+helper，与本节无关。
+
+### 六、新的 prelink 候选镜像
+
+输入与上一版一致，只有内核换了：
+
+```
+内核        16,969,016 字节，__CTF 段 filesize 与 section size 清零（同上一版）
+供体        /home/albert/kernelcache.fileset.macho（28 字节 FAT 头已剥）
+roots       com.apple.filesystems.apfs
+            com.apple.driver.AppleMobileFileIntegrity
+early init  com.apple.driver.AppleMobileFileIntegrity=0xfffffff0056fb000
+闭包        13 个组件，与上一版完全相同
+绑定        27,201 条
+```
+
+slide 不能沿用。emitter 把每个 donor 段放到 `donor_va + slide`，而内核对 prelink
+区留的空洞（`__PRELINK_TEXT` 占位段 `0xfffffe0003004000` 到 `__TEXT`
+`0xfffffe0006004000`）是 48 MiB；donor 的四个 coalesced 段合计 48.2 MiB，正好
+卡进去。因此 slide 要重新解方程：让 `__PRELINK_TEXT` 落在占位段上。
+
+```
+slide = 0xfffffe0003004000 - 0xfffffff004dc8000 = -0x1f001dc4000
+```
+
+对比（同一个内核）：
+
+| slide | prelink 区起点 | 跨度 | 判定 |
+| --- | --- | --- | --- |
+| `-0x1f009cdc000`（上一版沿用的值） | `0xfffffdfffb0ec000` | 0xbfd5000（191.8 MiB） | 过，但白留 133 MiB |
+| `-0x1f001fc4000`（再降 2 MiB） | `0xfffffe0002e04000` | 0x42bd000（66.7 MiB） | 过 |
+| **`-0x1f001dc4000`**（本节） | `0xfffffe0003004000` | **0x40bd000（64.7 MiB）** | 过 |
+| 再升 2 MiB | — | — | prelink 区顶到 `__TEXT` 只剩 48 KiB，不再留余量 |
+
+选中的是"落在占位段上"这一档：prelink 区 `0xfffffe0003004000` -
+`0xfffffe0005df8000`，与 `__TEXT` 之间留 2 MiB。跨度直接由 loader 的上限决定，
+不是审美问题——`DarwinBoot::ParseKernel()` 对整张镜像的 `End - Base` 有硬上限
+`0x0fe00000`（256 MiB 窗口减 2 MiB），上一版 191.8 MiB 虽然过线，但余量只有 62 MiB。
+
+loader 四条检查（按 `ParseKernel()` 逐条复算）：
+
+```
+magic            0xfeedfacf                     ok
+cputype          0x100000c                      ok
+subtype          0                             ok
+filetype         2                             ok
+LC_UNIXTHREAD    cmdsize 288, flavor 6, count 68
+                 PC 0xfffffe0006477488，落在 __TEXT_EXEC（可执行段内）
+映射跨度         0x40bd000  <= 0x0fe00000        ok
+段数             15 mapped（上限 64）             ok
+段重叠           无                              ok
+Base 页对齐      0xfffffe0003004000              ok
+```
+
+产物与哈希：
+
+```
+候选镜像   prelink-0159.bin   54,853,632 字节
+           sha256 a25593d7855141471734c73ec1016e1ac3399ab4d0ab4b6fa6b3b6aacf16e9a2
+payload    payload-PL4.img    67,108,864 字节
+           sha256 d7b0a5d4efeca0ea30f60bf0d9940cf13c0b166ad1bfb56ff48834396431dc95
+boot       boot-PL4.img      100,663,296 字节
+           sha256 4d17727b972933d36d25030aaf9db2ed7f78da9ba7a6f9fb9d88b5412cbb55d0
+```
+
+`boot-PL4.img` 的 `[0, 0x800000)` 与 `signed.img` 逐字节相同，payload 区等于
+`payload-PL4.img`，其余不变。**没有刷机**，真机验证由人来做。候选镜像的
+`__ZTV9IOService` 也是 170 字（168 槽），与内核一致。
+
+### 七、下一个结构性缺口：IOMedia 还是进不了内核
+
+`IOStorageFamily` 是 prelinked kext。emitter 只把 **donor kext 里的指针重绑到
+本内核的导出符号**（`unique_kernel_binding`），反方向——内核代码引用 kext 的
+符号——它不处理，也不该处理：那在静态链接期就该有定义。
+
+所以 `KebabBlockStorageDevice`（`0158`）仍然只能以源码形式躺着：
+`iokit/conf/files.arm64` 里的构建行是注释掉的，`kebab_ufs.c` 的注册点在
+`#if defined(KEBAB_BLOCKSTORAGE)` 里面。要让 APFS 真正挂上 UFS，必须先满足二选一：
+
+1. emitter 支持"作者提供的 kext"（现在它只按 bundle id 从 donor 里选组件）；
+2. 把 `IOStorageFamily`（至少 `IOBlockStorageDevice`/`IOStorage`/`IOMedia`/
+   `IOBlockStorageDriver`）从源码编进内核。
+
+两条今天都不存在，这是继 vtable padding 之后的**下一个结构性缺口**，不是配置项。
+
+一个好消息：padding=0 之后，vendored 的 22 槽尾部正好落在 170 的基址上——上一轮
+为对齐尾部做的裁剪没有白做。等上面任一条成立，打开 `KEBAB_BLOCKSTORAGE` 就只剩
+链接问题，驱动代码本身不用再改布局。
