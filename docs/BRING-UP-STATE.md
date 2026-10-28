@@ -11901,7 +11901,7 @@ panic 路径没有改：`ud_panic_reboot()` 仍然直接调用 `ud_platform_rest
 
 在 128 补丁内核（`kernel-0149.kebab`，sha256
 `e009981f…fcd0fe8`）上重跑了 phase B，镜像参数与旧 `boot-B.img` 逐字节相同。
-只发 `skel.kist` 和 `base.kist`，未发 `cache.kist`：
+先发 `skel.kist` 和 `base.kist`，随后另起一轮发 `cache.kist`：
 
 | 步骤 | 设备卷头 free | delta | expected |
 | --- | ---: | ---: | ---: |
@@ -11910,28 +11910,39 @@ panic 路径没有改：`ud_panic_reboot()` 仍然直接调用 `ud_platform_rest
 | base.kist 后 | 4,193,449 | 423 | 419 |
 | 再次 `SYNC` | 4,193,449 | 0 | — |
 | `REBOOT` 后挂载 | 4,193,449 | — | — |
+| cache.kist 后 | 3,380,373 | 813,076 | 813,076 |
+| cache 后 `SYNC` | 3,380,373 | 0 | — |
+| cache 后 `REBOOT` 挂载 | 3,380,373 | — | — |
 
-* 两条流的 `INST SYNC stream end vfs ok device ok` 都在 `INST DONE` 之前出现；
-* `INST VERIFY` 三条 `cold full ok`（skel）和三条 `cold full ok`（base）通过；
-* `INST FREE` 的 delta 分别是 6 和 423，expected 是 1 和 419；多出的 4 块是
-  catalog/extents/bitmap 元数据；
+* 三条流的 `INST SYNC stream end vfs ok device ok` 都在 `INST DONE` 之前出现；
+* `INST VERIFY` 三条 `cold full ok`（skel）、三条 `cold full ok`（base）、
+  两条 `cold full ok` + `.symbols cold tail 4096 ok`（cache）全部通过；
+* `INST FREE` 的 delta 分别是 6、423、813,076，expected 是 1、419、813,076；
+  base 多出的 4 块是 catalog/extents/bitmap 元数据，cache 的 delta 与 expected
+  完全相等；
+* cache.kist：44 entries、3,330,359,296 安装字节、1,067,909,120 wire 字节、
+  16,295 chunks；10:22:04 → 10:27:05，300.0 s，3.40 MiB/s（3.56 MB/s），
+  `INST DONE ... ms 299976`；
 * `REBOOT` 前打印
   `KEBAB SYNC: REBOOT: VFS_SYNC + SYNCHRONIZE CACHE ok ms 0`；
-* 重启后 HFS 挂载行直接报
-  `free blocks 4193449`，`INST CHECK /private/etc/passwd`、`/sbin/launchd`、
-  `/usr/libexec/xpcproxy` 的 size/SHA-256 全部与安装时一致；
+* base 后重启的 HFS 挂载行直接报 `free blocks 4193449`，
+  `INST CHECK /private/etc/passwd`、`/sbin/launchd`、`/usr/libexec/xpcproxy`
+  的 size/SHA-256 全部与安装时一致；
+* cache 后重启的挂载行报 `free blocks 3380373`，`INST CHECK` 的 small
+  (`.02`, 98,304 B)、medium (`.41.dylddata`, 102,547,456 B) 和
+  `.symbols` (592,101,376 B) 全部 MATCH；
 * `devfs_kernel_mount` 不再打印 `kernel_mount failed: 2`，`/dev` 正常；
   `static.trustcache` 从卷上加载成功。
 
 一个需要写进 run book 的细节：**同一个 boot 内 `INST? space` / `INST? bsize` 的
 statfs free 不会随安装变化**，即使 `VFS_SYNC` 已经完成；HFS+ 把 statfs 的 free
 计数缓存在挂载结构里。设备卷头（`INST? vh` / `SYNC VH`）才是安装后立即正确的数字；
-重启后 statfs 才从卷头重算（实测 4,151,935 → 4,151,506，正好 429 块，与
-6 + 423 一致）。orchestrator 的断言因此只用 `INST FREE` 的设备卷头数字，不看
-同一 boot 的 statfs。
+重启后 statfs 才从卷头重算（base 后实测 4,151,935 → 4,151,506，正好 429 块；
+cache 后 4,151,506 → 3,338,430，正好 813,076 块）。orchestrator 的断言因此只用
+`INST FREE` 的设备卷头数字，不看同一 boot 的 statfs。
 
-这次实测覆盖 skel/base 和一次普通 REBOOT；cache 流、最终镜像和断电测试仍未执行，
-不能据此宣称整条 P1 已完成。
+这次实测覆盖 skel/base/cache 和两次普通 REBOOT；最终镜像（phase C）和断电测试
+仍未执行，不能据此宣称整条 P1 已完成。
 
 本节的代码已经编译进 `kernel.development.kebab`；第 7 小节中未在硬件上执行的部分
 不写成"已验证"。
