@@ -12384,3 +12384,108 @@ failed to get the code signing identity for a boot-task
 与已附加的 blob 保持一致。
 
 真机需要确认：`mount-phase-1` 越过身份检查；`launchd` 不再以 namespace 7 退出。
+
+## 八十六、prelink 移植需求清单
+
+上游 sheng 用 prelink 把 Apple 的 kext 直接并进内核，从而运行真实的 APFS 与存储加密栈，
+并跑到了主屏幕。我们的移植当初换了目标设备时把 prelink 整段删掉了（提交 `96609a0`），
+不是技术否决。本节把恢复它所需的东西拆成可执行的清单。
+
+### 一、工具
+
+`kits/NativePrelink` 是 UniXNU 的子模块，本地未初始化。取法：
+
+```
+git submodule update --init --depth 1 kits/NativePrelink
+```
+
+已取到 `2b6ffb5`，含 `emit_prelink.py`、`native_prelink.py`、`patches/`、测试。
+
+接口：
+
+```
+--kernel <Mach-O>          我们自己构建的内核
+--prelinked <Mach-O>       供体 kernelcache 解密后的 Mach-O
+--root <bundle-id>         可重复，选择要并入的 kext
+--slide <int>              通常是负数，如 -0x1000000
+--early-security-init BUNDLE=VA
+--output <path>
+```
+
+### 二、输入
+
+| 输入 | 来源 | 状态 |
+| --- | --- | --- |
+| 我们的内核 Mach-O | KEBAB 构建产物 | 需确认能作为 prelink 输入 |
+| 供体 kernelcache | IPSW `kernelcache.release.iphone10b`，18,204,358 字节 | 在本地 IPSW 里 |
+| 供体解密 | iOS 的 kernelcache 是加密的 | **未解决** |
+| slide 与 early_security_init 地址 | 由供体计算 | 未算 |
+
+**解密是最大的未知。** sheng 的 `kernelcache_sha256` 是解密后的哈希，说明他们拿到了明文；
+我们目前没有解密能力。这一条不解决，后面全部无法进行。
+
+### 三、roots 集合
+
+sheng 选了 31 个 bundle id，顺序即依赖顺序。与存储和用户态直接相关的核心项：
+
+```
+com.apple.filesystems.apfs                          文件系统
+com.apple.iokit.IOStorageFamily                     块设备栈
+com.apple.driver.AppleEffaceableStorage             密钥存储
+com.apple.driver.AppleMobileFileIntegrity           签名与信任
+com.apple.security.AppleImage4                      镜像校验
+com.apple.kec.corecrypto / Libm                     加密原语
+com.apple.iokit.IOCryptoAcceleratorFamily           加密加速
+com.apple.driver.IODARTFamily                       IOMMU
+com.apple.security.sandbox                          沙盒
+com.apple.kext.AppleMatch / CoreTrust
+com.apple.AppleFSCompression.AppleFSCompressionTypeZlib
+```
+
+其余是平台与图形相关（AppleARMPlatform、ApplePMGR、AppleARMWatchdogTimer、IOGPUFamily、
+IOSurface、IOMobileGraphicsFamily、IOHIDFamily、IOHIDEventDriver 等），对 mount-phase-1
+不是必需，但对后续用户态是。
+
+### 四、内核侧必须补的两个补丁
+
+工具目录自带两个补丁，但都是 **xnu-10063.141.1**（iOS 17）的：
+
+```
+patches/xnu-10063.141.1-security-init.patch
+patches/xnu-10063.141.1-sparse-index.patch
+```
+
+我们的树是 **xnu-8796.141.3**。两个补丁都要移植：
+
+- `security-init`：让内核在启动早期调用指定的安全扩展初始化（AMFI）
+- `sparse-index`：prelink 输出的稀疏索引，内核据此登记预链接进来的模块
+
+### 五、必须确认的三个技术前提
+
+1. **页大小**。sheng 是 4 KiB 内核，所以它需要 `native-4k-bootstrap-capacity` 一类补丁。
+   我们是 16 KiB，供体是 iOS 16 KiB，理论上反而更匹配，但要用实测确认
+   prelink 的段映射在 16 KiB 页下成立。
+2. **符号集**。并入的 kext import 大量内核符号，我们的内核必须导出同名同 ABI 的符号。
+   xnu 版本一致能解决大部分，但需要逐项核对。
+3. **构建产物形态**。sheng 需要 `mach.development.<machine>.unstripped.noctf`
+   （未剥离、无 CTF）。我们的 `kernel.development.kebab` 是否等价需要确认，
+   不等价的话要在构建里加一个对应产物。
+
+### 六、验证方法
+
+分四级，每级都有客观判据：
+
+```
+一  工具自检         kits/NativePrelink 自带的测试全过
+二  离线生成         用我们的内核 + 供体，成功产出 prelinked 镜像与元数据
+三  内核侧登记       启动日志中出现预链接模块的登记信息
+四  真机 kext 加载    com.apple.filesystems.apfs 出现在 IOKit 的已加载列表里
+```
+
+第四级之后才是 `mount-phase-1` 能否通过。
+
+### 七、当前判断
+
+这条路是唯一能让真实 APFS 与 data 卷可读的方案，而且有 sheng 的成功先例。
+但它卡在供体 kernelcache 解密这一条上，其余部分都是有明确做法的工程。
+解密不解决之前，不建议投入时间到内核补丁移植上。
