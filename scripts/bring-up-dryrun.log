@@ -29,12 +29,13 @@
 [    0.24]   verify skel [15/16] /tmp
 [    0.24]   verify skel [16/16] /var
 [    0.24] [ OK ] D-05 dry.stream.skel          16 entries (3 files, 10 dirs, 3 links), 153 B installed, 65536 B wire, sha256 b0b22fad2086de1f3d7eb3c054822c4746633ebd2439dad384f73aee9dad2bc2
-[    0.24]   verify base [1/5] /sbin/launchd
-[    0.24]   verify base [2/5] /usr/lib/dyld
-[    0.24]   verify base [3/5] /System/Library/Caches/com.apple.kernelcaches/static.trustcache
-[    0.24]   verify base [4/5] /usr/lib/zprint
-[    0.24]   verify base [5/5] /System/Library/LaunchDaemons/com.kebab.zprint.plist
-[    0.24] [ OK ] D-06 dry.stream.base          5 entries, 6.8 KiB installed, 64.0 KiB wire, sha256 d1ed835388fed3ad97e9ff455f6e3cdbd529439fae128470d6d60d0f275f6710
+[    0.24]   verify base [1/6] /sbin/launchd
+[    0.24]   verify base [2/6] /usr/lib/dyld
+[    0.24]   verify base [3/6] /System/Library/Caches/com.apple.kernelcaches/static.trustcache
+[    0.24]   verify base [4/6] /usr/lib/zprint
+[    0.24]   verify base [5/6] /usr/libexec/xpcproxy
+[    0.24]   verify base [6/6] /System/Library/LaunchDaemons/com.kebab.zprint.plist
+[    0.24] [ OK ] D-06 dry.stream.base          6 entries, 8.4 KiB installed, 64.0 KiB wire, sha256 9c7ffeca223e93414bb61048383558b5c8c30810c303fd82c272c3be4acccb34
 [    0.24]   verify cache [1/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64
 [    0.24]   verify cache [2/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6401
 [    0.24]   verify cache [3/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6402
@@ -79,18 +80,19 @@
 [    0.24]   verify cache [42/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6441
 [    0.24]   verify cache [43/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6442
 [    0.24]   verify cache [44/44] /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm6443
-[    0.25] [ OK ] D-07 dry.stream.cache         44 entries, 343.8 KiB installed, 256.0 KiB wire, sha256 4eef48db289515f71bacef515635b0ccc064e2f0612bb0b58d27a928c1a2c3ec
-[    0.25] [ OK ] D-08 dry.fastboot             /bin/true
-[    0.25] 
-[    0.25] PLAN (auto -> final):
-[    0.25]   1. precondition fastboot devices; current-slot == b; FASTBOOT through the console only if needed
-[    0.25]   2. vol          flash boot-vol.img; VOL DRY; VOL BEGIN ... CONFIRM; require OLD 512 bytes, VOL DONE and the new HFS+ mount
-[    0.25]   3. install      flash boot-inst.img; require INST? root rw, 4,194,304 blocks, 17,179,869,184 bytes and free space
-[    0.25]   4. skel         send skel.kist (16 v2 entries: 3 files, 10 dirs, 3 links, 153 B installed); require 'INST STREAM v2 skeleton' and uid 0/gid 0 read-back
-[    0.25]   5. base         INST CHECK all 5 entries; send only if incomplete; verify a sample
-[    0.25]   6. cache        INST CHECK all 44 entries; send only if incomplete; verify a sample; report elapsed
-[    0.25]   7. final        flash boot-final.img; capture to the first failure or launchd; print the last 100 lines
-[    0.25] 
-[    0.25] DRY RUN OK: all artifacts and command strings verified; nothing was written
-[    0.25] 
-[    0.25] DRY RUN COMPLETE: nothing was written
+[    0.24] [ OK ] D-07 dry.stream.cache         44 entries, 343.8 KiB installed, 256.0 KiB wire, sha256 4eef48db289515f71bacef515635b0ccc064e2f0612bb0b58d27a928c1a2c3ec
+[    0.24] [ OK ] D-08 dry.fastboot             /bin/true
+[    0.24] 
+[    0.24] PLAN (auto -> final):
+[    0.24]   1. precondition fastboot devices; current-slot == b; FASTBOOT through the console only if needed
+[    0.24]   2. vol          flash boot-vol.img; VOL DRY; VOL BEGIN ... CONFIRM; require OLD 512 bytes, VOL DONE and the new HFS+ mount
+[    0.24]   3. install      flash boot-inst.img; require INST? root rw, 4,194,304 blocks, 17,179,869,184 bytes and free space
+[    0.24]   4. skel         send skel.kist (16 v2 entries: 3 files, 10 dirs, 3 links, 153 B installed); require 'INST STREAM v2 skeleton' and uid 0/gid 0 read-back
+[    0.24]   5. base         INST CHECK all 6 entries; send only if incomplete; verify a sample
+[    0.24]   6. cache        INST CHECK all 44 entries; send only if incomplete; verify a sample; report elapsed
+[    0.24]   7. final        flash boot-final.img; capture to the first failure or launchd; print the last 100 lines
+[    0.24]   console: C-BOOT-BANNER waits for 'KEBAB USB: event thread started' (USB-visible); 'KEBAB USB: running (DSTS ...)' is printed before ud.running and stays on the panel
+[    0.24] 
+[    0.24] DRY RUN OK: all artifacts and command strings verified; nothing was written
+[    0.24] 
+[    0.24] DRY RUN COMPLETE: nothing was written

@@ -340,7 +340,9 @@ class FakeDevice:
                  files: dict | None = None, final: str = "success",
                  panic_after: int | None = None,
                  silent_panic: bool = False,
-                 bad_attrs: str = ""):
+                 bad_attrs: str = "",
+                 panel_banner: bool = False,
+                 mount_line: bool = True):
         self.fx = fixture
         self.console = console
         self.serial = "kebab-test"
@@ -354,6 +356,14 @@ class FakeDevice:
         # real kernel aborts; this models the case where it does not, so the
         # orchestrator's own checkpoint has to catch it.
         self.bad_attrs = bad_attrs
+        # By default the fake transcript carries only lines the USB gate can
+        # deliver.  panel_banner=True adds the panel-only startup lines
+        # ("running (DSTS ...)", "Darwin Kernel Version") so a test can prove
+        # the orchestrator never needs them.
+        self.panel_banner = panel_banner
+        # mount_line=False omits the KEBAB HFS geometry line while still
+        # printing the registration line, which is the mandatory-line failure.
+        self.mount_line = mount_line
         self.mode = "kernel"
         self.pending_image = None
         self.current_image = None
@@ -380,15 +390,25 @@ class FakeDevice:
         self.mode = "kernel"
         self.console.set_connected(True)
         self.console.feed_host("fake boot %s" % os.path.basename(image or "?"))
-        self.console.feed("Darwin Kernel Version 22.1.0: fake")
-        self.console.feed("KEBAB USB: running (DSTS 0x00000003 after 120 ms), "
-                          "DMA at 0x12340000")
+        if self.panel_banner:
+            # These lines are printed before ud.running is set, so the kernel's
+            # USB tee drops them.  They are here only as noise for the test
+            # that proves a checkpoint must not depend on them.
+            self.console.feed("Darwin Kernel Version 22.1.0: fake")
+            self.console.feed("KEBAB USB: running (DSTS 0x00000003 after 120 ms), "
+                              "DMA at 0x12340000")
+        # The first line that can reach USB: printed after ud.running = true.
         self.console.feed("KEBAB USB: event thread started, waiting for the host")
         if "kebab_vol=1" in args:
-            self.console.feed("KEBAB HFS: KebabRoot: block size 4096, total "
-                              "blocks %d (%d MiB), free blocks %d"
-                              % (self.volume_blocks, self.volume_blocks * 4096 >> 20,
-                                 max(0, self.volume_blocks - 426)))
+            # The real bsd_init prints the HFS registration before mountroot;
+            # it must not be mistaken for the mount geometry line.
+            self.console.feed("KEBAB HFS: hfs-627.100.6 registered")
+            if self.mount_line:
+                self.console.feed("KEBAB HFS: KebabRoot: block size 4096, total "
+                                  "blocks %d (%d MiB), free blocks %d"
+                                  % (self.volume_blocks,
+                                     self.volume_blocks * 4096 >> 20,
+                                     max(0, self.volume_blocks - 426)))
         if "kebab_noinit=1" in args:
             self.console.feed("KEBAB: kebab_noinit=1: staying in the kernel, "
                               "no init program")
@@ -458,11 +478,13 @@ class FakeDevice:
             total = self.volume_blocks * 4096
             self.console.feed("VOL? gated 1 active 0 dry 0 chunk 65536 writable 1")
             self.console.feed("VOL? partition 245895331840 bytes (234500 MiB)")
-            self.console.feed("VOL? DISK vh sig 0x482b version 4 attributes "
+            # kv_print_vh("DISK", ...) does not repeat the "VOL?" command
+            # prefix: the kernel prints "VOL DISK vh ...".
+            self.console.feed("VOL DISK vh sig 0x482b version 4 attributes "
                               "0x80000100 lastMount 0x0 journal 0x0")
-            self.console.feed("VOL? DISK vh created 0 modified 0 checked 0 "
+            self.console.feed("VOL DISK vh created 0 modified 0 checked 0 "
                               "files 0 folders 0 nextcnid 16")
-            self.console.feed("VOL? DISK vh bsize 4096 blocks %d free %d "
+            self.console.feed("VOL DISK vh bsize 4096 blocks %d free %d "
                               "freebytes %d volbytes %d"
                               % (self.volume_blocks,
                                  max(0, self.volume_blocks - 426),
@@ -674,6 +696,37 @@ def make_factories(fixture: Fixture, **kwargs):
     return ff, cf, holder
 
 
+def check_console_markers(tmp: str) -> None:
+    """A panel-only line must never satisfy a boot checkpoint.
+
+    kebab_usb_start() prints "KEBAB USB: running (DSTS ...)" before it sets
+    ud.running, and kebab_usb_log() drops every byte until then.  Only the
+    event-thread line can reach the host, so the matcher and the panic detector
+    must both reject the panel line.  This is the regression test for the
+    C-BOOT-BANNER defect in docs/BRING-UP-STATE.md section 78.3.
+    """
+    panel = ("KEBAB USB: running (DSTS 0x00000003 after 120 ms), "
+             "DMA at 0x12340000")
+    usb = "KEBAB USB: event thread started, waiting for the host"
+    if not bu.is_console_boot_banner(usb):
+        raise AssertionError("the USB banner was not accepted: %r" % usb)
+    if bu.is_console_boot_banner(panel):
+        raise AssertionError("the panel-only banner was accepted: %r" % panel)
+    if bu.BOOT_BANNER_RE.search(panel):
+        raise AssertionError("BOOT_BANNER_RE still matches the panel line")
+    if bu.BOOT_BANNER_RE.search("Darwin Kernel Version 22.1.0: fake"):
+        raise AssertionError("BOOT_BANNER_RE still matches the pre-USB banner")
+    if not bu.BOOT_BANNER_RE.search(usb):
+        raise AssertionError("BOOT_BANNER_RE does not match the USB banner")
+    if not bu.BOOT_BANNER_RE.search(
+            "KEBAB: kebab_noinit=1: staying in the kernel, no init program"):
+        raise AssertionError("BOOT_BANNER_RE lost the kebab_noinit marker")
+    # The old expectation must be recorded as panel-only so a future edit that
+    # promotes it back to a checkpoint is caught here.
+    if not any(m in panel for m in bu.PANEL_ONLY_BOOT_MARKERS):
+        raise AssertionError("the panel-only list does not name the running line")
+
+
 def check_kist_compressed_large(tmp: str) -> None:
     """A compressed entry's *file* size may exceed the whole stream size.
 
@@ -863,6 +916,13 @@ def main(argv=None) -> int:
             failures += 1
             print("FAIL kist-v2")
             traceback.print_exc()
+        try:
+            check_console_markers(tmp)
+            print("PASS console-markers")
+        except Exception:
+            failures += 1
+            print("FAIL console-markers")
+            traceback.print_exc()
 
         cases = [
             Case("dry-run", ["--dry-run", "--work-dir", fixture.dir,
@@ -872,6 +932,26 @@ def main(argv=None) -> int:
             Case("happy-path", ["--from", "vol", "--work-dir", fixture.dir,
                                 "--log-dir", os.path.join(log_root, "happy")],
                  fixture, 0),
+            # kebab_usb_start() prints "running (DSTS ...)" before ud.running is
+            # set, so it never reaches USB.  A console-only transcript must still
+            # satisfy C-BOOT-BANNER via the event-thread line.
+            Case("no-panel-banner", ["--from", "vol", "--to", "vol",
+                                     "--work-dir", fixture.dir,
+                                     "--log-dir", os.path.join(log_root, "nopanel")],
+                 fixture, 0, panel_banner=False),
+            # The converse: a stray panel line in the transcript must not become
+            # the checkpoint's evidence, and must not confuse the panic detector.
+            Case("panel-banner-noise", ["--from", "vol", "--to", "vol",
+                                        "--work-dir", fixture.dir,
+                                        "--log-dir", os.path.join(log_root, "panelnoise")],
+                 fixture, 0, panel_banner=True),
+            # The mount geometry line is mandatory: its absence must still fail
+            # the phase even though the HFS registration line is present.
+            Case("missing-mount-line", ["--from", "vol", "--to", "vol",
+                                        "--boot-timeout", "3",
+                                        "--work-dir", fixture.dir,
+                                        "--log-dir", os.path.join(log_root, "nomount")],
+                 fixture, 3, mount_line=False),
             Case("resume", ["--from", "auto", "--work-dir", fixture.dir,
                             "--log-dir", os.path.join(log_root, "resume")],
                  fixture, 0,
@@ -980,6 +1060,19 @@ def main(argv=None) -> int:
                     assert board.device.sent_log[0][0] == 65536, board.device.sent_log
                     assert "C-SKEL-ATTRS" in out, out[-3000:]
                     assert "mode 01777" in out, out[-3000:]
+                if case.name in ("no-panel-banner", "panel-banner-noise"):
+                    # The checkpoint must have been satisfied by the
+                    # console-visible line, never by the panel-only one.
+                    ok_lines = [l for l in out.splitlines()
+                                if "[ OK ] C-BOOT-BANNER" in l]
+                    assert ok_lines, out[-3000:]
+                    assert "event thread started" in ok_lines[0], ok_lines[0]
+                    assert "running (DSTS" not in ok_lines[0], ok_lines[0]
+                    if case.name == "no-panel-banner":
+                        assert "running (DSTS" not in out, out[-3000:]
+                if case.name == "missing-mount-line":
+                    assert "vol.reboot" in err, err[-3000:]
+                    assert "KEBAB HFS" in err, err[-3000:]
                 if case.name == "skel-bad-attrs":
                     assert "skel.attrs" in err, err[-3000:]
                     assert "uid 501 gid 20" in err, err[-3000:]

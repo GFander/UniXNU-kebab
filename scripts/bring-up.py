@@ -131,10 +131,34 @@ CMD_REBOOT = b"REBOOT\n"
 CMD_INST_STATUS = b"INST?\n"
 CMD_VOL_STATUS = b"VOL?\n"
 
-BOOT_BANNER_RE = re.compile(
-    r"^(KEBAB USB: running \(DSTS|KEBAB USB: event thread started|"
-    r"Darwin Kernel Version|KEBAB: kebab_noinit=1:)"
+# The boot markers the USB console can actually deliver.  This is deliberately
+# narrower than every "a boot happened" line in the kernel:
+#
+#   * "KEBAB USB: running (DSTS ...)" is printed by kebab_usb_start() at
+#     bsd/dev/kebab_usb.c:2582, BEFORE ud.running is set at :2597.  The console
+#     tee (kebab_usb_log, :898) drops every byte while !ud.running, so that line
+#     reaches the panel only and is never checkpoint evidence.
+#   * "Darwin Kernel Version" is printed before bsd_init() calls
+#     kebab_usb_start() (bsd/kern/bsd_init.c:508), so it is panel-only too.
+#
+# The first line that can reach USB is the event-thread line at :2605, printed
+# after ud.running is set.  Keep this list in sync with the table in
+# docs/BRING-UP-STATE.md section 79.
+USB_CONSOLE_BANNER = "KEBAB USB: event thread started"
+PANEL_ONLY_BOOT_MARKERS = (
+    "KEBAB USB: running (DSTS",
+    "Darwin Kernel Version",
 )
+BOOT_BANNER_RE = re.compile(
+    r"^(KEBAB USB: event thread started|KEBAB: kebab_noinit=1:)"
+)
+
+
+def is_console_boot_banner(line: str) -> bool:
+    """True only for a boot line that can pass the !ud.running USB gate."""
+    return line.startswith(USB_CONSOLE_BANNER)
+
+
 PANIC_RE = re.compile(
     r"(^panic\(cpu|Debugger called:|^KEBAB PANIC|^panic: |"
     r"KEBAB USB: panic console cannot be serviced|"
@@ -173,7 +197,10 @@ VOL_STATUS_RE = re.compile(
 )
 VOL_PART_RE = re.compile(r"^VOL\? partition (\d+) bytes \((\d+) MiB\)$")
 VOL_DISK_RE = re.compile(
-    r"^VOL\? DISK vh bsize (\d+) blocks (\d+) free (\d+)"
+    # kv_print_vh("DISK", ...) in bsd/dev/kebab_vol.c prints "VOL DISK vh";
+    # the "VOL?" prefix only exists on the literal printf()s in
+    # kebab_vol_status().  There is no "VOL? DISK" line in the kernel.
+    r"^VOL DISK vh bsize (\d+) blocks (\d+) free (\d+)"
 )
 HFS_RE = re.compile(
     r"^KEBAB HFS: (\S+): block size (\d+), total blocks (\d+) "
@@ -1429,16 +1456,12 @@ class Orchestrator:
         timeout = boot_timeout or self.opts.boot_timeout
         banner = ""
         try:
-            banner = self.wait(lambda l: "KEBAB USB: event thread started" in l
-                               or "KEBAB USB: running (DSTS" in l, timeout,
+            # Only the event-thread line is accepted.  "KEBAB USB: running
+            # (DSTS ...)" is printed before ud.running is set and therefore
+            # never reaches the USB console on an ordinary boot; waiting for it
+            # here would turn a healthy boot into a timeout.
+            banner = self.wait(is_console_boot_banner, timeout,
                                "USB console startup")
-            if "KEBAB USB: running (DSTS" in banner:
-                # kebab_usb_start() prints "running" and then "event thread
-                # started"; both belong to this boot, and the panic detector
-                # must not mistake the second line for a second boot.
-                banner = self.wait(
-                    lambda l: "KEBAB USB: event thread started" in l, 15,
-                    "USB event thread startup")
         except TimeoutError:
             # The USB console may enumerate after its startup lines are printed.
             # IMEM? is the authoritative liveness probe; a fresh boot banner is
@@ -1451,8 +1474,7 @@ class Orchestrator:
                             elapsed=0)
         if banner:
             self.checkpoint("C-BOOT-BANNER", "boot.banner",
-                            "a kernel boot banner on the new image", banner,
-                            elapsed=0)
+                            USB_CONSOLE_BANNER, banner, elapsed=0)
         if noinit:
             try:
                 line = self.wait(lambda l: l.startswith("KEBAB: kebab_noinit=1:"),
@@ -1928,8 +1950,16 @@ class Orchestrator:
                       hint="kebab_vol=1 and ufsrw=1 must both be present")
         if got.get("chunk") != CHUNK:
             self.fail("vol.status", "chunk %d" % CHUNK, " | ".join(lines))
+        if "partition" not in got or "disk_blocks" not in got:
+            self.fail("vol.status",
+                      "VOL? gated 1 ... writable 1, VOL? partition and "
+                      "VOL DISK vh bsize/blocks",
+                      " | ".join(lines) or "no on-disk volume header",
+                      hint="VOL? prints the on-disk header from kv_read_vh(); "
+                           "without it VOL BEGIN refuses the write")
         self.checkpoint("C-VOL-STATUS", "vol.status",
-                        "VOL? gated 1 writable 1 chunk 65536",
+                        "VOL? gated 1 writable 1 chunk 65536, VOL DISK vh "
+                        "bsize/blocks",
                         "partition %s, disk %s blocks"
                         % (human(got.get("partition", 0)), got.get("disk_blocks")))
 
@@ -2082,8 +2112,13 @@ class Orchestrator:
         self.detector = PanicDetector(self.console, armed=False, phase="reboot")
         self.send_cmd(CMD_REBOOT, "REBOOT")
         try:
-            line = self.wait(lambda l: l.startswith("KEBAB REBOOT: PEHaltRestart"),
-                             15, "REBOOT acknowledgement")
+            # The failure branch prints "KEBAB REBOOT: PEHaltRestart returned
+            # <n>, the machine did not reset" (kebab_usb.c:1602); match only the
+            # success line (:1592) so a refused reset cannot satisfy C-VOL-REBOOT.
+            line = self.wait(
+                lambda l: l.startswith(
+                    "KEBAB REBOOT: PEHaltRestart(kPERestartCPU)"),
+                15, "REBOOT acknowledgement")
             self.checkpoint("C-VOL-REBOOT", "vol.reboot",
                             "REBOOT reaches PEHaltRestart(kPERestartCPU)", line)
         except TimeoutError:
@@ -2092,10 +2127,15 @@ class Orchestrator:
         # The same vol image boots again, still with kebab_vol=1 and
         # kebab_noinit=1.  Its HFS+ mount line proves the new geometry.
         try:
-            self.wait(lambda l: "KEBAB USB: event thread started" in l
-                      or "KEBAB USB: running (DSTS" in l,
+            self.wait(is_console_boot_banner,
                       self.opts.boot_timeout, "post-REBOOT boot banner")
-            line = self.wait(lambda l: l.startswith("KEBAB HFS: "),
+            # Match the geometry line itself, not the first "KEBAB HFS: " line:
+            # every boot also prints "KEBAB HFS: hfs-627.100.6 registered"
+            # (kebab_hfs_iokit.c:108) before the mount, and a dirty root prints
+            # "KEBAB HFS: mounting dirty non-journaled root read-write"
+            # (hfs_vfsutils.c:211).  Neither carries the block geometry, so a
+            # prefix match fails C-VOL-MOUNT on a healthy board.
+            line = self.wait(lambda l: HFS_RE.match(l) is not None,
                              self.opts.boot_timeout, "new KebabRoot mount")
         except TimeoutError:
             self.fail("vol.reboot", "a fresh boot with KEBAB HFS: KebabRoot ... "
@@ -2648,6 +2688,13 @@ class Orchestrator:
         ]
         for row in rows:
             self.log.info("  %s. %-12s %s" % row)
+        # Documented in the dry-run log on purpose: this is the one boot line
+        # that cannot be assumed.  "KEBAB USB: running (DSTS ...)" is printed
+        # before ud.running is set and never reaches USB (section 79).
+        self.log.info("  console: C-BOOT-BANNER waits for '%s' "
+                      "(USB-visible); 'KEBAB USB: running (DSTS ...)' is "
+                      "printed before ud.running and stays on the panel"
+                      % USB_CONSOLE_BANNER)
         if self.volume_imprinted is True:
             self.log.info("  resume: INST? reports the 16 GiB geometry, so the "
                           "vol phase would be skipped")

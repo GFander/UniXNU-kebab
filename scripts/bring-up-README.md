@@ -41,10 +41,10 @@ Every path can be overridden (`--vol-image`, `--skel-stream`, `--base-stream`,
 | C01 | precondition.fastboot | `fastboot devices` lists the board, or a console `FASTBOOT` brings it there |
 | C02 | precondition.slot | `current-slot: b` |
 | C-ARGS | precondition.args | the image's embedded `args = "..."` match the phase |
-| C-BOOT-BANNER | boot.banner | `KEBAB USB: running (DSTS ...)` / `event thread started` after the reboot |
+| C-BOOT-BANNER | boot.banner | `KEBAB USB: event thread started, waiting for the host` after the reboot (`running (DSTS ...)` is printed before `ud.running` is set and stays on the panel; see BRING-UP-STATE section 79) |
 | C-BOOT-NOINIT-* | boot.noinit | `KEBAB: kebab_noinit=1: staying in the kernel, no init program` |
 | C-VOL-STREAM | vol.stream | VEXT size, extents and embedded HFS+ header (4,194,304 blocks) |
-| C-VOL-STATUS | vol.status | `VOL? gated 1 ... writable 1`, partition and on-disk header |
+| C-VOL-STATUS | vol.status | `VOL? gated 1 ... writable 1`, partition and the on-disk `VOL DISK vh bsize/blocks` line |
 | C-VOL-OLD | vol.old-header | 3 `VOL OLD vh` lines + 32 `VOL OLD bytes` lines (the old 512-byte header) |
 | C-VOL-DRY | vol.dry | `VOL PLAN extents 3 bytes 1744896 wire 1769472 volume 17179869184` |
 | C-VOL-WRITE | vol.write | `VOL NEW ... bsize 4096 blocks 4194304` and `VOL DONE extents 3 ...` |
@@ -61,7 +61,7 @@ Every path can be overridden (`--vol-image`, `--skel-stream`, `--base-stream`,
 `skel.kist` is always sent whole (one 64 KiB chunk): `INST CHECK` describes a
 file size and hash, so it cannot precheck a directory or symlink, and the kernel
 re-applies the exact mode/owner on a re-run.  `base.kist` is checked entry by
-entry; if all 5 already verify the stream is not sent.  `cache.kist` is checked
+entry; if all 6 already verify the stream is not sent.  `cache.kist` is checked
 the same way for all 44 entries.  A partial stream is sent in full and the
 kernel reports the already-correct entries as `SKIP`; a complete stream is never
 re-sent.

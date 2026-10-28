@@ -7445,7 +7445,9 @@ verify: 44 entries, all digests match
 0xa2de4000（2,732,474,368）字节**，42/42 个子缓存按 UUID 找到，dylddata=2、
 dyldlinkedit=2，`.symbols` 只报告不映射，区域
 `0x180000000 + 0xaade8000`，最高映射末端 `0x22ade4000`，slack `0x4000`。这些
-数字就是内核 `KEBAB DSC: plan ...` 行应当给出的值。
+数字是**主机侧**的 51 条计划；`0142` 之后内核会在主缓存里追加 dynamic-config
+一页，所以内核行是 52 条 / `0xa2de8000` / extent `0xaade8000`（end
+`0x22ade8000`），不要拿主机侧的 51 去对内核的 52，见 7.1。
 
 发送顺序建议：先 `base.kist`（先有 launchd/dyld/trustcache），再 `cache.kist`；
 两者都只写文件，顺序不影响最终内容，但先 base 可以在 cache 传到一半时仍然保留
@@ -7453,6 +7455,12 @@ dyldlinkedit=2，`.symbols` 只报告不映射，区域
 `send-userland.py` 的 ACK 流控走。
 
 ### 7. 成功时控制台应该看到什么
+
+> **2026-10-28 更正：本节下面的清单是 `0142`/`0143` 之前的输出，已被取代。**
+> 当前默认启动（`kebab_dsc_verbose=0`）只打一行计划摘要，数字是
+> `52 mappings` / `0xa2de8000 mapped` / `extent 0xaade8000 (end 0x22ade8000)`；
+> 逐文件明细要 `kebab_dsc_verbose=1`。旧清单保留在下面，作为当时的记录，不删除；
+> 现在该看什么见 7.1，检查点字符串的逐条审计见第七十九节。
 
 启动参数（首启验证）：
 
@@ -7520,6 +7528,48 @@ Unable to open /System/Library/xpc/launchd.plist [2:No such file or directory]
 
 它不影响首启；要消掉就把该文件放进卷骨架。
 
+#### 7.1 当前默认输出（`0142`/`0143` 之后）
+
+默认启动只带 `kebab_dsc=1 kebab_dsc_map=1`（没有 `kebab_dsc_verbose`）。
+`0143` 把计划明细和成功侧的校验行全部移到 `kebab_dsc_verbose=1`，`0142`
+又给计划追加了 dynamic-config 页，所以 USB 上应看到的 DSC 行是（`<…>` 是变量）：
+
+```text
+KEBAB DSC: enabled for "<dir>"; kebab_dsc_map=1 kebab_dsc_slide=0x0 (default) kebab_dsc_verbose=0
+KEBAB DSC: plan 43 files / 52 mappings, 0xa2de8000 mapped, extent 0xaade8000 (end 0x22ade8000), base 0x180000000, slide 0x0, dynamic config page appended
+KEBAB DSC: map: no shared region at boot (kernel task); deferred to first exec (ENODEV)
+load_init_program: attempting to load /sbin/launchd
+KEBAB DSC: first exec (pid 1): attempting the deferred mapping
+KEBAB DSC: map: mapped 0xa2de8000 bytes at 0x180000000
+KEBAB DSC: map: dynamic config page 0x22ade4000+0x4000 is zero-filled; dyld will report "no dynamic config data" and continue
+KEBAB DSC: map: shared_region_check_np base 0x180000000 (slide 0x0)
+KEBAB DSC: mapping complete; dyld will find the cache already in the shared region
+```
+
+与旧清单的三处差别，以及各自的原因：
+
+1. **数字**：`51 mappings` → `52 mappings`，`0xa2de4000` → `0xa2de8000`，
+   `highest mapped end 0x22ade4000` → `extent 0xaade8000 (end 0x22ade8000)`。
+   `0142` 在主缓存里追加了 `sharedRegionStart + dynamicDataOffset` 那一页，
+   所以映射数和 mapped 字节都多一页、extent 正好落在 `sharedRegionSize` 上。
+   主机侧 `check-shared-cache.py` 仍是 51 条 / `0xaade4000`，因为它不模拟这
+   一页；**内核的数字比主机侧多一页是正常的。**
+2. **行数**：旧清单里的 `main`、`region`、`resolved`、`symbols`、`validate`、
+   `file NN`、`map NN` 以及 `highest mapped end … region slack …` 默认都不再
+   打印。`0143` 后默认只有上面这一行摘要；要看 43 个文件约 100 行明细，加
+   `kebab_dsc_verbose=1`（约 102 行 / 11,560 B，占 16 KiB 环的 70%，这正是
+   把它关掉的原因）。失败路径会自动补打明细，不需要 verbose。
+3. **`KEBAB CS: policy 0xf …` 不在 USB 上**。这一行由
+   `STARTUP(CODESIGNING, …)` 在 `kernel_bootstrap_thread()` 的
+   `STARTUP_SUB_EARLY_BOOT` 阶段打印，早于 `bsd_init()` 里的
+   `kebab_usb_start()`；`kebab_usb_log()` 在 `!ud.running` 时丢字节，所以它
+   只上面板。USB 日志的第一行是
+   `KEBAB USB: event thread started, waiting for the host`。同理，`KEBAB USB:
+   SMMU …`、`reset … after … ms`、`step 1..7` 也只在面板上。
+
+`KEBAB CS: static trust cache v2: …` 与 `KEBAB CS: exec cdhash …` 仍然在
+`bsd_init`/exec 里打印，晚于 `kebab_usb_start()`，所以它们在 USB 上是正常的。
+
 ### 8. 三种失败：用日志区分
 
 #### 8.1 launchd 找不到缓存
@@ -7560,7 +7610,7 @@ initproc failed to start -- exit reason namespace 6 subcode 0x1 description: ...
 /sbin/launchd failed, errno N`。如果日志停在 9/6 的 `copyout stage=...`，那是
 0136 记录的另一条路径，exec 根本没到 dyld，不要把它读成"缓存缺失"；如果停在
 9/e，是平台门，见 8.3。）**区分点：DSC 的 `NOT mapped` + dyld 的
-`Library not loaded` + namespace 6，且没有 `mapped 0xa2de4000`。**
+`Library not loaded` + namespace 6，且没有 `mapped 0xa2de8000`。**
 
 #### 8.2 launchd 起来了，但每个 job 都 spawn 失败
 
@@ -7762,7 +7812,7 @@ extent 数和 data 字节做成可覆盖参数（`--expected-vol-stream`、
 | C01 | `precondition.fastboot` | `fastboot devices` 列出板子；否则控制台 `IMEM?` 有回答后发 `FASTBOOT`，40 s 内重新枚举 |
 | C02 | `precondition.slot` | `fastboot getvar current-slot` 为 `b` |
 | C-ARGS | `precondition.args` | 镜像 payload 的 `args` 含本阶段参数、不含禁止参数 |
-| C-BOOT-BANNER | `boot.banner` | 重启后出现 `KEBAB USB: running (DSTS ...)` 且随后 `event thread started` |
+| C-BOOT-BANNER | `boot.banner` | 重启后出现 `KEBAB USB: event thread started, waiting for the host`（`running (DSTS ...)` 在 `ud.running` 之前打印，只上面板，见第七十九节） |
 | C-BOOT-NOINIT-* | `boot.noinit` | `KEBAB: kebab_noinit=1: staying in the kernel, no init program` |
 | C-VOL-STREAM | `vol.stream` | VEXT 大小/3 extents/内嵌卷头 `sig 0x482b version 4 bsize 4096 blocks 4194304` |
 | C-VOL-STATUS | `vol.status` | `VOL? gated 1 ... writable 1`，partition 与磁盘卷头 |
@@ -7783,6 +7833,12 @@ extent 数和 data 字节做成可覆盖参数（`--expected-vol-stream`、
 脚本的 `checkpoint` 行、`[ OK ]`/`[FAIL]` 行和最终 summary 都带 ID；失败时
 `checkpoint:` 字段就是这里的一行。注意 `C-VOL-OLD` 会出现两次（`VOL DRY` 和
 `VOL BEGIN` 各打印一次旧卷头），这是内核行为，不是重复执行。
+
+> **2026-10-28 更正（见第七十九节）：** 上表的 `C-BOOT-BANNER` 原先写的是
+> `KEBAB USB: running (DSTS ...)` 且随后 `event thread started`；前者到不了
+> USB。同轮审计还改了 `C-VOL-STATUS` 的磁盘卷头行（`VOL DISK vh`，不是
+> `VOL? DISK`）、`C-VOL-MOUNT` 的匹配方式（直接匹配几何行，避开 HFS 注册行和
+> 脏卷提示行）和 `C-VOL-REBOOT` 的匹配（不再接受 `PEHaltRestart returned`）。
 
 ### 3. 每阶段的启动参数
 
@@ -7939,7 +7995,7 @@ checkpoint/phase 记录。退出码：0 完成，2 前置失败，3 检查点/�
 | `INST ABORT ...` / `FAIL ...` | 流/文件系统/空间错误 | 保留卷，重跑同阶段 |
 | `INST TIMEOUT ...` | 60 s 没有新块 | 传输停了 |
 | `panic(cpu ...)` | 内核 panic | 0134 会重启；修复首个 panic |
-| 新 `KEBAB USB: running` | 阶段中途重启（panic 恢复） | 按 panic 处理，不是 ACK 慢 |
+| 新 `KEBAB USB: event thread started` | 阶段中途重启（panic 恢复） | 按 panic 处理，不是 ACK 慢 |
 | `CS_KILLED` | launchd 被签名策略杀 | 信任缓存/cdhash 问题 |
 | `initproc ...` / `pid 1 exited` | PID 1 没起来或退出 | 看更早的 exec/DSC 行 |
 | `KEBAB DSC: ... NOT mapped` | 共享缓存计划失败 | 先修 44 条缓存 |
@@ -7953,8 +8009,9 @@ checkpoint/phase 记录。退出码：0 完成，2 前置失败，3 检查点/�
 不是 `INST ACK` 慢。脚本在阶段进入 ready 之后 arm 检测器，任一条件成立即
 报 `PanicDetected`（退出码 4）：
 
-* 出现新的 `KEBAB USB: running (DSTS ...)`、`event thread started` 或
-  `Darwin Kernel Version`；
+* 出现新的 `KEBAB USB: event thread started, waiting for the host`
+  （`KEBAB USB: running (DSTS ...)` 与 `Darwin Kernel Version` 在
+  `kebab_usb_start()` 之前打印，到不了 USB，不能当判据；见第七十九节）；
 * 出现 `panic(cpu ...)`、`KEBAB USB: panic console cannot be serviced`；
 * 控制台重新枚举（`console reopened`），或消失超过 10 s；
 * `KEBAB REBOOT: PEHaltRestart returned ...`（复位失败，仍是 panic）。
@@ -11021,7 +11078,7 @@ pid 1 的 `custom` 必须是 `0`、`alloc=0x0+0x0`。若某次 exec 出现
 | 11 | `KEBAB EXEC: stack map=0x… shift=14 custom=0 user=0x16fe0000 alloc=0x0+0x0 guard=0x0+0x0 kr=0` | `custom=1`/`kr≠0` = 用户栈这条线（`0141` 或 HFS/USRSTACK64）；`shift=14` 不是 14 = 页大小不对 |
 | 12 | `KEBAB EXEC: pid 1 pre-copyout cs=0x… imgp_cs=0x… load_cs=0x… stack=0x16fe0000` | 这行之后紧跟 `copyout-failed error=…` = 9/6，按 `stage=` 查；没有失败行就是正常 |
 | 13 | `KEBAB DSC: first exec (pid 1): attempting the deferred mapping` | 缺失 = `kebab_dsc_plan` 为空或已经被标记 attempt 过（第一次就缺说明第 7 步已经拒了） |
-| 14 | `KEBAB DSC: map: mapped 0xa2de8000 bytes at 0x180000000, check_np base 0x180000000, dynamic config page 0x22ade4000+0x4000 zero-filled` | `check_np base` ≠ `0x180000000` = `sr_first_mapping` 不是主缓存那条；`HALF MAPPED` = 半映射 |
+| 14 | `KEBAB DSC: map: mapped 0xa2de8000 bytes at 0x180000000`<br>`KEBAB DSC: map: dynamic config page 0x22ade4000+0x4000 is zero-filled; dyld will report "no dynamic config data" and continue`<br>`KEBAB DSC: map: shared_region_check_np base 0x180000000 (slide 0x0)` | `check_np base` ≠ `0x180000000` = `sr_first_mapping` 不是主缓存那条；`HALF MAPPED` = 半映射；这三行默认都打印（`dynamic config page` 行只在 `0142` 加页时出现） |
 | 15 | `KEBAB DSC: mapping complete; dyld will find the cache already in the shared region` | `mapping failed (error …)` = 共享缓存没映射，后面必然是 namespace 6 |
 | 16 | （dyld 自己）`mapped cache does not contain dynamic config data` | **这一行是 `0142` 的正向证据**：它说明那一页可读且 dyld 没有 crash。没有这一行而进程还在跑 = dyld 没走 `reuseExistingCache()` |
 | 17 | `launchd logging initialized. name: launchd pid: 1`（launchd 自己的字符串；第六十八节记作 `launchd`，第七十四/七十五节记作 `com.apple.xpc.launchd`，以实际为准） | 缺失 = `/dev/console` 打不开（`service spawn failed: 6`）或 launchd 没到 main（看第 12/13 步或 9/e/9/6） |
@@ -11076,6 +11133,17 @@ kebab_vrm_write=1 kebab_pon_write=1` 的真实输出——两路 LDO 的 `EN 0x0
 （同样是代码推导，但按 `0143` 之后的实际输出）。
 
 #### 8.3 文档缺陷：第九节的 `C-BOOT-BANNER` 期望一行不可能出现在 USB 上
+
+> **2026-10-28 复核（见第七十九节）：下面的"会在第一个 checkpoint 失败"不成立。**
+> `scripts/bring-up.py` 里的谓词是 `event thread started OR running (DSTS …)`，
+> 所以默认启动会靠前者通过，不会因为 `running` 只在面板上而超时。但这一条仍然
+> 是真实缺陷：期望/文档把不可能的行写成主判据，fake board 又同时喂两行，没有任何
+> 测试能证明"可以不要它"。第七十九节已把检查点固定为
+> `KEBAB USB: event thread started, waiting for the host`，并补了
+> `no-panel-banner`、`panel-banner-noise`、`console-markers` 三个测试。同一轮
+> 审计还发现 `C-VOL-MOUNT` 在真机上**每次**都会失败（HFS 注册行先到），以及
+> `C-VOL-STATUS` 的 `VOL? DISK` 拼写错误——它们比 8.3 严重。以下保留当时的
+> 记录原文。
 
 `scripts/bring-up.py` 的 `C-BOOT-BANNER` 期望"`KEBAB USB: running (DSTS ...)` 且随后
 `event thread started`"。按 `kebab_usb.c` 的顺序，`printf("KEBAB USB: running
@@ -11138,3 +11206,131 @@ kebab_vrm_write=1 kebab_pon_write=1` 的真实输出——两路 LDO 的 `EN 0x0
 换句话说：**下一轮启动如果出现"根卷挂载失败""SPMI 读不到""触摸没有应答"，
 不要先怀疑本节这 20 个改动**——先按第 9 节的证据边界判断它属于哪一层；只有当
 失败点落在第 3 节那五条 (b) 的判断点上时，本节才是第一嫌疑人。
+
+## 七十九、P1 检查点字符串审计：每个期望行的出处与可见性
+
+> 2026-10-28。范围：`scripts/bring-up.py` 里所有 `self.wait()` 谓词、所有
+> `*_RE` 正则，以及 `PanicDetector` 的 `BOOT_BANNER_RE`。方法：对每条字符串
+> 在补丁系列 `0000`–`0147` 的最终源码里找到 `printf`/`kprintf` 调用点，再按
+> `kebab_usb_log()` 的 `!ud.running` 门（`bsd/dev/kebab_usb.c:898`）和调用点
+> 的先后，判断它能否到达 USB。板子仍然 stranded，**本节没有真机日志**；证据是
+> 内核源码（`xnu-8796.141.3` + `patches/xnu-8796-kebab`）和 fake board 测试。
+>
+> 结论：**4 个检查点的期望/匹配写错了**：
+>
+> | # | 检查点 | 错误类型 | 真机后果 |
+> | ---: | --- | --- | --- |
+> | 1 | `C-BOOT-BANNER` | 把只上面板的 `running (DSTS ...)` 当成判据 | 代码里的 OR 谓词让它侥幸通过；但期望、文档和 fake board 都以错行为准，没有任何测试证明可以不要它 |
+> | 2 | `C-VOL-STATUS` | `VOL? DISK` 拼错，内核打的是 `VOL DISK` | `VOL?` 的磁盘几何永远解析不到；`query_vol()` 总返回 unknown，`--from auto` 的 resume 判断退化 |
+> | 3 | `C-VOL-MOUNT` | 先等任意 `KEBAB HFS: `，再套几何正则 | **每次真机启动都会失败**：HFS 注册行先到，脏卷时还有 dirty 行 |
+> | 4 | `C-VOL-REBOOT` | 前缀也匹配 `PEHaltRestart returned ...` | 复位被固件拒绝时仍记 OK，下一步 mount 才报错，误导定位 |
+>
+> 另有 1 个非检查点：`BOOT_BANNER_RE`（panic 重启检测）含两条到不了 USB 的行。
+> 第七十八节 §8.3 说"第一个 checkpoint 会超时"只对了一半：`86e2b94` 的代码
+> 谓词是 `event thread started OR running (DSTS ...)`，所以不会因为 `running`
+> 超时；但那一行确实不该出现在期望里，已按本节改正并补测试。
+
+### 1. 判据：一行能不能到 USB
+
+`kebab_usb_start()` 在 `bsd/dev/kebab_usb.c` 里的顺序是：
+
+```c
+printf("KEBAB USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n", ...);  /* :2582 */
+...
+ud.running = true;                                                           /* :2597 */
+kernel_thread_start((thread_continue_t)ud_thread, NULL, &thread);
+printf("KEBAB USB: event thread started, waiting for the host\n");           /* :2605 */
+```
+
+而控制台 tee 在 `_cnputc()` 里：
+
+```c
+kebab_usb_log(&c, 1);        /* osfmk/console/serial_console.c */
+...
+void kebab_usb_log(const char *buf, size_t len) {
+    if (!ud.running || !buf || !len) return;   /* bsd/dev/kebab_usb.c:898 */
+```
+
+所以 `:2582` 之前的每一行都只上面板（`printf` 仍然会画面板）。第一条能到
+USB 的启动行是 `:2605` 的 `event thread started`。同理，
+`bsd_init()` 在 `bsd/kern/bsd_init.c:508` 才调用 `kebab_usb_start()`，所以
+`Darwin Kernel Version`、`KEBAB USB: SMMU ...`、`reset ... after ... ms`、
+`step 1..7`、`KEBAB CS: policy 0xf ...` 都到不了 USB（`policy` 行由
+`STARTUP(CODESIGNING)` 在 `_EARLY_BOOT` 阶段打印，早于 `bsd_init()`）。
+例外只有 `kebabkdp=1`：`kebab_usb_kdp_start()` 会更早把端口带起来，而 P1
+默认拒绝这个参数（`require_args()` 把 `kebabkdp=1` 放进 forbidden 集合）。
+
+### 2. 逐条对照
+
+下表的"内核来源"是最终补丁树里的文件与行号（行号取
+`xnu-8796.141.3` 基线的当前补丁状态；`kebab_usb.c` 在 `0142`–`0147` 里没有
+改动，行号稳定）。
+
+| 检查点 | 旧期望 | 新期望 | 内核来源 | 说明 |
+| --- | --- | --- | --- | --- |
+| `C-BOOT-BANNER` | `KEBAB USB: running (DSTS ...)`，随后 `event thread started` | 只接受 `KEBAB USB: event thread started, waiting for the host` | `bsd/dev/kebab_usb.c:2582`（running）、`:2597`（`ud.running = true`）、`:2605`（event thread）、`:898`（门） | 旧主判据在门之前，只上面板。OR 谓词让默认启动侥幸通过；现改为 `is_console_boot_banner()`，`running`/`Darwin` 只作为"不可用"记录在 `PANEL_ONLY_BOOT_MARKERS` 里，测试会拒绝它们。 |
+| `C-VOL-STATUS` | `^VOL\? DISK vh bsize ...` | `^VOL DISK vh bsize ...` | `bsd/dev/kebab_vol.c:179-201`（`kv_print_vh()` 打 `VOL %s vh ...`），`:795` 以 tag `"DISK"` 调用 | 内核不在 `DISK` 前加 `?`；旧 regex 从不匹配，磁盘几何丢失，`query_vol()` 因 `"blocks" not in info` 总返回 `None`。现在缺 `VOL DISK vh bsize/blocks` 会让 C-VOL-STATUS 直接失败。 |
+| `C-VOL-MOUNT` | 先等任意 `l.startswith("KEBAB HFS: ")`，再 `HFS_RE.match()` | 直接等 `HFS_RE.match(l)` 的几何行 | 几何行 `bsd/kebab_hfs/core/hfs_vfsops.c:1866`；注册行 `bsd/kebab_hfs/kebab_hfs_iokit.c:108`；脏卷行 `bsd/kebab_hfs/core/hfs_vfsutils.c:211` | 每次 `bsd_init` 都先打 `KEBAB HFS: hfs-627.100.6 registered`，所以旧代码的"第一行 KEBAB HFS"必然不是几何行，`HFS_RE` 必然失败。**这是真机上每次都会停住的地方。** |
+| `C-VOL-REBOOT` | `startswith("KEBAB REBOOT: PEHaltRestart")` | 精确匹配 `KEBAB REBOOT: PEHaltRestart(kPERestartCPU)` | 成功行 `bsd/dev/kebab_usb.c:1592`；失败行 `:1602`（`PEHaltRestart returned %d, the machine did not reset`） | 旧前缀也接受失败行，会把"固件拒绝复位"记成 OK，然后在 C-VOL-MOUNT 以"没有 HFS 行"报错。 |
+| （非检查点）`BOOT_BANNER_RE` | 含 `running (DSTS`、`event thread started`、`Darwin Kernel Version`、`kebab_noinit=1` | 只含 `event thread started`、`kebab_noinit=1` | 同 `kebab_usb.c:2582/2597/2605`；`Darwin` 早于 `bsd_init.c:508` | `running` 与 `Darwin` 到不了 USB；保留它们会让 panic 检测器把"永远等不到的 reboot 证据"写进逻辑。实际 reboot 证据是 event-thread 行与 `console reopened`。 |
+
+逐条核对过、**没有改**的（避免下一个人重查）：
+
+| 检查点 | 期望行 | 内核来源 | 为什么能到 USB |
+| --- | --- | --- | --- |
+| `C-BOOT-NOINIT-*` | `KEBAB: kebab_noinit=1: staying in the kernel, no init program` | `bsd/kern/bsd_init.c:1201` | `bsdinit_task()` 在 `bsd_init()` 之后运行，而 `kebab_usb_start()` 在 `bsd_init.c:508` 已经返回 |
+| `C-VOL-OLD` / `C-VOL-DRY` / `C-VOL-WRITE` | `VOL OLD vh/bytes`、`VOL BEGIN ...`、`VOL PLAN ...`、`VOL NEW vh/bytes`、`VOL DONE ...` | `bsd/dev/kebab_vol.c:173-203`（`kv_print_vh`）、`:371`、`:634`、`:658`、`:754` | 全部由 USB 命令触发，命令能到就说明 `ud.running` 为真 |
+| `C-INST-GEOM` / `C-*-PRECHECK` / `C-SEND-*` / `C-VERIFY-*` | `INST? ...`、`INST CHECK ...`、`INST BEGIN/ACK/STREAM/DONE`、`OK`/`SKIP` | `bsd/dev/kebab_install.c:1275/1301/1400/1457/1494/1563` | 同上，都是命令应答 |
+| `C-FINAL` | `launchd logging initialized` / `zone name` / `ZONE TOTALS` | 用户态 launchd 与 zprint，不在内核树里 | 依赖 `0145` 的 `/dev/console` 路由；本节无法用源码证明，仍是真机待验证项 |
+
+### 3. 为什么不是"第一个检查点就 abort"
+
+`86e2b94` 的 `boot()` 原本是：
+
+```python
+banner = self.wait(lambda l: "KEBAB USB: event thread started" in l
+                   or "KEBAB USB: running (DSTS" in l, timeout, ...)
+if "KEBAB USB: running (DSTS" in banner:
+    banner = self.wait(lambda l: "KEBAB USB: event thread started" in l, ...)
+```
+
+只要 `event thread started` 到达，第一行匹配后 `if` 不成立，检查点就以它通过。
+所以第七十八节 §8.3 的"第一个 checkpoint 会超时"在当前代码上**不成立**；
+fake board 也一直同时喂两行，测试不可能发现这个期望是错的。真正会在真机上
+**每次**失败的是 `C-VOL-MOUNT`（见上表），它发生在 vol 阶段写完之后，不是
+第一个检查点。把 `running` 去掉、只留 console 行，仍然是对的：它让"期望"与
+"可达"一致，也让测试第一次能证明这一点。
+
+### 4. 测试
+
+`scripts/test-bring-up.py` 新增：
+
+| 测试 | 做什么 | 失败意味着 |
+| --- | --- | --- |
+| `console-markers` | 单元测试：`is_console_boot_banner()` 接受 event-thread 行、拒绝 `running (DSTS`；`BOOT_BANNER_RE` 不再匹配 `running`/`Darwin`，但仍匹配 event-thread 与 `kebab_noinit` | 有人把只上面板的行重新加回判据 |
+| `no-panel-banner` | 完整 `--from vol --to vol`，fake transcript **不含** `running (DSTS` 与 `Darwin`；要求 rc=0，且 `[ OK ] C-BOOT-BANNER` 的 seen 是 event-thread 行 | 检查点又依赖面板行 |
+| `panel-banner-noise` | 同样的流程，但 transcript 故意带上两条面板行；要求检查点仍用 event-thread 行 | 面板行被误当成证据 |
+| `missing-mount-line` | 保留 `KEBAB HFS: hfs-627.100.6 registered`，删掉几何行，`--boot-timeout 3`；要求 rc=3 且失败报告出现 `vol.reboot`/`KEBAB HFS` | 缺了 mandatory 行仍然通过（测试变成空转） |
+
+fake board 同时改成更像内核：`VOL DISK vh`（不再 `VOL? DISK`）、每次启动先打
+HFS 注册行、`running`/`Darwin` 变成可选噪声。原有 18 个测试全部保留并通过；
+新增后共 **22 个测试**（3 个单元 + 19 个 fake-board 用例），加
+`--kernel-source` 时再跑命令 lint（23 项）。命令：
+
+```sh
+python3 scripts/test-bring-up.py \
+  --kernel-source /home/albert/xnu-0139/bsd/dev/kebab_usb.c
+```
+
+### 5. 本轮改了什么、没改什么
+
+* **内核一个字节没改。** 所有问题都在主机侧期望与测试里；不需要新补丁。
+* 文档：本节；第六十八节 §7 顶部加"已被取代"，并新增 7.1 的当前输出；
+  第六十九节 §2 的 `C-BOOT-BANNER` 行、§5 的"新 banner"行、§6 的 reboot
+  判据；第七十八节 §8.3 顶部加复核结论（原文保留）。
+* `scripts/bring-up-README.md` 与 `MIGRATION.md` 的 `C-BOOT-BANNER` 行同步。
+* `scripts/bring-up-dryrun.log` 重新生成，PLAN 末尾新增一行说明
+  `C-BOOT-BANNER` 等的是哪一条 USB 行。
+* 仍未验证：`C-FINAL` 的 launchd/zprint 行、`0145` 的路由，以及所有真机
+  时序。板子回来时，先按第七十八节 §7 的 18 步读，再用本节表格核对这些
+  检查点是否与日志一致。

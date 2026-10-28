@@ -214,7 +214,7 @@ kebab_pon_write=1 kebab_cs=15
 | `C02` `precondition.slot` | `fastboot getvar current-slot` 为 `b` |
 | `C-ARGS` `precondition.args` | 镜像 payload 的 `args` 含本阶段必需参数，不含禁止参数（`kebab_vol`、`kebab_noinit`、`kebab_dsc*`、`kebabkdp`） |
 | `C-REENTER` | 控制台 `FASTBOOT` 后确实进了 bootloader |
-| `C-BOOT-BANNER` | 重启后出现 `KEBAB USB: running (DSTS ...)`，随后 `event thread started` |
+| `C-BOOT-BANNER` | 重启后出现 `KEBAB USB: event thread started, waiting for the host`（`running (DSTS ...)` 在 `ud.running` 之前打印，只上面板；见 BRING-UP-STATE 第七十九节） |
 | `C-BOOT-NOINIT-*` | `KEBAB: kebab_noinit=1: staying in the kernel, no init program` |
 | `C-VOL-STREAM` | VEXT 大小/3 extents/内嵌 HFS+ 头 `sig 0x482b version 4 bsize 4096 blocks 4194304` |
 | `C-VOL-STATUS` | `VOL? gated 1 ... writable 1`，partition 行与磁盘卷头都对 |
