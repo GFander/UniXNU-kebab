@@ -13531,3 +13531,72 @@ IOBlockStorageDevice::getMetaClass 原址 0xfffffff0055d9dc4
 四  日志出现 KEBAB BLOCK: "userdata" ... 与 IOMedia 名
 五  mount-phase-1 不再退出 66
 ```
+
+## 九十二、IOMedia 绑定的地址恢复进展
+
+### 已完成：11 个符号的真实名字
+
+从编好的 `KebabBlockStorageDevice.cpo` 的符号表里直接读出，与链接器报的完全一致。
+清单存于 `p1-run/kebab-11-symbols.txt`：
+
+```
+__ZN20IOBlockStorageDevice10gMetaClassE
+__ZN20IOBlockStorageDevice13doSetPriorityEP26IOBlockStorageDeviceExtentjh
+__ZN20IOBlockStorageDevice13setPropertiesEP8OSObject
+__ZN20IOBlockStorageDevice17doLockUnlockMediaEb
+__ZN20IOBlockStorageDevice18getWriteCacheStateEPb
+__ZN20IOBlockStorageDevice18setWriteCacheStateEb
+__ZN20IOBlockStorageDevice20doGetProvisionStatusEyyPjP35IOBlockStorageProvisionDeviceExtenty
+__ZN20IOBlockStorageDeviceC2EPK11OSMetaClass
+__ZN20IOBlockStorageDeviceD2Ev
+__ZNK20IOBlockStorageDevice11getPropertyEPK8OSSymbol
+__ZTV20IOBlockStorageDevice
+```
+
+### 已恢复的两个地址
+
+```
+gMetaClass     原址 0xfffffff007a091d0（由 __mod_init_func 的注册 thunk 得到）
+getMetaClass   原址 0xfffffff0055d9dc4（adrp/add/ret 返回 &gMetaClass）
+```
+
+### 供体的段布局（本轮实测）
+
+```
+存储 kext 的代码            __PLK_TEXT_EXEC  0xfffffff00558c000 + 0x16d4000
+数据                        __DATA_CONST     0xfffffff0070...
+                            __DATA           0xfffffff00784...
+                            __PRELINK_DATA   0xfffffff007aa...
+```
+
+### 已排除的做法
+
+**按数据段里的连续代码指针找 vtable 行不通。**
+`__DATA_CONST` 里有 103 段长度 ≥20 的连续代码指针，`__PRELINK_DATA` 里 10 段，
+但它们要么是跳转表（199 个槽全部落在 0x6e41xxx 这个窄区间），要么与存储无关。
+`getMetaClass` 是静态方法，不在 vtable 里，所以用它做过滤也无效。
+
+### 下一步的确切做法
+
+vtable 的地址由**构造函数**写入 `this+8`。所以从构造函数反查更可靠：
+
+```
+在 __PLK_TEXT_EXEC 里找形如
+    adrp x8, <__DATA_CONST 页>
+    add  x8, x8, #<偏移>
+    str  x8, [x0, #8]
+的函数 —— 那就是基类构造函数，它写的就是 __ZTV 的地址
+再对该地址按 190 槽（sheng 记录的槽数）读出 22 个存储方法槽
+```
+
+注意 sheng 的审计里 `method_slots == 190`，那是整个基类链的槽数，不是我们子类的 22。
+我们的 vendored 头只声明了尾巴那 22 个，所以槽位比对要从第 190-22 个开始对齐。
+
+### 收口状态
+
+```
+补丁 142 个，全序列通过
+内核构建通过（0163 之后），预链接镜像真机跑通 launchd
+IOMedia 驱动可编译，链接缺 11 个符号，名字已确认
+地址恢复：2/11
+```
