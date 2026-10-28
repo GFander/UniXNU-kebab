@@ -223,6 +223,31 @@ check_patches() {
 }
 
 # ---------------------------------------------------------------------------
+# the /dev/console write path (docs/BRING-UP-STATE.md 76)
+#
+# 0145 routed /dev/console to the kebab character device, so a userland write
+# now enters console_write()/_cnputc(), the same sink kprintf uses.  The audit
+# found no deadlock; the properties it relies on are structural and easy to
+# lose in a later patch, so check them against the tree with the whole series
+# applied.  The board is stranded: this is the only place they can be enforced.
+
+check_console_path() {
+	local name=consolepath tree=$tmp/xnu rc
+
+	if [ ! -f "$tree/bsd/dev/kebab_ufs.c" ]; then
+		skip $name "no patched xnu tree (run without --fast)"
+		return
+	fi
+	run $name "$python" "$repo/scripts/check-console-path.py" "$tree"
+	rc=$?
+	if [ $rc -ne 0 ]; then
+		fail $name "$(why "$logdir/$name.log" $rc)"
+		return
+	fi
+	pass $name "$(tail -n 1 "$logdir/$name.log" | sed 's/^PASS: //')"
+}
+
+# ---------------------------------------------------------------------------
 # 2. the committed panel table
 
 check_panel() {
@@ -467,6 +492,7 @@ if [ "$fast" -eq 1 ]; then
 else
 	check_patches
 fi
+check_console_path
 check_panel
 check_selftest ep0 decode-ep0-probe.py
 check_shared_cache

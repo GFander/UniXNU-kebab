@@ -9925,3 +9925,322 @@ select()/poll() -> seltrue()（可写，不报告可读）
 8. 如果 launchd 对 console 调 `tcgetattr`/`isatty` 并在失败后降级或退出，日志会
    直接告诉我们；必要时再把 `cdevsw[0].d_type` 改成 0，或补一个最小的 termios
    shim。
+
+## 七十六、控制台写路径的并发审计
+
+> 写于 2026-10-28。`0145` 把 `/dev/console` 接到 kebab 字符设备之后，用户态第一次
+> 可以通过 `write(2)` 走进内核自己的 `console_write()` → `_cnputc()` 路径。这一节
+> 回答一个问题：这条路径会不会死锁或饿死，从而在真正出事的时候把唯一的观察通道
+> 一起带走。板子仍然 stranded，所以下面只区分“读代码/构建可证”和“必须真机才能定”。
+
+结论先写在这里：
+
+* **没有发现死锁、重入或饥饿路径。** 用户态写入只是增加了一个可睡眠的进程上下文
+  去占用 `console_write()` 的环形缓冲；它拿不到任何 USB 或 panic 路径需要的锁。
+  `kebab_usb_log()` 是**有界、非阻塞**的交接，拿不到就丢字节，只有
+  `panic_active()` 时才同步 drain；`ud_enter()`/`ud_rx_enter()` 都是关中断的
+  try-lock；`_cnputc()` 里的面板输出 `kebab_early_putc()` 根本不取锁。
+* **panic 的头和尾不经过控制台环。** `paniclog_append_noflush()`（panic 头、
+  结尾的 “Please go to …”）走 `consdebug_putc_unbuffered()` →
+  `console_write_unbuffered()` → `_cnputc()`，不碰 `console_ring` 的
+  `flush_lock`/`write_lock`。panic 字符串主体仍走 `consdebug_putc()` →
+  `console_write_char()`（和 printf 同一条路），所以它可能被正在写的用户态进程
+  推迟一个有界的临界区（≤16 字符 + 一次由 `panic_active()` 触发的 USB flush），
+  但不会死锁：持有者一定会跑完（见 2.2）。
+* **唯一真实的缺口是“不变量没有写在代码里”。** 如果将来有人在关中断的上下文里
+  进入 `kebab_console_write()`，`console_write()` 会
+  `panic("Console I/O from interrupt-disabled context")`（`serial_console.c:194`
+  的 `console_io_allowed()`）——正好在需要日志的时候把日志打死。`0146` 改成返回
+  `EDEADLK`，并把这个上下文约束写成注释和检查。
+* **`0145` 的注释“writable and never readable”是错的。** `seltrue()` 两个方向都
+  报；而且 readable 才是对的：`read()` 返回 0，EOF 就是可读条件，和 `/dev/null`
+  一致。`0146` 只改注释和说明，**不改 select 语义**（理由见第 5 小节）。
+* **内核 `printf` 的机制没有变。** `0146` 不碰 `osfmk/console/serial_console.c`、
+  `osfmk/kern/printf.c`、`bsd/kern/subr_prf.c`；构建后这三个目标文件、以及
+  `cons.o`、`kebab_usb.o` 全部与 `0145` 构建逐字节相同（第 6 小节），新的守护
+  分支也能在链接后的内核里看到。
+* 系列 124 → **125** 个补丁，在 pristine `1b191cb` 上按文件名顺序 **125/125**
+  应用（`scripts/verify-all.sh`，新增的 `consolepath` 检查 PASS）。全量构建通过，
+  `kernel.development.kebab` 17,209,120 字节，SHA-256
+  `087e951635130c12e185026b92200523ad5af2006b6ab26c665c72331bf299f2`。
+
+### 1. 两条路径：谁走 `cons.c`，谁走 `_cnputc`
+
+先把“控制台”拆成两个不同的东西，否则很容易把 `cons.c` 当成 printf 的出口：
+
+| 路径 | 入口 | 经过 | 出口 |
+| --- | --- | --- | --- |
+| 内核日志 | `printf()` → `console_printbuf_putc()` → `cons_putc_locked()`/`conslog_putc()` → `console_write_char()` | `console_write()` → 控制台环 → `console_ring_try_empty()` → `_cnputs()` → `_cnputc()` | `kebab_usb_log()` + `kebab_early_putc()` |
+| panic 头/尾 | `paniclog_append_noflush()` → `consdebug_putc_unbuffered()` → `console_write_unbuffered()` | 直接 `_cnputc()`，**不经过控制台环** | 同上 |
+| panic 字符串主体 | `_doprnt(panic_str, …, consdebug_putc)` → `console_write_char()` | 与内核日志同一条环（`console_suspend()` 之后改走 unbuffered） | 同上 |
+| 用户态 `/dev/console` | `write(2)` → `cnwrite()` → `kebab_console_write()` | `console_write()`（与内核日志同一条环） | 同上 |
+
+要点：
+
+* `bsd/dev/arm/cons.c` 里**没有** `cnputc`/`_cnputc`。这个树的 `cnputc` 只有 i386
+  的 `bsd/dev/i386/cons.c` 有；arm64 的字符输出在
+  `osfmk/console/serial_console.c`。所以 `0145`/`0146` 改的 `cnopen`/`cnclose`/
+  `cnread`/`cnwrite`/`cnioctl`/`cnselect` 从来不在 printf 的调用图上。
+* 两边唯一共享的全局量是 `constty`，而 `cons.c` 只读它（`kebab_console_route()`
+  用 `constty == NULL` 判断是否接管）。`printf` 侧读 `constty` 决定是否把字符送到
+  一个 tty；kebab 上没有任何代码把它设成非 NULL（`TIOCCONS` 在路由之后只会得到
+  `ENOTTY`），所以 printf 一直走 `console_write_char()`。
+* `_cnputc()` 里的 KEBAB tee 是 `0094`（console mute）加的，`0145` 没有碰它；
+  `0146` 也没有。用户态写入之所以能到 USB 和面板，是因为它和 printf 共用
+  `console_write()`，不是因为改写了 printf。
+
+### 2. 五个风险逐条
+
+| # | 风险 | 结论 | 依据 |
+| --- | --- | --- | --- |
+| 1 | 改坏了内核 printf 的机制 | **没有** | `0146` 的 diff 只有 `bsd/dev/kebab_ufs.c`；printf 三个核心目标文件逐字节相同（第 6 小节）；`cons.c` 的 `cn*` 不在 printf 调用图上 |
+| 2 | 重入 / 锁序 / USB 事件线程持锁 | **没有死锁** | `kebab_usb_log()` 只做关中断的 `log_busy` cmpxchg，抢不到就丢；`ud_enter()`/`ud_rx_enter()` 是不阻塞的 try-lock；控制台侧只取控制台环的锁，USB 侧只取 `ud.owner`/`ud.rx_owner`，没有反向获取 |
+| 3 | 在错误上下文阻塞 | **不会** | 唯一的阻塞点是控制台环的 mutex，只在进程上下文；`console_write()` 在抢占关闭/中断关闭时自己会 drop 或 panic，不会睡；panic 路径绕开环 |
+| 4 | `kebab_early_putc()` 撞显示路径 / 拆机后还调用 | **不会死锁** | 它不取任何锁；帧缓冲是 `arm_vm_init` 建的常驻内核 VA；即使 `early_disabled` 置位也只是返回，不会 fault |
+| 5 | `read()` 返回 EOF 让轮询进程 100% 空转并饿死 USB 线程 | **不会饿死内核线程** | `kebab_console_read()` 是 8 字节的 `mov w0,#0; ret`，不取锁不等待；空转只发生在用户态，拿不到任何内核锁；USB 事件线程是内核线程 |
+
+#### 2.1 风险 2 的细账：锁到底有几个
+
+控制台写路径上只有四个同步点：
+
+1. `console_ring.write_lock`（ticket spin）——`console_ring_reserve_space()`
+   在关抢占的窗口里加 `nreserved`，然后放锁；持有时间以百纳秒计。
+2. `console_ring.flush_lock`（mutex）——`console_ring_try_empty()` 持它做
+   `_cnputs()`。这是用户态唯一可能**睡**的地方（环形缓冲满时
+   `console_write()` 会 `lck_mtx_lock(false)` 等它）。
+3. `ud.log_busy`（`os_atomic_cmpxchg`，关中断）——`kebab_usb_log()` 的 16 KB
+   USB 环生产者锁，抢不到直接丢字节。
+4. `ud.owner` / `ud.rx_owner`（关中断的 try-lock，按 CPU 可重入）——只有
+   `panic_active()` 时 `kebab_usb_log()` 走 `kebab_usb_log_flush()` 才会碰，
+   抢不到就返回。
+
+锁序是单向的：控制台环的锁 → （仅 panic）`ud.owner` → `ud.rx_owner`。USB 侧没有
+任何路径反过来去取控制台环的锁，因为 `ud_poll_locked()`/`ud_event()`/
+`ud_bulk_*_done()` 里没有一句 `printf`/`kebab_usb_log`（`kebab_usb.c` 的
+`printf` 全部在 probe/init/takeover 这些不持传输门的函数里；`ud_bulk_out_done()`
+的注释明确写了“把 printf 挡在传输路径之外”）。所以不存在环。
+
+#### 2.2 风险 2 的细账：panic 时谁会等谁
+
+* `kebab_usb_log()` 里只有 `if (panic_active()) kebab_usb_log_flush();` 这一句会
+  同步 drain；drain 本身是 `ud_flush_from_panic()`，最多轮询
+  300 × `delay(100)`（约 30 s），**只在 panic/KDP 路径**。
+* panic 头和结尾走 `paniclog_append_noflush()` → unbuffered，完全不取控制台环的
+  锁，所以“机器出了什么事”这一行不依赖任何控制台锁。
+* panic 字符串主体走 `consdebug_putc()` → `console_write_char()`，也就是控制台环
+  （`handle_debugger_trap()` 里的 `console_suspend()` 在这一步之后，见
+  `debug.c:1346` 与 `debug.c:1561` 的先后）。最坏交错是：一个用户态进程在
+  `_cnputs()` 里被抢占、持有 `flush_lock`；panic 线程打印字符串时环满，在
+  `lck_mtx_lock()` 上睡。调度器会继续跑那个用户态进程，它的临界区是“≤16 字节 +
+  面板绘制 + 一次 `kebab_usb_log()`”，不等待任何东西，所以一定会跑完并放锁。
+  **这是有界延迟，不是死锁。** 唯一的放大项是它正好停在 `kebab_usb_log()` 里、
+  因为 `panic_active()` 为真而做一次最多 30 s 的 drain；那仍然是有限的。
+* panic 期间其它 CPU 已经被 `DebuggerHaltOtherCores()` 停住；`cpus=1` 的 boot-arg
+  意味着根本没有“其它 CPU 持有 flush_lock”这回事。
+* 即使一个已经停住的 CPU 留下了 `log_busy`，`ud_panic_takeover()`
+  （`kebab_usb.c:2240`）也会在 `panic_active()` 时直接清掉它；如果还遗留了传输门/
+  接收锁的 owner，它先重启控制器再接管。这是 `0091` 起就有、`0134` 扩展过的
+  “panic 必须能抢回端口”的保底。
+* panic 之后用户态不会再被调度去写 console：panic 循环占住本 CPU，其它 CPU 已
+  停。所以“用户态一直写、panic 永远排不上”这种交错不存在。
+
+#### 2.3 考虑过的交错，以及为什么都不成立
+
+| 交错 | 会发生什么 |
+| --- | --- |
+| 用户态 A 在 `_cnputs()` 里被抢占，持有 `flush_lock`；内核线程 B `printf()` | B 在 `console_ring_try_empty(true)` 里 try-lock 失败就返回，字节留在环里；B 只有在环满时才 `lck_mtx_lock(false)` 睡，而 A 的临界区是“≤16 字节 + 面板绘制”，不等待任何东西，必定前进 |
+| 用户态 A 写满 16 KB 控制台环；中断上下文 `printf()` | `console_write()` 在 `get_preemption_level() != 0` 时不会睡：环里有空间就只入环、不 flush，环满就返回（丢字节）。不死锁 |
+| 用户态 A 在 `kebab_usb_log()` 的 1 字节窗口里被抢占；中断/其它 CPU 也要 `kebab_usb_log()` | 窗口内中断是关的；其它 CPU 的 cmpxchg 失败 → 丢字节。**生产者永远不阻塞** |
+| 用户态 A 在 `console_write()` 里被抢占；同一 CPU 上 panic | A 的临界区有界且不等待任何锁，panic 线程在 `flush_lock`/环空间上的等待会由 A 跑完解除；panic 头本身走 unbuffered，不依赖 A。最坏是延迟一个临界区（A 正好停在 panic flush 里时以 30 s 为上限），不是死锁 |
+| 用户态 A 在 `console_write()` 里；USB 事件线程 `ud_thread` 在 `ud_poll_locked()`（持 `ud.owner`+`ud.rx_owner`） | A 不取 `ud.*`（非 panic 不走 flush）；事件线程也不取环锁（不打印）。互不相干 |
+| 用户态 A 写 `/dev/console`；显示 vsync 在 `AppleCLCD::present()` 里 memcpy 同一块物理帧缓冲 | 两个都是普通内存写，不共享锁；最坏是某个字符被下一帧盖掉（显示问题，不是死锁） |
+| 用户态 A 写 `/dev/console`；宿主通过 USB 触发 `kebab usb console test` → `ud_thread` 调 `panic()` | panic 在事件线程里、`ud_leave()` 之后才调用；panic 打印不取环锁。A 的写入最多是把 16 字节留在环里 |
+| 两个用户态进程同时写 `/dev/console` | 环和 `flush_lock` 串行化；两条 write 的输出可以交错，但不会互相等死 |
+
+### 3. 写路径会阻塞吗？写到什么程度
+
+会，但只在**进程上下文**、并且是“等控制台环腾出空间”这种有界等待：
+
+* 每次 `write(2)` 最多把 `uio` 里的数据按 64 字节分块，`kebab_console_write()`
+  先 `uiomove()` 再 `console_write()`。`uiomove()` 可能缺页/睡眠，但那时**没有
+  持有任何控制台锁**，所以不会把控制台锁带进缺页路径。
+* `console_write()` 在环满时用 `lck_mtx_lock()` 睡在 `flush_lock` 上；持有者每
+  16 个字符放一次锁，且持锁期间只做 `kebab_usb_log()`（非阻塞）和
+  `kebab_early_putc()`（纯内存写），所以等待是有界的。
+* 最坏情况：一个不停写 stderr 的程序会被面板绘制速度限流。`kebab_early_putc()`
+  每个字符要写 16×2×8×2 = 512 个 32 位像素到 Normal Non-Cacheable 内存，16 个
+  字符就是 8192 次写；换算下来控制台吞吐大约几十 KB/s，写几 MB 的程序会慢，但
+  **不会卡死**，也不会丢它自己的字节（`console_write()` 会一直重试到全部入环）。
+* USB 环（16 KB）是另一回事：它满了就丢（`kebab_usb_log()` 的设计），所以大量
+  输出在 USB 侧会截断，面板侧仍然完整。这不是 `0145` 引入的（`kebab_usb_log()` 从 `0091` 起就是丢字节语义）。
+* 唯一会 panic 的上下文是“关中断 + 非 suspend”：`console_io_allowed()`
+  （`serial_console.c:194`）会 `panic("Console I/O from interrupt-disabled
+  context")`。这正是 `0146` 用 `EDEADLK` 提前挡掉的情况。
+
+### 4. `kebab_early_putc()` 与面板
+
+* 它不取任何锁（`osfmk/arm64/kebab_early.c`），只读写静态的
+  `early_row/early_col` 和帧缓冲；`kebab_early_clear_row()`/`clear_screen()`
+  也是纯内存循环。所以它不可能和显示驱动形成锁环。
+* 帧缓冲地址：`arm_vm_init.c:2193` 调 `kebab_early_relocate(KEBAB_EARLY_FB_VA)`，
+  把 `0x9C000000` 的 splash 帧缓冲映射成常驻内核 VA。这个映射没有拆除路径。
+* “显示拆掉”在代码里只有两种形态，都不会 fault：
+  * `kebab_early_disable()` 只在 `serial_init()` 返回真（有 UART）时调用
+    （`osfmk/arm/arm_init.c:567`）。kebab 没有 UART，所以它一直是 0；即便置位，
+    `kebab_early_putc()` 也只是立刻返回。
+  * `kebabfb_noconsole=1` 时 `AppleCLCD::present()` 把 `kebab_console_muted`
+    置 1（`KebabFramebuffer.cpp:428`），`_cnputc()` 在 tee 之后跳过面板绘制
+    （`serial_console.c:302`）。USB 照旧，panic 照旧（`!panic_active()` 才 muting）。
+* 显示驱动 `AppleCLCD` 只在自己的 workloop 里用 `IOLock fLock`，从不调用
+  `kebab_early_putc()`；两边唯一的交互是“同一块物理内存的像素”，最多互相覆盖，
+  不会死锁。
+
+### 5. 读语义、EOF 与 `cpus=1`
+
+* `kebab_console_read()` 是 `return 0;`——链接后的代码就是 `mov w0, #0; ret`
+  两个指令（第 6 小节）。它不取锁、不等待、不循环，所以**内核里没有自旋**。
+* `kebab_console_select()` 用 `seltrue()`，两个方向都报就绪。readable 不是疏忽：
+  `read()` 立刻返回 0，EOF 本身就是可读条件，`/dev/null` 就是这个语义。改成
+  “只报 writable”会让 `select()` 在一个 `read()` 立刻完成的 fd 上永久阻塞——
+  对 launchd 的 job 来说，“永远等不到输入”比“看到 EOF”更糟。
+* 一个**忽略 EOF** 的程序（`while (read(fd, ...) == 0);` 或 select 循环）会在
+  用户态 100% 空转。但它：
+  1. 不持有任何内核锁（`cnread()` 甚至没有加锁路径）；
+  2. 用户态是可抢占的，`cpus=1` 上定时器中断照样调度；
+  3. USB 事件线程是内核线程（`ud_thread`，`kebab_usb.c:2106`），优先级高于
+     用户态，它自己的 1 ms 轮询（`delay(1000)`，睡眠或内核态 spin）不受用户态
+     空转影响。
+  所以这个空转是“费电/占 CPU”，不是“饿死 USB”。真正会饿死的是内核态关中断
+  自旋，而这条路径上不存在。
+* 真机上要观察的是：有没有**内核**线程被 console 拖住（例如 USB 事件线程的
+  `ud_poll_locked()` 周期变长）。判据见第 9 小节。
+
+### 6. 内核 printf 未变：读代码 + 构建级证据
+
+**读代码**：`0146` 的 diff 只有 `bsd/dev/kebab_ufs.c` 一个文件。`printf` 的调用图
+（第 1 小节）里没有任何 `cn*` 函数；`_cnputc()` 的 KEBAB tee 一行没动。
+
+**构建级证据**（同一棵 `dxb/xnu`，`0145` 构建 vs `0145+0146` 构建，同一 KDK、
+同一 clang、同一 flags）：
+
+| 目标文件 | 0145 构建 | 0145+0146 构建 | 结论 |
+| --- | --- | --- | --- |
+| `osfmk/DEVELOPMENT/serial_console.o` | `ddaf5f37…` | `ddaf5f37…` | 逐字节相同 |
+| `osfmk/DEVELOPMENT/printf.o` | `ada5038a…` | `ada5038a…` | 逐字节相同 |
+| `bsd/DEVELOPMENT/subr_prf.o` | `60d4a026…` | `60d4a026…` | 逐字节相同 |
+| `bsd/DEVELOPMENT/cons.o` | `384ba360…` | `384ba360…` | 逐字节相同（`0146` 不碰 cons.c） |
+| `bsd/DEVELOPMENT/kebab_usb.o` | `84447f86…` | `84447f86…` | 逐字节相同（`0146` 不碰 kebab_usb.c） |
+| `bsd/DEVELOPMENT/kebab_ufs.o` | `3c64cfe5…` | `6fe98af8…` | 只有这里变了 |
+
+这些 `.o` 在两次构建里都被重新编译过（mtime 都是新构建时间），不是“make 跳过了
+所以相同”。链接后的内核里也能直接看到改动生效：
+
+```
+fffffe00064e7538 <_kebab_console_write>:
+  ...
+  bl   _ml_get_interrupts_enabled
+  cbz  w0, 0xfffffe00064e75dc        ; 中断关着 -> 走拒绝分支
+  ...
+fffffe00064e75dc: mov w0, #11        ; EDEADLK
+```
+
+```
+fffffe00064e7530 <_kebab_console_read>:
+  mov w0, #0                         ; return 0 (EOF)
+  ret
+fffffe00064e7614 <_kebab_console_select>:
+  b   _seltrue
+```
+
+**警告**：用构建日志里那条原始 clang 命令行（`-DKEBAB`、同一套 `-I`、同样从
+`build/xnu.obj/.../bsd/DEVELOPMENT` 目录跑）对 `bsd/dev/kebab_ufs.c` 做
+`-fsyntax-only`，打补丁前后都是 16 条警告，其中 13 条是那个文件里原有的
+`-Wdeclaration-after-statement`；`cons.c` 0 条，`kebab_usb.c` 45 条（未改动）。
+全量构建日志里 `kebab_ufs.c` 也正好是这 13 条，没有新增。
+
+**构建结果**：
+
+| 项 | 值 |
+| --- | --- |
+| 配置 | `DEVELOPMENT ARM64 KEBAB`，macOS 13.5，KDK `KDK_13.5_22G74.kdk` |
+| 源码树 | `dxb/xnu` 重置到 `1b191cb` 后按文件名顺序应用 125 个 kebab 补丁 |
+| 产物 | `build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab` |
+| 大小 | 17,209,120 字节（与 `0145` 相同，守护分支落在对齐填充里） |
+| SHA-256 | `087e951635130c12e185026b92200523ad5af2006b6ab26c665c72331bf299f2` |
+| 对照（`0145`） | 17,209,120 字节，`231a577f66834dfbde1d3f34212aae50cc140d8cdb7e10b242def83a857f5302` |
+
+### 7. `0146` 改了什么（只改 `bsd/dev/kebab_ufs.c`）
+
+1. `kebab_console_write()` 开头加一个上下文守护：
+
+   ```c
+   if (!ml_get_interrupts_enabled()) {
+           return EDEADLK;
+   }
+   ```
+
+   注释里写明它是 `docs/BRING-UP-STATE.md` 第 76 节的不变量：用户态字节进入内核
+   控制台的唯一入口必须是可睡眠的线程上下文。关中断意味着 USB 传输门
+   （`ud_enter()` 会关中断整个临界区）或中断处理程序——前者会让 drain 卡在 USB
+   端口后面，后者会让 `console_io_allowed()` 直接 panic。今天唯一的调用者是
+   `write(2)`，这条分支不可达；将来谁把它接进别的上下文，会得到一个可诊断的
+   `EDEADLK`，而不是在需要日志时丢掉日志。
+2. 修正 `0145` 的错误注释（“Select reports the device writable and never
+   readable”），并在 `kebab_console_select()` 上写清楚为什么 `seltrue()` 两个
+   方向都报是对的（第 5 小节）。
+3. 加 `#include <arm/machine_routines.h>`（`ml_get_interrupts_enabled()` 的声明；
+   `kebab_usb.c` 一直这么包含）。
+
+**没有改**：`bsd/dev/arm/cons.c`、`osfmk/console/serial_console.c`、
+`osfmk/kern/printf.c`、`bsd/kern/subr_prf.c`、`kebab_usb.c`、`kebab_ufs.h`。
+
+### 8. 未来回归怎么抓
+
+两条互补的防线：
+
+1. **运行时守护（`0146`，内核里）**：`kebab_console_write()` 的 `EDEADLK`。只要
+   有人把这条路径接进关中断的上下文（USB 传输门、中断处理程序），第一次写就会
+   失败并留下 errno，而不是把控制台锁死在 USB 端口后面。
+2. **离线架构检查（`0146`，`scripts/check-console-path.py`，接进
+   `scripts/verify-all.sh` 的 `consolepath` 项）**：在“整串补丁应用后的树”上检查
+   六个结构性不变量，板子不在也能跑：
+
+   | 检查 | 断言 |
+   | --- | --- |
+   | `printf-path` | `printf.c`/`serial_console.c`/`subr_prf.c` 不得出现 `cn*` 或 `kebab_console_*` |
+   | `console-device` | `cons.c` 里不得有 `console_write()`/`_cnputc()`/`kebab_usb_log()` 这类 sink，且必须仍然路由到 `kebab_console_write()` |
+   | `console-write` | `kebab_console_write()` 必须调用 `console_write()`，且不得调用 `kebab_usb_log()`/`kebab_usb_log_flush()` |
+   | `console-guard` | `kebab_console_write()` 必须保留 `ml_get_interrupts_enabled()` + `EDEADLK` |
+   | `console-read` | `kebab_console_read()` 的函数体必须就是 `return 0;`，不得有 `while`/`for`/`thread_block`/`delay` 之类 |
+   | `console-select` | `kebab_console_select()` 必须仍然用 `seltrue()` |
+
+   检查器自己做过反向验证：把守护删掉、往写路径塞一句
+   `kebab_usb_log_flush()`、往 `printf.c` 里塞 `cnwrite(`、往 `cons.c` 里塞
+   `console_write(`，四种改动都会让对应项 FAIL。它读的是去掉注释和字符串之后的
+   代码，所以注释里提到这些符号不会误报。
+
+`verify-all.sh` 的实际输出（本机，2026-10-28）：
+
+```
+patches            PASS    125/125 patches apply in filename order to 1b191cb (xnu-8796.141.3)
+consolepath        PASS    6 console write-path invariants hold
+panel              PASS    committed table and header match the pinned source
+...
+verdict: PASS  (8 passed, 0 failed, 4 skipped)
+```
+
+### 9. 真机上才能定的
+
+这一节只能证明“读代码和构建层面没有死锁”，下面这些仍然要等板子：
+
+1. launchd 及子进程写 `/dev/console` 时，USB 口上的输出是否完整、CRLF 是否只补
+   一次；`kebab_early_putc()` 的面板绘制是否跟得上（观察 USB 是否被面板拖慢）。
+2. 有没有**内核**线程被 console 拖住：最直接的判据是 `kebab_usb_panic_spin()`
+   之前的 USB 心跳（host 侧 CDC 是否持续收到字节），以及
+   `KEBAB KDP STATE: ... owners=.../.../...` 这行里的 `owner`/`rx_owner` 是否
+   长期非 0。用户态空转不会出现在这里。
+3. 大量 stderr 输出时，`write(2)` 的实际吞吐和延迟（面板绘制是主要成本）。如果
+   慢到影响 launchd，可选项是给用户态写加一个“只进 USB 环、不画面板”的开关，
+   但那是性能问题，不是死锁问题。
+4. 如果确有子进程忽略 EOF 空转（第七十五节第 7 条），再决定是否给 console 加
+   一个阻塞读的输入环；在那之前，`read()` 返回 EOF 是正确语义。
