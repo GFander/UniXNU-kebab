@@ -10244,3 +10244,310 @@ verdict: PASS  (8 passed, 0 failed, 4 skipped)
    但那是性能问题，不是死锁问题。
 4. 如果确有子进程忽略 EOF 空转（第七十五节第 7 条），再决定是否给 console 加
    一个阻塞读的输入环；在那之前，`read()` 返回 EOF 是正确语义。
+
+## 七十七、大文件写入的 HFS+ 边界
+
+> 结论先说：这条路径**不是**移植层自己写的简化 writer，而是 Apple 完整的
+> HFS+（`hfs-627.100.6`）；8 个 inline extent 用满之后，第 9 个 extent 会走
+> extents overflow B-tree 的 `CreateExtentRecord()`/`UpdateExtentRecord()`，
+> 这条路径在源码里存在且被编译进内核。按 16 GiB 卷的几何和安装器的写粒度，
+> 最大的 592,101,376 B 文件应当只有 1 个 extent；8 个 inline extent 有极大
+> 余量。**不需要改 HFS+ 写路径**。本节把证据、边界和只有真机能定的部分分开
+> 写清楚；新增的 0147 只是把本节依赖的格式常量钉成编译期断言，不改行为。
+>
+> 板子仍然 stranded：下面是代码审计、卷格式实测和构建结果，不是 592 MB
+> 真机写入结果。真机上完整创建过的最大文件目前仍是 `dyld` 的 922,912 B；
+> 64,028,672 B 是 64 MiB 旧卷写满后的部分写入，不是完整文件。
+
+### 1. 用的是哪套 HFS+ 写路径
+
+`bsd/kebab_hfs/` 是 Apple OSS `hfs-627.100.6` 的源码，由
+`0080-kebab-hfs-sources.patch` 整体加入，`0081-kebab-hfs-build.patch` 把它
+编进内核。写路径的 vnode 操作表在 `hfs_vnops.c`：
+
+```
+bsd/kebab_hfs/core/hfs_vnops.c:7379
+    { &vnop_write_desc, (VOPFUNC)hfs_vnop_write },   /* write */
+```
+
+`hfs_vnop_write()` 在 `hfs_readwrite.c:336`；它调用的 `ExtendFileC()` 在
+`FileExtentMapping.c:836`；块分配在 `VolumeAllocation.c:982` 的
+`BlockAllocate()`；B-tree 在 `BTree*.c` 和 `hfs_btreeio.c`。这一整条链
+都不是 KEBAB 新写的。
+
+**逐文件对照。** 2026-10-28 把 `bsd/kebab_hfs/core/` 与
+`apple-oss-distributions/hfs` 的 tag `hfs-627.100.6` 做了 SHA-256 对照：
+两边都有 66 个 `.c`/`.h`，**62 个逐字节相同**；只有 4 个不同：
+
+| 文件 | 差异 | 是否写路径 |
+| --- | --- | --- |
+| `hfs_readwrite.c` | 只有 `iotypeflag = (uint32_t)(uintptr_t)ap->a_data;` 一处 64 位指针 cast（`hfs_readwrite.c:2382`，ioctl） | 否 |
+| `hfs_vfsops.c` | KEBAB 的脏根卷挂载策略、低磁盘通知常量、`KEBAB HFS:` 挂载日志 | 否 |
+| `hfs_vfsutils.c` | KEBAB 的脏非日志根卷放行、日志 replay 检查 | 否 |
+| `hfs_iokit.h` | `CONFIG_PROTECT` 的 `#if` 包住 AppleKeyStore 声明 | 否 |
+
+`FileExtentMapping.c`、`VolumeAllocation.c`、`BTree.c`、`BTreeAllocate.c`、
+`BTreeTreeOps.c`、`BTreeWrapper.c`、`hfs_btreeio.c`、`hfs_vnops.c`、
+`hfs_extents.c` 全部与 Apple 原版逐字节相同。也就是说，extent 溢出、位图分配、
+B-tree 增长这些逻辑没有被移植层替换或裁剪。
+
+`hfs_extents.c` 里另有一套 `hfs_ext_find()`/`hfs_ext_replace()` iterator API，
+但本 build 没有任何调用者（`grep` 全树只命中定义和头文件）；真正给普通文件
+写 extent 的是 `FileExtentMapping.c`。不要因为看到 `hfs_extents.c` 就以为
+那是写路径。
+
+`kebab_hfs_compat.h` 把 `CONFIG_HFS_RBTREE` 清掉，但这份 Apple 源码的
+`hfs_isrbtree_active()` 本来就固定返回 0（`VolumeAllocation.c:4105`），分配走
+bitmap + free-extent cache；这个开关不影响 extent overflow。
+
+### 2. Extent overflow：8 个 inline extent 之后到底发生什么
+
+HFS+ 的 catalog 文件记录里，每个 fork 内联 8 个 `HFSPlusExtentDescriptor`
+（`kHFSPlusExtentDensity = 8`，`hfs_format.h:166`；descriptor 8 字节，
+key 10 字节）。第 9 个不连续的 extent 必须写进 extents overflow B-tree。
+
+写路径里这条分支是明确实现的：
+
+- `ExtendFileC()` 先 `SearchExtentFile()`（`FileExtentMapping.c:1680`）；
+- 当前记录未满，直接改 `foundData[foundIndex]`，走
+  `UpdateExtentRecord()`（`FileExtentMapping.c:1805`），B-tree 记录用
+  `BTReplaceRecord()`（`1858`）回写；
+- 满 8 个时，`foundIndex == numExtentsPerRecord`（`1133`），构造新 key
+  （`fileID`、fork type、`startBlock = nextBlock`），清零 8 个 slot，然后
+  `CreateExtentRecord()`（`1162`）；后者在 `FileExtentMapping.c:273`，最终
+  `BTInsertRecord()`（`310`）插入 `vcb->extentsRefNum` 指向的 extents B-tree；
+- 如果 B-tree 自己长不动，`BTInsertRecord()` 返回 `btNoSpaceAvail`
+  （`fsBTFullErr`）；`ExtendFileC()` 也把 `fxOvFlErr` 转成 `dskFulErr`，
+  并把刚分配的 extent 退掉（`1163`-`1170`）。
+
+**如果这条路径不存在，失败点会在哪里？** 不是“文件到 64 MB”，而是
+**第 9 个不连续 extent 的那次分配**：
+
+1. `ExtendFileC()` 发现当前记录 8 个 slot 已满；
+2. 没有可写的 overflow record，插入失败；
+3. `ExtendFileC()` 返回 `dskFulErr`（`-34`）；
+4. `hfs_readwrite.c:563` 的 `MacToVFSError()` 把它映射成 **ENOSPC**；
+5. `hfs_vnop_write()` 若已有部分进展，会按 POSIX 返回 short write，
+   `vn_rdwr()` 的 `resid != 0` 让安装器得到 **EIO**；若一点也没写进去，
+   安装器直接看到 **ENOSPC**。
+
+安装器会把这条错误打印成
+`FAIL <path> write failed (error 28)` 或 `(error 5)`（`kebab_install.c:1044`），
+然后 `ki_abort("write failed", error)`。这就是“看起来像磁盘满或 I/O 错误”的
+来源。
+
+但这条路径**存在**，所以不会在第 9 个 extent 停。更直接的旁证是 64 MiB
+旧卷上的实测：那个卷写了 64,028,672 B 才 ENOSPC。如果每个 64 KiB 写都变成
+一个独立 extent，8 个 extent 只能覆盖 512 KiB，早在第 9 个 extent 就失败了；
+它没有，说明 allocator 至少把相邻分配合并了（下面的第 3 节），或者 overflow
+record 已经在工作。两种解释都排除了“第 9 个 extent 必死”。
+
+### 3. 分配策略与碎片：为什么 592 MB 应该是 1 个 extent
+
+`hfs_vnop_write()` 默认带 `kEFDeferMask`（`hfs_readwrite.c:422`），只有单次
+请求 ≥ 1 MiB（`HFS_MAX_DEFERED_ALLOC`，`hfs.h:92`）才立即分配；安装器每次
+`vn_rdwr()` 是 64 KiB，所以 9,035 次写（9,034 个 64 KiB 加一个 48 KiB）都只记在
+`ff_unallocblocks`（别名 `ff_data.cf_vblocks`）里。
+
+真正落盘发生在 UBC 把脏页推下去的时候：`hfs_vnop_blockmap()` 看到
+`VNODE_WRITE` 且 `ff_unallocblocks != 0`，调用
+`ExtendFileC(hfsmp, fp, 0, 0, kEFAllMask | kEFNoClumpMask, ...)`
+（`hfs_readwrite.c:3483`），把**所有** deferred 块一次性变成真实 extent。
+`ExtendFileC()` 的策略是：
+
+1. 先按 `wantContig = true` 要一整段连续空间（`HFS_ALLOC_FORCECONTIG`，
+   `VolumeAllocation.c:1072`）；
+2. 失败才退化成“有多少拿多少”，并可能分多次 `BlockAllocate()`；
+3. 每次拿到的 `actualStartBlock` 如果正好等于上一个 extent 的末尾
+   （`startBlock`），就直接把上一个 extent 的 `blockCount` 加大
+   （`FileExtentMapping.c:1117`-`1125`），不会新建 extent。
+
+所以顺序写、空卷的场景下，一整个文件就是一个 extent。即使 deferred 分配被
+分几批 materialize，只要下一批的起点接在上一个 extent 末尾，仍然合并。
+
+**这个 16 GiB 卷的实测几何**（`/tmp/KebabRoot.img`，`newfs_hfs -b 4096
+-c c=256,e=32,a=8 -I c=256,e=32,a=8`）：
+
+| 项 | 值 |
+| --- | ---: |
+| block size | 4096 |
+| total blocks | 4,194,304 |
+| free blocks | 4,193,878（16,382 MiB） |
+| allocated blocks | 426 |
+| `nextAllocation` | 23,545（约 92 MiB） |
+| allocation bitmap | 128 blocks（512 KiB） |
+| extents B-tree | 32 blocks，4096 B/node，1 extent（block 129..160） |
+| catalog B-tree | 256 blocks，8192 B/node，1 extent（block 249..504） |
+| attributes B-tree | 8 blocks（block 161..168） |
+
+位图里只有三段已分配：`0..168`、`249..504`、`4,194,303`。从
+`nextAllocation = 23,545` 到卷尾 `4,194,302` 是**连续的 4,170,759 个空闲块**
+（约 15.9 GiB）。安装器的最大文件 592,101,376 B 正好是
+**144,556 个 4096 B 块**，只占这段连续空间的 3.47%，也占全部空闲块的 3.45%。
+
+具体到安装序列：
+
+- 44 个文件合计 3,330,359,296 B = **813,076 块**，占空闲块的 19.39%；
+- 安装完（cache 流）还剩 **3,380,802 块**（12.895 GiB），再加 `base.kist`
+  的 396 块也够；
+- 每个文件按 64 KiB 顺序写，文件之间由安装器串行执行；本卷元数据区尚有
+  余量，正常情况下不会插进正在写的文件的连续数据段。
+
+**最坏现实碎片**：catalog 叶节点在 44 条记录之间偶尔分裂，可能在某个文件
+的数据段之前或之后插一个 8 KiB 元数据块。那最多让一个文件变成 2 个 extent；
+extents B-tree 自己的增长也可能占一个 extent 级别的块，但都在数据段之外。
+**8 个 inline extent 对 592 MB 仍然足够。**
+
+**真正的上界**：即使极端到每 64 KiB 一个 extent，592 MB 也只有
+`ceil(9,034.99) = 9,035` 个 extent；每个 overflow record 装 8 个，需要
+**1,130 条记录**。extents B-tree 初始 32 个 4 KiB node、31 个空闲，并且自己
+还能再长出最多 7 个 extent（每个 clump 32 块，合计约 1 MiB、约 256 个 node），
+大约能放 1.3 万条记录，装得下。只有 4 KiB 级碎片（144,556 个 extent、18,070 条记录）按最小的 32 块 clump
+估算才会超过这棵树；本卷 81% 空闲、写粒度 64 KiB，不会出现这种碎片。
+
+### 4. 尺寸与偏移：592 MB 离所有 32 位边界都很远
+
+| 量 | 类型/位置 | 本安装的值 | 边界 |
+| --- | --- | ---: | ---: |
+| 文件逻辑大小 | `HFSPlusForkData.logicalSize`，u64 | 592,101,376 | 2^63-1 |
+| 写调用偏移/长度 | `hfs_vnop_write()` 的 `off_t`、`int64_t bytesToAdd` | < 2^31 | 2^63-1 |
+| extent 查找块号 | `SearchExtentFile()`：`(u_int32_t)(filePosition / blockSize)` | 144,556 | 2^32 块 = 16 TiB @4K |
+| extent 起点/长度 | `HFSPlusExtentDescriptor.startBlock/blockCount`，u32 | 144,556 块以内 | 2^32-1 块 |
+| fork 块计数 | `ff_blocks`/`c_blocks`，u32 | 144,556 | 2^32-1 |
+| 单次 `vn_rdwr` | `resid`/`n`，int，最多 64 KiB | 65,536 | 2^31-1 |
+| 安装器偏移 | `ki_entry.offset` u64，传给 `off_t` | < 2^31 | 2^63-1 |
+
+`SearchExtentFile()` 的 `u_int32_t` 块号是数据路径上最明显的一个 32 位截断
+点（`MapFileBlockC()` 里的 `firstFABN`/`nextFABN` 同样是 u32 块号），但单位是
+allocation block，4 KiB 块下能表示 16 TiB；592 MB 只用了 144,556，离上限有
+约 4.5 个数量级的余量。文件字节偏移本身一路是
+`off_t`/`int64_t`，不存在 2 GiB 或 4 GiB 的截断。
+
+chunked write 的 signed/unsigned 也检查过：`hfs_vnop_write()` 里
+`writelimit`、`bytesToAdd`、`actualBytesAdded` 都是 `off_t`/`int64_t`；
+`uio_resid()` 是 `ssize_t`，每块 64 KiB；`hfs_vnop_read()` 的 `offset`、
+`filesize` 也是 `off_t`。没有“4 GiB 以上变负”的路径。即使某个辅助函数
+误用 32 位有符号 `int`，592 MB < 2^31，也不会在本次安装里暴露；但实际数据
+路径没有这种误用。
+
+### 5. 空闲空间记账与卷尾行为
+
+- 挂载时 `vcb->freeBlocks = SWAP_BE32(vhp->freeBlocks)`（`hfs_vfsutils.c:284`），
+  本卷为 4,193,878；`allocLimit = totalBlocks`（`hfs_vfsutils.c:283`）。
+- 每次分配在 `hfs_block_alloc_int()` 里 `hfsmp->freeBlocks -= extent->blockCount`
+  （`VolumeAllocation.c` 的 mark-allocated 段），同时
+  `BlockMarkAllocatedInternal()`（`2784`）在 allocation bitmap 里置位；
+  bitmap 块通过 `ReleaseBitmapBlock(..., true)` → `buf_bdwrite()`（`2030`）
+  延迟写回。
+- `hfs_freeblks(hfsmp, wantreserve)`（`hfs_vfsutils.c:2054`）返回
+  `freeBlocks - reserveBlocks - loanedBlocks/lockedBlocks`；root 卷的
+  `reserveBlocks` 是 1% 且不超过 250 MiB（`hfs_vfsops.c:512`，
+  `hfs.h:133`-`134`），本卷约 167 MiB。`statfs` 的 `f_bavail` 走这个值
+  （`hfs_vfsops.c:2260`），安装器的 `ki_space()` 也用它做预检。
+- 44 个文件 813,076 块分配完，`freeBlocks` 从 4,193,878 降到 3,380,802；
+  这些数都远小于 2^32，没有 32 位回绕。
+- **卷尾**：`BlockAllocate()` 在 `freeBlocks == 0` 或找不到连续段时返回
+  `dskFulErr`；`ExtendFileC()` 把 `dskFulErr` 交给
+  `MacToVFSError()` → **ENOSPC**。如果只分配到最后一段的一部分，
+  `hfs_vnop_write()` 会返回 short write，`vn_rdwr()` 的 resid 让安装器看到
+  **EIO**。两条路都会在越界前停下，不会把卷写穿。本安装只用 19.4% 的空闲
+  空间，离卷尾还有 12.9 GiB，不会触发。
+- 非日志卷的 `hfs_volupdate()` 不会立刻把 `freeBlocks` 刷回 volume header
+  （`hfs_vfsops.c:3482`，只有 journaled 才 flush header）；内存里的计数和
+  bitmap 是准的，崩溃后旧 header 的 freeBlocks 可能偏大，但 bitmap 仍是
+  权威，`fsck_hfs` 可修。这不是本次 44 文件安装的失败点。
+
+### 6. 读回：close 会先把数据真正推下去
+
+安装器写完一个文件后 `vnode_close()`，然后按路径重新 lookup、读回、算
+SHA-256（`kebab_install.c:1184`-`1196`）。这条读回不是只读 UBC 缓存：
+
+- `vnode_close()` 丢掉最后一个 usecount 后触发 `hfs_vnop_inactive()`
+  （`hfs_cnode.c:579`）；
+- `hfs_vnop_inactive()` → `hfs_cnode_teardown()`，后者在
+  `hfs_cnode.c:229` 调 `hfs_filedone()`；
+- `hfs_filedone()` 调 `cluster_push(vp, IO_CLOSE)`（`hfs_cnode.c:703`），
+  把脏页推给 `hfs_vnop_pageout()`；pageout 的 `hfs_vnop_blockmap()` 以
+  `VNODE_WRITE` materialize 所有 deferred 块，然后 `hfs_update()`（`711`）
+  把正确的 size/blocks/extents 写回 catalog。
+
+读回本身走 `hfs_vnop_read()`（`hfs_readwrite.c:103`）→ `cluster_read()`；
+`hfs_vnop_blockmap()` 对读请求调用 `MapFileBlockC()`
+（`FileExtentMapping.c:367`），后者用 `SearchExtentFile()` 找 FCB 或
+extents B-tree 里的记录，并把 `availableBytes` 限制到当前 extent 的末尾。
+跨 extent 的读会由 cluster code 再调一次 blockmap，所以在 extent 边界上
+不会把相邻 extent 的数据混在一起。
+
+`ki_hash_file()` 用 64 位 `off` 和 64 KiB `vn_rdwr()` 逐块读
+（`kebab_install.c:556`），`ubc_getsize()` 给出 592,101,376，循环 9,035 次，
+SHA-256 覆盖全部字节。只要能写成功，这条读回路径在 592 MB 上没有额外上限。
+
+### 7. 离线能证明到什么程度
+
+**没有**可以直接跑内核 writer 的 host harness。树里与 HFS 有关的 host 工具
+只有：
+
+- `scripts/build-newfs-hfs.sh`：编译 `newfs_hfs`/`fsck_hfs`，只能造卷/查卷，
+  不能往卷里写文件；
+- `scripts/make-root-volume.py`：造 16 GiB 镜像和 VEXT 流，只写/读卷格式，
+  不调用内核 HFS+ writer；
+- `scripts/check-shared-cache.py`、`verify-shared-cache-plan.py`：解析
+  用户态缓存文件，和 HFS 写路径无关。
+
+Apple 源码里有 `HFS_ALLOC_TEST` / `HFS_EXTENTS_TEST` 的编译开关，但 vendored
+树里没有 `main`、没有测试向量、没有 Makefile，按任务要求没有从零搭 harness。
+
+本次实际做的离线检查是：
+
+1. 用现成的 16 GiB `/tmp/KebabRoot.img` 解析 volume header、allocation bitmap
+   和两个 B-tree 头，得到上面的 4,193,878 空闲块、1 extent 的 extents 文件、
+   32 个 4 KiB node 等几何；
+2. 把 `bsd/kebab_hfs/core/` 的 66 个 `.c`/`.h` 与 Apple tag `hfs-627.100.6`
+   做 SHA-256 对照，确认 62 个逐字节相同、4 个差异都在写路径之外；
+3. 在 `FileExtentMapping.o` 里确认 `_ExtendFileC`、`_SearchExtentFile` 等符号
+   被编进内核，而不是只存在于源码；
+4. 0147 在 `kebab_hfs_compat.h` 里把 `kHFSPlusExtentDensity == 8`、
+   `sizeof(HFSPlusExtentDescriptor) == 8`、`kHFSPlusExtentKeyMaximumLength == 10`
+   钉成编译期断言：以后若有人换成另一套 HFS 源，构建会先失败，而不是让本节
+   的算术悄悄失效。
+5. `scripts/verify-all.sh` 把 126 个 kebab patch 按文件名顺序应用到
+   `1b191cb` 并 PASS；同一套 patch 的 `KEBAB`/`DEVELOPMENT` clean full
+   build 通过，产出 `kernel.development.kebab`，SHA-256
+   `6e77347680b0766f61a8aeff3399bdfa5d62bc91e5651a9eaf1168ec9d84326c`
+   （2026-10-28，`build-0147-full.log`）。`kebab_hfs_compat.h` 本身没有
+   产生任何 warning。
+
+这些能证明“实现是完整的、卷几何足够、代码被编进内核”，**不能**证明
+“592 MB 在这块板子的内存压力/供电/中断环境下一定跑完”。后者只能上真机。
+
+### 8. 只有真机能定的
+
+1. **592 MB 完整写入 + 读回 SHA-256**。预期 `big.kist` 的
+   `INST DONE entries 1 ok 1 skipped 0 bytes 592101376` 和随后的
+   `SAME ...symbols`；这是第一个 >64 MiB 的完整文件。
+2. **实际 extent 数**。当前没有 debug 计数器；真机上可以通过在
+   `CreateExtentRecord()` 首次命中时加临时打印，或 dump catalog 记录的
+   8 个 extent + extents B-tree 来确认。按本节分析预期是 1 个，最多 2-3 个。
+3. **44 文件全量安装**。3.3 GB 总量、44 条 `OK`、安装后剩余约 12.9 GiB；
+   同时观察 UBC 脏页压力下是否出现长时间 pageout。
+4. **掉电/重启后的持久性**。非日志卷 + 脏根卷放行意味着没有 fsck 兜底；
+   `hfs_filedone()` 在 close 时 flush，但整个安装结束后没有显式
+   `vfs_sync`/unmount。真机上应在 `INST DONE` 后等一次 sync 或重启验证
+   44 个文件仍在。
+5. **反复安装/删除后的碎片**。本节的 8-extent 余量基于空卷；如果以后在
+   已经碎片化的卷上重装，extents B-tree 的余量需要重新算。
+6. **卷写满时的错误形态**。卷尾可能是 ENOSPC，也可能是 short write 导致的
+   EIO；本次 16 GiB 安装不会到卷尾，但错误注入测试可以确认安装器打印的是
+   `write failed (error 28)` 还是 `(error 5)`。
+
+### 9. 一句话边界
+
+- **实现**：Apple 完整 HFS+ `hfs-627.100.6`，extents overflow B-tree 在写路径里。
+- **extent 判决**：第 9 个不连续 extent 才需要 overflow record；本卷 592 MB
+  预期 1 个 extent，8 个 inline extent 足够；overflow 路径存在，真要有碎片也
+  能接住 64 KiB 级的 9,035 个 extent。
+- **最大可证明文件**：按卷几何和代码，592,101,376 B（144,556 块）可创建；
+  格式上限是该卷的 4,193,878 个空闲块（约 16.0 GiB，扣元数据）。
+- **已实测最大完整文件**：922,912 B（`dyld`）；64,028,672 B 是旧 64 MiB 卷
+  写满的部分写入。
+- **需要改的代码**：无。0147 只加编译期格式断言，不改写路径。

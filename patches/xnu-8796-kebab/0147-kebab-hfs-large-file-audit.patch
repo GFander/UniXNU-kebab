@@ -1,0 +1,38 @@
+hfs: pin the extent format constants the large-file audit relies on
+
+BRING-UP-STATE 77 audits whether the HFS+ write path can create the
+592,101,376-byte file the P1 install needs.  The writer is Apple's full
+hfs-627.100.6 implementation, including the extents overflow B-tree, and
+the audit's arithmetic assumes an 8-entry inline extent record, an
+8-byte extent descriptor and a 10-byte extent key.
+
+Pin those three format constants with compile-time assertions in the
+KEBAB compat header.  A future source import that changes them will fail
+the build instead of silently invalidating the audit.
+
+No behavior change.
+
+--- a/bsd/kebab_hfs/kebab_hfs_compat.h
++++ b/bsd/kebab_hfs/kebab_hfs_compat.h
+@@ -23,6 +23,21 @@
+ #include "core/kext-config.h"
+ #include "hfs_encodings/hfs_encodings_internal.h"
+ 
++/*
++ * BRING-UP-STATE 77: the P1 install writes a 592,101,376-byte file through
++ * hfs_vnop_write.  The writer is Apple's full hfs-627.100.6 implementation,
++ * including the extents overflow B-tree, and the audit's arithmetic is tied
++ * to these on-disk format constants.  Fail the build if a future source
++ * import changes them, so the audit is redone instead of silently invalid.
++ */
++#include "core/hfs_format.h"
++_Static_assert(kHFSPlusExtentDensity == 8,
++    "HFS+ extent audit (BRING-UP-STATE 77) assumes 8 inline extents");
++_Static_assert(sizeof(HFSPlusExtentDescriptor) == 8,
++    "HFS+ extent descriptor is not the audited 8 bytes");
++_Static_assert(kHFSPlusExtentKeyMaximumLength == 10,
++    "HFS+ extent key is not the audited 10 bytes");
++
+ /* iOS kext-config.h enables AppleKeyStore; this board has none. */
+ #undef CONFIG_PROTECT
+ #define CONFIG_PROTECT 0
