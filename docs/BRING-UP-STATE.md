@@ -12421,8 +12421,22 @@ git submodule update --init --depth 1 kits/NativePrelink
 | 供体解密 | iOS 的 kernelcache 是加密的 | **未解决** |
 | slide 与 early_security_init 地址 | 由供体计算 | 未算 |
 
-**解密是最大的未知。** sheng 的 `kernelcache_sha256` 是解密后的哈希，说明他们拿到了明文；
-我们目前没有解密能力。这一条不解决，后面全部无法进行。
+**这一条已经解决，而且不需要解密。** 供体 `kernelcache.release.iphone10b` 的 IM4P 净荷
+是 **LZFSE 压缩**，不是加密：没有 `encr` 标签，前四字节是 `bvx2`。用 `lzfse` 模块解压后得到
+50,937,884 字节，magic 为 `0xbebafeca`，即 **MH_FILESET**（iOS 12 之后的 kext 集合格式），
+里面能直接搜到 `com.apple.filesystems.apfs`、`com.apple.driver.AppleMobileFileIntegrity`、
+`com.apple.iokit.IOStorageFamily` 等 bundle id。
+
+```
+解压产物  /home/albert/kernelcache.iphone10b.macho
+长度      50,937,884 字节
+SHA-256   1c1e2d36a0c0daef07e4c6d2ac544eed08ab8e17a045ce8f95195a099bdadcc4
+格式      MH_FILESET（不是单一 Mach-O）
+依赖      pip install --user --break-system-packages lzfse
+```
+
+因此清单里原本标注为"未解决"的那一项，改为"已解决，输入就绪"。剩下的未知只有
+符号集与构建产物形态两项。
 
 ### 三、roots 集合
 
