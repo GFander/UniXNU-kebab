@@ -1,0 +1,58 @@
+feat(touch): power both rails at bring-up, clock the SE, report the identity
+
+The S3908 on SE13 is unpowered on every reboot: both supplies are RPMh-owned
+VREG registers that come back 0x00, and an unpowered target aborts the
+transfer with GENI state 0x21 instead of NACKing.  0130 proved the TCS path
+by hand; this makes the bring-up take it.
+
+  - kebab_touch_power=1 (default off) makes kebab_touch_start() read each
+    enable through the same SPMI observer path PWR? uses, skip a rail that
+    already reads 0x80, send one ENABLE for ldoa13 and then one for ldoc1
+    through kebab_spmi_vrm_enable() -- the console path 0130 was measured
+    through, so the encoder, the whitelist, the per-rail one-shot gate and
+    the dead-channel rule are the ones already on hardware -- wait for each
+    TCS to complete, and read the rail back.  One line per rail carries the
+    state-machine outcome, CMD_STATUS and the enable before and after.
+  - the sequence still requires kebab_vrm_write=1: kebab_touch_power is a
+    second gate on the same writes, not a replacement for the safety one.
+  - 15 ms after the second rail and 20 ms after the reset release, both
+    inside the 10-20 ms the hardware was measured in.
+  - failure is soft: the driver prints which rail failed and why, marks
+    touch unavailable and returns -1.  kebab_touch_start() becomes int for
+    that and bsd_init ignores the value; nothing panics, loops or retries,
+    and a failed command already closes the channel for the boot.
+  - the boot path now enables the SE13 branch clock before it touches GENI.
+    That is not cosmetic: 0116 measured that the first GENI register group
+    written without the clock stops the console, and this bring-up stopped
+    at the same line ("se_init: force default, output ctrl") until TOUCHCLK
+    was moved into the boot path, which is the step TOUCHSE has always done
+    from the console.  With it, se_init completes and the identify command
+    reaches 0x4b.
+  - identify prints the payload as raw bytes before decoding it, and then
+    locates the part number instead of indexing a fixed offset: the part
+    string is the only self-evident field, and version/mode are the two
+    bytes in front of it in the vendor struct.  Anything in front of those
+    is printed as an uninterpreted prefix.  A message of the wrong kind is
+    now read out of the stream instead of being decoded as the answer to
+    the next command.
+  - boot info names the answer: code 0x0e on this firmware is
+    "not implemented", which is what an application-mode firmware does.
+  - a chip that is not in application mode is reported as such and the
+    driver stops.  The old code sent CMD_RUN_APPLICATION_FIRMWARE and
+    re-identified, which assumed a mode switch this driver never verified;
+    making the touch firmware run needs a firmware download, which stays
+    out of scope.  When the report program is not accepted the poll thread
+    is not started either, because polling would only print a framing error
+    every interval on the only readable channel this port has.
+
+Measured on hardware (boot_b, kebab_touch=1 kebab_touch_boot=1
+kebab_touch_power=1 kebab_vrm_write=1 kebab_pon_write=1): ldoa13 EN 0x00 ->
+0x80 and ldoc1 EN 0x00 -> 0x80, each with phase COMPLETE and CMD_STATUS
+0x00010101; TOUCHCLK moves 0x52008 from 0x063c83c0 to 0x0e3c83c0; the reset
+pulse runs; identify answers message 0x10 with 24 bytes
+
+  a5 03 01 01 73 33 39 30 38 2d 31 35 2e 30 2e 30 00 00 00 00 b9 ba 3c 00
+
+which is part number "s3908-15.0.0", version 0x01, mode 0x01 -- application
+mode, so the touch firmware is already running and no download is needed.
+get-boot-info answers 0x0e (not implemented) with no payload.

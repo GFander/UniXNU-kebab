@@ -12363,3 +12363,24 @@ panic 泵本身没有改动，仍然是纯原子量的无锁循环。非 panic �
    `KEBAB PANIC: no console to service; rebooting via PSCI SYSTEM_RESET` 后复位；
 4. 发一个诊断类命令（如 `KEBAB_TOUCH_*`、`RPMH`），应当被拒绝一行且泵继续存活，
    这证明拒绝路径本身不会把板子弄丢。
+
+## 八十五、CS_SIGNED 与签名身份的传播
+
+真机上 launchd 报：
+
+```
+initproc exited -- exit reason namespace 7 subcode 0x1
+failed to get the code signing identity for a boot-task
+(mount-phase-1, /sbin/mount) errno: 2
+```
+
+`cs_identity_get()` 在 `proc_getcsflags()` 没有 `CS_SIGNED` 时直接返回 NULL；`csproc_get_blob()`
+同样因为缺这一位而拒绝给出 blob。`CS_SIGNED` 在 Apple 平台由 AMFI 设置，所以它被刻意排除在
+`exec_mach_imgact()` 的 `load_result.csflags` 掩码之外，而这个移植从未设置它 —— 于是所有身份与
+权限路径都表现为"进程未签名"。
+
+`0154` 从同一个 `CS_VALID` 判定里传播它：已经通过 `cs_blob_init_validated()` 的 blob 带
+`CS_VALID`，因此该标志不可能比 blob 证明的更多。`kebab_cs` 仍然决定信任与否，这里只让进程标志
+与已附加的 blob 保持一致。
+
+真机需要确认：`mount-phase-1` 越过身份检查；`launchd` 不再以 namespace 7 退出。
