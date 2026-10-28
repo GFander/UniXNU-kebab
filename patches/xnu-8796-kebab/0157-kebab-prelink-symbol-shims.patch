@@ -20,16 +20,20 @@ index 76153d5..8debdf0 100644
 +bsd/dev/kebab_prelink_shims.c	standard
 diff --git a/bsd/dev/kebab_prelink_shims.c b/bsd/dev/kebab_prelink_shims.c
 new file mode 100644
-index 0000000..8b8b229
+index 0000000..75571ee
 --- /dev/null
 +++ b/bsd/dev/kebab_prelink_shims.c
 @@ -0,0 +1,55 @@
 +/* SPDX-License-Identifier: BSD-2-Clause-Patent */
 +/*
-+ * Compatibility symbols that the iOS 16.7.16 kexts import but this kernel does
-+ * not define.  They exist so the native prelink can bind the storage stack; the
-+ * IOMMU and DART entries belong to drivers this port does not run, so they are
-+ * stubs that complain once if anything actually calls them.
++ * Compatibility symbols the iOS 16.7.16 kexts import but this kernel does not
++ * define.  The C identifiers deliberately omit the Mach-O leading underscore, so
++ * a definition of `tty_trylock` produces the symbol `_tty_trylock` the donors
++ * import.  Naming them with the underscore would yield `__tty_trylock`.
++ *
++ * vfs_getvfs_with_vfsops() is real, because APFS calls it.  The rest are stubs;
++ * the reviewed apfs closure imports none of them, but they exist so a future
++ * closure binds instead of failing at link time.
 + */
 +#include <sys/param.h>
 +#include <sys/mount.h>
@@ -40,11 +44,7 @@ index 0000000..8b8b229
 +static void
 +kebab_prelink_unexpected(const char *name)
 +{
-+	static int warned;
-+	if (!warned) {
-+		warned = 1;
-+		printf("KEBAB PRELINK: %s called but not implemented\n", name);
-+	}
++	printf("KEBAB PRELINK: %s called but not implemented\n", name);
 +}
 +
 +/* Real: return the mount with this fsid whose vfsops match. */
@@ -55,27 +55,27 @@ index 0000000..8b8b229
 +	return (mp != NULL && mp->mnt_op == ops) ? mp : NULL;
 +}
 +
-+void *_ml_amcc_error_inject_register(void) { kebab_prelink_unexpected("_ml_amcc_error_inject_register"); return NULL; }
-+void *_ml_dcs_error_inject_register(void) { kebab_prelink_unexpected("_ml_dcs_error_inject_register"); return NULL; }
-+void *_ml_mem_fault_report_enable_register(void) { kebab_prelink_unexpected("_ml_mem_fault_report_enable_register"); return NULL; }
-+void *_nvme_ppl_get_desc(void) { kebab_prelink_unexpected("_nvme_ppl_get_desc"); return NULL; }
-+void *_pmap_cs_configuration(void) { kebab_prelink_unexpected("_pmap_cs_configuration"); return NULL; }
-+void *_pmap_has_iofilter_protected_write(void) { kebab_prelink_unexpected("_pmap_has_iofilter_protected_write"); return NULL; }
-+void *_pmap_iommu_alloc_contiguous_pages(void) { kebab_prelink_unexpected("_pmap_iommu_alloc_contiguous_pages"); return NULL; }
-+void *_pmap_iommu_init(void) { kebab_prelink_unexpected("_pmap_iommu_init"); return NULL; }
-+void *_pmap_iommu_ioctl(void) { kebab_prelink_unexpected("_pmap_iommu_ioctl"); return NULL; }
-+void *_pmap_iommu_iovmalloc(void) { kebab_prelink_unexpected("_pmap_iommu_iovmalloc"); return NULL; }
-+void *_pmap_iommu_iovmfree(void) { kebab_prelink_unexpected("_pmap_iommu_iovmfree"); return NULL; }
-+void *_pmap_iommu_map(void) { kebab_prelink_unexpected("_pmap_iommu_map"); return NULL; }
-+void *_pmap_iommu_unmap(void) { kebab_prelink_unexpected("_pmap_iommu_unmap"); return NULL; }
-+void *_sart_get_desc(void) { kebab_prelink_unexpected("_sart_get_desc"); return NULL; }
-+void *_t6000dart_get_desc(void) { kebab_prelink_unexpected("_t6000dart_get_desc"); return NULL; }
-+void *_t6000dart_vo_tte(void) { kebab_prelink_unexpected("_t6000dart_vo_tte"); return NULL; }
-+void *_t8020dart_get_desc(void) { kebab_prelink_unexpected("_t8020dart_get_desc"); return NULL; }
-+void *_t8020dart_vo_tte(void) { kebab_prelink_unexpected("_t8020dart_vo_tte"); return NULL; }
-+void *_t8110dart_get_desc(void) { kebab_prelink_unexpected("_t8110dart_get_desc"); return NULL; }
-+void *_t8110dart_max_translation_levels(void) { kebab_prelink_unexpected("_t8110dart_max_translation_levels"); return NULL; }
-+void *_t8110dart_vo_tt_index(void) { kebab_prelink_unexpected("_t8110dart_vo_tt_index"); return NULL; }
-+void *_t8110dart_vo_tte(void) { kebab_prelink_unexpected("_t8110dart_vo_tte"); return NULL; }
-+void *_tty_trylock(void) { kebab_prelink_unexpected("_tty_trylock"); return NULL; }
-+void *_uat_get_desc(void) { kebab_prelink_unexpected("_uat_get_desc"); return NULL; }
++void *ml_amcc_error_inject_register(void) { kebab_prelink_unexpected("_ml_amcc_error_inject_register"); return NULL; }
++void *ml_dcs_error_inject_register(void) { kebab_prelink_unexpected("_ml_dcs_error_inject_register"); return NULL; }
++void *ml_mem_fault_report_enable_register(void) { kebab_prelink_unexpected("_ml_mem_fault_report_enable_register"); return NULL; }
++void *nvme_ppl_get_desc(void) { kebab_prelink_unexpected("_nvme_ppl_get_desc"); return NULL; }
++void *pmap_cs_configuration(void) { kebab_prelink_unexpected("_pmap_cs_configuration"); return NULL; }
++void *pmap_has_iofilter_protected_write(void) { kebab_prelink_unexpected("_pmap_has_iofilter_protected_write"); return NULL; }
++void *pmap_iommu_alloc_contiguous_pages(void) { kebab_prelink_unexpected("_pmap_iommu_alloc_contiguous_pages"); return NULL; }
++void *pmap_iommu_init(void) { kebab_prelink_unexpected("_pmap_iommu_init"); return NULL; }
++void *pmap_iommu_ioctl(void) { kebab_prelink_unexpected("_pmap_iommu_ioctl"); return NULL; }
++void *pmap_iommu_iovmalloc(void) { kebab_prelink_unexpected("_pmap_iommu_iovmalloc"); return NULL; }
++void *pmap_iommu_iovmfree(void) { kebab_prelink_unexpected("_pmap_iommu_iovmfree"); return NULL; }
++void *pmap_iommu_map(void) { kebab_prelink_unexpected("_pmap_iommu_map"); return NULL; }
++void *pmap_iommu_unmap(void) { kebab_prelink_unexpected("_pmap_iommu_unmap"); return NULL; }
++void *sart_get_desc(void) { kebab_prelink_unexpected("_sart_get_desc"); return NULL; }
++void *t6000dart_get_desc(void) { kebab_prelink_unexpected("_t6000dart_get_desc"); return NULL; }
++void *t6000dart_vo_tte(void) { kebab_prelink_unexpected("_t6000dart_vo_tte"); return NULL; }
++void *t8020dart_get_desc(void) { kebab_prelink_unexpected("_t8020dart_get_desc"); return NULL; }
++void *t8020dart_vo_tte(void) { kebab_prelink_unexpected("_t8020dart_vo_tte"); return NULL; }
++void *t8110dart_get_desc(void) { kebab_prelink_unexpected("_t8110dart_get_desc"); return NULL; }
++void *t8110dart_max_translation_levels(void) { kebab_prelink_unexpected("_t8110dart_max_translation_levels"); return NULL; }
++void *t8110dart_vo_tt_index(void) { kebab_prelink_unexpected("_t8110dart_vo_tt_index"); return NULL; }
++void *t8110dart_vo_tte(void) { kebab_prelink_unexpected("_t8110dart_vo_tte"); return NULL; }
++void *tty_trylock(void) { kebab_prelink_unexpected("_tty_trylock"); return NULL; }
++void *uat_get_desc(void) { kebab_prelink_unexpected("_uat_get_desc"); return NULL; }
