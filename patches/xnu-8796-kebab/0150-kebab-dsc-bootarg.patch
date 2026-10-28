@@ -1,0 +1,54 @@
+dsc: parse kebab_dsc as a string so kebab_dsc=1 is honoured
+
+kebab_dsc_boot() read the switch with PE_parse_boot_argn() into char arg[256].
+For "kebab_dsc=1" the boot-arg parser classifies the value as numeric and
+argnumcpy() writes a 32-bit integer 1 into the buffer, so arg is "\x01", not
+"1"; the strcmp(arg, "1") check never matched and the absolute-directory
+check rejected the switch.  The phase C boot printed
+
+    KEBAB DSC: kebab_dsc= is not an absolute directory; ignored
+
+and never built or mapped the plan, so the whole DSC path stayed untested.
+
+Use PE_parse_boot_arg_str(), which forces the string form: "kebab_dsc=1" now
+selects the default directory, "kebab_dsc=0" stays disabled and an absolute
+path still overrides the directory.
+
+kebab_dsc_map is a numeric switch and is unchanged in behaviour; spell out
+that it is numeric and assign (map != 0) explicitly.  The boot argument form
+used by the docs and the orchestrator is kebab_dsc=1 kebab_dsc_map=1, and it
+now works.
+
+diff --git a/bsd/kern/kebab_dyldcache.c b/bsd/kern/kebab_dyldcache.c
+index 89eefef..192c792 100644
+--- a/bsd/kern/kebab_dyldcache.c
++++ b/bsd/kern/kebab_dyldcache.c
+@@ -1868,7 +1868,15 @@ kebab_dsc_boot(void)
+ 	uint64_t slide = 0;
+ 	int error;
+ 
+-	if (!PE_parse_boot_argn("kebab_dsc", arg, sizeof(arg)) || arg[0] == '\0') {
++	/*
++	 * This is a string argument, not a number.  PE_parse_boot_argn() treats
++	 * "kebab_dsc=1" as numeric and argnumcpy() stores a 32-bit integer in
++	 * the char buffer, so the old check compared "\x01" against "1" and
++	 * silently ignored the switch.  PE_parse_boot_arg_str() forces the
++	 * string form; both "kebab_dsc=1" and an absolute directory work.
++	 */
++	if (!PE_parse_boot_arg_str("kebab_dsc", arg, sizeof(arg)) ||
++	    arg[0] == '\0') {
+ 		return;
+ 	}
+ 	if (strcmp(arg, "0") == 0) {
+@@ -1884,8 +1892,9 @@ kebab_dsc_boot(void)
+ 		    kebab_dsc_dir);
+ 		return;
+ 	}
+-	if (PE_parse_boot_argn("kebab_dsc_map", &map, sizeof(map)) && map != 0) {
+-		kebab_dsc_map_enabled = TRUE;
++	/* kebab_dsc_map is a genuine numeric switch: 1 enables the mapping. */
++	if (PE_parse_boot_argn("kebab_dsc_map", &map, sizeof(map))) {
++		kebab_dsc_map_enabled = (map != 0);
+ 	}
+ 	if (PE_parse_boot_argn("kebab_dsc_slide", &slide, sizeof(slide))) {
+ 		kebab_dsc_slide_requested = TRUE;

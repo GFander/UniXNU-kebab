@@ -11894,8 +11894,10 @@ panic 路径没有改：`ud_panic_reboot()` 仍然直接调用 `ud_platform_rest
 * `patches/xnu-8796-kebab/0148-kebab-install-durability.patch`：流末 fsync、
   VFS_SYNC、SYNCHRONIZE CACHE、冷读、复位前同步。
 * `patches/xnu-8796-kebab/0149-kebab-install-free-delta.patch`：`SYNC` 命令、
-  `INST FREE`、`INST? vh`、orchestrator 的自由块断言。序列总数为 128 个补丁
-  （原 126 个加 0148、0149）。
+  `INST FREE`、`INST? vh`、orchestrator 的自由块断言。
+* `patches/xnu-8796-kebab/0150-kebab-dsc-bootarg.patch`：`kebab_dsc=1` 的
+  boot-arg 解析修复（字符串形式，而不是 numeric 写进 char 缓冲区）。序列总数为
+  129 个补丁（原 126 个加 0148、0149、0150）。
 
 ### 9. 2026-10-28 修复后实测
 
@@ -11941,8 +11943,35 @@ statfs free 不会随安装变化**，即使 `VFS_SYNC` 已经完成；HFS+ 把 
 cache 后 4,151,506 → 3,338,430，正好 813,076 块）。orchestrator 的断言因此只用
 `INST FREE` 的设备卷头数字，不看同一 boot 的 statfs。
 
-这次实测覆盖 skel/base/cache 和两次普通 REBOOT；最终镜像（phase C）和断电测试
-仍未执行，不能据此宣称整条 P1 已完成。
+这次实测覆盖 skel/base/cache 和两次普通 REBOOT。phase C（init 启动）已经尝试，
+但还没有进入 DSC，原因见第 10 节；最终镜像和断电测试仍未完成，不能据此宣称整条
+P1 已完成。
+
+### 10. phase C 的两个硬件发现（2026-10-28）
+
+第一次 phase C 启动（去掉 `kebab_noinit=1`/`kebab_install=1`，加
+`kebab_dsc=1 kebab_dsc_map=1`）得到两个与安装落盘无关、但必须记录的发现：
+
+1. **`kebab_dsc=1` 此前根本没有启用 DSC。** `kebab_dsc_boot()` 用
+   `PE_parse_boot_argn("kebab_dsc", arg, sizeof(arg))` 读进 `char arg[256]`。
+   `=1` 被 boot-arg parser 判成 numeric，`argnumcpy()` 往 char 缓冲区写了一个
+   32 位整数 1，于是 `arg` 是 `"\x01"` 而不是 `"1"`；`strcmp(arg, "1")` 永远
+   不成立，最后打印
+   `KEBAB DSC: kebab_dsc= is not an absolute directory; ignored`，整个
+   plan/map/dyld 路径没有执行。`0150` 改用 `PE_parse_boot_arg_str()`，并明确
+   `kebab_dsc_map` 是 numeric switch；`kebab_dsc=1` 现在会选择默认目录
+   `/System/Library/Caches/com.apple.dyld`，绝对路径仍可覆盖，`=0` 仍关闭。
+   在 0150 之前的 phase C 结果不能用来判断 DSC、dynamic-config 页或 slide。
+2. **`kebabkdp=1` 下 userspace panic 会停在 KDP，而不是按 0134 重启。** launchd
+   因 `mount-phase-1` 缺少可执行文件触发
+   `userspace panic: boot task failure: mount-phase-1 ...` 后，日志是
+   `Using serial KDP.` / `Waiting for remote debugger connection.`；向 COM7 发
+   `REBOOT` 和 `FASTBOOT` 都没有回应（后者写超时），板子需要物理断电重启。
+   这与没有 `kebabkdp=1` 时 0134 直接 PSCI 复位的 runbook 不同：调试 KDP 时
+   不要把"panic 后会自动回来"当成前提。
+
+`mount-phase-1` 可执行文件缺失是另一个 worker 的用户态任务，和本节的文件系统
+落盘无关；等它补齐后，phase C 才能同时验证 DSC 映射和 launchd 的 boot task。
 
 本节的代码已经编译进 `kernel.development.kebab`；第 7 小节中未在硬件上执行的部分
 不写成"已验证"。
