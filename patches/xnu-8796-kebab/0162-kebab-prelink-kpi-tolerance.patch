@@ -1,0 +1,117 @@
+--- a/libkern/c++/OSKext.cpp
++++ b/libkern/c++/OSKext.cpp
+@@ -6775,6 +6775,30 @@
+ 	}
+ 
+ 	mh = (kernel_mach_header_t *)linkedExecutable->getBytesNoCopy();
++	/*
++	 * A prelinked entry is not guaranteed to point at a Mach-O header.  The
++	 * kernel-interface stubs (com.apple.kpi.*) are codeless symbol-versioning
++	 * records whose _PrelinkExecutableLoadAddr values are offsets from the
++	 * original __PRELINK_TEXT base; a relinked cache can place other bytes at
++	 * those offsets.  Such an entry has no executable and nothing to slide, so
++	 * treat it like a codeless kext instead of parsing arbitrary bytes.
++	 */
++	if (mh == NULL || (vm_offset_t)mh < VM_MIN_KERNEL_ADDRESS ||
++	    linkedExecutable->getLength() < sizeof(*mh) ||
++	    (mh->magic != MH_MAGIC_64 && mh->magic != MH_CIGAM_64)) {
++		printf("OSKext: prelinked executable for %s at %p has no Mach-O header; nothing to slide\n",
++		    getIdentifierCString(), (void *)mh);
++		result = kOSReturnSuccess;
++		goto finish;
++	}
++	if (mh->magic == MH_CIGAM_64) {
++		/* This kernel cannot slide a byte-swapped Mach-O image. */
++		printf("OSKext: prelinked executable for %s at %p is byte-swapped; nothing to slide\n",
++		    getIdentifierCString(), (void *)mh);
++		result = kOSReturnSuccess;
++		goto finish;
++	}
++
+ 	if (kernel_mach_header_is_in_fileset(mh)) {
+ 		// kexts in filesets are slid as part of collection sliding
+ 		result = kOSReturnSuccess;
+--- a/osfmk/arm/machine_routines.h
++++ b/osfmk/arm/machine_routines.h
+@@ -656,6 +656,16 @@
+ 	addr64_t paddr, unsigned long long data);
+ 
+ void ml_static_mfree(
++	vm_offset_t,
++	vm_size_t);
++
++/*
++ * Boot-time prelink teardown only: like ml_static_mfree(), but rounds an
++ * unaligned start down and the end up to page boundaries instead of asserting.
++ * The strict ml_static_mfree() keeps its alignment assert for every other
++ * caller, so an alignment bug outside the prelink path still fails hard.
++ */
++void ml_static_mfree_rounded(
+ 	vm_offset_t,
+ 	vm_size_t);
+ 
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -1824,6 +1824,42 @@
+ #if     DEBUG
+ 	kprintf("ml_static_mfree: Released 0x%x pages at VA %p, size:0x%llx, last ppn: 0x%x, +%d bad\n", freed_pages, (void *)vaddr, (uint64_t)size, ppn, bad_page_cnt);
+ #endif
++}
++
++/*
++ *	Routine:        ml_static_mfree_rounded
++ *	Function:       Prelink teardown variant of ml_static_mfree().
++ *
++ *	The emitter lays __PRELINK_TEXT/__PRELINK_INFO out on 4 KiB boundaries,
++ *	while this kernel's PAGE_SIZE is 16 KiB.  A segment edge can therefore be
++ *	aligned for the emitter but not for ml_static_mfree().  Expand the range
++ *	out to the containing pages and report the adjustment.  This entry point is
++ *	used only by the boot-time prelink teardown; ml_static_mfree() itself keeps
++ *	its hard alignment assert.
++ */
++void
++ml_static_mfree_rounded(
++	vm_offset_t vaddr,
++	vm_size_t   size)
++{
++	vm_offset_t start;
++	vm_offset_t end;
++	vm_offset_t unrounded_end;
++
++	if (size == 0) {
++		return;
++	}
++
++	start = trunc_page_64(vaddr);
++	unrounded_end = vaddr + size;
++	end = round_page_64(unrounded_end);
++
++	if (start != vaddr || end != unrounded_end) {
++		kprintf("ml_static_mfree: rounding prelink range %p..%p to %p..%p\n",
++		    (void *)vaddr, (void *)unrounded_end, (void *)start, (void *)end);
++	}
++
++	ml_static_mfree(start, end - start);
+ }
+ 
+ /*
+--- a/libsa/bootstrap.cpp
++++ b/libsa/bootstrap.cpp
+@@ -329,7 +329,7 @@
+ 			return;
+ 		}
+ 
+-		ml_static_mfree((vm_offset_t)prelinkTextSegment->vmaddr, prelinkTextSegment->vmsize);
++		ml_static_mfree_rounded((vm_offset_t)prelinkTextSegment->vmaddr, prelinkTextSegment->vmsize);
+ 	}
+ #endif /* CONFIG_KEXT_BASEMENT */
+ 
+@@ -349,7 +349,7 @@
+ 	if (prelinkInfoSegment) {
+ 		if (prelinkInfoSegment->vmsize != 0) {
+ 			freedPrelinkInfo = true;
+-			ml_static_mfree((vm_offset_t)prelinkInfoSegment->vmaddr,
++			ml_static_mfree_rounded((vm_offset_t)prelinkInfoSegment->vmaddr,
+ 			    (vm_size_t)prelinkInfoSegment->vmsize);
+ 		}
+ 	}
