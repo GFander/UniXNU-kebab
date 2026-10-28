@@ -165,7 +165,8 @@ PANIC_RE = re.compile(
     r"KEBAB REBOOT: PEHaltRestart returned)"
 )
 FAIL_RE = re.compile(
-    r"^(INST ABORT|INST TIMEOUT|VOL ABORT|VOL FAIL|VOL TIMEOUT|"
+    r"^(INST ABORT|INST TIMEOUT|INST busy|INST refused|"
+    r"VOL ABORT|VOL busy|VOL FAIL|VOL TIMEOUT|"
     r"FAIL |panic\(cpu|Debugger called:|KEBAB PANIC|"
     r"KEBAB USB: panic console cannot be serviced)"
 )
@@ -201,6 +202,16 @@ VOL_DISK_RE = re.compile(
     # the "VOL?" prefix only exists on the literal printf()s in
     # kebab_vol_status().  There is no "VOL? DISK" line in the kernel.
     r"^VOL DISK vh bsize (\d+) blocks (\d+) free (\d+)"
+)
+# kebab_vol_status() prints the root mount's MNT_RDONLY state.  On a
+# kebab_vol=1 boot the old root must be read-only: a writable root could write
+# a cached block over the volume being replaced.  The kernel also logs
+# "KEBAB VOL: kebab_vol=1 keeps the old root read-only", but that line is
+# printed by mountroot before the USB console is running, so VOL? root is the
+# only console-visible proof.
+VOL_ROOT_RE = re.compile(
+    r"^VOL\? root (ro|rw) space (\d+) free of (\d+) bytes bsize (\d+) "
+    r"blocks (\d+) free (\d+)$"
 )
 HFS_RE = re.compile(
     r"^KEBAB HFS: (\S+): block size (\d+), total blocks (\d+) "
@@ -1023,11 +1034,20 @@ class PanicDetector:
                      "will re-enumerate and the next boot starts again",
             )
         if FAIL_RE.search(line):
+            hint = ("the kernel prints the reason after FAIL/ABORT; do not "
+                    "retry the same stream blindly")
+            if line.startswith(("INST busy", "VOL busy")):
+                hint = ("a previous stream is still open; the kernel clears it "
+                        "after 60 s (INST TIMEOUT / VOL TIMEOUT).  Wait for "
+                        "that line, then retry; do not reboot mid-write")
+            elif line.startswith("INST refused"):
+                hint = ("INST BEGIN was refused before the stream was taken; "
+                        "check kebab_install=1, rootrw=1 and ufsrw=1 on the "
+                        "running image")
             raise DeviceRefused(
                 self.phase, "the device not to refuse or time out",
                 "device line: %s" % line,
-                hint="the kernel prints the reason after FAIL/ABORT; do not "
-                     "retry the same stream blindly",
+                hint=hint,
             )
         if self.armed and BOOT_BANNER_RE.search(line):
             raise PanicDetected(
@@ -1643,14 +1663,24 @@ class Orchestrator:
             raise ValueError(kind)
         self.send_cmd(cmd, "INST BEGIN %d" % size)
         try:
-            line = self.wait(lambda l: begin_re.match(l) is not None,
-                             self.opts.phase_timeout, "INST BEGIN response")
+            line = self.wait(
+                lambda l: begin_re.match(l) is not None
+                or l.startswith("INST busy") or l.startswith("INST refused"),
+                self.opts.phase_timeout, "INST BEGIN response")
         except TimeoutError:
             self.fail("send.begin", "INST BEGIN %d write chunk %d" % (size, CHUNK),
                       "no INST BEGIN within %.0fs" % self.opts.phase_timeout,
                       hint="check that kebab_install=1 and rootrw=1 are on the "
                            "running image")
             raise AssertionError("unreachable")
+        if line.startswith("INST busy"):
+            self.fail("send.begin", "INST BEGIN %d write chunk %d" % (size, CHUNK),
+                      line, hint="a previous INST stream is still open; wait for "
+                      "INST TIMEOUT (60 s without a chunk), then retry")
+        if line.startswith("INST refused"):
+            self.fail("send.begin", "INST BEGIN %d write chunk %d" % (size, CHUNK),
+                      line, hint="the kernel refused the stream before taking it; "
+                      "check kebab_install=1, rootrw=1 and ufsrw=1")
         m = begin_re.match(line)
         assert m
         if int(m.group(1)) != size or m.group(2) != "write" or int(m.group(3)) != CHUNK:
@@ -1941,13 +1971,26 @@ class Orchestrator:
             m = VOL_DISK_RE.match(line)
             if m:
                 got.update(disk_bsize=int(m.group(1)), disk_blocks=int(m.group(2)))
+            m = VOL_ROOT_RE.match(line)
+            if m:
+                got.update(root=m.group(1), root_free=int(m.group(2)),
+                           root_total=int(m.group(3)), root_bsize=int(m.group(4)))
         if not got:
-            self.fail("vol.status", "VOL? gated 1 ... writable 1, partition and "
-                      "on-disk volume header", " | ".join(lines) or "no answer",
+            self.fail("vol.status", "VOL? gated 1 ... writable 1, root ro and "
+                      "the on-disk volume header", " | ".join(lines) or "no answer",
                       hint="the vol image must carry kebab_vol=1")
         if got.get("gated") != 1 or got.get("writable") != 1:
             self.fail("vol.status", "VOL? gated 1 ... writable 1", " | ".join(lines),
                       hint="kebab_vol=1 and ufsrw=1 must both be present")
+        if got.get("root") != "ro":
+            # This is the safety precondition of the whole volume step, not a
+            # cosmetic check: kebab_vol=1 exists to keep the mounted old HFS+
+            # from writing a cached block over the volume being imprinted.
+            self.fail("vol.status", "VOL? root ro (kebab_vol=1 keeps the old "
+                      "root read-only)", "VOL? root %s" % got.get("root", "absent"),
+                      hint="root-rw means kebab_vol=1 did not force the old "
+                           "root read-only; do not imprint the volume from "
+                           "this boot")
         if got.get("chunk") != CHUNK:
             self.fail("vol.status", "chunk %d" % CHUNK, " | ".join(lines))
         if "partition" not in got or "disk_blocks" not in got:
@@ -1958,10 +2001,11 @@ class Orchestrator:
                       hint="VOL? prints the on-disk header from kv_read_vh(); "
                            "without it VOL BEGIN refuses the write")
         self.checkpoint("C-VOL-STATUS", "vol.status",
-                        "VOL? gated 1 writable 1 chunk 65536, VOL DISK vh "
-                        "bsize/blocks",
-                        "partition %s, disk %s blocks"
-                        % (human(got.get("partition", 0)), got.get("disk_blocks")))
+                        "VOL? gated 1 writable 1 chunk 65536 root ro, VOL DISK "
+                        "vh bsize/blocks",
+                        "partition %s, root %s, disk %s blocks"
+                        % (human(got.get("partition", 0)), got.get("root"),
+                           got.get("disk_blocks")))
 
     def vol_send(self, vs: VextStream, dry: bool) -> None:
         size = vs.file_size
@@ -1990,6 +2034,7 @@ class Orchestrator:
                     or l.startswith("VOL OLD bytes ")
                     or l.startswith("VOL BEGIN ")
                     or l.startswith("VOL refused")
+                    or l.startswith("VOL busy")
                     or l.startswith("VOL ABORT")
                     or l.startswith("VOL disabled"),
                     self.opts.phase_timeout, "VOL header / VOL BEGIN")
@@ -2001,10 +2046,15 @@ class Orchestrator:
                     begin_line = line
                     break
                 else:
+                    hint = ("VOL requires kebab_vol=1, ufsrw=1 and a "
+                            "readable old HFS+ header")
+                    if line.startswith("VOL busy"):
+                        hint = ("a previous VOL stream is still open; the "
+                                "kernel clears it after 60 s (VOL TIMEOUT).  "
+                                "Wait for that line, then retry")
                     self.fail("vol.%s" % expect_mode,
                               "the old header and VOL BEGIN", line,
-                              hint="VOL requires kebab_vol=1, ufsrw=1 and a "
-                                   "readable old HFS+ header")
+                              hint=hint)
         except TimeoutError:
             self.fail("vol.%s" % expect_mode, "the old header and VOL BEGIN",
                       "no VOL BEGIN within %.0fs" % self.opts.phase_timeout,

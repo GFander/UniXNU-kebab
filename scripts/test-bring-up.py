@@ -342,7 +342,10 @@ class FakeDevice:
                  silent_panic: bool = False,
                  bad_attrs: str = "",
                  panel_banner: bool = False,
-                 mount_line: bool = True):
+                 mount_line: bool = True,
+                 vol_root: str = "ro",
+                 inst_busy: bool = False,
+                 inst_refused: bool = False):
         self.fx = fixture
         self.console = console
         self.serial = "kebab-test"
@@ -364,6 +367,15 @@ class FakeDevice:
         # mount_line=False omits the KEBAB HFS geometry line while still
         # printing the registration line, which is the mandatory-line failure.
         self.mount_line = mount_line
+        # kebab_vol=1 must keep the old root read-only.  vol_root="rw" models
+        # the safety precondition failing, which VOL? reports and the
+        # orchestrator now requires.
+        self.vol_root = vol_root
+        # A stale INST session prints "busy" instead of BEGIN; a gated or
+        # misconfigured boot prints "refused".  Both used to be invisible to
+        # the waiter and cost a full phase timeout.
+        self.inst_busy = inst_busy
+        self.inst_refused = inst_refused
         self.mode = "kernel"
         self.pending_image = None
         self.current_image = None
@@ -478,6 +490,12 @@ class FakeDevice:
             total = self.volume_blocks * 4096
             self.console.feed("VOL? gated 1 active 0 dry 0 chunk 65536 writable 1")
             self.console.feed("VOL? partition 245895331840 bytes (234500 MiB)")
+            self.console.feed("VOL? root %s space %d free of %d bytes bsize "
+                              "4096 blocks %d free %d"
+                              % (self.vol_root,
+                                 max(0, self.volume_blocks - 426) * 4096, total,
+                                 self.volume_blocks,
+                                 max(0, self.volume_blocks - 426)))
             # kv_print_vh("DISK", ...) does not repeat the "VOL?" command
             # prefix: the kernel prints "VOL DISK vh ...".
             self.console.feed("VOL DISK vh sig 0x482b version 4 attributes "
@@ -500,7 +518,12 @@ class FakeDevice:
             self.begin_vol(size, dry=False)
         elif cmd.startswith("INST BEGIN "):
             size = int(cmd.split()[2])
-            self.begin_inst(size)
+            if self.inst_busy:
+                self.console.feed("INST busy: 123 of 456 bytes already consumed")
+            elif self.inst_refused:
+                self.console.feed("INST refused: a stream needs a non-zero length")
+            else:
+                self.begin_inst(size)
         elif cmd.startswith("INST CHECK "):
             path = cmd[len("INST CHECK "):]
             cur = self.files.get(path)
@@ -952,6 +975,22 @@ def main(argv=None) -> int:
                                         "--work-dir", fixture.dir,
                                         "--log-dir", os.path.join(log_root, "nomount")],
                  fixture, 3, mount_line=False),
+            # kebab_vol=1 must leave the old root read-only.  VOL? prints that
+            # state; the orchestrator must fail the checkpoint when it is rw.
+            Case("vol-root-rw", ["--from", "vol", "--to", "vol",
+                                 "--work-dir", fixture.dir,
+                                 "--log-dir", os.path.join(log_root, "rootrw")],
+                 fixture, 3, vol_root="rw"),
+            # A stale stream prints busy/refused instead of BEGIN.  Both must
+            # fail immediately with the device line, not after 180 s.
+            Case("inst-busy", ["--from", "base", "--to", "base",
+                               "--work-dir", fixture.dir,
+                               "--log-dir", os.path.join(log_root, "instbusy")],
+                 fixture, 3, volume_blocks=4194304, inst_busy=True),
+            Case("inst-refused", ["--from", "base", "--to", "base",
+                                  "--work-dir", fixture.dir,
+                                  "--log-dir", os.path.join(log_root, "instrefused")],
+                 fixture, 3, volume_blocks=4194304, inst_refused=True),
             Case("resume", ["--from", "auto", "--work-dir", fixture.dir,
                             "--log-dir", os.path.join(log_root, "resume")],
                  fixture, 0,
@@ -1076,6 +1115,14 @@ def main(argv=None) -> int:
                 if case.name == "skel-bad-attrs":
                     assert "skel.attrs" in err, err[-3000:]
                     assert "uid 501 gid 20" in err, err[-3000:]
+                if case.name == "vol-root-rw":
+                    assert "VOL? root ro" in err, err[-3000:]
+                    assert "root rw" in err or "VOL? root rw" in err, err[-3000:]
+                if case.name == "inst-busy":
+                    assert "INST busy" in err, err[-3000:]
+                    assert "60 s" in err, err[-3000:]
+                if case.name == "inst-refused":
+                    assert "INST refused" in err, err[-3000:]
             except Exception:
                 failures += 1
                 print("FAIL %-18s exception" % case.name)

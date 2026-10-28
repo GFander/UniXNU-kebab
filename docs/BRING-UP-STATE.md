@@ -11613,3 +11613,202 @@ DSC/签名问题、实际是丢失写入的结果——而 DSC 和签名正是�
 真机的两个子系统。
 
 > 本节只读不改：内核与 `scripts/` 一个字节没动。
+
+## 八十一、安装数据的落盘保证
+
+本节回应第八十节复核的 A1：安装路径在报告 `INST DONE` 之前没有任何一次
+`VNOP_FSYNC`，没有带 `IO_SYNC` 的写，也没有 `kebab_ufs_sync()`；`ki_finish_entry()`
+的读回和 `INST CHECK` 都走 UBC，而 `hfs_vnop_close()` 不做 `msync`；最后从
+`FASTBOOT` 到 `ud_fastboot_restart()` 再到 `PEHaltRestart()` 的转换同样没有 VFS
+同步。这一段现在补上了，并且在真机跑 P1 之前先把"哪一段已经落盘、哪一段仍是缓存"
+写清楚。
+
+### 1. 复核指出的缺口
+
+`kebab_vol.c` 的写路径是对的：写完最后一个 extent 后先 `kebab_ufs_sync()`
+（`SYNCHRONIZE CACHE(10)`），再从设备原样读回 512 字节卷头并 memcmp，只有一致才打印
+`VOL DONE`。安装路径此前没有对应的动作：
+
+* `ki_write_bytes()` 用 `vn_rdwr(UIO_WRITE, ..., UIO_SYSSPACE, 0, ...)` 写文件，
+  `ioflag` 是 0，不是 `IO_SYNC`；
+* `ki_finish_entry()` 在 `vnode_close()` 之后用 `ki_hash_file()` 整文件读回，
+  这次读命中的是刚写进去的 UBC 页，证明的是"内核看到的内容"，不是"介质上的内容"；
+* `INST CHECK` 同样调用 `ki_hash_file()`，没有任何逐出或设备级读；
+* `hfs_vnop_close()` 只做 close 语义，不把脏页推下去；
+* `FASTBOOT` 命令直接进 `ud_fastboot_restart()`，写 PON reason 和 IMEM cookie 后
+  调 `PEHaltRestart()` / `PSCI SYSTEM_RESET`，中间没有 `VFS_SYNC`。
+
+量级上这不是理论问题：实测 7.84 MiB/s 时，30 秒写回窗口约 235 MB，足以截断
+592,101,376 字节的 `.symbols` 或一个共享缓存分片。这样的失败在最终阶段会表现成
+dyld、codesign 或 shared cache 错误，而不是"少写了文件"，正好会把这一轮改动最多、
+最没上过真机的两个子系统当成嫌疑人。
+
+### 2. 现在每次流的落盘顺序
+
+普通文件在 `ki_finish_entry()` 里、vnode 还持有的时候先做一次
+`VNOP_FSYNC(MNT_WAIT)`，通过后才 `vnode_close()`。HFS+ 的
+`hfs_vnop_fsync()` 会进 `hfs_fsync()`：对普通文件 `cluster_push(vp, IO_SYNC)`
+推数据簇，`buf_flushdirtyblks()` 推元数据缓冲，`hfs_update()` 与
+`hfs_metasync()` 更新目录记录。非日志卷的默认 fsync 不会走
+`hfs_flush(HFS_FLUSH_CACHE)`，所以设备写缓存仍然要单独刷，这一步不能省。
+
+流结束时 `ki_finish_stream()` 按下面的顺序执行，全部成功才打印 `INST DONE`：
+
+1. `VFS_SYNC(rootvnode->v_mount, MNT_WAIT, ...)`：把 HFS+ 目录项、extent 记录和
+   UBC 里剩余的数据推到设备。这里同步的是根挂载，不是全局 `sync()`；本移植只有
+   根卷是可写的，所以两者等价。根是只读时跳过。
+2. `kebab_ufs_sync()`：与 `kebab_vol.c` 完全相同的 `SYNCHRONIZE CACHE(10)`，刷
+   UFS 设备自己的写缓存。`ufsrw=0` 时它返回 `EROFS`，安装路径本来就走不到这里，
+   reset 路径把 `EROFS` 当成"没有可刷的写"。
+3. 冷读抽样：从本次流写过的普通文件里取四个样本——第一个文件、最大的文件、流中间
+   那个 entry、最后一个文件（重复路径只算一次）。对每个样本先
+   `ubc_msync(vp, 0, size, NULL, UBC_PUSHALL | UBC_INVALIDATE | UBC_SYNC)` 丢掉
+   UBC 里的页，再重新 `vnode_lookup()` + `vn_rdwr()` 读：
+
+   * 文件不超过 4 MiB：整文件重新算 SHA-256，与 entry 头里的摘要比较，打印
+     `INST VERIFY <path> <size> cold full ok`；
+   * 更大的文件：核对 `ubc_getsize()` 与写入长度，再读最后 4096 字节，与写入时
+     滚动保留的尾部摘要比较，打印
+     `INST VERIFY <path> <size> cold tail 4096 ok`。
+
+   大文件用"长度 + 尾部"而不是整文件重读，是为了不在 600 秒的 `INST DONE` 等待
+   里再花一分钟读 `.symbols`。截断会同时改变长度和尾部，所以这个检查对 A1 的失败
+   模式是有效的；它不是全文件摘要。
+
+成功时新增一行：
+
+```
+INST SYNC stream end vfs ok device ok ms <n>
+```
+
+失败时打印 `FAIL install data: VFS_SYNC ...` 或
+`FAIL install data: SYNCHRONIZE CACHE ...`，然后走
+`INST DONE with <n> failure(s), ...`，不会出现成功的 `INST DONE`。冷读失败同样是
+`FAIL` 行加失败计数。
+
+### 3. 仍然由缓存承担的部分
+
+必须说清楚，避免把这一节读成"整条流都做了设备级校验"：
+
+* **逐文件 fsync 覆盖了每一个普通文件**，但它们随后的整文件读回仍然走 UBC。
+  读回通过只证明 VFS 视角一致；真正的落盘保证来自 fsync + 流末 `VFS_SYNC` +
+  `SYNCHRONIZE CACHE`，不是来自这次读回。
+* **冷读只覆盖四个样本**。其余文件没有第二次"从介质读回"的证据；它们只有
+  fsync、VFS 同步和设备缓存刷新的保证。样本选的是第一个、最大、中间、最后一个，
+  目的是覆盖"尾部被截断"和"大文件尾部丢失"，不是覆盖全部 16,295 个 entry。
+* **`INST CHECK` 仍然是 UBC 路径。** 正常 P1 顺序里它发生在 install 镜像刚启动
+  之后，UBC 里没有这些文件的页，所以实际上是从设备读；但代码没有显式逐出，不能
+  把它当成冷读证明。
+* **目录和符号链接没有单独 fsync。** 它们的目录项、catalog 记录由流末的
+  `VFS_SYNC` 覆盖；`ki_start_entry()` 创建目录/链接后只 `vnode_put()`。冷读样本
+  只取普通文件。
+* **没有文件级的 raw block 读。** `kebab_vol.c` 能 raw 读，是因为它知道卷头固定在
+  偏移 0；任意文件的 extent 映射是 HFS+ 私有的，本移植没有暴露"文件偏移到设备块"
+  的接口。因此这里做到的是"逐出 UBC 后重新走 VNOP_READ"，不是"直接读设备块"。
+  如果以后要在内核里做真正的设备级文件校验，需要在 HFS+ 里增加一个只读的
+  extent 查询接口，那是另一项改动。
+* **`VFS_SYNC` 是根挂载级，不是全局所有挂载。** 本移植没有第二个可写卷；将来若
+  增加数据卷，这里要改成遍历所有可写挂载。
+
+### 4. reset 前的同步
+
+`ud_run_reboot_command()` 在分派 `FASTBOOT`、`FASTBOOT2`、`REBOOT` 之前调用
+`kebab_install_sync_for_reset(why)`：
+
+* 先 `VFS_SYNC(root, MNT_WAIT)`，再 `kebab_ufs_sync()`；
+* 两者任一失败就打印
+  `KEBAB SYNC: <why> FAILED (vfs <n>, device <n>); not resetting` 并**不复位**，
+  避免把一次没有落盘的写变成一次无法归因的启动；
+* 成功打印
+  `KEBAB SYNC: <why>: VFS_SYNC + SYNCHRONIZE CACHE ok ms <n>`，然后才进
+  `ud_fastboot_restart()` / `ud_platform_restart()`。
+
+panic 路径没有改：`ud_panic_reboot()` 仍然直接调用 `ud_platform_restart()`，
+不经过 `ud_run_reboot_command()`，所以 panic 不会开始一次可能很长的文件系统同步。
+这是刻意保留的差异，不是漏改。
+
+### 5. 根卷只读断言
+
+`kebab_vol=1` 的全部安全性建立在"旧根仍然只读"上：根可写时，旧 HFS+ 的缓存块可能
+覆盖刚写下去的新卷元数据。内核在 mountroot 时打印
+`KEBAB VOL: kebab_vol=1 keeps the old root read-only`，但这一行发生在
+`kebab_usb_start()` 之前，USB tee 还没打开，所以它只到面板，不能作为控制台证据。
+`kebab_vol_status()` 因此把 `vfs_flags(rootvnode->v_mount) & MNT_RDONLY` 打成
+`VOL? root ro|rw space ...` 一行，这是控制台能看到的唯一证据。
+
+`scripts/bring-up.py` 现在：
+
+* 新增 `VOL_ROOT_RE` 解析
+  `VOL? root (ro|rw) space <free> free of <total> bytes bsize <n> blocks <n> free <n>`；
+* `vol_status()` 要求 `root == "ro"`，否则 `vol.status` 检查点失败，提示"root-rw
+  说明 kebab_vol=1 没有把旧根压成只读，不要从这次启动压卷"；
+* `C-VOL-STATUS` 的期望文本改成
+  `VOL? gated 1 writable 1 chunk 65536 root ro, VOL DISK vh bsize/blocks`。
+
+没有改内核来补这行：`VOL?` 已经打印它，缺的是主机侧解析。若 `VOL?` 根本没有
+`root` 行（例如 `vfs_statfs()` 失败），同样按缺失处理并失败，不会静默通过。
+
+### 6. 新的失败模式
+
+`FAIL_RE` 增加了三条前缀：
+
+* `INST busy`：上一次 INST 流还没被 60 秒 watchdog 清掉；
+* `INST refused`：`INST BEGIN` 在取流之前就被拒绝（gate、长度、缓冲区）；
+* `VOL busy`：上一次 VOL 流还没清掉。
+
+`PanicDetector.feed()` 对 busy 给出"等 60 秒的 `INST TIMEOUT` / `VOL TIMEOUT`，
+不要重启"的专项提示，对 `INST refused` 给出检查 `kebab_install=1`、`rootrw=1`、
+`ufsrw=1` 的提示。`send_stream()` 等 `INST BEGIN` 的谓词和 `vol_send()` 等
+`VOL BEGIN` 的谓词也直接匹配这三条，所以即使 detector 未 armed，也不会再出现
+180 秒的静默等待和"检查 rootrw"这种误导性提示。
+
+`scripts/test-bring-up.py` 的 fake board 增加了 `vol_root`、`inst_busy`、
+`inst_refused` 三个注入点，并新增 `vol-root-rw`、`inst-busy`、`inst-refused`
+三个用例；三者都要求退出码 3，且错误里必须出现对应的 `VOL? root ro` /
+`INST busy` / `INST refused` 行。
+
+### 7. 真机还必须确认什么
+
+1. 每条非 dry 流在 `INST DONE` 之前有且只有一行
+   `INST SYNC stream end vfs ok device ok ms <n>`；没有这行就是内核没带 0148。
+2. 至少出现一条 `INST VERIFY ... cold full ok` 或
+   `INST VERIFY ... cold tail 4096 ok`，且流末没有
+   `INST VERIFY ... failed` / `FAIL ... cold ...`。cache.kist 里 592 MB 的
+   `.symbols` 应该是"最大文件"样本，确认它的路径和 `cold tail` 行。
+3. `FASTBOOT` 时先看到
+   `KEBAB SYNC: FASTBOOT: VFS_SYNC + SYNCHRONIZE CACHE ok ms <n>`，再看到
+   `KEBAB FASTBOOT: writing IMEM restart_reason ...`。整段必须在主机等
+   `KEBAB FASTBOOT: IMEM read back` 的 15 秒窗口内完成；如果超时，日志里会有
+   `KEBAB SYNC` 行，可据此判断是同步慢还是复位没发生。
+4. 记录 `INST DONE ... ms <n>` 与旧值比较。每个文件一次 fsync、每条流一次
+   `VFS_SYNC`、四个样本的冷读都会增加时间；7.84 MiB/s、1.04 GB 的 cache 流原来
+   约 7 分钟，现在要给 `INST DONE` 的 600 秒等待留出余量。第一次真机跑要先确认
+   `send.done` 没有踩 600 秒。
+5. 故意在 install 镜像上连发两次 `INST BEGIN`，确认第二次立刻 `INST busy` 失败并
+   带 60 秒提示，而不是 180 秒后报 `send.begin`。
+6. vol 镜像上确认 `C-VOL-STATUS` 的证据行里有 `root ro`；如果 boot 参数误删
+   `kebab_vol=1`，这一步必须失败，而不是继续压卷。
+7. 如果条件允许，做一次"`INST DONE` 后立刻断电、再启动 final 镜像"的破坏性验证：
+   用 `INST CHECK` 至少核 `.symbols` 和一个 cache 分片的长度与 SHA-256。这是唯一
+   能把"fsync + SYNCHRONIZE CACHE"从推断变成实测的办法；不做也可以，但要在风险
+   清单里保留这条未验证项。
+8. panic 中途的行为要复核：panic 仍然直接 PSCI 复位，日志里不应出现
+   `KEBAB SYNC`，也不应因为同步而延迟复位。
+
+### 8. 改动位置
+
+* `bsd/dev/kebab_install.c`：`ki_tail_update()`、`ki_sample_add()`、
+  `ki_cold_verify_one()`、`ki_cold_verify()`、`ki_vfs_sync()`、
+  `ki_sync_media()`、`kebab_install_sync_for_reset()`；`ki_finish_entry()` 增加
+  `VNOP_FSYNC`，`ki_finish_stream()` 增加流末同步与冷读。
+* `bsd/dev/kebab_install.h`：`kebab_install_sync_for_reset()` 声明。
+* `bsd/dev/kebab_usb.c`：`ud_run_reboot_command()` 在三个复位命令前调用同步，
+  panic 路径不变。
+* `scripts/bring-up.py`：`VOL_ROOT_RE`、`vol_status()` 的 `root ro` 断言、
+  `FAIL_RE`、busy/refused 提示、`send_stream()` / `vol_send()` 的等待谓词。
+* `scripts/test-bring-up.py`：fake board 的三个注入点和三个新用例。
+* `patches/xnu-8796-kebab/0148-kebab-install-durability.patch`：内核侧 0144 之后的
+  增量补丁，序列总数为 127 个补丁（原 126 个加 0148）。
+
+本节的代码已经编译进 `kernel.development.kebab`；真机验证项见第 7 小节，未在硬件
+上执行的部分不写成"已验证"。

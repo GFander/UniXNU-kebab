@@ -1,0 +1,536 @@
+install: make every stream durable before INST DONE and before a reset
+
+The P1 installer wrote the userland through the UBC and reported INST DONE
+without a VOP_FSYNC, without a filesystem sync and without a device cache
+flush.  A 1.04 GB stream at 7.84 MiB/s leaves up to ~235 MB inside a 30 s
+write-back window, so the next phase could boot from a truncated .symbols or
+cache shard and report a dyld/codesign failure instead of a lost write.
+FASTBOOT then went straight to PEHaltRestart() with no VFS sync at all.
+
+Flush at both transitions:
+
+  - VNOP_FSYNC(MNT_WAIT) on every regular-file vnode while it is still held,
+    so HFS+ pushes the clusters and the catalog record before close;
+  - at stream completion, VFS_SYNC(root mount, MNT_WAIT) followed by the same
+    SYNCHRONIZE CACHE(10) kebab_vol.c uses, and only then INST DONE;
+  - a cold sample check after that sync: the first, largest, middle and last
+    files have their UBC pages invalidated and are read again.  Small files
+    are hashed in full; a large file is checked by size plus the digest of
+    its last 4 KiB.  There is no device-level read for an arbitrary file
+    because the extent map is private to HFS+, so this is a cache-dropped
+    VFS read, not a raw block read;
+  - before FASTBOOT/FASTBOOT2/REBOOT, kebab_install_sync_for_reset() runs
+    VFS_SYNC and SYNCHRONIZE CACHE and refuses the reset if either fails.
+    The panic path calls ud_platform_restart() directly and is unchanged.
+
+INST CHECK and the per-entry read-back stay UBC-backed; the stream-end sync
+is what makes their contents media-backed, and the cold sample is the proof
+for a few files.
+
+diff --git a/bsd/dev/kebab_install.c b/bsd/dev/kebab_install.c
+index 06b586e..870609c 100644
+--- a/bsd/dev/kebab_install.c
++++ b/bsd/dev/kebab_install.c
+@@ -61,6 +61,7 @@
+ #include <pexpert/pexpert.h>
+ 
+ #include "kebab_install.h"
++#include "kebab_ufs.h"
+ 
+ #define KI_STREAM_HDR     32u
+ #define KI_ENTRY_HDR      192u
+@@ -78,6 +79,9 @@
+ #define KI_PATH_FIELD     128u
+ #define KI_IO_BUF         65536u        /* inflate output and read-back block */
+ #define KI_TIMEOUT_NS     60000000000ull /* 60 s with no chunk */
++#define KI_TAIL_LEN       4096u         /* cold-read tail sample per file */
++#define KI_COLD_FULL_MAX  (4u * 1024u * 1024u) /* full cold hash up to 4 MiB */
++#define KI_SAMPLE_MAX     4u
+ #define KI_HDR_PATH_OFF   60u
+ #define KI_HDR_SHA_OFF    28u
+ #define KI_HDR_USIZE_OFF  20u
+@@ -141,6 +145,8 @@ struct ki_entry {
+ 	uint64_t    wire_left;
+ 	uint64_t    got;           /* uncompressed bytes produced so far */
+ 	uint64_t    offset;        /* write offset */
++	uint8_t     tail[KI_TAIL_LEN]; /* last bytes written, for the cold check */
++	uint32_t    tail_len;
+ 	bool        skip;
+ 	bool        deflate;
+ 	bool        is_dir;
+@@ -154,6 +160,29 @@ struct ki_entry {
+ 	bool        z_end;
+ };
+ 
++/*
++ * A stream completion re-reads a few destinations after dropping their UBC
++ * pages.  The full digest is checked for small files; a large file is checked
++ * by size plus the digest of its last KI_TAIL_LEN bytes.  A truncation loses
++ * the size and the tail, which is the failure this guards against.
++ */
++struct ki_sample {
++	char        path[KEBAB_INST_PATH_MAX];
++	uint64_t    size;
++	uint8_t     sha[32];
++	uint8_t     tail_sha[32];
++	uint32_t    tail_len;
++	bool        set;
++};
++
++/* Slot order: first file, largest file, middle entry, last file. */
++enum {
++	KI_SAMPLE_FIRST = 0,
++	KI_SAMPLE_LARGEST,
++	KI_SAMPLE_MIDDLE,
++	KI_SAMPLE_LAST,
++};
++
+ static struct {
+ 	bool        gate_checked;
+ 	bool        gated;
+@@ -179,6 +208,8 @@ static struct {
+ 	uint64_t    ns_start;
+ 	uint64_t    ns_last;
+ 
++	struct ki_sample samples[KI_SAMPLE_MAX];
++
+ 	uint8_t    *io;            /* KI_IO_BUF, allocated per session */
+ 	uint32_t    session;
+ 	struct ki_entry e;
+@@ -600,6 +631,281 @@ ki_hash_file(const char *path, uint64_t *sizep, uint8_t digest[32],
+ 	return 0;
+ }
+ 
++/* --------------------------------------------------------- durable output */
++
++/*
++ * VFS_SYNC on the root mount.  This is the same operation sync() runs on
++ * every writable volume; the installer only writes the root, so syncing that
++ * mount is enough.  It pushes the HFS+ catalog/extents metadata and the file
++ * data still in the UBC to the device.  A read-only root has nothing to push.
++ */
++static int
++ki_vfs_sync(void)
++{
++	if (rootvnode == NULLVP || rootvnode->v_mount == NULL) {
++		return ENODEV;
++	}
++	if (vfs_flags(rootvnode->v_mount) & MNT_RDONLY) {
++		return 0;
++	}
++	return VFS_SYNC(rootvnode->v_mount, MNT_WAIT, vfs_context_current());
++}
++
++static void
++ki_sample_store(uint32_t slot)
++{
++	struct ki_entry *e = &ki.e;
++	struct ki_sample *s = &ki.samples[slot];
++	size_t len = strlen(e->path);
++
++	memset(s, 0, sizeof(*s));
++	if (len >= sizeof(s->path)) {
++		return;
++	}
++	memcpy(s->path, e->path, len + 1);
++	s->size = e->size;
++	memcpy(s->sha, e->sha, sizeof(s->sha));
++	s->tail_len = e->tail_len;
++	if (s->tail_len) {
++		SHA256_CTX shactx;
++
++		SHA256_Init(&shactx);
++		SHA256_Update(&shactx, e->tail, s->tail_len);
++		SHA256_Final(s->tail_sha, &shactx);
++	}
++	s->set = true;
++}
++
++/*
++ * Remember a few written files for a cold check after the stream has been
++ * flushed to the device: the first file, the largest file, the entry at the
++ * middle of the stream and the last file.  The last slot is always rewritten,
++ * and duplicates are skipped by path at verify time.
++ */
++static void
++ki_sample_add(void)
++{
++	struct ki_entry *e = &ki.e;
++
++	if (e->is_dir || e->is_link) {
++		return;
++	}
++	if (!ki.samples[KI_SAMPLE_FIRST].set) {
++		ki_sample_store(KI_SAMPLE_FIRST);
++	}
++	if (!ki.samples[KI_SAMPLE_LARGEST].set ||
++	    e->size > ki.samples[KI_SAMPLE_LARGEST].size) {
++		ki_sample_store(KI_SAMPLE_LARGEST);
++	}
++	if (!ki.samples[KI_SAMPLE_MIDDLE].set && ki.entries_total > 1 &&
++	    ki.entries_done == ki.entries_total / 2) {
++		ki_sample_store(KI_SAMPLE_MIDDLE);
++	}
++	ki_sample_store(KI_SAMPLE_LAST);
++}
++
++/*
++ * Re-read one sample after its UBC pages were dropped.  There is no
++ * device-level read for an arbitrary file: the extents that map a file to
++ * device blocks are private to HFS+, so this is the closest a caller can get
++ * to the media without changing the filesystem.  The read goes through
++ * VNOP_READ again, which has to fetch the pages from the device.
++ */
++static int
++ki_cold_verify_one(const struct ki_sample *s)
++{
++	vfs_context_t ctx = vfs_context_current();
++	vnode_t vp = NULLVP;
++	off_t size;
++	uint8_t digest[32];
++	int resid = 0;
++	int error;
++
++	error = vnode_lookup(s->path, 0, &vp, ctx);
++	if (error) {
++		printf("FAIL %s cold lookup failed (error %d)\n", s->path, error);
++		return error;
++	}
++	if (vp->v_type != VREG) {
++		vnode_put(vp);
++		printf("FAIL %s is not a regular file after the write\n", s->path);
++		return EINVAL;
++	}
++	size = ubc_getsize(vp);
++	if (size < 0 || (uint64_t)size != s->size) {
++		printf("FAIL %s cold size %lld, wrote %llu\n", s->path,
++		    (long long)size, (unsigned long long)s->size);
++		vnode_put(vp);
++		return EIO;
++	}
++	if (size > 0) {
++		/* Dirty pages were fsynced and the device cache was flushed
++		 * before this runs, so invalidating only discards clean cache. */
++		(void)ubc_msync(vp, 0, size, NULL,
++		    UBC_PUSHALL | UBC_INVALIDATE | UBC_SYNC);
++	}
++	if (s->size <= KI_COLD_FULL_MAX) {
++		uint64_t have = 0;
++
++		vnode_put(vp);
++		error = ki_hash_file(s->path, &have, digest, ctx);
++		if (error) {
++			printf("FAIL %s cold read failed (error %d)\n", s->path,
++			    error);
++			return error;
++		}
++		if (have != s->size ||
++		    memcmp(digest, s->sha, sizeof(digest)) != 0) {
++			printf("FAIL %s cold full hash differs (%llu bytes)\n",
++			    s->path, (unsigned long long)have);
++			return EIO;
++		}
++		printf("INST VERIFY %s %llu cold full ok\n", s->path,
++		    (unsigned long long)s->size);
++		return 0;
++	}
++	if (s->tail_len == 0) {
++		vnode_put(vp);
++		return 0;
++	}
++	error = vn_rdwr(UIO_READ, vp, (caddr_t)ki.io, (int)s->tail_len,
++	    (off_t)(s->size - s->tail_len), UIO_SYSSPACE, 0,
++	    vfs_context_ucred(ctx), &resid, NULL);
++	if (!error && resid != 0) {
++		error = EIO;
++	}
++	if (error) {
++		printf("FAIL %s cold tail read failed (error %d)\n", s->path,
++		    error);
++		vnode_put(vp);
++		return error;
++	}
++	{
++		SHA256_CTX shactx;
++
++		SHA256_Init(&shactx);
++		SHA256_Update(&shactx, ki.io, s->tail_len);
++		SHA256_Final(digest, &shactx);
++	}
++	if (memcmp(digest, s->tail_sha, sizeof(digest)) != 0) {
++		printf("FAIL %s cold tail differs (%u bytes at %llu)\n", s->path,
++		    s->tail_len, (unsigned long long)(s->size - s->tail_len));
++		vnode_put(vp);
++		return EIO;
++	}
++	printf("INST VERIFY %s %llu cold tail %u ok\n", s->path,
++	    (unsigned long long)s->size, s->tail_len);
++	vnode_put(vp);
++	return 0;
++}
++
++/* Returns the number of samples that failed. */
++static int
++ki_cold_verify(void)
++{
++	uint32_t checked = 0;
++	uint32_t bad = 0;
++
++	for (uint32_t i = 0; i < KI_SAMPLE_MAX; i++) {
++		bool duplicate = false;
++
++		if (!ki.samples[i].set) {
++			continue;
++		}
++		for (uint32_t j = 0; j < i; j++) {
++			if (ki.samples[j].set &&
++			    strcmp(ki.samples[i].path,
++			    ki.samples[j].path) == 0) {
++				duplicate = true;
++				break;
++			}
++		}
++		if (duplicate) {
++			continue;
++		}
++		checked++;
++		if (ki_cold_verify_one(&ki.samples[i]) != 0) {
++			bad++;
++		}
++	}
++	if (bad) {
++		printf("INST VERIFY %u of %u cold sample(s) failed\n", bad,
++		    checked);
++	} else if (checked) {
++		printf("INST VERIFY %u cold sample(s) ok\n", checked);
++	}
++	return (int)bad;
++}
++
++/*
++ * Push the whole install to stable storage: VFS metadata first, then the
++ * device write cache, then the cold sample check.  Called from the stream
++ * state machine before INST DONE, and from the reboot path before a reset.
++ * Returns the number of failed steps (0 means everything reached the device).
++ */
++static int
++ki_sync_media(const char *why, bool samples)
++{
++	uint64_t t0 = ki_now_ns();
++	int vfs_error;
++	int dev_error;
++	int bad = 0;
++
++	vfs_error = ki_vfs_sync();
++	/* SYNCHRONIZE CACHE is meaningless when ufsrw=0 never enabled writes. */
++	dev_error = kebab_ufs_sync();
++	if (dev_error == EROFS) {
++		dev_error = 0;
++	}
++	if (vfs_error) {
++		printf("FAIL install data: VFS_SYNC (%s) failed (error %d)\n",
++		    why, vfs_error);
++		bad++;
++	}
++	if (dev_error) {
++		printf("FAIL install data: SYNCHRONIZE CACHE (%s) failed "
++		    "(error %d)\n", why, dev_error);
++		bad++;
++	}
++	if (bad) {
++		return bad;
++	}
++	printf("INST SYNC %s vfs ok device ok ms %llu\n", why,
++	    (unsigned long long)((ki_now_ns() - t0) / 1000000ull));
++	if (samples) {
++		bad += ki_cold_verify();
++	}
++	return bad;
++}
++
++/*
++ * Reset-path flush.  FASTBOOT/REBOOT are console commands, so they run after
++ * the stream and after any install; the data has to be on the device before
++ * the reset, not merely in the UBC or the drive's write cache.  The panic path
++ * does not call this: a panic must not wait for a filesystem sync.
++ */
++bool
++kebab_install_sync_for_reset(const char *why)
++{
++	uint64_t t0 = ki_now_ns();
++	int vfs_error;
++	int dev_error;
++
++	vfs_error = ki_vfs_sync();
++	dev_error = kebab_ufs_sync();
++	if (dev_error == EROFS) {
++		dev_error = 0;
++	}
++	if (vfs_error || dev_error) {
++		printf("KEBAB SYNC: %s FAILED (vfs %d, device %d); not resetting\n",
++		    why, vfs_error, dev_error);
++		return false;
++	}
++	printf("KEBAB SYNC: %s: VFS_SYNC + SYNCHRONIZE CACHE ok ms %llu\n", why,
++	    (unsigned long long)((ki_now_ns() - t0) / 1000000ull));
++	return true;
++}
++
+ /*
+  * Free and total bytes on the root volume.  HFS+ reports these in allocation
+  * blocks; the installer uses them to refuse a stream that cannot fit before it
+@@ -665,6 +971,31 @@ ki_zfree(voidpf opaque __unused, voidpf ptr)
+ 
+ /* ---------------------------------------------------------- entry output */
+ 
++/*
++ * Keep the last KI_TAIL_LEN bytes of a file as it is written.  The stream is
++ * forward-only, so this is the only way to know the tail without a second
++ * pass; the completion sample check compares it against an uncached read.
++ */
++static void
++ki_tail_update(struct ki_entry *e, const void *p, size_t n)
++{
++	const uint8_t *b = p;
++
++	if (n >= KI_TAIL_LEN) {
++		memcpy(e->tail, b + n - KI_TAIL_LEN, KI_TAIL_LEN);
++		e->tail_len = KI_TAIL_LEN;
++		return;
++	}
++	if ((size_t)e->tail_len + n > KI_TAIL_LEN) {
++		uint32_t drop = (uint32_t)((size_t)e->tail_len + n - KI_TAIL_LEN);
++
++		memmove(e->tail, e->tail + drop, e->tail_len - drop);
++		e->tail_len -= drop;
++	}
++	memcpy(e->tail + e->tail_len, b, n);
++	e->tail_len += (uint32_t)n;
++}
++
+ static int
+ ki_write_bytes(const void *p, size_t n)
+ {
+@@ -691,6 +1022,7 @@ ki_write_bytes(const void *p, size_t n)
+ 		return EIO;
+ 	}
+ 	e->offset += n;
++	ki_tail_update(e, p, n);
+ 	return 0;
+ }
+ 
+@@ -1181,6 +1513,21 @@ ki_finish_entry(void)
+ 		    e->deflate ? "deflate" : "store");
+ 	} else {
+ 		if (e->opened) {
++			/*
++			 * The file's data is only in the UBC until this runs.
++			 * hfs_fsync() pushes the clusters with IO_SYNC and
++			 * updates/metasyncs the catalog record; the stream-end
++			 * VFS_SYNC and SYNCHRONIZE CACHE below then make that
++			 * durable on the device.  Do it while the vnode is still
++			 * held, before close drops it.
++			 */
++			error = VNOP_FSYNC(e->vp, MNT_WAIT, ctx);
++			if (error) {
++				printf("FAIL %s fsync failed (error %d)\n",
++				    e->path, error);
++				ki_abort("fsync failed", error);
++				return;
++			}
+ 			error = vnode_close(e->vp, FWRITE, ctx);
+ 			e->opened = false;
+ 			e->vp = NULLVP;
+@@ -1223,6 +1570,7 @@ ki_finish_entry(void)
+ 			}
+ 			vnode_put(vp);
+ 		}
++		ki_sample_add();
+ 		ki.ok++;
+ 	}
+ 	ki_next_entry();
+@@ -1255,6 +1603,7 @@ kebab_install_begin(bool dry, uint64_t wire_bytes)
+ 	}
+ 	memset(&ki.e, 0, sizeof(ki.e));
+ 	ki.e.vp = NULLVP;
++	memset(ki.samples, 0, sizeof(ki.samples));
+ 	ki.active = true;
+ 	ki.dry = dry;
+ 	ki.skel = false;
+@@ -1281,7 +1630,7 @@ kebab_install_begin(bool dry, uint64_t wire_bytes)
+ static void
+ ki_finish_stream(void)
+ {
+-	uint64_t ms = (ki_now_ns() - ki.ns_start) / 1000000ull;
++	uint64_t ms;
+ 
+ 	if (ki.state != KI_S_PAD && ki.state != KI_S_DONE) {
+ 		ki_abort("stream ended mid-entry", 0);
+@@ -1298,7 +1647,20 @@ ki_finish_stream(void)
+ 		printf("INST PLAN entries %u bytes %llu wire %llu\n",
+ 		    ki.entries_done, (unsigned long long)ki.usize_total,
+ 		    (unsigned long long)ki.wire_seen);
+-	} else if (ki.failed == 0) {
++		ki_reset();
++		return;
++	}
++	/*
++	 * The stream is complete, but every byte can still be in the UBC or in
++	 * the device's write cache.  Flush the filesystem metadata, then the
++	 * device cache, then re-read a few files with their cache dropped;
++	 * only after that may INST DONE claim the install is on the media.
++	 */
++	if (ki.failed == 0) {
++		ki.failed += (uint32_t)ki_sync_media("stream end", true);
++	}
++	ms = (ki_now_ns() - ki.ns_start) / 1000000ull;
++	if (ki.failed == 0) {
+ 		printf("INST DONE entries %u ok %u skipped %u bytes %llu "
+ 		    "wire %llu ms %llu\n", ki.entries_done, ki.ok, ki.skipped,
+ 		    (unsigned long long)ki.usize_total,
+diff --git a/bsd/dev/kebab_install.h b/bsd/dev/kebab_install.h
+index 2ce3a54..795db71 100644
+--- a/bsd/dev/kebab_install.h
++++ b/bsd/dev/kebab_install.h
+@@ -41,4 +41,12 @@ void kebab_install_status(void);
+ /* INST CHECK <path>: current size and SHA-256 of a destination. */
+ void kebab_install_check(const char *path);
+ 
++/*
++ * Flush the root filesystem and the UFS device cache before a reset, and
++ * report whether both succeeded.  Called from the console reboot path only;
++ * the panic path must not run a filesystem sync.  Returns false when the
++ * caller must not reset (the data could not be made durable).
++ */
++bool kebab_install_sync_for_reset(const char *why);
++
+ #endif /* _KEBAB_INSTALL_H_ */
+diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
+index 662a4fa..dd09439 100644
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -1787,6 +1787,24 @@ ud_vol_arm(bool dry)
+ static void
+ ud_run_reboot_command(uint32_t command)
+ {
++	/*
++	 * A console-requested reset is the transition from the install phase to
++	 * the next boot.  Make every written byte durable before the PSCI call:
++	 * VFS_SYNC flushes the HFS+ metadata/data still in the UBC and
++	 * SYNCHRONIZE CACHE flushes the drive's write cache.  The panic path
++	 * calls ud_platform_restart() directly (ud_panic_reboot()), so a panic
++	 * still resets without waiting for a filesystem sync.
++	 */
++	if (command == UD_REBOOT_FASTBOOT || command == UD_REBOOT_FASTBOOT2 ||
++	    command == UD_REBOOT_PLAIN) {
++		const char *why = command == UD_REBOOT_FASTBOOT ? "FASTBOOT" :
++		    command == UD_REBOOT_FASTBOOT2 ? "FASTBOOT2" : "REBOOT";
++
++		if (!kebab_install_sync_for_reset(why)) {
++			/* Do not turn a failed flush into an unattributable boot. */
++			return;
++		}
++	}
+ 	if (command == UD_REBOOT_FASTBOOT) {
+ 		ud_fastboot_restart(false);
+ 	} else if (command == UD_REBOOT_FASTBOOT2) {
