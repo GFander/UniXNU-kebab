@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Verify Apple's static trust cache against the real launchd and dyld.
+"""Verify Apple's static trust cache against the real launchd, dyld and
+xpcproxy.
 
 This is the host-side counterpart of the kernel's code-signing classification:
 
@@ -90,6 +91,14 @@ EXPECTED = {
         "hash_type": 2,
         "page_shift": 12,
         "slots": (220, 220),
+    },
+    "xpcproxy": {
+        "cdhash": "f7f090b0a9b94dc944026136fc6154372763c846",
+        "cd_offset": 0x12AD4,
+        "cd_length": 940,
+        "hash_type": 2,
+        "page_shift": 12,
+        "slots": (19, 19),
     },
 }
 
@@ -415,6 +424,11 @@ def main():
         default=os.path.join(home, "ios-userland", "extracted", "usr", "lib",
                              "dyld"),
         help="real /usr/lib/dyld")
+    parser.add_argument(
+        "--xpcproxy",
+        default=os.path.join(home, "ios-userland", "extracted", "usr",
+                             "libexec", "xpcproxy"),
+        help="real /usr/libexec/xpcproxy")
     args = parser.parse_args()
 
     # SHA-256("abc"), FIPS 180-4.  The kernel's SHA256_Init/Update/Final
@@ -435,7 +449,7 @@ def main():
     print("binary        slice  cd off    cd len  hash          page  "
           "slots     trust cache")
     results = []
-    for path in (args.launchd, args.dyld):
+    for path in (args.launchd, args.dyld, args.xpcproxy):
         name, row, ok = check_binary(path, tc)
         results.append((name, row, ok))
         print("%-13s 0x%-4x 0x%-7x %-7u %-13s %-5u %3u/%-3u   %s"
@@ -465,7 +479,8 @@ def main():
                      row["matched"], row["slots"]))
     if failures:
         return 1
-    print("OK: the kernel's cdhash and Apple's cache agree for both binaries")
+    print("OK: the kernel's cdhash and Apple's cache agree for all "
+          "three binaries")
     return 0
 
 

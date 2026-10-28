@@ -215,6 +215,7 @@ class Fixture:
             ("/System/Library/Caches/com.apple.kernelcaches/static.trustcache",
              b"tc" * 300, 0o644, False),
             ("/usr/lib/zprint", b"zprint" * 200, 0o755, True),
+            ("/usr/libexec/xpcproxy", b"xpcproxy" * 200, 0o755, True),
             ("/System/Library/LaunchDaemons/com.kebab.zprint.plist",
              b"<plist/>", 0o644, False),
         ]
@@ -615,7 +616,7 @@ class FakeDevice:
     def select_stream(self):
         """Identify the stream by size and by the header the board received.
 
-        skel.kist and the 5-entry base fixture are both one 64 KiB chunk, so
+        skel.kist and the 6-entry base fixture are both one 64 KiB chunk, so
         the INST BEGIN size alone is ambiguous in the tests.
         """
         try:

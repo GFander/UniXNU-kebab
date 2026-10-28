@@ -390,15 +390,17 @@ GPIO 36/37 mux 到 qup13，reset 38，irq 39）。地址取自设备自己的 DT
 不需要下载 6.17 GB：
 
 ```
-/usr/lib/dyld     922,912   dyld-1067
-/sbin/launchd     541,600
+/usr/lib/dyld         922,912   dyld-1067
+/sbin/launchd         541,600
+/usr/libexec/xpcproxy  96,352   launchd 的 job spawn 入口
 ```
 
 iOS 的文件是 `UF_COMPRESSED` + decmpfs **type 4**（64 KiB zlib 分块，存在资源叉里），
 不是 LZFSE。资源叉的 oid 是 inode+1，chunk offset 相对 `0x104`。
 
-根卷需要两块：OS 卷给 `/usr/lib/dyld`，`Cryptex1,SystemOS` 给 44 个分片的共享缓存。
-**libSystem 在任何地方都不是文件**，它由共享缓存提供。
+根卷需要两块：OS 卷给 `/usr/lib/dyld` 和 `/usr/libexec/xpcproxy`，
+`Cryptex1,SystemOS` 给 44 个分片的共享缓存。**xpcproxy 不在 cryptex**：那个卷的
+`/usr` 下只有 `lib/`。**libSystem 在任何地方都不是文件**，它由共享缓存提供。
 
 签名侧：IPSW 里有独立的 `087-86698-044.dmg.trustcache`（2,760 条），
 内核在 `bsd_init` 从 `/System/Library/Caches/com.apple.kernelcaches/static.trustcache`

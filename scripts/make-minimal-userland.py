@@ -7,8 +7,9 @@ creates before any file is written: /dev, /private/etc, /private/tmp (01777),
 symlinks, and the root entries in passwd, master.passwd and group.  It is KIST
 v2 because v1 could only carry regular files and masked modes to 0777.
 
-`base.kist` carries the five files launchd needs before it can run a job:
-launchd, dyld, the static trust cache, one job executable and its plist.
+`base.kist` carries the six files launchd needs before it can run a job:
+launchd, dyld, the static trust cache, xpcproxy, one job executable and
+its plist.
 `cache.kist` carries the 44 split dyld shared cache files (43 mapped files and
 the .symbols file the kernel reports but does not map).
 
@@ -56,6 +57,7 @@ TRUST = os.path.join(HERE, "extract-ios-trustcache.py")
 ALLOW = [
     "/sbin/",
     "/usr/lib/",
+    "/usr/libexec/",
     "/usr/standalone/",
     "/System/Library/Caches/com.apple.dyld/",
     "/System/Library/Caches/com.apple.kernelcaches/",
@@ -426,7 +428,8 @@ def main():
     launchd = os.path.join(args.userland, "sbin", "launchd")
     dyld = os.path.join(args.userland, "usr", "lib", "dyld")
     zprint = os.path.join(args.userland, "usr", "bin", "zprint")
-    for path in (launchd, dyld, zprint, args.trustcache):
+    xpcproxy = os.path.join(args.userland, "usr", "libexec", "xpcproxy")
+    for path in (launchd, dyld, zprint, xpcproxy, args.trustcache):
         if not os.path.isfile(path):
             return die("%s is missing" % path)
 
@@ -445,6 +448,8 @@ def main():
          "kebab_cs_trustcache_load() default path; marks launchd platform"),
         (zprint, "/usr/lib/zprint", 0o755,
          "job payload; all five dylibs are in the split cache"),
+        (xpcproxy, "/usr/libexec/xpcproxy", 0o755,
+         "launchd's only job-spawn entry: posix_spawnp(xpcproxy) per job"),
         (plist, "/System/Library/LaunchDaemons/com.kebab.zprint.plist", 0o644,
          "RunAtLoad job: zprint -L writes the zone table to /dev/console"),
     ]
@@ -474,9 +479,11 @@ def main():
         trust = load_module(TRUST, "ios_trustcache")
         if args.only in ("cache", "both"):
             check_cache_sources(args.cache, manifest)
-        check_trustcache(trust, args.trustcache, [launchd, dyld, zprint])
+        check_trustcache(trust, args.trustcache,
+                         [launchd, dyld, zprint, xpcproxy])
         check_dependencies(deps, os.path.join(
-            args.cache, "dyld_shared_cache_arm64"), [launchd, dyld, zprint])
+            args.cache, "dyld_shared_cache_arm64"),
+            [launchd, dyld, zprint, xpcproxy])
 
     if args.only in ("base", "both"):
         spec = os.path.join(args.out, "base.spec")
