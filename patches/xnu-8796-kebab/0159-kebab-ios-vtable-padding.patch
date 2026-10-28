@@ -1,0 +1,49 @@
+iokit: force the iOS C++ vtable layout under KEBAB
+
+APPLE_KEXT_VTABLE_PADDING is 1 whenever XNU_TARGET_OS_OSX is defined, and this
+port builds against the macOS SDK, so every OSMetaClassDeclareReservedUnused()
+declaration became a real vtable slot: __ZTV9IOService is 274 slots here against
+170 in the iOS 16.7.16 donor.
+
+That is not a size difference, it is an offset difference.  A prelinked C++ kext
+lays out its vtable for a 170-slot base while the kernel dispatches through a
+274-slot one, so every virtual call from kext code lands on the wrong method --
+IOStorageFamily's IOBlockStorageDriver would read reportBlockSize() out of a
+reserved slot -- and no prelinked C++ kext can run.
+
+Force the padding to 0 under KEBAB and keep XNU_TARGET_OS_OSX, which the SDK
+headers still need.  Measured after the change: __ZTV9IOService is 170 slots,
+matching the donor.
+
+The reserved declarations expand to nothing with the padding off, so the export
+lists that name those symbols have to change with it.  That is the next patch,
+and it is not optional.
+
+diff --git a/libkern/libkern/c++/OSMetaClass.h b/libkern/libkern/c++/OSMetaClass.h
+index 78315a2..f4e3b71 100644
+--- a/libkern/libkern/c++/OSMetaClass.h
++++ b/libkern/libkern/c++/OSMetaClass.h
+@@ -162,11 +162,20 @@ class OSInterface
+ 
+ #ifdef XNU_KERNEL_PRIVATE
+ 
+-#if !XNU_TARGET_OS_OSX
++/*
++ * KEBAB is an iOS ABI port.  The prelinked kexts are iOS builds, where this is
++ * 0, but XNU_TARGET_OS_OSX is defined because the kernel is built against the
++ * macOS SDK, so every OSMetaClassDeclareReservedUnused() became a real vtable
++ * slot: IOService had 274 slots against the donor's 170.  A prelinked C++ kext
++ * then lays out its vtable for a 170-slot base while the kernel dispatches
++ * through a 274-slot one, and every virtual call lands on the wrong method.
++ * Keep XNU_TARGET_OS_OSX for the SDK headers, but match the iOS layout.
++ */
++#if defined(KEBAB) || !XNU_TARGET_OS_OSX
+ #define APPLE_KEXT_VTABLE_PADDING   0
+-#else /* !XNU_TARGET_OS_OSX */
++#else /* defined(KEBAB) || !XNU_TARGET_OS_OSX */
+ #define APPLE_KEXT_VTABLE_PADDING   1
+-#endif /* !XNU_TARGET_OS_OSX */
++#endif /* defined(KEBAB) || !XNU_TARGET_OS_OSX */
+ 
+ #else /* XNU_KERNEL_PRIVATE */
+ 
