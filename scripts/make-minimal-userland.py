@@ -7,9 +7,14 @@ creates before any file is written: /dev, /private/etc, /private/tmp (01777),
 symlinks, and the root entries in passwd, master.passwd and group.  It is KIST
 v2 because v1 could only carry regular files and masked modes to 0777.
 
-`base.kist` carries the six files launchd needs before it can run a job:
+`base.kist` carries the files launchd needs before it can run a job:
 launchd, dyld, the static trust cache, xpcproxy, one job executable and
-its plist.
+its plist, plus the executables of every boot task launchd runs before the
+first job.  The boot-task order is hard-coded in launchd at 0x100040138 and
+the normal-boot filter runs every task, not only the PerformAlways blocks;
+the required (RequireRun) executables are /sbin/mount (mount-phase-1 and
+mount-phase-2), /sbin/fsck (only when / is MNT_RDONLY), cc_fips_test,
+dirs_cleaner and launchd_cache_loader.
 `cache.kist` carries the 44 split dyld shared cache files (43 mapped files and
 the .symbols file the kernel reports but does not map).
 
@@ -429,7 +434,15 @@ def main():
     dyld = os.path.join(args.userland, "usr", "lib", "dyld")
     zprint = os.path.join(args.userland, "usr", "bin", "zprint")
     xpcproxy = os.path.join(args.userland, "usr", "libexec", "xpcproxy")
-    for path in (launchd, dyld, zprint, xpcproxy, args.trustcache):
+    mount = os.path.join(args.userland, "sbin", "mount")
+    fsck = os.path.join(args.userland, "sbin", "fsck")
+    fips = os.path.join(args.userland, "usr", "libexec", "cc_fips_test")
+    dirs_cleaner = os.path.join(args.userland, "usr", "libexec",
+                                "dirs_cleaner")
+    cache_loader = os.path.join(args.userland, "usr", "libexec",
+                                "launchd_cache_loader")
+    for path in (launchd, dyld, zprint, xpcproxy, mount, fsck, fips,
+                 dirs_cleaner, cache_loader, args.trustcache):
         if not os.path.isfile(path):
             return die("%s is missing" % path)
 
@@ -450,6 +463,21 @@ def main():
          "job payload; all five dylibs are in the split cache"),
         (xpcproxy, "/usr/libexec/xpcproxy", 0o755,
          "launchd's only job-spawn entry: posix_spawnp(xpcproxy) per job"),
+        (mount, "/sbin/mount", 0o755,
+         "boot tasks mount-phase-1 and mount-phase-2 (/sbin/mount -P 1|2); "
+         "five dylibs all in the split cache, cdhash in the static TC"),
+        (fsck, "/sbin/fsck", 0o755,
+         "boot task fsck (runs only when / is MNT_RDONLY per launchd's "
+         "statfs check); four dylibs in the split cache, cdhash in the TC"),
+        (fips, "/usr/libexec/cc_fips_test", 0o755,
+         "boot task fips, RequireRun+RequireSuccess; libSystem.B only, "
+         "cdhash in the static TC"),
+        (dirs_cleaner, "/usr/libexec/dirs_cleaner", 0o755,
+         "boot task dirs_cleaner, RequireRun+RequireSuccess; libSystem.B "
+         "only, cdhash in the static TC"),
+        (cache_loader, "/usr/libexec/launchd_cache_loader", 0o755,
+         "boot task launchd_cache_loader, RequireRun+RequireSuccess; seven "
+         "dylibs all in the split cache, cdhash in the static TC"),
         (plist, "/System/Library/LaunchDaemons/com.kebab.zprint.plist", 0o644,
          "RunAtLoad job: zprint -L writes the zone table to /dev/console"),
     ]
@@ -480,10 +508,12 @@ def main():
         if args.only in ("cache", "both"):
             check_cache_sources(args.cache, manifest)
         check_trustcache(trust, args.trustcache,
-                         [launchd, dyld, zprint, xpcproxy])
+                         [launchd, dyld, zprint, xpcproxy, mount, fsck, fips,
+                          dirs_cleaner, cache_loader])
         check_dependencies(deps, os.path.join(
             args.cache, "dyld_shared_cache_arm64"),
-            [launchd, dyld, zprint, xpcproxy])
+            [launchd, dyld, zprint, xpcproxy, mount, fsck, fips,
+             dirs_cleaner, cache_loader])
 
     if args.only in ("base", "both"):
         spec = os.path.join(args.out, "base.spec")

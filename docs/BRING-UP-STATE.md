@@ -7176,9 +7176,12 @@ python3 scripts/check-shared-cache.py ~/ios-userland/cryptex-cache
 
 结论先写在这里：
 
-* `base.kist` 现在有 **6 条**（0144 起）：`/sbin/launchd`、`/usr/lib/dyld`、
-  静态信任缓存、`/usr/libexec/xpcproxy`、一个只依赖共享缓存的 `zprint`，以及
-  它的 LaunchDaemon plist。**640.0 KiB** 线上字节，装完 1,716,034 字节。
+* `base.kist` 现在有 **11 条**（0151 起）：`/sbin/launchd`、`/usr/lib/dyld`、
+  静态信任缓存、`/usr/libexec/xpcproxy`、一个只依赖共享缓存的 `zprint`、它的
+  LaunchDaemon plist，以及五个 boot task 可执行文件（`/sbin/mount`、
+  `/sbin/fsck`、`/usr/libexec/cc_fips_test`、`/usr/libexec/dirs_cleaner`、
+  `/usr/libexec/launchd_cache_loader`）。**655,360 字节**线上字节（10 chunks），
+  装完 2,057,682 字节。
 * `cache.kist` 是 **44 条**：43 个被内核映射的分片加 `.symbols`（内核只报告、
   不映射）。**1018.44 MiB** 线上字节，装完 3.10 GiB。
 * `base.kist` 里没有 `/dev`、`/var`、`/tmp`，也不应该有：安装器的允许清单只有
@@ -7223,8 +7226,8 @@ python3 scripts/check-shared-cache.py ~/ios-userland/cryptex-cache
 | --- | --- |
 | `/System/Library/CoreServices/SystemVersion.plist` | launchd 不靠它启动；574 B 也不能证明任何东西 |
 | `fileproviderctl`（259,248 B） | 16 个依赖也全在缓存里，但它比 zprint 大、会碰 MobileKeyBag/FileProvider，作为第一个 job 只会引入噪声 |
-| `/usr/libexec/launchd_cache_loader` | 可执行文件不在共享缓存（缓存里只有 dylib）；`/usr/libexec/` 现在虽已允许，但它的 boot task 带 `PerformAfterUserspaceReboot`，普通首启被过滤掉，本轮不装 |
-| `/sbin/mount`、`/sbin/fsck`、`/usr/libexec/prng_seedctl` 等 boot task | 同样不在缓存/不允许；普通首启不执行（见第 2.1 节），只有 userspace reboot/restore 才需要 |
+| `/usr/libexec/launchd_cache_loader` | **必需**（`RequireRun`）：普通首启也会执行；旧结论说它被 `PerformAfterUserspaceReboot` 过滤掉是错的（见 2.1）。0151 起进 `base.kist` |
+| `/sbin/mount`、`/sbin/fsck`、`/usr/libexec/cc_fips_test`、`/usr/libexec/dirs_cleaner` 等 boot task | **必需或条件必需**：`mount-phase-1/2`、`fsck`、`fips`、`dirs_cleaner`、`launchd_cache_loader` 都带 `RequireRun`；旧结论说普通首启不执行是错的。0151 起全部进 `base.kist` |
 | `/bin/sh`、`/usr/bin/*` 工具 | 第一个 job 不需要 shell；需要时再按同一方法核对依赖 |
 | `/dev` 节点 | 不能作为普通文件安装，见第 3 节 |
 
@@ -7251,30 +7254,70 @@ upward，拿主缓存 `imagesText` 的 2,710 条路径做名字解析。判定�
 `libSystem.B`/`libobjc.A` 两条本身就在 2,710 条 image 记录里。**上表的直接依赖
 没有一条 NOWHERE。**
 
-#### 2.1 `launchd_cache_loader` 与 boot task：为什么不是 blocker
+#### 2.1 boot task：普通首启会全部执行，缺可执行文件就是 panic
 
-launchd 二进制里带一份 boot task 表（`/System/Library/xpc/launchd.plist` 的编译
-内默认值），其中有 `mount-phase-1/2`、`fsck`、`fips`、`data-protection`、
-`launchd_cache_loader` 等。只看名字会以为最小树必须带 `/sbin/mount`、
-`/sbin/fsck`、`/usr/libexec/*`；但过滤函数（launchd 内 0x10003f868）的规则是：
+**这一节原来的结论是错的，2026-10-28 的真机日志已经推翻它。** 旧说法是
+“普通首启只跑 `PerformAlways` 的 Block 项，`mount-phase-1/2`、`fsck` 被跳过，
+所以最小树不需要这些可执行文件”。真实的过滤函数在 launchd 内 `0x10003f868`：
 
-1. `PerformAlways` 直接运行；
-2. 否则只有对应的 boot 模式标志为真时才运行（`PerformAfterUserspaceReboot`、
-   `PerformInRestore`、`PerformInLeanTestEnvironment`、`PerformInBaseSystem`）；
-3. 没有任何 `Perform*` 标志、也不是 `PerformAlways` 的项，普通首启直接
-   `Skipping boot-task`。
+1. `PerformAlways` → 直接运行；
+2. `getenv("XPC_USERSPACE_REBOOTED")` 非空（userspace reboot）时，只运行带
+   `PerformAfterUserspaceReboot` 的项；
+3. restore / lean / BaseSystem 三种模式下，同样只运行对应 `PerformIn*` 的项；
+4. **普通首启（以上四个标志都为假）不套用任何 `Perform*` 过滤，每一项都运行。**
 
-普通首启（不是 userspace reboot、不是 restore）只有 `commit-boot-mode` 和
-`init-with-data-volume` 两个 `PerformAlways` 的 **Block** 项在 launchd 进程内
-处理。`launchd_cache_loader` 带 `PerformAfterUserspaceReboot`，被跳过；
-`mount-phase-1/2`、`fsck` 没有标志，也被跳过。因此最小树不需要这些可执行文件。
-反过来说：**如果以后做 userspace reboot，它们会变成 blocker**，因为
-`/usr/libexec/` 不在允许清单、可执行文件也不在缓存里。
+所以 `PerformAfterUserspaceReboot` 的语义是“userspace reboot 之后还要再跑
+一次”，不是“只在 userspace reboot 跑”。`launchd_cache_loader`、`dirs_cleaner`、
+`keybag`、`usermanagerd` 在普通首启也会执行。
 
-`/System/Library/xpc/launchd.plist` 本身缺了不致命：`open()` 失败只打一行
-`Unable to open /System/Library/xpc/launchd.plist [2:No such file or directory]`，
-然后跳过给 cache loader 准备共享内存那一步。普通首启不跑 cache loader，所以这
-行是良性的；要消掉它，可以把该文件放进卷骨架。
+执行顺序也不是 plist 的字典顺序，而是 launchd 在 `0x100040138` 里硬编码的
+调用序列（`fsck` 之前还有一个 `statfs("/")` 判断）：
+
+| # | boot task | Program | 标志 | 普通首启 |
+| ---: | --- | --- | --- | --- |
+| 1 | `fsck` | `/sbin/fsck -qL` | RequireRun + RequireSuccess | 仅当 `statfs("/").f_flags & MNT_RDONLY`；**必需** |
+| 2 | `mount-phase-1` | `/sbin/mount -P 1` | RequireRun + RequireSuccess | **必需** |
+| 3 | `data-protection` | `/usr/libexec/init_data_protection` | RequireSuccess | 可选 |
+| 4 | `finish-obliteration` | `/usr/libexec/mobile_obliterator --init` | RequireSuccess | 可选 |
+| 5 | `detect-installed-roots` | Block | — | 进程内 |
+| 6 | `commit-boot-mode` | Block | PerformAlways | 进程内 |
+| 7 | `restore-datapartition` | `/usr/libexec/HorizonSetup` | PerformInRestore + RequireSuccess | 可选 |
+| 8 | `mount-phase-2` | `/sbin/mount -P 2` | RequireRun + RequireSuccess | **必需** |
+| 9 | `init-with-data-volume` | Block | PerformAlways | 进程内 |
+| 10 | `MSUEarlyBootTask` | `/usr/libexec/MSUEarlyBootTask` | AllowCrash | 可选 |
+| 11 | `fips` | `/usr/libexec/cc_fips_test` | RequireRun + RequireSuccess | **必需** |
+| 12 | `darwinos-boot-task` | `/usr/libexec/darwinos-boot-task` | RequireSuccess | 仅 darwinos |
+| 13 | `keybag` | `/usr/libexec/keybagd --init` | PerformAfterUserspaceReboot + AllowCrash | 可选 |
+| 14 | `usermanagerd` | `/usr/libexec/usermanagerd --init` | PerformAfterUserspaceReboot + AllowCrash | 可选 |
+| 15 | `dirs_cleaner` | `/usr/libexec/dirs_cleaner /tmp /var/run` | PerformAfterUserspaceReboot + RequireRun + RequireSuccess | **必需** |
+| 16 | `xpcroleaccountd` | `/usr/libexec/xpcroleaccountd -boot` | — | 可选 |
+| 17 | `init_featureflags` | `/usr/libexec/init_featureflags --boot` | PerformAfterUserspaceReboot | 可选 |
+| 18 | `auearlyboot` | `…/MobileAccessoryUpdater.framework/Support/auearlyboot --early-boot` | — | 可选 |
+| 19 | `tzinit` | `/usr/libexec/tzinit` | RequireSuccess | 可选 |
+| 20 | `finish-restore` | `/usr/libexec/FinishRestoreFromBackup` | PerformAfterUserspaceReboot + RequireSuccess | 可选 |
+| 21 | `finish-demo-restore` | `/usr/libexec/finish_demo_restore` | RequireSuccess | 可选 |
+| 22 | `sysstatuscheck` | `/usr/libexec/sysstatuscheck` | PerformAfterUserspaceReboot + RebootOnSuccess + AllowCrash | 可选 |
+| 23 | `prng_seedctl` | `/usr/libexec/prng_seedctl` | AllowCrash | 可选 |
+| 24 | `launchd_cache_loader` | `/usr/libexec/launchd_cache_loader` | PerformAfterUserspaceReboot + RequireRun + RequireSuccess | **必需** |
+
+“必需”就是带 `RequireRun`：`posix_spawnp` 返回 ENOENT 时 launchd 打
+`<name> boot task not present`，随后
+`boot task failure: <name> - required boot task executable not found` 并
+panic；带 `RequireSuccess` 的项还会在子进程非 0 退出或崩溃时 panic。
+最小 `base.kist` 第一次上真机撞到的正是
+`userspace panic: boot task failure: mount-phase-1 - required boot task
+executable not found`（2026-10-28）。因此最小树必须带 `/sbin/mount`、
+`/sbin/fsck`、`/usr/libexec/cc_fips_test`、`/usr/libexec/dirs_cleaner`、
+`/usr/libexec/launchd_cache_loader`；0144 之后 `/sbin/` 和 `/usr/libexec/`
+都已在安装器允许清单里，装这些文件不需要改内核。
+
+`/System/Library/xpc/launchd.plist` 仍然不是“缺了就 panic”的文件：launchd
+`open()` 失败只打一行 `Unable to open /System/Library/xpc/launchd.plist
+[2:No such file or directory]`，然后跳过给 cache loader 准备共享内存那一步。
+但 0144 之后的 `launchd_cache_loader` 是必需项，它需要那个 plist 和 `.sig`；
+缺文件时它会在自己的错误路径上 abort（不是“可选”）。要让它真正跑通，得把
+`/System/Library/xpc/` 加进允许清单并装这两个文件——本轮没有做，实测停在它
+之前的 `mount-phase-1`（见第八十二节）。
 
 ### 3. `/dev`：不是安装文件，也不是 launchd 创建
 
@@ -9326,9 +9369,12 @@ KEBAB DSC: plan 43 files / 52 mappings, 0xa2de8000 mapped, extent 0xaade8000 (en
    `proc_rlimit_control`、`setlogin`、`setsid`、`chdir("/")` 都有实现，权限也对
    （launchd 是 `initproc`）。唯一会因“非 Apple 配置”失败的是 `hw.targettype`
    整个 sysctl 不存在（本树有，见 2.2）和 `kern.bootargs` 为空（本树有）。
-4. 卷上缺的东西里，只有 `/usr/libexec/xpcproxy` 是**硬 blocker**；
+4. 卷上缺的东西里，`/usr/libexec/xpcproxy` 和 boot task 的可执行文件
+   （`/sbin/mount`、`/sbin/fsck`、`/usr/libexec/cc_fips_test`、
+   `/usr/libexec/dirs_cleaner`、`/usr/libexec/launchd_cache_loader`）都是
+   **硬 blocker**；旧结论漏掉了后者，真机已用 `mount-phase-1` panic 证明。
    `/private/var/db/com.apple.xpc.launchd`、`/System/Library/xpc/launchd.plist`、
-   jetsam/limits/personas plist 缺失都只影响某一项功能或产生一行日志。
+   jetsam/limits/personas plist 缺失本身只影响某一项功能或产生一行日志。
 5. 只有真机能定的关键三条：`/dev/console` 的 `cnopen → km_tty[0] → kmopen` 是否
    真的通；xpcproxy 的 cdhash 是否在静态信任缓存里；xpcproxy 的
    `POSIX_SPAWN_SETEXEC` 第二次 exec 是否和 launchd 的第一次 exec 一样过关。
@@ -9390,13 +9436,14 @@ job 相关的键：
 * `SystemRoots`：`/System/Library`、`/AppleInternal/Library`、
   `/System/Cryptexes/{OS,App}/System/Library`、`/private/preboot/Cryptexes/...`；
   后四个本卷没有，缺失只是少几个候选根。
-* `Boot`：29 项。普通首启（不是 userspace reboot、不是 restore）只有
-  **`commit-boot-mode`** 和 **`init-with-data-volume`** 是 `PerformAlways`；
-  `detect-installed-roots`、`workload-properties-init` 是 `Block` 但没有
-  `Perform*` 标志；`fsck`、`mount-phase-1/2`、`data-protection` 等没有标志，
-  直接 `Skipping boot-task`；`launchd_cache_loader`、`keybag`、`dirs_cleaner`
-  等带 `PerformAfterUserspaceReboot`，普通首启不跑。第 68 节 2.1 的过滤规则
-  在这里被真实二进制再次确认。
+* `Boot`：29 项。**旧结论“普通首启只跑 `PerformAlways`”已被真机推翻，
+  2026-10-28 起以第六十八节 2.1 为准。** 过滤函数 `0x10003f868` 对普通首启
+  （`XPC_USERSPACE_REBOOTED` 为空、restore/lean/BaseSystem 都为假）不套用任何
+  `Perform*` 过滤：每一项都执行。`PerformAfterUserspaceReboot` 的意思是
+  “userspace reboot 之后再跑一次”，不是“只在 userspace reboot 跑”。执行顺序
+  是 `0x100040138` 里的硬编码序列，不是字典顺序；带 `RequireRun` 的必需项为
+  `fsck`（仅 `/` 为 `MNT_RDONLY` 时）、`mount-phase-1`、`mount-phase-2`、
+  `fips`、`dirs_cleaner`、`launchd_cache_loader`。
 * `HighWatermark = 50`、`SIGTERMTimeout = 3`、`ExtensionWatchdog = true`。
 
 **修正一个容易误解的点**：`init-with-data-volume` 的 block handler 是
@@ -11975,3 +12022,80 @@ P1 已完成。
 
 本节的代码已经编译进 `kernel.development.kebab`；第 7 小节中未在硬件上执行的部分
 不写成"已验证"。
+
+## 八十二、2026-10-28 真机：boot task 与 DSC 的当前边界
+
+> 本节记录 0150/0151 内核上的实测，接第八十一节。镜像 `p1-run/boot-C-0151.img`
+> 与 0150 相同，只去掉 `kebabkdp=1`，让 0134 的 panic 路径走复位而不是 KDP。
+
+### 1. 安装：新 base.kist 只补五个文件
+
+`0151` 的 base 流是 11 entries / 2,057,682 安装字节 / 655,360 线上字节，
+SHA-256 `8a40071e0b22b7af0a8460dd6da04fa2bfef31ea523f0f6681c8ef06494a4f58`。
+在已有 skel+base+cache 的卷上重发，安装器把 6 条同内容项标成 `SKIP`，只写
+5 条新文件：
+
+```
+INST FREE before 3380373 after 3380287 delta 86 expected 84 bsize 4096 written 341648 replaced 0
+INST SYNC stream end vfs ok device ok ms 1
+INST VERIFY /sbin/fsck 71008 cold full ok
+INST VERIFY /sbin/mount 91952 cold full ok
+INST VERIFY /usr/libexec/launchd_cache_loader 72336 cold full ok
+INST DONE entries 11 ok 5 skipped 6 bytes 2057682 wire 655360 ms 130
+```
+
+`SYNC` 随即确认卷头已是新值：`before 3380287 after 3380287 delta 0`。所以
+“只加文件、不重做 3.3 GB”这条路是通的。
+
+### 2. boot task：`/sbin/mount` 找到了，但被平台位挡住
+
+`mount-phase-1` 不再报 ENOENT；`/sbin/mount` 被 exec，信任缓存命中也正确：
+
+```
+KEBAB CS: exec cdhash b6a7272461fce359ceb407594e7aaf4fdf4949f1 cd=0x11a84+904 hash=2 slice=0x0 tc=hit platform=1
+Allowing spawn of iOS binary mount since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+panic(cpu 0 caller 0xfffffe0006b00a9c): userspace panic: boot task is not a platform binary (mount-phase-1, /sbin/mount)
+```
+
+launchd 的 boot task runner 在 `posix_spawnp` 成功后立刻
+`csops(pid, CS_OPS_STATUS)` 检查 bit 26；`kebab_cs` 的 `platform=1` 是
+exec 分类结果，但 `p_csflags` 里没有 `CS_PLATFORM_BINARY`（0100 的注释本来就
+说这个位是 AMFI 的，本移植从未设置它）。这是内核 CS 传播缺口，不是文件缺失；
+下一个改动应当是让“静态 TC 命中”同时落到 `p_csflags`，否则每个 boot task 都
+会停在同一处。
+
+### 3. DSC：plan 在 subcache 38 上被拒
+
+`kebab_dsc=1` 这次真的进了 plan（0150 的 `PE_parse_boot_arg_str` 修复生效），
+但计划在解析第 38 个分片时拒绝：
+
+```
+KEBAB DSC: subcache 38 suffix ".38" uuid 0f806d3d90313bab88bccbb44f5b1a04: NO FILE WITH THIS UUID
+KEBAB DSC: plan rejected (error 2); shared cache NOT mapped
+KEBAB DSC: resolved 37/42 subcaches by uuid; dylddata=1 dyldlinkedit=1
+KEBAB DSC: plan 38 files / 0 mappings / 0x0 bytes (0)
+```
+
+`.38` 的源文件在 `~/ios-userland/cryptex-cache/` 里，头里的 UUID 正是
+`0f806d3d…`，安装日志也有 `OK …/dyld_shared_cache_arm64.38 573440`；内核却
+连 `cannot open`/`not a dyld cache header` 都没打，说明它根本没在目录扫描结果
+里。两个候选原因，下一次安装启动可以区分：
+
+1. `.38` 的目录项没有在 3.3 GB 安装后存活（数据块已分配，所以 `INST FREE` 的
+   delta 仍然对得上；这需要 `INST CHECK` 全部 44 个文件才能发现）；
+2. `kebab_dsc_list_dir()` 用 `pos + sizeof(struct dirent) <= used` 作为循环边界，
+   而内核的 `struct dirent` 是 1048 字节、缓冲区是 8192 字节；如果 HFS+ 一次
+   读回的记录让尾部不足 1048 字节，最后几条会被静默丢掉。
+
+无论哪一条，dyld 都退回了文件系统路径：42 行
+`shared_region: … map(…'dyld_shared_cache_arm64.NN'): not in trust cache`，
+没有 `mapped cache does not contain dynamic config data`。
+
+### 4. 下一步（按依赖顺序）
+
+1. 进安装内核，对 44 个 cache 文件逐条 `INST CHECK`，确认 `.38` 是否还在卷上；
+2. 若在，修 `kebab_dsc_list_dir()` 的 dirent 边界（改用
+   `pos + offsetof(struct dirent, d_name) + 1` 或 `d_reclen` 自身做边界），
+   再上板；
+3. 同时把 `CS_PLATFORM_BINARY` 落到 boot task 子进程的 `p_csflags`，否则
+   `mount-phase-1` 之后无法继续。
