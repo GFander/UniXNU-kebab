@@ -13030,3 +13030,367 @@ boot       boot-PL4.img      100,663,296 字节
 一个好消息：padding=0 之后，vendored 的 22 槽尾部正好落在 170 的基址上——上一轮
 为对齐尾部做的裁剪没有白做。等上面任一条成立，打开 `KEBAB_BLOCKSTORAGE` 就只剩
 链接问题，驱动代码本身不用再改布局。
+
+## 八十九、让内核调用预链接 kext
+
+写于 2026-10-28。第八十八节留下的最后一个结构性缺口是方向问题：emitter 只把
+**供体 kext 里的指针重绑到本内核的导出符号**，不支持**内核代码引用预链接 kext
+的符号**。本节补上反方向，给出机制、arm64 引用形式、可达范围分析，以及一个在
+真实 0159 内核、真实供体、真实 slide 上完成的离线原型。**没有刷机，也没有把
+`KebabBlockStorageDevice` 真正编进内核**；原型用一段注入到真实内核镜像里的
+四指令探针代替整块驱动，原因和边界见第五节。
+
+### 一、结论先行
+
+选定的机制是**清单驱动的直接重绑定**，不是 dyld 绑定，也不是 PLT/GOT 间接层：
+
+```
+--kernel-import SYMBOL=ORIGINAL_VA[@NATIVE_VA]
+```
+
+- `ORIGINAL_VA` 是符号在供体组件里的原始地址；
+- `NATIVE_VA` 是内核侧占位定义/探针槽的地址，省略时按同名符号查内核
+  `LC_SYMTAB`；
+- 最终地址 `FINAL_VA = ORIGINAL_VA + slide`；
+- emitter 在内核的**可执行段**里找 `B/BL`、`ADRP+ADD`、`ADRP+LDR`，在**非可执行
+  段**里找正好等于 `NATIVE_VA` 的 8 字节槽（vtable、GOT、字面量池），把目标改成
+  `FINAL_VA`；
+- 找不到引用、地址不在所选闭包内、`B/BL` 超出 ±128 MiB、`ADRP` 超出 ±4 GiB，
+  一律拒绝生成候选，而不是静默留下错误地址。
+
+原型结果：真实 0159 内核里的两条引用分别被改成
+`0xfffffe0005c451d0`（`IOBlockStorageDevice::gMetaClass`，落在
+`__PRELINK_DATA`）和 `0xfffffe0003815dc4`（`IOBlockStorageDevice::getMetaClass`，
+落在 `__PLK_TEXT_EXEC`）。反汇编复核两条目标都指向预链接块内部；函数字节与供体
+逐字节相同。
+
+### 二、为什么不是 dyld 的 GOT/惰性指针
+
+先把“内核是怎么引用一个外部符号的”量清楚。用 0158 的真实驱动 TU，在内核的完整
+编译参数下编译：
+
+```
+202 个未定义符号
+其中属于 IOStorageFamily 的 11 个：
+  gMetaClass
+  __ZTV20IOBlockStorageDevice
+  C2（构造）
+  D2（析构）
+  setProperties
+  doSetPriority
+  doLockUnlockMedia
+  getWriteCacheState
+  setWriteCacheState
+  doGetProvisionStatus
+  getProperty(OSSymbol const *)
+```
+
+`otool -rv` 给出的重定位形态是三类：
+
+| 形态 | 例子 | 数量 | 静态链接后的样子 |
+| --- | --- | --- | --- |
+| `GOTLDP/GOTLDPOFF` | `gMetaClass`、`__ZTV20IOBlockStorageDevice` | 各 3 处 | GOT 被 ld64 松弛成 `ADRP+ADD` / `ADRP+LDR` |
+| `BR26` | `C2`、`D2` | 6 + 3 处 | 直接 `BL` |
+| `UNSIGND` 8 字节槽 | 基类虚函数、`setProperties`、`getProperty` | vtable 的 0x128/0x180/0x578/0x5d0/0x5d8/0x5f8/0x608 | 绝对地址 |
+
+关键点：**最终内核是 `-static -pie`，没有 dyld**。`-undefined dynamic_lookup`
+在 `-static -pie` 下不是可用的逃生门：ld64 1053.12 在本机直接断言失败
+（`IndirectSymbolTableAtom<arm64>::symIndexOfLazyPointerAtom` /
+`ExternalRelocationsAtom::size`）。所以最终镜像里不会留下可被 dyld 处理的惰性
+绑定；能重写的只有已经形成的指令和 8 字节槽。
+
+这也解释了为什么不能只改 `LC_SYMTAB`：符号表值不参与已经链接好的指令。内核若
+用占位定义骗过链接器，引用会以 `ADRP+ADD`、`BL` 或 vtable 槽的形式固化；必须
+逐个改这些位置。
+
+### 三、arm64 引用形式与补丁位置
+
+对每个 `SYMBOL=ORIGINAL_VA`，emitter 在 native 镜像里做四类匹配：
+
+1. **`B/BL`**：`imm26` 解码出的目标正好是 `NATIVE_VA`。改 `imm26` 为
+   `(FINAL_VA - PC) >> 2`。这是函数调用的常见形态。
+2. **`ADRP+ADD`**：`ADRP` 的页基址加 `ADD` 的 12 位立即数正好是 `NATIVE_VA`。
+   同时改 `ADRP` 的 `immlo/immhi` 和 `ADD` 的 `imm12`。这是取数据地址
+   （`&gMetaClass`）的常见形态。
+3. **`ADRP+LDR`**：`ADRP` 的页基址加 `LDR` 的 12 位缩放偏移正好是
+   `NATIVE_VA`。同时改两者。用于“从符号地址读取内容”的形态。
+4. **8 字节绝对槽**：非可执行段里 qword 正好等于 `NATIVE_VA`。直接写
+   `FINAL_VA`。vtable 的基类虚函数槽、`setProperties`/`getProperty` 槽、以及
+   任何 GOT/字面量池都属于这一类。64 位绝对地址，**不受 ±128 MiB 限制**。
+
+工具对每个请求至少要求命中一个位置；命中后逐字节校验旧值再写，避免输入在扫描
+后被改动。报告里记录 `kind`、`va`、旧字、新字，便于离线复核。
+
+### 四、两个方向不是同一个问题
+
+供体→内核是**数据指针重绑**：`_PrelinkLinkKASLROffsets` 里的 8 字节槽是绝对
+地址，重定位表给的是“站点”，写入的是“目标”，不受指令编码范围影响。
+
+内核→kext 则混合了三种东西：
+
+- 数据地址：`ADRP+ADD`/`ADRP+LDR`，`ADRP` 可达 ±4 GiB，`ADD/LDR` 只覆盖页内
+  12 位；
+- 函数调用：`BL`，有符号 26 位，**±128 MiB**；
+- 取地址/虚表：8 字节绝对槽，无范围限制。
+
+当前 slide `-0x1f001dc4000` 下：
+
+```
+预链接块       0xfffffe0003004000 .. 0xfffffe00070c1000
+其中可执行     __PLK_TEXT_EXEC 0xfffffe00037c8000 .. 0xfffffe0004e9c000
+内核可执行     __TEXT_EXEC     0xfffffe00062d0000 .. 0xfffffe0006b2c000
+               __KLD          0xfffffe0006b2c000 .. 0xfffffe0006b30000
+```
+
+最坏 `BL` 距离是内核 `__KLD` 末尾到组件可执行段开头：
+
+```
+0xfffffe0006b30000 - 0xfffffe00037c8000 = 0x3368000
+                                      = 53,903,360 字节 = 51.4 MiB
+```
+
+原型探针的 `BL` 是
+
+```
+0xfffffe0003815dc4 - 0xfffffe00070c1008 = -0x38ab244
+                                       = -59,421,252 字节 = -56.7 MiB
+```
+
+两者都在 ±128 MiB 内。**但这个结论依赖当前 slide**。旧 slide
+`-0x1f009cdc000` 把预链接块放到 `0xfffffdfffb0ec000`，到内核可执行段的距离
+约 177.9 MiB；组件可执行子段从 `0xfffffdfffb8b0000` 开始，距离约 170.1 MiB，
+仍然超过 ±128 MiB。那种布局下直接 `BL` 必然不可达，必须加 veneer（本原型没有
+实现，工具会拒绝并报错）。
+
+`ADRP` 的 ±4 GiB 在两种布局下都够用；8 字节槽完全不受影响。因此设计上把
+“函数调用的可达性”作为必须显式检查的条件，而不是假设 slide 永远合适。
+
+### 五、原型：在真实内核里注入两条引用
+
+#### 1. 供体符号被剥掉了
+
+这里有一个必须先说的事实：`kernelcache.fileset.macho` 里 IOStorageFamily 组件的
+`LC_SYMTAB` 是**全零**（`symoff=0, nsyms=0, stroff=0, strsize=0`），也没有
+`LC_DYLD_EXPORTS_TRIE`；外层 `LC_SYMTAB` 只有 5873 个内核符号。也就是说，
+“组件导出的每个符号都有已知最终地址”这句话在 Apple 的 release kernelcache 上
+**不能靠符号表直接成立**。
+
+原型没有去伪造一个假的 `gMetaClass`，而是从 IOStorageFamily 的
+`__mod_init_func` 里把真实地址解出来：
+
+```
+0xfffffff0055da09c  __mod_init_func（IOBlockStorageDevice 的注册 thunk）
+  x0 = 0xfffffff007a091d0        // &gMetaClass
+  x1 = 0xfffffff004dd0376        // "IOBlockStorageDevice"
+  x2 = [0xfffffff006c72e68]      // 供体内核里的 IOService::gMetaClass
+  w3 = 0x90                      // class size
+  bl 0xfffffff0055eb304          // OSMetaClass 基类构造
+  str 0xfffffff006c74568, [x0]   // MetaClass vtable
+```
+
+因此：
+
+```
+gMetaClass（原始）       0xfffffff007a091d0
+gMetaClass（+ slide）    0xfffffe0005c451d0   __PRELINK_DATA
+getMetaClass（原始）     0xfffffff0055d9dc4   // adrp x0,&gMetaClass; add; ret
+getMetaClass（+ slide）  0xfffffe0003815dc4   __PLK_TEXT_EXEC
+```
+
+`getMetaClass` 的 thunk 本身也证实了 `gMetaClass` 的地址：它就是把
+`0xfffffff007a09000 + 0x1d0` 返回。
+
+#### 2. 探针
+
+把真实 0159 内核（16,969,016 字节，`706f4280…`）复制一份，在 Mach-O 头部的
+填充区里加一个 4 KiB 的 `__PRELINK_PROBE` 段：
+
+```
+VA       0xfffffe00070c1000
+fileoff  0x102f000
+权限     r-x
++0x00    ADRP x0, 0x70c1000
++0x04    ADD  x0, x0, #0x80        // -> 0x70c1080，占位 gMetaClass
++0x08    BL   0x70c1090            // -> 占位 getMetaClass
++0x0c    RET
++0x80    16 字节零                  // 占位对象
++0x90    RET                        // 占位函数
+```
+
+这不是“另写一个假内核”，而是**真实内核镜像 + 一段编译器会生成的引用形态**。
+没有编真实驱动的原因是：驱动要进内核，除了这 11 个符号，还缺一个完整的
+placeholder/import 对象和 vtable 槽布局验证；那属于下一组内核补丁，不是工具
+本身能单独证明的。探针明确只覆盖“数据地址 + 直接函数调用”两种最关键的形态，
+vtable 槽形态由合成单测覆盖。
+
+#### 3. emitter 调用
+
+```
+python3 emit_prelink.py \
+  --kernel kernel-0159-probe \
+  --prelinked kernelcache.fileset.macho \
+  --root com.apple.filesystems.apfs \
+  --root com.apple.driver.AppleMobileFileIntegrity \
+  --slide -0x1f001dc4000 \
+  --early-security-init com.apple.driver.AppleMobileFileIntegrity=0xfffffff0056fb000 \
+  --kernel-import '__ZN20IOBlockStorageDevice10gMetaClassE=0xfffffff007a091d0@0xfffffe00070c1080' \
+  --kernel-import '__ZN20IOBlockStorageDevice13getMetaClassEv=0xfffffff0055d9dc4@0xfffffe00070c1090' \
+  --output prelink-probe.bin
+```
+
+结果：
+
+```
+候选         54,857,728 字节（原 0159 候选 54,853,632 + 4 KiB 探针段）
+sha256       db77afd98931cadc55efa86d559ee9731b97a5c7919a9da1e458cec1c614e796
+探针原字     90000000 91020000 94000022 d65f03c0
+探针新字     90ff5c20 91074000 971d536f d65f03c0
+数据目标     0xfffffe0005c451d0  （__PRELINK_DATA）
+BL 目标      0xfffffe0003815dc4  （__PLK_TEXT_EXEC）
+```
+
+复核：
+
+- 两条目标都落在候选镜像的预链接段内；
+- `getMetaClass` 目标处 0x20 字节与供体原地址逐字节相同
+  （`8021019000400791c0035fd6…`）；
+- `gMetaClass` 在 `__common`，文件里是零填充，候选里也是零；
+- 不带 `--kernel-import` 重跑原内核，候选 sha256 仍是
+  `a25593d7855141471734c73ec1016e1ac3399ab4d0ab4b6fa6b3b6aacf16e9a2`，
+  与第八十八节的 0159 候选完全一致，说明改动没有影响原有输出；
+- 工具自测 25 项通过（14 项 `test_native_prelink.py`，11 项
+  `test_emit_prelink.py`），新增的两项覆盖 `ADRP+ADD`/`BL`/8 字节槽和
+  `BL` 超程拒绝。
+
+### 六、运行时风险（按优先级）
+
+**1. MetaClass 初始化顺序（最高）**
+
+内核自己的 C++ 静态构造在启动早期执行；`KebabBlockStorageDevice` 的
+`OSDefineMetaClassAndStructors` 会构造它自己的 `gMetaClass`，并把
+`&IOBlockStorageDevice::gMetaClass` 作为 `superClassLink` 存下来。此时
+IOStorageFamily 还没启动，它的 `gMetaClass` 只是预链接段里的零填充 BSS。
+
+`OSMetaClass::OSMetaClass()` 本身只保存指针，不立刻解引用；
+`postModLoad()` 会沿着 `superClassLink` 走链，但只读指针本身，零对象会让链
+提前结束、深度算错，不一定会立刻崩。`instanceConstructed()` 也是非虚函数，
+只对 `superClassLink` 指向的 `instanceCount`/链字段做读写；基类对象在
+`__PRELINK_DATA` 里是可写的，零对象上的读写不一定触发 fault，但会把实例计数
+和类链深度算错。更危险的是任何在基类初始化前发生的
+`metaCast`/`getClassName`/vtable dispatch：它们会读零 `className` 或零
+vtable。也就是说，**静态类构造不一定立刻崩，实例构造/动态 cast 才是危险点**；
+这个区别决定了注册点能否放在 `kebab_ufs_rootdev()` 里。
+
+启动顺序上有一个好消息：`PE_lockdown_iokit()` → `StartIOKitMatching()` 在
+`bsd_init()` 之前，而 `kebab_ufs_rootdev()` 在 `bsd_init()` 的 mountroot 路径里。
+也就是说**实例构造/注册**（如果放在 `kebab_ufs_rootdev` 里）大概率晚于 kext
+匹配；但**静态 `gMetaClass` 构造**仍然早于 kext 初始化。两者不是一回事，不能
+用“注册发生在后面”掩盖静态构造的顺序问题。这是上真机前第一个要加日志/断言的
+点。
+
+**2. vtable/ABI 是否真正一致**
+
+padding=0 只证明了 `IOService` 的 vtable 从 274 降到 170，与供体一致；没有证明
+`IOBlockStorageDevice` 的完整 vtable（继承部分 + 22 个自有槽）与供体逐槽一致。
+真实驱动把 5 个未覆盖的基类虚函数、`setProperties`、`getProperty` 的地址放进
+自己的 vtable；只要基址或槽序错一个，dispatch 就会落到别的函数。需要用供体
+vtable 与 vendored 头做逐槽对照，不能只看 `IOService` 的总字数。
+
+**3. 构造/析构与基类方法地址还没验证**
+
+原型只证明了 `gMetaClass` 和 `getMetaClass`。真实驱动还需要 `C2`/`D2`、5 个
+基类虚函数和 `setProperties`/`getProperty`。我们目前对 `C2` 的候选是
+`0xfffffff0055d9d98`（调用 `0xfffffff0055eb4c0` 后把 `0xfffffff006c73f60`
+写进 `[x0]`），但没有用真实链接 + 运行验证；`D2` 甚至还没定位。地址错一个的
+后果是对象构造/析构直接破坏内存，不是“少一个功能”。
+
+**4. 供体符号被剥掉，清单本身是可信边界**
+
+release kernelcache 没有 kext 符号表，也没有 export trie。原型的
+`gMetaClass` 地址是从 `__mod_init_func` 反解出来的，`getMetaClass` 是从
+thunk 反解出来的；这类地址与具体供体版本强绑定（供体是
+`xnu-8796.142.1.703.8`，本内核是 `8796.141.3`）。生产工具必须把“符号名 →
+原始地址”的清单当作输入，并对每个地址做字节指纹/结构校验；否则版本漂移会
+静默绑到错误函数。
+
+**5. `IOService::init` 能不能在 IOStorageFamily start 之前跑**
+
+分两层：
+
+- **实例 `init`**：如果注册点仍在 `kebab_ufs_rootdev()`，按当前启动顺序它在
+  `StartIOKitMatching()` 之后，实例层大概率合法；但这依赖
+  `IOStorageFamily` 已经被匹配/启动，而不仅是“被登记为 kext”。
+- **静态类注册**：如第 1 条，早于 kext 初始化，不能假设合法。
+
+因此不能简单回答“可以”；需要把驱动注册延后到 `IOStorageFamily` 的类注册
+完成之后，或者改成不依赖 `OSDefineMetaClassAndStructors` 的运行时查找
+（`OSMetaClass::lookupClass` 只能拿 meta class，拿不到构造函数，仍不够）。
+
+**6. loader 跨度/段数**
+
+探针把候选从 15 个映射段加到 16 个，跨度从 `0x40bd000` 增到 `0x40cd000`
+（64.8 MiB），仍远低于 `DarwinBoot::ParseKernel()` 的 `0x0fe00000` 上限和
+64 段上限。但如果后续把 import 槽/veneer 也做成独立段，必须重新复算，不能
+假设“只加 4 KiB 没事”。
+
+**7. 生产形态**
+
+`__PRELINK_PROBE` 是测试段，不在 `_PrelinkInfoDictionary`、不在
+`_PrelinkLinkKASLROffsets`、不在 sparse index 里。它能被 Mach-O 段表映射，
+但不能作为正式机制。正式形态应该是：
+
+- 由内核构建生成一个 `__DATA,__prelink_imports` 段和配套的
+  `__TEXT_EXEC,__prelink_import_stubs`，每个 import 一个 8 字节槽；或
+- 把驱动做成作者 kext，让 kext→kext 链接在 prelink 阶段完成；
+- 或者退回到第八十七节的方案 2：把 IOStorageFamily 必要部分源码编进内核。
+
+在正式形态确定前，`KEBAB_BLOCKSTORAGE` 仍应保持关闭，`ufsmedia=1` 不应在
+真机上打开。
+
+### 七、当前状态与下一步
+
+```
+工具补丁          本地 NativePrelink 已扩展，25 项自测通过
+真实内核+真实供体  两条引用已离线绑定到预链接块，字节复核通过
+无 import 回归     0159 候选 sha256 不变
+真实驱动           未编进内核；C2/D2/vtable 未验证
+真机               未刷机，未做任何硬件动作
+```
+
+下一步顺序建议：
+
+1. 先解决/证明第 1 条（MetaClass 初始化顺序）。可以在内核里加一个
+   `IOBlockStorageDevice::gMetaClass` 的启动期指纹打印，或在
+   `OSMetaClass::postModLoad` 里加断言，确认 kext 类注册早于内核子类注册。
+2. 用供体 vtable 和 vendored 头做逐槽对照，确认 22 槽尾部与基址。
+3. 再补 `C2`/`D2`/5 个基类虚函数的地址清单，把真实驱动编进内核并做一次
+   离线链接；仍不刷机。
+4. 最后才讨论把 `ufsmedia=1` 放到真机；APFS 写风险仍按第八十七节第六节处理。
+
+### 八、工具补丁与复现
+
+工具改动不在 xnu 的 139 个补丁系列里（`kits/NativePrelink` 是独立工具仓库），
+单独放在：
+
+```
+patches/native-prelink/0001-prelink-kernel-imports.patch
+```
+
+在 `NativePrelink` 根目录应用：
+
+```
+git apply ../../patches/native-prelink/0001-prelink-kernel-imports.patch
+# 或
+patch -p1 < ../../patches/native-prelink/0001-prelink-kernel-imports.patch
+```
+
+自测：
+
+```
+cd kits/NativePrelink
+python3 -m unittest -v test_native_prelink.py test_emit_prelink.py
+```
+
+补丁新增 `--kernel-import`、四类引用扫描/重写、超程拒绝和两项单测；不含
+真实驱动、桥接 kext 或内核构建改动。探针段与验证脚本是本次离线原型的测试
+载体，不进入默认内核构建。
