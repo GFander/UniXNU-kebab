@@ -12612,3 +12612,180 @@ kext 的生命周期是 `KLDBootstrap::readStartupExtensions()`
 让 `IOStorageFamily` 的匹配链能把它交到 APFS 手里。这需要 IOKit C++（本内核已开
 `IOKITCPP`），规模约两百行。它必须在第二环验证之后再做，因为要先确认 prelink
 真的能把驱动加载起来。
+## 八十七、为 APFS 发布 IOMedia
+
+写于 2026-10-28。第八十六节把 prelink 之后的缺口定位到"内核里没有任何东西发布
+`IOMedia`"。本节补上这块代码，并把实现过程中量出来的两个硬约束一并写清楚：
+C++ vtable 的 padding 不匹配，以及静态内核无法链接 `IOStorageFamily` 的符号。
+前者是 prelink 链路的阻塞项，后者决定了这块驱动当前只能以源码形式落地，
+不能进默认内核镜像。
+
+### 一、目标形态
+
+`kebab_ufs` 是 BSD 块设备（`bdevsw`/`strategy`）加一组按字节偏移读写的 raw 接口，
+没有 IOKit 服务。APFS 通过 `IOMedia` 找盘，而 `IOMedia` 由 `IOStorageFamily` 的
+通用 `IOBlockStorageDriver` 为 `IOBlockStorageDevice` 子类创建。因此链条是：
+
+```
+IOPlatformExpertDevice            现有 provider（getServiceRoot()）
+  KebabBlockStorageDevice         本次新增的 IOBlockStorageDevice 子类
+    IOBlockStorageDriver          Apple，来自 prelink 的 IOStorageFamily
+      IOMedia                     Whole=true，名字取自产品名 + " Media"
+```
+
+驱动本身不碰 UFS 硬件：`doAsyncReadWrite` 把请求按 64 KiB 切块，经
+`kebab_ufs_raw_read()` / `kebab_ufs_raw_write()` 落到分区上；`doSynchronize`
+调 `kebab_ufs_sync()`。几何全部来自驱动：`kebab_ufs_partition_bytes()`、新增的
+`kebab_ufs_block_size()`（返回 `UFS_BLOCK`，即 4096）、`kebab_ufs_writable()`。
+没有硬编码分区起始块或大小。传输用一块 64 KiB 的 bounce buffer 加 `IOLock`
+串行化，completion 在返回前同步调用（UFS 路径本来就是轮询同步的）。
+
+### 二、代码与注册点
+
+- `iokit/Kernel/arm/KebabBlockStorageDevice.cpp`：类 `KebabBlockStorageDevice`，
+  实现 `IOBlockStorageDevice` 的 14 个纯虚函数。`doEjectMedia`、`doFormatMedia`、
+  `doUnmap` 返回 `kIOReturnUnsupported`；`reportBlockSize` 返回 4096；
+  `reportMaxValidBlock` 返回块数减一；`reportWriteProtection` 跟随 `ufsrw`；
+  `reportMediaState` 第一次报告 `changedState=true`。
+- `bsd/dev/kebab_ufs.c`：新增只读 helper `kebab_ufs_block_size()`；在
+  `kebab_ufs_rootdev()` 释放 `kebab_ufs_lock` **之后**调用
+  `kebab_blockstorage_start()`。必须在锁外，因为注册路径会再读几何。
+  原有 BSD 接口（`bdevsw`、`strategy`、`raw_*`）一字未改，只是加了一个包装层。
+- 启动参数：`ufsmedia=1`，默认关闭。注册失败只打印，不 panic、不阻塞启动。
+  provider 用 `IOService::getServiceRoot()`，先 `attach()` 再 `registerService()`。
+- `IOStorageFamily` 的 `IOBlockStorageDriver` 按 prelink 镜像里读出的 personality
+  （`IOPropertyMatch = { device-type = Generic }`）匹配这个服务，然后按
+  `reportBlockSize()` / `reportMaxValidBlock()` 发布 `IOMedia`。
+
+成功时启动日志应出现（大小以驱动实测为准）：
+
+```
+KEBAB BLOCK: "userdata" 229843 MiB, 4096-byte blocks, read-only; IOMedia "UFS userdata Media"
+```
+
+随后 `ioreg -c IOMedia` 应能看到 `UFS userdata Media`，属性 `Whole=true`、
+`BlockSize=4096`、`Size` 等于分区字节数；如果 `IOMediaBSDClient` 也匹配，
+还会多出 `BSD Name`（如 `disk0`）和 `/dev/disk0`。**没有这一行或没有 IOMedia**
+就说明匹配/ABI 有问题，先查下面的第五节。
+
+### 三、vendored 头文件
+
+全部放在 `iokit/IOKit/storage/`，随源码树走，不依赖会移动的 SDK 路径：
+
+| 文件 | 处理 |
+| --- | --- |
+| `IOBlockStorageDevice.h` | 按 iOS 16.7.16 的 22 槽尾部裁剪（见下） |
+| `IOMedia.h` | 原样 |
+| `IOStorage.h` | 原样 |
+| `IOStorageDeviceCharacteristics.h` | 去掉 `TargetConditionals.h` / DriverKit 分支 |
+| `IOStorageProtocolCharacteristics.h` | 同上 |
+| `IOStorageControllerCharacteristics.h` | 去掉 `TargetConditionals.h` include |
+
+裁剪依据是从 prelink 候选镜像里实测的 `IOBlockStorageDevice` 派发表：iOS 16.7.16
+的类只有 **22 个自有虚函数**，顺序为 `doEjectMedia`、`doFormatMedia`、
+`doGetFormatCapacities`、`doLockUnlockMedia`、`getVendorString`、
+`getProductString`、`getRevisionString`、`getAdditionalDeviceInfoString`、
+`reportBlockSize`、`reportEjectability`、`reportMaxValidBlock`、
+`reportMediaState`、`reportRemovability`、`reportWriteProtection`、
+`getWriteCacheState`、`setWriteCacheState`、`doAsyncReadWrite`、`requestIdle`、
+`doUnmap`、`doSetPriority`、`doSynchronize`、`doGetProvisionStatus`；
+没有 macOS 头里的 `doSynchronizeCache`、`reportLockability`、
+`reportPollRequirements`、`doDiscard`，也没有 32 个 `OSMetaClass` reserved 槽。
+vendored 头按这个形状改：删掉上述四个方法，`doLockUnlockMedia` 保留并去掉
+`TARGET_OS_OSX` 保护，删掉全部 reserved 声明。三个 characteristics 头只做
+include 收敛，常量本身没动。
+
+### 四、当前不能进默认内核：链接边界
+
+把该文件加进 `iokit/conf/files.arm64` 后，内核在**链接**阶段失败：
+
+```
+Undefined symbols: IOBlockStorageDevice::gMetaClass,
+IOBlockStorageDevice::vtable, IOBlockStorageDevice::IOBlockStorageDevice(...),
+IOBlockStorageDevice::setProperties(...), ...
+```
+
+原因不是缺桩，而是架构边界：`IOStorageFamily` 是 prelink 进来的 kext，
+不在静态内核镜像里；内核代码对它的引用没有定义。prelink 工具只把 donor kext
+里的指针重绑到本内核的导出符号（`unique_kernel_binding`），不处理反方向的
+内核 → kext 引用。因此：
+
+- `iokit/conf/files.arm64` 里的构建行目前是**注释掉的**；
+- `kebab_ufs.c` 的调用点用 `#if defined(KEBAB_BLOCKSTORAGE)` 包住，默认不编译。
+
+要让驱动真正跑起来，必须先满足下面二选一，再加 `-DKEBAB_BLOCKSTORAGE`：
+
+1. 把驱动做成独立 kext，并让 prelink/加载链路接受作者提供的 kext
+   （当前 emitter 只按 bundle id 从 donor 里选组件）；或
+2. 把 `IOStorageFamily`（至少 `IOBlockStorageDevice`/`IOStorage`/`IOMedia`/
+   `IOBlockStorageDriver`）从源码编进内核，让这些符号在静态链接时就有定义，
+   像上游 sheng 的 `refer/IOStorageFamily` 那样。
+
+在此之前，本文件做到的是：用内核 IOKit 的完整编译参数（含 `-Weverything`）
+编译通过，新代码零 warning；整条 137 个 patch 的系列在 pristine `1b191cb` 上
+干净应用，内核构建通过（驱动被 gate 掉，不参与链接）。
+
+### 五、主要风险：macOS 14.5 头 vs iOS 16.7.16 IOStorageFamily
+
+实测两个数字：
+
+- donor kernelcache 的 `__ZTV9IOService` 是 **170** 槽；
+- 我们当前内核的是 **274** 槽。
+
+根因在 `libkern/libkern/c++/OSMetaClass.h`：
+
+```c
+#if !XNU_TARGET_OS_OSX
+#define APPLE_KEXT_VTABLE_PADDING   0
+#else
+#define APPLE_KEXT_VTABLE_PADDING   1
+#endif
+```
+
+本移植用 macOS SDK 构建，定义了 `XNU_TARGET_OS_OSX`，于是所有
+`OSMetaClassDeclareReservedUnused` 都变成真实 vtable 槽；iOS kext 是 0，
+没有这些槽。104 个槽的差不是"多几个方法"，而是**槽位整体错位**：内核按 274
+的布局调用 `probe`/`start`/`attach`，kext 对象按 170 的布局排 vtable，
+dispatch 会落到别的函数。对本驱动而言，`IOStorageFamily` 的
+`IOBlockStorageDriver` 会在 attach/start 时按 170 的基址取
+`reportBlockSize`、`doAsyncReadWrite` 等；只要基址不一致，轻则 `IOMedia`
+不出现，重则在 `IOStorageFamily` 内部崩。
+
+vendored 头已经把 22 槽尾部对齐；padding=0 时 `doEjectMedia` 正好落在 170，
+和 donor 一致（用同一份头编译探针验证）。也就是说**尾部不是问题，基址才是**。
+
+padding=0 原型（未提交）：在 `OSMetaClass.h` 里对 KEBAB 强制 0，并删掉
+`config/*.exports` 里 825 个 `_RESERVED*` 名字（arm64 构建用到其中 5 个文件；
+否则 config 阶段报 `exported name not in import list`），内核构建通过，
+重建后 `__ZTV9IOService` = **170**。42 个头文件里的 C++ 类受影响
+（`IOService` 46 个 reserved 声明、`IORegistryEntry` 32、`IOMemoryDescriptor`
+23、`IOPlatformExpert` 21、`IOUserClient` 20、`IOMedia` 16、`IOStorage` 9 等），
+`KebabPlatformExpert`/`KebabCPU`/`ArmDTPlatform` 这些内核内子类的基类布局全部
+变了。**构建通过不等于能启动**：真机若失败，最先怀疑 IOKit 早期类注册或
+平台专家 `start`，而不是本驱动。
+
+### 六、分区读写警告
+
+这个分区就是当前启动用的 HFS+ 根卷。默认 `ufsrw` 未开时驱动是只读的，发布出去
+不会写盘，风险可控；一旦 `ufsrw=1` 且 APFS 以读写方式挂载，APFS 会把 HFS+ 卷
+当作自己的容器重写，`/sbin/launchd` 等当前启动链依赖的文件会消失，下一次启动
+直接失败。所以：
+
+- 在 APFS 根卷真正接管之前，不要同时开 `ufsrw=1` 和 `ufsmedia=1` 让 APFS 挂载；
+- 即使只读，只要 APFS 认为卷可以修复并尝试写，后果相同；
+- 这块驱动目前只用于验证"`IOMedia` 是否出现"，不要在这块盘上做 APFS 写实验。
+
+### 七、验证状态
+
+```
+137 patches 应用在 1b191cb             通过
+内核构建（驱动 gate 掉，不参与链接）     通过
+驱动 TU 用内核 IOKit 完整 flags 编译     通过，新代码零 warning
+padding=0 原型构建                      通过，__ZTV9IOService = 170
+真机                                    未验证，未刷机
+```
+
+下一步的顺序应该是：先做 padding=0 的正式补丁，让内核在真机上启动并确认
+IOKit 类注册正常；再决定 kext 还是源码内置 `IOStorageFamily`；最后才打开
+`KEBAB_BLOCKSTORAGE` 和 `ufsmedia=1` 看 `IOMedia`。当前驱动只做到
+"编译可验证、代码就位"，还不能在未解决前两项的情况下宣称能挂载 APFS。
