@@ -11343,3 +11343,273 @@ python3 scripts/test-bring-up.py \
 * 仍未验证：`C-FINAL` 的 launchd/zprint 行、`0145` 的路由，以及所有真机
   时序。板子回来时，先按第七十八节 §7 的 18 步读，再用本节表格核对这些
   检查点是否与日志一致。
+
+## 八十、P1 执行计划的独立复核
+
+> 2026-10-28。范围：`9a4fcb4` 上的 `scripts/bring-up.py`（2,921 行）、
+> `scripts/bring-up-README.md`、`scripts/pack-userland.py`、`scripts/make-root-volume.py`、
+> `scripts/make-minimal-userland.py`、`scripts/test-bring-up.py`，以及内核侧
+> `bsd/dev/kebab_usb.c`、`kebab_install.c`、`kebab_vol.c`、`kebab_ufs.c`
+> （`xnu-0139` 树 + `0132`–`0147`，即当前 126 个补丁的终态）。
+>
+> 板子仍然 stranded：**本节没有一条真机日志**。唯一引用的实测数字来自第六十二节
+> （命令往返中位数 **2.4 ms**、写入 **7.84 MiB/s**、64 MiB 卷在第 64,028,672 字节
+> ENOSPC），其余全部是代码推导。
+>
+> 复核方法：把计划当成状态机，对每一步问三个问题——① 这一步的前置条件是谁建立的；
+> ② 这一步的证据下一步还能不能看见；③ 失败之后下一次能不能从同一处继续。
+> 下面按**代价**分组，不按代码顺序。
+
+### 1. 结论
+
+| # | 发现 | 分组 | 代价 |
+| --- | --- | --- | --- |
+| A1 | 装完 `cache.kist` 后没有任何"已落到介质"的保证，而进最终镜像要过一次 PSCI 复位 | 会白跑本次 | 最终启动失败无法归因，下一轮查错方向 |
+| A2 | `VOL? root ro` 与 `KEBAB VOL:` 两行都打印，主机一条都不检查 | 会白跑本次（下一次启动才发作） | 卷被旧 HFS+ 盖回去，且不知道为什么 |
+| A3 | 镜像参数检查只覆盖"本相位增量"，`-v`/`rd=`/`cpus=1` 不在任何 required 集合里 | 会白跑本次 | 静默控制台 / 复位循环 / SMP 抖动，三种都像别的问题 |
+| A4 | 第一步依赖"**已经刷进去那张镜像**"的 `kebab_pon_write=1`，计划无法预检 | 会白跑本次 | 卡在 `precondition.fastboot`，只能按键 |
+| A5 | `INST busy` / `INST refused` / `VOL busy` 不在 `FAIL_RE` 里 | 会白跑本次 | 180 s 静默，提示指向参数（参数其实是对的） |
+| B1 | 卷挂不上时没有回头路：压卷本身要求根能挂上 | 会白跑第二次 | 要按键或另做一张不挂根的镜像 |
+| B2 | 恢复要重发整条 1.04 GB 流，并且无条件重刷 install 镜像 | 会白跑第二次 | 第二轮成本≈第一轮 |
+| B3 | `skel.kist` 的符号链接在重跑时只核对长度、不核对目标 | 会白跑第二次 | 修不好，只能重建卷 |
+
+另有 **12 条已经正确防护**（第 5 节，请不要重复改）、**4 条可以删的步骤**（第 6 节）、
+**5 个 fake board 覆盖不到的盲区**（第 7 节）。
+
+### 2. 会白跑本次
+
+#### A1. 装完 cache 没有落盘保证，进最终镜像却是 PSCI 复位
+
+**事实。**
+
+* `kebab_install.c` 全文没有 `VOP_FSYNC`、没有 `fsync`、没有 `kebab_ufs_sync`。
+  `ki_finish_entry()` 的读回（`kebab_install.c:1193`–`1207`）走 `vnode_lookup` +
+  `vn_rdwr`，`INST CHECK`（`:1550`）走 `ki_hash_file()`，两者都读 **UBC 里的同一份
+  页**；`hfs_vnop_close()`（`bsd/kebab_hfs/core/hfs_vnops.c:650`）不 msync 也不
+  fsync（只对 ejectable 卷调 `hfs_sync_ejectable()`）。
+  那句注释——"Read the file back: the payload hash proved the wire, this proves the
+  volume"（`:1193`）——说的比它做到的多了"介质"这一层。
+* 对照 `kebab_vol.c:641`：写完先 `kebab_ufs_sync()`（`kebab_ufs.c:685`，注释就是
+  `SYNCHRONIZE CACHE(10)`），再 `kebab_ufs_raw_read()` 从**设备**读回卷头并 memcmp
+  （`:646`–`657`）。同一条总线、同一个驱动，压卷是"落盘 + 复核"，装流是"读回就算"。
+* 进最终镜像的路径：`phase_userland("cache")` → `phase_final()` → `boot()` →
+  `ensure_fastboot()`（`bring-up.py:1386`）→ 控制台 `FASTBOOT` →
+  `ud_fastboot_restart()`（`kebab_usb.c:1634`）→ `ud_platform_restart()`
+  （`:1587`–`1602`）→ `PEHaltRestart(kPERestartCPU)`。这条路径上没有 vfs sync，
+  也没有 unmount；
+  它不是"干净重启"，是**掉电**。
+
+**机制。** 最终镜像启动时，`/System/Library/Caches/com.apple.dyld/` 下 44 个分片里
+最后写入的那一段可能还留在 UBC 或 UFS 设备缓存里，重启后不存在。按实测 7.84 MiB/s，
+一个 30 s 的回写窗口就是约 **235 MiB**；最大的分片是 592 MB 的 `.symbols`，尾部少
+一块 dyld 就映射不了。
+
+**为什么"白跑"。** `C-FINAL` 的判定表（`bring-up.py:2724`–`2737`）把
+`Library not loaded` 指向 dyld、把 `CS_KILLED` 指向签名、把
+`KEBAB DSC: … NOT mapped` 指向共享缓存。这一次它们会是同一个原因：**盘上没有**。
+而三个子系统都刚被改过、都没有上过真机（第七十八节 §3.3、§9），下一轮必然先去查
+DSC。
+
+**这一轮怎么办。** 把"最终启动失败"的结论**降级为未定**：复跑时先让 install 镜像
+重启一次（任何一次重启都会清空 UBC），再对同样的 8 条 `INST CHECK`，让 cache 与
+介质对齐。真正要修的是内核侧——在 `ki_finish_stream()` 里对每个写完的文件
+`VOP_FSYNC`，末尾再 `kebab_ufs_sync()`，三行以内，值得在下次上板前做掉。
+
+#### A2. 强制只读这件事，内核打印了两次，主机一次都不看
+
+**事实。**
+
+* `kebab_vol_status()` 打印 `VOL? root %s space … bsize …`（`kebab_vol.c:800`–`808`），
+  `%s` 就是 `ro`/`rw`。
+* `vfs_mountroot()` 在 HFS 挂载前打印
+  `KEBAB VOL: kebab_vol=1 keeps the old root read-only`（`bsd/vfs/vfs_subr.c:1286`）。
+* `vol_status()`（`bring-up.py:1929`–`1964`）只解析 `gated/writable/chunk/partition/
+  VOL DISK`，`got` 字典里**没有 root**；`bring-up-README.md` 的 C-VOL-STATUS 行也没有它。
+
+**为什么这是最贵的一条。** 整个"先写卷、再重启"的安全性论证就压在这一条上：
+README 写"`kebab_vol=1` forces the old root read-only so a stale HFS+ mount cannot
+flush over the new volume metadata"，第七十八节 §4.4 写"如果它没生效而卷写又跑了，
+故障要到下一次启动才出现"。**唯一没有判据的，恰好就是这一条。**
+
+`kv_finish()` 的设备读回只能证明"读完那一刻"块 0 是新的；写完 `VOL DONE` 之后到
+`REBOOT` 之间，旧 HFS+ 若还持有可写挂载（或周期性 sync），仍可能把旧卷头盖回去，
+而症状出现在**下一次启动**的 `C-VOL-MOUNT` / `C-INST-GEOM`：你会看到几何不对或挂
+载失败，却没有任何证据指向"只读没生效"。
+
+**改法（主机侧两行）。** `vol_status()` 里加 `root` 的解析，要求 `ro`；
+`phase_vol()` 在 DRY 之前断言 `KEBAB VOL:` 那行。两条证据互相独立，任一条缺失都停。
+
+#### A3. 参数检查只覆盖"本相位增量"，不覆盖"能不能启动"
+
+**事实。** `BASE_ARGS`（`bring-up.py:115`–`121`）只有
+`kebabusb/ufsrw/rootrw/kebab_pon_write/kebab_cs`，各相位再加自己的 delta。
+而真正让这台机器启动的是 `board.toml` 的 `kernel_args` 前缀：
+
+```
+-v -enable_kprintf_spam startup_debug=1 serial=3 debug=0x14e cpus=1
+rd=ufsroot0 ufsroot=userdata ufsrw=1 rootrw=1
+```
+
+这七项**一项都不在 required 集合里**，`require_args()`（`bring-up.py:2478`）不会看
+它们。README 说"All images are checked for … the required/forbidden boot arguments
+before a flash"——这里的 "required" 只是 delta，不是完整命令行。
+
+**四种缺失各自伪装成什么：**
+
+| 缺 / 拼错 | 现场 | 会被误当成 |
+| --- | --- | --- |
+| `-v` 或 `-enable_kprintf_spam` | USB 上一行都没有（面板上其实有输出） | 控制器没起来 / `kebabusb=1` 丢了 |
+| `rd=ufsroot0` 或 `ufsroot=userdata` | `KEBAB: cannot mount root` → panic → 0134 复位 → 反复 `event thread started` | 板子在阶段中重启 / 电源不稳 |
+| `cpus=1` | 8 核 SMP：`ud.log_busy` 的串行化、`in_ring`、安装器的时序假设全部按单核写的；症状位置随机 | "时序问题" / USB 丢包 |
+| `kebab_cs=15` / `kebab_dsc=1`（这两项**在** required 里，能查出来） | 查不出来时会像签名/缓存问题 | 已经防护，列在这里只为对照 |
+
+另外 `cpus=1` 还有一个隐性作用：本节的整套时序论证（2.4 ms 往返、一个事件线程服务
+所有事）都**假设**单核。计划里没有任何检查点证明这个前提成立。
+
+**建议。** 把 `rd=`、`ufsroot=`、`cpus=1`、`-v`、`-enable_kprintf_spam` 加进每相位
+的 required 集合；这不需要改内核，只需要改 `BASE_ARGS`（它们在三个相位里都应该在）。
+
+#### A4. 第一步依赖"上电时正在跑的那张镜像"，而计划只能检查"即将刷的镜像"
+
+`precondition()`（`bring-up.py:1785`）的顺序是：`fastboot devices` → 没有就
+`IMEM?` 探活 → `FASTBOOT`。而 `FASTBOOT` 在 `kebab_pon_write=0` 时**只打印一行然后
+什么都不做**（`kebab_usb.c:1648`–`1651`）：
+
+```
+KEBAB FASTBOOT: disabled because kebab_pon_write=0; use REBOOT for a plain restart
+```
+
+计划对此的提示是"if the line says disabled, this kernel cannot enter fastboot"——准确，
+但是**终点**：按键之外没有第二条路，因为进入 fastboot 的命令本身也要走这张镜像。
+任务描述里的场景是"板子停在 panic 自旋、人按一次电源"：按下去之后跑的就是**上一次
+刷进去的那张**，计划在它启动之前无法知道它带了什么参数。
+
+三条 P1 镜像都带 `kebab_pon_write=1`，所以只要上一次刷的是它们之一就没事。风险在
+"上一次不是"。**建议**：运行手册里把"确认 boot_b 上最后刷的是三张 P1 镜像之一"
+写成上电前的第一条；代码侧可以在 `FASTBOOT` 被拒时直接打印 vol-up+power 的按键序列，
+而不是让人去读第 78 节。
+
+#### A5. 设备"忙"，主机看到的是参数错误
+
+`kebab_install_begin()` 有三种拒绝：`INST busy`（上一次流还活着，`:1238`）、
+`INST refused`（长度为零，`:1244`）、`INST disabled`（gate 关）。
+`FAIL_RE`（`bring-up.py:167`–`171`）只认 `INST ABORT` / `INST TIMEOUT` / `VOL ABORT` /
+`VOL FAIL` / `VOL TIMEOUT` / `FAIL ` / panic 行；`send_stream()` 等 `INST BEGIN` 时
+只用 `INST_BEGIN_RE`。于是：
+
+* 上一次流因为主机侧放弃而残留（内核侧还有最多 60 s 才超时清掉），这一轮立刻重跑
+  → `INST busy` 不匹配任何判据 → **静默 180 s** → 报 `send.begin`，提示
+  "check that kebab_install=1 and rootrw=1 are on the running image"。这两项都是对的。
+* `VOL busy` 同理（`kebab_vol.c:278`），`vol_send()` 的等待谓词里没有它。
+
+这是"控制台协议在真实时序下会在哪里停"的一个具体答案：**不是链路停，是会话没清干净**。
+把 `INST busy` / `INST refused` / `VOL busy` 加进 `FAIL_RE` 是一行的事，而且能把
+180 s 的误判变成一条明确的"等 60 s 再试"。
+
+### 3. 会白跑第二次
+
+#### B1. 卷挂不上时没有回头路——压卷本身要求根能挂上
+
+这是"如果 imprint 成功但 mount 检查失败，能不能不重新上电"的直接答案：**不能保证。**
+
+* `kebab_vol` 的写路径是 raw 块（`kebab_ufs_raw_write`），确实不需要文件系统；但要跑
+  到 `VOL BEGIN`，这次启动必须先过 `vfs_mountroot()`。挂不上就是
+  `panic("KEBAB: cannot mount root")`，0134 把 panic 变成 PSCI 复位
+  （第七十八节 §3.2），于是**重启循环**，控制台每次只活几秒。
+* 主机侧这次启动的入口是 `console_answers()`（`bring-up.py:1852`）：**一次** 3 s 的
+  `IMEM?`。撞不上就报"a physical power cycle is required"。`probe_imem(attempts=30)`
+  只在 `boot()` 里用，不在 `precondition()` 里。
+* 就算撞上了，`FASTBOOT` 也只有 15 s 的确认窗口（`:1811`），重启循环里未必够。
+
+所以"卷写坏了"这一类失败，恢复手段是**手按 vol-up+power**，或者做一张不挂根、
+只跑 `kebab_vol` 的镜像。计划里两者都没有。**这是唯一一类"这一轮之后板子回不来"的
+失败**，优先级应该高于任何性能问题。建议：`precondition()` 的 `IMEM?` 改成
+`probe_imem(attempts=30, timeout=2.0)`（`boot()` 已经这么做了），并在失败报告里写明
+按键序列。
+
+#### B2. 恢复一次的成本接近重跑一次
+
+* 内核侧有 per-entry SKIP（`kebab_install.c:888`–`899`），但主机侧只要有一条不同就
+  `send_stream()` **整条**流（`bring-up.py:2351`–`2353`）；README 也明说
+  "A partial stream is sent in full"。1.04 GB 要重发一遍。
+* `run()` 在 skel/base/cache 之前**无条件**走 `phase_install()`（`:1760`–`1761`），
+  即使板子已经跑着 install 镜像——一次 `--from cache` 的恢复要付一次 96 MiB 刷写 +
+  一次复位 + 一整条流。
+* 实测 7.84 MiB/s 下，写 3.33 GB 约 7 分钟，而 `ki_finish_entry()` 每条还要**整文件
+  读回**一次（`:1195`），实际 I/O 是 3.33 GB 写 + 3.33 GB 读 ≈ **14 分钟**；再加
+  16,295 × 2.4 ms ≈ 39 s 的往返。预算要按"每轮 20 分钟"算，恢复轮也一样。
+
+**建议**：`phase_install()` 之前先用 `INST?` 探一次（`gated 1 / root rw /
+blocks 4194304` 就说明已经跑在 install 镜像上），成立就不刷不重启；`pack-userland.py`
+已经有 `--skip-list`，把 precheck 的 `same` 列表直接喂给它，就能只发缺的那几条。
+
+#### B3. `skel.kist` 的符号链接：重跑只核长度，不核目标
+
+* 内核侧 EEXIST 分支只做 `vnode_islnk()`（`kebab_install.c:1152`），打印
+  `SKIP <path> <n> link exists`；目标字符串根本不读。
+* 主机侧 SKIP 分支只比对 `entry.size`（`bring-up.py:2293`–`2300`），而 `size` 就是
+  目标长度。
+* 首次创建时 OK 行会带 `-> target`，所以第一次是对的；但只要卷上存在一个**同长度的
+  错误目标**（构建错误、手改、上一版 skel），之后每一轮都 SKIP 通过，最后表现为
+  launchd 找不到 `/etc/passwd`——`C-FINAL` 会把它记成 init 进程失败。
+
+影响面小（新卷第一次就对），但它是"重跑修不好"的那一类，和第七十八节 §4.7 记的
+"`SKIP` 不会重设属主/模式"是同一个形状。**建议**：`check_skel_console()` 对 SKIP 的
+链接要求内核打印目标，或至少在 OK 行存在过的前提下才接受 SKIP。
+
+### 4. 计划里已经做对、且**不要**再改的部分
+
+这一节是为了避免下一轮把已经防护好的东西重新改一遍。
+
+| # | 已经防护的事 | 证据 |
+| --- | --- | --- |
+| 1 | **迟到 ACK 不会打乱流**：主机从不重传（超时直接失败），ACK 是累计值，只有 `acked >= target` 才前进 | `bring-up.py:1671`–`1684`；`kebab_install.c:1457` |
+| 2 | **短包/分片 ACK 也被容忍**：一个 64 KiB 块被拆成多次 completion 时，多个小于 target 的 ACK 只会让主机继续等同一个 target | 同上（这条没有测试覆盖，但逻辑成立） |
+| 3 | **设备在写完之前不重新 arm OUT**：`ud_service()` 的 arm 条件是 `!inst_pending && !vol_pending && reboot_command == 0`，缓冲区由 arm 时记录，不由当前模式推断 | `kebab_usb.c:1176`–`1193`、`:1852`–`1880` |
+| 4 | **压卷是真的落盘**：`SYNCHRONIZE CACHE(10)` + 设备 raw read + memcmp，之后才打印 `VOL DONE` | `kebab_vol.c:641`–`657`；`kebab_ufs.c:685` |
+| 5 | **phase B 的挂载是新的**：install 镜像是新一次启动，`INST?` 读的是 `rootvnode->v_mount` | `kebab_install.c:1491`；`bring-up.py:2158` |
+| 6 | **空闲空间检查读的就是新卷**：`ki_space()` → `vfs_statfs(rootvnode->v_mount)`，不是旧卷、不是宿主机推算 | `kebab_install.c:607`–`621` |
+| 7 | **skel 失败不会被 base 掩盖**：16 条逐条读回、mode/uid/gid（含 01777）全对才继续 | `bring-up.py:2239`–`2316`；`kebab_install.c:379`–`405` |
+| 8 | **每张镜像刷之前都查参数**：install 禁 `kebab_vol=1`、final 禁 `kebab_vol/kebab_noinit`、默认禁 `kebabkdp=1` | `bring-up.py:2478`–`2509` |
+| 9 | **`kebab_noinit` 缺失会被点名**：`boot()` 等 `KEBAB: kebab_noinit=1:`，超时提示"the image was built without kebab_noinit=1" | `bring-up.py:1478`–`1488` |
+| 10 | **panic / 重启可判定**：console epoch、`console reopened`、新 banner、`panic(cpu` 都能触发 `PanicDetected`，不会变成"慢 ACK" | `bring-up.py:973`–`1047` |
+| 11 | **写块 0 之前就把旧卷头和流头验完**：`VOL OLD` 三行 + 32 行原字节、流头 block size/volume/边界都在第一次 flush 之前 | `kebab_vol.c:336`–`340`、`:413`–`433` |
+| 12 | **第七十九节那四处检查点字符串错误已在 HEAD 修掉**（`C-BOOT-BANNER` / `VOL DISK` / `C-VOL-MOUNT` / `C-VOL-REBOOT`） | `9053d4e`、`9a4fcb4` |
+
+### 5. 可以删、或者可以合的步骤
+
+1. **vol 镜像上的 `kebab_install=1`**（`VOL_ARGS`，`bring-up.py:122`）。这一相位用不到
+   INST，而它让**唯一一次破坏性写盘的启动**上多了一个写者。INST 需要 root rw，根被压成
+   只读所以是惰性的——但删掉零成本，收益是那一跑只剩一个写者。
+2. **恢复时无条件重刷 install 镜像**（见 B2）。先用 `INST?` 探，成立就不刷。
+3. **`reboot_and_check_new_volume()` 的额外一次启动**。`C-INST-GEOM`（blocks 4194304 +
+   `root rw` + `free > 0`）已经**更强地**证明了同一件事。省一次启动就省一次复位风险；
+   代价是丢掉"卷挂不上 vs install 镜像有问题"的归因。**建议保留，但在 run book 里写明
+   它是为归因、不是为正确性**——这样下次有人想删时知道删掉什么。
+4. **`VOL DRY` 保留，但别把它当写能力的证据**。`kebab_vol_begin()` 的
+   `kebab_ufs_writable()` 检查只在 `!dry` 分支（`kebab_vol.c:284`），所以
+   `ufsrw=0` 时 DRY 照样通过。真正的 writable 判据是 `VOL? … writable 1`，计划已经查了。
+
+### 6. fake board 覆盖不到的五个点
+
+| # | 测试里怎么过 | 真机上为什么不一样 |
+| --- | --- | --- |
+| 1 | `FakeConsole.send()` 同步调 `device.receive()`，一个 chunk 立刻回 ACK | 真机是 2.4 ms 往返；控制台排出是 `ud_pump_log()` 每次 poll 发 `mps-1` 字节、`ud_thread` 每轮 sleep 1 ms（`kebab_usb.c:2055`–`2066`、`:2154`），即约 63 KB/s 的上限 |
+| 2 | `INST CHECK` 和 SKIP 读的是内存里的 `files` 字典 | 真机读的是 UBC；A1 那类"读回一致、盘上没有"在测试里**不可能**出现 |
+| 3 | `reboot()` 保留 `files` 与 `volume_blocks`，panic 中途重启后卷一定一致、可续 | 真机可能挂不上（B1），也可能丢尾部（A1） |
+| 4 | `chunk()` 每个 chunk 必回一条精确累计 ACK | 没有短传输、没有重复、没有丢行；`LOG_RING_SIZE` 只有 16 KiB（`kebab_usb.c:243`），环满按字节丢弃，可能把一个 ACK 行截断 |
+| 5 | 不模拟 `mps` 边界 | `ud_inst_command()` 只在**单次 completion** 内匹配（`kebab_usb.c:1246`–`1287`），而控制台 arm 长度是 `ud.mps`。HS 下是 512 B，最长命令（`INST CHECK` 一条 65 字符路径 = 77 B）安全；一旦链路掉到 FS，长路径会被**静默截断**成 53 字符并对错路径回 `MISSING`。第七十八节 §2 的 7.84 MiB/s 已经证明当前是 HS，所以这条现在不发作——但没有任何判据保证它 |
+
+第 1、4 两条建议各加一个 fake board 用例：ACK 分两次给（32 KiB + 32 KiB）、
+以及一次 ACK 行被截断后主机应有的反应（60 s 内看到 `INST TIMEOUT`，而不是 180 s）。
+
+### 7. 如果只改一处
+
+**在 `ki_finish_stream()` 里加一次 flush**（`VOP_FSYNC` + `kebab_ufs_sync()`），
+或者退一步：在 `phase_userland("cache")` 之后插一次"重启 → 重新 `INST CHECK` 同样的
+8 条 → 再进最终镜像"。前者三行、后者一次启动。理由是 A1 是唯一一条**会让本轮结论
+反过来**的发现：其余问题最多让你停在某一步，A1 让你在最后一步拿到一个看起来像
+DSC/签名问题、实际是丢失写入的结果——而 DSC 和签名正是这一轮改动最多、最没上过
+真机的两个子系统。
+
+> 本节只读不改：内核与 `scripts/` 一个字节没动。
