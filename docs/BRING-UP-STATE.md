@@ -13395,3 +13395,67 @@ python3 -m unittest -v test_native_prelink.py test_emit_prelink.py
 补丁新增 `--kernel-import`、四类引用扫描/重写、超程拒绝和两项单测；不含
 真实驱动、桥接 kext 或内核构建改动。探针段与验证脚本是本次离线原型的测试
 载体，不进入默认内核构建。
+
+## 九十、prelink 在真机上跑通
+
+2026-10-28 傍晚，预链接内核在 kebab 上启动成功，这是本条线的目标。
+
+### 结果
+
+```
+内核载入 13 个 Apple 组件（apfs、IOStorageFamily、AppleEffaceableStorage、
+AppleImage4、corecrypto、CoreTrust、IOCryptoAcceleratorFamily 等）
+bsd_init 一路执行，USB 控制台出现并响应命令
+launchd 启动，spawn 了 mount-phase-1
+/sbin/mount 被执行，以退出码 66（EX_NOINPUT）退出
+libignition 打印 preboot: mounting preboot
+```
+
+也就是说 Apple 的 kext 栈被内核接住了 ✓，只是它们没有块设备可以挂载 ✗。
+
+### 四次失败给出的四个必要条件
+
+一、**C++ vtable 填充**。`APPLE_KEXT_VTABLE_PADDING` 在 macOS 目标是 1、iOS 是 0。
+我们的 `IOService` vtable 是 274 字，供体是 170 字，虚函数派发全部错位。
+补丁 `0159` 强制为 0，`0160` 删掉 438 个 `_RESERVED*` 导出名。
+
+二、**32 MiB 引导映射同余**。内核用 32 MiB 的 L2 块建初始映射，要求
+`(physBase ^ virtBase) & 0x1ffffff == 0`。把预链接块放在内核下方会把最低段
+拉低 0x03000000，同余被破坏，翻译一开就取错物理地址，而早期异常向量是自旋的，
+于是没有输出、没有复位 —— 表现为静默挂住。
+把块放在内核上方（slide `-0x1effcdc8000`）即恢复同余。
+
+三、**KPI 伪 kext 的假 Mach 头**。`com.apple.kpi.*` 记录的
+`_PrelinkExecutableLoadAddr` 是相对 `__PRELINK_TEXT` 基址的小偏移，在 Apple 自己的
+布局里落在合法头上；我们的摆放让它们落在别处。内核在
+`slidePrelinkedExecutable()+0x48` 读 `getcommandfromheader()` 时 data abort，
+`far = 0x180`。补丁 `0162` 校验魔数后按无可执行体返回。
+
+四、**未对齐地址传给 ml_static_mfree**。`OSKext::unload()` 释放上面那些记录的地址时
+传入非页对齐值，`machine_routines.c` 的断言触发。补丁 `0163` 在 `ml_static_mfree`
+里把范围向外取整并打印一行，而不是断言。
+
+### 当前阻塞：没有 IOMedia
+
+`kebab_ufs` 是 BSD 块设备（`bdevsw` + `strategy`），不是 IOKit 服务；
+内核里没有任何东西发布 `IOMedia`，而 APFS 通过它找盘。所以 APFS 注册了却无事可做。
+
+### 下一步的确切做法
+
+```
+一  打开 iokit/conf/files.arm64 里被注释的那行
+      iokit/Kernel/arm/KebabBlockStorageDevice.cpp  optional iokitcpp
+    并去掉 bsd/dev/kebab_ufs.c 里 #if defined(KEBAB_BLOCKSTORAGE) 的守卫
+二  为 IOStorageFamily 的 11 个符号提供占位定义，让静态链接通过
+      gMetaClass、__ZTV20IOBlockStorageDevice、C2、D2、setProperties、
+      doSetPriority、doLockUnlockMedia、getWriteCacheState、
+      setWriteCacheState、doGetProvisionStatus、getProperty(OSSymbol const*)
+三  用工具的 --kernel-import 把这 11 个引用改写到预链接块里的真实地址
+      工具侧原型已完成：patches/native-prelink/0001-prelink-kernel-imports.patch
+      已恢复的真实地址示例：
+        IOBlockStorageDevice::gMetaClass   → 0xfffffe0005c451d0
+        IOBlockStorageDevice::getMetaClass → 0xfffffe0003815dc4
+      注意供体符号表是空的，地址要从 __mod_init_func 恢复
+四  启动参数加 ufsmedia=1，判据是 IOKit 里出现 IOMedia，
+    然后 mount-phase-1 不再退出 66
+```

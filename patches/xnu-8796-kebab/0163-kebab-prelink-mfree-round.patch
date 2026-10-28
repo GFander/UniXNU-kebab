@@ -1,0 +1,50 @@
+prelink: round the range in ml_static_mfree instead of asserting
+
+OSKext::unload() frees the load address recorded in the prelinked kext
+records.  For the com.apple.kpi.* pseudo-kexts that address is a small offset
+from __PRELINK_TEXT, so it is not page aligned and the assert in
+ml_static_mfree() fires during the prelink teardown:
+
+  panic: Assertion failed: (vaddr & (PAGE_SIZE - 1)) == 0
+
+Round the range out to whole pages there instead.  The rounded range covers
+the original bytes and adds at most one page on each side, which is part of the
+same block being torn down, so no memory outside the allocation is released.
+A line is printed whenever the rounding happens so the case stays visible.
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+index 91a8a6b..5ca9ea5 100644
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -1810,7 +1810,31 @@ ml_static_mfree(
+ 		return;
+ 	}
+ 
+-	assert((vaddr & (PAGE_SIZE - 1)) == 0); /* must be page aligned */
++	/*
++	 * The native-prelink teardown hands us addresses taken straight from the
++	 * prelinked kext records.  The com.apple.kpi.* pseudo-kexts carry small
++	 * offsets from __PRELINK_TEXT as their load address, and OSKext::unload()
++	 * passes those here verbatim, so they are not page aligned:
++	 *
++	 *   panic: Assertion failed: (vaddr & (PAGE_SIZE - 1)) == 0
++	 *
++	 * Round the range out to whole pages instead.  The rounded range covers the
++	 * original bytes and adds at most one page on each side, which belongs to
++	 * the same block being torn down, so nothing outside the allocation is
++	 * released.  A line is printed whenever this happens so it stays visible.
++	 */
++	if (vaddr & (PAGE_SIZE - 1)) {
++		vm_offset_t aligned_start = trunc_page_64(vaddr);
++		vm_offset_t aligned_end   = round_page_64(vaddr + size);
++
++		printf("KEBAB PRELINK: ml_static_mfree %#lx+%#lx not page aligned, "
++		    "rounding to %#lx+%#lx\n",
++		    (unsigned long)vaddr, (unsigned long)size,
++		    (unsigned long)aligned_start,
++		    (unsigned long)(aligned_end - aligned_start));
++		vaddr = aligned_start;
++		size  = aligned_end - aligned_start;
++	}
+ 
+ 	for (vaddr_cur = vaddr;
+ 	    vaddr_cur < trunc_page_64(vaddr + size);
