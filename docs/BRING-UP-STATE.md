@@ -13600,3 +13600,177 @@ vtable 的地址由**构造函数**写入 `this+8`。所以从构造函数反查
 IOMedia 驱动可编译，链接缺 11 个符号，名字已确认
 地址恢复：2/11
 ```
+
+## 九十三、恢复 IOStorageFamily 的十一个符号地址
+
+写于 2026-10-28。第九十二节停在 2/11，本节把十一个地址全部从供体的结构里恢复出来。
+先说结论里最要紧的一条：**十个符号在供体里有确切的函数或数据对象，第十一个
+`doLockUnlockMedia` 在 iOS 16.7.16 的类里并不存在**——vendored 头把它放在了
+`doSynchronizeCache` 的那一槽上。按槽位绑定仍然可用（两者默认实现同为
+`kIOReturnUnsupported`），但这是 vendored 头要修的问题，不是地址猜错，详见第三节。
+
+### 一、十一个地址
+
+| # | 符号 | 原址（未滑动） | 置信度 | 证据 |
+| --- | --- | --- | --- | --- |
+| 1 | `__ZN20IOBlockStorageDevice10gMetaClassE` | `0xfffffff007a091d0` | 确定 | `__mod_init_func[2]=0xfffffff0055da09c` 把该地址作为 `this`，`x1` 为 `"IOBlockStorageDevice"`，`w3=0x90`，调用 `OSMetaClass` 构造后把 `0xfffffff006c74568` 写进 `[x0]` |
+| 2 | `__ZN20IOBlockStorageDevice13doSetPriorityEP26IOBlockStorageDeviceExtentjh` | `0xfffffff0055da068` | 高 | vtable 槽 187；函数体 `mov w0,#0x2c7 / movk w0,#0xe000 / ret`（`kIOReturnUnsupported`）；槽位由声明顺序定，见第二节第 6 步 |
+| 3 | `__ZN20IOBlockStorageDevice13setPropertiesEP8OSObject` | `0xfffffff0055d9f38` | 确定 | vtable 槽 44；先调 `super::setProperties`，再 `clientHasPrivilege(current_task(),"root")`，取字典 `"WriteCacheState"` 后调用槽 183（`setWriteCacheState`） |
+| 4 | `__ZN20IOBlockStorageDevice17doLockUnlockMediaEb` | `0xfffffff0055da074` | 见第三节 | vtable 槽 171；**供体该槽是 `doSynchronizeCache`**（槽 188 的 `doSynchronize` 尾调 `[x0,#0x558]` 就是它） |
+| 5 | `__ZN20IOBlockStorageDevice18getWriteCacheStateEPb` | `0xfffffff0055da038` | 确定 | vtable 槽 182；被槽 33（`getProperty`）和槽 44（`setProperties`）以 `&bool` 调用，返回 `kIOReturnUnsupported` |
+| 6 | `__ZN20IOBlockStorageDevice18setWriteCacheStateEb` | `0xfffffff0055da044` | 确定 | vtable 槽 183；被槽 44 以 `bool` 参数调用，返回 `kIOReturnUnsupported` |
+| 7 | `__ZN20IOBlockStorageDevice20doGetProvisionStatusEyyPjP35IOBlockStorageProvisionDeviceExtenty` | `0xfffffff0055da08c` | 高 | vtable 最后一个槽 189；返回 `kIOReturnUnsupported`；槽位由声明顺序定，见第二节第 6 步 |
+| 8 | `__ZN20IOBlockStorageDeviceC2EPK11OSMetaClass` | `0xfffffff0055d9d98` | 确定 | 整个 kext 里唯一一条把 `0xfffffff006c73f60` 写进 `[x0]` 的 `str`（在 `0x55d9dac`）；前面 `bl 0x55eb4c0` 是 `IOService` 构造桩；`IOUserBlockStorageDevice` 的构造在 `0x55d7640` 直接调它 |
+| 9 | `__ZN20IOBlockStorageDeviceD2Ev` | `0xfffffff0055d9db8` | 确定 | 紧接 C2 之后、无栈帧的 `b 0x55eb4cc`（`IOService` 析构桩）；`IOUserBlockStorageDevice` 的 D1/D0（`0x55d7658`/`0x55d765c`）都尾调它 |
+| 10 | `__ZNK20IOBlockStorageDevice11getPropertyEPK8OSSymbol` | `0xfffffff0055d9e88` | 确定 | vtable 槽 33；`key->isEqualTo("WriteCacheState")` 为真时调槽 182，返回 `kOSBooleanTrue`/`kOSBooleanFalse` |
+| 11 | `__ZTV20IOBlockStorageDevice` | `0xfffffff006c73f50` | 确定 | `0x6c73f50`/`0x6c73f58` 是两个零头字，`0x6c73f60` 起 190 个槽；`0x6c73f40` 是 `&gMetaClass`；C2 写进对象的 vptr 是 `0x6c73f60`（即 `__ZTV+16`） |
+
+注意 `__ZTV` 给的是**符号地址**（两个头字里第一个的地址），不是对象里的 vptr：
+Itanium ABI 下 vptr = `__ZTV + 16`。供体 `__ZTV9IOService` 的符号值是
+`0xfffffff0071977f0`、槽从 `0xfffffff007197800` 起，也是这个关系；这两点可以互相印证。
+
+### 二、方法
+
+整个过程只用供体文件，不依赖符号表（供体的 `LC_SYMTAB` 里没有 kext 符号）。
+
+1. **先给 kext 划界。** 外层 Mach-O 的段表只到 `__PRELINK_TEXT` /
+   `__PLK_TEXT_EXEC` 这一级；每个 kext 在 `__PRELINK_TEXT` 里自带一个
+   `MH_KEXT_BUNDLE`（filetype 11）头。以 4 字节对齐扫 `0xfeedfacf`，逐个解析，
+   得到每个 kext 的 `__TEXT` / `__TEXT_EXEC` / `__DATA_CONST` / `__DATA` 的
+   最终（未滑动）地址。也可以用 `__PRELINK_INFO` 里
+   `com.apple.iokit.IOStorageFamily` 字典的 `_PrelinkExecutableLoadAddr`
+   （`0xfffffff004dcf280`）直接定位。实测：
+
+   ```
+   __TEXT       0xfffffff004dcf280 + 0x1fc0    __cstring / __const
+   __TEXT_EXEC  0xfffffff0055d7000 + 0x14808   __text / __stubs
+   __DATA_CONST 0xfffffff006c72c80 + 0x5c20    __got / __mod_init_func / __const / ...
+   __DATA       0xfffffff007a09000 + 0x3b1     __data / __common / __bss
+   __LINKEDIT   size 0（符号表和导出 trie 都没了）
+   ```
+
+   注意 `__const`（`0x6c73210`–`0x6c77e80`）才是 vtable 所在，**不是**外层的
+   `__DATA_CONST` / `__PRELINK_DATA`。第九十二节第 1 条在错误的段里扫，
+   自然只能扫到跳转表。
+
+2. **找类注册。** kext 的 `__mod_init_func`（`0x6c73160`，11 项）里有一项是
+   该类的 `gMetaClass` 静态初始化：`adrp/add x0, &gMetaClass`、`x1` 指向
+   类名字符串、`w3 = sizeof(class)`，调用 `OSMetaClass` 构造，最后把
+   `MetaClass` 的 vtable 写进 `[x0]`。对 `IOBlockStorageDevice`：
+
+   ```
+   0x55da0a4  adrp x0, 0xfffffff007a09000
+   0x55da0a8  add  x0, x0, #0x1d0          ; x0 = &gMetaClass = 0xfffffff007a091d0
+   0x55da0ac  adrp x1, 0xfffffff004dd0000
+   0x55da0b0  add  x1, x1, #0x376          ; "IOBlockStorageDevice"
+   0x55da0b4  adrp x2, 0xfffffff006c72000
+   0x55da0b8  ldr  x2, [x2, #0xe68]        ; 父类 metaclass（GOT，启动时绑定）
+   0x55da0bc  mov  w3, #0x90               ; sizeof(IOBlockStorageDevice)
+   0x55da0c0  bl   0xfffffff0055eb304      ; OSMetaClass::OSMetaClass()
+   0x55da0c4  adrp x8, 0xfffffff006c74000
+   0x55da0c8  add  x8, x8, #0x568          ; MetaClass vtable = 0xfffffff006c74568
+   0x55da0cc  str  x8, [x0]
+   ```
+
+3. **找实例 vtable。** 在 kext 的 `__DATA_CONST,__const` 里扫
+   “16 个零字节 + 一长串指向可执行段的指针”（零字是 offset-to-top 和
+   typeinfo，`-fno-rtti` 下都是 0）。对每个候选验证两件事：
+
+   - `vtable_slots[-0x10]`（即 vtable 头字之前的那个 qword）等于第 2 步得到的
+     `&gMetaClass`；
+   - 槽 7 是一个 `adrp/add &gMetaClass; ret` 的小函数（`getMetaClass`）。
+
+   命中 `0xfffffff006c73f50`，190 个槽。
+
+4. **槽位对齐。** `IOService` 的 vtable 是 168 槽（`__ZTV9IOService =
+   0xfffffff0071977f0`，槽从 `0x7197800` 起，共 170 字 = 2 头 + 168 槽），
+   所以本类自己的 22 个虚函数占槽 168–189。槽位映射用两条独立证据交叉验证：
+
+   - 内核对 `init` / `getProperty` / `setProperties` 的覆盖分别在槽 21 / 33 / 44，
+     而内核自己的 `LC_SYMTAB` 里
+     `__ZTV9IOService+16+21*8 = __ZN9IOService4initEP12OSDictionary`、
+     `+33*8 = __ZNK15IORegistryEntry11getPropertyEPK8OSSymbol`、
+     `+44*8 = __ZN15IORegistryEntry13setPropertiesEP8OSObject`，完全对上；
+   - 22 个新槽里恰好 14 个都指向同一个内核地址 `0xfffffff00770ace4`
+     （`__cxa_pure_virtual`），这 14 个正是头文件里的 14 个纯虚函数
+     （`doEjectMedia`、`doFormatMedia`、`doGetFormatCapacities`、
+     `getVendorString`、`getProductString`、`getRevisionString`、
+     `getAdditionalDeviceInfoString`、`reportBlockSize`、`reportEjectability`、
+     `reportMaxValidBlock`、`reportMediaState`、`reportRemovability`、
+     `reportWriteProtection`、`doAsyncReadWrite`）；其余 8 个是具体默认实现。
+     子类 `IOUserBlockStorageDevice`（vtable `0xfffffff006c73230`）恰好覆盖这
+     14 个纯虚槽加 doUnmap、doSynchronize，保留另外 8 个，反向印证了这个划分。
+
+5. **构造函数和析构函数不在 vtable 里**，要单独找：
+
+   - C2：全 kext 唯一一条把 `vtable+16` 写进 `[this]` 的 `str`。命中的函数
+     形如 `bl <IOService 构造桩>; adrp/add x8, vtable; str x8,[x0]; ret`，
+     函数首地址就是 C2（`0x55d9d98`）。
+   - D2：clang 把 D2 紧挨着 C2 发射，且 D2 没有栈帧，只有一条到
+     `IOService` 析构桩的 `b`（`0x55d9db8`）。再用子类的 D1/D0 验证：它们都
+     尾调这个地址。
+
+6. **槽位 → 方法名**按类声明顺序读（`IOBlockStorageDevice.h`，iOS 版本），
+   槽 168–189 依次是：
+
+   | 槽 | 方法 | 槽 | 方法 |
+   | --- | --- | --- | --- |
+   | 168 | doEjectMedia（纯） | 179 | reportMediaState（纯） |
+   | 169 | doFormatMedia（纯） | 180 | reportRemovability（纯） |
+   | 170 | doGetFormatCapacities（纯） | 181 | reportWriteProtection（纯） |
+   | 171 | **doSynchronizeCache** | 182 | getWriteCacheState |
+   | 172 | getVendorString（纯） | 183 | setWriteCacheState |
+   | 173 | getProductString（纯） | 184 | doAsyncReadWrite（纯） |
+   | 174 | getRevisionString（纯） | 185 | requestIdle |
+   | 175 | getAdditionalDeviceInfoString（纯） | 186 | doUnmap |
+   | 176 | reportBlockSize（纯） | 187 | doSetPriority |
+   | 177 | reportEjectability（纯） | 188 | doSynchronize |
+   | 178 | reportMaxValidBlock（纯） | 189 | doGetProvisionStatus |
+
+   槽 33 / 44 的位置则用行为认：槽 33 读 `"WriteCacheState"` 并返回
+   `kOSBoolean*`，是 `getProperty`；槽 44 做 `clientHasPrivilege(...,"root")`
+   后取字典再写回，是 `setProperties`。
+
+### 三、`doLockUnlockMedia` 为什么不在供体里
+
+`IOBlockStorageDevice.h` 的 macOS 版本里，`doLockUnlockMedia`、
+`reportLockability`、`reportPollRequirements`、`doDiscard` 四个方法在
+`#if TARGET_OS_OSX` 里；iOS 构建不编译它们。上一轮的 vendored 头把
+`doLockUnlockMedia` 留了下来、却删掉了 `doSynchronizeCache`，两个名字正好错位：
+
+- 供体槽 171 的实现（`0xfffffff0055da074`）被槽 188 的 `doSynchronize`
+  尾调，而 Apple 源码里 `doSynchronize` 的实现就是
+  `return doSynchronizeCache();`——所以槽 171 是 `doSynchronizeCache`；
+- 如果槽 171 是 `doLockUnlockMedia`，`doSynchronize` 就会去调
+  “锁/解锁介质”，语义上说不通，而且 22 个槽的纯虚/具体分布也会错位。
+
+所以供体里没有 `doLockUnlockMedia` 这个符号。**绑定时把
+`0xfffffff0055da074` 给它是槽位正确的**（我们的子类 vtable 槽 171 需要的正是
+这个实现，返回值也同为 `kIOReturnUnsupported`），但正确的修法是改 vendored 头：
+把 `doLockUnlockMedia` 换成 `doSynchronizeCache`，那时链接期缺的符号会变成
+`__ZN20IOBlockStorageDevice18doSynchronizeCacheEv`，地址仍是
+`0xfffffff0055da074`。
+
+### 四、复现
+
+脚本在 `scripts/recover-kext-symbols.py`，只读供体：
+
+```
+python3 scripts/recover-kext-symbols.py /home/albert/kernelcache.fileset.macho \
+        IOBlockStorageDevice com.apple.iokit.IOStorageFamily
+```
+
+它打印 kext 的段、注册初始化、vtable 的 190 个槽（含每个槽的
+pure/kext/kernel 分类）、C2/D2，以及最终 11 个地址。换别的类时改类名和
+bundle id 即可；槽位表（`TAIL`）要按那个类的头文件另写，纯虚/具体分布和
+子类覆盖情况仍然是最好的交叉验证。
+
+### 五、收口状态
+
+```
+地址恢复                 11/11（其中 doLockUnlockMedia 为同槽位绑定）
+名字精确匹配             10/11
+vendored 头待修           doLockUnlockMedia ↔ doSynchronizeCache
+本节只改文档和新增 scripts/recover-kext-symbols.py，未改内核代码，未重跑构建
+HEAD 40eef86，补丁 142 个
+```
