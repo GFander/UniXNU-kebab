@@ -1,0 +1,38 @@
+--- a/iokit/Kernel/arm/NativeAES.cpp
++++ b/iokit/Kernel/arm/NativeAES.cpp
+@@ -112,20 +112,31 @@
+     !provider->performAES(source, destination, 64, &publicIV, IOAESEncrypt, &key, 16, 32, callback, &completion) &&
+     destination->readBytes(32, output, 64) == 64 && !memcmp(output, expected, 64) &&
+     !memcmp(publicIV.bytes, expected + 48, 16) && completion.count == 1 && completion.status == 0;
++  IOLog("KEBAB AES KAT: descriptors=%u completed=%u\n", interface, native_aes_completed);
+   key.selector = 2001; // Original hardware-key selector, deliberately unsupported.
+   interface = interface && provider->performAES(source, destination, 64, &publicIV,
+     IOAESEncrypt, &key, 16, 32, callback, &completion) == kIOReturnUnsupported && completion.count == 1 &&
+     destination->readBytes(32, output, 64) == 64 && !memcmp(output, expected, 64) &&
+     !memcmp(publicIV.bytes, expected + 48, 16) && !provider->isKeySupported(key.selector);
++  IOLog("KEBAB AES KAT: unsupported=%u count=%u\n", interface, completion.count);
+   key.selector = 0;
+   interface = interface && provider->performAES(source, destination, 64, &publicIV,
+     IOAESEncrypt, &key, 16, 80, callback, &completion) == kIOReturnBadArgument && completion.count == 1;
++  IOLog("KEBAB AES KAT: bounds=%u count=%u\n", interface, completion.count);
+   for (unsigned i = 0; i < 16; ++i) publicIV.bytes[i] = static_cast<unsigned char>(i);
+-  interface = interface && !provider->performAES(const_cast<unsigned char *>(input), output, kernel_task,
+-    64, &publicIV, IOAESEncrypt, &key, nullptr, nullptr) && !memcmp(output, expected, 64);
++  IOReturn rawStatus = kIOReturnNotReady;
++  if (interface) rawStatus = provider->performAES(const_cast<unsigned char *>(input), output, kernel_task,
++    64, &publicIV, IOAESEncrypt, &key, nullptr, nullptr);
++  interface = interface && !rawStatus && !memcmp(output, expected, 64);
++  IOLog("KEBAB AES KAT: raw-encrypt=%u status=0x%x first=%02x%02x%02x%02x iv=%02x completed=%u\n",
++        interface, rawStatus, output[0], output[1], output[2], output[3], publicIV.bytes[0], native_aes_completed);
+   for (unsigned i = 0; i < 16; ++i) publicIV.bytes[i] = static_cast<unsigned char>(i);
+-  interface = interface && !provider->performAES(output, output, kernel_task, 64, &publicIV,
+-    IOAESDecrypt, &key, nullptr, nullptr) && !memcmp(output, input, 64) && !memcmp(publicIV.bytes, expected + 48, 16);
++  rawStatus = kIOReturnNotReady;
++  if (interface) rawStatus = provider->performAES(output, output, kernel_task, 64, &publicIV,
++    IOAESDecrypt, &key, nullptr, nullptr);
++  interface = interface && !rawStatus && !memcmp(output, input, 64) && !memcmp(publicIV.bytes, expected + 48, 16);
++  IOLog("KEBAB AES KAT: raw-decrypt=%u status=0x%x first=%02x%02x%02x%02x iv=%02x completed=%u\n",
++        interface, rawStatus, output[0], output[1], output[2], output[3], publicIV.bytes[0], native_aes_completed);
+   native_aes_interface_status = interface ? 1 : 2;
+   if (source) source->release();
+   if (destination) destination->release();

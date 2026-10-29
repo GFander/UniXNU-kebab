@@ -1,0 +1,56 @@
+--- a/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
++++ b/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
+@@ -1,3 +1,5 @@
++#include <pexpert/arm64/board_config.h>
++#if defined(KEBAB)
+ /*
+  * KEBAB block storage: publish the userdata partition as an IOKit block device.
+  *
+@@ -669,3 +671,5 @@
+ 	    read, shortBuffer, bounds, write, result.calls);
+ 	return passed;
+ }
++
++#endif /* KEBAB */
+--- a/iokit/Kernel/arm/KebabPrelinkBindings.cpp
++++ b/iokit/Kernel/arm/KebabPrelinkBindings.cpp
+@@ -1,3 +1,5 @@
++#include <pexpert/arm64/board_config.h>
++#if defined(KEBAB)
+ /*
+  * Link-time bindings for the IOStorageFamily symbols the kernel-side block
+  * storage driver needs.  These live in the prelinked IOStorageFamily kext, so a
+@@ -16,3 +18,5 @@
+ __asm__(".globl __ZN20IOBlockStorageDeviceD2Ev\n.set __ZN20IOBlockStorageDeviceD2Ev, 0xfffffe0008811db8");
+ __asm__(".globl __ZNK20IOBlockStorageDevice11getPropertyEPK8OSSymbol\n.set __ZNK20IOBlockStorageDevice11getPropertyEPK8OSSymbol, 0xfffffe0008811e88");
+ __asm__(".globl __ZTV20IOBlockStorageDevice\n.set __ZTV20IOBlockStorageDevice, 0xfffffe0009eabf50");
++
++#endif /* KEBAB */
+--- a/iokit/Kernel/arm/NativeAES.cpp
++++ b/iokit/Kernel/arm/NativeAES.cpp
+@@ -1,3 +1,5 @@
++#include <pexpert/arm64/board_config.h>
++#if defined(KEBAB)
+ // SPDX-License-Identifier: BSD-2-Clause-Patent
+ #include "OriginalAESABI.h"
+ #include <IOKit/IOLib.h>
+@@ -256,3 +258,5 @@
+   destination->release();
+   return result;
+ }
++
++#endif /* KEBAB */
+--- a/iokit/Kernel/arm/OriginalAESBindings.cpp
++++ b/iokit/Kernel/arm/OriginalAESBindings.cpp
+@@ -1,3 +1,5 @@
++#include <pexpert/arm64/board_config.h>
++#if defined(KEBAB)
+ /* Pinned 20H392 original crypto-family bindings; see IOAESAccelerator.json. */
+ __asm__(".globl __ZN16IOAESAccelerator10gMetaClassE\n.set __ZN16IOAESAccelerator10gMetaClassE, 0xfffffe000ac49050");
+ __asm__(".globl __ZN16IOAESAccelerator10performAESEP18IOMemoryDescriptorS1_yP7IOAESIV14IOAESOperationP12IOAESKeyDatayyPFvPviES7_\n.set __ZN16IOAESAccelerator10performAESEP18IOMemoryDescriptorS1_yP7IOAESIV14IOAESOperationP12IOAESKeyDatayyPFvPviES7_, 0xfffffe0008911c8c");
+@@ -21,3 +23,5 @@
+ __asm__(".globl __ZN16IOAESAcceleratorD2Ev\n.set __ZN16IOAESAcceleratorD2Ev, 0xfffffe0008911078");
+ __asm__(".globl __ZNK16IOAESAccelerator11getWorkLoopEv\n.set __ZNK16IOAESAccelerator11getWorkLoopEv, 0xfffffe00089119f4");
+ __asm__(".globl __ZNK16IOAESAccelerator12getMetaClassEv\n.set __ZNK16IOAESAccelerator12getMetaClassEv, 0xfffffe00089110c4");
++
++#endif /* KEBAB */

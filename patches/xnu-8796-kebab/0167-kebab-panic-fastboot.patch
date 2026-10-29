@@ -1,0 +1,162 @@
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -76,6 +76,7 @@
+  * SYSTEM_RESET2 directly, and the probe needs PSCI_FEATURES; neither belongs
+  * in a USB driver, so the platform expert exports them.
+  */
++extern uint64_t kebab_psci_call(uint64_t function, uint64_t arg1, uint64_t arg2);
+ extern uint32_t kebab_psci_version(void);
+ extern uint32_t kebab_psci_features(uint32_t function);
+ extern uint64_t kebab_psci_system_reset2(uint32_t reset_type, uint32_t cookie);
+@@ -1610,7 +1611,10 @@
+ 	int rc;
+ 
+ 	ud.restart_armed = true;
+-	printf("KEBAB REBOOT: PEHaltRestart(kPERestartCPU)\n");
++	bool panicking = panic_active() != 0;
++	printf("KEBAB REBOOT: %s\n", panicking ?
++	    "panic PSCI SYSTEM_RESET (no platform driver required)" :
++	    "PEHaltRestart(kPERestartCPU)");
+ 	/*
+ 	 * The reset only returns on failure, so the lines above have to leave the
+ 	 * device first.  Without this the host sees the port vanish with the
+@@ -1618,9 +1622,12 @@
+ 	 */
+ 	kebab_usb_log_flush();
+ 	delay(300000);
+-	rc = PEHaltRestart(kPERestartCPU);
++	/* Early panics can precede the IOPlatformExpert instance. The SMC
++	 * backend needs no service lookup, allocation, scheduler or driver lock. */
++	rc = panicking ? (int32_t)kebab_psci_call(KEBAB_PSCI_SYSTEM_RESET, 0, 0) :
++	    PEHaltRestart(kPERestartCPU);
+ 	ud.restart_armed = false;
+-	printf("KEBAB REBOOT: PEHaltRestart returned %d, the machine did not reset\n", rc);
++	printf("KEBAB REBOOT: reset returned %d, the machine did not reset\n", rc);
+ 	return rc;
+ }
+ 
+@@ -1657,7 +1664,6 @@
+ {
+ 	volatile uint32_t *reason;
+ 	uint32_t previous, cookie, readback;
+-	uint64_t rc;
+ 
+ 	/*
+ 	 * FASTBOOT is the single supported fastboot entry point, and it writes
+@@ -1708,16 +1714,24 @@
+ 	readback = *reason;
+ 	printf("KEBAB FASTBOOT: IMEM read back 0x%08x (%s)\n", readback,
+ 	    readback == cookie ? "MATCH" : "MISMATCH");
++	if (readback != cookie) {
++		*reason = previous;
++		__asm__ volatile ("dsb sy" ::: "memory");
++		printf("KEBAB FASTBOOT: IMEM cookie was not verified; not resetting\n");
++		return;
++	}
+ 	/* The cookie has to be in memory before the firmware can read it. */
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+-	rc = use_reset2 ? ud_platform_restart2() : (uint64_t)ud_platform_restart();
+-	if (rc != 0) {
+-		/* The machine is still here, so a later reset must not inherit a
+-		 * fastboot request that was never delivered. */
+-		*reason = previous;
+-		__asm__ volatile ("dsb sy" ::: "memory");
+-		printf("KEBAB FASTBOOT: restored restart_reason to 0x%08x\n", previous);
+-	}
++	if (use_reset2) {
++		(void)ud_platform_restart2();
++	} else {
++		(void)ud_platform_restart();
++	}
++	/* PSCI reset must never return, even with zero. Any return is failure. */
++	/* A later reset must not inherit an undelivered fastboot request. */
++	*reason = previous;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	printf("KEBAB FASTBOOT: restored restart_reason to 0x%08x\n", previous);
+ }
+ 
+ /*
+@@ -1830,14 +1844,18 @@
+ 	if (panicking) {
+ 		if (command == UD_REBOOT_FASTBOOT || command == UD_REBOOT_FASTBOOT2 ||
+ 		    command == UD_REBOOT_PLAIN) {
+-			printf("KEBAB PANIC: reset requested (%s); skipping the install "
+-			    "flush (VFS_SYNC and kebab_ufs_lock cannot run with "
+-			    "preemption disabled) and resetting via PSCI SYSTEM_RESET\n",
++			printf("KEBAB PANIC: reset requested (%s); skipping filesystem sync\n",
+ 			    command == UD_REBOOT_FASTBOOT ? "FASTBOOT" :
+ 			    command == UD_REBOOT_FASTBOOT2 ? "FASTBOOT2" : "REBOOT");
+-			/* Does not return on success; prints and keeps the pump alive on
+-			 * failure, which is the only safe answer left in a panic. */
+-			(void)ud_platform_restart();
++			/* PON and IMEM were mapped during normal USB startup. Their
++			 * bounded MMIO paths need no allocation or driver/VFS locks.
++			 * Preserve the requested boot target instead of degrading
++			 * FASTBOOT to an ordinary restart of the panicking kernel. */
++			if (command == UD_REBOOT_PLAIN) {
++				(void)ud_platform_restart();
++			} else {
++				ud_fastboot_restart(command == UD_REBOOT_FASTBOOT2);
++			}
+ 			return;
+ 		}
+ 		printf("KEBAB PANIC: command 0x%x refused while panicking; it can "
+@@ -2953,7 +2971,7 @@
+  * watchdog that would reset it, so an unattended boot would need a physical
+  * power cycle.  Print the one line that tells the next session which case
+  * happened, try to flush it, and reset through the same
+- * PEHaltRestart(kPERestartCPU) path the REBOOT command uses.  A return means
++ * panic-safe PSCI path the REBOOT command uses.  A return means
+  * the firmware refused the reset; stay in the loop with the diagnosis on the
+  * ring rather than claiming success.
+  */
+@@ -2970,7 +2988,7 @@
+ 
+ /*
+  * Keep the pipe alive after a panic instead of letting the machine halt with a dead
+- * controller. panic_spin_forever() calls this terminal loop: the host
++ * controller. Panic halt/restart paths call this terminal loop: the host
+  * can then reconnect, keep reading later console output, and the device no longer
+  * disappears the moment the panic report ends.
+  */
+@@ -3011,6 +3029,7 @@
+ 				ud_panic_reboot(ud.dead ? "controller dead" :
+ 				    "console not running");
+ 			}
++			printf("KEBAB PANIC: USB command loop ready (FASTBOOT/REBOOT/FWLOG?)\n");
+ 		}
+ 		if (ud.running && ud_enter(&irq)) {
+ 			if (ud_rx_enter()) {
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -45,6 +45,9 @@
+ #include <kern/misc_protos.h>
+ #include <prng/random.h>
+ #include <kern/startup.h>
++#if defined(KEBAB)
++#include <kern/debug.h>
++#endif
+ #include <kern/thread.h>
+ #include <kern/timer_queue.h>
+ #include <mach/machine.h>
+@@ -746,6 +749,20 @@
+ void
+ halt_all_cpus(boolean_t reboot)
+ {
++#if defined(KEBAB)
++	/* An early panic can precede IOPlatformExpert registration, so its
++	 * haltRestart override cannot own the USB controller yet. Intercept the
++	 * terminal stop here as well, before falling into the unscheduled loop. */
++	{
++		extern bool kebab_usb_console_ready(void);
++		extern bool kebab_usb_restart_armed(void);
++		extern void kebab_usb_panic_spin(void) __dead2;
++		if (panic_active() && kebab_usb_console_ready() &&
++		    !kebab_usb_restart_armed()) {
++			kebab_usb_panic_spin();
++		}
++	}
++#endif
+ 	if (reboot) {
+ 		printf("MACH Reboot\n");
+ 		PEHaltRestart(kPERestartCPU);

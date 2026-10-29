@@ -1,0 +1,22 @@
+--- a/iokit/Kernel/arm/NativeAES.cpp
++++ b/iokit/Kernel/arm/NativeAES.cpp
+@@ -151,6 +151,10 @@
+ 
+ bool NativeAES::start(IOService *provider)
+ {
++  // CBC qualification does not provide Apple's UID/GID hardware keys.
++  // Keep the incomplete nonce-manager integration explicitly opt-in.
++  uint32_t enabled = 0;
++  if (!PE_parse_boot_argn("kebab_software_aes", &enabled, sizeof(enabled)) || enabled != 1) return false;
+   if (!g_crypto_funcs || !g_crypto_funcs->ccaes_cbc_encrypt || !g_crypto_funcs->ccaes_cbc_decrypt ||
+       !IOService::start(provider)) return false;
+   // The native class is only a subclass of this target's original base.
+@@ -185,6 +189,8 @@
+   if (!input || !output || !key || !iv || !bytes || (bytes & 15) ||
+       (key->bits != 128 && key->bits != 192 && key->bits != 256)) return kIOReturnBadArgument;
+   if (key->selector || (operation != IOAESEncrypt && operation != IOAESDecrypt)) {
++    IOLog("KEBAB AES: rejected selector=%u bits=%u operation=%u bytes=%llu\n",
++          key->selector, key->bits, static_cast<unsigned>(operation), bytes);
+     __atomic_fetch_add(&native_aes_unsupported_key, 1, __ATOMIC_RELAXED);
+     return kIOReturnUnsupported;
+   }

@@ -1,0 +1,25 @@
+--- a/iokit/Kernel/arm/KebabDriverManifest.h
++++ b/iokit/Kernel/arm/KebabDriverManifest.h
+@@ -3,6 +3,8 @@
+  * DRV? independently queries the registry for every non-NULL class. */
+ #define KEBAB_DRIVER_MANIFEST(X) \
+  X("platform", "KebabPlatformExpert", "ADT platform/resources") \
++ X("image4", "AppleImage4", "original defaults-nub service; startup qualification separate") \
++ X("aes", "IOAESAccelerator", "original crypto-family identity; backend qualification separate") \
+  X("cpu", "KebabCPU", "single boot CPU; no SMP qualification") \
+  X("ufs", "KebabBlockStorageDevice", "boot C UFS + native storage bridge") \
+  X("usb", NULL, "resident DWC3 C core; no normal IOService") \
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -124,7 +124,10 @@
+ const char *
+ KebabPlatformExpert::excludeList(void)
+ {
+-	return "('chosen', 'defaults', 'cpus', 'options')";
++	/* The donor AppleImage4 personality matches the software defaults nub.
++	 * It finalizes nonce-manager handoff in start(); filtering this node left
++	 * the real ignition_blob handler waiting forever. */
++	return "('chosen', 'cpus', 'options')";
+ }
+ 
+ void

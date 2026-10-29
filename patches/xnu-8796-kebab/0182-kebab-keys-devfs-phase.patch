@@ -1,0 +1,96 @@
+--- a/bsd/dev/kebab_keys.c
++++ b/bsd/dev/kebab_keys.c
+@@ -59,6 +59,8 @@
+ 
+ /* bsd/kern/bsd_init.c calls this; the polling thread never returns. */
+ int kebab_keys_start(void);
++void kebab_keys_publish(void);
++bool kebab_keys_node_selftest(void);
+ static void kk_thread(void *arg, wait_result_t result) __dead2;
+ 
+ /* ---------------------------------------------------------------- record */
+@@ -94,6 +96,7 @@
+ 	uint32_t    poll_ms;
+ 	bool        verbose;            /* kebab_keys_raw=1 */
+ 	bool        dev_ready;
++	bool        polling;           /* startup succeeded; publish after devfs init */
+ 	uint32_t    errors;
+ 	uint32_t    last_error_report;
+ 	uint32_t    zero_count;
+@@ -598,10 +601,41 @@
+ 	 * Publish the node only after the thread exists: the other order would
+ 	 * leave a device that can be opened and then never receives a record.
+ 	 */
+-	kk_dev_register();
++	kk.polling = true;
++	printf("KEBAB KEYS: node publication deferred until devfs is ready\n");
+ 	printf("KEBAB KEYS: polling every %u ms%s\n", kk.poll_ms,
+ 	    kk.verbose ? ", raw changes shown" : "");
+ 	return 0;
+ }
+ 
++/* Polling is boot-owned and permanent. Publishing the character device is a
++ * separate, idempotent normal phase after devfs_kernel_mount(). No sample,
++ * debounce or record layout is changed by this timing correction. */
++static LCK_GRP_DECLARE(kk_publish_group, "kebabkeys-publish");
++static LCK_MTX_DECLARE(kk_publish_lock, &kk_publish_group);
++void
++kebab_keys_publish(void)
++{
++	lck_mtx_lock(&kk_publish_lock);
++	if (kk.polling && !kk.dev_ready) { kk_dev_register(); }
++	lck_mtx_unlock(&kk_publish_lock);
++}
++
++bool
++kebab_keys_node_selftest(void)
++{
++	if (!kk.polling) {
++		printf("KEBAB DRIVER TEST: keys devfs SKIP (polling not enabled)\n");
++		return true;
++	}
++	vnode_t node = NULL;
++	int error = vnode_lookup("/dev/kebab_keys", 0, &node, vfs_context_kernel());
++	bool passed = kk.dev_ready && error == 0 && node != NULL &&
++	    vnode_vtype(node) == VCHR && vnode_specrdev(node) == makedev(kk.cmajor, 0);
++	if (node != NULL) { vnode_put(node); }
++	printf("KEBAB DRIVER TEST: keys devfs %s (lookup=%d major=%d record=%u)\n",
++	    passed ? "PASS" : "FAIL", error, kk.cmajor, (unsigned)sizeof(struct kk_record));
++	return passed;
++}
++
+ #endif /* KEBAB */
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1165,6 +1165,11 @@
+ 	bsd_init_kprintf("bsd_do_post - done");
+ 
+ #if defined(KEBAB)
++	/* devfs is now mounted; early PMIC polling did not publish its node. */
++	{
++		extern void kebab_keys_publish(void);
++		kebab_keys_publish();
++	}
+ 	/*
+ 	 * On a real device the static trust cache is a boot-chain component
+ 	 * handed over in the device tree.  This port reads Apple's copy from
+--- a/iokit/Kernel/arm/KebabDriverSelfTest.cpp
++++ b/iokit/Kernel/arm/KebabDriverSelfTest.cpp
+@@ -15,6 +15,7 @@
+ extern "C" bool kebab_blockstorage_selftest(void);
+ extern "C" bool kebab_spmi_services_selftest(void);
+ extern "C" bool kebab_geni_services_selftest(void);
++extern "C" bool kebab_keys_node_selftest(void);
+ 
+ static bool
+ kebab_client_selftest(const char *name, bool surface)
+@@ -78,7 +79,8 @@
+ 	bool storage = kebab_blockstorage_selftest();
+ 	bool spmi = kebab_spmi_services_selftest();
+ 	bool geni = kebab_geni_services_selftest();
++	bool keys = kebab_keys_node_selftest();
+ 	IOLog("KEBAB DRIVER TEST: read-only native contracts %s\n",
+-	    surface && display && storage && spmi && geni ? "PASS" : "FAIL");
++	    surface && display && storage && spmi && geni && keys ? "PASS" : "FAIL");
+ }
+ #endif /* KEBAB */
