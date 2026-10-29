@@ -1,0 +1,66 @@
+{
+  "scope": "Same explicit source/header/config extension inventory on both build hosts.",
+  "matched": 4195,
+  "different": [
+    {
+      "path": "bsd/kern/kebab_data.c",
+      "ubuntu": null,
+      "mac": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "bsd/kern/kebab_data.h",
+      "ubuntu": null,
+      "mac": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "bsd/net/skywalk_stubs.c",
+      "ubuntu": "933ba087331f0e12712411a5cbbfb9b54f65a73bbf29d86fe06a281ebacf1ee0",
+      "mac": "57e5d98662ff13dab03a05bc41165750c22af15e8ec3b449bfdd407f480f0b03"
+    },
+    {
+      "path": "bsd/skywalk/packet/os_packet.h",
+      "ubuntu": "2fa7741e86a07dbafbb1c189633f569c1d0f2f6244bf0c266e423d6d2b6bf71e",
+      "mac": "3b94a133787af6889bf9d43bce913e78329fbd2b778b3282d330ceb39862646f"
+    },
+    {
+      "path": "bsd/skywalk/packet/packet_kern.c",
+      "ubuntu": "fdb16c235c98c22080aea2d055d704076e5bda4bd43a111699b618756dbe8b85",
+      "mac": "66b5a5035d7bd3cdce14016f56257d49516611b3710e4848912807a381751c09"
+    },
+    {
+      "path": "bsd/skywalk/packet/packet_var.h",
+      "ubuntu": "ca3d792a01da1bae98e2c13da5e67b280c11ca3359629256955c8a58883ca7ea",
+      "mac": "2020f05fd5c4b0872cb06e46bd7a303bd70a87783438ed0707a9ea4652760b04"
+    },
+    {
+      "path": "bsd/sys/kas_info.h",
+      "ubuntu": "a10972d1bbed2f2b07bafbb874858611934c3250e3effacac3f672e3e2e3166c",
+      "mac": "130dc235df8721a1dd76e6b3f194dc199b526c3b990940a11083f631a56dd216"
+    },
+    {
+      "path": "bsd/vm/vm_unix.c",
+      "ubuntu": "ccbbe69a5a1e81adb451fd260c9dc68c98092e82d38cb023a574a36ae435ce71",
+      "mac": "f88d3a7f38ed93ee0c5c252a119f6c20c2809e66ddfc9955292b0c1519800952"
+    },
+    {
+      "path": "makedefs/MakeInc.cmd",
+      "ubuntu": "4bb6b5aec167b8a41ff19615714f11300e79be7710def4b7d2da5be61a189509",
+      "mac": "27eafbe51abab33e3ff4f08bb0804c893fe6d7210a79ea9c0516aef35386308d"
+    },
+    {
+      "path": "makedefs/MakeInc.def",
+      "ubuntu": "c12a033463a25d1aaa14b7edb0f0bb0a4329347cb7fe3224b6c2f22fbd58f5e2",
+      "mac": "d797adaeb49767296bd488c6117be0b7bda8ee009123bb0ec90beef54ecd949d"
+    },
+    {
+      "path": "osfmk/arm64/machine_routines.c",
+      "ubuntu": "04879d18f60640f9759c4f89a50d803f8ded13abae1799f941691c387bca2ad0",
+      "mac": "4668ef504cbb6dccfbb46e9e98c768628c28c6c3c65033bd8973b97a20fe6c76"
+    },
+    {
+      "path": "osfmk/arm64/start.s",
+      "ubuntu": "d4058ef09be4c9db27c13454731810a97ff9c292260ba3406a8f84ea99fa002e",
+      "mac": "8a47132e892be0c3a135825f0c4a17ed5d9c21c0b2528d7a152f7fad2fb82d52"
+    }
+  ]
+}

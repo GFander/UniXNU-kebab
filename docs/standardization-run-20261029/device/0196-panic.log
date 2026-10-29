@@ -1,0 +1,71 @@
+[2026-10-29T02:54:27] sending 'PANIC!' on COM7
+[   0.096] KEBAB SPMI TEST: normal bus mutex held for intentional panic
+[   0.096] panic(cpu 0 caller 0xfffffe0006acdaa8): kebab usb console test (normal SPMI lock held) @kebab_spmi.c:1985
+[   0.096] Debugger message: panic
+[   0.096] Memory ID: 0x0
+[   0.096] OS release type: Not set yet
+[   0.096] OS version: Not set yet
+[   0.096] Kernel version: Darwin Kernel Version 22.6.0: Mon Aug 14 05:06:07 UTC 2023; albertlee:xnu-8796.141.3
+[   0.096] KernelCache UUID: 7E245D9EA58CA7C7B9DD45A959D84BF5
+[   0.096] Kernel UUID: 2755DA17-A0B0-35E5-BCCB-B1F081424328
+[   0.159] Boot session UUID: 3A4B8F57-AB00-42A9-B644-2794C997C082
+[   0.159] iBoot version: kebab-uefi-1.0
+[   0.159] secure boot?: YES
+[   0.160] roots installed: 0
+[   0.160] Paniclog version: 14
+[   0.160] Kernel text base:  0xfffffe0006004000
+[   0.160] mach_absolute_time: 0x15bfca36f
+[   0.160] Epoch Time:        sec       usec
+[   0.160]   Boot    : 0x00000034 0x00088cfa
+[   0.160]   Sleep   : 0x00000000 0x00000000
+[   0.160]   Wake    : 0x00000000 0x00000000
+[   0.160]   Calendar: 0x00000130 0x0001272d
+[   0.160] 
+[   0.160] Zone info:
+[   0.160]   Zone map: 0xfffffe1004c40000 - 0xfffffe3004c40000
+[   0.160]   . PGZ   : 0xfffffe1004c40000 - 0xfffffe1004da4000
+[   0.160]   . VM    : 0xfffffe1004da4000 - 0xfffffe14d1a38000
+[   0.221]   . RO    : 0xfffffe14d1a38000 - 0xfffffe166b3c0000
+[   0.222]   . GEN0  : 0xfffffe166b3c0000 - 0xfffffe1b38058000
+[   0.222]   . GEN1  : 0xfffffe1b38058000 - 0xfffffe2004cf0000
+[   0.222]   . GEN2  : 0xfffffe2004cf0000 - 0xfffffe24d1988000
+[   0.222]   . GEN3  : 0xfffffe24d1988000 - 0xfffffe299e620000
+[   0.222]   . DATA  : 0xfffffe299e620000 - 0xfffffe3004c40000
+[   0.222]   Metadata: 0xfffffe300b450000 - 0xfffffe3013450000
+[   0.222]   Bitmaps : 0xfffffe3013450000 - 0xfffffe3013504000
+[   0.222]   Extra   : 0 - 0
+[   0.222] 
+[   0.222] TPIDRx_ELy = {1: 0xfffffe299e4dc430  0: 0x0000000000000000  0ro: 0x0000000000000000 }
+[   0.284] CORE 0 is the one that panicked. Check the full backtrace for details.
+[   0.284] Compressor Info: 0% of compressed pages limit (OK) and 0% of segments limit (OK) with 0 swapfiles and OK swap space
+[   0.284] Panicked task 0xfffffe299e508ae8: 0 pages, 53 threads: pid 0: kernel_task
+[   0.284] Panicked thread: 0xfffffe299e4dc430, backtrace: 0xfffffe48da95b840, tid: 110
+[   0.284] 		  lr: 0xfffffe00063113a0  fp: 0xfffffe48da95b8c0
+[   0.285] 		  lr: 0xfffffe00064846cc  fp: 0xfffffe48da95b8e0
+[   0.285] 		  lr: 0xfffffe0006474df0  fp: 0xfffffe48da95b930
+[   0.285] 		  lr: 0xfffffe0006473de0  fp: 0xfffffe48da95ba00
+[   0.346] 		  lr: 0xfffffe00064735a4  fp: 0xfffffe48da95ba10
+[   0.346] 		  lr: 0xfffffe000631097c  fp: 0xfffffe48da95bdc0
+[   0.346] 		  lr: 0xfffffe0006311a8c  fp: 0xfffffe48da95be40
+[   0.346] 		  lr: 0xfffffe0006a995c0  fp: 0xfffffe48da95be60
+[   0.346] 		  lr: 0xfffffe0006acdaa8  fp: 0xfffffe48da95be80
+[   0.346] 		  lr: 0xfffffe00064e31a8  fp: 0xfffffe48da95bea0
+[   0.346] 		  lr: 0xfffffe00064d6238  fp: 0xfffffe48da95bf20
+[   0.346] 		  lr: 0xfffffe0006479548  fp: 0x0000000000000000
+[   0.346] 
+[   0.472] 
+[   0.472] ** Stackshot Succeeded ** Bytes Traced 6311 (Uncompressed 17968) **
+[   0.597] KEBAB PANIC: USB command loop ready (FASTBOOT/REBOOT/FWLOG?)
+[   0.597] KEBAB EP0 PROBE: progress 0xdb140000 seq 219 req 0 phase 20 status 0
+[   0.597] KEBAB EP0 STATE: resets=1 disconnects=0 fences=0 events=7389 acked=29556 discarded=0 cursor=884 takeover=5 tx_complete=2738 line=00c20100000008 controls=3
+[   0.597] KEBAB KDP STATE: host_in=193 in_drop=0 kdp_in=0 kdp_frames=0 kdp_out=0 tx_bytes=49653 owners=1/0/1 depths=1/0
+[   0.597] KEBAB EP0 PROBE: [28]0xbc080600 [29]0xbd040600 [30]0xbe050600 [31]0xbf060600
+[   0.597] KEBAB EP0 PROBE: [00]0xc0070600 [01]0xc1010700 [02]0xc2080700 [03]0xc3040700
+[   0.597] KEBAB EP0 PROBE: [04]0xc4050700 [05]0xc5060700 [06]0xc6160700 [07]0xc7070700
+[   0.597] KEBAB EP0 PROBE: [08]0xc81a0700 [09]0xc9010500 [10]0xca020500 [11]0xcb030500
+[   0.597] KEBAB EP0 PROBE: [12]0xcc080500 [13]0xcd040500 [14]0xce050500 [15]0xcf060500
+[   0.597] KEBAB EP0 PROBE: [16]0xd0170500 [17]0xd1070500 [18]0xd2010600 [19]0xd3020600
+[   0.597] KEBAB EP0 PROBE: [20]0xd41a0600 [21]0xd5030600 [22]0xd6080600 [23]0xd7040600
+[   0.597] KEBAB EP0 PROBE: [24]0xd8050600 [25]0xd9060600 [26]0xda070600 [27]0xdb140000
+[   0.597] KEBAB EP0 END
+[2026-10-29T02:54:32] done, 3636 bytes

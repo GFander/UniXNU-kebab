@@ -1,0 +1,15 @@
+[2026-10-29T06:04:09] sending 'PON?' on COM7
+[   0.093] KEBAB SPMI: === SPMI-3: PON registers through the observer ===
+[   0.093] KEBAB SPMI: PPID 0x008 APID 0x001 map[core+0x904]=0x00000800 own[cnfg+0x704]=0x00000001 -> write_ee 0x1 irq_owner 0 irq_ee 0xff
+[   0.093] KEBAB SPMI: PPID 0x008 APID 0x00d map[core+0x934]=0x01000800 own[cnfg+0x734]=0x00000000 -> write_ee 0x0 irq_owner 1 irq_ee 0x0 (owned by this EE)
+[   0.093] KEBAB SPMI: PPID 0x008 APID 0x075 map[core+0xad4]=0x00000800 own[cnfg+0x8d4]=0x00000004 -> write_ee 0x4 irq_owner 0 irq_ee 0xff
+[   0.093] KEBAB SPMI: using APID 0x00d for PPID 0x008, SID 0, ee 0
+[   0.093] KEBAB SPMI: REG 0x0805 read 1: APID 0x00d obsrvr+0x680 cmd 0x78000050 status 0x00000001 -> 0x04
+[   0.094] KEBAB SPMI: REG 0x0805 read 2: APID 0x00d obsrvr+0x680 cmd 0x78000050 status 0x00000001 -> 0x04
+[   0.094] KEBAB SPMI: PON subtype 0x0805 reads 0x04 / 0x04 -> STABLE
+[   0.094] KEBAB SPMI: REG 0x088f read 1: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x00
+[   0.094] KEBAB SPMI: REG 0x088f read 2: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x00
+[   0.094] KEBAB SPMI: SOFT_RB_SPARE 0x088f reads 0x00 / 0x00 -> STABLE
+[   0.094] KEBAB SPMI: PON generation: Gen2 (subtype 0x04); the Gen2 SOFT_RB_SPARE layout would apply
+[   0.094] KEBAB SPMI: SPMI-3 PASS
+[2026-10-29T06:04:13] done, 1154 bytes

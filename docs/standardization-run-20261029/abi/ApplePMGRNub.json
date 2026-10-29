@@ -1,0 +1,23 @@
+{
+  "target": "iPhone10,3 20H392 / XNU8796.141.3 ARM64 16KiB",
+  "original_kernelcache_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "evidence_version": "0225",
+  "native_sha256": "e7cb391447d5a6aaf2feb45a3e5d48191996ca775f179a40adecc38f09b1655b",
+  "io_class": "ApplePMGRNub",
+  "source_path": "iokit/Kernel/arm/KebabPlatformExpert.cpp",
+  "source_sha256": "b97d9d6185417f45f69ac9ea0642183228cd21b35428d46e99da1bb16f637ea1",
+  "implementation": "original donor metaclass object; development provider-less compatibility",
+  "donor_class_size": 1856,
+  "private_provider_offset": 136,
+  "private_provider_value": null,
+  "static_audit": "unchanged AMFI/PMGR executable hashes, NULL-provider accessor instructions, size immediate and native init binding PASS",
+  "original_pmgr_text_sha256": "74ac53a277da51806f323e8c7d765d4ce9baa443adf4e513be2cff52a245db0e",
+  "aon_read_on_null": "0xffffffff (unsupported)",
+  "aon_write_on_null": "no operation",
+  "real_power_management_qualified": false,
+  "limits": [
+    "No Qualcomm PMIC MMIO by original Apple accessors",
+    "Original hardware start is not called; object retained for platform lifetime",
+    "Not a persistent AON or IOPM implementation"
+  ]
+}

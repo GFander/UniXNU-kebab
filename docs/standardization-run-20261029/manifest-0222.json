@@ -1,0 +1,464 @@
+{
+  "version": "0222",
+  "target": "SM8250 / XNU8796.141.3 / 16KiB / 20H392",
+  "hardware_platform_groups": 9,
+  "groups": {
+    "platform": [
+      "iokit/Kernel/arm/KebabPlatformExpert.cpp"
+    ],
+    "cpu": [
+      "iokit/Kernel/arm/KebabCPU.cpp"
+    ],
+    "ufs": [
+      "bsd/dev/kebab_ufs.c",
+      "iokit/Kernel/arm/KebabBlockStorageDevice.cpp"
+    ],
+    "usb": [
+      "bsd/dev/kebab_usb.c",
+      "bsd/dev/kebab_reboot.c"
+    ],
+    "spmi_pmic": [
+      "bsd/dev/kebab_spmi.c",
+      "bsd/dev/kebab_spmi_bus.c",
+      "bsd/dev/kebab_spmi_pon.c",
+      "bsd/dev/kebab_spmi_keys.c",
+      "bsd/dev/kebab_spmi_power.c",
+      "iokit/Kernel/arm/KebabSPMI.cpp"
+    ],
+    "rpmh_vrm": [
+      "bsd/dev/kebab_rpmh.c",
+      "bsd/dev/kebab_rpmh_vrm.c"
+    ],
+    "touch": [
+      "bsd/dev/kebab_geni.c",
+      "bsd/dev/kebab_touch.c",
+      "bsd/dev/kebab_touch_tcm.c",
+      "iokit/Kernel/arm/KebabGeni.cpp"
+    ],
+    "keys": [
+      "bsd/dev/kebab_keys.c",
+      "bsd/dev/kebab_keys_core.c"
+    ],
+    "display": [
+      "iokit/Kernel/arm/KebabFramebuffer.cpp"
+    ]
+  },
+  "separate_compatibility": {
+    "surface": [
+      "iokit/Kernel/arm/KebabSurface.cpp"
+    ]
+  },
+  "separate_components": {
+    "software_aes": [
+      "iokit/Kernel/arm/NativeAES.cpp"
+    ],
+    "apfs_probe": [
+      "iokit/Kernel/arm/KebabVolumeLookup.cpp",
+      "bsd/kern/kebab_apfs_probe.c"
+    ]
+  },
+  "implementation_files": 25,
+  "physical_lines": 16321,
+  "classes": {
+    "KebabBlockStorageDevice": {
+      "base": "IOBlockStorageDevice",
+      "path": "iokit/Kernel/arm/KebabBlockStorageDevice.cpp"
+    },
+    "KebabCPU": {
+      "base": "IOCPU",
+      "path": "iokit/Kernel/arm/KebabCPU.cpp"
+    },
+    "IOMobileFramebuffer": {
+      "base": "IOService",
+      "path": "iokit/Kernel/arm/KebabFramebuffer.cpp"
+    },
+    "AppleCLCD": {
+      "base": "IOMobileFramebuffer",
+      "path": "iokit/Kernel/arm/KebabFramebuffer.cpp"
+    },
+    "IOMobileFramebufferUserClient": {
+      "base": "IOUserClient",
+      "path": "iokit/Kernel/arm/KebabFramebuffer.cpp"
+    },
+    "KebabI2CDevice": {
+      "base": "IOService",
+      "path": "iokit/Kernel/arm/KebabGeni.cpp"
+    },
+    "KebabGeniBus": {
+      "base": "IOService",
+      "path": "iokit/Kernel/arm/KebabGeni.cpp"
+    },
+    "KebabTouch": {
+      "base": "IOService",
+      "path": "iokit/Kernel/arm/KebabGeni.cpp"
+    },
+    "KebabPlatformExpert": {
+      "base": "IODTPlatformExpert",
+      "path": "iokit/Kernel/arm/KebabPlatformExpert.cpp"
+    },
+    "KebabSPMIDevice": {
+      "base": "IOService",
+      "path": "iokit/Kernel/arm/KebabSPMI.cpp"
+    },
+    "KebabSPMIBus": {
+      "base": "IOService",
+      "path": "iokit/Kernel/arm/KebabSPMI.cpp"
+    },
+    "KebabPon": {
+      "base": "IOService",
+      "path": "iokit/Kernel/arm/KebabSPMI.cpp"
+    },
+    "KebabPmicKeys": {
+      "base": "IOService",
+      "path": "iokit/Kernel/arm/KebabSPMI.cpp"
+    },
+    "KebabVrm": {
+      "base": "IOService",
+      "path": "iokit/Kernel/arm/KebabSPMI.cpp"
+    },
+    "KebabSurface": {
+      "base": "OSObject",
+      "path": "iokit/Kernel/arm/KebabSurface.cpp"
+    },
+    "KebabSurfaceRef": {
+      "base": "OSObject",
+      "path": "iokit/Kernel/arm/KebabSurface.cpp"
+    },
+    "IOCoreSurfaceRoot": {
+      "base": "IOService",
+      "path": "iokit/Kernel/arm/KebabSurface.cpp"
+    },
+    "IOSurfaceRootUserClient": {
+      "base": "IOUserClient",
+      "path": "iokit/Kernel/arm/KebabSurface.cpp"
+    },
+    "NativeAES": {
+      "base": "IOAESAccelerator",
+      "path": "iokit/Kernel/arm/NativeAES.cpp"
+    }
+  },
+  "class_count": 19,
+  "native_sha256": "4e0477efd15d656a655aac53de385690156317380d9b60a9b574822aa0f5d83d",
+  "boot_sha256": "d8b66b1adfdd4596d85f086151c40d9fad29d919f4cd588e668ee8830d904c8f",
+  "source_trees_equal": true,
+  "independent_patch_replay_equal": true,
+  "equality_scope": "Only explicitly listed implementation/support files; whole-checkout equality is not asserted.",
+  "files": {
+    "bsd/dev/kebab_geni.c": {
+      "sha256": "0f6865d81bc93fe5701ac03374105addf9b84fb9c5a846100fff76532b56973e",
+      "bytes": 38604,
+      "lines": 1290
+    },
+    "bsd/dev/kebab_keys.c": {
+      "sha256": "354036ba124784fc920066c20e8eda88f44455a66756481fa5e050f624d9db7a",
+      "bytes": 19477,
+      "lines": 641
+    },
+    "bsd/dev/kebab_keys_core.c": {
+      "sha256": "f23fc14cbc437f196d5211f4098b0618b6372e9a399da6184c24daf2a7f21c6e",
+      "bytes": 6571,
+      "lines": 223
+    },
+    "bsd/dev/kebab_reboot.c": {
+      "sha256": "e71ef8f807f0548d5f187f9ff46c9463a48e51c2f23b1871e06cafd4e6172233",
+      "bytes": 11592,
+      "lines": 315
+    },
+    "bsd/dev/kebab_rpmh.c": {
+      "sha256": "2087a9f085d9caf1adf5916242c58369f2b4ab7717fd553f9e5207af8fd93646",
+      "bytes": 23018,
+      "lines": 660
+    },
+    "bsd/dev/kebab_rpmh_vrm.c": {
+      "sha256": "eed3ca3043162c6de94a6783128200217e8766923172dec78a29f962287de42d",
+      "bytes": 18842,
+      "lines": 674
+    },
+    "bsd/dev/kebab_spmi.c": {
+      "sha256": "cdfe9ba259a41bad63e579b9b2c8ae44770dd6eac5762c2d3186dce2c7dbab80",
+      "bytes": 520,
+      "lines": 18
+    },
+    "bsd/dev/kebab_spmi_bus.c": {
+      "sha256": "894e369abb971ff9205ac17fb054c0a82c5f4eec465e52ab1917d94da91b5c8a",
+      "bytes": 16807,
+      "lines": 507
+    },
+    "bsd/dev/kebab_spmi_keys.c": {
+      "sha256": "752406591ccd261f94f3cc55f1f04e2d5595c1322069c3929cbb39d0ad196d03",
+      "bytes": 3837,
+      "lines": 134
+    },
+    "bsd/dev/kebab_spmi_pon.c": {
+      "sha256": "31e2cd676043c8c1fff2debb457c165dbc924b2cab5fcba19f336a7b977f47a6",
+      "bytes": 13730,
+      "lines": 388
+    },
+    "bsd/dev/kebab_spmi_power.c": {
+      "sha256": "ad307c515948822ab2b35da302e02a0bb94a1e280c4861d41bcee1df0ad012bc",
+      "bytes": 6989,
+      "lines": 225
+    },
+    "bsd/dev/kebab_touch.c": {
+      "sha256": "dad921ba73b54036a28c79c1e92314ce87c79f923dcf625bddc3a328ed6b17b8",
+      "bytes": 59696,
+      "lines": 1705
+    },
+    "bsd/dev/kebab_touch_tcm.c": {
+      "sha256": "3cfd0c2a9a6a67f207844efeb032ddeae99b4630726213b5ac15876d257984c0",
+      "bytes": 18276,
+      "lines": 660
+    },
+    "bsd/dev/kebab_ufs.c": {
+      "sha256": "68fac484f1eda939a12f6a59c09637b072820e8e9b17054111ad9af0e7bb54a7",
+      "bytes": 33229,
+      "lines": 1134
+    },
+    "bsd/dev/kebab_usb.c": {
+      "sha256": "8ad1207835c05d5eb08f61bdf878201a23e894e7eec980f1552b9dad24cd2081",
+      "bytes": 99317,
+      "lines": 2844
+    },
+    "bsd/kern/kebab_apfs_probe.c": {
+      "sha256": "e6bbef2f7ccc579c8ed6bac5cad2431331f69d86caff226eb5781bd54b983f4f",
+      "bytes": 7700,
+      "lines": 168
+    },
+    "iokit/Kernel/arm/KebabBlockStorageDevice.cpp": {
+      "sha256": "cd5ec397c8fe63acda8e43d707351dfe253ea76544af30ff826e8441dd16bc07",
+      "bytes": 20815,
+      "lines": 675
+    },
+    "iokit/Kernel/arm/KebabCPU.cpp": {
+      "sha256": "c11a5b0b4bd3144b3139ef7ce394afa1788f7542f379c426f52b966c2243d01d",
+      "bytes": 10111,
+      "lines": 284
+    },
+    "iokit/Kernel/arm/KebabFramebuffer.cpp": {
+      "sha256": "bc6c2c8b70d023eda3f49a515128761728bb238391a059b007472bad151109a0",
+      "bytes": 35668,
+      "lines": 1147
+    },
+    "iokit/Kernel/arm/KebabGeni.cpp": {
+      "sha256": "f9bf59e9636526dec52f8d11fab011ba8a9e9773f6b29852bf8eb139d8b44409",
+      "bytes": 6552,
+      "lines": 186
+    },
+    "iokit/Kernel/arm/KebabPlatformExpert.cpp": {
+      "sha256": "b97d9d6185417f45f69ac9ea0642183228cd21b35428d46e99da1bb16f637ea1",
+      "bytes": 10916,
+      "lines": 303
+    },
+    "iokit/Kernel/arm/KebabSPMI.cpp": {
+      "sha256": "db684264b2f08f2b4dd8b1bc24b20fe49055cad911ff8a2f0b60453231069f29",
+      "bytes": 11520,
+      "lines": 343
+    },
+    "iokit/Kernel/arm/KebabSurface.cpp": {
+      "sha256": "6805297d7d2649b50bde0c0de7cd10918fb5bc5528cde5a15be1393adc793f14",
+      "bytes": 43552,
+      "lines": 1447
+    },
+    "iokit/Kernel/arm/KebabVolumeLookup.cpp": {
+      "sha256": "d762fd9623e3bce4c83c375bdc881b1959c43e7cb07f5f659e5c7918dd3fbee8",
+      "bytes": 3365,
+      "lines": 88
+    },
+    "iokit/Kernel/arm/NativeAES.cpp": {
+      "sha256": "d065f929d2588fd3f39f9519f42d784fc39ea32c82f797f4cbf2ee57bc8ccbef",
+      "bytes": 14124,
+      "lines": 262
+    },
+    "iokit/KernelConfigTables.cpp": {
+      "sha256": "e421b9e8205a82bfe858e15a2029361de55f2a5084d4f1eef15fe95c5cdf08c9",
+      "bytes": 4170,
+      "lines": 117
+    },
+    "iokit/Kernel/arm/KebabDriverManifest.h": {
+      "sha256": "59c3a177cbc8bae16f390d51183a4a60fdbce042aafbcd073d3b68dcadeac605",
+      "bytes": 1282,
+      "lines": 18
+    },
+    "iokit/Kernel/arm/KebabDriverDiagnostics.cpp": {
+      "sha256": "5794ec358a0cfd50b1d055490521d4a9409997429ed2d8c448b06e995e69f97a",
+      "bytes": 2374,
+      "lines": 61
+    },
+    "iokit/Kernel/arm/KebabDriverSelfTest.cpp": {
+      "sha256": "48d2b1e4805b9caf829913727dd85bdb7a6559b1f923a0ecbd0a38e5b4bfcadf",
+      "bytes": 3205,
+      "lines": 86
+    },
+    "bsd/dev/kebab_geni.h": {
+      "sha256": "1dea367bb8c750e01a40e25f14e4994be7a21d0d8ab443b0cbbb1a7b2b3f3045",
+      "bytes": 1803,
+      "lines": 48
+    },
+    "bsd/dev/kebab_spmi_bus.h": {
+      "sha256": "20d6757407d72aa99dd8c5493a559f28eee14a0a1b750f79e47f8151a907ec27",
+      "bytes": 1937,
+      "lines": 64
+    },
+    "bsd/dev/kebab_spmi_bus_private.h": {
+      "sha256": "7505e9b2d3439b9980a204b1d6c43b4b6da91564ab083d86fea9eb810b1edf2d",
+      "bytes": 4589,
+      "lines": 123
+    },
+    "bsd/dev/kebab_spmi_clients.h": {
+      "sha256": "6fccabb9fde9c7a114e2f88726b6e0706f6eb854a84485be1f09f723da84065f",
+      "bytes": 1500,
+      "lines": 58
+    },
+    "bsd/dev/kebab_pmic_regs.h": {
+      "sha256": "ab625d41e6d8930ba5a3d8a2b80b495247b9c08e65ad4c1b26cb7059a0ef4395",
+      "bytes": 983,
+      "lines": 22
+    },
+    "bsd/kern/kebab_bootdiag.c": {
+      "sha256": "5abda7fdb35aedd45153e1148d59e0eeb654fed6731caa9c912068e38e66e069",
+      "bytes": 1750,
+      "lines": 59
+    },
+    "osfmk/kern/kebab_bootdiag.c": {
+      "sha256": "1d102b6aeabcc90d624816e453974acae77d6230ca993b880502e36cf163ba39",
+      "bytes": 3627,
+      "lines": 84
+    },
+    "bsd/conf/files": {
+      "sha256": "b6f17da2adc67605ceea65b40876fccf86635dcb8cdd2aa5870cf2829b07279a",
+      "bytes": 27555,
+      "lines": 668
+    },
+    "osfmk/conf/files": {
+      "sha256": "3d87ac592ab7f98adb0097e59b769065eb091a97f47302b658d3246269e565f1",
+      "bytes": 13386,
+      "lines": 365
+    },
+    "iokit/conf/files.arm64": {
+      "sha256": "8a1fc721cd9884f3153831b9e7a6eae4809c7d604123a01aac094064295c854b",
+      "bytes": 1625,
+      "lines": 35
+    },
+    "bsd/kern/bsd_init.c": {
+      "sha256": "878bf87d722749e05f7c6cbeece6f95e01d54fb1bdc511edd041e3684e4dbd98",
+      "bytes": 47602,
+      "lines": 1728
+    },
+    "bsd/kern/kern_exec.c": {
+      "sha256": "b1422c85587581c0b9f4c229dbb998c1425802560d19a3fcced12792135e5f1a",
+      "bytes": 240739,
+      "lines": 8036
+    },
+    "bsd/kern/kern_newsysctl.c": {
+      "sha256": "2914c0396ea3a461c205dc42de97bbd7528198a9fd655919eda06c7bf2e806ad",
+      "bytes": 63536,
+      "lines": 2397
+    },
+    "iokit/Kernel/IOMemoryDescriptor.cpp": {
+      "sha256": "ed1e50ca9b0e08a2a8827507eb49b74b3ab28b2fccbf46892bc8c430a041e192",
+      "bytes": 166626,
+      "lines": 6236
+    },
+    "iokit/Kernel/arm/OriginalAESABI.h": {
+      "sha256": "14eda5b77c81054673198cb028bd0008cc39210b4fd47b5f609e177d1d090a19",
+      "bytes": 2291,
+      "lines": 47
+    },
+    "iokit/Kernel/arm/OriginalAESBindings.cpp": {
+      "sha256": "8cfe7373242fd0cb3bb1becc4da467a3f948de4c7e997c54c7796ea4cd5b39cd",
+      "bytes": 3461,
+      "lines": 27
+    },
+    "iokit/Kernel/arm/KebabPrelinkBindings.cpp": {
+      "sha256": "c46a70a9942d43a3b7e8aa52c2a8b2dcfc0b0d0f8e6a469c61d24db5b7838f77",
+      "bytes": 1965,
+      "lines": 22
+    },
+    "bsd/kern/kebab_scm_probe.c": {
+      "sha256": "88501c5bb4236691e45e4cf9b34a9ff3201916ea7b8c1fe187f7b79e9b0e203b",
+      "bytes": 4129,
+      "lines": 103
+    },
+    "bsd/dev/kebab_reboot.h": {
+      "sha256": "6978944baa91d19a929981185358e25cb2b776fda4b3deb15e8738111e0ecf79",
+      "bytes": 699,
+      "lines": 21
+    },
+    "bsd/kern/kebab_apfs_probe.h": {
+      "sha256": "e44fb2ed0548fa3dc2fd077657c82b1fa60e69c3090d5cea9c275e1f462baf07",
+      "bytes": 426,
+      "lines": 17
+    },
+    "bsd/dev/kebab_install.c": {
+      "sha256": "efa4b7a18e60fe9f7b2d00b29ecabd0ace4982d001a7e380157f52a359275e21",
+      "bytes": 56261,
+      "lines": 2115
+    }
+  },
+  "native_personality": "(   {     'IOClass'         = KebabPlatformExpert;     'IOProviderClass' = IOPlatformExpertDevice;     'IONameMatch'     = 'oneplus,kebab';     'IOProbeScore'    = 10000:32;   },   {     'IOClass'         = KebabCPU;     'IOProviderClass' = IOPlatformDevice;     'IONameMatch'     = cpu;     'IOProbeScore'    = 10000:32;   },   {     'IOClass'         = IOCoreSurfaceRoot;     'IOProviderClass' = IOResources;     'IOResourceMatch' = IOBSD;     'IOMatchCategory' = IOCoreSurfaceRoot;   },   {     'IOClass' = KebabSPMIBus;     'IOProviderClass' = IOPlatformDevice;     'IONameMatch' = 'kebab,sm8250-spmi';     'IOProbeScore' = 1000:32;     'IOResourceMatch' = IOBSD;   },   {     'IOClass' = KebabPon;     'IOProviderClass' = KebabSPMIDevice;     'IONameMatch' = 'pmic-pon';     'IOProbeScore' = 1000:32;   },   {     'IOClass' = KebabPmicKeys;     'IOProviderClass' = KebabSPMIDevice;     'IONameMatch' = 'pmic-keys';     'IOProbeScore' = 1000:32;   },   {     'IOClass' = KebabVrm;     'IOProviderClass' = KebabSPMIDevice;     'IONameMatch' = 'rpmh-vrm-policy';     'IOProbeScore' = 1000:32;   },   {     'IOClass' = NativeAES;     'IOProviderClass' = IOResources;     'IOResourceMatch' = IOBSD;     'IOProbeScore' = 1000:32;   },   {     'IOClass' = KebabGeniBus;     'IOProviderClass' = IOPlatformDevice;     'IONameMatch' = 'kebab,sm8250-geni13';     'IOResourceMatch' = IOBSD;   },   {     'IOClass' = KebabTouch;     'IOProviderClass' = KebabI2CDevice;     'IONameMatch' = 'synaptics,s3908';   },   {     'IOClass'         = IOPanicPlatform;     'IOProviderClass' = IOPlatformExpertDevice;     'IOProbeScore'    = 0:32;   })",
+  "observed_registry": {
+    "platform": {
+      "io_class": "KebabPlatformExpert",
+      "matched": 1,
+      "iterator_valid": true
+    },
+    "cpu": {
+      "io_class": "KebabCPU",
+      "matched": 1,
+      "iterator_valid": true
+    },
+    "ufs": {
+      "io_class": "KebabBlockStorageDevice",
+      "matched": 1,
+      "iterator_valid": true
+    },
+    "spmi": {
+      "io_class": "KebabSPMIBus",
+      "matched": 1,
+      "iterator_valid": true
+    },
+    "pon": {
+      "io_class": "KebabPon",
+      "matched": 1,
+      "iterator_valid": true
+    },
+    "keys": {
+      "io_class": "KebabPmicKeys",
+      "matched": 1,
+      "iterator_valid": true
+    },
+    "rpmh": {
+      "io_class": "KebabVrm",
+      "matched": 1,
+      "iterator_valid": true
+    },
+    "geni": {
+      "io_class": "KebabGeniBus",
+      "matched": 1,
+      "iterator_valid": true
+    },
+    "touch": {
+      "io_class": "KebabTouch",
+      "matched": 1,
+      "iterator_valid": true
+    },
+    "display": {
+      "io_class": "AppleCLCD",
+      "matched": 1,
+      "iterator_valid": true
+    },
+    "surface": {
+      "io_class": "IOCoreSurfaceRoot",
+      "matched": 1,
+      "iterator_valid": true
+    }
+  },
+  "limits": [
+    "USB remains a resident C core",
+    "normal bus services do not unload boot-owned C mappings/polling",
+    "No HID/backboardd/Metal/DPU-vsync or full launchd qualification",
+    "No SMMU/SMP/encrypted-Data-write qualification",
+    "SoftwareAES raw-key CBC does not supply original Image4 selector 2212",
+    "APFS Preboot proof is recorded separately and does not establish Data protection"
+  ]
+}

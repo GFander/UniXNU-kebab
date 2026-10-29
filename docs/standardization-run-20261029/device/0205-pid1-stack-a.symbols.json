@@ -1,0 +1,102 @@
+{
+  "version": "0205",
+  "frames": [
+    {
+      "return_address": "0xfffffe00064850f4",
+      "callsite": "0xfffffe00064850f0",
+      "owner": "native",
+      "nearest_symbol": [
+        "_machine_switch_context"
+      ],
+      "offset": "0x84"
+    },
+    {
+      "return_address": "0xfffffe0006347568",
+      "callsite": "0xfffffe0006347564",
+      "owner": "native",
+      "nearest_symbol": [
+        "_thread_invoke"
+      ],
+      "offset": "0x36c"
+    },
+    {
+      "return_address": "0xfffffe0006345c6c",
+      "callsite": "0xfffffe0006345c68",
+      "owner": "native",
+      "nearest_symbol": [
+        "_thread_block_reason"
+      ],
+      "offset": "0xe4"
+    },
+    {
+      "return_address": "0xfffffe0006332768",
+      "callsite": "0xfffffe0006332764",
+      "owner": "native",
+      "nearest_symbol": [
+        "_gate_wait"
+      ],
+      "offset": "0x140"
+    },
+    {
+      "return_address": "0xfffffe0006332f3c",
+      "callsite": "0xfffffe0006332f38",
+      "owner": "native",
+      "nearest_symbol": [
+        "_lck_mtx_gate_wait"
+      ],
+      "offset": "0x17c"
+    },
+    {
+      "return_address": "0xfffffe000891c3cc",
+      "callsite": "0xfffffe000891c3c8",
+      "owner": "com.apple.security.AppleImage4",
+      "nearest_symbol": [],
+      "offset": null
+    },
+    {
+      "return_address": "0xfffffe00067c76f8",
+      "callsite": "0xfffffe00067c76f4",
+      "owner": "native",
+      "nearest_symbol": [
+        "_sysctl_root"
+      ],
+      "offset": "0x44c"
+    },
+    {
+      "return_address": "0xfffffe00067c78ec",
+      "callsite": "0xfffffe00067c78e8",
+      "owner": "native",
+      "nearest_symbol": [
+        "_sysctl"
+      ],
+      "offset": "0x174"
+    },
+    {
+      "return_address": "0xfffffe0006951ba4",
+      "callsite": "0xfffffe0006951ba0",
+      "owner": "native",
+      "nearest_symbol": [
+        "_unix_syscall"
+      ],
+      "offset": "0x314"
+    },
+    {
+      "return_address": "0xfffffe0006478e6c",
+      "callsite": "0xfffffe0006478e68",
+      "owner": "native",
+      "nearest_symbol": [
+        "_sleh_synchronous"
+      ],
+      "offset": "0x2e8"
+    },
+    {
+      "return_address": "0xfffffe00064785a4",
+      "callsite": "0xfffffe00064785a0",
+      "owner": "native",
+      "nearest_symbol": [
+        "_fleh_synchronous"
+      ],
+      "offset": "0x24"
+    }
+  ]
+}

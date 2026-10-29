@@ -1,0 +1,388 @@
+[2026-10-29T08:35:24] sending 'FWLOG?' on COM7
+[   0.088] KEBAB FWLOG: ring=65536 written=170351 dump=32768 (tail)
+[   0.088] KEBAB FWLOG: ---- begin ----
+[   0.088] KEBAB DRV: surface class=IOCoreSurfaceRoot matched=1 valid=1 scope=compatibility selectors; private ABI incomplete
+[   0.088] KEBAB DRV: end; matched service does not certify user ABI or hardware capability
+[   0.088] KEBAB DRV: manifest v1; registry state is observed now; C entries have no service
+[   0.151] KEBAB DRV: platform class=KebabPlatformExpert id=10000011d state=0x1e inactive=0 provider=oneplus,kebab
+[   0.151] KEBAB DRV: platform class=KebabPlatformExpert matched=1 valid=1 scope=ADT platform/resources
+[   0.151] KEBAB DRV: image4 class=AppleImage4 query=unavailable scope=original defaults-nub service; startup qualification separate
+[   0.152] KEBAB DRV: aes class=IOAESAccelerator query=unavailable scope=original crypto-family identity; backend qualification separate
+[   0.152] KEBAB DRV: cpu class=KebabCPU id=10000012a state=0x1e inactive=0 provider=cpu0
+[   0.213] KEBAB DRV: cpu class=KebabCPU matched=1 valid=1 scope=single boot CPU; no SMP qualification
+[   0.213] KEBAB DRV: ufs class=KebabBlockStorageDevice id=10000013e state=0x1e inactive=0 provider=oneplus,kebab
+[   0.213] KEBAB DRV: ufs class=KebabBlockStorageDevice matched=1 valid=1 scope=boot C UFS + native storage bridge
+[   0.213] KEBAB DRV: usb backend=C service=none scope=resident DWC3 C core; no normal IOService
+[   0.213] KEBAB DRV: spmi class=KebabSPMIBus id=10000012d state=0x1e inactive=0 provider=kebab-spmi
+[   0.213] KEBAB DRV: spmi class=KebabSPMIBus matched=1 valid=1 scope=ADT arbiter + boot C backend
+[   0.276] KEBAB DRV: pon class=KebabPon id=100000139 state=0x1e inactive=0 provider=pmic-pon
+[   0.276] KEBAB DRV: pon class=KebabPon matched=1 valid=1 scope=scoped PON; panic uses C core directly
+[   0.276] KEBAB DRV: keys class=KebabPmicKeys id=10000013a state=0x1e inactive=0 provider=pmic-keys
+[   0.276] KEBAB DRV: keys class=KebabPmicKeys matched=1 valid=1 scope=raw PMIC sampling; no HID
+[   0.276] KEBAB DRV: rpmh class=KebabVrm id=10000013b state=0x1e inactive=0 provider=rpmh-vrm-policy
+[   0.276] KEBAB DRV: rpmh class=KebabVrm matched=1 valid=1 scope=RSC policy/readback; no IOPM
+[   0.338] KEBAB DRV: geni class=KebabGeniBus id=10000012e state=0x1e inactive=0 provider=kebab-geni13
+[   0.338] KEBAB DRV: geni class=KebabGeniBus matched=1 valid=1 scope=SE13/bitbang transport; boot C mappings
+[   0.338] KEBAB DRV: touch class=KebabTouch id=10000013d state=0x1e inactive=0 provider=synaptics,s3908
+[   0.338] KEBAB DRV: touch class=KebabTouch matched=1 valid=1 scope=typed TCM state; C polling lifetime; no HID
+[   0.338] KEBAB DRV: display class=AppleCLCD id=100000126 state=0x1e inactive=0 provider=KebabPlatformExpert
+[   0.400] KEBAB DRV: display class=AppleCLCD matched=1 valid=1 scope=CPU framebuffer; no GPU/vsync qualification
+[   0.400] KEBAB DRV: surface class=IOCoreSurfaceRoot id=100000131 state=0x1e inactive=0 provider=IOResources
+[   0.400] KEBAB DRV: surface class=IOCoreSurfaceRoot matched=1 valid=1 scope=compatibility selectors; private ABI incomplete
+[   0.400] KEBAB DRV: end; matched service does not certify user ABI or hardware capability
+[   0.400] KEBAB DRV: manifest v1; registry state is observed now; C entries have no service
+[   0.400] KEBAB DRV: platform class=KebabPlatformExpert id=10000011d state=0x1e inactive=0 provider=oneplus,kebab
+[   0.462] KEBAB DRV: platform class=KebabPlatformExpert matched=1 valid=1 scope=ADT platform/resources
+[   0.462] KEBAB DRV: image4 class=AppleImage4 query=unavailable scope=original defaults-nub service; startup qualification separate
+[   0.462] KEBAB DRV: aes class=IOAESAccelerator query=unavailable scope=original crypto-family identity; backend qualification separate
+[   0.462] KEBAB DRV: cpu class=KebabCPU id=10000012a state=0x1e inactive=0 provider=cpu0
+[   0.462] KEBAB DRV: cpu class=KebabCPU matched=1 valid=1 scope=single boot CPU; no SMP qualification
+[   0.523] KEBAB DRV: ufs class=KebabBlockStorageDevice id=10000013e state=0x1e inactive=0 provider=oneplus,kebab
+[   0.524] KEBAB DRV: ufs class=KebabBlockStorageDevice matched=1 valid=1 scope=boot C UFS + native storage bridge
+[   0.524] KEBAB DRV: usb backend=C service=none scope=resident DWC3 C core; no normal IOService
+[   0.524] KEBAB DRV: spmi class=KebabSPMIBus id=10000012d state=0x1e inactive=0 provider=kebab-spmi
+[   0.524] KEBAB DRV: spmi class=KebabSPMIBus matched=1 valid=1 scope=ADT arbiter + boot C backend
+[   0.585] KEBAB DRV: pon class=KebabPon id=100000139 state=0x1e inactive=0 provider=pmic-pon
+[   0.586] KEBAB DRV: pon class=KebabPon matched=1 valid=1 scope=scoped PON; panic uses C core directly
+[   0.586] KEBAB DRV: keys class=KebabPmicKeys id=10000013a state=0x1e inactive=0 provider=pmic-keys
+[   0.586] KEBAB DRV: keys class=KebabPmicKeys matched=1 valid=1 scope=raw PMIC sampling; no HID
+[   0.586] KEBAB DRV: rpmh class=KebabVrm id=10000013b state=0x1e inactive=0 provider=rpmh-vrm-policy
+[   0.586] KEBAB DRV: rpmh class=KebabVrm matched=1 valid=1 scope=RSC policy/readback; no IOPM
+[   0.648] KEBAB DRV: geni class=KebabGeniBus id=10000012e state=0x1e inactive=0 provider=kebab-geni13
+[   0.648] KEBAB DRV: geni class=KebabGeniBus matched=1 valid=1 scope=SE13/bitbang transport; boot C mappings
+[   0.648] KEBAB DRV: touch class=KebabTouch id=10000013d state=0x1e inactive=0 provider=synaptics,s3908
+[   0.648] KEBAB DRV: touch class=KebabTouch matched=1 valid=1 scope=typed TCM state; C polling lifetime; no HID
+[   0.648] KEBAB DRV: display class=AppleCLCD id=100000126 state=0x1e inactive=0 provider=KebabPlatformExpert
+[   0.711] KEBAB DRV: display class=AppleCLCD matched=1 valid=1 scope=CPU framebuffer; no GPU/vsync qualification
+[   0.711] KEBAB DRV: surface class=IOCoreSurfaceRoot id=100000131 state=0x1e inactive=0 provider=IOResources
+[   0.711] KEBAB DRV: surface class=IOCoreSurfaceRoot matched=1 valid=1 scope=compatibility selectors; private ABI incomplete
+[   0.711] KEBAB DRV: end; matched service does not certify user ABI or hardware capability
+[   0.711] KEBAB DRV: manifest v1; registry state is observed now; C entries have no service
+[   0.711] KEBAB DRV: platform class=KebabPlatformExpert id=10000011d state=0x1e inactive=0 provider=oneplus,kebab
+[   0.773] KEBAB DRV: platform class=KebabPlatformExpert matched=1 valid=1 scope=ADT platform/resources
+[   0.773] KEBAB DRV: image4 class=AppleImage4 query=unavailable scope=original defaults-nub service; startup qualification separate
+[   0.773] KEBAB DRV: aes class=IOAESAccelerator query=unavailable scope=original crypto-family identity; backend qualification separate
+[   0.773] KEBAB DRV: cpu class=KebabCPU id=10000012a state=0x1e inactive=0 provider=cpu0
+[   0.773] KEBAB DRV: cpu class=KebabCPU matched=1 valid=1 scope=single boot CPU; no SMP qualification
+[   0.835] KEBAB DRV: ufs class=KebabBlockStorageDevice id=10000013e state=0x1e inactive=0 provider=oneplus,kebab
+[   0.835] KEBAB DRV: ufs class=KebabBlockStorageDevice matched=1 valid=1 scope=boot C UFS + native storage bridge
+[   0.835] KEBAB DRV: usb backend=C service=none scope=resident DWC3 C core; no normal IOService
+[   0.835] KEBAB DRV: spmi class=KebabSPMIBus id=10000012d state=0x1e inactive=0 provider=kebab-spmi
+[   0.835] KEBAB DRV: spmi class=KebabSPMIBus matched=1 valid=1 scope=ADT arbiter + boot C backend
+[   0.835] KEBAB DRV: pon class=KebabPon id=100000139 state=0x1e inactive=0 provider=pmic-pon
+[   0.898] KEBAB DRV: pon class=KebabPon matched=1 valid=1 scope=scoped PON; panic uses C core directly
+[   0.898] KEBAB DRV: keys class=KebabPmicKeys id=10000013a state=0x1e inactive=0 provider=pmic-keys
+[   0.898] KEBAB DRV: keys class=KebabPmicKeys matched=1 valid=1 scope=raw PMIC sampling; no HID
+[   0.898] KEBAB DRV: rpmh class=KebabVrm id=10000013b state=0x1e inactive=0 provider=rpmh-vrm-policy
+[   0.898] KEBAB DRV: rpmh class=KebabVrm matched=1 valid=1 scope=RSC policy/readback; no IOPM
+[   0.962] KEBAB DRV: geni class=KebabGeniBus id=10000012e state=0x1e inactive=0 provider=kebab-geni13
+[   0.963] KEBAB DRV: geni class=KebabGeniBus matched=1 valid=1 scope=SE13/bitbang transport; boot C mappings
+[   0.963] KEBAB DRV: touch class=KebabTouch id=10000013d state=0x1e inactive=0 provider=synaptics,s3908
+[   0.963] KEBAB DRV: touch class=KebabTouch matched=1 valid=1 scope=typed TCM state; C polling lifetime; no HID
+[   0.963] KEBAB DRV: display class=AppleCLCD id=100000126 state=0x1e inactive=0 provider=KebabPlatformExpert
+[   0.963] KEBAB DRV: display class=AppleCLCD matched=1 valid=1 scope=CPU framebuffer; no GPU/vsync qualification
+[   1.025] KEBAB DRV: surface class=IOCoreSurfaceRoot id=100000131 state=0x1e inactive=0 provider=IOResources
+[   1.025] KEBAB DRV: surface class=IOCoreSurfaceRoot matched=1 valid=1 scope=compatibility selectors; private ABI incomplete
+[   1.025] KEBAB DRV: end; matched service does not certify user ABI or hardware capability
+[   1.025] KEBAB DRV: manifest v1; registry state is observed now; C entries have no service
+[   1.025] KEBAB DRV: platform class=KebabPlatformExpert id=10000011d state=0x1e inactive=0 provider=oneplus,kebab
+[   1.088] KEBAB DRV: platform class=KebabPlatformExpert matched=1 valid=1 scope=ADT platform/resources
+[   1.088] KEBAB DRV: image4 class=AppleImage4 query=unavailable scope=original defaults-nub service; startup qualification separate
+[   1.088] KEBAB DRV: aes class=IOAESAccelerator query=unavailable scope=original crypto-family identity; backend qualification separate
+[   1.088] KEBAB DRV: cpu class=KebabCPU id=10000012a state=0x1e inactive=0 provider=cpu0
+[   1.088] KEBAB DRV: cpu class=KebabCPU matched=1 valid=1 scope=single boot CPU; no SMP qualification
+[   1.088] KEBAB DRV: ufs class=KebabBlockStorageDevice id=10000013e state=0x1e inactive=0 provider=oneplus,kebab
+[   1.150] KEBAB DRV: ufs class=KebabBlockStorageDevice matched=1 valid=1 scope=boot C UFS + native storage bridge
+[   1.151] KEBAB DRV: usb backend=C service=none scope=resident DWC3 C core; no normal IOService
+[   1.151] KEBAB DRV: spmi class=KebabSPMIBus id=10000012d state=0x1e inactive=0 provider=kebab-spmi
+[   1.151] KEBAB DRV: spmi class=KebabSPMIBus matched=1 valid=1 scope=ADT arbiter + boot C backend
+[   1.151] KEBAB DRV: pon class=KebabPon id=100000139 state=0x1e inactive=0 provider=pmic-pon
+[   1.213] KEBAB DRV: pon class=KebabPon matched=1 valid=1 scope=scoped PON; panic uses C core directly
+[   1.213] KEBAB DRV: keys class=KebabPmicKeys id=10000013a state=0x1e inactive=0 provider=pmic-keys
+[   1.213] KEBAB DRV: keys class=KebabPmicKeys matched=1 valid=1 scope=raw PMIC sampling; no HID
+[   1.213] KEBAB DRV: rpmh class=KebabVrm id=10000013b state=0x1e inactive=0 provider=rpmh-vrm-policy
+[   1.213] KEBAB DRV: rpmh class=KebabVrm matched=1 valid=1 scope=RSC policy/readback; no IOPM
+[   1.213] KEBAB DRV: geni class=KebabGeniBus id=10000012e state=0x1e inactive=0 provider=kebab-geni13
+[   1.276] KEBAB DRV: geni class=KebabGeniBus matched=1 valid=1 scope=SE13/bitbang transport; boot C mappings
+[   1.276] KEBAB DRV: touch class=KebabTouch id=10000013d state=0x1e inactive=0 provider=synaptics,s3908
+[   1.276] KEBAB DRV: touch class=KebabTouch matched=1 valid=1 scope=typed TCM state; C polling lifetime; no HID
+[   1.276] KEBAB DRV: display class=AppleCLCD id=100000126 state=0x1e inactive=0 provider=KebabPlatformExpert
+[   1.276] KEBAB DRV: display class=AppleCLCD matched=1 valid=1 scope=CPU framebuffer; no GPU/vsync qualification
+[   1.338] KEBAB DRV: surface class=IOCoreSurfaceRoot id=100000131 state=0x1e inactive=0 provider=IOResources
+[   1.338] KEBAB DRV: surface class=IOCoreSurfaceRoot matched=1 valid=1 scope=compatibility selectors; private ABI incomplete
+[   1.338] KEBAB DRV: end; matched service does not certify user ABI or hardware capability
+[   1.338] KEBAB DRV: manifest v1; registry state is observed now; C entries have no service
+[   1.338] KEBAB DRV: platform class=KebabPlatformExpert id=10000011d state=0x1e inactive=0 provider=oneplus,kebab
+[   1.338] KEBAB DRV: platform class=KebabPlatformExpert matched=1 valid=1 scope=ADT platform/resources
+[   1.400] KEBAB DRV: image4 class=AppleImage4 query=unavailable scope=original defaults-nub service; startup qualification separate
+[   1.400] KEBAB DRV: aes class=IOAESAccelerator query=unavailable scope=original crypto-family identity; backend qualification separate
+[   1.400] KEBAB DRV: cpu class=KebabCPU id=10000012a state=0x1e inactive=0 provider=cpu0
+[   1.400] KEBAB DRV: cpu class=KebabCPU matched=1 valid=1 scope=single boot CPU; no SMP qualification
+[   1.400] KEBAB DRV: ufs class=KebabBlockStorageDevice id=10000013e state=0x1e inactive=0 provider=oneplus,kebab
+[   1.463] KEBAB DRV: ufs class=KebabBlockStorageDevice matched=1 valid=1 scope=boot C UFS + native storage bridge
+[   1.463] KEBAB DRV: usb backend=C service=none scope=resident DWC3 C core; no normal IOService
+[   1.463] KEBAB DRV: spmi class=KebabSPMIBus id=10000012d state=0x1e inactive=0 provider=kebab-spmi
+[   1.463] KEBAB DRV: spmi class=KebabSPMIBus matched=1 valid=1 scope=ADT arbiter + boot C backend
+[   1.463] KEBAB DRV: pon class=KebabPon id=100000139 state=0x1e inactive=0 provider=pmic-pon
+[   1.463] KEBAB DRV: pon class=KebabPon matched=1 valid=1 scope=scoped PON; panic uses C core directly
+[   1.524] KEBAB DRV: keys class=KebabPmicKeys id=10000013a state=0x1e inactive=0 provider=pmic-keys
+[   1.524] KEBAB DRV: keys class=KebabPmicKeys matched=1 valid=1 scope=raw PMIC sampling; no HID
+[   1.524] KEBAB DRV: rpmh class=KebabVrm id=10000013b state=0x1e inactive=0 provider=rpmh-vrm-policy
+[   1.524] KEBAB DRV: rpmh class=KebabVrm matched=1 valid=1 scope=RSC policy/readback; no IOPM
+[   1.524] KEBAB DRV: geni class=KebabGeniBus id=10000012e state=0x1e inactive=0 provider=kebab-geni13
+[   1.524] KEBAB DRV: geni class=KebabGeniBus matched=1 valid=1 scope=SE13/bitbang transport; boot C mappings
+[   1.586] KEBAB DRV: touch class=KebabTouch id=10000013d state=0x1e inactive=0 provider=synaptics,s3908
+[   1.586] KEBAB DRV: touch class=KebabTouch matched=1 valid=1 scope=typed TCM state; C polling lifetime; no HID
+[   1.586] KEBAB DRV: display class=AppleCLCD id=100000126 state=0x1e inactive=0 provider=KebabPlatformExpert
+[   1.586] KEBAB DRV: display class=AppleCLCD matched=1 valid=1 scope=CPU framebuffer; no GPU/vsync qualification
+[   1.586] KEBAB DRV: surface class=IOCoreSurfaceRoot id=100000131 state=0x1e inactive=0 provider=IOResources
+[   1.649] KEBAB DRV: surface class=IOCoreSurfaceRoot matched=1 valid=1 scope=compatibility selectors; private ABI incomplete
+[   1.649] KEBAB DRV: end; matched service does not certify user ABI or hardware capability
+[   1.649] KEBAB DRV: manifest v1; registry state is observed now; C entries have no service
+[   1.649] KEBAB DRV: platform class=KebabPlatformExpert id=10000011d state=0x1e inactive=0 provider=oneplus,kebab
+[   1.649] KEBAB DRV: platform class=KebabPlatformExpert matched=1 valid=1 scope=ADT platform/resources
+[   1.713] KEBAB DRV: image4 class=AppleImage4 query=unavailable scope=original defaults-nub service; startup qualification separate
+[   1.713] KEBAB DRV: aes class=IOAESAccelerator query=unavailable scope=original crypto-family identity; backend qualification separate
+[   1.713] KEBAB DRV: cpu class=KebabCPU id=10000012a state=0x1e inactive=0 provider=cpu0
+[   1.713] KEBAB DRV: cpu class=KebabCPU matched=1 valid=1 scope=single boot CPU; no SMP qualification
+[   1.713] KEBAB DRV: ufs class=KebabBlockStorageDevice id=10000013e state=0x1e inactive=0 provider=oneplus,kebab
+[   1.776] KEBAB DRV: ufs class=KebabBlockStorageDevice matched=1 valid=1 scope=boot C UFS + native storage bridge
+[   1.776] KEBAB DRV: usb backend=C service=none scope=resident DWC3 C core; no normal IOService
+[   1.776] KEBAB DRV: spmi class=KebabSPMIBus id=10000012d state=0x1e inactive=0 provider=kebab-spmi
+[   1.776] KEBAB DRV: spmi class=KebabSPMIBus matched=1 valid=1 scope=ADT arbiter + boot C backend
+[   1.776] KEBAB DRV: pon class=KebabPon id=100000139 state=0x1e inactive=0 provider=pmic-pon
+[   1.776] KEBAB DRV: pon class=KebabPon matched=1 valid=1 scope=scoped PON; panic uses C core directly
+[   1.838] KEBAB DRV: keys class=KebabPmicKeys id=10000013a state=0x1e inactive=0 provider=pmic-keys
+[   1.838] KEBAB DRV: keys class=KebabPmicKeys matched=1 valid=1 scope=raw PMIC sampling; no HID
+[   1.838] KEBAB DRV: rpmh class=KebabVrm id=10000013b state=0x1e inactive=0 provider=rpmh-vrm-policy
+[   1.838] KEBAB DRV: rpmh class=KebabVrm matched=1 valid=1 scope=RSC policy/readback; no IOPM
+[   1.838] KEBAB DRV: geni class=KebabGeniBus id=10000012e state=0x1e inactive=0 provider=kebab-geni13
+[   1.838] KEBAB DRV: geni class=KebabGeniBus matched=1 valid=1 scope=SE13/bitbang transport; boot C mappings
+[   1.900] KEBAB DRV: touch class=KebabTouch id=10000013d state=0x1e inactive=0 provider=synaptics,s3908
+[   1.900] KEBAB DRV: touch class=KebabTouch matched=1 valid=1 scope=typed TCM state; C polling lifetime; no HID
+[   1.900] KEBAB DRV: display class=AppleCLCD id=100000126 state=0x1e inactive=0 provider=KebabPlatformExpert
+[   1.900] KEBAB DRV: display class=AppleCLCD matched=1 valid=1 scope=CPU framebuffer; no GPU/vsync qualification
+[   1.900] KEBAB DRV: surface class=IOCoreSurfaceRoot id=100000131 state=0x1e inactive=0 provider=IOResources
+[   1.963] KEBAB DRV: surface class=IOCoreSurfaceRoot matched=1 valid=1 scope=compatibility selectors; private ABI incomplete
+[   1.963] KEBAB DRV: end; matched service does not certify user ABI or hardware capability
+[   1.963] KEBAB DRV: manifest v1; registry state is observed now; C entries have no service
+[   1.963] KEBAB DRV: platform class=KebabPlatformExpert id=10000011d state=0x1e inactive=0 provider=oneplus,kebab
+[   1.963] KEBAB DRV: platform class=KebabPlatformExpert matched=1 valid=1 scope=ADT platform/resources
+[   1.963] KEBAB DRV: image4 class=AppleImage4 query=unavailable scope=original defaults-nub service; startup qualification separate
+[   2.026] KEBAB DRV: aes class=IOAESAccelerator query=unavailable scope=original crypto-family identity; backend qualification separate
+[   2.026] KEBAB DRV: cpu class=KebabCPU id=10000012a state=0x1e inactive=0 provider=cpu0
+[   2.026] KEBAB DRV: cpu class=KebabCPU matched=1 valid=1 scope=single boot CPU; no SMP qualification
+[   2.026] KEBAB DRV: ufs class=KebabBlockStorageDevice id=10000013e state=0x1e inactive=0 provider=oneplus,kebab
+[   2.026] KEBAB DRV: ufs class=KebabBlockStorageDevice matched=1 valid=1 scope=boot C UFS + native storage bridge
+[   2.089] KEBAB DRV: usb backend=C service=none scope=resident DWC3 C core; no normal IOService
+[   2.089] KEBAB DRV: spmi class=KebabSPMIBus id=10000012d state=0x1e inactive=0 provider=kebab-spmi
+[   2.089] KEBAB DRV: spmi class=KebabSPMIBus matched=1 valid=1 scope=ADT arbiter + boot C backend
+[   2.089] KEBAB DRV: pon class=KebabPon id=100000139 state=0x1e inactive=0 provider=pmic-pon
+[   2.089] KEBAB DRV: pon class=KebabPon matched=1 valid=1 scope=scoped PON; panic uses C core directly
+[   2.089] KEBAB DRV: keys class=KebabPmicKeys id=10000013a state=0x1e inactive=0 provider=pmic-keys
+[   2.149] KEBAB DRV: keys class=KebabPmicKeys matched=1 valid=1 scope=raw PMIC sampling; no HID
+[   2.149] KEBAB DRV: rpmh class=KebabVrm id=10000013b state=0x1e inactive=0 provider=rpmh-vrm-policy
+[   2.149] KEBAB DRV: rpmh class=KebabVrm matched=1 valid=1 scope=RSC policy/readback; no IOPM
+[   2.149] KEBAB DRV: geni class=KebabGeniBus id=10000012e state=0x1e inactive=0 provider=kebab-geni13
+[   2.149] KEBAB DRV: geni class=KebabGeniBus matched=1 valid=1 scope=SE13/bitbang transport; boot C mappings
+[   2.211] KEBAB DRV: touch class=KebabTouch id=10000013d state=0x1e inactive=0 provider=synaptics,s3908
+[   2.211] KEBAB DRV: touch class=KebabTouch matched=1 valid=1 scope=typed TCM state; C polling lifetime; no HID
+[   2.211] KEBAB DRV: display class=AppleCLCD id=100000126 state=0x1e inactive=0 provider=KebabPlatformExpert
+[   2.211] KEBAB DRV: display class=AppleCLCD matched=1 valid=1 scope=CPU framebuffer; no GPU/vsync qualification
+[   2.211] KEBAB DRV: surface class=IOCoreSurfaceRoot id=100000131 state=0x1e inactive=0 provider=IOResources
+[   2.211] KEBAB DRV: surface class=IOCoreSurfaceRoot matched=1 valid=1 scope=compatibility selectors; private ABI incomplete
+[   2.273] KEBAB DRV: end; matched service does not certify user ABI or hardware capability
+[   2.273] KEBAB DRV: manifest v1; registry state is observed now; C entries have no service
+[   2.273] KEBAB DRV: platform class=KebabPlatformExpert id=10000011d state=0x1e inactive=0 provider=oneplus,kebab
+[   2.273] KEBAB DRV: platform class=KebabPlatformExpert matched=1 valid=1 scope=ADT platform/resources
+[   2.273] KEBAB DRV: image4 class=AppleImage4 query=unavailable scope=original defaults-nub service; startup qualification separate
+[   2.336] KEBAB DRV: aes class=IOAESAccelerator query=unavailable scope=original crypto-family identity; backend qualification separate
+[   2.336] KEBAB DRV: cpu class=KebabCPU id=10000012a state=0x1e inactive=0 provider=cpu0
+[   2.336] KEBAB DRV: cpu class=KebabCPU matched=1 valid=1 scope=single boot CPU; no SMP qualification
+[   2.336] KEBAB DRV: ufs class=KebabBlockStorageDevice id=10000013e state=0x1e inactive=0 provider=oneplus,kebab
+[   2.336] KEBAB DRV: ufs class=KebabBlockStorageDevice matched=1 valid=1 scope=boot C UFS + native storage bridge
+[   2.398] KEBAB DRV: usb backend=C service=none scope=resident DWC3 C core; no normal IOService
+[   2.398] KEBAB DRV: spmi class=KebabSPMIBus id=10000012d state=0x1e inactive=0 provider=kebab-spmi
+[   2.398] KEBAB DRV: spmi class=KebabSPMIBus matched=1 valid=1 scope=ADT arbiter + boot C backend
+[   2.398] KEBAB DRV: pon class=KebabPon id=100000139 state=0x1e inactive=0 provider=pmic-pon
+[   2.398] KEBAB DRV: pon class=KebabPon matched=1 valid=1 scope=scoped PON; panic uses C core directly
+[   2.398] KEBAB DRV: keys class=KebabPmicKeys id=10000013a state=0x1e inactive=0 provider=pmic-keys
+[   2.458] KEBAB DRV: keys class=KebabPmicKeys matched=1 valid=1 scope=raw PMIC sampling; no HID
+[   2.458] KEBAB DRV: rpmh class=KebabVrm id=10000013b state=0x1e inactive=0 provider=rpmh-vrm-policy
+[   2.458] KEBAB DRV: rpmh class=KebabVrm matched=1 valid=1 scope=RSC policy/readback; no IOPM
+[   2.458] KEBAB DRV: geni class=KebabGeniBus id=10000012e state=0x1e inactive=0 provider=kebab-geni13
+[   2.458] KEBAB DRV: geni class=KebabGeniBus matched=1 valid=1 scope=SE13/bitbang transport; boot C mappings
+[   2.458] KEBAB DRV: touch class=KebabTouch id=10000013d state=0x1e inactive=0 provider=synaptics,s3908
+[   2.521] KEBAB DRV: touch class=KebabTouch matched=1 valid=1 scope=typed TCM state; C polling lifetime; no HID
+[   2.521] KEBAB DRV: display class=AppleCLCD id=100000126 state=0x1e inactive=0 provider=KebabPlatformExpert
+[   2.521] KEBAB DRV: display class=AppleCLCD matched=1 valid=1 scope=CPU framebuffer; no GPU/vsync qualification
+[   2.521] KEBAB DRV: surface class=IOCoreSurfaceRoot id=100000131 state=0x1e inactive=0 provider=IOResources
+[   2.521] KEBAB DRV: surface class=IOCoreSurfaceRoot matched=1 valid=1 scope=compatibility selectors; private ABI incomplete
+[   2.583] KEBAB DRV: end; matched service does not certify user ABI or hardware capability
+[   2.583] 
+[   2.583] KEBAB FWLOG: ---- end ----
+[   2.583] KEBAB SPMI: === SPMI-3: PON registers through the observer ===
+[   2.583] KEBAB SPMI: PPID 0x008 APID 0x001 map[core+0x904]=0x00000800 own[cnfg+0x704]=0x00000001 -> write_ee 0x1 irq_owner 0 irq_ee 0xff
+[   2.583] KEBAB SPMI: PPID 0x008 APID 0x00d map[core+0x934]=0x01000800 own[cnfg+0x734]=0x00000000 -> write_ee 0x0 irq_owner 1 irq_ee 0x0 (owned by this EE)
+[   2.644] KEBAB SPMI: PPID 0x008 APID 0x075 map[core+0xad4]=0x00000800 own[cnfg+0x8d4]=0x00000004 -> write_ee 0x4 irq_owner 0 irq_ee 0xff
+[   2.644] KEBAB SPMI: using APID 0x00d for PPID 0x008, SID 0, ee 0
+[   2.644] KEBAB SPMI: REG 0x0805 read 1: APID 0x00d obsrvr+0x680 cmd 0x78000050 status 0x00000001 -> 0x04
+[   2.644] KEBAB SPMI: REG 0x0805 read 2: APID 0x00d obsrvr+0x680 cmd 0x78000050 status 0x00000001 -> 0x04
+[   2.644] KEBAB SPMI: PON subtype 0x0805 reads 0x04 / 0x04 -> STABLE
+[   2.644] KEBAB SPMI: REG 0x088f read 1: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x00
+[   2.707] KEBAB SPMI: REG 0x088f read 2: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x00
+[   2.707] KEBAB SPMI: SOFT_RB_SPARE 0x088f reads 0x00 / 0x00 -> STABLE
+[   2.707] KEBAB SPMI: PON generation: Gen2 (subtype 0x04); the Gen2 SOFT_RB_SPARE layout would apply
+[   2.707] KEBAB SPMI: SPMI-3 PASS
+[   2.707] KEBAB DRV: manifest v1; registry state is observed now; C entries have no service
+[   2.707] KEBAB DRV: platform class=KebabPlatformExpert id=10000011d state=0x1e inactive=0 provider=oneplus,kebab
+[   2.707] KEBAB DRV: platform class=KebabPlatformExpert matched=1 valid=1 scope=ADT platform/resources
+[   2.769] KEBAB DRV: image4 class=AppleImage4 query=unavailable scope=original defaults-nub service; startup qualification separate
+[   2.769] KEBAB DRV: aes class=IOAESAccelerator query=unavailable scope=original crypto-family identity; backend qualification separate
+[   2.769] KEBAB DRV: cpu class=KebabCPU id=10000012a state=0x1e inactive=0 provider=cpu0
+[   2.769] KEBAB DRV: cpu class=KebabCPU matched=1 valid=1 scope=single boot CPU; no SMP qualification
+[   2.769] KEBAB DRV: ufs class=KebabBlockStorageDevice id=10000013e state=0x1e inactive=0 provider=oneplus,kebab
+[   2.831] KEBAB DRV: ufs class=KebabBlockStorageDevice matched=1 valid=1 scope=boot C UFS + native storage bridge
+[   2.831] KEBAB DRV: usb backend=C service=none scope=resident DWC3 C core; no normal IOService
+[   2.831] KEBAB DRV: spmi class=KebabSPMIBus id=10000012d state=0x1e inactive=0 provider=kebab-spmi
+[   2.831] KEBAB DRV: spmi class=KebabSPMIBus matched=1 valid=1 scope=ADT arbiter + boot C backend
+[   2.831] KEBAB DRV: pon class=KebabPon id=100000139 state=0x1e inactive=0 provider=pmic-pon
+[   2.831] KEBAB DRV: pon class=KebabPon matched=1 valid=1 scope=scoped PON; panic uses C core directly
+[   2.894] KEBAB DRV: keys class=KebabPmicKeys id=10000013a state=0x1e inactive=0 provider=pmic-keys
+[   2.894] KEBAB DRV: keys class=KebabPmicKeys matched=1 valid=1 scope=raw PMIC sampling; no HID
+[   2.894] KEBAB DRV: rpmh class=KebabVrm id=10000013b state=0x1e inactive=0 provider=rpmh-vrm-policy
+[   2.894] KEBAB DRV: rpmh class=KebabVrm matched=1 valid=1 scope=RSC policy/readback; no IOPM
+[   2.894] KEBAB DRV: geni class=KebabGeniBus id=10000012e state=0x1e inactive=0 provider=kebab-geni13
+[   2.894] KEBAB DRV: geni class=KebabGeniBus matched=1 valid=1 scope=SE13/bitbang transport; boot C mappings
+[   2.957] KEBAB DRV: touch class=KebabTouch id=10000013d state=0x1e inactive=0 provider=synaptics,s3908
+[   2.957] KEBAB DRV: touch class=KebabTouch matched=1 valid=1 scope=typed TCM state; C polling lifetime; no HID
+[   2.957] KEBAB DRV: display class=AppleCLCD id=100000126 state=0x1e inactive=0 provider=KebabPlatformExpert
+[   2.957] KEBAB DRV: display class=AppleCLCD matched=1 valid=1 scope=CPU framebuffer; no GPU/vsync qualification
+[   2.957] KEBAB DRV: surface class=IOCoreSurfaceRoot id=100000131 state=0x1e inactive=0 provider=IOResources
+[   3.019] KEBAB DRV: surface class=IOCoreSurfaceRoot matched=1 valid=1 scope=compatibility selectors; private ABI incomplete
+[   3.019] KEBAB DRV: end; matched service does not certify user ABI or hardware capability
+[   3.019] KEBAB SPMI: === SPMI-1: arbiter version ===
+[   3.019] KEBAB SPMI: core 0x0c440000+0x1100 mapped; core+0x0000 = 0x50010000
+[   3.020] KEBAB SPMI: version family v5
+[   3.020] KEBAB SPMI: SPMI-1 PASS
+[   3.020] KEBAB SPMI: === SPMI-2: PPID 0x008 -> APID ===
+[   3.020] KEBAB SPMI: scan APID 0x000..0x1ff: core+0x900 + 4*apid, 512 entries bounded by core size 0x1100
+[   3.020] KEBAB SPMI: negative control PPID 0xf00 -> 0 APID(s) (expected 0)
+[   3.082] KEBAB SPMI: scanned 512 entries: 352 non-zero mapping(s), 3 map PPID 0x008
+[   3.082] KEBAB SPMI: PPID 0x008 APID 0x001 map[core+0x904]=0x00000800 own[cnfg+0x704]=0x00000001 -> write_ee 0x1 irq_owner 0 irq_ee 0xff
+[   3.082] KEBAB SPMI: PPID 0x008 APID 0x00d map[core+0x934]=0x01000800 own[cnfg+0x734]=0x00000000 -> write_ee 0x0 irq_owner 1 irq_ee 0x0 (owned by this EE)
+[   3.082] KEBAB SPMI: PPID 0x008 APID 0x075 map[core+0xad4]=0x00000800 own[cnfg+0x8d4]=0x00000004 -> write_ee 0x4 irq_owner 0 irq_ee 0xff
+[   3.082] KEBAB SPMI: SPMI-2 PASS: 3 APID(s) map PPID 0x008
+[   3.145] KEBAB SPMI: === SPMI-3: PON registers through the observer ===
+[   3.145] KEBAB SPMI: PPID 0x008 APID 0x001 map[core+0x904]=0x00000800 own[cnfg+0x704]=0x00000001 -> write_ee 0x1 irq_owner 0 irq_ee 0xff
+[   3.145] KEBAB SPMI: PPID 0x008 APID 0x00d map[core+0x934]=0x01000800 own[cnfg+0x734]=0x00000000 -> write_ee 0x0 irq_owner 1 irq_ee 0x0 (owned by this EE)
+[   3.145] KEBAB SPMI: PPID 0x008 APID 0x075 map[core+0xad4]=0x00000800 own[cnfg+0x8d4]=0x00000004 -> write_ee 0x4 irq_owner 0 irq_ee 0xff
+[   3.145] KEBAB SPMI: using APID 0x00d for PPID 0x008, SID 0, ee 0
+[   3.209] KEBAB SPMI: REG 0x0805 read 1: APID 0x00d obsrvr+0x680 cmd 0x78000050 status 0x00000001 -> 0x04
+[   3.209] KEBAB SPMI: REG 0x0805 read 2: APID 0x00d obsrvr+0x680 cmd 0x78000050 status 0x00000001 -> 0x04
+[   3.209] KEBAB SPMI: PON subtype 0x0805 reads 0x04 / 0x04 -> STABLE
+[   3.209] KEBAB SPMI: REG 0x088f read 1: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x00
+[   3.209] KEBAB SPMI: REG 0x088f read 2: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x00
+[   3.209] KEBAB SPMI: SOFT_RB_SPARE 0x088f reads 0x00 / 0x00 -> STABLE
+[   3.209] KEBAB SPMI: PON generation: Gen2 (subtype 0x04); the Gen2 SOFT_RB_SPARE layout would apply
+[   3.271] KEBAB SPMI: SPMI-3 PASS
+[   3.271] KEBAB TCS: === read-only TCS dump, APPS RSC drv-2 ===
+[   3.271] KEBAB TCS: drv-2 0x18220000, tcs_base = drv + 0xd00 = 0xfffffe7845688d00, stride 672
+[   3.271] KEBAB TCS: rsc irq: enable[tcs_base+0x0] 0x00000001 status[+0x4] 0x00000000 clear[+0x8] 0x00000000
+[   3.271] KEBAB TCS: tcs 0 at 0xfffffe7845688d00: CONTROL[+0x14] 0x01010000 (AMC_ENABLE 1, AMC_TRIGGER 1) CMD_ENABLE[+0x1c] 0x00000003 CMD_WAIT[+0x10] 0x00000000 CMD_STATUS[+0x3c] 0x00010101 (ISSUED 1, COMPL 1)
+[   3.334] KEBAB TCS: tcs 1 at 0xfffffe7845688fa0: CONTROL[+0x14] 0x00010000 (AMC_ENABLE 1, AMC_TRIGGER 0) CMD_ENABLE[+0x1c] 0x00000000 CMD_WAIT[+0x10] 0x00000000 CMD_STATUS[+0x3c] 0x00000000 (ISSUED 0, COMPL 0)
+[   3.334] KEBAB TCS: VERDICT: TCS1 is idle and clean; a kernel-side send is plausible
+[   3.334] KEBAB TCS: done; no register was written, cleared or recovered
+[   3.334] KEBAB SPMI: === PWR: touch rails, observer reads only ===
+[   3.334] KEBAB SPMI: PWR: pm8150_l13: SID 1 base 0x4c00 PPID 0x14c
+[   3.334] KEBAB SPMI: PWR: pm8150_l13: APID 0x0c9 write_ee 0x4 irq_owner 1
+[   3.334] KEBAB SPMI: PWR: pm8150_l13: type 0x04 subtype 0x7b
+[   3.395] KEBAB SPMI: PWR: pm8150_l13: enable 0x00 (bit7 0), range 0xc0, set 0x0b
+[   3.395] KEBAB SPMI: PWR: pm8150a_l1: SID 5 base 0x4000 PPID 0x540
+[   3.395] KEBAB SPMI: PWR: pm8150a_l1: APID 0x11b write_ee 0x4 irq_owner 1
+[   3.395] KEBAB SPMI: PWR: pm8150a_l1: type 0x04 subtype 0x71
+[   3.395] KEBAB SPMI: PWR: pm8150a_l1: enable 0x00 (bit7 0), range 0x08, set 0x07
+[   3.395] KEBAB SPMI: PWR: mappings per SID: 0:66 1:51 2:67 3:5 4:43 5:53 6:5 7:0
+[   3.395] KEBAB SPMI: PWR: mapping present for SID 1 base 0x4000 (PPID 0x140)
+[   3.395] KEBAB SPMI: PWR: mapping present for SID 1 base 0x4c00 (PPID 0x14c)
+[   3.458] KEBAB SPMI: PWR: mapping present for SID 2 base 0x4000 (PPID 0x240)
+[   3.458] KEBAB SPMI: PWR: mapping present for SID 5 base 0x4000 (PPID 0x540)
+[   3.458] KEBAB SPMI: PWR: done; no peripheral write was issued
+[   3.458] KEBAB TOUCH: read-only probe begin; no register is written
+[   3.458] KEBAB TOUCH: state: initialized 0, dead 0, rails 0, unavailable 0, last mode never read
+[   3.458] KEBAB TOUCH: GCC 0x52008 = 0x063c83c0: wrap1_s5 0 m_ahb 1 s_ahb 1
+[   3.458] KEBAB TOUCH: GCC halt m_ahb 0x00000000 s_ahb 0x80000002 wrap1_s5 0x80004220
+[   3.458] KEBAB TOUCH: probe wrapper QUP_HW_VER 0x20050000
+[   3.520] KEBAB TOUCH: probe GENI_FW_REVISION_RO 0x00000303 protocol 3
+[   3.521] KEBAB TOUCH: probe GENI_STATUS 0x00000000 M_IRQ_STATUS 0x00000000 S_IRQ_STATUS 0x00000000
+[   3.521] KEBAB TOUCH: probe DMA_MODE_EN 0x00000000 CGC_CTRL 0x0000007f
+[   3.521] KEBAB TOUCH: probe TX_WATERMARK 0x00000000 M_IRQ_EN 0x33c0007e
+[   3.521] KEBAB TOUCH: probe SER_M_CLK_CFG 0x00000011 SCL_COUNTERS 0x00000000
+[   3.521] KEBAB TOUCH: probe TX_FIFO_STATUS 0x00000000 RX_FIFO_STATUS 0x00000000
+[   3.521] KEBAB TOUCH: probe pin 36 ctl 0x00000001 io 0x00000000
+[   3.521] KEBAB TOUCH: probe pin 37 ctl 0x00000001 io 0x00000000
+[   3.583] KEBAB TOUCH: probe pin 38 ctl 0x00000001 io 0x00000000
+[   3.583] KEBAB TOUCH: probe pin 39 ctl 0x00000001 io 0x00000000
+[   3.583] KEBAB TOUCH: read-only probe end
+[   3.583] INST CHECK /sbin/launchd 541600 12370e5ee35bf28ae479b6c4b4455f4f4693ab803e37c5eb3032537c18cac61c
+[   3.583] INST CHECK /usr/lib/dyld 922912 5806834564fe6462ae981d0915d612b1eb2f6f168822b5d278bee56254933757
+[   3.583] KEBAB SPMI TEST: normal bus mutex held for intentional panic
+[   3.583] panic(cpu 0 caller 0xfffffe0006ad92a0): kebab usb console test (normal SPMI lock held) @kebab_spmi_pon.c:345
+[   3.583] Debugger message: panic
+[   3.645] Memory ID: 0x0
+[   3.645] OS release type: Not set yet
+[   3.645] OS version: Not set yet
+[   3.645] Kernel version: Darwin Kernel Version 22.6.0: Sat Sep  5 21:59:54 UTC 2026; albertlee:6639065
+[   3.645] KernelCache UUID: 9A7AD86CE18FDA1B438E8DF50BE123FC
+[   3.645] Kernel UUID: 8CFA1CF2-2BBE-3B73-8224-640CB8D19170
+[   3.645] Boot session UUID: BAAA7074-021C-4CA6-93F6-537EF8F2E536
+[   3.645] iBoot version: kebab-uefi-1.0
+[   3.645] secure boot?: YES
+[   3.645] roots installed: 0
+[   3.645] Paniclog version: 14
+[   3.645] Kernel text base:  0xfffffe0006004000
+[   3.645] mach_absolute_time: 0xb0debbd9
+[   3.645] Epoch Time:        sec       usec
+[   3.708]   Boot    : 0x00000034 0x0008a2bf
+[   3.708]   Sleep   : 0x00000000 0x00000000
+[   3.708]   Wake    : 0x00000000 0x00000000
+[   3.708]   Calendar: 0x0000009a 0x000869f2
+[   3.708] 
+[   3.708] Zone info:
+[   3.708]   Zone map: 0xfffffe1108910000 - 0xfffffe3108910000
+[   3.708]   . PGZ   : 0xfffffe1108910000 - 0xfffffe1108a74000
+[   3.708]   . VM    : 0xfffffe1108a74000 - 0xfffffe15d5708000
+[   3.708]   . RO    : 0xfffffe15d5708000 - 0xfffffe176f090000
+[   3.708]   . GEN0  : 0xfffffe176f090000 - 0xfffffe1c3bd28000
+[   3.708]   . GEN1  : 0xfffffe1c3bd28000 - 0xfffffe21089c0000
+[   3.708]   . GEN2  : 0xfffffe21089c0000 - 0xfffffe25d5658000
+[   3.770]   . GEN3  : 0xfffffe25d5658000 - 0xfffffe2aa22f0000
+[   3.770]   . DATA  : 0xfffffe2aa22f0000 - 0xfffffe3108910000
+[   3.770]   Metadata: 0xfffffe110084c000 - 0xfffffe110884c000
+[   3.770]   Bitmaps : 0xfffffe110884c000 - 0xfffffe1108900000
+[   3.770]   Extra   : 0 - 0
+[   3.770] 
+[   3.770] TPIDRx_ELy = {1: 0xfffffe1c3be3d820  0: 0x0000000000000000  0ro: 0x0000000000000000 }
+[   3.770] CORE 0 is the one that panicked. Check the full backtrace for details.
+[   3.770] Compressor Info: 0% of compressed pages limit (OK) and 0% of segments limit (OK) with 0 swapfiles and OK swap space
+[   3.833] Panicked task 0xfffffe1c3be02bd0: 0 pages, 54 threads: pid 0: kernel_task
+[   3.833] Panicked thread: 0xfffffe1c3be3d820, backtrace: 0xfffffe8ffa59f840, tid: 110
+[   3.833] 		  lr: 0xfffffe00063153a0  fp: 0xfffffe8ffa59f8c0
+[   3.833] 		  lr: 0xfffffe00064896cc  fp: 0xfffffe8ffa59f8e0
+[   3.833] 		  lr: 0xfffffe0006479df0  fp: 0xfffffe8ffa59f930
+[   3.833] 		  lr: 0xfffffe0006478de0  fp: 0xfffffe8ffa59fa00
+[   3.833] 		  lr: 0xfffffe00064785a4  fp: 0xfffffe8ffa59fa10
+[   3.833] 		  lr: 0xfffffe000631497c  fp: 0xfffffe8ffa59fdc0
+[   3.833] 		  lr: 0xfffffe0006315a8c  fp: 0xfffffe8ffa59fe40
+[   3.896] 		  lr: 0xfffffe0006aa4dc0  fp: 0xfffffe8ffa59fe60
+[   3.896] 		  lr: 0xfffffe0006ad92a0  fp: 0xfffffe8ffa59fe80
+[   3.896] 		  lr: 0xfffffe00064e72a0  fp: 0xfffffe8ffa59fea0
+[   3.896] 		  lr: 0xfffffe00064db080  fp: 0xfffffe8ffa59ff20
+[   3.896] 		  lr: 0xfffffe000647e548  fp: 0x0000000000000000
+[   3.896] 
+[   3.896] 
+[   3.896] ** Stackshot Succeeded ** Bytes Traced 6502 (Uncompressed 18448) **
+[   3.896] KEBAB PANIC: USB command loop ready (FASTBOOT/REBOOT/FWLOG?)
+[   3.896] 
+[   3.896] KEBAB FWLOG: ---- end ----
+[2026-10-29T08:35:29] done, 33268 bytes

@@ -1,0 +1,161 @@
+0xfffffe0008052459 )Apple Secure Boot Certification Authority
+0xfffffe0008056439 preboot splat manifest hash
+0xfffffe00080564da kImg4DecodeLocalPolicyEc384Sha384
+0xfffffe0008056575 kImg4DecodeSecureBootRsa4kSha384DDIGlobal
+0xfffffe00080565c3 blessed_local_policy_generation
+0xfffffe0008056633 illegal chip definition: name = %s, field = secure boot, value = 0x%llx
+0xfffffe0008056703 attempted to query local policy without CSM data
+0xfffffe0008056792 40A0DDD2-77F8-4392-B4A3-1E7304206516:ignition-failure-boot
+0xfffffe00080568be 40A0DDD2-77F8-4392-B4A3-1E7304206516:recovery-boot-mode
+0xfffffe0008056989 security domain
+0xfffffe0008056c7f failed to copy nonce: %d
+0xfffffe0008057618 using caller provided nonce
+0xfffffe000805765a invalid nonce domain: 0x%x
+0xfffffe0008057675 failed to copy nonce: %s: %d
+0xfffffe00080576d5 chip does not use vnum anti-replay policy
+0xfffffe0008057750 cannot initialize nonce from buffer: len = %lu, max = %lu
+0xfffffe0008057894 manifest is consistent with original boot chain
+0xfffffe0008057d0b setting nonce
+0xfffffe0008057dd2 caller specified no nonce; failing
+0xfffffe0008057e44 manifest has no nonce; allowing mix-n-match
+0xfffffe0008057ea3 nonce shadows AP; using AP mix-n-match policy
+0xfffffe0008057fda overriding mix-n-match policy: old = %s, new = %s
+0xfffffe00080580ba enforcing manifest chain policy: %s
+0xfffffe00080580de enforcing mix-n-match policy: %s
+0xfffffe000805816d copying nonce
+0xfffffe0008058262 failed to get mix-n-match policy: %d
+0xfffffe00080582ca failed to read boot nonce hash: secure boot level = %#llx: %d
+0xfffffe00080583f9 secure boot level
+0xfffffe000805840b boot nonce hash
+0xfffffe000805844c certificate-security-mode
+0xfffffe0008058485 effective-security-mode-ap
+0xfffffe0008058544 security-domain
+0xfffffe000805856e boot-manifest-hash
+0xfffffe0008058581 apfs-preboot-uuid
+0xfffffe00080585f8 nonce set
+0xfffffe0008058602 nonce value too large: actual = %u, expected <= %lu
+0xfffffe0008058636 nonce already set: %llu
+0xfffffe0008058669 nonce roll
+0xfffffe0008058674 nonce copy
+0xfffffe000805867f invalid nonce domain index: %llu
+0xfffffe00080586a0 attempted to query nonce value without CSM data
+0xfffffe0008058733 boot splat manifest hash
+0xfffffe000805874c ap-hosted cryptex1 boot coprocessor
+0xfffffe0008058770 ap-hosted cryptex1 boot proposal
+0xfffffe0008058791 ap-hosted cryptex1 pre-reboot coprocessor
+0xfffffe0008058bd6 kImg4DecodeSecureBootRsa4kSha384DDIFakeGlobal
+0xfffffe0008058c41 chip is not booted
+0xfffffe0008058d8b nonce manager: committing nonce seeds: count = %lu
+0xfffffe0008058dbe nonce manager: marking nonce as rolled: %s
+0xfffffe0008058de9 40A0DDD2-77F8-4392-B4A3-1E7304206516:nonce-seeds
+0xfffffe0008058e1a nonce manager: wrote nonce blob: length = %lu bytes
+0xfffffe0008058e4e nonce manager: nonce persistence disallowed by environment
+0xfffffe0008058e89 nonce manager: no space left in nvram; personalizations will be invalidated at next boot
+0xfffffe0008058ee2 nonce manager: unknown device error; personalizations will be invalidated at next boot
+0xfffffe0008058f39 failed to write nonce blob: %d
+0xfffffe0008058f58 nonce manager: locking nonce hashes
+0xfffffe0008058f7c using shadowed ap nonce for domain: %s
+0xfffffe0008058fa3 nonce is inaccessible: %s: %d
+0xfffffe0008058fc1 rolling nonce
+0xfffffe0008058fcf [roll] boot mode disallows nvram commits
+0xfffffe0008058ff8 [roll] failed to commit nonce blob: %d
+0xfffffe000805901f pre-rolling nonce
+0xfffffe0008059031 [preroll] boot mode disallows nvram commits
+0xfffffe000805905d [preroll] failed to commit nonce blob: %d
+0xfffffe0008059087 peeking nonce
+0xfffffe0008059095 nonce has no proposed value: %s
+0xfffffe00080590b5 nonce manager: error reading seeds: %d
+0xfffffe00080590dc failed to read nonce blob: %d
+0xfffffe00080590fa no active nonce domains in seed blob
+0xfffffe000805911f nonce manager: mix-n-match permitted; demoting epoch
+0xfffffe0008059154 nonce manager: initial generation of domain: name = %s, flags = %#llx
+0xfffffe000805919a nonce manager: unversioned blob; normalizing to version 0
+0xfffffe00080591d4 nonce manager: unsupported nonce blob: version = %#x, length = %lu, v0 length = %lu
+0xfffffe0008059228 nonce manager: nonce blob has unexpected length: version = %#x, actual = %lu, minimum = %lu
+0xfffffe0008059284 nonce manager: nonce blob has unexpected length: version = %#x, actual = %lu, maximum = %lu
+0xfffffe00080592e0 nonce manager: nonce blob has unexpected length: version = %#x, actual = %lu, expected = %lu: %d
+0xfffffe0008059341 nonce manager: seed blob version: %#x
+0xfffffe0008059367 nonce manager: seed count greater than maximum: version = %#x, count = %lu, max = %lu
+0xfffffe00080593bd nonce manager: seed count lower than minimum: version = %#x, count = %lu, min = %lu
+0xfffffe0008059411 nonce manager: remote boot; preserving all nonces
+0xfffffe0008059443 nonce manager: seed blob boot manifest hash: %s
+0xfffffe0008059473 nonce manager: new blob version; assuming update
+0xfffffe00080594a4 nonce manager: boot manifest hash length changed; assuming update
+0xfffffe00080594e6 nonce manager: boot manifest hash changed; assuming update
+0xfffffe0008059521 nonce manager: obliteration in progress
+0xfffffe0008059549 nonce manager: host is in ephemeral data mode
+0xfffffe0008059577 nonce manager: nonce epoch shift: %#llx
+0xfffffe000805959f nonce domain: %s: nonce has seed proposal
+0xfffffe00080595c9 nonce manager: requiring boot manifest change to accept proposal
+0xfffffe000805960a nonce domain: %s: nonce rolled; forcing regeneration
+0xfffffe000805963f nonce domain: %s: seed is zero; forcing regeneration
+0xfffffe0008059674 bogus nonce epoch defined/computed: %s
+0xfffffe000805969b nonce domain: %s: epoch shift: actual shift = %#llx, actual limit = %#llx, effective shift = %#llx, effective limit = %#llx, proposal = %#x, regenerate = %#x
+0xfffffe000805976d nonce domain: %s: setting ap shadow domain
+0xfffffe00080597d1 failed to compute nonce digest: nonce = %s, error = [%d] %s
+0xfffffe000805980d nonce domain: %s: nonce digest: %s
+0xfffffe0008059854 nonce domain: %s: %s: length = %lu
+0xfffffe0008059898 com.apple.private.img4.nonce.test
+0xfffffe00080598c6 com.apple.private.img4.nonce.trust-cache
+0xfffffe0008059907 com.apple.private.img4.nonce.pdi
+0xfffffe0008059930 com.apple.private.img4.nonce.cryptex
+0xfffffe0008059955 developer disk image
+0xfffffe000805996a com.apple.private.img4.nonce.ddi
+0xfffffe000805999d com.apple.private.img4.nonce.ephemeral-cryptex
+0xfffffe00080599eb com.apple.private.img4.nonce.cryptex1.snuf-stub
+0xfffffe0008059a1b cryptex1 coprocessor boot
+0xfffffe0008059a35 com.apple.private.img4.nonce.cryptex1.boot
+0xfffffe0008059a7b com.apple.private.img4.nonce.cryptex1.asset
+0xfffffe0008059ad1 com.apple.private.img4.nonce.cryptex1.supplemental
+0xfffffe0008059b23 com.apple.private.img4.nonce.cryptex1.simulator
+0xfffffe0008059b53 invalid nonce domain: %llu
+0xfffffe0008059b75 reduced-security arm ap
+0xfffffe0008059bae universal device identifier
+0xfffffe0008059be4 failed MAC policy init: %#x
+0xfffffe0008059c51 kImg4DecodeSecureBootRsa4kSha384DDIFake
+0xfffffe0008059c7e blessed local policy generation
+0xfffffe0008059d2b [init] failed to commit nonce blob: %d
+0xfffffe0008059eba copy nonce
+0xfffffe0008059ec5 roll nonce
+0xfffffe0008059ed0 preroll nonce
+0xfffffe0008059ede peek nonce
+0xfffffe0008059fa0 prerolling nonce
+0xfffffe0008059fb1 kImg4DecodeSecureBootRsa4kSha384DDI
+0xfffffe0008059fda extended security domain
+0xfffffe000805a011 boot type
+0xfffffe000805a028 boot media
+0xfffffe000805a033 remote boot
+0xfffffe000805a042 ramdisk boot
+0xfffffe000805a063 nonce epoch
+0xfffffe000805a13f local policy
+0xfffffe000805a14c com.apple.private.img4.set-local-policy
+0xfffffe000805a238 medium-security hybrid arm/x86 ap
+0xfffffe000805a5f1 use-ddi-secure-boot
+0xfffffe000805a605 failed to get device tree node: %s: %d
+0xfffffe000805a737 boot-type
+0xfffffe000805a748 failed to retrieve boot type: %d
+0xfffffe000805a769 boot-command
+0xfffffe000805a776 boot command overflow: actual = %#x, expected <= %#x
+0xfffffe000805a7d7 osenvironment
+0xfffffe000805a818 img4_nonce_epoch
+0xfffffe000805a901 reduced-security cryptex1 boot coprocessor
+0xfffffe000805a92c reduced-security cryptex1 boot proposal
+0xfffffe000805a954 reduced-security cryptex1 pre-reboot coprocessor
+0xfffffe000805a9ab x86-hosted cryptex1 boot coprocessor
+0xfffffe000805a9d0 x86-hosted static cryptex1 boot coprocessor
+0xfffffe000805a9fc relaxed x86-hosted cryptex1 boot coprocessor
+0xfffffe000805aa29 x86-hosted cryptex1 pre-reboot coprocessor
+0xfffffe000805aa54 x86-hosted static cryptex1 pre-reboot coprocessor
+0xfffffe000805aa86 relaxed x86-hosted cryptex1 pre-reboot coprocessor
+0xfffffe000805ae94 blessed local policy ap
+0xfffffe000805af5c com.apple.private.security.AppleImage4.user-client
+0xfffffe000805afde non-sensical nonce length: %u
+0xfffffe000805affc failed to roll nonce: %d
+0xfffffe000805b279 certificate security mode
+0xfffffe000805b298 x86 certificate security mode
+0xfffffe000805b2d8 effective security mode
+0xfffffe000805b2f0 vma2-hosted cryptex1 boot coprocessor
+0xfffffe000805b316 vma2 clone-hosted cryptex1 boot coprocessor
+0xfffffe000805b342 vma2-hosted cryptex1 boot proposal
+0xfffffe000805b365 vma2 clone-hosted cryptex1 boot proposal
+0xfffffe000805b38e vma2-hosted cryptex1 pre-reboot coprocessor

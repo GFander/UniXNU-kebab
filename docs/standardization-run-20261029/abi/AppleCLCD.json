@@ -1,0 +1,177 @@
+{
+  "target": "iPhone10,3 20H392 / XNU8796.141.3 ARM64 16KiB",
+  "original_kernelcache_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "evidence_version": "0225",
+  "native_sha256": "e7cb391447d5a6aaf2feb45a3e5d48191996ca775f179a40adecc38f09b1655b",
+  "io_class": "AppleCLCD",
+  "source_path": "iokit/Kernel/arm/KebabFramebuffer.cpp",
+  "source_sha256": "bc6c2c8b70d023eda3f49a515128761728bb238391a059b007472bad151109a0",
+  "implementation": "native IOKit compatibility service/client",
+  "original_private_layout_recovered": false,
+  "donor_userland_abi_qualified": false,
+  "class_size_crosses_foreign_binary_boundary": false,
+  "native_methods": [
+    {
+      "name": "kKebabFBGetLayerDefaultSurface",
+      "selector": 3,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 1
+    },
+    {
+      "name": "kKebabFBSwapBegin",
+      "selector": 4,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 1
+    },
+    {
+      "name": "kKebabFBSwapEnd",
+      "selector": 5,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabFBSwapWait",
+      "selector": 6,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabFBGetID",
+      "selector": 7,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 1
+    },
+    {
+      "name": "kKebabFBGetDisplaySize",
+      "selector": 8,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 2
+    },
+    {
+      "name": "kKebabFBRequestPowerChange",
+      "selector": 12,
+      "native_scalar_input_min": 1,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabFBSetDebugFlags",
+      "selector": 15,
+      "native_scalar_input_min": 1,
+      "native_scalar_output_min": 1
+    },
+    {
+      "name": "kKebabFBSetGammaTable",
+      "selector": 17,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabFBIsMainDisplay",
+      "selector": 18,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 1
+    },
+    {
+      "name": "kKebabFBSetDisplayDevice",
+      "selector": 22,
+      "native_scalar_input_min": 1,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabFBGetGammaTable",
+      "selector": 27,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabFBGetDotPitch",
+      "selector": 28,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 1
+    },
+    {
+      "name": "kKebabFBGetDisplayArea",
+      "selector": 29,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabFBVideoPowerSavings",
+      "selector": 33,
+      "native_scalar_input_min": 1,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabFBSetBrightnessCorrection",
+      "selector": 50,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabFBSetMatrix",
+      "selector": 55,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabFBGetColorRemapMode",
+      "selector": 57,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 1
+    },
+    {
+      "name": "kKebabFBSetParameter",
+      "selector": 68,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabFBNotifications",
+      "selector": 72,
+      "native_scalar_input_min": 3,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabFBSupportedFrameInfo",
+      "selector": 74,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabFBGetBlock",
+      "selector": 79,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabFBCopyDisplayedSurface",
+      "selector": 83,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 1
+    },
+    {
+      "name": "kKebabFBSetContrast",
+      "selector": 84,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    }
+  ],
+  "unresolved": [
+    {
+      "selector": 74,
+      "name": "SupportedFrameInfo",
+      "status": "project compatibility layout; donor layout not recovered"
+    }
+  ],
+  "verification": [
+    "0191 lifecycle/parameter contracts",
+    "0203 native factory/query/close PASS",
+    "0204 actual AppleCLCD registry match"
+  ],
+  "limits": [
+    "Native compatibility implementation; no original graphics kext object/vtable is imported.",
+    "Native factory/query/bad-output/close tests are qualified; user-process IOServiceOpen and donor frameworks are not.",
+    "Scalar counts describe this implementation minima; partial structure conventions are preserved, not proven donor layouts.",
+    "No backboardd, hardware vsync, DPU scanout, 120Hz or GPU qualification."
+  ]
+}

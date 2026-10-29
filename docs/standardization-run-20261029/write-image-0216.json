@@ -1,0 +1,16 @@
+{
+  "version": "0216",
+  "boot": "D:\\LOS\\HiOS\\p1-run\\prelink-fix\\boot-0216-preboot-write.img",
+  "boot_sha256": "e9aba9a516e5cd5717c81e09a6ab6860240a0094fb6376728f116e4da6a800e8",
+  "system_readonly": true,
+  "ufs_writable": true,
+  "probe_mode": 2,
+  "fixed_file": "/private/preboot/.hios-apfs-proof-v1",
+  "exclusive_create": true,
+  "firmware_unchanged": true,
+  "other_fat_files_unchanged": true,
+  "adt_inputs_unchanged": true,
+  "owner_measurements_valid": true,
+  "userdata_redeployment": false,
+  "device_write_not_yet_executed": true
+}

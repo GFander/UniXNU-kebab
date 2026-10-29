@@ -1,0 +1,206 @@
+[2026-10-29T07:37:11] console present: 'COM7'
+[2026-10-29T07:37:11] capturing on COM7 for 100s
+[  33.012] KEBAB TOUCH: console window over, starting MMIO
+[  33.012] KEBAB TOUCH: queue selftest: 64 slots, 192 pushed, 128 dropped without a reader, 64 drained: ok
+[  33.012] KEBAB TOUCH: mapping SE13 0x00a94000+0x4000, wrapper 0x00ac0000+0x2000
+[  33.012] KEBAB TOUCH: mapping TLMM SOUTH at 0x0f500000+0x40000
+[  33.012] KEBAB TOUCH: MMIO done: se 0xfffffe48dce3c000 wrap 0xfffffe48dce40000 tlmm 0xfffffe48dce44000
+[  33.012] KEBAB TOUCH: MMIO mapped, hardware untouched; TOUCH? is read-only, TOUCHINIT starts the driver
+[  33.012] KEBAB SPMI: key source PPID 0x008 -> observer APID 0x00d (owned by this EE)
+[  33.012] KEBAB SPMI: key source PPID 0x0c5 -> observer APID 0x019 (owned by this EE)
+[  33.022] KEBAB SPMI: key source PPID 0x0c6 -> observer APID 0x01a (owned by this EE)
+[  33.022] KEBAB KEYS: GPIO6 mode=0x00 pull=0x00 en=0x80 -> enabled input with pull-up; GPIO7 mode=0x00 pull=0x00 en=0x80 -> enabled input with pull-up
+[  33.022] KEBAB KEYS: sources: PON RT_STS 0x0810, PM8150 GPIO6 RT_STS 0x0c510, GPIO7 RT_STS 0x0c610, GPIO type 0x0c504 (expected 0x10)
+[  33.022] KEBAB KEYS: first sample pon=0x04 gpio6=0x01 gpio7=0x01 ident=0x10 -> power released, volume-up released, volume-down released
+[  33.022] KEBAB KEYS: queue selftest: 64 slots, 192 pushed, 128 dropped without a reader, 64 drained: ok
+[  33.022] KEBAB KEYS: node publication deferred until devfs is ready
+[  33.022] KEBAB KEYS: polling every 16 ms
+[  33.022] Copyright (c) 1982, 1986, 1989, 1991, 1993
+[  33.022] 	The Regents of the University of California. All rights reserved.
+[  33.022] 
+[  33.022] bsd_init: calling kauth_init
+[  33.022] bsd_init: calling process_name
+[  33.022] bsd_init: calling get_bsdthread_info
+[  33.022] MAC Framework successfully initialized
+[  33.022] bsd_init: calling kauth_cred_create
+[  33.022] bsd_init: calling chgproccnt
+[  33.022] bsd_init: calling kmem_suballoc
+[  33.022] bsd_init: calling bsd_bufferinit
+[  33.022] using 256 buffer headers and 256 cluster IO buffer headers
+[  33.022] bsd_init: calling IOKitInitializeTime
+[  33.022] AMFI: PMGRAON latched to: ffffffff
+[  33.022] AMFI: Enabling developer mode since protected data is not available
+[  33.022] AMFI: finished: 1 1
+[  63.064] bsd_init: calling vfsinit
+[  63.064] ktriage_register_subsystem_strings: set subsystem 8 strings
+[  63.064] KEBAB HFS: hfs-627.100.6 registered
+[  63.064] bsd_init: calling proc_uuid_policy_init()
+[  63.064] mcache: 1 CPU(s), 64 bytes CPU cache line size
+[  63.064] bsd_init: calling mbinit
+[  63.064] mbinit: done [64 MB total pool size, (42/21) split]
+[  63.064] bsd_init: calling audit_init
+[  63.064] bsd_init: calling knote_init
+[  63.064] bsd_init: calling eventhandler_init
+[  63.064] bsd_init: calling aio_init
+[  63.064] bsd_init: calling pshm_cache_init
+[  63.064] bsd_init: calling psem_cache_init
+[  63.064] bsd_init: calling nwk_wq_init
+[  63.064] bsd_init: calling dlil_init
+[  63.064] SK: netagent is enabled by default for this platform
+[  63.064] DLIL: running SUM16 self-tests ... PASSED
+[  63.064] dlil_init: Waiting for all the create dlil kernel threads to get scheduled at least once.
+[  63.064] dlil_init: All the created dlil kernel threads have been scheduled at least once. Proceeding.
+[  63.064] bsd_init: calling socketinit
+[  63.064] bsd_init: calling domaininit
+[  63.064] bsd_init: calling skywalk_init
+[  63.064] SK[0]: skmem_region_init              seg_size 16384, md_seg_size 16384, drv_buf_seg_size 65536 [eff 81920], usr_buf_seg_size 16384
+[  63.064] Skywalk: running self-tests
+[  63.064] Skywalk: sk_copy64_8 ... PASSED
+[  63.064] Skywalk: sk_copy32_8 ... PASSED
+[  63.064] Skywalk: sk_copy64_16 ... PASSED
+[  63.064] Skywalk: sk_copy32_16 ... PASSED
+[  63.064] Skywalk: sk_copy64_20 ... PASSED
+[  63.064] Skywalk: sk_copy64_24 ... PASSED
+[  63.064] Skywalk: sk_copy64_32 ... PASSED
+[  63.064] Skywalk: sk_copy32_32 ... PASSED
+[  63.064] Skywalk: sk_copy64_40 ... PASSED
+[  63.064] Skywalk: sk_copy64_64x ... PASSED
+[  63.065] Skywalk: sk_copy64_32x ... PASSED
+[  63.065] Skywalk: sk_copy64_8x ... PASSED
+[  63.065] Skywalk: sk_copy64_4x ... PASSED
+[  63.065] Skywalk: sk_zero_16 ... PASSED
+[  63.065] Skywalk: sk_zero_32 ... PASSED
+[  63.065] Skywalk: sk_zero_48 ... PASSED
+[  63.065] Skywalk: sk_zero_128 ... PASSED
+[  63.065] Skywalk: memcmp mask ... PASSED
+[  63.065] bsd_init: calling memorystatus_init
+[  63.065] bsd_init: calling sysctl_mib_init
+[  63.065] bsd_init: calling bsd_autoconf
+[  63.065] bsd_autoconf: calling kminit
+[  63.065] bsd_init: calling loopattach
+[  63.065] ifnet_attach: All kernel threads created for interface lo0 have been scheduled at least once. Proceeding.
+[  63.065] ifnet_attach: Waiting for all kernel threads created for interface gif0 to get scheduled at least once.
+[  63.065] com.apple.AppleFSCompressionTypeZlib kmod start
+[  63.065] ifnet_attach: All kernel threads created for interface gif0 have been scheduled at least once. Proceeding.
+[  63.065] bsd_init: calling ether_family_init
+[  63.065] bsd_init: calling net_init_run
+[  63.065] skip attaching fsw to lo0 using legacy TX modelifnet_attach: Waiting for all kernel threads created for interface stf0 to get scheduled at least once.
+[  63.065] ifnet_attach: All kernel threads created for interface stf0 have been scheduled at least once. Proceeding.
+[  63.065] bsd_init: calling inittodr
+[  63.065] bsd_init: calling setconf
+[  63.065] apfs_module_start:3058: load: com.apple.filesystems.apfs, v2142.140.9, apfs-2142.140.9.704.1, 2025/07/11
+[  63.065] ktriage_register_subsystem_strings: set subsystem 7 strings
+[  63.065] KEBAB SURF: IOCoreSurfaceRoot registered
+[  63.065] com.apple.AppleFSCompressionTypeZlib load succeeded
+[  63.065] Setting up notifier for CoreAnalyticsHub
+[  63.065] apfs_sysctl_register:1562: done registering sysctls.
+[  63.065] KEBAB SPMI IOKIT: bus registered; 3 scoped nubs, C core retains panic mappings
+[  63.065] KEBAB SPMI IOKIT: KebabPon matched usid0/peripheral08
+[  63.065] KEBAB SPMI IOKIT: KebabPmicKeys matched usid0/pages08,c5,c6; polling policy retained
+[  63.065] KEBAB SPMI IOKIT: KebabVrm matched RSC policy/readback resources; no IOPM claim
+[  63.065] KEBAB GENI IOKIT: bus registered; S3908@4b scoped nub; existing transport retained
+[  63.065] KEBAB GENI IOKIT: KebabTouch matched S3908@4b; typed state only, no HID
+[  63.065] KEBAB UFS: VER 0x300 CAP 0x1587031f HCE 0x1 HCS 0x10f
+[  63.065] KEBAB UFS: DMA PA 0xc5968000 size 0x104000 (firmware must allow physical DMA)
+[  63.065] KEBAB UFS: /dev/kebabcon ready
+[  63.065] KEBAB UFS: "userdata" on LUN 0: first block 0x2c7420, 229843 MiB, read-only
+[  63.065] KEBAB BLOCK: block storage up: 229843 MiB, 4096-byte blocks, read-only
+[  63.065] KEBAB BLOCK: registered Generic device for 229843 MiB, 4096-byte blocks, read-only; IOMedia child not yet verified
+[  63.065] KEBAB BLOCK: UFS provider ready; selecting APFS volume through root-matching
+[  63.065] Waiting on <dict ID="0"><key>IOProviderClass</key><string ID="1">IOMedia</string><key>IOPropertyMatch</key><dict ID="2"><key>UUID</key><string ID="3">DADD93F8-DBBF-4B17-A1DF-0F11E64172F7</string></dict></dict>
+[  63.065] dev_init:296: disk0 device accelerated crypto: 0 (compiled @ Jul 11 2025 15:52:26)
+[  63.065] dev_init:299: disk0 device_handle block size 4096 block count 58840027 features 0 internal 
+[  63.065] nx_mount:1224: disk0 initializing cache w/hash_size 1024 and cache size 2500
+[  63.126] nx_mount:1553: disk0 checkpoint search: largest xid 261, best xid 261 @ 11
+[  63.126] nx_mount:1555: disk0 reloading after unclean unmount, checkpoint xid 261, superblock xid 260
+[  63.126] nx_mount:1580: disk0 stable checkpoint indices: desc 10 data 24
+[  63.126] probe:3995: disk0 Caching extended container info for container disk0
+[  63.126] import_iboot_forwarded_roothash:3317: importing root hash (basesystem ? 0)...
+[  63.126] apfs_extract_root_hash_arm:12140: could not retrieve system-volume-auth-blob from device tree
+[  63.126] import_iboot_forwarded_roothash:3322: apfs_extract_root_hash_and_manifest failed with error: No such file or directory (2)
+[  63.126] Got boot device = IOService:/kebab-ufs0/IOBlockStorageDriver/KEBAB UFS userdata Media/AppleAPFSContainerScheme/AppleAPFSMedia/AppleAPFSContainer/SydneyUpdate20H392.D22D221OS@1
+[  63.126] BSD root: disk1s1, major 1, minor 2
+[  63.126] bsd_init: vfs_mountroot
+[  63.126] disk1s1: device is not readable.
+[  63.126] hfs_mountfs: buf_meta_bread failed with 13
+[  63.126] hfs_mount: hfs_mountfs returned error=13 for device unknown-dev
+[  63.126] hfs_mountroot failed: 13
+[  63.127] apfs_vfsop_mountroot:2745: apfs: mountroot called!
+[  63.127] dev_init:296: disk1 device accelerated crypto: 0 (compiled @ Jul 11 2025 15:52:26)
+[  63.127] dev_init:299: disk1 device_handle block size 4096 block count 58840027 features 0 internal 
+[  63.127] nx_mount:1224: disk1 initializing cache w/hash_size 1024 and cache size 2500
+[  63.189] nx_mount:1553: disk1 checkpoint search: largest xid 261, best xid 261 @ 11
+[  63.190] nx_mount:1555: disk1 reloading after unclean unmount, checkpoint xid 261, superblock xid 260
+[  63.190] nx_mount:1580: disk1 stable checkpoint indices: desc 10 data 24
+[  63.190] apfs_vfsop_mount:2408: disk1 Promoter has been locked 
+[  63.190] apfs_find_named_root_snapshot_xid:1925: disk1s1 failed to retrieve default root snapshot xid: No such file or directory (2)
+[  63.190] apfs_find_named_root_snapshot_xid:1961: disk1s1 The global payload bytes pointer is NULL
+[  63.190] apfs_vfsop_mount:2447: disk1s1 failed to find named root snapshot: Need authenticator (81)
+[  63.190] apfs_log_mount_unmount:2039: disk1s1 mounting volume SydneyUpdate20H392.D22D221OS, requested by: kernel_task (pid 0); parent: kernel_task (pid 0)
+[  63.190] handle_mount:765: disk1s1 vol-uuid: DADD93F8-DBBF-4B17-A1DF-0F11E64172F7 block size: 4096 block count: 58840027 (unencrypted; flags: 0x1; features: 8.0.12)
+[  63.190] handle_mount:778: disk1s1 setting dev block size to 4096 from 512
+[  63.190] nx_volume_group_update:7903: disk1s1 Volume SydneyUpdate20H392.D22D221OS is not in a volume group
+[  63.190] bsd_init: calling VFS_ROOT
+[  63.190] is_root_hash_authentication_required_ios:456: disk1s1 Release kext, booting xid: 0
+[  63.190] is_root_hash_authentication_required:540: disk1s1 Root Volume, root hash authentication is required
+[  63.190] KEBAB: root volume is not sealed (error 80); continuing
+[  63.190] bsd_init: calling devfs_kernel_mount
+[  63.190] bsd_init: calling siginit
+[  63.190] bsd_init: calling bsd_utaskbootstrap
+[  63.190] bsd_init: calling mountroot_post_hook
+[  63.190] bsd_init: done
+[  63.190] Serial keyboard started
+[  63.190] vm_free_delayed_pages: initialized 0 free pages
+[  63.190] VM Swap Subsystem is ON
+[  63.190] No POST boot-arg set.
+[  63.190] bsd_init: bsd_do_post - doneKEBAB KEYS: /dev/kebab_keys major 21, 24-byte records, 64 slots
+[  63.190] KEBAB CS: no static trust cache at /System/Library/Caches/com.apple.kernelcaches/static.trustcache (error 2); platform binaries will not be recognised
+[  63.190] KEBAB BOOT: prelink index parse on (1)
+[  63.190] KEBAB DSC: enabled for "/System/Library/Caches/com.apple.dyld"; kebab_dsc_map=1 kebab_dsc_slide=0x0 (default) kebab_dsc_verbose=0
+[  63.190] KEBAB DSC: main cache /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64: cannot open (error 2)
+[  63.190] KEBAB DSC: plan rejected (error 2); shared cache NOT mapped
+[  63.190] KEBAB DSC: plan detail follows (failure path):
+[  63.190] KEBAB DSC: region start=0x0 size=0x0 end=0x0 maxSlide=0x0
+[  63.190] KEBAB DSC: slide 0x0 (default); 0 mapping(s) carry slide info; shared region [0x180000000, 0x280000000)
+[  63.190] KEBAB DSC: dir 0 entries, 0 cache names offered, 0 resolved; resolved 0/0 subcaches by uuid; dylddata=0 dyldlinkedit=0
+[  63.190] KEBAB DSC: symbols: absent, NOT mapped
+[  63.190] KEBAB DSC: plan 0 files / 0 mappings / 0x0 bytes (0)
+[  63.190] KEBAB DSC: highest mapped end 0x0 (unslid 0x0), cache extent end 0x0
+[  63.190] KEBAB SURF: init sel 13
+[  63.190] KEBAB DRIVER TEST: IOCoreSurfaceRoot factory/query/bad-output/close PASS (0x0/0xe00002db/0xe00002c0)
+[  63.190] KEBAB FB: init sel 8 in 0/0 out 2/0 -> 0x0
+[  63.190] KEBAB DRIVER TEST: AppleCLCD factory/query/bad-output/close PASS (0x0/0xe00002c2/0xe00002c0)
+[  63.190] KEBAB DRIVER TEST: UFS NXSB/completion/reentry/short/bounds/RO PASS (0x0/0xe00002c2/0xe00002c2/0xe00002cf, calls=1)
+[  63.190] KEBAB DRIVER TEST: SPMI typed PON/keys/RSC PASS (PON 04/00 keys 04/01/01/10 TCS1 00000000)
+[  63.190] KEBAB DRIVER TEST: GENI typed transport/TCM state PASS (proto=3 mapped=1 bb=0 identified=0 decode=0 node=0)
+[  63.190] KEBAB DRIVER TEST: keys devfs PASS (lookup=0 major=21 record=24)
+[  63.190] KEBAB DRIVER TEST: read-only native contracts PASS
+[  63.190] KEBAB APFS PROBE: target uuid=EF45F98E-9F6C-43DB-B7C6-F418CA77429B path=/dev/disk1s3 dev=1/4 backing=10000013e System=1/2 readonly=1
+[  63.190] apfs_log_mount_unmount:2039: disk1s3 mounting volume Preboot, requested by: init (pid 1); parent: kernel_task (pid 0)
+[  63.190] handle_mount:765: disk1s3 vol-uuid: EF45F98E-9F6C-43DB-B7C6-F418CA77429B block size: 4096 block count: 58840027 (unencrypted; flags: 0x1; features: 8.0.2)
+[  63.190] handle_mount:778: disk1s3 setting dev block size to 4096 from 512
+[  63.190] nx_volume_group_update:7897: disk1s3 Volume Preboot role 10 Not a System or data volume
+[  63.190] KEBAB APFS PROBE: mount syscall error=0
+[  63.190] KEBAB APFS PROBE: mounted dev=1/4 readonly=1 System-readonly=1 identity=PASS
+[  63.190] KEBAB APFS PROOF: reboot-read bytes=65559 sha256=3f2f47b49455f2d5cce7d745829440ccf0e8f1beda6c5120641c25213f78c957 PASS
+[  63.190] load_init_program: attempting to load /usr/appleinternal/sbin/launchd.development
+[  63.190] load_init_program: attempting to load /sbin/launchd
+[  63.190] KEBAB CS: exec cdhash b65c36c9f5b287a6a8f5ca83d9427fb55ef04f4e cd=0x7e124+4398 hash=2 slice=0x0 tc=miss platform=1
+[  63.190] KEBAB CS: exec cdhash 684d847c40e6e873eeaec693011d4d997a869d2a cd=0xdb284+7218 hash=2 slice=0x0 tc=miss platform=1
+[  63.190] KEBAB EXEC: stack map=0xfffffe110c5181a8 shift=14 custom=0 user=0x16f3e4000 alloc=0x16b3e4000+0x4000000 guard=0x16b3e4000+0x3804000 kr=0
+[  63.190] KEBAB EXEC: pid 1 pre-copyout cs=0x1 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16f3e4000
+[  63.190] Allowing spawn of iOS binary launchd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[  63.253] shared_region: 0x68cd25e277c671dd [1(launchd)] check_np(0x16f3e3bb0) vm_shared_region_start_address() failed
+[  63.253] Darwin Ignition Sequence Version 1.0.0: Tue Jul  2 20:41:23 PDT 2024; root:libignition-51~1974/libignition_core/RELEASE_ARM64
+[  63.253] KEBAB SYSCTL: enter sysctl.name2oid leaf=name2oid handler=0xfffffe00067c6a18 oldlen=56 newlen=13
+[  63.253] KEBAB SYSCTL: leave sysctl.name2oid error=0 copied=8
+[  63.253] KEBAB SYSCTL: enter kern.bootargs leaf=bootargs handler=0xfffffe00067c2c38 oldlen=1216 newlen=0
+[  63.253] KEBAB SYSCTL: leave kern.bootargs error=0 copied=412
+[  63.253] libignition: 1: arguments           :
+[  63.253] libignition: 1:   ignition level    : 0x5
+[  63.253] libignition: 1:   force dylib root  : 0x0
+[  63.253] libignition: 1:   halt after stage  : n/a
+[  63.253] KEBAB SYSCTL: enter sysctl.name2oid leaf=name2oid handler=0xfffffe00067c6a18 oldlen=56 newlen=31
+[  63.253] KEBAB SYSCTL: leave sysctl.name2oid error=0 copied=16
+[  63.253] KEBAB SYSCTL: enter security.mac.img4.ignition_blob leaf=ignition_blob handler=0xfffffe000891c330 oldlen=132 newlen=0
+[2026-10-29T07:37:45] captured 13547 bytes, 203 lines

@@ -1,0 +1,10 @@
+{
+  "version": "0223",
+  "candidate_qualified": false,
+  "normal_full_dump_timed_out": true,
+  "PON_query_after_timeout_passed": true,
+  "normal_sync_fastboot_after_timeout_passed": true,
+  "diagnosis": "Normal command runs on USB event thread; 64KiB dump exceeded 16KiB TX ring without draining.",
+  "replacement": "0224 adds per-chunk normal drain; not yet device-qualified.",
+  "host_16KiB_TX_overflow_reproduced": true
+}

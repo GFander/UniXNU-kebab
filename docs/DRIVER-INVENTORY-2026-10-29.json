@@ -1,0 +1,224 @@
+{
+  "baseline": "native 0187; boot0190 uses prelink0188 unchanged",
+  "hardware_platform_groups": 9,
+  "groups": {
+    "platform": [
+      "iokit/Kernel/arm/KebabPlatformExpert.cpp"
+    ],
+    "cpu": [
+      "iokit/Kernel/arm/KebabCPU.cpp"
+    ],
+    "ufs": [
+      "bsd/dev/kebab_ufs.c",
+      "iokit/Kernel/arm/KebabBlockStorageDevice.cpp"
+    ],
+    "usb": [
+      "bsd/dev/kebab_usb.c"
+    ],
+    "spmi_pmic": [
+      "bsd/dev/kebab_spmi.c"
+    ],
+    "rpmh_vrm": [
+      "bsd/dev/kebab_rpmh_vrm.c"
+    ],
+    "touch": [
+      "bsd/dev/kebab_touch.c",
+      "bsd/dev/kebab_touch_tcm.c"
+    ],
+    "keys": [
+      "bsd/dev/kebab_keys.c",
+      "bsd/dev/kebab_keys_core.c"
+    ],
+    "display": [
+      "iokit/Kernel/arm/KebabFramebuffer.cpp"
+    ]
+  },
+  "separate_compatibility_services": {
+    "surface": [
+      "iokit/Kernel/arm/KebabSurface.cpp"
+    ]
+  },
+  "pmgr_compatibility_entry": "embedded in KebabPlatformExpert.cpp; original donor class, not own driver",
+  "unique_implementation_files": 13,
+  "physical_lines": 14533,
+  "class_count": 10,
+  "classes": {
+    "KebabPlatformExpert": {
+      "base": "IODTPlatformExpert",
+      "path": "iokit/Kernel/arm/KebabPlatformExpert.cpp"
+    },
+    "KebabCPU": {
+      "base": "IOCPU",
+      "path": "iokit/Kernel/arm/KebabCPU.cpp"
+    },
+    "KebabBlockStorageDevice": {
+      "base": "IOBlockStorageDevice",
+      "path": "iokit/Kernel/arm/KebabBlockStorageDevice.cpp"
+    },
+    "IOMobileFramebuffer": {
+      "base": "IOService",
+      "path": "iokit/Kernel/arm/KebabFramebuffer.cpp"
+    },
+    "AppleCLCD": {
+      "base": "IOMobileFramebuffer",
+      "path": "iokit/Kernel/arm/KebabFramebuffer.cpp"
+    },
+    "IOMobileFramebufferUserClient": {
+      "base": "IOUserClient",
+      "path": "iokit/Kernel/arm/KebabFramebuffer.cpp"
+    },
+    "KebabSurface": {
+      "base": "OSObject",
+      "path": "iokit/Kernel/arm/KebabSurface.cpp"
+    },
+    "KebabSurfaceRef": {
+      "base": "OSObject",
+      "path": "iokit/Kernel/arm/KebabSurface.cpp"
+    },
+    "IOCoreSurfaceRoot": {
+      "base": "IOService",
+      "path": "iokit/Kernel/arm/KebabSurface.cpp"
+    },
+    "IOSurfaceRootUserClient": {
+      "base": "IOUserClient",
+      "path": "iokit/Kernel/arm/KebabSurface.cpp"
+    }
+  },
+  "files": {
+    "iokit/Kernel/arm/KebabPlatformExpert.cpp": {
+      "group": "platform",
+      "physical_lines": 300,
+      "bytes": 10724,
+      "sha256": "efbc014b0df04b6eaf6e1b688f25bca92a97767a240c67f6f2dad176ed2e9466"
+    },
+    "iokit/Kernel/arm/KebabCPU.cpp": {
+      "group": "cpu",
+      "physical_lines": 284,
+      "bytes": 10111,
+      "sha256": "c11a5b0b4bd3144b3139ef7ce394afa1788f7542f379c426f52b966c2243d01d"
+    },
+    "bsd/dev/kebab_ufs.c": {
+      "group": "ufs",
+      "physical_lines": 1134,
+      "bytes": 33229,
+      "sha256": "68fac484f1eda939a12f6a59c09637b072820e8e9b17054111ad9af0e7bb54a7"
+    },
+    "iokit/Kernel/arm/KebabBlockStorageDevice.cpp": {
+      "group": "ufs",
+      "physical_lines": 556,
+      "bytes": 16389,
+      "sha256": "6ca5da3f6b75f13398c6026f80daa0e3b366ab135075901ec223df3a302ff781"
+    },
+    "bsd/dev/kebab_usb.c": {
+      "group": "usb",
+      "physical_lines": 3071,
+      "bytes": 108513,
+      "sha256": "5c696c3c8a2007fe132e86eeac2bfd3904fe5d9857f7cf26dd9475422dccfb80"
+    },
+    "bsd/dev/kebab_spmi.c": {
+      "group": "spmi_pmic",
+      "physical_lines": 1907,
+      "bytes": 67465,
+      "sha256": "ff192c1a23de1340367159a0f0e9949c2f57f63cf6deb6661695406245fa82c1"
+    },
+    "bsd/dev/kebab_rpmh_vrm.c": {
+      "group": "rpmh_vrm",
+      "physical_lines": 674,
+      "bytes": 18842,
+      "sha256": "eed3ca3043162c6de94a6783128200217e8766923172dec78a29f962287de42d"
+    },
+    "bsd/dev/kebab_touch.c": {
+      "group": "touch",
+      "physical_lines": 2807,
+      "bytes": 94156,
+      "sha256": "774e2d46a9dd5d829aa90221f274a39165aaa0e632641c3819d647c0ae7a8965"
+    },
+    "bsd/dev/kebab_touch_tcm.c": {
+      "group": "touch",
+      "physical_lines": 660,
+      "bytes": 18276,
+      "sha256": "3cfd0c2a9a6a67f207844efeb032ddeae99b4630726213b5ac15876d257984c0"
+    },
+    "bsd/dev/kebab_keys.c": {
+      "group": "keys",
+      "physical_lines": 607,
+      "bytes": 18136,
+      "sha256": "2402f15c3c442f7a751ecf2809996f1688383da70f8705117a036bc34ff96ff0"
+    },
+    "bsd/dev/kebab_keys_core.c": {
+      "group": "keys",
+      "physical_lines": 223,
+      "bytes": 6571,
+      "sha256": "f23fc14cbc437f196d5211f4098b0618b6372e9a399da6184c24daf2a7f21c6e"
+    },
+    "iokit/Kernel/arm/KebabFramebuffer.cpp": {
+      "group": "display",
+      "physical_lines": 941,
+      "bytes": 30622,
+      "sha256": "2c7bf68eab315c1a63604e7a3bea4be53b995a41eefbd4955291b9b6993c00a9"
+    },
+    "iokit/Kernel/arm/KebabSurface.cpp": {
+      "group": "surface",
+      "physical_lines": 1369,
+      "bytes": 41753,
+      "sha256": "16274b63b79d6d9ddb188f714fcfaedeb9640f772919429c202d6e8ccb36b20b"
+    }
+  },
+  "kernel_sha256": "ce03a20bca0acc80f578fe77f8de179012670143b80521b2698996e0232c267a",
+  "linked_symbol_examples": {
+    "platform": [
+      "__ZN19KebabPlatformExpert10deleteListEv",
+      "__ZN19KebabPlatformExpert10gMetaClassE",
+      "__ZN19KebabPlatformExpert10superClassE"
+    ],
+    "cpu": [
+      "__ZN8KebabCPU10gMetaClassE",
+      "__ZN8KebabCPU10getCPUNameEv",
+      "__ZN8KebabCPU10quiesceCPUEv"
+    ],
+    "ufs": [
+      "_kebab_ufs_rootdev"
+    ],
+    "usb": [
+      "_kebab_usb_start"
+    ],
+    "spmi_pmic": [
+      "_kebab_spmi_init"
+    ],
+    "rpmh_vrm": [
+      "_kebab_rpmh_address_known",
+      "_kebab_rpmh_cmd_allowed",
+      "_kebab_rpmh_cmd_bit"
+    ],
+    "touch": [
+      "_kebab_touch_start"
+    ],
+    "keys": [
+      "_kebab_keys_start"
+    ],
+    "display": [
+      "__ZN9AppleCLCD10gMetaClassE",
+      "__ZN9AppleCLCD10superClassE",
+      "__ZN9AppleCLCD10vsyncFiredEP8OSObjectP18IOTimerEventSource"
+    ],
+    "surface": [
+      "__ZN17IOCoreSurfaceRoot10gMetaClassE",
+      "__ZN17IOCoreSurfaceRoot10superClassE",
+      "__ZN17IOCoreSurfaceRoot5startEP9IOService"
+    ]
+  },
+  "donor_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "compiled_personality_table": "(   {     'IOClass'         = KebabPlatformExpert;     'IOProviderClass' = IOPlatformExpertDevice;     'IONameMatch'     = 'oneplus,kebab';     'IOProbeScore'    = 10000:32;   },   {     'IOClass'         = KebabCPU;     'IOProviderClass' = IOPlatformDevice;     'IONameMatch'     = cpu;     'IOProbeScore'    = 10000:32;   },   {     'IOClass'         = IOPanicPlatform;     'IOProviderClass' = IOPlatformExpertDevice;     'IOProbeScore'    = 0:32;   })",
+  "surface_root_matching_in_native_table": false,
+  "selected_donor_hid_components": [],
+  "excluded": [
+    "headers",
+    "crypto library ports",
+    "Apple OSS HFS+",
+    "donor kexts",
+    "installer and volume writer",
+    "AMFI/code-sign/dyld helpers",
+    "early console, GIC/timer/architecture adaptations",
+    "tests and host probes"
+  ]
+}

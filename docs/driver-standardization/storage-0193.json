@@ -1,0 +1,289 @@
+{
+  "target": "iPhone10,3 20H392 / XNU8796.141.3 ARM64 16KiB",
+  "original_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "slide": -2130251120640,
+  "candidate_sha256": "69cbd55c98b39943448723b020837fe19abce4522e32963fdc4a230c28909568",
+  "storage_text_sha256": "4c9e7e8f12306986dc124e9e2cd4f9126fa7dc61e89155d973767b88a0d5ce6f",
+  "header_sha256": "e9a21a2d38463fb81abbe8d3e6b1a0b867f77ba4d808565a93c8f72b2daa3105",
+  "bindings_sha256": "2393000e4d78b21fb5aefdf48a0151df8261f620f698597dd5a550e82c441f59",
+  "bindings": [
+    {
+      "symbol": "__ZN20IOBlockStorageDevice10gMetaClassE",
+      "address": "0xfffffe000ac411d0",
+      "segment": "__DATA"
+    },
+    {
+      "symbol": "__ZN20IOBlockStorageDevice13doSetPriorityEP26IOBlockStorageDeviceExtentjh",
+      "address": "0xfffffe0008812068",
+      "segment": "__TEXT_EXEC"
+    },
+    {
+      "symbol": "__ZN20IOBlockStorageDevice13setPropertiesEP8OSObject",
+      "address": "0xfffffe0008811f38",
+      "segment": "__TEXT_EXEC"
+    },
+    {
+      "symbol": "__ZN20IOBlockStorageDevice18getWriteCacheStateEPb",
+      "address": "0xfffffe0008812038",
+      "segment": "__TEXT_EXEC"
+    },
+    {
+      "symbol": "__ZN20IOBlockStorageDevice18setWriteCacheStateEb",
+      "address": "0xfffffe0008812044",
+      "segment": "__TEXT_EXEC"
+    },
+    {
+      "symbol": "__ZN20IOBlockStorageDevice20doGetProvisionStatusEyyPjP35IOBlockStorageProvisionDeviceExtenty",
+      "address": "0xfffffe000881208c",
+      "segment": "__TEXT_EXEC"
+    },
+    {
+      "symbol": "__ZN20IOBlockStorageDeviceC2EPK11OSMetaClass",
+      "address": "0xfffffe0008811d98",
+      "segment": "__TEXT_EXEC"
+    },
+    {
+      "symbol": "__ZN20IOBlockStorageDeviceD2Ev",
+      "address": "0xfffffe0008811db8",
+      "segment": "__TEXT_EXEC"
+    },
+    {
+      "symbol": "__ZNK20IOBlockStorageDevice11getPropertyEPK8OSSymbol",
+      "address": "0xfffffe0008811e88",
+      "segment": "__TEXT_EXEC"
+    },
+    {
+      "symbol": "__ZTV20IOBlockStorageDevice",
+      "address": "0xfffffe0009eabf50",
+      "segment": "__DATA_CONST"
+    }
+  ],
+  "bridge_vtable": "0xfffffe00062924e0",
+  "methods": [
+    {
+      "slot": 168,
+      "method": "doEjectMedia",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6a77c",
+      "donor_base_target": "0xfffffe0006973db0",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice12doEjectMediaEv"
+      ]
+    },
+    {
+      "slot": 169,
+      "method": "doFormatMedia",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6a788",
+      "donor_base_target": "0xfffffe0006973db0",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice13doFormatMediaEy"
+      ]
+    },
+    {
+      "slot": 170,
+      "method": "doGetFormatCapacities",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6a794",
+      "donor_base_target": "0xfffffe0006973db0",
+      "compiled_symbols": [
+        "__ZNK23KebabBlockStorageDevice21doGetFormatCapacitiesEPyj"
+      ]
+    },
+    {
+      "slot": 171,
+      "method": "doSynchronizeCache",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6b144",
+      "donor_base_target": "0xfffffe0008812074",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice18doSynchronizeCacheEv"
+      ]
+    },
+    {
+      "slot": 172,
+      "method": "getVendorString",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6a79c",
+      "donor_base_target": "0xfffffe0006973db0",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice15getVendorStringEv"
+      ]
+    },
+    {
+      "slot": 173,
+      "method": "getProductString",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6a7a8",
+      "donor_base_target": "0xfffffe0006973db0",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice16getProductStringEv"
+      ]
+    },
+    {
+      "slot": 174,
+      "method": "getRevisionString",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6a7b4",
+      "donor_base_target": "0xfffffe0006973db0",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice17getRevisionStringEv"
+      ]
+    },
+    {
+      "slot": 175,
+      "method": "getAdditionalDeviceInfoString",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6a7c0",
+      "donor_base_target": "0xfffffe0006973db0",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice29getAdditionalDeviceInfoStringEv"
+      ]
+    },
+    {
+      "slot": 176,
+      "method": "reportBlockSize",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6a7cc",
+      "donor_base_target": "0xfffffe0006973db0",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice15reportBlockSizeEPy"
+      ]
+    },
+    {
+      "slot": 177,
+      "method": "reportEjectability",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6a7f0",
+      "donor_base_target": "0xfffffe0006973db0",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice18reportEjectabilityEPb"
+      ]
+    },
+    {
+      "slot": 178,
+      "method": "reportMaxValidBlock",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6a80c",
+      "donor_base_target": "0xfffffe0006973db0",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice19reportMaxValidBlockEPy"
+      ]
+    },
+    {
+      "slot": 179,
+      "method": "reportMediaState",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6a834",
+      "donor_base_target": "0xfffffe0006973db0",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice16reportMediaStateEPbS0_"
+      ]
+    },
+    {
+      "slot": 180,
+      "method": "reportRemovability",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6a8a4",
+      "donor_base_target": "0xfffffe0006973db0",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice18reportRemovabilityEPb"
+      ]
+    },
+    {
+      "slot": 181,
+      "method": "reportWriteProtection",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6a8c0",
+      "donor_base_target": "0xfffffe0006973db0",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice21reportWriteProtectionEPb"
+      ]
+    },
+    {
+      "slot": 182,
+      "method": "getWriteCacheState",
+      "owner": "IOBlockStorageDevice",
+      "target": "0xfffffe0008812038",
+      "donor_base_target": "0xfffffe0008812038",
+      "compiled_symbols": [
+        "__ZN20IOBlockStorageDevice18getWriteCacheStateEPb"
+      ]
+    },
+    {
+      "slot": 183,
+      "method": "setWriteCacheState",
+      "owner": "IOBlockStorageDevice",
+      "target": "0xfffffe0008812044",
+      "donor_base_target": "0xfffffe0008812044",
+      "compiled_symbols": [
+        "__ZN20IOBlockStorageDevice18setWriteCacheStateEb"
+      ]
+    },
+    {
+      "slot": 184,
+      "method": "doAsyncReadWrite",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6a8e8",
+      "donor_base_target": "0xfffffe0006973db0",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice16doAsyncReadWriteEP18IOMemoryDescriptoryyP19IOStorageAttributesP19IOStorageCompletion"
+      ]
+    },
+    {
+      "slot": 185,
+      "method": "requestIdle",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6ab3c",
+      "donor_base_target": "0xfffffe0008812050",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice11requestIdleEv"
+      ]
+    },
+    {
+      "slot": 186,
+      "method": "doUnmap",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6ab30",
+      "donor_base_target": "0xfffffe000881205c",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice7doUnmapEP26IOBlockStorageDeviceExtentjj"
+      ]
+    },
+    {
+      "slot": 187,
+      "method": "doSetPriority",
+      "owner": "IOBlockStorageDevice",
+      "target": "0xfffffe0008812068",
+      "donor_base_target": "0xfffffe0008812068",
+      "compiled_symbols": [
+        "__ZN20IOBlockStorageDevice13doSetPriorityEP26IOBlockStorageDeviceExtentjh"
+      ]
+    },
+    {
+      "slot": 188,
+      "method": "doSynchronize",
+      "owner": "KebabBlockStorageDevice",
+      "target": "0xfffffe0006a6aad0",
+      "donor_base_target": "0xfffffe0008812080",
+      "compiled_symbols": [
+        "__ZN23KebabBlockStorageDevice13doSynchronizeEyyj"
+      ]
+    },
+    {
+      "slot": 189,
+      "method": "doGetProvisionStatus",
+      "owner": "IOBlockStorageDevice",
+      "target": "0xfffffe000881208c",
+      "donor_base_target": "0xfffffe000881208c",
+      "compiled_symbols": [
+        "__ZN20IOBlockStorageDevice20doGetProvisionStatusEyyPjP35IOBlockStorageProvisionDeviceExtenty"
+      ]
+    }
+  ],
+  "limits": [
+    "Static binding/slot identity only; class sizes and private userland ABI not inferred.",
+    "Provider remains the boot-lifetime platform root; C backend owns the UFS controller.",
+    "No DMA, SMMU, IRQ or SMP behavior was changed by standardization."
+  ]
+}

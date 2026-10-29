@@ -1,0 +1,14 @@
+[2026-10-29T05:44:15] sending 'SPMI?' on COM7
+[   0.091] KEBAB SPMI: === SPMI-1: arbiter version ===
+[   0.091] KEBAB SPMI: core 0x0c440000+0x1100 mapped; core+0x0000 = 0x50010000
+[   0.091] KEBAB SPMI: version family v5
+[   0.091] KEBAB SPMI: SPMI-1 PASS
+[   0.091] KEBAB SPMI: === SPMI-2: PPID 0x008 -> APID ===
+[   0.091] KEBAB SPMI: scan APID 0x000..0x1ff: core+0x900 + 4*apid, 512 entries bounded by core size 0x1100
+[   0.091] KEBAB SPMI: negative control PPID 0xf00 -> 0 APID(s) (expected 0)
+[   0.091] KEBAB SPMI: scanned 512 entries: 352 non-zero mapping(s), 3 map PPID 0x008
+[   0.091] KEBAB SPMI: PPID 0x008 APID 0x001 map[core+0x904]=0x00000800 own[cnfg+0x704]=0x00000001 -> write_ee 0x1 irq_owner 0 irq_ee 0xff
+[   0.092] KEBAB SPMI: PPID 0x008 APID 0x00d map[core+0x934]=0x01000800 own[cnfg+0x734]=0x00000000 -> write_ee 0x0 irq_owner 1 irq_ee 0x0 (owned by this EE)
+[   0.092] KEBAB SPMI: PPID 0x008 APID 0x075 map[core+0xad4]=0x00000800 own[cnfg+0x8d4]=0x00000004 -> write_ee 0x4 irq_owner 0 irq_ee 0xff
+[   0.092] KEBAB SPMI: SPMI-2 PASS: 3 APID(s) map PPID 0x008
+[2026-10-29T05:44:18] done, 915 bytes
