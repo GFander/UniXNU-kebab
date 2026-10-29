@@ -1,0 +1,97 @@
+{
+  "os": "iPhone10,3 16.7.16 / 20H392",
+  "file_sha256": "ccac6fa5b10c74ac9458212044bdc4115831c7a01be04d61d04e86bdec52dc27",
+  "mount_payload_stack_base": "sp+0x1700",
+  "device_path_pointer_offset": 0,
+  "normal_mode_offset": 16,
+  "normal_mode": 1,
+  "anonymous_uid_offset": 324,
+  "anonymous_gid_offset": 328,
+  "anonymous_default": 4294967295,
+  "provided_bytes": 336,
+  "system_readonly": true,
+  "first_test_data_readonly": true,
+  "instructions": {
+    "0x100001a80": [
+      [
+        "add",
+        "x26, sp, #1, lsl #12"
+      ],
+      [
+        "add",
+        "x26, x26, #0x700"
+      ]
+    ],
+    "0x100001bd4": [
+      [
+        "add",
+        "x8, x26, #0x144"
+      ],
+      [
+        "movi",
+        "v0.2d, #0xffffffffffffffff"
+      ],
+      [
+        "str",
+        "d0, [x8]"
+      ]
+    ],
+    "0x100001f3c": [
+      [
+        "strh",
+        "w8, [sp, #0x1710]"
+      ]
+    ],
+    "0x1000023e0": [
+      [
+        "cmp",
+        "x11, #0"
+      ],
+      [
+        "mov",
+        "w8, #8"
+      ],
+      [
+        "csinc",
+        "w8, w8, wzr, ne"
+      ],
+      [
+        "strh",
+        "w8, [sp, #0x1710]"
+      ]
+    ],
+    "0x1000025c4": [
+      [
+        "ldr",
+        "w2, [sp, #0x118]"
+      ],
+      [
+        "adr",
+        "x0, #0x100003ad9"
+      ],
+      [
+        "nop",
+        ""
+      ],
+      [
+        "add",
+        "x1, sp, #0x948"
+      ],
+      [
+        "add",
+        "x3, sp, #1, lsl #12"
+      ],
+      [
+        "add",
+        "x3, x3, #0x700"
+      ],
+      [
+        "bl",
+        "#0x100003654"
+      ]
+    ]
+  },
+  "limits": [
+    "Field and call-site evidence; actual target mount is qualified separately."
+  ]
+}

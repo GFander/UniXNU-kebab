@@ -1,0 +1,24 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,10 @@
+ bsd/dev/kebab_vol.c			standard
+ bsd/dev/kebab_spmi.c			standard
+ bsd/dev/kebab_spmi_bus.c			standard
++bsd/dev/kebab_spmi_pon.c			standard
++bsd/dev/kebab_spmi_keys.c			standard
++bsd/dev/kebab_spmi_power.c			standard
++bsd/dev/kebab_rpmh.c			standard
+ bsd/dev/kebab_spmi_pon.c			standard
+ bsd/dev/kebab_spmi_keys.c			standard
+ bsd/dev/kebab_spmi_power.c			standard
+--- a/bsd/dev/kebab_rpmh.c
++++ b/bsd/dev/kebab_rpmh.c
+@@ -67,6 +67,8 @@
+ #define KEBAB_RSC_CMD_DATA      0x38u
+ #define KEBAB_RSC_CMD_STATUS    0x3cu
+ 
++
++#define KEBAB_VRM_EN_ON 0x80u
+ static struct {
+ 	bool        parsed;
+ 	bool        gate;

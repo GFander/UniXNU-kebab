@@ -1,0 +1,39 @@
+--- a/tools/lldbmacros/core/syntax_checker.py
++++ b/tools/lldbmacros/core/syntax_checker.py
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python
++#!/usr/bin/env python3
+ from __future__ import absolute_import, print_function
+ 
+ 
+@@ -12,6 +12,9 @@
+ """
+ import sys
+ import os
++# The adjacent core/collections.py is an LLDB package module, not stdlib.
++_script_directory = os.path.dirname(os.path.realpath(__file__))
++sys.path = [entry for entry in sys.path if os.path.realpath(entry) != _script_directory]
+ import re
+ 
+ tabs_search_rex = re.compile("^\s*\t+",re.MULTILINE|re.DOTALL)
+@@ -35,6 +38,7 @@
+             continue
+         fh = open(fname)
+         strdata = fh.readlines()
++        fh.close()
+         lineno = 0
+         syntax_fail = False
+         for linedata in strdata:
+@@ -42,9 +46,9 @@
+             if len(tabs_search_rex.findall(linedata)) > 0 :
+                 print("Error: Found a TAB character at %s:%d" % (fname, lineno), file=sys.stderr)
+                 syntax_fail = True
+-        if find_non_ascii(linedata):
+-            print("Error: Found a non ascii character at %s:%d" % (fname, lineno), file=sys.stderr)
+-            syntax_fail = True
++            if find_non_ascii(linedata):
++                print("Error: Found a non ascii character at %s:%d" % (fname, lineno), file=sys.stderr)
++                syntax_fail = True
+         if syntax_fail:
+             print("Error: Syntax check failed. Please fix the errors and try again.", file=sys.stderr)
+             sys.exit(1)

@@ -1,0 +1,202 @@
+"""Opt-in, identity-checked APFS Data mount; first qualification stays read-only."""
+from pathlib import Path
+import json,subprocess
+r=Path(__file__).parent;d=r/'data-mount'
+files=['iokit/conf/files.arm64','bsd/conf/files','bsd/kern/kern_exec.c']
+got=json.loads(subprocess.run(['ssh','ubuntualbert','python3 source-reader.py /home/albert/s4/x'],input=json.dumps(files),text=True,capture_output=True,check=True).stdout)
+for p,value in got.items():
+    for folder in ['before','after']:
+        f=d/folder/p;f.parent.mkdir(parents=True,exist_ok=True);f.write_text(value['source'],newline='\n')
+def put(name,text):
+    f=d/'after'/name;f.parent.mkdir(parents=True,exist_ok=True);f.write_text(text,newline='\n')
+put('bsd/kern/kebab_data.h',r'''/* Private normal-boot volume identity, no IOKit types in BSD. */
+#ifndef KEBAB_DATA_H
+#define KEBAB_DATA_H
+#include <sys/types.h>
+struct kebab_volume_identity {
+ uint32_t major_number, minor_number;
+ uint64_t backing_id;
+ char bsd_name[32];
+};
+#ifdef __cplusplus
+extern "C" {
+#endif
+int kebab_lookup_apfs_data(struct kebab_volume_identity *, struct kebab_volume_identity *);
+#ifdef __cplusplus
+}
+#endif
+#endif
+''')
+put('iokit/Kernel/arm/KebabVolumeLookup.cpp',r'''/* Registry properties only; source IOService ABI, no private IOMedia fields.
+ * The iterator owns matched services. Every ancestor copy is released. */
+#include <pexpert/arm64/board_config.h>
+#if defined(KEBAB)
+#include <IOKit/IOService.h>
+#include <IOKit/IOLib.h>
+#include <libkern/c++/OSIterator.h>
+#include <libkern/c++/OSNumber.h>
+#include <libkern/c++/OSString.h>
+#include <sys/errno.h>
+#include "../../../bsd/kern/kebab_data.h"
+
+static uint64_t
+kebab_backing_id(IORegistryEntry *entry)
+{
+ uint64_t result = 0;
+ entry->retain();
+ for (unsigned depth = 0; entry && depth < 16; depth++) {
+  if (entry->metaCast("KebabBlockStorageDevice")) {
+   result = entry->getRegistryEntryID();
+   break;
+  }
+  IORegistryEntry *parent = entry->copyParentEntry(gIOServicePlane);
+  entry->release();
+  entry = parent;
+ }
+ OSSafeReleaseNULL(entry);
+ return result;
+}
+
+static int
+kebab_lookup_uuid(const char *uuid, struct kebab_volume_identity *out)
+{
+ bzero(out, sizeof(*out));
+ OSDictionary *matching = IOService::serviceMatching("IOMedia");
+ OSDictionary *properties = OSDictionary::withCapacity(1);
+ OSString *value = OSString::withCString(uuid);
+ bool ready = matching && properties && value && properties->setObject("UUID", value) &&
+     matching->setObject("IOPropertyMatch", properties);
+ OSSafeReleaseNULL(value);
+ OSSafeReleaseNULL(properties);
+ if (!ready) { OSSafeReleaseNULL(matching); return ENOMEM; }
+ OSIterator *iterator = IOService::getMatchingServices(matching);
+ matching->release();
+ if (!iterator) return ENOENT;
+ unsigned count = 0;
+ int error = ENOENT;
+ while (count < 2) {
+  IOService *service = OSDynamicCast(IOService, iterator->getNextObject());
+  if (!service) break;
+  count++;
+  OSString *name = OSDynamicCast(OSString, service->getProperty("BSD Name"));
+  OSNumber *major = OSDynamicCast(OSNumber, service->getProperty("BSD Major"));
+  OSNumber *minor = OSDynamicCast(OSNumber, service->getProperty("BSD Minor"));
+  uint64_t backing = kebab_backing_id(service);
+  if (service->isInactive() || !name || !major || !minor || !backing ||
+      major->unsigned64BitValue() > 255 || minor->unsigned64BitValue() > 0xffffff ||
+      name->getLength() == 0 || name->getLength() >= sizeof(out->bsd_name)) { error = EINVAL; break; }
+  const char *text = name->getCStringNoCopy();
+  bool valid = true;
+  for (unsigned i = 0; i < name->getLength(); i++) {
+   char c = text[i];
+   if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) valid = false;
+  }
+  if (!valid) { error = EINVAL; break; }
+  out->major_number = major->unsigned32BitValue();
+  out->minor_number = minor->unsigned32BitValue();
+  out->backing_id = backing;
+  strlcpy(out->bsd_name, text, sizeof(out->bsd_name));
+  error = 0;
+ }
+ if (!iterator->isValid() || count != 1) error = EINVAL;
+ iterator->release();
+ if (error) bzero(out, sizeof(*out));
+ return error;
+}
+
+extern "C" int
+kebab_lookup_apfs_data(struct kebab_volume_identity *system, struct kebab_volume_identity *data)
+{
+ if (!system || !data) return EINVAL;
+ int error = kebab_lookup_uuid("DADD93F8-DBBF-4B17-A1DF-0F11E64172F7", system);
+ if (!error) error = kebab_lookup_uuid("4C56203C-CFE8-4DFF-BF8E-BB48D852C936", data);
+ if (!error && (system->backing_id != data->backing_id ||
+     (system->major_number == data->major_number && system->minor_number == data->minor_number))) error = EINVAL;
+ return error;
+}
+#endif
+''')
+put('bsd/kern/kebab_data.c',r'''/* Opt-in APFS Data qualification. System remains read-only. No raw writes. */
+#include <pexpert/arm64/board_config.h>
+#if defined(KEBAB)
+#include <pexpert/pexpert.h>
+#include <sys/param.h>
+#include <sys/errno.h>
+#include <sys/proc_internal.h>
+#include <sys/mount_internal.h>
+#include <sys/vnode_internal.h>
+#include <sys/sysproto.h>
+#include <libkern/libkern.h>
+#include "kebab_data.h"
+
+int kebab_data_prepare(proc_t, user_addr_t);
+int
+kebab_data_prepare(proc_t p, user_addr_t scratch)
+{
+ uint32_t mode = 0, rw = 0;
+ if (!PE_parse_boot_argn("kebab_data_mount", &mode, sizeof(mode)) || !mode) return 0;
+ if (mode != 1 || !scratch) return EINVAL;
+ PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
+ if (rw) return EINVAL; /* first mounted-volume test must be read-only throughout */
+ mount_t original_root = vnode_mount(rootvnode);
+ if (!(vfs_flags(original_root) & MNT_RDONLY) || strcmp(vfs_statfs(original_root)->f_fstypename, "apfs")) return EINVAL;
+ struct kebab_volume_identity system, data;
+ int error = kebab_lookup_apfs_data(&system, &data);
+ if (error) { printf("KEBAB DATA: identity lookup error=%d\n", error); return error; }
+ vnode_t root_device = vfs_devvp(original_root);
+ dev_t root_dev = root_device ? vnode_specrdev(root_device) : NODEV;
+ if (root_device) vnode_put(root_device);
+ if (root_dev != makedev(system.major_number, system.minor_number)) return EINVAL;
+ char path[64];
+ snprintf(path, sizeof(path), "/dev/%s", data.bsd_name);
+ printf("KEBAB DATA: target uuid=4C56203C-CFE8-4DFF-BF8E-BB48D852C936 path=%s dev=%u/%u backing=%llx System=%u/%u readonly=1\n",
+     path, data.major_number, data.minor_number, data.backing_id, system.major_number, system.minor_number);
+ /* Structure offsets recovered from this target's original mount_apfs.
+  * The descriptor is copied to the current init task's scratch page;
+  * APFS's normal mount syscall consumes user pointers from that page. */
+ uint8_t payload[0x150] = {0};
+ user64_addr_t spec = scratch + 0x160;
+ uint16_t normal_mount = 1;
+ uint32_t anonymous_owner = UINT32_MAX;
+ memcpy(payload, &spec, sizeof(spec));
+ memcpy(payload + 16, &normal_mount, sizeof(normal_mount));
+ memcpy(payload + 0x144, &anonymous_owner, sizeof(anonymous_owner));
+ memcpy(payload + 0x148, &anonymous_owner, sizeof(anonymous_owner));
+ struct mount_args request = { .type = scratch + 0x100, .path = scratch + 0x120,
+     .flags = MNT_RDONLY, .data = scratch + 0x200 };
+ int32_t result = 0;
+ if ((error = copyout("apfs", request.type, 5)) ||
+     (error = copyout("/private/var", request.path, 13)) ||
+     (error = copyout(path, spec, strlen(path) + 1)) ||
+     (error = copyout(payload, request.data, sizeof(payload)))) return error;
+ error = mount(p, &request, &result);
+ printf("KEBAB DATA: mount syscall error=%d\n", error);
+ if (error) return error;
+ vnode_t data_root = NULLVP;
+ error = vnode_lookup("/private/var", 0, &data_root, vfs_context_current());
+ if (error) return error;
+ mount_t mounted = vnode_mount(data_root);
+ vnode_t device = vfs_devvp(mounted);
+ dev_t actual = device ? vnode_specrdev(device) : NODEV;
+ if (device) vnode_put(device);
+ if (actual != makedev(data.major_number, data.minor_number) || mounted == original_root ||
+     !(vfs_flags(mounted) & MNT_RDONLY) || strcmp(vfs_statfs(mounted)->f_fstypename, "apfs") ||
+     vnode_mount(rootvnode) != original_root || !(vfs_flags(original_root) & MNT_RDONLY)) error = EINVAL;
+ printf("KEBAB DATA: mounted dev=%u/%u readonly=%u System-readonly=%u identity=%s\n",
+     major(actual), minor(actual), (vfs_flags(mounted) & MNT_RDONLY) != 0,
+     (vfs_flags(original_root) & MNT_RDONLY) != 0, error ? "FAIL" : "PASS");
+ vnode_put(data_root);
+ return error;
+}
+#endif
+''')
+p=d/'after/iokit/conf/files.arm64';s=p.read_text();needle='iokit/Kernel/arm/KebabGeni.cpp\toptional iokitcpp';assert needle in s;s=s.replace(needle,needle+'\niokit/Kernel/arm/KebabVolumeLookup.cpp\toptional iokitcpp',1);p.write_text(s,newline='\n')
+p=d/'after/bsd/conf/files';s=p.read_text();needle='bsd/kern/kebab_bootdiag.c\t\t\tstandard';assert needle in s;s=s.replace(needle,needle+'\nbsd/kern/kebab_data.c\t\t\tstandard',1);p.write_text(s,newline='\n')
+p=d/'after/bsd/kern/kern_exec.c';s=p.read_text();needle='\t(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);';assert needle in s
+s=s.replace(needle,needle+'''
+#if defined(KEBAB)
+ extern int kebab_data_prepare(proc_t, user_addr_t);
+ int kebab_data_error = kebab_data_prepare(p, (user_addr_t)scratch_addr);
+ if (kebab_data_error) panic("kebab Data mount test failed: %d", kebab_data_error);
+#endif''',1);p.write_text(s,newline='\n')
+print('Prepared optional identity-checked Data read-only mount')

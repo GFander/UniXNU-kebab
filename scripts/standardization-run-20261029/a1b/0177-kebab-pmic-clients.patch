@@ -1,0 +1,3641 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,10 @@
+ bsd/dev/kebab_vol.c			standard
+ bsd/dev/kebab_spmi.c			standard
+ bsd/dev/kebab_spmi_bus.c			standard
++bsd/dev/kebab_spmi_pon.c			standard
++bsd/dev/kebab_spmi_keys.c			standard
++bsd/dev/kebab_spmi_power.c			standard
++bsd/dev/kebab_rpmh.c			standard
+ bsd/dev/kebab_rpmh_vrm.c		standard
+ bsd/dev/kebab_touch.c			standard
+ bsd/dev/kebab_touch_tcm.c		standard
+--- /dev/null
++++ b/bsd/dev/kebab_pmic_regs.h
+@@ -0,0 +1,22 @@
++/* PM8150 board register facts retained from kebab_spmi.c: vendor DT,
++ * qpnp-power-on.c and pinctrl-spmi-gpio.c. These are PMIC addresses, not VAs. */
++#ifndef _KEBAB_PMIC_REGS_H
++#define _KEBAB_PMIC_REGS_H
++#define KEBAB_SPMI_PON_SID      0u
++#define KEBAB_SPMI_PON_PPID     0x008u
++#define KEBAB_SPMI_PON_SUBTYPE  0x0805u
++#define KEBAB_SPMI_PON_SPARE    0x088fu
++#define KEBAB_SPMI_KEYS_PON_RT      0x0810u
++#define KEBAB_SPMI_KEYS_GPIO6_RT    0x0c510u
++#define KEBAB_SPMI_KEYS_GPIO7_RT    0x0c610u
++#define KEBAB_SPMI_KEYS_GPIO6_TYPE  0x0c504u
++#define KEBAB_SPMI_KEYS_GPIO6_MODE  0x0c540u
++#define KEBAB_SPMI_KEYS_GPIO6_PULL  0x0c542u
++#define KEBAB_SPMI_KEYS_GPIO6_EN    0x0c546u
++#define KEBAB_SPMI_KEYS_GPIO7_MODE  0x0c640u
++#define KEBAB_SPMI_KEYS_GPIO7_PULL  0x0c642u
++#define KEBAB_SPMI_KEYS_GPIO7_EN    0x0c646u
++#define KEBAB_SPMI_PON_REASON_MASK   0xfeu
++#define KEBAB_SPMI_PON_REASON_BOOTLOADER 0x02u
++#define KEBAB_SPMI_PON_REASON_FIELD  (KEBAB_SPMI_PON_REASON_BOOTLOADER << 1)
++#endif
+--- /dev/null
++++ b/bsd/dev/kebab_rpmh.c
+@@ -0,0 +1,636 @@
++/* RPMh command DB/RSC controller adapter and board rail policy.
++ * TCS is an RSC transport, not an SPMI transaction. The tested encoder/state
++ * machine stays in kebab_rpmh_vrm.c; PMIC readback goes through its SPMI client.
++ */
++#if defined(KEBAB)
++#define KEBAB_RPMH_KERNEL 1
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <mach/boolean.h>
++#include <pexpert/pexpert.h>
++#include "kebab_spmi_bus.h"
++#include "kebab_spmi_clients.h"
++#include "kebab_pmic_regs.h"
++#include "kebab_rpmh_vrm.h"
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern void kebab_usb_log_flush(void);
++/* ------------------------------------------- RPMh discovery (read only) */
++
++/*
++ * The rails the S3908 needs are RPMh VRM resources.  Before any request can
++ * be formed, two things have to be read, never written:
++ *
++ *   - the command DB, a 128 KiB reserved region at 0x80860000 whose entries
++ *     map a resource name to the address a VRM command must carry;
++ *   - the APPS RSC's drv-2 window at 0x18220000, where the active TCS slots
++ *     live at tcs-offset 0xd00 with a 672-byte stride.
++ *
++ * Layouts are from the vendor cmd-db.c and rpmh-rsc.c.  Every offset is
++ * bounds-checked against the mapped window before it is read, and nothing
++ * below writes a register.
++ */
++#define KEBAB_CMD_DB_PA         0x80860000u
++#define KEBAB_CMD_DB_SIZE       0x00020000u
++#define KEBAB_CMD_DB_HEADER     144u    /* 4 + 4 + 8*16 + 4 + 4 */
++#define KEBAB_CMD_DB_SLAVES     8u
++#define KEBAB_CMD_DB_ENTRY      24u
++
++#define KEBAB_RSC_DRV2_PA       0x18220000u
++#define KEBAB_RSC_SIZE          0x00010000u
++#define KEBAB_RSC_TCS_OFF       0x00000d00u
++#define KEBAB_RSC_TCS_STRIDE    672u
++#define KEBAB_RSC_CMD_STRIDE    20u
++#define KEBAB_RSC_ACTIVE_TCS    2u
++#define KEBAB_RSC_TCS_TOTAL     8u      /* prnt_chld says 8; the control TCS is not in this array */
++#define KEBAB_RSC_CMD_WAIT      0x10u
++#define KEBAB_RSC_RESP_DATA     0x40u
++#define KEBAB_RSC_IRQ_CLEAR     0x08u
++#define KEBAB_RSC_PRNT_CHLD     0x0cu
++#define KEBAB_RSC_TCS_MASK      0x3fu
++#define KEBAB_RSC_TCS_SHIFT     6u
++#define KEBAB_RSC_NCPT_MASK     0x1fu
++#define KEBAB_RSC_NCPT_SHIFT    27u
++#define KEBAB_RSC_NCPT_MAX      16u
++#define KEBAB_RSC_AMC_ENABLE    (1u << 16)
++#define KEBAB_RSC_AMC_TRIGGER   (1u << 24)
++#define KEBAB_RSC_CMD_ISSUED    (1u << 8)
++#define KEBAB_RSC_CMD_COMPL     (1u << 16)
++
++#define KEBAB_RSC_IRQ_ENABLE    0x00u
++#define KEBAB_RSC_IRQ_STATUS    0x04u
++#define KEBAB_RSC_CONTROL       0x14u
++#define KEBAB_RSC_STATUS        0x18u
++#define KEBAB_RSC_CMD_ENABLE    0x1cu
++#define KEBAB_RSC_CMD_MSGID     0x30u
++#define KEBAB_RSC_CMD_ADDR      0x34u
++#define KEBAB_RSC_CMD_DATA      0x38u
++#define KEBAB_RSC_CMD_STATUS    0x3cu
++
++
++#define KEBAB_VRM_EN_ON 0x80u
++static struct {
++	bool        parsed;
++	bool        gate;
++	vm_offset_t drv;               /* drv-2 window; zero until mapped */
++	vm_offset_t tcs;               /* TCS1 window inside it */
++	kebab_rpmh_tcs channel;
++	bool        ldoa13_done;
++	bool        ldoa13_ok;
++	bool        ldoc1_done;
++	bool        ldoc1_ok;
++} vrm;
++
++static uint32_t
++kebab_rpmh_read32(vm_offset_t base, uint32_t offset)
++{
++	uint32_t value = *(volatile uint32_t *)(base + offset);
++
++	/* Device memory: finish the read before its result is used. */
++	__asm__ volatile ("dmb sy" ::: "memory");
++	return value;
++}
++
++static void
++kebab_rpmh_write32(vm_offset_t base, uint32_t offset, uint32_t value)
++{
++	*(volatile uint32_t *)(base + offset) = value;
++	/* The command must reach the arbiter before the status is polled. */
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++static void
++kebab_rpmh_cmd_db(void)
++{
++	vm_offset_t db;
++	uint32_t version, magic, i, j;
++
++	db = ml_io_map(KEBAB_CMD_DB_PA, KEBAB_CMD_DB_SIZE);
++	if (db == 0) {
++		printf("KEBAB RPMH: cannot map the command DB at 0x%08x\n",
++		    KEBAB_CMD_DB_PA);
++		return;
++	}
++	version = kebab_rpmh_read32(db, 0);
++	magic = kebab_rpmh_read32(db, 4);
++	printf("KEBAB RPMH: cmd-db 0x%08x+0x%x: version 0x%08x magic 0x%08x (%s)\n",
++	    KEBAB_CMD_DB_PA, KEBAB_CMD_DB_SIZE, version, magic,
++	    magic == 0x0c0330dbu ? "match" : "MISMATCH");
++	if (magic != 0x0c0330dbu) {
++		return;
++	}
++	for (i = 0; i < KEBAB_CMD_DB_SLAVES; i++) {
++		uint32_t off = 8u + i * 16u;
++		uint32_t w0 = kebab_rpmh_read32(db, off);
++		uint32_t w1 = kebab_rpmh_read32(db, off + 4u);
++		uint32_t slv = w0 & 0xffffu;
++		uint32_t hdr_off = (w0 >> 16) & 0xffffu;
++		uint32_t cnt = (w1 >> 16) & 0xffffu;
++
++		if (cnt == 0) {
++			continue;
++		}
++		printf("KEBAB RPMH: slave %u: %u entries at +0x%x\n",
++		    slv, cnt, hdr_off);
++		/*
++		 * Only bound the walk so a corrupt count cannot spin: the
++		 * per-entry check below rejects anything past the window.  67
++		 * entries is a normal VREG slave, so 64 was too tight.
++		 */
++		if (cnt > 1024u) {
++			printf("KEBAB RPMH: slave %u: count %u is implausible; skipped\n",
++			    slv, cnt);
++			continue;
++		}
++		for (j = 0; j < cnt; j++) {
++			uint32_t e = KEBAB_CMD_DB_HEADER + hdr_off +
++			    j * KEBAB_CMD_DB_ENTRY;
++			uint32_t w_id0, w_id1, addr, tail;
++			char id[9];
++
++			if (e + KEBAB_CMD_DB_ENTRY > KEBAB_CMD_DB_SIZE) {
++				printf("KEBAB RPMH: slave %u: entry %u outside the window; stopped\n",
++				    slv, j);
++				break;
++			}
++			w_id0 = kebab_rpmh_read32(db, e);
++			w_id1 = kebab_rpmh_read32(db, e + 4u);
++			addr = kebab_rpmh_read32(db, e + 16u);
++			tail = kebab_rpmh_read32(db, e + 20u);
++			memcpy(id, &w_id0, 4);
++			memcpy(id + 4, &w_id1, 4);
++			id[8] = 0;
++			if (strcmp(id, "ldoa13") != 0 && strcmp(id, "ldoc1") != 0) {
++				continue;
++			}
++			printf("KEBAB RPMH: %s: addr 0x%08x len %u offset %u\n",
++			    id, addr, tail & 0xffffu, (tail >> 16) & 0xffffu);
++		}
++	}
++}
++
++static void
++kebab_rpmh_rsc(void)
++{
++	vm_offset_t drv, base, t;
++	uint32_t i, c, prnt, max_tcs, ncpt, control;
++
++	drv = ml_io_map(KEBAB_RSC_DRV2_PA, KEBAB_RSC_SIZE);
++	if (drv == 0) {
++		printf("KEBAB RPMH: cannot map the drv-2 window at 0x%08x\n",
++		    KEBAB_RSC_DRV2_PA);
++		return;
++	}
++	base = drv + KEBAB_RSC_TCS_OFF;
++	printf("KEBAB RPMH: drv-2 0x%08x, tcs_base +0x%x -> 0x%llx\n",
++	    KEBAB_RSC_DRV2_PA, KEBAB_RSC_TCS_OFF, (unsigned long long)base);
++	/*
++	 * IRQ_ENABLE/STATUS/CLEAR are shared but live at tcs_base + 0x0/0x4/0x8
++	 * (rpmh-rsc.c reads them through read_tcs_reg with tcs_id 0); only
++	 * DRV_PRNT_CHLD_CONFIG sits at drv->base.
++	 */
++	printf("KEBAB RPMH: irq_en 0x%08x irq_status 0x%08x irq_clear 0x%08x prnt_chld 0x%08x\n",
++	    kebab_rpmh_read32(base, KEBAB_RSC_IRQ_ENABLE),
++	    kebab_rpmh_read32(base, KEBAB_RSC_IRQ_STATUS),
++	    kebab_rpmh_read32(base, KEBAB_RSC_IRQ_CLEAR),
++	    kebab_rpmh_read32(drv, KEBAB_RSC_PRNT_CHLD));
++	prnt = kebab_rpmh_read32(drv, KEBAB_RSC_PRNT_CHLD);
++	max_tcs = (prnt >> (KEBAB_RSC_TCS_SHIFT * 2u)) & KEBAB_RSC_TCS_MASK;
++	ncpt = (prnt >> KEBAB_RSC_NCPT_SHIFT) & KEBAB_RSC_NCPT_MASK;
++	printf("KEBAB RPMH: prnt_chld decode: drv-2 tcs %u, ncpt %u\n",
++	    max_tcs, ncpt);
++	if (max_tcs == 0 || max_tcs > KEBAB_RSC_TCS_TOTAL) {
++		max_tcs = KEBAB_RSC_TCS_TOTAL;
++	}
++	for (i = 0; i < max_tcs; i++) {
++		t = base + i * KEBAB_RSC_TCS_STRIDE;
++		control = kebab_rpmh_read32(t, KEBAB_RSC_CONTROL);
++		printf("KEBAB RPMH: tcs %u: wait 0x%08x control 0x%08x (amc_en %u amc_trig %u) status 0x%08x enable 0x%08x\n",
++		    i, kebab_rpmh_read32(t, KEBAB_RSC_CMD_WAIT), control,
++		    (control & KEBAB_RSC_AMC_ENABLE) != 0,
++		    (control & KEBAB_RSC_AMC_TRIGGER) != 0,
++		    kebab_rpmh_read32(t, KEBAB_RSC_STATUS),
++		    kebab_rpmh_read32(t, KEBAB_RSC_CMD_ENABLE));
++		/*
++		 * NCPT says how many command slots the hardware has; walk all
++		 * of them, not just the two this kernel happens to poke.
++		 */
++		for (c = 0; c < KEBAB_RSC_NCPT_MAX; c++) {
++			vm_offset_t slot = t + c * KEBAB_RSC_CMD_STRIDE;
++			uint32_t msgid = kebab_rpmh_read32(slot, KEBAB_RSC_CMD_MSGID);
++			uint32_t addr = kebab_rpmh_read32(slot, KEBAB_RSC_CMD_ADDR);
++			uint32_t data = kebab_rpmh_read32(slot, KEBAB_RSC_CMD_DATA);
++			uint32_t status = kebab_rpmh_read32(slot, KEBAB_RSC_CMD_STATUS);
++			uint32_t resp = kebab_rpmh_read32(slot, KEBAB_RSC_RESP_DATA);
++
++			if (msgid == 0 && addr == 0 && data == 0 &&
++			    status == 0 && resp == 0) {
++				continue;
++			}
++			printf("KEBAB RPMH: tcs %u slot %u: msgid 0x%08x addr 0x%08x data 0x%08x status 0x%08x resp 0x%08x\n",
++			    i, c, msgid, addr, data, status, resp);
++		}
++	}
++}
++
++static const char *
++kebab_vrm_status_name(kebab_rpmh_status status)
++{
++	switch (status) {
++	case KEBAB_RPMH_OK:                 return "OK";
++	case KEBAB_RPMH_ERR_ARGUMENT:       return "ERR_ARGUMENT";
++	case KEBAB_RPMH_ERR_RESOURCE:       return "ERR_RESOURCE";
++	case KEBAB_RPMH_ERR_ADDRESS:        return "ERR_ADDRESS";
++	case KEBAB_RPMH_ERR_VOLTAGE:        return "ERR_VOLTAGE";
++	case KEBAB_RPMH_ERR_COMMAND_DB:     return "ERR_COMMAND_DB";
++	case KEBAB_RPMH_ERR_DUPLICATE:      return "ERR_DUPLICATE";
++	case KEBAB_RPMH_ERR_TCS_BUSY:       return "ERR_TCS_BUSY";
++	case KEBAB_RPMH_ERR_TCS_STATE:      return "ERR_TCS_STATE";
++	case KEBAB_RPMH_ERR_NO_SINK:        return "ERR_NO_SINK";
++	case KEBAB_RPMH_ERR_SINK_FAILED:    return "ERR_SINK_FAILED";
++	case KEBAB_RPMH_ERR_NOT_ALLOWED:    return "ERR_NOT_ALLOWED";
++	case KEBAB_RPMH_PENDING:            return "PENDING";
++	case KEBAB_RPMH_ERR_TIMEOUT:        return "ERR_TIMEOUT";
++	case KEBAB_RPMH_ERR_RECLAIM:        return "ERR_RECLAIM";
++	}
++	return "UNKNOWN";
++}
++
++static const char *
++kebab_vrm_phase_name(kebab_tcs_phase phase)
++{
++	switch (phase) {
++	case KEBAB_TCS_PHASE_IDLE:                 return "IDLE";
++	case KEBAB_TCS_PHASE_VALIDATED:            return "VALIDATED";
++	case KEBAB_TCS_PHASE_ARMED:                return "ARMED";
++	case KEBAB_TCS_PHASE_TRIGGERED:            return "TRIGGERED";
++	case KEBAB_TCS_PHASE_COMPLETE:             return "COMPLETE";
++	case KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER:   return "FAILED_PRE_TRIGGER";
++	case KEBAB_TCS_PHASE_FAILED_POST_TRIGGER:  return "FAILED_POST_TRIGGER";
++	case KEBAB_TCS_PHASE_COMPLETE_UNCLEAN:     return "COMPLETE_UNCLEAN";
++	}
++	return "UNKNOWN";
++}
++
++/*
++ * The io the state machine talks to.  ctx is the TCS1 window; the offsets are
++ * the module's KEBAB_TCS_* constants, which are the same numbers the TCS uses
++ * (0x10 CMD_WAIT, 0x14 CONTROL, 0x18 STATUS, 0x1c CMD_ENABLE, 0x30..0x3c the
++ * slot registers, 0x40 RESP_DATA).  Bounding every access to one TCS window
++ * keeps a bad offset from becoming a read of the neighbouring TCS.
++ */
++static int
++kebab_vrm_rd(void *ctx, uint32_t off, uint32_t *val)
++{
++	vm_offset_t t = (vm_offset_t)ctx;
++
++	if (t == 0 || val == NULL || off + 4u > KEBAB_RSC_TCS_STRIDE) {
++		return -1;
++	}
++	*val = kebab_rpmh_read32(t, off);
++	return 0;
++}
++
++static int
++kebab_vrm_wr(void *ctx, uint32_t off, uint32_t val)
++{
++	vm_offset_t t = (vm_offset_t)ctx;
++
++	if (t == 0 || off + 4u > KEBAB_RSC_TCS_STRIDE) {
++		return -1;
++	}
++	kebab_rpmh_write32(t, off, val);
++	return 0;
++}
++
++/*
++ * The state machine does not sleep: it has a poll cap and, when a clock is
++ * present, a wall budget as well.  Feeding it the monotonic clock means a
++ * stalled or jumping one can only extend a wait to the cap, never past it.
++ */
++static uint64_t
++kebab_vrm_now_us(void *ctx)
++{
++	uint64_t ns = 0;
++
++	(void)ctx;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / 1000u;
++}
++
++/*
++ * One gate for both rails, parsed once.  Default off: an unattended boot never
++ * powers a rail, and VROMON printed from the panic loop only reads a boolean.
++ */
++bool
++kebab_spmi_vrm_writes_enabled(void)
++{
++	uint32_t enabled = 0;
++
++	if (!vrm.parsed) {
++		vrm.parsed = true;
++		vrm.gate = PE_parse_boot_argn("kebab_vrm_write", &enabled,
++		    sizeof(enabled)) && enabled != 0;
++		printf("KEBAB VRM: kebab_vrm_write=%u: RPMh rail writes %s\n",
++		    enabled, vrm.gate ? "ENABLED" : "disabled (default)");
++	}
++	return vrm.gate;
++}
++
++/*
++ * Map the drv-2 window and compute TCS1's address in it.  Called from
++ * kebab_spmi_init() when the gate is on, and from TCS? which has to be able to
++ * look whether or not a write was ever allowed.  Mapped once: a second call is
++ * a no-op, so a command can never remap over a live window.
++ */
++static bool
++kebab_vrm_map(void)
++{
++	if (vrm.tcs != 0) {
++		return true;
++	}
++	if (vrm.drv == 0) {
++		vrm.drv = ml_io_map(KEBAB_RSC_DRV2_PA, KEBAB_RSC_SIZE);
++		if (vrm.drv == 0) {
++			printf("KEBAB VRM: cannot map the drv-2 window at 0x%08x\n",
++			    KEBAB_RSC_DRV2_PA);
++			return false;
++		}
++	}
++	vrm.tcs = vrm.drv + KEBAB_RSC_TCS_OFF + 1u * KEBAB_RSC_TCS_STRIDE;
++	printf("KEBAB VRM: drv-2 0x%08x+0x%x -> tcs_base 0x%llx; TCS1 = tcs_base + 0x%x = 0x%llx (stride %u)\n",
++	    KEBAB_RSC_DRV2_PA, KEBAB_RSC_SIZE,
++	    (unsigned long long)(vrm.drv + KEBAB_RSC_TCS_OFF),
++	    1u * KEBAB_RSC_TCS_STRIDE, (unsigned long long)vrm.tcs,
++	    KEBAB_RSC_TCS_STRIDE);
++	return true;
++}
++
++/* Map the TCS1 window now, in normal context, so a command only reads a bool. */
++void
++kebab_spmi_vrm_init(void)
++{
++	if (vrm.tcs != 0 || !kebab_spmi_vrm_writes_enabled()) {
++		return;
++	}
++	if (!kebab_vrm_map()) {
++		printf("KEBAB VRM: VROMON will refuse: no window\n");
++		return;
++	}
++	printf("KEBAB VRM: write path ready, gated by kebab_vrm_write\n");
++}
++
++/*
++ * TCS?: the read-only state of the channel a send would use.  Two questions,
++ * both answered from registers only: is the channel idle, and is it clean (no
++ * completion left over from somebody else's command)?  A wedged or dirty
++ * channel is reported as such and never touched: the TCS may carry another
++ * execution environment's vote, so clearing it here could revoke a resource
++ * this kernel does not own.
++ */
++void
++kebab_tcs_report(void)
++{
++	vm_offset_t base, t, irq_en, irq_status, irq_clear;
++	uint32_t i, control, enable, wait, status;
++	bool wedged = false, dirty = false;
++
++	printf("KEBAB TCS: === read-only TCS dump, APPS RSC drv-2 ===\n");
++	if (!kebab_vrm_map()) {
++		printf("KEBAB TCS: FAIL: the drv-2 window is not mapped\n");
++		return;
++	}
++	base = vrm.drv + KEBAB_RSC_TCS_OFF;
++	irq_en = kebab_rpmh_read32(base, KEBAB_RSC_IRQ_ENABLE);
++	irq_status = kebab_rpmh_read32(base, KEBAB_RSC_IRQ_STATUS);
++	irq_clear = kebab_rpmh_read32(base, KEBAB_RSC_IRQ_CLEAR);
++	printf("KEBAB TCS: drv-2 0x%08x, tcs_base = drv + 0x%x = 0x%llx, stride %u\n",
++	    KEBAB_RSC_DRV2_PA, KEBAB_RSC_TCS_OFF, (unsigned long long)base,
++	    KEBAB_RSC_TCS_STRIDE);
++	printf("KEBAB TCS: rsc irq: enable[tcs_base+0x0] 0x%08x status[+0x4] 0x%08x clear[+0x8] 0x%08x\n",
++	    irq_en, irq_status, irq_clear);
++	for (i = 0; i < KEBAB_RSC_ACTIVE_TCS; i++) {
++		t = base + i * KEBAB_RSC_TCS_STRIDE;
++		control = kebab_rpmh_read32(t, KEBAB_RSC_CONTROL);
++		enable = kebab_rpmh_read32(t, KEBAB_RSC_CMD_ENABLE);
++		wait = kebab_rpmh_read32(t, KEBAB_RSC_CMD_WAIT);
++		status = kebab_rpmh_read32(t, KEBAB_RSC_CMD_STATUS);
++		printf("KEBAB TCS: tcs %u at 0x%llx: CONTROL[+0x%x] 0x%08x (AMC_ENABLE %u, AMC_TRIGGER %u) CMD_ENABLE[+0x%x] 0x%08x CMD_WAIT[+0x%x] 0x%08x CMD_STATUS[+0x%x] 0x%08x (ISSUED %u, COMPL %u)\n",
++		    i, (unsigned long long)t, KEBAB_RSC_CONTROL, control,
++		    (control & KEBAB_RSC_AMC_ENABLE) != 0,
++		    (control & KEBAB_RSC_AMC_TRIGGER) != 0,
++		    KEBAB_RSC_CMD_ENABLE, enable, KEBAB_RSC_CMD_WAIT, wait,
++		    KEBAB_RSC_CMD_STATUS, status,
++		    (status & KEBAB_RSC_CMD_ISSUED) != 0,
++		    (status & KEBAB_RSC_CMD_COMPL) != 0);
++		if ((status & KEBAB_RSC_CMD_ISSUED) != 0 &&
++		    (status & KEBAB_RSC_CMD_COMPL) == 0) {
++			wedged = true;
++		}
++		if (i == 1) {
++			/* The channel VROMON would use, judged on its own. */
++			if (enable != 0 || wait != 0 ||
++			    (control & KEBAB_RSC_AMC_TRIGGER) != 0 ||
++			    (status & KEBAB_RSC_CMD_ISSUED) != 0) {
++				wedged = true;
++			}
++			if ((status & KEBAB_RSC_CMD_COMPL) != 0) {
++				dirty = true;
++			}
++		}
++	}
++	if (wedged) {
++		printf("KEBAB TCS: VERDICT: TCS1 is NOT idle (a command is in flight or wedged); a kernel-side send must refuse\n");
++	} else if (dirty) {
++		printf("KEBAB TCS: VERDICT: TCS1 holds a leftover COMPL; the state machine refuses it instead of reading it as ours\n");
++	} else {
++		printf("KEBAB TCS: VERDICT: TCS1 is idle and clean; a kernel-side send is plausible\n");
++	}
++	printf("KEBAB TCS: done; no register was written, cleared or recovered\n");
++}
++
++/*
++ * Enable one rail.  This is the whole VRM sequence, and it is deliberately
++ * one rail per call: the console enables ldoa13, then verifies with PWR?, and
++ * only then enables ldoc1.  Nothing here retries, nothing here picks a
++ * different address on failure, and a rail that failed is never attempted
++ * again in the same boot.
++ */
++int
++kebab_spmi_vrm_enable(const char *rail)
++{
++	kebab_rpmh_cmd cmd;
++	kebab_rpmh_status encoded, sent;
++	kebab_tcs_io io;
++	uint32_t bit;
++	bool *done, *ok;
++
++	if (rail != NULL && strcmp(rail, "ldoa13") == 0) {
++		done = &vrm.ldoa13_done;
++		ok = &vrm.ldoa13_ok;
++	} else if (rail != NULL && strcmp(rail, "ldoc1") == 0) {
++		done = &vrm.ldoc1_done;
++		ok = &vrm.ldoc1_ok;
++	} else {
++		printf("KEBAB VRM: %s is not a rail this command may power; the whitelist is ldoa13 (VROMON) and ldoc1 (VROMON ldoc1), nothing sent\n",
++		    rail != NULL ? rail : "(no argument)");
++		return -1;
++	}
++	if (!kebab_spmi_vrm_writes_enabled()) {
++		printf("KEBAB VRM: kebab_vrm_write is off; refusing to send %s\n",
++		    rail);
++		return -1;
++	}
++	if (*done) {
++		printf("KEBAB VRM: %s was already attempted this boot (%s); not retried\n",
++		    rail, *ok ? "it completed" : "it failed");
++		return -1;
++	}
++	if (strcmp(rail, "ldoc1") == 0 && !vrm.ldoa13_ok) {
++		printf("KEBAB VRM: ldoc1 is the second rail: send VROMON, confirm ldoa13 with PWR?, then VROMON ldoc1\n");
++		return -1;
++	}
++	if (!kebab_vrm_map()) {
++		printf("KEBAB VRM: no TCS1 window; nothing sent\n");
++		return -1;
++	}
++
++	encoded = kebab_rpmh_encode_enable(rail, &cmd);
++	printf("KEBAB VRM: encode %s ENABLE -> %s msgid 0x%08x addr 0x%08x data 0x%08x\n",
++	    rail, kebab_vrm_status_name(encoded), cmd.msgid, cmd.addr, cmd.data);
++	if (encoded != KEBAB_RPMH_OK) {
++		printf("KEBAB VRM: the encoder refused; nothing sent\n");
++		return -1;
++	}
++	bit = kebab_rpmh_cmd_bit(&cmd);
++	if (bit == 0 || !kebab_rpmh_cmd_allowed(&cmd)) {
++		printf("KEBAB VRM: the whitelist refused the encoded command (slot 0x%x); nothing sent\n",
++		    bit);
++		return -1;
++	}
++	printf("KEBAB VRM: whitelist: WRITE_ACK to the ENABLE register of %s only, slot 0x%x\n",
++	    rail, bit);
++
++	io.rd = kebab_vrm_rd;
++	io.wr = kebab_vrm_wr;
++	io.now_us = kebab_vrm_now_us;
++	io.ctx = (void *)vrm.tcs;
++	kebab_rpmh_tcs_init_global(&vrm.channel, io);
++
++	*done = true;
++	sent = kebab_rpmh_tcs_send(&vrm.channel, &cmd);
++	*ok = sent == KEBAB_RPMH_OK;
++	printf("KEBAB VRM: send %s -> %s (%d)\n", rail,
++	    kebab_vrm_status_name(sent), (int)sent);
++	printf("KEBAB VRM: phase %s, CMD_STATUS 0x%08x (ISSUED %u, COMPL %u)\n",
++	    kebab_vrm_phase_name(vrm.channel.phase), vrm.channel.last_status,
++	    (vrm.channel.last_status & KEBAB_TCS_CMD_ISSUED) != 0,
++	    (vrm.channel.last_status & KEBAB_TCS_CMD_COMPL) != 0);
++	if (!*ok) {
++		printf("KEBAB VRM: %s did not complete; the channel is closed for this boot and the rail must not be assumed on\n",
++		    rail);
++		return -1;
++	}
++	printf("KEBAB VRM: %s ENABLE acknowledged by RPMh; confirm the rail with PWR? before the next step\n",
++	    rail);
++	return 0;
++}
++
++/*
++ * The two-rail power sequence for a boot that asked for it with
++ * kebab_touch_power=1.  It is the VROMON sequence with the console removed:
++ * read the enable, encode and send one ENABLE, wait for the TCS to complete,
++ * read the enable back, then the same for the second rail.  It calls
++ * kebab_spmi_vrm_enable() instead of re-implementing the send, so the encoder,
++ * the RPMh whitelist, the per-rail one-shot gate and the dead-channel rule are
++ * exactly the ones VROMON was measured through.
++ *
++ * Returns 0 only when both rails end at 0x80.  Any failure returns -1 and
++ * leaves the channel closed for the boot; there is no retry here, because a
++ * second attempt into a state machine that refused the first one is exactly
++ * what that gate exists to prevent.  The caller must not retry either.
++ */
++static int
++kebab_spmi_vrm_boot_power_unserialized(void)
++{
++	static const struct {
++		const char *rail;
++		const char *peripheral;
++	} order[2] = {
++		{ "ldoa13", "pm8150_l13" },
++		{ "ldoc1",  "pm8150a_l1"  },
++	};
++	uint32_t i;
++
++	printf("KEBAB VRM: === boot power: touch rails, one ENABLE each ===\n");
++	if (!kebab_spmi_vrm_writes_enabled()) {
++		printf("KEBAB VRM: boot power: kebab_vrm_write=0, so no rail may be commanded; touch stays unpowered\n");
++		return -1;
++	}
++	for (i = 0; i < 2; i++) {
++		uint8_t before = 0;
++		uint8_t after = 0;
++		int rc;
++
++		if (kebab_spmi_rail_enable_read_locked(order[i].rail,
++		    order[i].peripheral, &before) != 0) {
++			printf("KEBAB VRM: boot power: %s enable unreadable; nothing sent\n",
++			    order[i].rail);
++			return -1;
++		}
++		if (before == KEBAB_VRM_EN_ON) {
++			printf("KEBAB VRM: boot power: %s already on (EN 0x%02x), skipped\n",
++			    order[i].rail, before);
++			/*
++			 * ldoc1 is only allowed to follow a rail that is up.  A
++			 * skipped ldoa13 is up, so record that without claiming
++			 * a send: ldoa13_done stays false, so a later VROMON may
++			 * still spend the one-shot on it.
++			 */
++			if (i == 0) {
++				vrm.ldoa13_ok = true;
++			}
++			continue;
++		}
++		rc = kebab_spmi_vrm_enable(order[i].rail);
++		if (kebab_spmi_rail_enable_read_locked(order[i].rail,
++		    order[i].peripheral, &after) != 0) {
++			printf("KEBAB VRM: boot power: %s: the read-back failed; the rail must not be assumed on\n",
++			    order[i].rail);
++			return -1;
++		}
++		printf("KEBAB VRM: boot power: %s %s, phase %s, CMD_STATUS 0x%08x (ISSUED %u, COMPL %u), EN 0x%02x -> 0x%02x\n",
++		    order[i].rail, rc == 0 ? "COMPL" : "ERROR",
++		    kebab_vrm_phase_name(vrm.channel.phase),
++		    vrm.channel.last_status,
++		    (vrm.channel.last_status & KEBAB_TCS_CMD_ISSUED) != 0,
++		    (vrm.channel.last_status & KEBAB_TCS_CMD_COMPL) != 0,
++		    before, after);
++		if (rc != 0 || after != KEBAB_VRM_EN_ON) {
++			printf("KEBAB VRM: boot power: %s is not up; stopping here, the boot continues without touch\n",
++			    order[i].rail);
++			return -1;
++		}
++	}
++	printf("KEBAB VRM: boot power: ldoa13 and ldoc1 both read 0x80\n");
++	return 0;
++}
++
++int
++kebab_spmi_vrm_boot_power(void)
++{
++	kebab_spmi_bus_lock();
++	int result = kebab_spmi_vrm_boot_power_unserialized();
++	kebab_spmi_bus_unlock();
++	return result;
++}
++
++void
++kebab_rpmh_report(void)
++{
++	printf("KEBAB RPMH: === read-only discovery: cmd-db and drv-2 TCS ===\n");
++	kebab_rpmh_cmd_db();
++	kebab_rpmh_rsc();
++	printf("KEBAB RPMH: done; no register was written\n");
++}
++#endif /* KEBAB */
+--- a/bsd/dev/kebab_spmi.c
++++ b/bsd/dev/kebab_spmi.c
+@@ -1,1600 +1,18 @@
+-/*
+- * KEBAB SPMI: access to the SM8250 PMIC arbiter.
+- *
+- * The PMIC on this board is reachable only through the SPMI PMIC arbiter, and
+- * this kernel has no SPMI bus driver.  The restart-reason work needs the PMIC
+- * PON block: this file provides the arbiter version, the PPID -> APID mapping,
+- * observer reads of PMIC registers, and one gated masked write of the PON
+- * restart-reason register.
+- *
+- * Addresses and layout come from the device's own kona.dtsi and the vendor
+- * driver drivers/spmi/spmi-pmic-arb.c, not from another SoC:
+- *
+- *   core   0x0C440000  0x1100      version, APID mapping table
+- *   chnls  0x0C600000  0x2000000   read/write channels (one 4 KiB slice)
+- *   obsrvr 0x0E600000  0x100000    read-only observer channels
+- *   intr   0x0E700000  0x0A0000    interrupt controller (not used)
+- *   cnfg   0x0C40A000  0x26000     ownership table
+- *   qcom,ee = <0>, qcom,channel = <0>
+- *
+- * core, obsrvr and cnfg are mapped unconditionally.  chnls is 32 MiB and the
+- * kernel's io_map submap is 8 MiB in total (osfmk/arm/io_map.c), so only the
+- * 4 KiB read/write channel of the PON APID is mapped, and only when the write
+- * gate is on: chnls + 0x10000*apid = 0x0C6D0000 for APID 0x00d on this board.
+- * intr is interrupt-only and this driver has no interrupts.
+- *
+- * v5 layout:
+- *   - APID mapping register for APID n is core + 0x900 + 4*n; while that
+- *     offset is below the "core" resource size the register exists.  With the
+- *     DTS size 0x1100 that is 512 entries, APID 0..0x1FF.
+- *   - A mapping register holds PPID in bits 11:8 and the IRQ-owner bit in
+- *     bit 24.  The write execution environment of the same APID is the low
+- *     three bits of cnfg + 0x700 + 4*n.
+- *   - Several APIDs may map one PPID, one per EE; the walk prints every one
+- *     instead of taking the first, and a write requires write_ee == local EE,
+- *     exactly as pmic_arb_offset_v5() refuses one that is not.
+- *   - Observer address arithmetic is obsrvr + 0x10000*ee + 0x80*apid, which
+- *     is not the read/write arithmetic (chnls + 0x10000*apid).
+- *   - The read/write channel has the same CMD/STATUS/WDATA0/RDATA0 layout as
+- *     the observer; a single byte is written with PMIC_ARB_OP_EXT_WRITEL and
+- *     byte count 0, as pmic_arb_fmt_cmd_v2() encodes it.
+- *
+- * Everything that writes a PMIC register is gated by the boot argument
+- * kebab_pon_write, default off.  The PON restart-reason semantics are from the
+- * vendor's drivers/input/misc/qpnp-power-on.c and the DT binding
+- * include/dt-bindings/input/qcom,qpnp-power-on.h, not guessed:
+- *
+- *   SOFT_RB_SPARE            0x88F
+- *   Gen2 reason field        mask GENMASK(7,1) = 0xFE, value reason << 1
+- *   PON_RESTART_REASON_BOOTLOADER = 0x02, so the field value is 0x04
++/* Boot orchestration only. The arbiter owns mappings and transactions;
++ * PON/PMIC keys/rail-read clients own device policy. RPMh has its own RSC
++ * transport and the original tested TCS core. Legacy boot arguments remain.
+  */
+ #if defined(KEBAB)
+-
+-/*
+- * The RPMh VRM module is compiled in two worlds.  The host tests include
+- * package/KebabRpmhVrm.h as a plain C header; the kernel includes the same
+- * file with this define set, which selects <sys/types.h> plus
+- * <libkern/libkern.h> instead of the host headers.  bsd/dev/kebab_rpmh_vrm.c
+- * is that module, kept byte-identical by scripts/sync-rpmh-vrm.py.
+- */
+-#define KEBAB_RPMH_KERNEL 1
+-
+-#include <sys/param.h>
+-#include <sys/systm.h>
+-#include <kern/clock.h>
+-#include <kern/locks.h>
+-#include <mach/boolean.h>
+-#include <pexpert/pexpert.h>
+-#include <vm/pmap.h>
+-#include <vm/vm_kern.h>
+-
+-/* osfmk/arm64/machine_routines.c; the header declaration is guarded out. */
+-extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+-
+-/* The tested encoder, whitelist and TCS state machine (kebab_rpmh_vrm.c). */
+-#include "kebab_rpmh_vrm.h"
+-
+-/*
+- * bsd/dev/kebab_usb.c.  The reset path has to push the diagnostic lines out
+- * before the PMIC is allowed to reset the SoC, and the console owns that ring.
+- */
+-extern void kebab_usb_log_flush(void);
+-
+-/*
+- * bsd/dev/kebab_usb.c calls these two and carries its own extern
+- * declarations for them; repeating the prototypes here makes the
+- * definitions below checked against a declaration.
+- */
+-bool kebab_spmi_pon_writes_enabled(void);
+-int kebab_spmi_pon_reason_write(void);
+-/* bsd/dev/kebab_keys.c reads its four key bytes through this file. */
+-int kebab_spmi_keys_sample(uint8_t raw[4]);
+-int kebab_spmi_keys_config(uint8_t gpio6[3], uint8_t gpio7[3]);
+-
+-/* bsd/dev/kebab_usb.c: VROMON, gated by kebab_vrm_write; TCS? is read-only. */
+-bool kebab_spmi_vrm_writes_enabled(void);
+-int kebab_spmi_vrm_enable(const char *rail);
+-void kebab_spmi_vrm_init(void);
+-void kebab_tcs_report(void);
+-
+-/* Normal callers share arbiter command/data registers. Panic recovery uses
+- * kebab_spmi_pon_reason_write() directly and must never acquire this mutex. */
+-static LCK_GRP_DECLARE(kebab_spmi_normal_group, "kebab_spmi_normal");
+-static LCK_MTX_DECLARE(kebab_spmi_normal_lock, &kebab_spmi_normal_group);
+-int kebab_spmi_pon_reason_write_normal(void);
+-void kebab_spmi_test_panic_lock(void);
+-
+ #include "kebab_spmi_bus.h"
+-
+-/* ---------------------------------------------------------------- helpers */
+-
+-
+-/*
+- * One gate for every PMIC write in this file.  Parsed once, in kebab_spmi_init()
+- * at boot, so a command running from the panic loop only reads a boolean.
+- * Default off: an unmodified boot never writes a PMIC register.
+- */
+-bool
+-kebab_spmi_pon_writes_enabled(void)
+-{
+-	uint32_t enabled = 0, verbose = 0;
+-
+-	if (!spmi.write_gate_parsed) {
+-		spmi.write_gate_parsed = true;
+-		spmi.write_gate = PE_parse_boot_argn("kebab_pon_write", &enabled,
+-		    sizeof(enabled)) && enabled != 0;
+-		spmi.verbose = PE_parse_boot_argn("kebab_pon_verbose", &verbose,
+-		    sizeof(verbose)) && verbose != 0;
+-		printf("KEBAB SPMI: kebab_pon_write=%u: PMIC writes %s",
+-		    enabled, spmi.write_gate ? "ENABLED" : "disabled (default)");
+-		if (spmi.verbose) {
+-			printf(", kebab_pon_verbose=1: raw register traffic shown");
+-		}
+-		printf("\n");
+-	}
+-	return spmi.write_gate;
+-}
+-
+-/*
+- * The vendor driver selects the layout by threshold, not by an exact value:
+- * v1 below 0x20010000, v2 below 0x30000000, v3/v4 below 0x50000000, v5 at or
+- * above it.  Only v5's mapping table and observer arithmetic are implemented
+- * here; anything else is reported as identified but unsupported.
+- */
+-
+-
+-/*
+- * A register that reads back as all-zeroes or all-ones is not a version this
+- * driver can identify: 0xFFFFFFFF would otherwise satisfy the v5 threshold
+- * and send the walk into an unclocked or absent block.  Fail closed.
+- */
+-
+-
+-/* -------------------------------------------------------------- mapping walk */
+-
+-/*
+- * Walk the v5 APID table for one PPID.  Up to max matches are returned with
+- * their raw mapping and ownership registers; the caller prints them.  The
+- * total number of non-zero mapping registers seen is left in the file-scope
+- * kebab_spmi_nonzero, and the return value is the full match count even when
+- * it exceeds max_matches, so the report can state how much it covered.
+- *
+- * No per-entry table is printed: one SPMI? report has to fit the console log
+- * ring (16 KiB), and a full dump of the populated APIDs does not.  The three
+- * numbers the report prints (entries scanned, non-zero mappings, matches) are
+- * what make a short capture distinguishable from a truncated one.
+- *
+- * The loop bound comes from the "core" resource size, exactly as the vendor
+- * driver bounds pmic_arb_read_apid_map_v5(); the ownership read is bounded by
+- * the "cnfg" resource size.  No register outside those resources is touched.
+- */
+-
+-
+-static void
+-kebab_spmi_match_line(const struct kebab_spmi_match *m)
+-{
+-	printf("KEBAB SPMI: PPID 0x%03x APID 0x%03x map[core+0x%03x]=0x%08x own[cnfg+0x%03x]=0x%08x -> write_ee 0x%x irq_owner %u irq_ee 0x%x%s\n",
+-	    m->ppid, m->apid, KEBAB_SPMI_APID_MAP + 4u * m->apid, m->map_raw,
+-	    KEBAB_SPMI_OWNERSHIP + 4u * m->apid, m->own_raw, m->write_ee,
+-	    m->irq_owner, m->irq_ee,
+-	    m->write_ee == KEBAB_SPMI_EE ? " (owned by this EE)" : "");
+-}
+-
+-/*
+- * The APID the local EE may write the PON block through.  Several APIDs can
+- * map PPID 0x008 (one per execution environment); only the one whose
+- * ownership register says write_ee == this EE is usable, which is the same
+- * test pmic_arb_offset_v5() applies to a read/write channel.  Refusing here
+- * keeps every later write from being a permission experiment.
+- */
+-static int
+-kebab_spmi_pon_apid(uint32_t *apid_out)
+-{
+-	struct kebab_spmi_match matches[8];
+-	uint32_t count, i;
+-
+-	count = kebab_spmi_scan(KEBAB_SPMI_PON_PPID, matches, 8);
+-	if (count == 0) {
+-		printf("KEBAB SPMI: no APID maps PPID 0x%03x; no PON write is possible\n",
+-		    KEBAB_SPMI_PON_PPID);
+-		return -1;
+-	}
+-	if (count > 8) {
+-		count = 8;
+-	}
+-	for (i = 0; i < count; i++) {
+-		if (matches[i].write_ee == KEBAB_SPMI_EE) {
+-			*apid_out = matches[i].apid;
+-			if (spmi.verbose) {
+-				printf("KEBAB SPMI: PON write APID 0x%03x, write_ee 0x%x (this EE); chnls slice 0x%08x\n",
+-				    matches[i].apid, matches[i].write_ee,
+-				    KEBAB_SPMI_CHNLS_PA + 0x10000u * matches[i].apid);
+-			}
+-			return 0;
+-		}
+-	}
+-	printf("KEBAB SPMI: PPID 0x%03x has %u APID(s), none with write_ee %u; refusing every PON write\n",
+-	    KEBAB_SPMI_PON_PPID, count, KEBAB_SPMI_EE);
+-	return -1;
+-}
+-
+-/*
+- * The observer APID for one PPID, remembered across polls.  The keys driver
+- * reads three peripherals about sixty times a second; walking the 512-entry
+- * mapping table for every sample would be most of the work.  The mapping
+- * register is still re-read by kebab_spmi_obs_read_ex() for every transfer, so
+- * a stale cached APID cannot silently become a read of another peripheral: the
+- * transfer is refused and the caller drops the entry.
+- *
+- * A read does not need channel ownership; the observer path is available for
+- * every mapped PPID.  When several APIDs map one PPID, the one owned by this
+- * EE is preferred only so the answer matches what a write would use.
+- */
+-
+-
+-/* ---------------------------------------------------------- observer reads */
+-
+-/*
+- * Read one PMIC register through the observer channel.  The command register
+- * is written, status is polled with a bounded counter, and the data register
+- * is read only after DONE without FAILURE/DENIED/DROPPED.
+- *
+- * The APID is re-checked against the PPID derived from sid/addr, so a stale
+- * or wrong match cannot silently become a read of a different peripheral.
+- * The success line is raw register traffic and is printed only when the
+- * caller asks for it; failures print unless the caller is a poll that has its
+- * own rate-limited error line (the keys driver).
+- */
+-
+-
+-/* The PON? report always shows the raw reads; the write path does not. */
+-static int
+-kebab_spmi_obs_read(uint32_t apid, uint32_t sid, uint32_t addr,
+-    uint32_t attempt, uint8_t *value)
+-{
+-	return kebab_spmi_obs_read_ex(apid, sid, addr, attempt, true, false,
+-	    value);
+-}
+-
+-/* -------------------------------------------------- read/write PON registers */
+-
+-static int
+-kebab_spmi_pon_read(uint32_t apid, uint32_t addr, uint8_t *value)
+-{
+-	return kebab_spmi_obs_read_ex(apid, KEBAB_SPMI_PON_SID, addr,
+-	    ++spmi.read_attempt, spmi.verbose, false, value);
+-}
+-
+-/* ------------------------------------------------------- key registers */
+-
+-/*
+- * One look at the four PM8150 key bytes for bsd/dev/kebab_keys.c.  All four
+- * reads must complete; a partial sample is not a key state.  raw[] is filled
+- * only on success, and the caller treats a failure as "no observation".
+- *
+- * This is a read-only path: the only write is the observer command that asks
+- * the arbiter for a transfer.  No PMIC register is changed.
+- */
+-static int
+-kebab_spmi_keys_sample_unserialized(uint8_t raw[4])
+-{
+-	static const uint32_t addr[4] = {
+-		KEBAB_SPMI_KEYS_PON_RT,
+-		KEBAB_SPMI_KEYS_GPIO6_RT,
+-		KEBAB_SPMI_KEYS_GPIO7_RT,
+-		KEBAB_SPMI_KEYS_GPIO6_TYPE,
+-	};
+-	uint8_t value[4] = { 0, 0, 0, 0 };
+-	uint32_t i;
+-
+-	if (raw == NULL) {
+-		return -1;
+-	}
+-	raw[0] = 0;
+-	raw[1] = 0;
+-	raw[2] = 0;
+-	raw[3] = 0;
+-	if (!spmi.mapped || !kebab_spmi_version_known(spmi.version) ||
+-	    spmi.version < 0x50000000u) {
+-		return -1;
+-	}
+-	for (i = 0; i < 4; i++) {
+-		uint32_t ppid = (KEBAB_SPMI_PON_SID << 8) | (addr[i] >> 8);
+-		uint32_t apid;
+-
+-		if (kebab_spmi_reader(ppid, &apid) != 0) {
+-			if (spmi.verbose) {
+-				printf("KEBAB SPMI: keys: no APID maps PPID 0x%03x (register 0x%04x)\n",
+-				    ppid, addr[i]);
+-			}
+-			return -1;
+-		}
+-		if (kebab_spmi_obs_read_ex(apid, KEBAB_SPMI_PON_SID, addr[i],
+-		    ++spmi.read_attempt, spmi.verbose, true, &value[i]) != 0) {
+-			kebab_spmi_reader_forget(ppid);
+-			return -1;
+-		}
+-	}
+-	memcpy(raw, value, sizeof(value));
+-	return 0;
+-}
+-
+-/*
+- * The pin setup of the two volume-key inputs, read once by
+- * bsd/dev/kebab_keys.c before it starts polling.  Each array is
+- * { mode, pull, enable } from the vendor pinctrl registers 0x40, 0x42 and 0x46
+- * inside the GPIO's 0x100-byte page.
+- *
+- * The vendor device tree asks for an enabled input with a pull-up
+- * (input-enable, bias-pull-up, power-source 1).  This kernel never writes the
+- * PMIC, so the state has to come from the boot firmware; the keys driver
+- * reports these bytes and withholds a key whose pin is not configured that
+- * way, instead of turning a disabled input into a permanent press.
+- */
+-static int
+-kebab_spmi_keys_config_unserialized(uint8_t gpio6[3], uint8_t gpio7[3])
+-{
+-	static const uint32_t addr[6] = {
+-		KEBAB_SPMI_KEYS_GPIO6_MODE,
+-		KEBAB_SPMI_KEYS_GPIO6_PULL,
+-		KEBAB_SPMI_KEYS_GPIO6_EN,
+-		KEBAB_SPMI_KEYS_GPIO7_MODE,
+-		KEBAB_SPMI_KEYS_GPIO7_PULL,
+-		KEBAB_SPMI_KEYS_GPIO7_EN,
+-	};
+-	uint8_t value[6] = { 0, 0, 0, 0, 0, 0 };
+-	uint32_t i;
+-
+-	if (gpio6 == NULL || gpio7 == NULL) {
+-		return -1;
+-	}
+-	if (!spmi.mapped || !kebab_spmi_version_known(spmi.version) ||
+-	    spmi.version < 0x50000000u) {
+-		return -1;
+-	}
+-	for (i = 0; i < 6; i++) {
+-		uint32_t ppid = (KEBAB_SPMI_PON_SID << 8) | (addr[i] >> 8);
+-		uint32_t apid;
+-
+-		if (kebab_spmi_reader(ppid, &apid) != 0) {
+-			return -1;
+-		}
+-		if (kebab_spmi_obs_read_ex(apid, KEBAB_SPMI_PON_SID, addr[i],
+-		    ++spmi.read_attempt, spmi.verbose, true, &value[i]) != 0) {
+-			kebab_spmi_reader_forget(ppid);
+-			return -1;
+-		}
+-	}
+-	memcpy(gpio6, value, 3);
+-	memcpy(gpio7, value + 3, 3);
+-	return 0;
+-}
+-
+-/*
+- * One PMIC byte write through the read/write channel slice mapped for apid.
+- * The mapping and ownership registers are re-read here, not trusted from the
+- * caller: a write is only issued when the APID still maps the PPID derived
+- * from sid/addr and its write_ee is this EE.
+- *
+- * The caller must have read the old register value through the observer
+- * first; this primitive does not do the read-modify-write by itself.
+- */
+-
+-
+-/*
+- * Gen2 restart reason: qpnp_pon_set_restart_reason() does a masked write of
+- * GENMASK(7,1) with (reason << 1); reason 0x02 is PON_RESTART_REASON_BOOTLOADER,
+- * so the target field value is 0x04 and bit 0 is outside the mask and must
+- * survive unchanged.
+- *
+- * The old value is read first and printed; the write is issued only after the
+- * APID ownership check inside kebab_spmi_rw_write(); the register is then read
+- * back (bounded retries) and both the target bits and the untouched bits are
+- * checked before this returns success.
+- */
+-int
+-kebab_spmi_pon_reason_write(void)
+-{
+-	uint32_t apid, i, old, expect, readback = 0;
+-	uint8_t value = 0;
+-	bool readback_ok = false;
+-	int rc;
+-
+-	if (!kebab_spmi_pon_writes_enabled()) {
+-		printf("KEBAB PON: kebab_pon_write is off; refusing to write SOFT_RB_SPARE\n");
+-		return -1;
+-	}
+-	if (kebab_spmi_pon_apid(&apid) != 0) {
+-		return -1;
+-	}
+-	if (kebab_spmi_pon_read(apid, KEBAB_SPMI_PON_SPARE, &value) != 0) {
+-		printf("KEBAB PON: could not read SOFT_RB_SPARE 0x%04x; not writing it\n",
+-		    KEBAB_SPMI_PON_SPARE);
+-		return -1;
+-	}
+-	old = value;
+-	expect = (old & ~KEBAB_SPMI_PON_REASON_MASK) |
+-	    KEBAB_SPMI_PON_REASON_FIELD;
+-	printf("KEBAB PON: restart reason: SOFT_RB_SPARE 0x%02x -> 0x%02x (mask 0x%02x, PON_RESTART_REASON_BOOTLOADER 0x%02x << 1 = 0x%02x)\n",
+-	    old, expect, KEBAB_SPMI_PON_REASON_MASK,
+-	    KEBAB_SPMI_PON_REASON_BOOTLOADER, KEBAB_SPMI_PON_REASON_FIELD);
+-	if (expect == old) {
+-		printf("KEBAB PON: the field already held the bootloader value; writing it again to prove the path\n");
+-	}
+-	rc = kebab_spmi_rw_write(apid, KEBAB_SPMI_PON_SID, KEBAB_SPMI_PON_SPARE,
+-	    (uint8_t)expect);
+-	if (rc != 0) {
+-		printf("KEBAB PON: SOFT_RB_SPARE write failed; nothing verified\n");
+-		return -1;
+-	}
+-
+-	for (i = 0; i < 20u; i++) {
+-		if (kebab_spmi_pon_read(apid, KEBAB_SPMI_PON_SPARE, &value) == 0) {
+-			readback = value;
+-			readback_ok = true;
+-			if (value == expect) {
+-				break;
+-			}
+-		}
+-		delay(1000);
+-	}
+-	if (!readback_ok) {
+-		printf("KEBAB PON: FAIL: the write completed but SOFT_RB_SPARE could not be read back\n");
+-		return -1;
+-	}
+-	if ((readback & KEBAB_SPMI_PON_REASON_MASK) != KEBAB_SPMI_PON_REASON_FIELD) {
+-		printf("KEBAB PON: FAIL: read back 0x%02x, reason field is 0x%02x, not 0x%02x\n",
+-		    readback, readback & KEBAB_SPMI_PON_REASON_MASK,
+-		    KEBAB_SPMI_PON_REASON_FIELD);
+-		return -1;
+-	}
+-	if ((readback & ~KEBAB_SPMI_PON_REASON_MASK) !=
+-	    (old & ~KEBAB_SPMI_PON_REASON_MASK)) {
+-		printf("KEBAB PON: FAIL: bit 0 changed 0x%x -> 0x%x although it is outside mask 0x%02x\n",
+-		    old & 1u, readback & 1u, KEBAB_SPMI_PON_REASON_MASK);
+-		return -1;
+-	}
+-	printf("KEBAB PON: restart reason verified: read back 0x%02x, field 0x%02x, bit 0 unchanged 0x%x\n",
+-	    readback, readback & KEBAB_SPMI_PON_REASON_MASK, readback & 1u);
+-	return 0;
+-}
+-
+-/* ------------------------------------------------------------------- probe */
+-
++#include "kebab_spmi_clients.h"
+ void
+ kebab_spmi_init(void)
+ {
+-	if (spmi.attempted) {
+-		return;
+-	}
+-	spmi.attempted = true;
+-
+-	kebab_spmi_bus_map_arbiter();
+-	if (spmi.core == 0 || spmi.obsrvr == 0 || spmi.cnfg == 0) {
+-		printf("KEBAB SPMI: cannot map the arbiter (core 0x%x obsrvr 0x%x cnfg 0x%x); SPMI? will report the failure\n",
+-		    KEBAB_SPMI_CORE_PA, KEBAB_SPMI_OBSRV_PA, KEBAB_SPMI_CNFG_PA);
+-		return;
+-	}
+-	spmi.mapped = true;
+-
+-	uint32_t version = kebab_spmi_rd(spmi.core, KEBAB_SPMI_VERSION);
+-	spmi.version = version;
+-	printf("KEBAB SPMI: arbiter core 0x%08x+0x%x obsrvr 0x%08x+0x%x cnfg 0x%08x+0x%x (ee %u channel %u)\n",
+-	    KEBAB_SPMI_CORE_PA, KEBAB_SPMI_CORE_SIZE, KEBAB_SPMI_OBSRV_PA,
+-	    KEBAB_SPMI_OBSRV_SIZE, KEBAB_SPMI_CNFG_PA, KEBAB_SPMI_CNFG_SIZE,
+-	    KEBAB_SPMI_EE, KEBAB_SPMI_CHANNEL);
+-	printf("KEBAB SPMI: version core+0x0000 = 0x%08x (%s); intr 0x%08x not mapped\n",
+-	    version, kebab_spmi_version_known(version) ? kebab_spmi_family(version) : "unrecognised",
+-	    0x0e700000u);
+-	/*
+-	 * The RPMh VRM path is independent of the SPMI write gate and of the
+-	 * arbiter version: it reaches the RSC, not a PMIC.  Map its TCS1
+-	 * window here, before the early return below, so a boot with only
+-	 * kebab_vrm_write set can still use VROMON.
+-	 */
++	static bool attempted;
++	if (attempted) { return; }
++	attempted = true;
++	if (!kebab_spmi_bus_init()) { return; }
+ 	kebab_spmi_vrm_init();
+-	if (!kebab_spmi_pon_writes_enabled()) {
+-		printf("KEBAB SPMI: chnls 0x%08x not mapped; the write path is off\n",
+-		    KEBAB_SPMI_CHNLS_PA);
+-		return;
+-	}
+-	/*
+-	 * Map the write resources here, in normal context, for the same reason
+-	 * IMEM is mapped at start-up: a console command can run from the panic
+-	 * loop, where ml_io_map cannot allocate.
+-	 */
+-	if (kebab_spmi_version_known(version) && version >= 0x50000000u) {
+-		uint32_t apid;
+-		if (kebab_spmi_pon_apid(&apid) == 0) {
+-			vm_offset_t slice = KEBAB_SPMI_CHNLS_PA + 0x10000u * apid;
+-			spmi.chnl = kebab_spmi_bus_map_channel(apid);
+-			if (spmi.chnl != 0) {
+-				spmi.chnl_apid = apid;
+-				spmi.chnl_mapped = true;
+-				printf("KEBAB SPMI: write path ready: APID 0x%03x, 4 KiB chnls slice 0x%08lx mapped\n",
+-				    apid, (unsigned long)slice);
+-			} else {
+-				printf("KEBAB SPMI: cannot map the chnls slice 0x%08lx; the write path will refuse\n",
+-				    (unsigned long)slice);
+-			}
+-		}
+-	} else {
+-		printf("KEBAB SPMI: arbiter is not v5; the write path is not implemented for it\n");
+-	}
++	kebab_spmi_pon_prepare();
+ }
+-
+-/*
+- * SPMI-1 and SPMI-2.  The version is read again here so the console answer is
+- * a measurement, not a replay of the boot-time value.
+- */
+-/* --------------------------------------------------- touch rail reads */
+-
+-/*
+- * The S3908 node names two rails that RPMh owns; this file cannot command
+- * RPMh, but it can read the PMIC peripherals through the observer channel,
+- * which needs no channel ownership and issues no peripheral write.
+- *
+- * The SPMI bus on this board carries PM8150 on SID 0/1, PM8150B on 2/3,
+- * PM8150L on 4/5 and PMK8002 on 6/7.  The mapping survey below showed which
+- * USID actually exposes each LDO page: 0x4c00 is mapped on SID 1 (not 0) and
+- * 0x4000 on SID 5 (not 4), with SID 2 showing its own 0x4000 (PM8150B).  The
+- * table uses those measured USIDs; the type/subtype answer is what finally
+- * decides whether the peripheral is the expected LDO.  Lead with identity, and
+- * only read the control registers after it is stable and not empty.
+- */
+-struct kebab_spmi_power {
+-	const char *name;
+-	uint32_t    sid;
+-	uint32_t    base;
+-};
+-
+-static const struct kebab_spmi_power kebab_spmi_power_targets[] = {
+-	{ "pm8150_l13", 1, 0x4c00u },
+-	{ "pm8150a_l1", 5, 0x4000u },
+-};
+-
+-static int
+-kebab_spmi_power_read(uint32_t apid, uint32_t sid, uint32_t addr,
+-    const char *what, uint8_t *out)
+-{
+-	uint8_t a = 0, b = 0;
+-
+-	if (kebab_spmi_obs_read_ex(apid, sid, addr, 1, false, false, &a) != 0 ||
+-	    kebab_spmi_obs_read_ex(apid, sid, addr, 2, false, false, &b) != 0) {
+-		printf("KEBAB SPMI: PWR: %s 0x%04x read failed\n", what, addr);
+-		return -1;
+-	}
+-	if (a != b) {
+-		printf("KEBAB SPMI: PWR: %s 0x%04x unstable 0x%02x/0x%02x\n",
+-		    what, addr, a, b);
+-		return -1;
+-	}
+-	*out = a;
+-	return 0;
+-}
+-
+-static void
+-kebab_spmi_power_one(const struct kebab_spmi_power *t)
+-{
+-	struct kebab_spmi_match matches[8];
+-	uint32_t ppid = (t->sid << 8) | (t->base >> 8);
+-	uint32_t count, i, apid = 0;
+-	uint8_t type = 0, subtype = 0, enable = 0, range = 0, set = 0;
+-
+-	printf("KEBAB SPMI: PWR: %s: SID %u base 0x%04x PPID 0x%03x\n",
+-	    t->name, t->sid, t->base, ppid);
+-	count = kebab_spmi_scan(ppid, matches, 8);
+-	if (count == 0) {
+-		printf("KEBAB SPMI: PWR: %s: no APID maps PPID 0x%03x; the SID candidate is wrong or the peripheral is absent\n",
+-		    t->name, ppid);
+-		return;
+-	}
+-	if (count > 8) {
+-		count = 8;
+-	}
+-	for (i = 0; i < count; i++) {
+-		printf("KEBAB SPMI: PWR: %s: APID 0x%03x write_ee 0x%x irq_owner %u\n",
+-		    t->name, matches[i].apid, matches[i].write_ee,
+-		    matches[i].irq_owner);
+-	}
+-	apid = matches[0].apid;
+-	if (kebab_spmi_power_read(apid, t->sid, t->base + 0x04u, "type", &type) != 0 ||
+-	    kebab_spmi_power_read(apid, t->sid, t->base + 0x05u, "subtype",
+-	    &subtype) != 0) {
+-		printf("KEBAB SPMI: PWR: %s: identity unreadable; control registers not read\n",
+-		    t->name);
+-		return;
+-	}
+-	printf("KEBAB SPMI: PWR: %s: type 0x%02x subtype 0x%02x\n",
+-	    t->name, type, subtype);
+-	if (type == 0x00u || type == 0xffu) {
+-		printf("KEBAB SPMI: PWR: %s: identity is empty (0x%02x); stopping\n",
+-		    t->name, type);
+-		return;
+-	}
+-	if (kebab_spmi_power_read(apid, t->sid, t->base + 0x46u, "enable",
+-	    &enable) != 0 ||
+-	    kebab_spmi_power_read(apid, t->sid, t->base + 0x40u, "range",
+-	    &range) != 0 ||
+-	    kebab_spmi_power_read(apid, t->sid, t->base + 0x41u, "set", &set) != 0) {
+-		printf("KEBAB SPMI: PWR: %s: control registers unreadable\n", t->name);
+-		return;
+-	}
+-	printf("KEBAB SPMI: PWR: %s: enable 0x%02x (bit7 %u), range 0x%02x, set 0x%02x\n",
+-	    t->name, enable, (enable >> 7) & 1u, range, set);
+-}
+-
+-
+-/*
+- * The two candidates above can be "not mapped" for two very different
+- * reasons: the SID is wrong, or the AP's SPMI channel genuinely has no
+- * peripheral there.  This survey answers that without touching a peripheral:
+- * it walks the same 512-entry APID table SPMI-2 uses, counts mappings per
+- * SID, and looks for any PPID whose peripheral address falls in the two LDO
+- * pages.
+- */
+-static void
+-kebab_spmi_power_map_summary(void)
+-{
+-	uint32_t apid, i, ppid, sid;
+-	uint32_t per_sid[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+-	uint32_t page_hits = 0;
+-
+-	for (apid = 0; apid < KEBAB_SPMI_APID_MAX; apid++) {
+-		uint32_t map = kebab_spmi_rd(spmi.core,
+-		    KEBAB_SPMI_APID_MAP + 4u * apid);
+-		if (map == 0) {
+-			continue;
+-		}
+-		ppid = (map >> 8) & 0xfffu;
+-		sid = ppid >> 8;
+-		if (sid < 8) {
+-			per_sid[sid]++;
+-		}
+-	}
+-	printf("KEBAB SPMI: PWR: mappings per SID:");
+-	for (i = 0; i < 8; i++) {
+-		printf(" %u:%u", i, per_sid[i]);
+-	}
+-	printf("\n");
+-
+-	for (sid = 0; sid < 8; sid++) {
+-		static const uint32_t pages[] = { 0x40u, 0x4cu };
+-		for (i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
+-			ppid = (sid << 8) | pages[i];
+-			struct kebab_spmi_match hit[1];
+-
+-			if (kebab_spmi_scan(ppid, hit, 1) > 0) {
+-				printf("KEBAB SPMI: PWR: mapping present for SID %u base 0x%04x (PPID 0x%03x)\n",
+-				    sid, pages[i] << 8, ppid);
+-				page_hits++;
+-			}
+-		}
+-	}
+-	if (page_hits == 0) {
+-		printf("KEBAB SPMI: PWR: no SID 0..7 maps an LDO page at 0x4000/0x4c00; the AP SPMI channel cannot reach these rails\n");
+-	}
+-}
+-
+-/* ------------------------------------------- RPMh discovery (read only) */
+-
+-/*
+- * The rails the S3908 needs are RPMh VRM resources.  Before any request can
+- * be formed, two things have to be read, never written:
+- *
+- *   - the command DB, a 128 KiB reserved region at 0x80860000 whose entries
+- *     map a resource name to the address a VRM command must carry;
+- *   - the APPS RSC's drv-2 window at 0x18220000, where the active TCS slots
+- *     live at tcs-offset 0xd00 with a 672-byte stride.
+- *
+- * Layouts are from the vendor cmd-db.c and rpmh-rsc.c.  Every offset is
+- * bounds-checked against the mapped window before it is read, and nothing
+- * below writes a register.
+- */
+-#define KEBAB_CMD_DB_PA         0x80860000u
+-#define KEBAB_CMD_DB_SIZE       0x00020000u
+-#define KEBAB_CMD_DB_HEADER     144u    /* 4 + 4 + 8*16 + 4 + 4 */
+-#define KEBAB_CMD_DB_SLAVES     8u
+-#define KEBAB_CMD_DB_ENTRY      24u
+-
+-#define KEBAB_RSC_DRV2_PA       0x18220000u
+-#define KEBAB_RSC_SIZE          0x00010000u
+-#define KEBAB_RSC_TCS_OFF       0x00000d00u
+-#define KEBAB_RSC_TCS_STRIDE    672u
+-#define KEBAB_RSC_CMD_STRIDE    20u
+-#define KEBAB_RSC_ACTIVE_TCS    2u
+-#define KEBAB_RSC_TCS_TOTAL     8u      /* prnt_chld says 8; the control TCS is not in this array */
+-#define KEBAB_RSC_CMD_WAIT      0x10u
+-#define KEBAB_RSC_RESP_DATA     0x40u
+-#define KEBAB_RSC_IRQ_CLEAR     0x08u
+-#define KEBAB_RSC_PRNT_CHLD     0x0cu
+-#define KEBAB_RSC_TCS_MASK      0x3fu
+-#define KEBAB_RSC_TCS_SHIFT     6u
+-#define KEBAB_RSC_NCPT_MASK     0x1fu
+-#define KEBAB_RSC_NCPT_SHIFT    27u
+-#define KEBAB_RSC_NCPT_MAX      16u
+-#define KEBAB_RSC_AMC_ENABLE    (1u << 16)
+-#define KEBAB_RSC_AMC_TRIGGER   (1u << 24)
+-#define KEBAB_RSC_CMD_ISSUED    (1u << 8)
+-#define KEBAB_RSC_CMD_COMPL     (1u << 16)
+-
+-#define KEBAB_RSC_IRQ_ENABLE    0x00u
+-#define KEBAB_RSC_IRQ_STATUS    0x04u
+-#define KEBAB_RSC_CONTROL       0x14u
+-#define KEBAB_RSC_STATUS        0x18u
+-#define KEBAB_RSC_CMD_ENABLE    0x1cu
+-#define KEBAB_RSC_CMD_MSGID     0x30u
+-#define KEBAB_RSC_CMD_ADDR      0x34u
+-#define KEBAB_RSC_CMD_DATA      0x38u
+-#define KEBAB_RSC_CMD_STATUS    0x3cu
+-
+-static void
+-kebab_rpmh_cmd_db(void)
+-{
+-	vm_offset_t db;
+-	uint32_t version, magic, i, j;
+-
+-	db = ml_io_map(KEBAB_CMD_DB_PA, KEBAB_CMD_DB_SIZE);
+-	if (db == 0) {
+-		printf("KEBAB RPMH: cannot map the command DB at 0x%08x\n",
+-		    KEBAB_CMD_DB_PA);
+-		return;
+-	}
+-	version = kebab_spmi_rd(db, 0);
+-	magic = kebab_spmi_rd(db, 4);
+-	printf("KEBAB RPMH: cmd-db 0x%08x+0x%x: version 0x%08x magic 0x%08x (%s)\n",
+-	    KEBAB_CMD_DB_PA, KEBAB_CMD_DB_SIZE, version, magic,
+-	    magic == 0x0c0330dbu ? "match" : "MISMATCH");
+-	if (magic != 0x0c0330dbu) {
+-		return;
+-	}
+-	for (i = 0; i < KEBAB_CMD_DB_SLAVES; i++) {
+-		uint32_t off = 8u + i * 16u;
+-		uint32_t w0 = kebab_spmi_rd(db, off);
+-		uint32_t w1 = kebab_spmi_rd(db, off + 4u);
+-		uint32_t slv = w0 & 0xffffu;
+-		uint32_t hdr_off = (w0 >> 16) & 0xffffu;
+-		uint32_t cnt = (w1 >> 16) & 0xffffu;
+-
+-		if (cnt == 0) {
+-			continue;
+-		}
+-		printf("KEBAB RPMH: slave %u: %u entries at +0x%x\n",
+-		    slv, cnt, hdr_off);
+-		/*
+-		 * Only bound the walk so a corrupt count cannot spin: the
+-		 * per-entry check below rejects anything past the window.  67
+-		 * entries is a normal VREG slave, so 64 was too tight.
+-		 */
+-		if (cnt > 1024u) {
+-			printf("KEBAB RPMH: slave %u: count %u is implausible; skipped\n",
+-			    slv, cnt);
+-			continue;
+-		}
+-		for (j = 0; j < cnt; j++) {
+-			uint32_t e = KEBAB_CMD_DB_HEADER + hdr_off +
+-			    j * KEBAB_CMD_DB_ENTRY;
+-			uint32_t w_id0, w_id1, addr, tail;
+-			char id[9];
+-
+-			if (e + KEBAB_CMD_DB_ENTRY > KEBAB_CMD_DB_SIZE) {
+-				printf("KEBAB RPMH: slave %u: entry %u outside the window; stopped\n",
+-				    slv, j);
+-				break;
+-			}
+-			w_id0 = kebab_spmi_rd(db, e);
+-			w_id1 = kebab_spmi_rd(db, e + 4u);
+-			addr = kebab_spmi_rd(db, e + 16u);
+-			tail = kebab_spmi_rd(db, e + 20u);
+-			memcpy(id, &w_id0, 4);
+-			memcpy(id + 4, &w_id1, 4);
+-			id[8] = 0;
+-			if (strcmp(id, "ldoa13") != 0 && strcmp(id, "ldoc1") != 0) {
+-				continue;
+-			}
+-			printf("KEBAB RPMH: %s: addr 0x%08x len %u offset %u\n",
+-			    id, addr, tail & 0xffffu, (tail >> 16) & 0xffffu);
+-		}
+-	}
+-}
+-
+-static void
+-kebab_rpmh_rsc(void)
+-{
+-	vm_offset_t drv, base, t;
+-	uint32_t i, c, prnt, max_tcs, ncpt, control;
+-
+-	drv = ml_io_map(KEBAB_RSC_DRV2_PA, KEBAB_RSC_SIZE);
+-	if (drv == 0) {
+-		printf("KEBAB RPMH: cannot map the drv-2 window at 0x%08x\n",
+-		    KEBAB_RSC_DRV2_PA);
+-		return;
+-	}
+-	base = drv + KEBAB_RSC_TCS_OFF;
+-	printf("KEBAB RPMH: drv-2 0x%08x, tcs_base +0x%x -> 0x%llx\n",
+-	    KEBAB_RSC_DRV2_PA, KEBAB_RSC_TCS_OFF, (unsigned long long)base);
+-	/*
+-	 * IRQ_ENABLE/STATUS/CLEAR are shared but live at tcs_base + 0x0/0x4/0x8
+-	 * (rpmh-rsc.c reads them through read_tcs_reg with tcs_id 0); only
+-	 * DRV_PRNT_CHLD_CONFIG sits at drv->base.
+-	 */
+-	printf("KEBAB RPMH: irq_en 0x%08x irq_status 0x%08x irq_clear 0x%08x prnt_chld 0x%08x\n",
+-	    kebab_spmi_rd(base, KEBAB_RSC_IRQ_ENABLE),
+-	    kebab_spmi_rd(base, KEBAB_RSC_IRQ_STATUS),
+-	    kebab_spmi_rd(base, KEBAB_RSC_IRQ_CLEAR),
+-	    kebab_spmi_rd(drv, KEBAB_RSC_PRNT_CHLD));
+-	prnt = kebab_spmi_rd(drv, KEBAB_RSC_PRNT_CHLD);
+-	max_tcs = (prnt >> (KEBAB_RSC_TCS_SHIFT * 2u)) & KEBAB_RSC_TCS_MASK;
+-	ncpt = (prnt >> KEBAB_RSC_NCPT_SHIFT) & KEBAB_RSC_NCPT_MASK;
+-	printf("KEBAB RPMH: prnt_chld decode: drv-2 tcs %u, ncpt %u\n",
+-	    max_tcs, ncpt);
+-	if (max_tcs == 0 || max_tcs > KEBAB_RSC_TCS_TOTAL) {
+-		max_tcs = KEBAB_RSC_TCS_TOTAL;
+-	}
+-	for (i = 0; i < max_tcs; i++) {
+-		t = base + i * KEBAB_RSC_TCS_STRIDE;
+-		control = kebab_spmi_rd(t, KEBAB_RSC_CONTROL);
+-		printf("KEBAB RPMH: tcs %u: wait 0x%08x control 0x%08x (amc_en %u amc_trig %u) status 0x%08x enable 0x%08x\n",
+-		    i, kebab_spmi_rd(t, KEBAB_RSC_CMD_WAIT), control,
+-		    (control & KEBAB_RSC_AMC_ENABLE) != 0,
+-		    (control & KEBAB_RSC_AMC_TRIGGER) != 0,
+-		    kebab_spmi_rd(t, KEBAB_RSC_STATUS),
+-		    kebab_spmi_rd(t, KEBAB_RSC_CMD_ENABLE));
+-		/*
+-		 * NCPT says how many command slots the hardware has; walk all
+-		 * of them, not just the two this kernel happens to poke.
+-		 */
+-		for (c = 0; c < KEBAB_RSC_NCPT_MAX; c++) {
+-			vm_offset_t slot = t + c * KEBAB_RSC_CMD_STRIDE;
+-			uint32_t msgid = kebab_spmi_rd(slot, KEBAB_RSC_CMD_MSGID);
+-			uint32_t addr = kebab_spmi_rd(slot, KEBAB_RSC_CMD_ADDR);
+-			uint32_t data = kebab_spmi_rd(slot, KEBAB_RSC_CMD_DATA);
+-			uint32_t status = kebab_spmi_rd(slot, KEBAB_RSC_CMD_STATUS);
+-			uint32_t resp = kebab_spmi_rd(slot, KEBAB_RSC_RESP_DATA);
+-
+-			if (msgid == 0 && addr == 0 && data == 0 &&
+-			    status == 0 && resp == 0) {
+-				continue;
+-			}
+-			printf("KEBAB RPMH: tcs %u slot %u: msgid 0x%08x addr 0x%08x data 0x%08x status 0x%08x resp 0x%08x\n",
+-			    i, c, msgid, addr, data, status, resp);
+-		}
+-	}
+-}
+-
+-/*
+- * R5-C3: the production kebab_tcs_io binding.
+- *
+- * package/KebabRpmhVrm.c is the tested state machine and the only encoder for
+- * these two resources; bsd/dev/kebab_rpmh_vrm.c is that same file compiled
+- * into the kernel, so the code a console command runs is the code the host
+- * checks drive.  What this file adds is the part the host tests cannot have:
+- * the MMIO binding to the APPS RSC's drv-2 window.
+- *
+- * Geometry, from the 0127 probe rather than from memory: the TCS array starts
+- * at drv + 0xd00, one TCS window is 672 bytes, and only the active TCS1 is
+- * used -- TCS0 carries another execution environment's leftover commands.  The
+- * TCS1 register block is therefore drv + 0xd00 + 1 * 672, and every offset the
+- * state machine touches (0x10 CMD_WAIT .. 0x40 RESP_DATA) stays inside that
+- * one window; the io refuses anything wider.
+- *
+- * The window is mapped once, in kebab_spmi_init(), because a console command
+- * can run from the panic loop where ml_io_map cannot allocate.  Nothing here
+- * runs before the boot argument says so.
+- *
+- * TCS? is the read-only companion: it dumps the same registers before any send
+- * so a wedged or dirty channel can be told apart from a rail that simply did
+- * not come up.  It never writes, never clears and never recovers: a TCS may
+- * hold another execution environment's vote.
+- */
+-static struct {
+-	bool        parsed;
+-	bool        gate;
+-	vm_offset_t drv;               /* drv-2 window; zero until mapped */
+-	vm_offset_t tcs;               /* TCS1 window inside it */
+-	kebab_rpmh_tcs channel;
+-	bool        ldoa13_done;
+-	bool        ldoa13_ok;
+-	bool        ldoc1_done;
+-	bool        ldoc1_ok;
+-} vrm;
+-
+-static const char *
+-kebab_vrm_status_name(kebab_rpmh_status status)
+-{
+-	switch (status) {
+-	case KEBAB_RPMH_OK:                 return "OK";
+-	case KEBAB_RPMH_ERR_ARGUMENT:       return "ERR_ARGUMENT";
+-	case KEBAB_RPMH_ERR_RESOURCE:       return "ERR_RESOURCE";
+-	case KEBAB_RPMH_ERR_ADDRESS:        return "ERR_ADDRESS";
+-	case KEBAB_RPMH_ERR_VOLTAGE:        return "ERR_VOLTAGE";
+-	case KEBAB_RPMH_ERR_COMMAND_DB:     return "ERR_COMMAND_DB";
+-	case KEBAB_RPMH_ERR_DUPLICATE:      return "ERR_DUPLICATE";
+-	case KEBAB_RPMH_ERR_TCS_BUSY:       return "ERR_TCS_BUSY";
+-	case KEBAB_RPMH_ERR_TCS_STATE:      return "ERR_TCS_STATE";
+-	case KEBAB_RPMH_ERR_NO_SINK:        return "ERR_NO_SINK";
+-	case KEBAB_RPMH_ERR_SINK_FAILED:    return "ERR_SINK_FAILED";
+-	case KEBAB_RPMH_ERR_NOT_ALLOWED:    return "ERR_NOT_ALLOWED";
+-	case KEBAB_RPMH_PENDING:            return "PENDING";
+-	case KEBAB_RPMH_ERR_TIMEOUT:        return "ERR_TIMEOUT";
+-	case KEBAB_RPMH_ERR_RECLAIM:        return "ERR_RECLAIM";
+-	}
+-	return "UNKNOWN";
+-}
+-
+-static const char *
+-kebab_vrm_phase_name(kebab_tcs_phase phase)
+-{
+-	switch (phase) {
+-	case KEBAB_TCS_PHASE_IDLE:                 return "IDLE";
+-	case KEBAB_TCS_PHASE_VALIDATED:            return "VALIDATED";
+-	case KEBAB_TCS_PHASE_ARMED:                return "ARMED";
+-	case KEBAB_TCS_PHASE_TRIGGERED:            return "TRIGGERED";
+-	case KEBAB_TCS_PHASE_COMPLETE:             return "COMPLETE";
+-	case KEBAB_TCS_PHASE_FAILED_PRE_TRIGGER:   return "FAILED_PRE_TRIGGER";
+-	case KEBAB_TCS_PHASE_FAILED_POST_TRIGGER:  return "FAILED_POST_TRIGGER";
+-	case KEBAB_TCS_PHASE_COMPLETE_UNCLEAN:     return "COMPLETE_UNCLEAN";
+-	}
+-	return "UNKNOWN";
+-}
+-
+-/*
+- * The io the state machine talks to.  ctx is the TCS1 window; the offsets are
+- * the module's KEBAB_TCS_* constants, which are the same numbers the TCS uses
+- * (0x10 CMD_WAIT, 0x14 CONTROL, 0x18 STATUS, 0x1c CMD_ENABLE, 0x30..0x3c the
+- * slot registers, 0x40 RESP_DATA).  Bounding every access to one TCS window
+- * keeps a bad offset from becoming a read of the neighbouring TCS.
+- */
+-static int
+-kebab_vrm_rd(void *ctx, uint32_t off, uint32_t *val)
+-{
+-	vm_offset_t t = (vm_offset_t)ctx;
+-
+-	if (t == 0 || val == NULL || off + 4u > KEBAB_RSC_TCS_STRIDE) {
+-		return -1;
+-	}
+-	*val = kebab_spmi_rd(t, off);
+-	return 0;
+-}
+-
+-static int
+-kebab_vrm_wr(void *ctx, uint32_t off, uint32_t val)
+-{
+-	vm_offset_t t = (vm_offset_t)ctx;
+-
+-	if (t == 0 || off + 4u > KEBAB_RSC_TCS_STRIDE) {
+-		return -1;
+-	}
+-	kebab_spmi_wr(t, off, val);
+-	return 0;
+-}
+-
+-/*
+- * The state machine does not sleep: it has a poll cap and, when a clock is
+- * present, a wall budget as well.  Feeding it the monotonic clock means a
+- * stalled or jumping one can only extend a wait to the cap, never past it.
+- */
+-static uint64_t
+-kebab_vrm_now_us(void *ctx)
+-{
+-	uint64_t ns = 0;
+-
+-	(void)ctx;
+-	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+-	return ns / 1000u;
+-}
+-
+-/*
+- * One gate for both rails, parsed once.  Default off: an unattended boot never
+- * powers a rail, and VROMON printed from the panic loop only reads a boolean.
+- */
+-bool
+-kebab_spmi_vrm_writes_enabled(void)
+-{
+-	uint32_t enabled = 0;
+-
+-	if (!vrm.parsed) {
+-		vrm.parsed = true;
+-		vrm.gate = PE_parse_boot_argn("kebab_vrm_write", &enabled,
+-		    sizeof(enabled)) && enabled != 0;
+-		printf("KEBAB VRM: kebab_vrm_write=%u: RPMh rail writes %s\n",
+-		    enabled, vrm.gate ? "ENABLED" : "disabled (default)");
+-	}
+-	return vrm.gate;
+-}
+-
+-/*
+- * Map the drv-2 window and compute TCS1's address in it.  Called from
+- * kebab_spmi_init() when the gate is on, and from TCS? which has to be able to
+- * look whether or not a write was ever allowed.  Mapped once: a second call is
+- * a no-op, so a command can never remap over a live window.
+- */
+-static bool
+-kebab_vrm_map(void)
+-{
+-	if (vrm.tcs != 0) {
+-		return true;
+-	}
+-	if (vrm.drv == 0) {
+-		vrm.drv = ml_io_map(KEBAB_RSC_DRV2_PA, KEBAB_RSC_SIZE);
+-		if (vrm.drv == 0) {
+-			printf("KEBAB VRM: cannot map the drv-2 window at 0x%08x\n",
+-			    KEBAB_RSC_DRV2_PA);
+-			return false;
+-		}
+-	}
+-	vrm.tcs = vrm.drv + KEBAB_RSC_TCS_OFF + 1u * KEBAB_RSC_TCS_STRIDE;
+-	printf("KEBAB VRM: drv-2 0x%08x+0x%x -> tcs_base 0x%llx; TCS1 = tcs_base + 0x%x = 0x%llx (stride %u)\n",
+-	    KEBAB_RSC_DRV2_PA, KEBAB_RSC_SIZE,
+-	    (unsigned long long)(vrm.drv + KEBAB_RSC_TCS_OFF),
+-	    1u * KEBAB_RSC_TCS_STRIDE, (unsigned long long)vrm.tcs,
+-	    KEBAB_RSC_TCS_STRIDE);
+-	return true;
+-}
+-
+-/* Map the TCS1 window now, in normal context, so a command only reads a bool. */
+-void
+-kebab_spmi_vrm_init(void)
+-{
+-	if (vrm.tcs != 0 || !kebab_spmi_vrm_writes_enabled()) {
+-		return;
+-	}
+-	if (!kebab_vrm_map()) {
+-		printf("KEBAB VRM: VROMON will refuse: no window\n");
+-		return;
+-	}
+-	printf("KEBAB VRM: write path ready, gated by kebab_vrm_write\n");
+-}
+-
+-/*
+- * TCS?: the read-only state of the channel a send would use.  Two questions,
+- * both answered from registers only: is the channel idle, and is it clean (no
+- * completion left over from somebody else's command)?  A wedged or dirty
+- * channel is reported as such and never touched: the TCS may carry another
+- * execution environment's vote, so clearing it here could revoke a resource
+- * this kernel does not own.
+- */
+-void
+-kebab_tcs_report(void)
+-{
+-	vm_offset_t base, t, irq_en, irq_status, irq_clear;
+-	uint32_t i, control, enable, wait, status;
+-	bool wedged = false, dirty = false;
+-
+-	printf("KEBAB TCS: === read-only TCS dump, APPS RSC drv-2 ===\n");
+-	if (!kebab_vrm_map()) {
+-		printf("KEBAB TCS: FAIL: the drv-2 window is not mapped\n");
+-		return;
+-	}
+-	base = vrm.drv + KEBAB_RSC_TCS_OFF;
+-	irq_en = kebab_spmi_rd(base, KEBAB_RSC_IRQ_ENABLE);
+-	irq_status = kebab_spmi_rd(base, KEBAB_RSC_IRQ_STATUS);
+-	irq_clear = kebab_spmi_rd(base, KEBAB_RSC_IRQ_CLEAR);
+-	printf("KEBAB TCS: drv-2 0x%08x, tcs_base = drv + 0x%x = 0x%llx, stride %u\n",
+-	    KEBAB_RSC_DRV2_PA, KEBAB_RSC_TCS_OFF, (unsigned long long)base,
+-	    KEBAB_RSC_TCS_STRIDE);
+-	printf("KEBAB TCS: rsc irq: enable[tcs_base+0x0] 0x%08x status[+0x4] 0x%08x clear[+0x8] 0x%08x\n",
+-	    irq_en, irq_status, irq_clear);
+-	for (i = 0; i < KEBAB_RSC_ACTIVE_TCS; i++) {
+-		t = base + i * KEBAB_RSC_TCS_STRIDE;
+-		control = kebab_spmi_rd(t, KEBAB_RSC_CONTROL);
+-		enable = kebab_spmi_rd(t, KEBAB_RSC_CMD_ENABLE);
+-		wait = kebab_spmi_rd(t, KEBAB_RSC_CMD_WAIT);
+-		status = kebab_spmi_rd(t, KEBAB_RSC_CMD_STATUS);
+-		printf("KEBAB TCS: tcs %u at 0x%llx: CONTROL[+0x%x] 0x%08x (AMC_ENABLE %u, AMC_TRIGGER %u) CMD_ENABLE[+0x%x] 0x%08x CMD_WAIT[+0x%x] 0x%08x CMD_STATUS[+0x%x] 0x%08x (ISSUED %u, COMPL %u)\n",
+-		    i, (unsigned long long)t, KEBAB_RSC_CONTROL, control,
+-		    (control & KEBAB_RSC_AMC_ENABLE) != 0,
+-		    (control & KEBAB_RSC_AMC_TRIGGER) != 0,
+-		    KEBAB_RSC_CMD_ENABLE, enable, KEBAB_RSC_CMD_WAIT, wait,
+-		    KEBAB_RSC_CMD_STATUS, status,
+-		    (status & KEBAB_RSC_CMD_ISSUED) != 0,
+-		    (status & KEBAB_RSC_CMD_COMPL) != 0);
+-		if ((status & KEBAB_RSC_CMD_ISSUED) != 0 &&
+-		    (status & KEBAB_RSC_CMD_COMPL) == 0) {
+-			wedged = true;
+-		}
+-		if (i == 1) {
+-			/* The channel VROMON would use, judged on its own. */
+-			if (enable != 0 || wait != 0 ||
+-			    (control & KEBAB_RSC_AMC_TRIGGER) != 0 ||
+-			    (status & KEBAB_RSC_CMD_ISSUED) != 0) {
+-				wedged = true;
+-			}
+-			if ((status & KEBAB_RSC_CMD_COMPL) != 0) {
+-				dirty = true;
+-			}
+-		}
+-	}
+-	if (wedged) {
+-		printf("KEBAB TCS: VERDICT: TCS1 is NOT idle (a command is in flight or wedged); a kernel-side send must refuse\n");
+-	} else if (dirty) {
+-		printf("KEBAB TCS: VERDICT: TCS1 holds a leftover COMPL; the state machine refuses it instead of reading it as ours\n");
+-	} else {
+-		printf("KEBAB TCS: VERDICT: TCS1 is idle and clean; a kernel-side send is plausible\n");
+-	}
+-	printf("KEBAB TCS: done; no register was written, cleared or recovered\n");
+-}
+-
+-/*
+- * Enable one rail.  This is the whole VRM sequence, and it is deliberately
+- * one rail per call: the console enables ldoa13, then verifies with PWR?, and
+- * only then enables ldoc1.  Nothing here retries, nothing here picks a
+- * different address on failure, and a rail that failed is never attempted
+- * again in the same boot.
+- */
+-int
+-kebab_spmi_vrm_enable(const char *rail)
+-{
+-	kebab_rpmh_cmd cmd;
+-	kebab_rpmh_status encoded, sent;
+-	kebab_tcs_io io;
+-	uint32_t bit;
+-	bool *done, *ok;
+-
+-	if (rail != NULL && strcmp(rail, "ldoa13") == 0) {
+-		done = &vrm.ldoa13_done;
+-		ok = &vrm.ldoa13_ok;
+-	} else if (rail != NULL && strcmp(rail, "ldoc1") == 0) {
+-		done = &vrm.ldoc1_done;
+-		ok = &vrm.ldoc1_ok;
+-	} else {
+-		printf("KEBAB VRM: %s is not a rail this command may power; the whitelist is ldoa13 (VROMON) and ldoc1 (VROMON ldoc1), nothing sent\n",
+-		    rail != NULL ? rail : "(no argument)");
+-		return -1;
+-	}
+-	if (!kebab_spmi_vrm_writes_enabled()) {
+-		printf("KEBAB VRM: kebab_vrm_write is off; refusing to send %s\n",
+-		    rail);
+-		return -1;
+-	}
+-	if (*done) {
+-		printf("KEBAB VRM: %s was already attempted this boot (%s); not retried\n",
+-		    rail, *ok ? "it completed" : "it failed");
+-		return -1;
+-	}
+-	if (strcmp(rail, "ldoc1") == 0 && !vrm.ldoa13_ok) {
+-		printf("KEBAB VRM: ldoc1 is the second rail: send VROMON, confirm ldoa13 with PWR?, then VROMON ldoc1\n");
+-		return -1;
+-	}
+-	if (!kebab_vrm_map()) {
+-		printf("KEBAB VRM: no TCS1 window; nothing sent\n");
+-		return -1;
+-	}
+-
+-	encoded = kebab_rpmh_encode_enable(rail, &cmd);
+-	printf("KEBAB VRM: encode %s ENABLE -> %s msgid 0x%08x addr 0x%08x data 0x%08x\n",
+-	    rail, kebab_vrm_status_name(encoded), cmd.msgid, cmd.addr, cmd.data);
+-	if (encoded != KEBAB_RPMH_OK) {
+-		printf("KEBAB VRM: the encoder refused; nothing sent\n");
+-		return -1;
+-	}
+-	bit = kebab_rpmh_cmd_bit(&cmd);
+-	if (bit == 0 || !kebab_rpmh_cmd_allowed(&cmd)) {
+-		printf("KEBAB VRM: the whitelist refused the encoded command (slot 0x%x); nothing sent\n",
+-		    bit);
+-		return -1;
+-	}
+-	printf("KEBAB VRM: whitelist: WRITE_ACK to the ENABLE register of %s only, slot 0x%x\n",
+-	    rail, bit);
+-
+-	io.rd = kebab_vrm_rd;
+-	io.wr = kebab_vrm_wr;
+-	io.now_us = kebab_vrm_now_us;
+-	io.ctx = (void *)vrm.tcs;
+-	kebab_rpmh_tcs_init_global(&vrm.channel, io);
+-
+-	*done = true;
+-	sent = kebab_rpmh_tcs_send(&vrm.channel, &cmd);
+-	*ok = sent == KEBAB_RPMH_OK;
+-	printf("KEBAB VRM: send %s -> %s (%d)\n", rail,
+-	    kebab_vrm_status_name(sent), (int)sent);
+-	printf("KEBAB VRM: phase %s, CMD_STATUS 0x%08x (ISSUED %u, COMPL %u)\n",
+-	    kebab_vrm_phase_name(vrm.channel.phase), vrm.channel.last_status,
+-	    (vrm.channel.last_status & KEBAB_TCS_CMD_ISSUED) != 0,
+-	    (vrm.channel.last_status & KEBAB_TCS_CMD_COMPL) != 0);
+-	if (!*ok) {
+-		printf("KEBAB VRM: %s did not complete; the channel is closed for this boot and the rail must not be assumed on\n",
+-		    rail);
+-		return -1;
+-	}
+-	printf("KEBAB VRM: %s ENABLE acknowledged by RPMh; confirm the rail with PWR? before the next step\n",
+-	    rail);
+-	return 0;
+-}
+-
+-/* -------------------------------------------------------- boot rail power */
+-
+-#define KEBAB_VRM_EN_ON 0x80u
+-
+-/*
+- * The enable byte PWR? prints, split out so the boot sequence can ask whether a
+- * rail is already on before commanding it.  Same observer reads, same two
+- * matching reads of the same register: this is the path the console has
+- * already been measured through, not a second one.
+- */
+-static const struct kebab_spmi_power *
+-kebab_spmi_rail_target(const char *peripheral)
+-{
+-	uint32_t i;
+-
+-	for (i = 0; i < sizeof(kebab_spmi_power_targets) /
+-	    sizeof(kebab_spmi_power_targets[0]); i++) {
+-		if (strcmp(kebab_spmi_power_targets[i].name, peripheral) == 0) {
+-			return &kebab_spmi_power_targets[i];
+-		}
+-	}
+-	return NULL;
+-}
+-
+-static int
+-kebab_spmi_rail_enable_read(const char *rail, const char *peripheral,
+-    uint8_t *out)
+-{
+-	const struct kebab_spmi_power *t = kebab_spmi_rail_target(peripheral);
+-	struct kebab_spmi_match matches[8];
+-	uint32_t ppid;
+-
+-	if (t == NULL) {
+-		printf("KEBAB VRM: boot power: %s is not a peripheral this file knows\n",
+-		    rail);
+-		return -1;
+-	}
+-	ppid = (t->sid << 8) | (t->base >> 8);
+-	if (kebab_spmi_scan(ppid, matches, 8) == 0) {
+-		printf("KEBAB VRM: boot power: %s: no APID maps PPID 0x%03x\n",
+-		    rail, ppid);
+-		return -1;
+-	}
+-	return kebab_spmi_power_read(matches[0].apid, t->sid,
+-	    t->base + 0x46u, "enable", out);
+-}
+-
+-/*
+- * The two-rail power sequence for a boot that asked for it with
+- * kebab_touch_power=1.  It is the VROMON sequence with the console removed:
+- * read the enable, encode and send one ENABLE, wait for the TCS to complete,
+- * read the enable back, then the same for the second rail.  It calls
+- * kebab_spmi_vrm_enable() instead of re-implementing the send, so the encoder,
+- * the RPMh whitelist, the per-rail one-shot gate and the dead-channel rule are
+- * exactly the ones VROMON was measured through.
+- *
+- * Returns 0 only when both rails end at 0x80.  Any failure returns -1 and
+- * leaves the channel closed for the boot; there is no retry here, because a
+- * second attempt into a state machine that refused the first one is exactly
+- * what that gate exists to prevent.  The caller must not retry either.
+- */
+-static int
+-kebab_spmi_vrm_boot_power_unserialized(void)
+-{
+-	static const struct {
+-		const char *rail;
+-		const char *peripheral;
+-	} order[2] = {
+-		{ "ldoa13", "pm8150_l13" },
+-		{ "ldoc1",  "pm8150a_l1"  },
+-	};
+-	uint32_t i;
+-
+-	printf("KEBAB VRM: === boot power: touch rails, one ENABLE each ===\n");
+-	if (!kebab_spmi_vrm_writes_enabled()) {
+-		printf("KEBAB VRM: boot power: kebab_vrm_write=0, so no rail may be commanded; touch stays unpowered\n");
+-		return -1;
+-	}
+-	for (i = 0; i < 2; i++) {
+-		uint8_t before = 0;
+-		uint8_t after = 0;
+-		int rc;
+-
+-		if (kebab_spmi_rail_enable_read(order[i].rail,
+-		    order[i].peripheral, &before) != 0) {
+-			printf("KEBAB VRM: boot power: %s enable unreadable; nothing sent\n",
+-			    order[i].rail);
+-			return -1;
+-		}
+-		if (before == KEBAB_VRM_EN_ON) {
+-			printf("KEBAB VRM: boot power: %s already on (EN 0x%02x), skipped\n",
+-			    order[i].rail, before);
+-			/*
+-			 * ldoc1 is only allowed to follow a rail that is up.  A
+-			 * skipped ldoa13 is up, so record that without claiming
+-			 * a send: ldoa13_done stays false, so a later VROMON may
+-			 * still spend the one-shot on it.
+-			 */
+-			if (i == 0) {
+-				vrm.ldoa13_ok = true;
+-			}
+-			continue;
+-		}
+-		rc = kebab_spmi_vrm_enable(order[i].rail);
+-		if (kebab_spmi_rail_enable_read(order[i].rail,
+-		    order[i].peripheral, &after) != 0) {
+-			printf("KEBAB VRM: boot power: %s: the read-back failed; the rail must not be assumed on\n",
+-			    order[i].rail);
+-			return -1;
+-		}
+-		printf("KEBAB VRM: boot power: %s %s, phase %s, CMD_STATUS 0x%08x (ISSUED %u, COMPL %u), EN 0x%02x -> 0x%02x\n",
+-		    order[i].rail, rc == 0 ? "COMPL" : "ERROR",
+-		    kebab_vrm_phase_name(vrm.channel.phase),
+-		    vrm.channel.last_status,
+-		    (vrm.channel.last_status & KEBAB_TCS_CMD_ISSUED) != 0,
+-		    (vrm.channel.last_status & KEBAB_TCS_CMD_COMPL) != 0,
+-		    before, after);
+-		if (rc != 0 || after != KEBAB_VRM_EN_ON) {
+-			printf("KEBAB VRM: boot power: %s is not up; stopping here, the boot continues without touch\n",
+-			    order[i].rail);
+-			return -1;
+-		}
+-	}
+-	printf("KEBAB VRM: boot power: ldoa13 and ldoc1 both read 0x80\n");
+-	return 0;
+-}
+-
+-void
+-kebab_rpmh_report(void)
+-{
+-	printf("KEBAB RPMH: === read-only discovery: cmd-db and drv-2 TCS ===\n");
+-	kebab_rpmh_cmd_db();
+-	kebab_rpmh_rsc();
+-	printf("KEBAB RPMH: done; no register was written\n");
+-}
+-
+-static void
+-kebab_spmi_power_report_unserialized(void)
+-{
+-	uint32_t i;
+-
+-	if (!spmi.mapped) {
+-		printf("KEBAB SPMI: PWR: SPMI is not mapped\n");
+-		return;
+-	}
+-	printf("KEBAB SPMI: === PWR: touch rails, observer reads only ===\n");
+-	for (i = 0; i < sizeof(kebab_spmi_power_targets) /
+-	    sizeof(kebab_spmi_power_targets[0]); i++) {
+-		kebab_spmi_power_one(&kebab_spmi_power_targets[i]);
+-	}
+-	kebab_spmi_power_map_summary();
+-	printf("KEBAB SPMI: PWR: done; no peripheral write was issued\n");
+-}
+-
+-static void
+-kebab_spmi_report_unserialized(void)
+-{
+-	struct kebab_spmi_match matches[8];
+-	uint32_t version, count, total, i, entries;
+-
+-	if (!spmi.mapped) {
+-		printf("KEBAB SPMI: SPMI-1 FAIL: the arbiter registers are not mapped\n");
+-		return;
+-	}
+-
+-	printf("KEBAB SPMI: === SPMI-1: arbiter version ===\n");
+-	version = kebab_spmi_rd(spmi.core, KEBAB_SPMI_VERSION);
+-	printf("KEBAB SPMI: core 0x%08x+0x%x mapped; core+0x0000 = 0x%08x\n",
+-	    KEBAB_SPMI_CORE_PA, KEBAB_SPMI_CORE_SIZE, version);
+-	if (!kebab_spmi_version_known(version)) {
+-		printf("KEBAB SPMI: SPMI-1 FAIL: 0x%08x is not a recognised arbiter version (dead or unclocked block); stopping\n",
+-		    version);
+-		return;
+-	}
+-	printf("KEBAB SPMI: version family %s\n", kebab_spmi_family(version));
+-	if (version < 0x50000000u) {
+-		printf("KEBAB SPMI: SPMI-1 PASS: the version was read and identified\n");
+-		printf("KEBAB SPMI: SPMI-2 NOT RUN: the v5 APID table at core+0x900 and the v5 observer arithmetic do not apply to %s; stopping\n",
+-		    kebab_spmi_family(version));
+-		return;
+-	}
+-	printf("KEBAB SPMI: SPMI-1 PASS\n");
+-
+-	printf("KEBAB SPMI: === SPMI-2: PPID 0x%03x -> APID ===\n", KEBAB_SPMI_PON_PPID);
+-	entries = (KEBAB_SPMI_CORE_SIZE - KEBAB_SPMI_APID_MAP) / 4u;
+-	if (entries > KEBAB_SPMI_APID_MAX) {
+-		entries = KEBAB_SPMI_APID_MAX;
+-	}
+-	printf("KEBAB SPMI: scan APID 0x000..0x%03x: core+0x%03x + 4*apid, %u entries bounded by core size 0x%x\n",
+-	    entries - 1u, KEBAB_SPMI_APID_MAP, entries, KEBAB_SPMI_CORE_SIZE);
+-
+-	/* Negative control first: a PPID that cannot exist must not resolve. */
+-	count = kebab_spmi_scan(KEBAB_SPMI_NEGATIVE_PPID, matches, 8);
+-	printf("KEBAB SPMI: negative control PPID 0x%03x -> %u APID(s)%s\n",
+-	    KEBAB_SPMI_NEGATIVE_PPID, count, count == 0 ? " (expected 0)" : " (UNEXPECTED)");
+-	if (count != 0) {
+-		printf("KEBAB SPMI: SPMI-2 FAIL: the mapping walk resolved a PPID that cannot exist; its answers are not trustworthy\n");
+-		return;
+-	}
+-
+-	count = kebab_spmi_scan(KEBAB_SPMI_PON_PPID, matches, 8);
+-	total = count;
+-	printf("KEBAB SPMI: scanned %u entries: %u non-zero mapping(s), %u map PPID 0x%03x\n",
+-	    entries, kebab_spmi_nonzero, count, KEBAB_SPMI_PON_PPID);
+-	if (count == 0) {
+-		printf("KEBAB SPMI: SPMI-2 FAIL: no APID maps PPID 0x%03x\n",
+-		    KEBAB_SPMI_PON_PPID);
+-		return;
+-	}
+-	if (count > 8) {
+-		printf("KEBAB SPMI: %u matches, only the first 8 are listed; the count is complete\n",
+-		    count);
+-		count = 8;
+-	}
+-	for (i = 0; i < count; i++) {
+-		kebab_spmi_match_line(&matches[i]);
+-	}
+-	printf("KEBAB SPMI: SPMI-2 PASS: %u APID(s) map PPID 0x%03x\n", total,
+-	    KEBAB_SPMI_PON_PPID);
+-}
+-
+-/*
+- * SPMI-3: read the PON subtype and SOFT_RB_SPARE through the observer, twice
+- * each, and require both reads of a register to agree.  This is still a
+- * read-only gate: the observer command register is written to issue a read,
+- * no PMIC register is written.
+- */
+-static void
+-kebab_spmi_pon_report_unserialized(void)
+-{
+-	struct kebab_spmi_match matches[8];
+-	uint32_t count, i, chosen = 0, version;
+-	bool have_owned = false;
+-	uint8_t subtype[2] = { 0, 0 }, spare[2] = { 0, 0 };
+-	int rc1, rc2;
+-	bool subtype_stable, spare_stable, subtype_known;
+-
+-	if (!spmi.mapped) {
+-		printf("KEBAB SPMI: SPMI-3 FAIL: the arbiter registers are not mapped\n");
+-		return;
+-	}
+-	version = kebab_spmi_rd(spmi.core, KEBAB_SPMI_VERSION);
+-	if (!kebab_spmi_version_known(version)) {
+-		printf("KEBAB SPMI: SPMI-3 FAIL: arbiter version 0x%08x is not recognised; no read attempted\n",
+-		    version);
+-		return;
+-	}
+-	if (version < 0x50000000u) {
+-		printf("KEBAB SPMI: SPMI-3 FAIL: arbiter is %s, not v5; the v5 observer arithmetic is not used\n",
+-		    kebab_spmi_family(version));
+-		return;
+-	}
+-
+-	printf("KEBAB SPMI: === SPMI-3: PON registers through the observer ===\n");
+-	count = kebab_spmi_scan(KEBAB_SPMI_PON_PPID, matches, 8);
+-	if (count == 0) {
+-		printf("KEBAB SPMI: SPMI-3 FAIL: PPID 0x%03x has no APID\n",
+-		    KEBAB_SPMI_PON_PPID);
+-		return;
+-	}
+-	for (i = 0; i < count && i < 8; i++) {
+-		kebab_spmi_match_line(&matches[i]);
+-		if (!have_owned && matches[i].write_ee == KEBAB_SPMI_EE) {
+-			chosen = matches[i].apid;
+-			have_owned = true;
+-		}
+-	}
+-	if (!have_owned) {
+-		/*
+-		 * pmic_arb_read_apid_map_v5() falls back to the first mapping
+-		 * when no APID is owned by this EE, and the observer path does
+-		 * not check write_ee.  Say so instead of failing the read.
+-		 */
+-		chosen = matches[0].apid;
+-		printf("KEBAB SPMI: no APID for PPID 0x%03x is owned by EE %u; using the first mapping (observer reads are not ownership-checked)\n",
+-		    KEBAB_SPMI_PON_PPID, KEBAB_SPMI_EE);
+-	}
+-	printf("KEBAB SPMI: using APID 0x%03x for PPID 0x%03x, SID %u, ee %u\n",
+-	    chosen, KEBAB_SPMI_PON_PPID, KEBAB_SPMI_PON_SID, KEBAB_SPMI_EE);
+-
+-	rc1 = kebab_spmi_obs_read(chosen, KEBAB_SPMI_PON_SID,
+-	    KEBAB_SPMI_PON_SUBTYPE, 1, &subtype[0]);
+-	rc2 = kebab_spmi_obs_read(chosen, KEBAB_SPMI_PON_SID,
+-	    KEBAB_SPMI_PON_SUBTYPE, 2, &subtype[1]);
+-	subtype_stable = rc1 == 0 && rc2 == 0 && subtype[0] == subtype[1];
+-	printf("KEBAB SPMI: PON subtype 0x%04x reads 0x%02x / 0x%02x -> %s\n",
+-	    KEBAB_SPMI_PON_SUBTYPE, subtype[0], subtype[1],
+-	    subtype_stable ? "STABLE" : "NOT STABLE");
+-
+-	rc1 = kebab_spmi_obs_read(chosen, KEBAB_SPMI_PON_SID,
+-	    KEBAB_SPMI_PON_SPARE, 1, &spare[0]);
+-	rc2 = kebab_spmi_obs_read(chosen, KEBAB_SPMI_PON_SID,
+-	    KEBAB_SPMI_PON_SPARE, 2, &spare[1]);
+-	spare_stable = rc1 == 0 && rc2 == 0 && spare[0] == spare[1];
+-	printf("KEBAB SPMI: SOFT_RB_SPARE 0x%04x reads 0x%02x / 0x%02x -> %s\n",
+-	    KEBAB_SPMI_PON_SPARE, spare[0], spare[1],
+-	    spare_stable ? "STABLE" : "NOT STABLE");
+-
+-	subtype_known = subtype_stable && subtype[0] >= 0x01u && subtype[0] <= 0x05u;
+-	if (subtype_known) {
+-		if (subtype[0] == 0x04u || subtype[0] == 0x05u) {
+-			printf("KEBAB SPMI: PON generation: Gen2 (subtype 0x%02x); the Gen2 SOFT_RB_SPARE layout would apply\n",
+-			    subtype[0]);
+-		} else {
+-			printf("KEBAB SPMI: PON generation: Gen1/1REG (subtype 0x%02x); the Gen2 SOFT_RB_SPARE layout does not apply\n",
+-			    subtype[0]);
+-		}
+-	} else {
+-		printf("KEBAB SPMI: PON generation: UNKNOWN (subtype 0x%02x is not a documented PON subtype, or the reads did not repeat)\n",
+-		    subtype[0]);
+-	}
+-	if (subtype_stable && spare_stable && subtype_known) {
+-		printf("KEBAB SPMI: SPMI-3 PASS\n");
+-	} else {
+-		printf("KEBAB SPMI: SPMI-3 FAIL: subtype %s, SOFT_RB_SPARE %s, subtype %s\n",
+-		    subtype_stable ? "stable" : "unstable",
+-		    spare_stable ? "stable" : "unstable",
+-		    subtype_known ? "recognised" : "not recognised");
+-	}
+-}
+-
+-int
+-kebab_spmi_keys_sample(uint8_t raw[4])
+-{
+-	lck_mtx_lock(&kebab_spmi_normal_lock);
+-	int result = kebab_spmi_keys_sample_unserialized(raw);
+-	lck_mtx_unlock(&kebab_spmi_normal_lock);
+-	return result;
+-}
+-
+-int
+-kebab_spmi_keys_config(uint8_t gpio6[3], uint8_t gpio7[3])
+-{
+-	lck_mtx_lock(&kebab_spmi_normal_lock);
+-	int result = kebab_spmi_keys_config_unserialized(gpio6, gpio7);
+-	lck_mtx_unlock(&kebab_spmi_normal_lock);
+-	return result;
+-}
+-
+-void
+-kebab_spmi_report(void)
+-{
+-	lck_mtx_lock(&kebab_spmi_normal_lock);
+-	kebab_spmi_report_unserialized();
+-	lck_mtx_unlock(&kebab_spmi_normal_lock);
+-}
+-
+-void
+-kebab_spmi_pon_report(void)
+-{
+-	lck_mtx_lock(&kebab_spmi_normal_lock);
+-	kebab_spmi_pon_report_unserialized();
+-	lck_mtx_unlock(&kebab_spmi_normal_lock);
+-}
+-
+-void
+-kebab_spmi_power_report(void)
+-{
+-	lck_mtx_lock(&kebab_spmi_normal_lock);
+-	kebab_spmi_power_report_unserialized();
+-	lck_mtx_unlock(&kebab_spmi_normal_lock);
+-}
+-
+-int
+-kebab_spmi_vrm_boot_power(void)
+-{
+-	lck_mtx_lock(&kebab_spmi_normal_lock);
+-	int result = kebab_spmi_vrm_boot_power_unserialized();
+-	lck_mtx_unlock(&kebab_spmi_normal_lock);
+-	return result;
+-}
+-
+-int
+-kebab_spmi_pon_reason_write_normal(void)
+-{
+-	lck_mtx_lock(&kebab_spmi_normal_lock);
+-	int result = kebab_spmi_pon_reason_write();
+-	lck_mtx_unlock(&kebab_spmi_normal_lock);
+-	return result;
+-}
+-
+-/* Default-off failure injection: PANIC! invokes this on the normal console
+- * thread. Holding the ordinary bus mutex across the panic proves that the
+- * independent panic FASTBOOT path cannot wait on the interrupted owner. */
+-void
+-kebab_spmi_test_panic_lock(void)
+-{
+-	uint32_t enabled = 0;
+-	if (PE_parse_boot_argn("kebab_spmi_lockpanic", &enabled, sizeof(enabled)) && enabled) {
+-		lck_mtx_lock(&kebab_spmi_normal_lock);
+-		printf("KEBAB SPMI TEST: normal bus mutex held for intentional panic\n");
+-		panic("kebab usb console test (normal SPMI lock held)");
+-	}
+-}
+-
+ #endif /* KEBAB */
+--- a/bsd/dev/kebab_spmi_bus.c
++++ b/bsd/dev/kebab_spmi_bus.c
+@@ -9,12 +9,18 @@
+ #include <kern/clock.h>
+ #include <mach/boolean.h>
+ #include "kebab_spmi_bus.h"
++#include "kebab_spmi_clients.h"
++#include "kebab_spmi_bus_private.h"
++#include <kern/locks.h>
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
+-struct kebab_spmi_bus_state kebab_spmi_bus;
+-uint32_t kebab_spmi_nonzero;
+-
+-uint32_t
++static LCK_GRP_DECLARE(kebab_spmi_normal_group, "kebab_spmi_normal");
++static LCK_MTX_DECLARE(kebab_spmi_normal_lock, &kebab_spmi_normal_group);
++
++static struct kebab_spmi_bus_state kebab_spmi_bus;
++static uint32_t kebab_spmi_nonzero;
++
++static uint32_t
+ kebab_spmi_rd(vm_offset_t base, uint32_t offset)
+ {
+ 	uint32_t value = *(volatile uint32_t *)(base + offset);
+@@ -24,7 +30,7 @@
+ 	return value;
+ }
+ 
+-void
++static void
+ kebab_spmi_wr(vm_offset_t base, uint32_t offset, uint32_t value)
+ {
+ 	*(volatile uint32_t *)(base + offset) = value;
+@@ -289,7 +295,7 @@
+ 	return 0;
+ }
+ 
+-void
++static void
+ kebab_spmi_bus_map_arbiter(void)
+ {
+ 	spmi.core = ml_io_map(KEBAB_SPMI_CORE_PA, KEBAB_SPMI_CORE_SIZE);
+@@ -297,10 +303,205 @@
+ 	spmi.cnfg = ml_io_map(KEBAB_SPMI_CNFG_PA, KEBAB_SPMI_CNFG_SIZE);
+ }
+ 
+-vm_offset_t
++static vm_offset_t
+ kebab_spmi_bus_map_channel(uint32_t apid)
+ {
+ 	vm_offset_t slice = KEBAB_SPMI_CHNLS_PA + 0x10000u * apid;
+ 	return ml_io_map(slice, KEBAB_SPMI_CHNL_SLICE);
+ }
++
++
++/*
++ * The vendor driver selects the layout by threshold, not by an exact value:
++ * v1 below 0x20010000, v2 below 0x30000000, v3/v4 below 0x50000000, v5 at or
++ * above it.  Only v5's mapping table and observer arithmetic are implemented
++ * here; anything else is reported as identified but unsupported.
++ */
++
++
++/*
++ * A register that reads back as all-zeroes or all-ones is not a version this
++ * driver can identify: 0xFFFFFFFF would otherwise satisfy the v5 threshold
++ * and send the walk into an unclocked or absent block.  Fail closed.
++ */
++
++
++/* -------------------------------------------------------------- mapping walk */
++
++/*
++ * Walk the v5 APID table for one PPID.  Up to max matches are returned with
++ * their raw mapping and ownership registers; the caller prints them.  The
++ * total number of non-zero mapping registers seen is left in the file-scope
++ * kebab_spmi_nonzero, and the return value is the full match count even when
++ * it exceeds max_matches, so the report can state how much it covered.
++ *
++ * No per-entry table is printed: one SPMI? report has to fit the console log
++ * ring (16 KiB), and a full dump of the populated APIDs does not.  The three
++ * numbers the report prints (entries scanned, non-zero mappings, matches) are
++ * what make a short capture distinguishable from a truncated one.
++ *
++ * The loop bound comes from the "core" resource size, exactly as the vendor
++ * driver bounds pmic_arb_read_apid_map_v5(); the ownership read is bounded by
++ * the "cnfg" resource size.  No register outside those resources is touched.
++ */
++
++
++void
++kebab_spmi_match_line(const struct kebab_spmi_match *m)
++{
++	printf("KEBAB SPMI: PPID 0x%03x APID 0x%03x map[core+0x%03x]=0x%08x own[cnfg+0x%03x]=0x%08x -> write_ee 0x%x irq_owner %u irq_ee 0x%x%s\n",
++	    m->ppid, m->apid, KEBAB_SPMI_APID_MAP + 4u * m->apid, m->map_raw,
++	    KEBAB_SPMI_OWNERSHIP + 4u * m->apid, m->own_raw, m->write_ee,
++	    m->irq_owner, m->irq_ee,
++	    m->write_ee == KEBAB_SPMI_EE ? " (owned by this EE)" : "");
++}
++
++static void
++kebab_spmi_report_unserialized(void)
++{
++	struct kebab_spmi_match matches[8];
++	uint32_t version, count, total, i, entries;
++
++	if (!spmi.mapped) {
++		printf("KEBAB SPMI: SPMI-1 FAIL: the arbiter registers are not mapped\n");
++		return;
++	}
++
++	printf("KEBAB SPMI: === SPMI-1: arbiter version ===\n");
++	version = kebab_spmi_rd(spmi.core, KEBAB_SPMI_VERSION);
++	printf("KEBAB SPMI: core 0x%08x+0x%x mapped; core+0x0000 = 0x%08x\n",
++	    KEBAB_SPMI_CORE_PA, KEBAB_SPMI_CORE_SIZE, version);
++	if (!kebab_spmi_version_known(version)) {
++		printf("KEBAB SPMI: SPMI-1 FAIL: 0x%08x is not a recognised arbiter version (dead or unclocked block); stopping\n",
++		    version);
++		return;
++	}
++	printf("KEBAB SPMI: version family %s\n", kebab_spmi_family(version));
++	if (version < 0x50000000u) {
++		printf("KEBAB SPMI: SPMI-1 PASS: the version was read and identified\n");
++		printf("KEBAB SPMI: SPMI-2 NOT RUN: the v5 APID table at core+0x900 and the v5 observer arithmetic do not apply to %s; stopping\n",
++		    kebab_spmi_family(version));
++		return;
++	}
++	printf("KEBAB SPMI: SPMI-1 PASS\n");
++
++	printf("KEBAB SPMI: === SPMI-2: PPID 0x%03x -> APID ===\n", KEBAB_SPMI_PON_PPID);
++	entries = (KEBAB_SPMI_CORE_SIZE - KEBAB_SPMI_APID_MAP) / 4u;
++	if (entries > KEBAB_SPMI_APID_MAX) {
++		entries = KEBAB_SPMI_APID_MAX;
++	}
++	printf("KEBAB SPMI: scan APID 0x000..0x%03x: core+0x%03x + 4*apid, %u entries bounded by core size 0x%x\n",
++	    entries - 1u, KEBAB_SPMI_APID_MAP, entries, KEBAB_SPMI_CORE_SIZE);
++
++	/* Negative control first: a PPID that cannot exist must not resolve. */
++	count = kebab_spmi_scan(KEBAB_SPMI_NEGATIVE_PPID, matches, 8);
++	printf("KEBAB SPMI: negative control PPID 0x%03x -> %u APID(s)%s\n",
++	    KEBAB_SPMI_NEGATIVE_PPID, count, count == 0 ? " (expected 0)" : " (UNEXPECTED)");
++	if (count != 0) {
++		printf("KEBAB SPMI: SPMI-2 FAIL: the mapping walk resolved a PPID that cannot exist; its answers are not trustworthy\n");
++		return;
++	}
++
++	count = kebab_spmi_scan(KEBAB_SPMI_PON_PPID, matches, 8);
++	total = count;
++	printf("KEBAB SPMI: scanned %u entries: %u non-zero mapping(s), %u map PPID 0x%03x\n",
++	    entries, kebab_spmi_nonzero, count, KEBAB_SPMI_PON_PPID);
++	if (count == 0) {
++		printf("KEBAB SPMI: SPMI-2 FAIL: no APID maps PPID 0x%03x\n",
++		    KEBAB_SPMI_PON_PPID);
++		return;
++	}
++	if (count > 8) {
++		printf("KEBAB SPMI: %u matches, only the first 8 are listed; the count is complete\n",
++		    count);
++		count = 8;
++	}
++	for (i = 0; i < count; i++) {
++		kebab_spmi_match_line(&matches[i]);
++	}
++	printf("KEBAB SPMI: SPMI-2 PASS: %u APID(s) map PPID 0x%03x\n", total,
++	    KEBAB_SPMI_PON_PPID);
++}
++
++void
++kebab_spmi_report(void)
++{
++	lck_mtx_lock(&kebab_spmi_normal_lock);
++	kebab_spmi_report_unserialized();
++	lck_mtx_unlock(&kebab_spmi_normal_lock);
++}
++
++
++void kebab_spmi_bus_lock(void) { lck_mtx_lock(&kebab_spmi_normal_lock); }
++void kebab_spmi_bus_unlock(void) { lck_mtx_unlock(&kebab_spmi_normal_lock); }
++bool kebab_spmi_bus_ready(void) { return spmi.mapped; }
++uint32_t kebab_spmi_bus_version(void) { return spmi.version; }
++uint32_t kebab_spmi_bus_read_version(void) { return kebab_spmi_rd(spmi.core, KEBAB_SPMI_VERSION); }
++uint32_t kebab_spmi_bus_next_attempt(void) { return ++spmi.read_attempt; }
++bool kebab_spmi_bus_verbose(void) { return spmi.verbose; }
++void kebab_spmi_bus_set_verbose(bool verbose) { spmi.verbose = verbose; }
++uint32_t kebab_spmi_bus_mapping(uint32_t apid)
++{
++	return apid < KEBAB_SPMI_APID_MAX ?
++	       kebab_spmi_rd(spmi.core, KEBAB_SPMI_APID_MAP + 4u * apid) : 0;
++}
++uint64_t kebab_spmi_bus_channel_physical(uint32_t apid)
++{
++	return KEBAB_SPMI_CHNLS_PA + 0x10000u * apid;
++}
++void kebab_spmi_bus_get_info(struct kebab_spmi_bus_info *info)
++{
++	if (info == NULL) { return; }
++	*info = (struct kebab_spmi_bus_info) {
++		.resources = { KEBAB_SPMI_CORE_PA, KEBAB_SPMI_CORE_SIZE,
++		    KEBAB_SPMI_OBSRV_PA, KEBAB_SPMI_OBSRV_SIZE,
++		    KEBAB_SPMI_CNFG_PA, KEBAB_SPMI_CNFG_SIZE,
++		    KEBAB_SPMI_CHNLS_PA, KEBAB_SPMI_CHNLS_SIZE },
++		.version = spmi.version, .ee = KEBAB_SPMI_EE,
++		.mapped = spmi.mapped, .write_channel_mapped = spmi.chnl_mapped,
++		.write_apid = spmi.chnl_apid,
++	};
++}
++
++bool
++kebab_spmi_bus_init(void)
++{
++	if (spmi.attempted) { return spmi.mapped; }
++	spmi.attempted = true;
++	kebab_spmi_bus_map_arbiter();
++	if (spmi.core == 0 || spmi.obsrvr == 0 || spmi.cnfg == 0) {
++		printf("KEBAB SPMI: cannot map the arbiter (core 0x%x obsrvr 0x%x cnfg 0x%x); SPMI? will report the failure\n",
++		    KEBAB_SPMI_CORE_PA, KEBAB_SPMI_OBSRV_PA, KEBAB_SPMI_CNFG_PA);
++		return false;
++	}
++	spmi.mapped = true;
++
++	uint32_t version = kebab_spmi_rd(spmi.core, KEBAB_SPMI_VERSION);
++	spmi.version = version;
++	printf("KEBAB SPMI: arbiter core 0x%08x+0x%x obsrvr 0x%08x+0x%x cnfg 0x%08x+0x%x (ee %u channel %u)\n",
++	    KEBAB_SPMI_CORE_PA, KEBAB_SPMI_CORE_SIZE, KEBAB_SPMI_OBSRV_PA,
++	    KEBAB_SPMI_OBSRV_SIZE, KEBAB_SPMI_CNFG_PA, KEBAB_SPMI_CNFG_SIZE,
++	    KEBAB_SPMI_EE, KEBAB_SPMI_CHANNEL);
++	printf("KEBAB SPMI: version core+0x0000 = 0x%08x (%s); intr 0x%08x not mapped\n",
++	    version, kebab_spmi_version_known(version) ? kebab_spmi_family(version) : "unrecognised",
++	    0x0e700000u);
++	return true;
++}
++
++void
++kebab_spmi_bus_prepare_write(uint32_t apid)
++{
++	vm_offset_t slice = KEBAB_SPMI_CHNLS_PA + 0x10000u * apid;
++	spmi.chnl = kebab_spmi_bus_map_channel(apid);
++	if (spmi.chnl != 0) {
++		spmi.chnl_apid = apid;
++		spmi.chnl_mapped = true;
++		printf("KEBAB SPMI: write path ready: APID 0x%03x, 4 KiB chnls slice 0x%08lx mapped\n",
++		    apid, (unsigned long)slice);
++	} else {
++		printf("KEBAB SPMI: cannot map the chnls slice 0x%08lx; the write path will refuse\n",
++		    (unsigned long)slice);
++	}
++}
++
+ #endif /* KEBAB */
+--- a/bsd/dev/kebab_spmi_bus.h
++++ b/bsd/dev/kebab_spmi_bus.h
+@@ -1,100 +1,18 @@
+-/* SM8250 SPMI arbiter core. Transitional private header for A1a.
+- * A1b narrows client access; no IOKit, allocation or locks on the transfer path.
+- * Board values and register semantics are retained from kebab_spmi.c.
+- */
+ #ifndef _KEBAB_SPMI_BUS_H
+ #define _KEBAB_SPMI_BUS_H
+ #include <sys/types.h>
+-#include <mach/vm_types.h>
+-/* ------------------------------------------------------------ board facts */
+-
+-#define KEBAB_SPMI_CORE_PA      0x0c440000u
+-#define KEBAB_SPMI_CORE_SIZE    0x00001100u
+-#define KEBAB_SPMI_OBSRV_PA     0x0e600000u
+-#define KEBAB_SPMI_OBSRV_SIZE   0x00100000u
+-#define KEBAB_SPMI_CNFG_PA      0x0c40a000u
+-#define KEBAB_SPMI_CNFG_SIZE    0x00026000u
+-/* The whole read/write window is 32 MiB; only one APID's slice is mapped. */
+-#define KEBAB_SPMI_CHNLS_PA     0x0c600000u
+-#define KEBAB_SPMI_CHNLS_SIZE   0x02000000u
+-#define KEBAB_SPMI_CHNL_SLICE   0x00001000u
+-
+-#define KEBAB_SPMI_EE           0u
+-#define KEBAB_SPMI_CHANNEL      0u      /* qcom,channel; not used for reads */
+-
+-/* ---------------------------------------------------------- v5 register map */
+-
+-#define KEBAB_SPMI_VERSION      0x0000u
+-#define KEBAB_SPMI_APID_MAP     0x0900u
+-#define KEBAB_SPMI_APID_MAX     512u    /* PMIC_ARB_MAX_PERIPHS */
+-#define KEBAB_SPMI_OWNERSHIP    0x0700u
+-
+-#define KEBAB_SPMI_CMD          0x0000u
+-#define KEBAB_SPMI_STATUS       0x0008u
+-#define KEBAB_SPMI_WDATA0       0x0010u
+-#define KEBAB_SPMI_RDATA0       0x0018u
+-
+-#define KEBAB_SPMI_STATUS_DONE      (1u << 0)
+-#define KEBAB_SPMI_STATUS_FAILURE   (1u << 1)
+-#define KEBAB_SPMI_STATUS_DENIED    (1u << 2)
+-#define KEBAB_SPMI_STATUS_DROPPED   (1u << 3)
+-
+-#define KEBAB_SPMI_OP_READ      15u     /* PMIC_ARB_OP_READ */
+-#define KEBAB_SPMI_OP_WRITEL    0u      /* PMIC_ARB_OP_EXT_WRITEL */
+-
+-/* One poll per microsecond for a millisecond, like PMIC_ARB_TIMEOUT_US. */
+-#define KEBAB_SPMI_TIMEOUT_US   1000u
+-
+-/* PM8150 PON, SID 0: PPID is (sid << 8) | (addr >> 8). */
+-#define KEBAB_SPMI_PON_SID      0u
+-#define KEBAB_SPMI_PON_PPID     0x008u
+-#define KEBAB_SPMI_PON_SUBTYPE  0x0805u
+-#define KEBAB_SPMI_PON_SPARE    0x088fu
+-
+-/*
+- * The PM8150 key sources read by bsd/dev/kebab_keys.c.  Power is the PON's
+- * real-time status at 0x0810 (base 0x0800 + 0x10).  The volume keys are
+- * PM8150 GPIO6 and GPIO7, whose pages start at 0x0c500 and 0x0c600
+- * (0x0c000 + (n - 1) * 0x100); each page's real-time status is +0x10 and its
+- * type register is +0x04.  The type byte is part of every sample so an
+- * all-zero bus read cannot be mistaken for both active-low volume keys.
+- *
+- * Vendor evidence is in package/KebabKeys.h and docs/BRING-UP-STATE.md
+- * section 71: pm8150.dtsi, kona-pmic-overlay.dtsi, kebab-oem.dtsi,
+- * qpnp-power-on.c and pinctrl-spmi-gpio.c.
+- */
+-#define KEBAB_SPMI_KEYS_PON_RT      0x0810u
+-#define KEBAB_SPMI_KEYS_GPIO6_RT    0x0c510u
+-#define KEBAB_SPMI_KEYS_GPIO7_RT    0x0c610u
+-#define KEBAB_SPMI_KEYS_GPIO6_TYPE  0x0c504u
+-
+-/*
+- * The pin setup of the same two pages, read once at start-up: mode 0x40,
+- * pull 0x42, enable 0x46 (pinctrl-spmi-gpio.c).  The vendor state is an
+- * enabled input with a pull-up; this kernel never writes the PMIC, so the
+- * keys driver reports the registers and withholds a key whose pin is not
+- * configured that way.
+- */
+-#define KEBAB_SPMI_KEYS_GPIO6_MODE  0x0c540u
+-#define KEBAB_SPMI_KEYS_GPIO6_PULL  0x0c542u
+-#define KEBAB_SPMI_KEYS_GPIO6_EN    0x0c546u
+-#define KEBAB_SPMI_KEYS_GPIO7_MODE  0x0c640u
+-#define KEBAB_SPMI_KEYS_GPIO7_PULL  0x0c642u
+-#define KEBAB_SPMI_KEYS_GPIO7_EN    0x0c646u
+-
+-/* qpnp_pon_set_restart_reason(), Gen2 layout. */
+-#define KEBAB_SPMI_PON_REASON_MASK   0xfeu
+-#define KEBAB_SPMI_PON_REASON_BOOTLOADER 0x02u
+-#define KEBAB_SPMI_PON_REASON_FIELD  (KEBAB_SPMI_PON_REASON_BOOTLOADER << 1)
+-
+-/*
+- * A PPID that belongs to the AP block rather than to a PMIC, used as a
+- * negative control for the mapping walk.  No PMIC on this board has SID 0x0F,
+- * so PPID 0xF00 must not resolve; if it does, the walk is reading something
+- * other than the mapping table and none of its answers are trustworthy.
+- */
+-#define KEBAB_SPMI_NEGATIVE_PPID 0xf00u
+-
++#include <stdbool.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++/* Resource order: core, observer, configuration, channel window (u64 pairs).
++ * No mapped addresses are exposed. Normal clients must serialize complete
++ * transactions; early/panic PON deliberately uses the bounded unlocked core. */
++struct kebab_spmi_bus_info {
++	uint64_t resources[8];
++	uint32_t version, ee, write_apid;
++	bool mapped, write_channel_mapped;
++};
+ struct kebab_spmi_match {
+ 	uint32_t apid;
+ 	uint32_t ppid;
+@@ -105,42 +23,8 @@
+ 	uint32_t irq_ee;
+ };
+ 
+-/* A PPID-to-observer-APID answer kept across polls (see kebab_spmi_reader). */
+-struct kebab_spmi_reader {
+-	uint32_t ppid;
+-	uint32_t apid;
+-	bool     valid;
+-};
+-
+-#define KEBAB_SPMI_READERS      4u
+-
+-struct kebab_spmi_bus_state {
+-	vm_offset_t core;
+-	vm_offset_t obsrvr;
+-	vm_offset_t cnfg;
+-	vm_offset_t chnl;              /* one 4 KiB read/write channel slice */
+-	uint32_t    version;           /* arbiter version read once in init */
+-	uint32_t    chnl_apid;
+-	uint32_t    read_attempt;
+-	bool        mapped;
+-	bool        attempted;
+-	bool        write_gate;
+-	bool        write_gate_parsed;
+-	bool        verbose;            /* kebab_pon_verbose: raw register traffic */
+-	bool        chnl_mapped;
+-	struct kebab_spmi_reader readers[KEBAB_SPMI_READERS];
+-};
+-
+-extern struct kebab_spmi_bus_state kebab_spmi_bus;
+-#define spmi kebab_spmi_bus
+-
+-extern uint32_t kebab_spmi_nonzero;
+-
+-
+-uint32_t
+-kebab_spmi_rd(vm_offset_t base, uint32_t offset);
+-void
+-kebab_spmi_wr(vm_offset_t base, uint32_t offset, uint32_t value);
++#define KEBAB_SPMI_APID_MAX 512u
++#define KEBAB_SPMI_EE 0u /* board qcom,ee; never a mapped address */
+ const char *
+ kebab_spmi_family(uint32_t version);
+ bool
+@@ -157,6 +41,24 @@
+     uint32_t attempt, bool verbose, bool quiet, uint8_t *value);
+ int
+ kebab_spmi_rw_write(uint32_t apid, uint32_t sid, uint32_t addr, uint8_t value);
+-void kebab_spmi_bus_map_arbiter(void);
+-vm_offset_t kebab_spmi_bus_map_channel(uint32_t apid);
++void
++kebab_spmi_match_line(const struct kebab_spmi_match *m);
++void kebab_spmi_bus_lock(void);
++void kebab_spmi_bus_unlock(void);
++bool kebab_spmi_bus_ready(void);
++uint32_t kebab_spmi_bus_version(void);
++uint32_t kebab_spmi_bus_read_version(void);
++uint32_t kebab_spmi_bus_next_attempt(void);
++bool kebab_spmi_bus_verbose(void);
++void kebab_spmi_bus_set_verbose(bool verbose);
++uint32_t kebab_spmi_bus_mapping(uint32_t apid);
++uint64_t kebab_spmi_bus_channel_physical(uint32_t apid);
++void kebab_spmi_bus_get_info(struct kebab_spmi_bus_info *info);
++bool
++kebab_spmi_bus_init(void);
++void
++kebab_spmi_bus_prepare_write(uint32_t apid);
++#ifdef __cplusplus
++}
+ #endif
++#endif
+--- /dev/null
++++ b/bsd/dev/kebab_spmi_bus_private.h
+@@ -0,0 +1,123 @@
++/* Arbiter implementation only; not a PMIC client interface. */
++#ifndef _KEBAB_SPMI_BUS_PRIVATE_H
++#define _KEBAB_SPMI_BUS_PRIVATE_H
++/* ------------------------------------------------------------ board facts */
++
++#define KEBAB_SPMI_CORE_PA      0x0c440000u
++#define KEBAB_SPMI_CORE_SIZE    0x00001100u
++#define KEBAB_SPMI_OBSRV_PA     0x0e600000u
++#define KEBAB_SPMI_OBSRV_SIZE   0x00100000u
++#define KEBAB_SPMI_CNFG_PA      0x0c40a000u
++#define KEBAB_SPMI_CNFG_SIZE    0x00026000u
++/* The whole read/write window is 32 MiB; only one APID's slice is mapped. */
++#define KEBAB_SPMI_CHNLS_PA     0x0c600000u
++#define KEBAB_SPMI_CHNLS_SIZE   0x02000000u
++#define KEBAB_SPMI_CHNL_SLICE   0x00001000u
++
++#define KEBAB_SPMI_EE           0u
++#define KEBAB_SPMI_CHANNEL      0u      /* qcom,channel; not used for reads */
++
++/* ---------------------------------------------------------- v5 register map */
++
++#define KEBAB_SPMI_VERSION      0x0000u
++#define KEBAB_SPMI_APID_MAP     0x0900u
++#define KEBAB_SPMI_APID_MAX     512u    /* PMIC_ARB_MAX_PERIPHS */
++#define KEBAB_SPMI_OWNERSHIP    0x0700u
++
++#define KEBAB_SPMI_CMD          0x0000u
++#define KEBAB_SPMI_STATUS       0x0008u
++#define KEBAB_SPMI_WDATA0       0x0010u
++#define KEBAB_SPMI_RDATA0       0x0018u
++
++#define KEBAB_SPMI_STATUS_DONE      (1u << 0)
++#define KEBAB_SPMI_STATUS_FAILURE   (1u << 1)
++#define KEBAB_SPMI_STATUS_DENIED    (1u << 2)
++#define KEBAB_SPMI_STATUS_DROPPED   (1u << 3)
++
++#define KEBAB_SPMI_OP_READ      15u     /* PMIC_ARB_OP_READ */
++#define KEBAB_SPMI_OP_WRITEL    0u      /* PMIC_ARB_OP_EXT_WRITEL */
++
++/* One poll per microsecond for a millisecond, like PMIC_ARB_TIMEOUT_US. */
++#define KEBAB_SPMI_TIMEOUT_US   1000u
++
++/* PM8150 PON, SID 0: PPID is (sid << 8) | (addr >> 8). */
++#define KEBAB_SPMI_PON_SID      0u
++#define KEBAB_SPMI_PON_PPID     0x008u
++#define KEBAB_SPMI_PON_SUBTYPE  0x0805u
++#define KEBAB_SPMI_PON_SPARE    0x088fu
++
++/*
++ * The PM8150 key sources read by bsd/dev/kebab_keys.c.  Power is the PON's
++ * real-time status at 0x0810 (base 0x0800 + 0x10).  The volume keys are
++ * PM8150 GPIO6 and GPIO7, whose pages start at 0x0c500 and 0x0c600
++ * (0x0c000 + (n - 1) * 0x100); each page's real-time status is +0x10 and its
++ * type register is +0x04.  The type byte is part of every sample so an
++ * all-zero bus read cannot be mistaken for both active-low volume keys.
++ *
++ * Vendor evidence is in package/KebabKeys.h and docs/BRING-UP-STATE.md
++ * section 71: pm8150.dtsi, kona-pmic-overlay.dtsi, kebab-oem.dtsi,
++ * qpnp-power-on.c and pinctrl-spmi-gpio.c.
++ */
++#define KEBAB_SPMI_KEYS_PON_RT      0x0810u
++#define KEBAB_SPMI_KEYS_GPIO6_RT    0x0c510u
++#define KEBAB_SPMI_KEYS_GPIO7_RT    0x0c610u
++#define KEBAB_SPMI_KEYS_GPIO6_TYPE  0x0c504u
++
++/*
++ * The pin setup of the same two pages, read once at start-up: mode 0x40,
++ * pull 0x42, enable 0x46 (pinctrl-spmi-gpio.c).  The vendor state is an
++ * enabled input with a pull-up; this kernel never writes the PMIC, so the
++ * keys driver reports the registers and withholds a key whose pin is not
++ * configured that way.
++ */
++#define KEBAB_SPMI_KEYS_GPIO6_MODE  0x0c540u
++#define KEBAB_SPMI_KEYS_GPIO6_PULL  0x0c542u
++#define KEBAB_SPMI_KEYS_GPIO6_EN    0x0c546u
++#define KEBAB_SPMI_KEYS_GPIO7_MODE  0x0c640u
++#define KEBAB_SPMI_KEYS_GPIO7_PULL  0x0c642u
++#define KEBAB_SPMI_KEYS_GPIO7_EN    0x0c646u
++
++/* qpnp_pon_set_restart_reason(), Gen2 layout. */
++#define KEBAB_SPMI_PON_REASON_MASK   0xfeu
++#define KEBAB_SPMI_PON_REASON_BOOTLOADER 0x02u
++#define KEBAB_SPMI_PON_REASON_FIELD  (KEBAB_SPMI_PON_REASON_BOOTLOADER << 1)
++
++/*
++ * A PPID that belongs to the AP block rather than to a PMIC, used as a
++ * negative control for the mapping walk.  No PMIC on this board has SID 0x0F,
++ * so PPID 0xF00 must not resolve; if it does, the walk is reading something
++ * other than the mapping table and none of its answers are trustworthy.
++ */
++#define KEBAB_SPMI_NEGATIVE_PPID 0xf00u
++
++/* A PPID-to-observer-APID answer kept across polls (see kebab_spmi_reader). */
++struct kebab_spmi_reader {
++	uint32_t ppid;
++	uint32_t apid;
++	bool     valid;
++};
++
++#define KEBAB_SPMI_READERS      4u
++
++struct kebab_spmi_bus_state {
++	vm_offset_t core;
++	vm_offset_t obsrvr;
++	vm_offset_t cnfg;
++	vm_offset_t chnl;              /* one 4 KiB read/write channel slice */
++	uint32_t    version;           /* arbiter version read once in init */
++	uint32_t    chnl_apid;
++	uint32_t    read_attempt;
++	bool        mapped;
++	bool        attempted;
++	bool        verbose;            /* kebab_pon_verbose: raw register traffic */
++	bool        chnl_mapped;
++	struct kebab_spmi_reader readers[KEBAB_SPMI_READERS];
++};
++
++#define spmi kebab_spmi_bus
++
++
++
++
++
++#endif
+--- /dev/null
++++ b/bsd/dev/kebab_spmi_clients.h
+@@ -0,0 +1,49 @@
++#ifndef _KEBAB_SPMI_CLIENTS_H
++#define _KEBAB_SPMI_CLIENTS_H
++#include <sys/types.h>
++#include <stdbool.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++/* Keep legacy entry points. _locked rail read is internal to the serialized
++ * board power sequence. Panic may call only the original unlocked PON core. */
++void kebab_spmi_init(void);
++void
++kebab_spmi_report(void);
++bool
++kebab_spmi_pon_writes_enabled(void);
++int
++kebab_spmi_pon_reason_write(void);
++void
++kebab_spmi_pon_report(void);
++int
++kebab_spmi_pon_reason_write_normal(void);
++void
++kebab_spmi_test_panic_lock(void);
++void
++kebab_spmi_pon_prepare(void);
++int
++kebab_spmi_keys_sample(uint8_t raw[4]);
++int
++kebab_spmi_keys_config(uint8_t gpio6[3], uint8_t gpio7[3]);
++int
++kebab_spmi_rail_enable_read_locked(const char *rail, const char *peripheral,
++    uint8_t *out);
++void
++kebab_spmi_power_report(void);
++bool
++kebab_spmi_vrm_writes_enabled(void);
++void
++kebab_spmi_vrm_init(void);
++void
++kebab_tcs_report(void);
++int
++kebab_spmi_vrm_enable(const char *rail);
++int
++kebab_spmi_vrm_boot_power(void);
++void
++kebab_rpmh_report(void);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/bsd/dev/kebab_spmi_keys.c
+@@ -0,0 +1,134 @@
++/* PM8150 key register client; no arbiter mappings or MMIO. */
++#if defined(KEBAB)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <mach/boolean.h>
++#include <pexpert/pexpert.h>
++#include "kebab_spmi_bus.h"
++#include "kebab_spmi_clients.h"
++#include "kebab_pmic_regs.h"
++
++/* ------------------------------------------------------- key registers */
++
++/*
++ * One look at the four PM8150 key bytes for bsd/dev/kebab_keys.c.  All four
++ * reads must complete; a partial sample is not a key state.  raw[] is filled
++ * only on success, and the caller treats a failure as "no observation".
++ *
++ * This is a read-only path: the only write is the observer command that asks
++ * the arbiter for a transfer.  No PMIC register is changed.
++ */
++static int
++kebab_spmi_keys_sample_unserialized(uint8_t raw[4])
++{
++	static const uint32_t addr[4] = {
++		KEBAB_SPMI_KEYS_PON_RT,
++		KEBAB_SPMI_KEYS_GPIO6_RT,
++		KEBAB_SPMI_KEYS_GPIO7_RT,
++		KEBAB_SPMI_KEYS_GPIO6_TYPE,
++	};
++	uint8_t value[4] = { 0, 0, 0, 0 };
++	uint32_t i;
++
++	if (raw == NULL) {
++		return -1;
++	}
++	raw[0] = 0;
++	raw[1] = 0;
++	raw[2] = 0;
++	raw[3] = 0;
++	if (!kebab_spmi_bus_ready() || !kebab_spmi_version_known(kebab_spmi_bus_version()) ||
++	    kebab_spmi_bus_version() < 0x50000000u) {
++		return -1;
++	}
++	for (i = 0; i < 4; i++) {
++		uint32_t ppid = (KEBAB_SPMI_PON_SID << 8) | (addr[i] >> 8);
++		uint32_t apid;
++
++		if (kebab_spmi_reader(ppid, &apid) != 0) {
++			if (kebab_spmi_bus_verbose()) {
++				printf("KEBAB SPMI: keys: no APID maps PPID 0x%03x (register 0x%04x)\n",
++				    ppid, addr[i]);
++			}
++			return -1;
++		}
++		if (kebab_spmi_obs_read_ex(apid, KEBAB_SPMI_PON_SID, addr[i],
++		    kebab_spmi_bus_next_attempt(), kebab_spmi_bus_verbose(), true, &value[i]) != 0) {
++			kebab_spmi_reader_forget(ppid);
++			return -1;
++		}
++	}
++	memcpy(raw, value, sizeof(value));
++	return 0;
++}
++
++/*
++ * The pin setup of the two volume-key inputs, read once by
++ * bsd/dev/kebab_keys.c before it starts polling.  Each array is
++ * { mode, pull, enable } from the vendor pinctrl registers 0x40, 0x42 and 0x46
++ * inside the GPIO's 0x100-byte page.
++ *
++ * The vendor device tree asks for an enabled input with a pull-up
++ * (input-enable, bias-pull-up, power-source 1).  This kernel never writes the
++ * PMIC, so the state has to come from the boot firmware; the keys driver
++ * reports these bytes and withholds a key whose pin is not configured that
++ * way, instead of turning a disabled input into a permanent press.
++ */
++static int
++kebab_spmi_keys_config_unserialized(uint8_t gpio6[3], uint8_t gpio7[3])
++{
++	static const uint32_t addr[6] = {
++		KEBAB_SPMI_KEYS_GPIO6_MODE,
++		KEBAB_SPMI_KEYS_GPIO6_PULL,
++		KEBAB_SPMI_KEYS_GPIO6_EN,
++		KEBAB_SPMI_KEYS_GPIO7_MODE,
++		KEBAB_SPMI_KEYS_GPIO7_PULL,
++		KEBAB_SPMI_KEYS_GPIO7_EN,
++	};
++	uint8_t value[6] = { 0, 0, 0, 0, 0, 0 };
++	uint32_t i;
++
++	if (gpio6 == NULL || gpio7 == NULL) {
++		return -1;
++	}
++	if (!kebab_spmi_bus_ready() || !kebab_spmi_version_known(kebab_spmi_bus_version()) ||
++	    kebab_spmi_bus_version() < 0x50000000u) {
++		return -1;
++	}
++	for (i = 0; i < 6; i++) {
++		uint32_t ppid = (KEBAB_SPMI_PON_SID << 8) | (addr[i] >> 8);
++		uint32_t apid;
++
++		if (kebab_spmi_reader(ppid, &apid) != 0) {
++			return -1;
++		}
++		if (kebab_spmi_obs_read_ex(apid, KEBAB_SPMI_PON_SID, addr[i],
++		    kebab_spmi_bus_next_attempt(), kebab_spmi_bus_verbose(), true, &value[i]) != 0) {
++			kebab_spmi_reader_forget(ppid);
++			return -1;
++		}
++	}
++	memcpy(gpio6, value, 3);
++	memcpy(gpio7, value + 3, 3);
++	return 0;
++}
++
++int
++kebab_spmi_keys_sample(uint8_t raw[4])
++{
++	kebab_spmi_bus_lock();
++	int result = kebab_spmi_keys_sample_unserialized(raw);
++	kebab_spmi_bus_unlock();
++	return result;
++}
++
++int
++kebab_spmi_keys_config(uint8_t gpio6[3], uint8_t gpio7[3])
++{
++	kebab_spmi_bus_lock();
++	int result = kebab_spmi_keys_config_unserialized(gpio6, gpio7);
++	kebab_spmi_bus_unlock();
++	return result;
++}
++#endif /* KEBAB */
+--- /dev/null
++++ b/bsd/dev/kebab_spmi_pon.c
+@@ -0,0 +1,369 @@
++/* PM8150 PON policy and restart reason; panic core stays lock-free. */
++#if defined(KEBAB)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <mach/boolean.h>
++#include <pexpert/pexpert.h>
++#include "kebab_spmi_bus.h"
++#include "kebab_spmi_clients.h"
++#include "kebab_pmic_regs.h"
++
++static struct { bool write_gate, write_gate_parsed, verbose; } pon;
++
++/* ---------------------------------------------------------------- helpers */
++
++
++/*
++ * One gate for every PMIC write in this file.  Parsed once, in kebab_spmi_init()
++ * at boot, so a command running from the panic loop only reads a boolean.
++ * Default off: an unmodified boot never writes a PMIC register.
++ */
++bool
++kebab_spmi_pon_writes_enabled(void)
++{
++	uint32_t enabled = 0, verbose = 0;
++
++	if (!pon.write_gate_parsed) {
++		pon.write_gate_parsed = true;
++		pon.write_gate = PE_parse_boot_argn("kebab_pon_write", &enabled,
++		    sizeof(enabled)) && enabled != 0;
++		pon.verbose = PE_parse_boot_argn("kebab_pon_verbose", &verbose,
++		    sizeof(verbose)) && verbose != 0;
++		kebab_spmi_bus_set_verbose(pon.verbose);
++		printf("KEBAB SPMI: kebab_pon_write=%u: PMIC writes %s",
++		    enabled, pon.write_gate ? "ENABLED" : "disabled (default)");
++		if (pon.verbose) {
++			printf(", kebab_pon_verbose=1: raw register traffic shown");
++		}
++		printf("\n");
++	}
++	return pon.write_gate;
++}
++
++/*
++ * The APID the local EE may write the PON block through.  Several APIDs can
++ * map PPID 0x008 (one per execution environment); only the one whose
++ * ownership register says write_ee == this EE is usable, which is the same
++ * test pmic_arb_offset_v5() applies to a read/write channel.  Refusing here
++ * keeps every later write from being a permission experiment.
++ */
++static int
++kebab_spmi_pon_apid(uint32_t *apid_out)
++{
++	struct kebab_spmi_match matches[8];
++	uint32_t count, i;
++
++	count = kebab_spmi_scan(KEBAB_SPMI_PON_PPID, matches, 8);
++	if (count == 0) {
++		printf("KEBAB SPMI: no APID maps PPID 0x%03x; no PON write is possible\n",
++		    KEBAB_SPMI_PON_PPID);
++		return -1;
++	}
++	if (count > 8) {
++		count = 8;
++	}
++	for (i = 0; i < count; i++) {
++		if (matches[i].write_ee == KEBAB_SPMI_EE) {
++			*apid_out = matches[i].apid;
++			if (pon.verbose) {
++				printf("KEBAB SPMI: PON write APID 0x%03x, write_ee 0x%x (this EE); chnls slice 0x%08x\n",
++				    matches[i].apid, matches[i].write_ee,
++				    (uint32_t)kebab_spmi_bus_channel_physical(matches[i].apid));
++			}
++			return 0;
++		}
++	}
++	printf("KEBAB SPMI: PPID 0x%03x has %u APID(s), none with write_ee %u; refusing every PON write\n",
++	    KEBAB_SPMI_PON_PPID, count, KEBAB_SPMI_EE);
++	return -1;
++}
++
++/*
++ * The observer APID for one PPID, remembered across polls.  The keys driver
++ * reads three peripherals about sixty times a second; walking the 512-entry
++ * mapping table for every sample would be most of the work.  The mapping
++ * register is still re-read by kebab_spmi_obs_read_ex() for every transfer, so
++ * a stale cached APID cannot silently become a read of another peripheral: the
++ * transfer is refused and the caller drops the entry.
++ *
++ * A read does not need channel ownership; the observer path is available for
++ * every mapped PPID.  When several APIDs map one PPID, the one owned by this
++ * EE is preferred only so the answer matches what a write would use.
++ */
++
++
++/* ---------------------------------------------------------- observer reads */
++
++/*
++ * Read one PMIC register through the observer channel.  The command register
++ * is written, status is polled with a bounded counter, and the data register
++ * is read only after DONE without FAILURE/DENIED/DROPPED.
++ *
++ * The APID is re-checked against the PPID derived from sid/addr, so a stale
++ * or wrong match cannot silently become a read of a different peripheral.
++ * The success line is raw register traffic and is printed only when the
++ * caller asks for it; failures print unless the caller is a poll that has its
++ * own rate-limited error line (the keys driver).
++ */
++
++
++/* The PON? report always shows the raw reads; the write path does not. */
++static int
++kebab_spmi_obs_read(uint32_t apid, uint32_t sid, uint32_t addr,
++    uint32_t attempt, uint8_t *value)
++{
++	return kebab_spmi_obs_read_ex(apid, sid, addr, attempt, true, false,
++	    value);
++}
++
++/* -------------------------------------------------- read/write PON registers */
++
++static int
++kebab_spmi_pon_read(uint32_t apid, uint32_t addr, uint8_t *value)
++{
++	return kebab_spmi_obs_read_ex(apid, KEBAB_SPMI_PON_SID, addr,
++	    kebab_spmi_bus_next_attempt(), pon.verbose, false, value);
++}
++
++/*
++ * One PMIC byte write through the read/write channel slice mapped for apid.
++ * The mapping and ownership registers are re-read here, not trusted from the
++ * caller: a write is only issued when the APID still maps the PPID derived
++ * from sid/addr and its write_ee is this EE.
++ *
++ * The caller must have read the old register value through the observer
++ * first; this primitive does not do the read-modify-write by itself.
++ */
++
++
++/*
++ * Gen2 restart reason: qpnp_pon_set_restart_reason() does a masked write of
++ * GENMASK(7,1) with (reason << 1); reason 0x02 is PON_RESTART_REASON_BOOTLOADER,
++ * so the target field value is 0x04 and bit 0 is outside the mask and must
++ * survive unchanged.
++ *
++ * The old value is read first and printed; the write is issued only after the
++ * APID ownership check inside kebab_spmi_rw_write(); the register is then read
++ * back (bounded retries) and both the target bits and the untouched bits are
++ * checked before this returns success.
++ */
++int
++kebab_spmi_pon_reason_write(void)
++{
++	uint32_t apid, i, old, expect, readback = 0;
++	uint8_t value = 0;
++	bool readback_ok = false;
++	int rc;
++
++	if (!kebab_spmi_pon_writes_enabled()) {
++		printf("KEBAB PON: kebab_pon_write is off; refusing to write SOFT_RB_SPARE\n");
++		return -1;
++	}
++	if (kebab_spmi_pon_apid(&apid) != 0) {
++		return -1;
++	}
++	if (kebab_spmi_pon_read(apid, KEBAB_SPMI_PON_SPARE, &value) != 0) {
++		printf("KEBAB PON: could not read SOFT_RB_SPARE 0x%04x; not writing it\n",
++		    KEBAB_SPMI_PON_SPARE);
++		return -1;
++	}
++	old = value;
++	expect = (old & ~KEBAB_SPMI_PON_REASON_MASK) |
++	    KEBAB_SPMI_PON_REASON_FIELD;
++	printf("KEBAB PON: restart reason: SOFT_RB_SPARE 0x%02x -> 0x%02x (mask 0x%02x, PON_RESTART_REASON_BOOTLOADER 0x%02x << 1 = 0x%02x)\n",
++	    old, expect, KEBAB_SPMI_PON_REASON_MASK,
++	    KEBAB_SPMI_PON_REASON_BOOTLOADER, KEBAB_SPMI_PON_REASON_FIELD);
++	if (expect == old) {
++		printf("KEBAB PON: the field already held the bootloader value; writing it again to prove the path\n");
++	}
++	rc = kebab_spmi_rw_write(apid, KEBAB_SPMI_PON_SID, KEBAB_SPMI_PON_SPARE,
++	    (uint8_t)expect);
++	if (rc != 0) {
++		printf("KEBAB PON: SOFT_RB_SPARE write failed; nothing verified\n");
++		return -1;
++	}
++
++	for (i = 0; i < 20u; i++) {
++		if (kebab_spmi_pon_read(apid, KEBAB_SPMI_PON_SPARE, &value) == 0) {
++			readback = value;
++			readback_ok = true;
++			if (value == expect) {
++				break;
++			}
++		}
++		delay(1000);
++	}
++	if (!readback_ok) {
++		printf("KEBAB PON: FAIL: the write completed but SOFT_RB_SPARE could not be read back\n");
++		return -1;
++	}
++	if ((readback & KEBAB_SPMI_PON_REASON_MASK) != KEBAB_SPMI_PON_REASON_FIELD) {
++		printf("KEBAB PON: FAIL: read back 0x%02x, reason field is 0x%02x, not 0x%02x\n",
++		    readback, readback & KEBAB_SPMI_PON_REASON_MASK,
++		    KEBAB_SPMI_PON_REASON_FIELD);
++		return -1;
++	}
++	if ((readback & ~KEBAB_SPMI_PON_REASON_MASK) !=
++	    (old & ~KEBAB_SPMI_PON_REASON_MASK)) {
++		printf("KEBAB PON: FAIL: bit 0 changed 0x%x -> 0x%x although it is outside mask 0x%02x\n",
++		    old & 1u, readback & 1u, KEBAB_SPMI_PON_REASON_MASK);
++		return -1;
++	}
++	printf("KEBAB PON: restart reason verified: read back 0x%02x, field 0x%02x, bit 0 unchanged 0x%x\n",
++	    readback, readback & KEBAB_SPMI_PON_REASON_MASK, readback & 1u);
++	return 0;
++}
++
++/*
++ * SPMI-3: read the PON subtype and SOFT_RB_SPARE through the observer, twice
++ * each, and require both reads of a register to agree.  This is still a
++ * read-only gate: the observer command register is written to issue a read,
++ * no PMIC register is written.
++ */
++static void
++kebab_spmi_pon_report_unserialized(void)
++{
++	struct kebab_spmi_match matches[8];
++	uint32_t count, i, chosen = 0, version;
++	bool have_owned = false;
++	uint8_t subtype[2] = { 0, 0 }, spare[2] = { 0, 0 };
++	int rc1, rc2;
++	bool subtype_stable, spare_stable, subtype_known;
++
++	if (!kebab_spmi_bus_ready()) {
++		printf("KEBAB SPMI: SPMI-3 FAIL: the arbiter registers are not mapped\n");
++		return;
++	}
++	version = kebab_spmi_bus_read_version();
++	if (!kebab_spmi_version_known(version)) {
++		printf("KEBAB SPMI: SPMI-3 FAIL: arbiter version 0x%08x is not recognised; no read attempted\n",
++		    version);
++		return;
++	}
++	if (version < 0x50000000u) {
++		printf("KEBAB SPMI: SPMI-3 FAIL: arbiter is %s, not v5; the v5 observer arithmetic is not used\n",
++		    kebab_spmi_family(version));
++		return;
++	}
++
++	printf("KEBAB SPMI: === SPMI-3: PON registers through the observer ===\n");
++	count = kebab_spmi_scan(KEBAB_SPMI_PON_PPID, matches, 8);
++	if (count == 0) {
++		printf("KEBAB SPMI: SPMI-3 FAIL: PPID 0x%03x has no APID\n",
++		    KEBAB_SPMI_PON_PPID);
++		return;
++	}
++	for (i = 0; i < count && i < 8; i++) {
++		kebab_spmi_match_line(&matches[i]);
++		if (!have_owned && matches[i].write_ee == KEBAB_SPMI_EE) {
++			chosen = matches[i].apid;
++			have_owned = true;
++		}
++	}
++	if (!have_owned) {
++		/*
++		 * pmic_arb_read_apid_map_v5() falls back to the first mapping
++		 * when no APID is owned by this EE, and the observer path does
++		 * not check write_ee.  Say so instead of failing the read.
++		 */
++		chosen = matches[0].apid;
++		printf("KEBAB SPMI: no APID for PPID 0x%03x is owned by EE %u; using the first mapping (observer reads are not ownership-checked)\n",
++		    KEBAB_SPMI_PON_PPID, KEBAB_SPMI_EE);
++	}
++	printf("KEBAB SPMI: using APID 0x%03x for PPID 0x%03x, SID %u, ee %u\n",
++	    chosen, KEBAB_SPMI_PON_PPID, KEBAB_SPMI_PON_SID, KEBAB_SPMI_EE);
++
++	rc1 = kebab_spmi_obs_read(chosen, KEBAB_SPMI_PON_SID,
++	    KEBAB_SPMI_PON_SUBTYPE, 1, &subtype[0]);
++	rc2 = kebab_spmi_obs_read(chosen, KEBAB_SPMI_PON_SID,
++	    KEBAB_SPMI_PON_SUBTYPE, 2, &subtype[1]);
++	subtype_stable = rc1 == 0 && rc2 == 0 && subtype[0] == subtype[1];
++	printf("KEBAB SPMI: PON subtype 0x%04x reads 0x%02x / 0x%02x -> %s\n",
++	    KEBAB_SPMI_PON_SUBTYPE, subtype[0], subtype[1],
++	    subtype_stable ? "STABLE" : "NOT STABLE");
++
++	rc1 = kebab_spmi_obs_read(chosen, KEBAB_SPMI_PON_SID,
++	    KEBAB_SPMI_PON_SPARE, 1, &spare[0]);
++	rc2 = kebab_spmi_obs_read(chosen, KEBAB_SPMI_PON_SID,
++	    KEBAB_SPMI_PON_SPARE, 2, &spare[1]);
++	spare_stable = rc1 == 0 && rc2 == 0 && spare[0] == spare[1];
++	printf("KEBAB SPMI: SOFT_RB_SPARE 0x%04x reads 0x%02x / 0x%02x -> %s\n",
++	    KEBAB_SPMI_PON_SPARE, spare[0], spare[1],
++	    spare_stable ? "STABLE" : "NOT STABLE");
++
++	subtype_known = subtype_stable && subtype[0] >= 0x01u && subtype[0] <= 0x05u;
++	if (subtype_known) {
++		if (subtype[0] == 0x04u || subtype[0] == 0x05u) {
++			printf("KEBAB SPMI: PON generation: Gen2 (subtype 0x%02x); the Gen2 SOFT_RB_SPARE layout would apply\n",
++			    subtype[0]);
++		} else {
++			printf("KEBAB SPMI: PON generation: Gen1/1REG (subtype 0x%02x); the Gen2 SOFT_RB_SPARE layout does not apply\n",
++			    subtype[0]);
++		}
++	} else {
++		printf("KEBAB SPMI: PON generation: UNKNOWN (subtype 0x%02x is not a documented PON subtype, or the reads did not repeat)\n",
++		    subtype[0]);
++	}
++	if (subtype_stable && spare_stable && subtype_known) {
++		printf("KEBAB SPMI: SPMI-3 PASS\n");
++	} else {
++		printf("KEBAB SPMI: SPMI-3 FAIL: subtype %s, SOFT_RB_SPARE %s, subtype %s\n",
++		    subtype_stable ? "stable" : "unstable",
++		    spare_stable ? "stable" : "unstable",
++		    subtype_known ? "recognised" : "not recognised");
++	}
++}
++
++void
++kebab_spmi_pon_report(void)
++{
++	kebab_spmi_bus_lock();
++	kebab_spmi_pon_report_unserialized();
++	kebab_spmi_bus_unlock();
++}
++
++int
++kebab_spmi_pon_reason_write_normal(void)
++{
++	kebab_spmi_bus_lock();
++	int result = kebab_spmi_pon_reason_write();
++	kebab_spmi_bus_unlock();
++	return result;
++}
++
++/* Default-off failure injection: PANIC! invokes this on the normal console
++ * thread. Holding the ordinary bus mutex across the panic proves that the
++ * independent panic FASTBOOT path cannot wait on the interrupted owner. */
++void
++kebab_spmi_test_panic_lock(void)
++{
++	uint32_t enabled = 0;
++	if (PE_parse_boot_argn("kebab_spmi_lockpanic", &enabled, sizeof(enabled)) && enabled) {
++		kebab_spmi_bus_lock();
++		printf("KEBAB SPMI TEST: normal bus mutex held for intentional panic\n");
++		panic("kebab usb console test (normal SPMI lock held)");
++	}
++}
++
++/* Policy remains in PON; the bus maps only the selected owned channel. */
++void
++kebab_spmi_pon_prepare(void)
++{
++	struct kebab_spmi_bus_info info;
++	kebab_spmi_bus_get_info(&info);
++	if (!kebab_spmi_pon_writes_enabled()) {
++		printf("KEBAB SPMI: chnls 0x%08x not mapped; the write path is off\n",
++		    (uint32_t)info.resources[6]);
++		return;
++	}
++	if (kebab_spmi_version_known(info.version) && info.version >= 0x50000000u) {
++		uint32_t apid;
++		if (kebab_spmi_pon_apid(&apid) == 0) {
++			kebab_spmi_bus_prepare_write(apid);
++		}
++	} else {
++		printf("KEBAB SPMI: arbiter is not v5; the write path is not implemented for it\n");
++	}
++}
++#endif /* KEBAB */
+--- /dev/null
++++ b/bsd/dev/kebab_spmi_power.c
+@@ -0,0 +1,225 @@
++/* Read-only PMIC rail identity/state client of the SPMI arbiter. */
++#if defined(KEBAB)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <mach/boolean.h>
++#include <pexpert/pexpert.h>
++#include "kebab_spmi_bus.h"
++#include "kebab_spmi_clients.h"
++#include "kebab_pmic_regs.h"
++
++/*
++ * The S3908 node names two rails that RPMh owns; this file cannot command
++ * RPMh, but it can read the PMIC peripherals through the observer channel,
++ * which needs no channel ownership and issues no peripheral write.
++ *
++ * The SPMI bus on this board carries PM8150 on SID 0/1, PM8150B on 2/3,
++ * PM8150L on 4/5 and PMK8002 on 6/7.  The mapping survey below showed which
++ * USID actually exposes each LDO page: 0x4c00 is mapped on SID 1 (not 0) and
++ * 0x4000 on SID 5 (not 4), with SID 2 showing its own 0x4000 (PM8150B).  The
++ * table uses those measured USIDs; the type/subtype answer is what finally
++ * decides whether the peripheral is the expected LDO.  Lead with identity, and
++ * only read the control registers after it is stable and not empty.
++ */
++struct kebab_spmi_power {
++	const char *name;
++	uint32_t    sid;
++	uint32_t    base;
++};
++
++static const struct kebab_spmi_power kebab_spmi_power_targets[] = {
++	{ "pm8150_l13", 1, 0x4c00u },
++	{ "pm8150a_l1", 5, 0x4000u },
++};
++
++static int
++kebab_spmi_power_read(uint32_t apid, uint32_t sid, uint32_t addr,
++    const char *what, uint8_t *out)
++{
++	uint8_t a = 0, b = 0;
++
++	if (kebab_spmi_obs_read_ex(apid, sid, addr, 1, false, false, &a) != 0 ||
++	    kebab_spmi_obs_read_ex(apid, sid, addr, 2, false, false, &b) != 0) {
++		printf("KEBAB SPMI: PWR: %s 0x%04x read failed\n", what, addr);
++		return -1;
++	}
++	if (a != b) {
++		printf("KEBAB SPMI: PWR: %s 0x%04x unstable 0x%02x/0x%02x\n",
++		    what, addr, a, b);
++		return -1;
++	}
++	*out = a;
++	return 0;
++}
++
++static void
++kebab_spmi_power_one(const struct kebab_spmi_power *t)
++{
++	struct kebab_spmi_match matches[8];
++	uint32_t ppid = (t->sid << 8) | (t->base >> 8);
++	uint32_t count, i, apid = 0;
++	uint8_t type = 0, subtype = 0, enable = 0, range = 0, set = 0;
++
++	printf("KEBAB SPMI: PWR: %s: SID %u base 0x%04x PPID 0x%03x\n",
++	    t->name, t->sid, t->base, ppid);
++	count = kebab_spmi_scan(ppid, matches, 8);
++	if (count == 0) {
++		printf("KEBAB SPMI: PWR: %s: no APID maps PPID 0x%03x; the SID candidate is wrong or the peripheral is absent\n",
++		    t->name, ppid);
++		return;
++	}
++	if (count > 8) {
++		count = 8;
++	}
++	for (i = 0; i < count; i++) {
++		printf("KEBAB SPMI: PWR: %s: APID 0x%03x write_ee 0x%x irq_owner %u\n",
++		    t->name, matches[i].apid, matches[i].write_ee,
++		    matches[i].irq_owner);
++	}
++	apid = matches[0].apid;
++	if (kebab_spmi_power_read(apid, t->sid, t->base + 0x04u, "type", &type) != 0 ||
++	    kebab_spmi_power_read(apid, t->sid, t->base + 0x05u, "subtype",
++	    &subtype) != 0) {
++		printf("KEBAB SPMI: PWR: %s: identity unreadable; control registers not read\n",
++		    t->name);
++		return;
++	}
++	printf("KEBAB SPMI: PWR: %s: type 0x%02x subtype 0x%02x\n",
++	    t->name, type, subtype);
++	if (type == 0x00u || type == 0xffu) {
++		printf("KEBAB SPMI: PWR: %s: identity is empty (0x%02x); stopping\n",
++		    t->name, type);
++		return;
++	}
++	if (kebab_spmi_power_read(apid, t->sid, t->base + 0x46u, "enable",
++	    &enable) != 0 ||
++	    kebab_spmi_power_read(apid, t->sid, t->base + 0x40u, "range",
++	    &range) != 0 ||
++	    kebab_spmi_power_read(apid, t->sid, t->base + 0x41u, "set", &set) != 0) {
++		printf("KEBAB SPMI: PWR: %s: control registers unreadable\n", t->name);
++		return;
++	}
++	printf("KEBAB SPMI: PWR: %s: enable 0x%02x (bit7 %u), range 0x%02x, set 0x%02x\n",
++	    t->name, enable, (enable >> 7) & 1u, range, set);
++}
++
++/*
++ * The two candidates above can be "not mapped" for two very different
++ * reasons: the SID is wrong, or the AP's SPMI channel genuinely has no
++ * peripheral there.  This survey answers that without touching a peripheral:
++ * it walks the same 512-entry APID table SPMI-2 uses, counts mappings per
++ * SID, and looks for any PPID whose peripheral address falls in the two LDO
++ * pages.
++ */
++static void
++kebab_spmi_power_map_summary(void)
++{
++	uint32_t apid, i, ppid, sid;
++	uint32_t per_sid[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
++	uint32_t page_hits = 0;
++
++	for (apid = 0; apid < KEBAB_SPMI_APID_MAX; apid++) {
++		uint32_t map = kebab_spmi_bus_mapping(apid);
++		if (map == 0) {
++			continue;
++		}
++		ppid = (map >> 8) & 0xfffu;
++		sid = ppid >> 8;
++		if (sid < 8) {
++			per_sid[sid]++;
++		}
++	}
++	printf("KEBAB SPMI: PWR: mappings per SID:");
++	for (i = 0; i < 8; i++) {
++		printf(" %u:%u", i, per_sid[i]);
++	}
++	printf("\n");
++
++	for (sid = 0; sid < 8; sid++) {
++		static const uint32_t pages[] = { 0x40u, 0x4cu };
++		for (i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
++			ppid = (sid << 8) | pages[i];
++			struct kebab_spmi_match hit[1];
++
++			if (kebab_spmi_scan(ppid, hit, 1) > 0) {
++				printf("KEBAB SPMI: PWR: mapping present for SID %u base 0x%04x (PPID 0x%03x)\n",
++				    sid, pages[i] << 8, ppid);
++				page_hits++;
++			}
++		}
++	}
++	if (page_hits == 0) {
++		printf("KEBAB SPMI: PWR: no SID 0..7 maps an LDO page at 0x4000/0x4c00; the AP SPMI channel cannot reach these rails\n");
++	}
++}
++
++/*
++ * The enable byte PWR? prints, split out so the boot sequence can ask whether a
++ * rail is already on before commanding it.  Same observer reads, same two
++ * matching reads of the same register: this is the path the console has
++ * already been measured through, not a second one.
++ */
++static const struct kebab_spmi_power *
++kebab_spmi_rail_target(const char *peripheral)
++{
++	uint32_t i;
++
++	for (i = 0; i < sizeof(kebab_spmi_power_targets) /
++	    sizeof(kebab_spmi_power_targets[0]); i++) {
++		if (strcmp(kebab_spmi_power_targets[i].name, peripheral) == 0) {
++			return &kebab_spmi_power_targets[i];
++		}
++	}
++	return NULL;
++}
++
++int
++kebab_spmi_rail_enable_read_locked(const char *rail, const char *peripheral,
++    uint8_t *out)
++{
++	const struct kebab_spmi_power *t = kebab_spmi_rail_target(peripheral);
++	struct kebab_spmi_match matches[8];
++	uint32_t ppid;
++
++	if (t == NULL) {
++		printf("KEBAB VRM: boot power: %s is not a peripheral this file knows\n",
++		    rail);
++		return -1;
++	}
++	ppid = (t->sid << 8) | (t->base >> 8);
++	if (kebab_spmi_scan(ppid, matches, 8) == 0) {
++		printf("KEBAB VRM: boot power: %s: no APID maps PPID 0x%03x\n",
++		    rail, ppid);
++		return -1;
++	}
++	return kebab_spmi_power_read(matches[0].apid, t->sid,
++	    t->base + 0x46u, "enable", out);
++}
++
++static void
++kebab_spmi_power_report_unserialized(void)
++{
++	uint32_t i;
++
++	if (!kebab_spmi_bus_ready()) {
++		printf("KEBAB SPMI: PWR: SPMI is not mapped\n");
++		return;
++	}
++	printf("KEBAB SPMI: === PWR: touch rails, observer reads only ===\n");
++	for (i = 0; i < sizeof(kebab_spmi_power_targets) /
++	    sizeof(kebab_spmi_power_targets[0]); i++) {
++		kebab_spmi_power_one(&kebab_spmi_power_targets[i]);
++	}
++	kebab_spmi_power_map_summary();
++	printf("KEBAB SPMI: PWR: done; no peripheral write was issued\n");
++}
++
++void
++kebab_spmi_power_report(void)
++{
++	kebab_spmi_bus_lock();
++	kebab_spmi_power_report_unserialized();
++	kebab_spmi_bus_unlock();
++}
++#endif /* KEBAB */

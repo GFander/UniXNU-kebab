@@ -21,6 +21,7 @@ sources named above.
 from pathlib import Path
 import argparse
 import os
+import hashlib
 import struct
 import base64
 import json
@@ -126,6 +127,11 @@ def main():
     parser.add_argument('--unique-chip-id', type=lambda value: int(value, 16), default=None,
                         help='/chosen/unique-chip-id (8 bytes) and --chip-id (4 bytes) seed XNU IOPlatformUUID')
     parser.add_argument('--chip-id', type=lambda value: int(value, 16), default=None)
+    parser.add_argument('--development-boot', action='store_true',
+                        help='Declare custom UEFI mix-and-match policy and a development boot nonce; '
+                             'does not establish an Apple secure boot chain')
+    parser.add_argument('--owner-boot-manifest', type=Path,
+                        help='Owner image-set JSON to measure with SHA384; requires --development-boot')
     parser.add_argument('--iphone-identity', action='store_true',
                         help='/product and /buttons describe an iPhone-class device: phone idiom, '
                              'iPhone X (iPhone10,3 / D22AP) identity strings')
@@ -144,6 +150,16 @@ def main():
                         default=Path(__file__).resolve().parents[1] / 'configs/d22ap-product.json',
                         help='real D22AP /product node as JSON (from ipsw dtree)')
     args = parser.parse_args()
+    development_nonce = os.urandom(32) if args.development_boot else None
+    owner_manifest = None
+    owner_domain = None
+    if args.owner_boot_manifest:
+        if not args.development_boot:
+            parser.error('--owner-boot-manifest requires --development-boot')
+        owner_manifest = args.owner_boot_manifest.read_bytes()
+        owner_domain = json.loads(owner_manifest).get('domain')
+        if not isinstance(owner_domain, str) or not owner_domain or '\0' in owner_domain:
+            parser.error('Owner manifest requires a nonempty domain string')
 
     if (args.unique_chip_id is None) != (args.chip_id is None):
         parser.error('--unique-chip-id and --chip-id must be supplied together')
@@ -188,6 +204,25 @@ def main():
                                             ('model', b'oneplus,kebab\0')])
 
 
+    # Board-native normal-service resource contracts. These root entries use
+    # absolute 64-bit little-endian PA/size pairs (not arm-io-relative cells).
+    # Backend validation precedes publishing scoped child nubs.
+    normal_buses = [
+        node('kebab-spmi', [
+            ('compatible', b'kebab,sm8250-spmi\0qcom,spmi-pmic-arb\0'),
+            ('reg', struct.pack('<8Q', 0x0c440000, 0x1100, 0x0e600000, 0x100000,
+                                0x0c40a000, 0x26000, 0x0c600000, 0x2000000)),
+            ('qcom,ee', struct.pack('<I', 0)),
+            ('kebab,pon', struct.pack('<2I', 0, 8)),
+            ('kebab,pmic-keys', struct.pack('<4I', 0, 8, 0xc5, 0xc6)),
+            ('kebab,rpmh-rsc', struct.pack('<2Q', 0x18220000, 0x10000)),
+            ('kebab,rpmh-cmd-db', struct.pack('<2Q', 0x80860000, 0x20000))]),
+        node('kebab-geni13', [
+            ('compatible', b'kebab,sm8250-geni13\0qcom,i2c-geni\0'),
+            ('reg', struct.pack('<6Q', 0xa94000, 0x4000, 0xac0000, 0x2000, 0xf500000, 0x40000)),
+            ('kebab,touch-address', struct.pack('<I', 0x4b))]),
+    ]
+
     tree = node('device-tree', [
         ('model', b'iPhone10,3\0' if args.iphone_identity else (b'iPad7,1\0' if args.ipad_identity else b'OnePlus 8T\0')),
         *([('target-type', b'D22AP\0')] if args.iphone_identity else ([('target-type', b'J120\0')] if args.ipad_identity else [])),
@@ -201,6 +236,14 @@ def main():
                            ('chip-id', struct.pack('<I', args.chip_id))]
                           if args.unique_chip_id is not None else []),
                         ('osenvironment', b'main\0'),
+                        # This UEFI path has no Apple previous-stage manifest.
+                        *([('mix-n-match-prevention-status', struct.pack('<I', 0)),
+                           ('boot-nonce', development_nonce)]
+                          if development_nonce is not None else []),
+                        *([('owner-boot-manifest-domain', owner_domain.encode() + b'\0'),
+                           ('owner-boot-manifest', owner_manifest),
+                           ('boot-manifest-hash', hashlib.sha384(owner_manifest).digest())]
+                          if owner_manifest is not None else []),
                         *([('certificate-production-status', struct.pack('<I', 0)),
                            ('effective-production-status-ap', struct.pack('<I', 0)),
                            ('certificate-security-mode', struct.pack('<I', 1)),
@@ -222,7 +265,8 @@ def main():
              # No RAMDisk entry: kebab roots on the real block device, not on a
              # memory image, so nothing here should advertise one.
              [node('memory-map', ([('TrustCache', bytes(16))] if args.trust_cache else [])),
-              node('manifest-properties')]),
+              node('manifest-properties', [('BNCH', hashlib.sha384(development_nonce).digest())]
+                   if development_nonce is not None else [])]),
         # Panic log lives at the far end of the window the loader hands over.
         node('pram', [('reg', struct.pack('<QQ', PANIC_LOG_BASE, PANIC_LOG_SIZE))]),
         # UFS host controller. It sits far below the arm-io window, so it gets an
@@ -262,7 +306,7 @@ def main():
               # offset would be negative. The node exists only for class matching;
               # the driver takes its physical windows from board constants.
               node('ufshc', [('compatible', b'qcom,sm8250-ufshc\0qcom,kona-ufshc\0')])]),
-    ])
+    ] + normal_buses)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(tree)

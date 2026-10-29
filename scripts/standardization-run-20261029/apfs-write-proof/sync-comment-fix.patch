@@ -1,0 +1,5 @@
+--- a/bsd/dev/kebab_install.c
++++ b/bsd/dev/kebab_install.c
+@@ -665,1 +665,1 @@
+- * vfs_iterate(0) busies each mount and calls outside the mount-list lock.
++ * vfs_iterate(0) holds iteration references and calls outside the list lock.

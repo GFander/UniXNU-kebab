@@ -1,0 +1,478 @@
+--- a/bsd/dev/kebab_geni.c
++++ b/bsd/dev/kebab_geni.c
+@@ -4,6 +4,7 @@
+  * Bitbang remains the selected alternate byte transport. */
+ #if defined(KEBAB)
+ #include <kern/clock.h>
++#include <kern/locks.h>
+ #include <libkern/libkern.h>
+ #include <machine/machine_routines.h>
+ #include <stdarg.h>
+@@ -199,6 +200,10 @@
+ #define KT_GCC_RCG_S5       0x00018600u
+ #define KT_GCC_RCG_WORDS    8u
+ 
++static LCK_GRP_DECLARE(kebab_geni_lck_grp, "kebab-geni");
++static LCK_MTX_DECLARE(kebab_geni_lck, &kebab_geni_lck_grp);
++void kebab_geni_transaction_lock(void) { lck_mtx_lock(&kebab_geni_lck); }
++void kebab_geni_transaction_unlock(void) { lck_mtx_unlock(&kebab_geni_lck); }
+ static struct {
+ 	vm_offset_t se, wrap, tlmm, gcc_en, gcc_halt;
+ 	bool bb, se_dead, se_initialized;
+@@ -978,8 +983,8 @@
+ }
+ 
+ 
+-void
+-kebab_touch_se(void)
++static void
++kebab_touch_se_locked(void)
+ {
+ 	if (kg.se == 0) {
+ 		kg.se = ml_io_map(KT_SE13_PA_DEFAULT, KT_SE13_SIZE);
+@@ -1020,8 +1025,8 @@
+ }
+ 
+ 
+-void
+-kebab_touch_ping(void)
++static void
++kebab_touch_ping_locked(void)
+ {
+ 	uint8_t zero = 0;
+ 	int rc;
+@@ -1056,8 +1061,8 @@
+ }
+ 
+ 
+-void
+-kebab_touch_clock_enable(void)
++static void
++kebab_touch_clock_enable_locked(void)
+ {
+ 	uint32_t en, i;
+ 
+@@ -1196,7 +1201,7 @@
+ 		 * not fatal here: the bootloader may have left the clock on, and
+ 		 * the reads below are harmless either way.
+ 		 */
+-		kebab_touch_clock_enable();
++		kebab_touch_clock_enable_locked();
+ 		kebab_geni_trace("KEBAB TOUCH: reading wrapper/SE revision registers\n");
+ 		printf("KEBAB TOUCH: S3908 on QUPv3 SE13 at 0x%08x (I2C 0x%02x, %u Hz)"
+ 		    ", wrapper 0x%08x\n", se_pa, KT_I2C_ADDR, hz,
+@@ -1242,4 +1247,44 @@
+ 	return 0;
+ }
+ 
++void
++kebab_touch_se(void)
++{
++	kebab_geni_transaction_lock();
++	kebab_touch_se_locked();
++	kebab_geni_transaction_unlock();
++}
++
++void
++kebab_touch_ping(void)
++{
++	kebab_geni_transaction_lock();
++	kebab_touch_ping_locked();
++	kebab_geni_transaction_unlock();
++}
++
++void
++kebab_touch_clock_enable(void)
++{
++	kebab_geni_transaction_lock();
++	kebab_touch_clock_enable_locked();
++	kebab_geni_transaction_unlock();
++}
++
++int
++kebab_geni_read_status(struct kebab_geni_status *status)
++{
++	if (status == NULL) { return -1; }
++	kebab_geni_transaction_lock();
++	bzero(status, sizeof(*status));
++	kebab_geni_get_info(&status->info);
++	if (!status->info.mapped) { kebab_geni_transaction_unlock(); return -1; }
++	if (!kg.bb) {
++		status->protocol = (kt_se_rd(GENI_FW_REVISION_RO) & FW_REV_PROTOCOL_MSK) >> FW_REV_PROTOCOL_SHFT;
++		status->sequencer = kt_se_rd(SE_GENI_STATUS);
++		status->master_irq = kt_se_rd(SE_GENI_M_IRQ_STATUS);
++	}
++	kebab_geni_transaction_unlock();
++	return 0;
++}
+ #endif /* KEBAB */
+--- a/bsd/dev/kebab_geni.h
++++ b/bsd/dev/kebab_geni.h
+@@ -12,6 +12,20 @@
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
++/* Normal transactions serialize a whole TCM command or header+payload frame,
++ * rather than just each FIFO operation. Early/panic recovery does not use GENI. */
++void kebab_geni_transaction_lock(void);
++void kebab_geni_transaction_unlock(void);
++struct kebab_geni_status {
++	struct kebab_geni_info info;
++	uint32_t protocol, sequencer, master_irq;
++};
++struct kebab_touch_status {
++	uint32_t max_x, max_y, max_objects;
++	bool identified, decoding, queue_ok, device_node, unavailable;
++};
++int kebab_geni_read_status(struct kebab_geni_status *status);
++void kebab_touch_get_status(struct kebab_touch_status *status);
+ void kebab_geni_trace(const char *fmt, ...);
+ void kebab_geni_sleep_ms(uint32_t ms);
+ int kebab_geni_map(uint32_t se_pa, bool bitbang, uint32_t pins, uint32_t reset, bool raw);
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -675,8 +675,8 @@
+  * down with it, and the console is the only recovery channel that does not
+  * need a key press on the phone.
+  */
+-void
+-kebab_touch_probe(void)
++static void
++kebab_touch_probe_locked(void)
+ {
+ 	struct kebab_geni_info info;
+ 	if (!kebab_geni_map_default()) {
+@@ -693,8 +693,8 @@
+ 	kebab_geni_trace("KEBAB TOUCH: read-only probe end\n");
+ }
+ 
+-void
+-kebab_touch_init_now(void)
++static void
++kebab_touch_init_now_locked(void)
+ {
+ 	if (!kebab_geni_map_default()) {
+ 		printf("KEBAB TOUCH: TOUCHINIT cannot map SE13 or TLMM\n");
+@@ -1445,10 +1445,12 @@
+ kt_thread(void *arg __unused, wait_result_t wr __unused)
+ {
+ 	for (;;) {
++		kebab_geni_transaction_lock();
+ 		int n = kt_poll_once();
++		uint32_t errors = n < 0 ? kebab_geni_record_poll_error() : 0;
++		kebab_geni_transaction_unlock();
+ 
+ 		if (n < 0) {
+-			uint32_t errors = kebab_geni_record_poll_error();
+ 			if (errors == 1 || (errors % 500u) == 0) {
+ 				printf("KEBAB TOUCH: %u polling errors\n", errors);
+ 			}
+@@ -1467,8 +1469,8 @@
+ 
+ /* ------------------------------------------------------------------ start */
+ 
+-int
+-kebab_touch_start(void)
++static int
++kebab_touch_start_locked(void)
+ {
+ 	uint32_t enabled = 0;
+ 	uint32_t value = 0;
+@@ -1577,7 +1579,7 @@
+ 
+ 	if (kebab_geni_map(se_pa, kt.bb, pins, reset, kt.raw) != 0) { return -1; }
+ 	if (probe != 0) {
+-		kebab_touch_probe();
++		kebab_touch_probe_locked();
+ 		return 0;
+ 	}
+ 	if (boot == 0) {
+@@ -1664,4 +1666,40 @@
+ 	return 0;
+ }
+ 
++void
++kebab_touch_probe(void)
++{
++	kebab_geni_transaction_lock();
++	kebab_touch_probe_locked();
++	kebab_geni_transaction_unlock();
++}
++
++void
++kebab_touch_init_now(void)
++{
++	kebab_geni_transaction_lock();
++	kebab_touch_init_now_locked();
++	kebab_geni_transaction_unlock();
++}
++
++int
++kebab_touch_start(void)
++{
++	kebab_geni_transaction_lock();
++	int result = kebab_touch_start_locked();
++	kebab_geni_transaction_unlock();
++	return result;
++}
++
++void
++kebab_touch_get_status(struct kebab_touch_status *status)
++{
++	kebab_geni_transaction_lock();
++	*status = (struct kebab_touch_status) {
++		.max_x = kt.max_x, .max_y = kt.max_y, .max_objects = kt.max_objects,
++		.identified = kt.tcm_seen, .decoding = kt.decode, .queue_ok = kt.queue_ok,
++		.device_node = kt.dev_ready, .unavailable = kt.unavailable,
++	};
++	kebab_geni_transaction_unlock();
++}
+ #endif /* KEBAB */
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -28,3 +28,5 @@
+ iokit/Kernel/arm/KebabSPMI.cpp	optional iokitcpp
+ 
+ iokit/Kernel/arm/KebabDriverDiagnostics.cpp	optional iokitcpp
++
++iokit/Kernel/arm/KebabGeni.cpp	optional iokitcpp
+--- a/iokit/Kernel/arm/KebabDriverManifest.h
++++ b/iokit/Kernel/arm/KebabDriverManifest.h
+@@ -10,6 +10,7 @@
+  X("pon", "KebabPon", "scoped PON; panic uses C core directly") \
+  X("keys", "KebabPmicKeys", "raw PMIC sampling; no HID") \
+  X("rpmh", "KebabVrm", "RSC policy/readback; no IOPM") \
+- X("touch", NULL, "resident GENI/TCM C core; TOUCH?; no HID") \
++ X("geni", "KebabGeniBus", "SE13/bitbang transport; boot C mappings") \
++ X("touch", "KebabTouch", "typed TCM state; C polling lifetime; no HID") \
+  X("display", "AppleCLCD", "CPU framebuffer; no GPU/vsync qualification") \
+  X("surface", "IOCoreSurfaceRoot", "compatibility selectors; private ABI incomplete")
+--- a/iokit/Kernel/arm/KebabDriverSelfTest.cpp
++++ b/iokit/Kernel/arm/KebabDriverSelfTest.cpp
+@@ -14,6 +14,7 @@
+ extern "C" void kebab_driver_selftest(void);
+ extern "C" bool kebab_blockstorage_selftest(void);
+ extern "C" bool kebab_spmi_services_selftest(void);
++extern "C" bool kebab_geni_services_selftest(void);
+ 
+ static bool
+ kebab_client_selftest(const char *name, bool surface)
+@@ -76,7 +77,8 @@
+ 	bool display = kebab_client_selftest("AppleCLCD", false);
+ 	bool storage = kebab_blockstorage_selftest();
+ 	bool spmi = kebab_spmi_services_selftest();
++	bool geni = kebab_geni_services_selftest();
+ 	IOLog("KEBAB DRIVER TEST: read-only native contracts %s\n",
+-	    surface && display && storage && spmi ? "PASS" : "FAIL");
++	    surface && display && storage && spmi && geni ? "PASS" : "FAIL");
+ }
+ #endif /* KEBAB */
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabGeni.cpp
+@@ -0,0 +1,186 @@
++/* Normal resource/provider identities for the persistent GENI/TCM C cores.
++ * Typed state queries are serialized with whole C protocol transactions.
++ * The C core retains boot mappings and any polling thread for kernel lifetime;
++ * stopping these services drains their queries, not that resident backend.
++ * No HID class, report ABI, IRQ, or user client is claimed here. */
++#include <pexpert/arm64/board_config.h>
++#if defined(KEBAB)
++#include <IOKit/IOService.h>
++#include <IOKit/IOLib.h>
++#include <libkern/c++/OSData.h>
++#include "../../../bsd/dev/kebab_geni.h"
++
++extern "C" bool kebab_geni_services_selftest(void);
++static bool
++kebab_geni_property(IOService *provider, const char *key, const void *value, size_t size)
++{
++	OSData *data = OSDynamicCast(OSData, provider->getProperty(key));
++	return data != NULL && data->getLength() == size && memcmp(data->getBytesNoCopy(), value, size) == 0;
++}
++
++class KebabI2CDevice : public IOService {
++	OSDeclareDefaultStructors(KebabI2CDevice);
++};
++OSDefineMetaClassAndStructors(KebabI2CDevice, IOService);
++class KebabGeniBus : public IOService {
++	OSDeclareDefaultStructors(KebabGeniBus);
++	IOLock *fLock;
++	KebabI2CDevice *fChild;
++	bool fOnline, fAttached;
++	void clearChild();
++public:
++	bool init(OSDictionary *properties) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free() APPLE_KEXT_OVERRIDE;
++	IOReturn copyState(struct kebab_geni_status *bus, struct kebab_touch_status *touch);
++};
++OSDefineMetaClassAndStructors(KebabGeniBus, IOService);
++bool
++KebabGeniBus::init(OSDictionary *properties)
++{
++	fLock = NULL;
++	fChild = NULL;
++	fOnline = false;
++	fAttached = false;
++	if (!IOService::init(properties)) { return false; }
++	fLock = IOLockAlloc();
++	return fLock != NULL;
++}
++bool
++KebabGeniBus::start(IOService *provider)
++{
++	if (!IOService::start(provider)) { return false; }
++	struct kebab_geni_info info;
++	kebab_geni_transaction_lock();
++	kebab_geni_get_info(&info);
++	kebab_geni_transaction_unlock();
++	const uint32_t address = 0x4b;
++	if (!info.mapped ||
++	    !kebab_geni_property(provider, "reg", info.resources, sizeof(info.resources)) ||
++	    !kebab_geni_property(provider, "kebab,touch-address", &address, sizeof(address))) {
++		IOLog("KEBAB GENI IOKIT: ADT/backend resource contract rejected\n");
++		IOService::stop(provider);
++		return false;
++	}
++	fChild = new KebabI2CDevice;
++	if (fChild == NULL || !fChild->init()) { clearChild(); IOService::stop(provider); return false; }
++	fChild->setName("synaptics,s3908");
++	if (!fChild->setProperty("i2c,address", provider->getProperty("kebab,touch-address"))) {
++		clearChild(); IOService::stop(provider); return false;
++	}
++	fAttached = fChild->attach(this);
++	if (!fAttached) { clearChild(); IOService::stop(provider); return false; }
++	setName("KebabGeniBus");
++	setProperty("backend-owner", "persistent boot C core");
++	setProperty("bitbang-selected", info.bitbang);
++	IOLockLock(fLock);
++	fOnline = true;
++	IOLockUnlock(fLock);
++	registerService();
++	fChild->registerService();
++	IOLog("KEBAB GENI IOKIT: bus registered; S3908@4b scoped nub; existing transport retained\n");
++	return true;
++}
++void
++KebabGeniBus::clearChild()
++{
++	if (fChild == NULL) { return; }
++	if (fAttached) {
++		(void)fChild->terminate(kIOServiceSynchronous);
++		if (fChild->getProvider() == this) { fChild->detach(this); }
++	}
++	fAttached = false;
++	OSSafeReleaseNULL(fChild);
++}
++void
++KebabGeniBus::stop(IOService *provider)
++{
++	IOLockLock(fLock);
++	fOnline = false;
++	IOLockUnlock(fLock);
++	clearChild();
++	IOService::stop(provider);
++}
++void
++KebabGeniBus::free()
++{
++	clearChild();
++	if (fLock != NULL) { IOLockFree(fLock); fLock = NULL; }
++	IOService::free();
++}
++IOReturn
++KebabGeniBus::copyState(struct kebab_geni_status *bus, struct kebab_touch_status *touch)
++{
++	if (bus == NULL || touch == NULL) { return kIOReturnBadArgument; }
++	IOLockLock(fLock);
++	IOReturn status = kIOReturnNoDevice;
++	if (fOnline) {
++		status = kebab_geni_read_status(bus) == 0 ? kIOReturnSuccess : kIOReturnNotReady;
++		if (status == kIOReturnSuccess) { kebab_touch_get_status(touch); }
++	}
++	IOLockUnlock(fLock);
++	return status;
++}
++
++static KebabGeniBus *
++kebab_geni_copy_bus(IOService *client)
++{
++	IORegistryEntry *nub = client->copyParentEntry(gIOServicePlane);
++	if (nub == NULL) { return NULL; }
++	IORegistryEntry *parent = nub->copyParentEntry(gIOServicePlane);
++	nub->release();
++	KebabGeniBus *bus = OSDynamicCast(KebabGeniBus, parent);
++	if (bus == NULL) { OSSafeReleaseNULL(parent); }
++	return bus;
++}
++class KebabTouch : public IOService {
++	OSDeclareDefaultStructors(KebabTouch);
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	IOReturn copyState(struct kebab_geni_status *bus, struct kebab_touch_status *touch);
++};
++OSDefineMetaClassAndStructors(KebabTouch, IOService);
++bool
++KebabTouch::start(IOService *provider)
++{
++	if (!IOService::start(provider)) { return false; }
++	const uint32_t address = 0x4b;
++	KebabGeniBus *bus = kebab_geni_copy_bus(this);
++	bool valid = bus != NULL && kebab_geni_property(provider, "i2c,address", &address, sizeof(address));
++	OSSafeReleaseNULL(bus);
++	if (!valid) { IOService::stop(provider); return false; }
++	setName("KebabTouch");
++	setProperty("protocol", "Synaptics TouchComm");
++	setProperty("hid-published", false);
++	registerService();
++	IOLog("KEBAB GENI IOKIT: KebabTouch matched S3908@4b; typed state only, no HID\n");
++	return true;
++}
++IOReturn
++KebabTouch::copyState(struct kebab_geni_status *state, struct kebab_touch_status *touch)
++{
++	KebabGeniBus *bus = kebab_geni_copy_bus(this);
++	IOReturn status = bus == NULL ? kIOReturnNoDevice : bus->copyState(state, touch);
++	OSSafeReleaseNULL(bus);
++	return status;
++}
++extern "C" bool
++kebab_geni_services_selftest(void)
++{
++	OSDictionary *matching = IOService::serviceMatching("KebabTouch");
++	if (matching == NULL) { return false; }
++	IOService *service = IOService::waitForMatchingService(matching, 5ULL * kSecondScale);
++	matching->release();
++	KebabTouch *touch = OSDynamicCast(KebabTouch, service);
++	struct kebab_geni_status state = {};
++	struct kebab_touch_status protocol = {};
++	bool passed = touch != NULL && touch->copyState(&state, &protocol) == kIOReturnSuccess &&
++	    state.info.mapped && (state.info.bitbang || state.protocol == 3) && protocol.queue_ok;
++	IOLog("KEBAB DRIVER TEST: GENI typed transport/TCM state %s (proto=%u mapped=%u bb=%u identified=%u decode=%u node=%u)\n",
++	    passed ? "PASS" : "FAIL", state.protocol, state.info.mapped, state.info.bitbang,
++	    protocol.identified, protocol.decoding, protocol.device_node);
++	OSSafeReleaseNULL(service);
++	return passed;
++}
++#endif /* KEBAB */
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -78,6 +78,17 @@
+     "     'IONameMatch' = 'rpmh-vrm-policy';"
+     "     'IOProbeScore' = 1000:32;"
+     "   },"
++    "   {"
++    "     'IOClass' = KebabGeniBus;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch' = 'kebab,sm8250-geni13';"
++    "     'IOResourceMatch' = IOBSD;"
++    "   },"
++    "   {"
++    "     'IOClass' = KebabTouch;"
++    "     'IOProviderClass' = KebabI2CDevice;"
++    "     'IONameMatch' = 'synaptics,s3908';"
++    "   },"
+ #endif
+ #if defined(ARM64_BOARD_CONFIG_NEGRONI)
+     "   {"

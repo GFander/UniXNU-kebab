@@ -1,0 +1,11 @@
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -14,1 +14,1 @@
+-#include <sys/malloc.h>
++#include <kern/kalloc.h>
+@@ -32,1 +32,1 @@
+- uint8_t *buffer = _MALLOC(4096, M_TEMP, M_WAITOK);
++ uint8_t *buffer = kalloc_data(4096, Z_WAITOK);
+@@ -94,1 +94,1 @@
+- _FREE(buffer, M_TEMP);
++ kfree_data(buffer, 4096);

@@ -1,0 +1,1290 @@
+/* QUPv3 SE13 FIFO I2C transport and board GPIO/clock adapter.
+ * Extracted from kebab_touch.c without changing MMIO order, bounds or logs.
+ * The persistent C core owns mappings; no TCM decoder or input ABI lives here.
+ * Bitbang remains the selected alternate byte transport. */
+#if defined(KEBAB)
+#include <kern/clock.h>
+#include <kern/locks.h>
+#include <libkern/libkern.h>
+#include <machine/machine_routines.h>
+#include <stdarg.h>
+#include <sys/systm.h>
+#include "kebab_geni.h"
+extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+extern bool kebab_usb_console_ready(void);
+extern void kebab_usb_log_flush(void);
+#define KT_SE13_PA_DEFAULT      0x00a94000u
+#define KT_SE13_SIZE            0x00004000u
+#define KT_WRAP_PA_DEFAULT      0x00ac0000u
+#define KT_WRAP_SIZE            0x00002000u
+#define KT_TLMM_PA              0x0f000000u
+/*
+ * The TLMM block is 16 MiB in the device tree, but ml_io_map() allocates from
+ * the kernel's 8 MiB io_submap and passes KMA_NOFAIL, so an over-size request
+ * panics in kmem_alloc instead of returning 0.  This driver touches only the
+ * SOUTH-tile per-pin registers (GPIO 36..39, so offsets 0x24000..0x27000 from
+ * the tile base); 0x40000 covers SOUTH-tile pins 0..63.  Do not widen this
+ * back to the full block.
+ */
+#define KT_TLMM_SIZE            0x00040000u
+
+/*
+ * Timing for the powered bring-up.  The rails must be settled before the reset
+ * edge, and the chip needs time after the release before it answers the first
+ * transfer; 15 ms and 20 ms sit inside the 10-20 ms the hardware was measured
+ * in, and neither is a datasheet number.
+ */
+#define KT_RAIL_SETTLE_MS       15
+#define KT_RESET_SETTLE_MS      20
+
+#define KT_I2C_ADDR             0x4b    /* synaptics-s3908@4B; see the DT note */
+#define KT_PIN_SDA              36      /* qupv3_se13_i2c_active: gpio36 */
+#define KT_PIN_SCL              37      /* qupv3_se13_i2c_active: gpio37 */
+#define KT_PIN_RESET            38      /* reset-gpio */
+#define KT_PIN_IRQ              39      /* irq-gpio, unused: we poll */
+
+/* ------------------------------------------------------- QUP/GENI registers */
+
+#define QUP_HW_VER              0x4     /* wrapper, geni_se_get_qup_hw_version */
+
+#define GENI_FORCE_DEFAULT_REG  0x20
+#define GENI_OUTPUT_CTRL        0x24
+#define GENI_CGC_CTRL           0x28
+#define SE_GENI_STATUS          0x40
+#define GENI_SER_M_CLK_CFG      0x48
+#define GENI_IF_DISABLE_RO      0x64
+#define GENI_FW_REVISION_RO     0x68
+#define SE_GENI_CLK_SEL         0x7c
+#define SE_GENI_BYTE_GRAN       0x254
+#define SE_GENI_DMA_MODE_EN     0x258
+#define SE_GENI_TX_PACKING_CFG0 0x260
+#define SE_GENI_TX_PACKING_CFG1 0x264
+#define SE_GENI_RX_PACKING_CFG0 0x284
+#define SE_GENI_RX_PACKING_CFG1 0x288
+#define SE_GENI_M_CMD0          0x600
+#define SE_GENI_M_CMD_CTRL_REG  0x604
+#define SE_GENI_M_IRQ_STATUS    0x610
+#define SE_GENI_M_IRQ_EN        0x614
+#define SE_GENI_M_IRQ_CLEAR     0x618
+#define SE_GENI_S_CMD0          0x630
+#define SE_GENI_S_IRQ_STATUS    0x640
+#define SE_GENI_S_IRQ_EN        0x644
+#define SE_GENI_S_IRQ_CLEAR     0x648
+#define SE_GENI_TX_FIFO         0x700
+#define SE_GENI_RX_FIFO         0x780
+#define SE_GENI_TX_FIFO_STATUS  0x800
+#define SE_GENI_RX_FIFO_STATUS  0x804
+#define SE_GENI_TX_WATERMARK_REG 0x80c
+#define SE_GENI_RX_WATERMARK_REG 0x810
+#define SE_GENI_RX_RFR_WATERMARK_REG 0x814
+#define SE_GENI_IOS             0x908
+#define SE_GSI_EVENT_EN         0xe18
+#define SE_IRQ_EN               0xe1c
+#define SE_HW_PARAM_0           0xe24
+#define SE_DMA_GENERAL_CFG      0xe30
+
+/* I2C sequencer registers (i2c-qcom-geni.c) */
+#define SE_I2C_TX_TRANS_LEN     0x26c
+#define SE_I2C_RX_TRANS_LEN     0x270
+#define SE_I2C_SCL_COUNTERS     0x278
+
+/* GENI_FW_REVISION_RO: protocol in bits 15:8, GENI_SE_I2C == 3 */
+#define FW_REV_PROTOCOL_MSK     0x0000ff00u
+#define FW_REV_PROTOCOL_SHFT    8
+#define GENI_SE_I2C_PROTO       3
+
+/* GENI_M_CMD0: opcode in bits 31:27, parameters in 26:0 */
+#define M_OPCODE_SHFT           27
+
+/* I2C master opcodes */
+#define I2C_WRITE               0x1
+#define I2C_READ                0x2
+
+/* I2C command parameters: the 7-bit slave address in bits 15:9. */
+#define SLV_ADDR_SHFT           9
+#define SLV_ADDR_MSK            0x0000fe00u
+
+/* Master interrupt status/enable bits (geni-se.h). */
+#define M_CMD_DONE              (1u << 0)
+#define M_CMD_OVERRUN           (1u << 1)
+#define M_ILLEGAL_CMD           (1u << 2)
+#define M_CMD_FAILURE           (1u << 3)
+#define M_CMD_CANCEL            (1u << 4)
+#define M_CMD_ABORT             (1u << 5)
+#define M_GP_IRQ_0              (1u << 9)
+#define M_GP_IRQ_1_NACK         (1u << 10)
+#define M_RX_FIFO_WATERMARK     (1u << 26)
+#define M_RX_FIFO_LAST          (1u << 27)
+#define M_TX_FIFO_WATERMARK     (1u << 30)
+
+#define M_ERRORS                (M_CMD_OVERRUN | M_ILLEGAL_CMD | \
+	M_CMD_FAILURE | M_CMD_ABORT | M_GP_IRQ_1_NACK)
+
+/*
+ * SE_GENI_M_CMD_CTRL_REG is not the status register, and its bits are
+ * numbered differently (geni-se.h): CANCEL is bit 2 and ABORT bit 1, while
+ * the status bits of the same names are 4 and 5.  Writing a status bit into
+ * the control register is a silent no-op.
+ */
+#define M_GENI_CMD_ACTIVE       (1u << 0)       /* GENI_STATUS bit 0 */
+#define M_GENI_CMD_ABORT_REQ    (1u << 1)       /* CMD_CTRL: abort */
+#define M_GENI_CMD_CANCEL_REQ   (1u << 2)       /* CMD_CTRL: cancel */
+
+/* M_COMMON_GENI_M_IRQ_EN: bits 6:1 plus the FIFO access error bits. */
+#define M_IRQ_COMMON            (0x0000007eu | 0x03c00000u | 0x30000000u)
+/* S_COMMON_GENI_S_IRQ_EN, from the same header; the secondary engine is idle
+ * in I2C mode but the register is still programmed by geni_se_init(). */
+#define S_IRQ_COMMON            (0x0000003eu | 0x00003e00u | 0x03000000u)
+/* FIFO mode: command done and the watermarks select_fifo_mode() adds. */
+#define M_IRQ_FIFO              (M_CMD_DONE | M_TX_FIFO_WATERMARK | \
+	M_RX_FIFO_WATERMARK | M_RX_FIFO_LAST)
+
+/* RX_FIFO_STATUS */
+#define RX_FIFO_WC_MSK          0x01ffffffu
+
+/* geni_se_io_init() values. */
+#define DEFAULT_CGC_EN          0x0000007fu
+#define DEFAULT_IO_OUTPUT_CTRL  0x0000007fu
+#define DMA_GENERAL_CFG_VAL     0x0000000fu
+
+/*
+ * Packing configuration produced by geni_se_config_packing(se, 8, 4, true,
+ * true, true): four 4x8 vectors, MSB to LSB, stop bit on the last vector.
+ * cfg0 = 0x07f8fe, cfg1 = 0x0ffefe (computed from the PACKING_* shifts in
+ * qcom-geni-se.c).
+ */
+#define PACK_CFG0               0x0007f8feu
+#define PACK_CFG1               0x000ffefeu
+
+/* SCL timing, from geni_i2c_clk_map[] {rate, div, high, low, cycle}. */
+#define KT_SER_CLK_CFG(div)     ((((uint32_t)(div)) << 4) | 1u)
+#define KT_SCL_COUNTERS(high, low, cycle) \
+	((((uint32_t)(high)) << 20) | (((uint32_t)(low)) << 10) | \
+	(uint32_t)(cycle))
+
+/* ---------------------------------------------------------- TLMM registers */
+
+/*
+ * Kona's TLMM is tiled.  drivers/pinctrl/qcom/pinctrl-kona.c defines the tile
+ * bases NORTH 0x900000, SOUTH 0x500000, WEST 0x100000, EAST 0 and computes
+ * every pin as tile + 0x1000 * pin; GPIO 36..39 (SDA, SCL, reset, IRQ) are in
+ * the SOUTH tile.  A flat "block base + 0x1000 * pin" address lands in a hole
+ * between tiles and reads as zero, which is exactly what the first hardware
+ * run showed.  kg.tlmm is therefore the mapped SOUTH tile, not the block base.
+ */
+#define TLMM_TILE_SOUTH         0x00500000u
+#define TLMM_REG_SIZE           0x1000u
+#define TLMM_CTL(pin)           (TLMM_REG_SIZE * (pin))
+#define TLMM_IO(pin)            (TLMM_REG_SIZE * (pin) + 0x4u)
+#define TLMM_MUX_MSK            (0xfu << 2)     /* 10 functions per pin */
+#define TLMM_MUX_QUP13          (1u << 2)       /* "qup13" is entry 1 */
+#define TLMM_PULL_MSK           0x3u            /* 0 == bias-disable */
+#define TLMM_DRV_MSK            (0x7u << 6)     /* field 0 == 2 mA */
+#define TLMM_OE                 (1u << 9)
+#define TLMM_OUT                (1u << 1)
+
+#define KT_GCC_PA               0x00100000u
+#define KT_GCC_PAGE_EN          0x00052000u
+#define KT_GCC_PAGE_HALT        0x00018000u
+#define KT_GCC_ENABLE           0x00052008u
+#define KT_GCC_HALT_M_AHB       0x00018004u
+#define KT_GCC_HALT_S_AHB       0x00018008u
+#define KT_GCC_HALT_WRAP1_S5    0x000185fcu
+#define KT_GCC_EN_S5            (1u << 27)
+#define KT_GCC_EN_M_AHB         (1u << 20)
+#define KT_GCC_EN_S_AHB         (1u << 21)
+
+#define KT_BB_HALF_US   5u      /* ~100 kHz, like the reference port */
+#define KT_BB_STRETCH   200u    /* 1 ms of clock stretching, then fail */
+
+#define KT_GCC_RCG_S5       0x00018600u
+#define KT_GCC_RCG_WORDS    8u
+
+static LCK_GRP_DECLARE(kebab_geni_lck_grp, "kebab-geni");
+static LCK_MTX_DECLARE(kebab_geni_lck, &kebab_geni_lck_grp);
+void kebab_geni_transaction_lock(void) { lck_mtx_lock(&kebab_geni_lck); }
+void kebab_geni_transaction_unlock(void) { lck_mtx_unlock(&kebab_geni_lck); }
+static struct {
+	vm_offset_t se, wrap, tlmm, gcc_en, gcc_halt;
+	bool bb, se_dead, se_initialized;
+	uint32_t se_pa, errors; /* retain the legacy combined transport/poll counter */
+} kg;
+static uint32_t kt_bb_stretch_bails;
+static bool kt_se_recover(const char *why);
+struct kt_reg {
+	const char *name;
+	uint32_t    off;
+};
+
+static const struct kt_reg kt_se_regs[] = {
+	{ "GENI_STATUS",          SE_GENI_STATUS },
+	{ "GENI_FW_REVISION_RO",  GENI_FW_REVISION_RO },
+	{ "GENI_IF_DISABLE_RO",   GENI_IF_DISABLE_RO },
+	{ "SER_M_CLK_CFG",        GENI_SER_M_CLK_CFG },
+	{ "SE_GENI_DMA_MODE_EN",  SE_GENI_DMA_MODE_EN },
+	{ "SE_HW_PARAM_0",        SE_HW_PARAM_0 },
+	{ "SE_IRQ_EN",            SE_IRQ_EN },
+	{ "M_CMD0",               SE_GENI_M_CMD0 },
+	{ "M_IRQ_STATUS",         SE_GENI_M_IRQ_STATUS },
+	{ "M_IRQ_EN",             SE_GENI_M_IRQ_EN },
+	{ "S_IRQ_STATUS",         SE_GENI_S_IRQ_STATUS },
+	{ "TX_FIFO_STATUS",       SE_GENI_TX_FIFO_STATUS },
+	{ "RX_FIFO_STATUS",       SE_GENI_RX_FIFO_STATUS },
+	{ "GENI_IOS",             SE_GENI_IOS },
+	{ "I2C_SCL_COUNTERS",     SE_I2C_SCL_COUNTERS },
+};
+
+void
+kebab_geni_trace(const char *fmt, ...)
+{
+	char line[192];
+	va_list ap;
+	int n;
+
+	va_start(ap, fmt);
+	n = vsnprintf(line, sizeof(line), fmt, ap);
+	va_end(ap);
+	if (n <= 0) {
+		return;
+	}
+	printf("%s", line);
+	if (kebab_usb_console_ready()) {
+		kebab_usb_log_flush();
+	}
+}
+
+
+static inline uint32_t
+kt_rd(vm_offset_t base, uint32_t off)
+{
+	uint32_t v = *(volatile uint32_t *)(base + off);
+	__asm__ volatile ("dsb sy" ::: "memory");
+	return v;
+}
+
+
+static inline void
+kt_wr(vm_offset_t base, uint32_t off, uint32_t v)
+{
+	*(volatile uint32_t *)(base + off) = v;
+	__asm__ volatile ("dsb sy" ::: "memory");
+}
+
+
+static inline uint32_t
+kt_se_rd(uint32_t off)
+{
+	return kt_rd(kg.se, off);
+}
+
+
+static inline void
+kt_se_wr(uint32_t off, uint32_t v)
+{
+	kt_wr(kg.se, off, v);
+}
+
+
+void
+kebab_geni_sleep_ms(uint32_t ms)
+{
+	delay(ms * 1000);
+}
+
+
+static void
+kt_dump_regs(const char *when)
+{
+	uint32_t i;
+	uint32_t proto;
+
+	printf("KEBAB TOUCH: SE13 register dump (%s)\n", when);
+	if (kg.se == 0) {
+		printf("KEBAB TOUCH:   SE13 not mapped (bit-bang transport); TLMM only\n");
+	} else {
+		printf("KEBAB TOUCH:   wrapper QUP_HW_VER [0x004] 0x%08x\n",
+		    kg.wrap != 0 ? kt_rd(kg.wrap, QUP_HW_VER) : 0);
+		proto = (kt_se_rd(GENI_FW_REVISION_RO) & FW_REV_PROTOCOL_MSK) >>
+		    FW_REV_PROTOCOL_SHFT;
+		printf("KEBAB TOUCH:   protocol %u (want %u for I2C), GENI_STATUS 0x%08x\n",
+		    proto, GENI_SE_I2C_PROTO, kt_se_rd(SE_GENI_STATUS));
+		for (i = 0; i < sizeof(kt_se_regs) / sizeof(kt_se_regs[0]); i++) {
+			printf("KEBAB TOUCH:   %-20s [0x%03x] 0x%08x\n",
+			    kt_se_regs[i].name, kt_se_regs[i].off,
+			    kt_se_rd(kt_se_regs[i].off));
+		}
+	}
+	if (kg.tlmm != 0) {
+		printf("KEBAB TOUCH:   TLMM ctl %u..%u 0x%08x 0x%08x 0x%08x 0x%08x\n",
+		    KT_PIN_SDA, KT_PIN_IRQ,
+		    kt_rd(kg.tlmm, TLMM_CTL(KT_PIN_SDA)),
+		    kt_rd(kg.tlmm, TLMM_CTL(KT_PIN_SCL)),
+		    kt_rd(kg.tlmm, TLMM_CTL(KT_PIN_RESET)),
+		    kt_rd(kg.tlmm, TLMM_CTL(KT_PIN_IRQ)));
+		printf("KEBAB TOUCH:   TLMM io  %u..%u 0x%08x 0x%08x 0x%08x 0x%08x\n",
+		    KT_PIN_SDA, KT_PIN_IRQ,
+		    kt_rd(kg.tlmm, TLMM_IO(KT_PIN_SDA)),
+		    kt_rd(kg.tlmm, TLMM_IO(KT_PIN_SCL)),
+		    kt_rd(kg.tlmm, TLMM_IO(KT_PIN_RESET)),
+		    kt_rd(kg.tlmm, TLMM_IO(KT_PIN_IRQ)));
+	}
+}
+
+
+static void
+kt_pins_config(void)
+{
+	uint32_t pin;
+
+	for (pin = KT_PIN_SDA; pin <= KT_PIN_SCL; pin++) {
+		uint32_t old;
+		uint32_t val;
+
+		kebab_geni_trace("KEBAB TOUCH: qup13 pin %u: reading TLMM_CTL at 0x%08x\n",
+		    pin, KT_TLMM_PA + TLMM_TILE_SOUTH +
+		    TLMM_REG_SIZE * pin);
+		old = kt_rd(kg.tlmm, TLMM_CTL(pin));
+		val = old;
+
+		val &= ~TLMM_MUX_MSK;
+		val |= TLMM_MUX_QUP13;
+		val &= ~TLMM_PULL_MSK;
+		val &= ~TLMM_DRV_MSK;
+		kebab_geni_trace("KEBAB TOUCH: qup13 pin %u: ctl 0x%08x -> 0x%08x\n",
+		    pin, old, val);
+		kt_wr(kg.tlmm, TLMM_CTL(pin), val);
+		printf("KEBAB TOUCH: pin %u mux qup13, ctl 0x%08x -> 0x%08x\n",
+		    pin, old, kt_rd(kg.tlmm, TLMM_CTL(pin)));
+	}
+}
+
+
+static void
+kt_reset_level(uint32_t level)
+{
+	uint32_t ctl;
+	uint32_t io;
+
+	kebab_geni_trace("KEBAB TOUCH: reset pin %u level %u: reading TLMM_CTL/TLMM_IO\n",
+	    KT_PIN_RESET, level);
+	ctl = kt_rd(kg.tlmm, TLMM_CTL(KT_PIN_RESET));
+	io = kt_rd(kg.tlmm, TLMM_IO(KT_PIN_RESET));
+	kebab_geni_trace("KEBAB TOUCH: reset ctl 0x%08x io 0x%08x -> level %u\n",
+	    ctl, io, level);
+
+	ctl &= ~TLMM_MUX_MSK;           /* mux 0 == plain GPIO */
+	ctl &= ~TLMM_PULL_MSK;
+	ctl &= ~TLMM_DRV_MSK;
+	ctl |= TLMM_OE;
+
+	if (level != 0) {
+		io |= TLMM_OUT;
+	} else {
+		io &= ~TLMM_OUT;
+	}
+	/* value before output enable, so the pin does not glitch */
+	kt_wr(kg.tlmm, TLMM_IO(KT_PIN_RESET), io);
+	kt_wr(kg.tlmm, TLMM_CTL(KT_PIN_RESET), ctl);
+}
+
+
+static void
+kt_reset_pulse(uint32_t mode)
+{
+	uint32_t assert_level = (mode == 2) ? 1u : 0u;
+	uint32_t release_level = (mode == 2) ? 0u : 1u;
+
+	kt_reset_level(assert_level);
+	kebab_geni_sleep_ms(20);
+	kt_reset_level(release_level);
+	printf("KEBAB TOUCH: reset pulse (mode %u), ctl 0x%08x io 0x%08x\n",
+	    mode, kt_rd(kg.tlmm, TLMM_CTL(KT_PIN_RESET)),
+	    kt_rd(kg.tlmm, TLMM_IO(KT_PIN_RESET)));
+	kebab_geni_sleep_ms(200);
+}
+
+
+static bool
+kt_se_init(uint32_t hz)
+{
+	uint32_t v;
+	uint32_t depth;
+	uint32_t proto;
+
+	kebab_geni_trace("KEBAB TOUCH: se_init: clear IRQs\n");
+	kt_se_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
+	kt_se_wr(SE_GENI_S_IRQ_CLEAR, 0xffffffffu);
+	kt_se_wr(SE_GENI_DMA_MODE_EN, kt_se_rd(SE_GENI_DMA_MODE_EN) & ~1u);
+	kt_se_wr(SE_GSI_EVENT_EN, 0);
+
+	/* geni_se_io_init() */
+	kt_se_wr(GENI_CGC_CTRL, kt_se_rd(GENI_CGC_CTRL) | DEFAULT_CGC_EN);
+	kt_se_wr(SE_DMA_GENERAL_CFG,
+	    kt_se_rd(SE_DMA_GENERAL_CFG) | DMA_GENERAL_CFG_VAL);
+	kt_se_wr(GENI_OUTPUT_CTRL, DEFAULT_IO_OUTPUT_CTRL);
+	kebab_geni_trace("KEBAB TOUCH: se_init: force default, output ctrl\n");
+	kt_se_wr(GENI_FORCE_DEFAULT_REG, 1);
+
+	/* geni_se_io_set_mode() */
+	kt_se_wr(SE_IRQ_EN, kt_se_rd(SE_IRQ_EN) | 0xfu);
+	kt_se_wr(SE_GENI_DMA_MODE_EN, kt_se_rd(SE_GENI_DMA_MODE_EN) & ~1u);
+	kt_se_wr(SE_GSI_EVENT_EN, 0);
+
+	/* Watermarks, sized from the SE's own TX FIFO width. */
+	depth = (kt_se_rd(SE_HW_PARAM_0) >> 24) & 0x3fu;
+	if (depth == 0 || depth > 32) {
+		depth = 16;
+	}
+	kt_se_wr(SE_GENI_RX_WATERMARK_REG, depth - 1);
+	kt_se_wr(SE_GENI_RX_RFR_WATERMARK_REG, depth);
+
+	kt_se_wr(SE_GENI_M_IRQ_EN, kt_se_rd(SE_GENI_M_IRQ_EN) | M_IRQ_COMMON);
+	kt_se_wr(SE_GENI_S_IRQ_EN, kt_se_rd(SE_GENI_S_IRQ_EN) | S_IRQ_COMMON);
+	kt_se_wr(SE_GENI_M_IRQ_EN, kt_se_rd(SE_GENI_M_IRQ_EN) | M_IRQ_FIFO);
+
+	/* geni_se_config_packing(8 bits, 4 words, msb first) */
+	kebab_geni_trace("KEBAB TOUCH: se_init: packing + byte granularity\n");
+	kt_se_wr(SE_GENI_TX_PACKING_CFG0, PACK_CFG0);
+	kt_se_wr(SE_GENI_TX_PACKING_CFG1, PACK_CFG1);
+	kt_se_wr(SE_GENI_RX_PACKING_CFG0, PACK_CFG0);
+	kt_se_wr(SE_GENI_RX_PACKING_CFG1, PACK_CFG1);
+	kt_se_wr(SE_GENI_BYTE_GRAN, 0);
+
+	/* qcom_geni_i2c_conf(): internal SE clock, then the SCL timing. */
+	kebab_geni_trace("KEBAB TOUCH: se_init: clock select + SCL counters\n");
+	kt_se_wr(SE_GENI_CLK_SEL, 0);
+	if (hz == 400000u) {
+		kt_se_wr(GENI_SER_M_CLK_CFG, KT_SER_CLK_CFG(2));
+		kt_se_wr(SE_I2C_SCL_COUNTERS, KT_SCL_COUNTERS(5, 12, 24));
+	} else {
+		kt_se_wr(GENI_SER_M_CLK_CFG, KT_SER_CLK_CFG(7));
+		kt_se_wr(SE_I2C_SCL_COUNTERS, KT_SCL_COUNTERS(10, 11, 26));
+	}
+
+	v = kt_se_rd(SE_GENI_STATUS);
+	if ((v & 0x1u) != 0) {
+		printf("KEBAB TOUCH: sequencer already active, GENI_STATUS 0x%08x\n",
+		    v);
+	}
+
+	proto = (kt_se_rd(GENI_FW_REVISION_RO) & FW_REV_PROTOCOL_MSK) >>
+	    FW_REV_PROTOCOL_SHFT;
+	if (proto != GENI_SE_I2C_PROTO) {
+		printf("KEBAB TOUCH: SE13 protocol is %u, not %u (I2C): the "
+		    "bootloader did not configure this SE for I2C and this driver "
+		    "does not know how to select it\n", proto, GENI_SE_I2C_PROTO);
+		return false;
+	}
+	return true;
+}
+
+
+static void
+kt_gcc_probe(void)
+{
+	uint32_t en, m_ahb, s_ahb, s5;
+
+	if (kg.gcc_en == 0) {
+		kg.gcc_en = ml_io_map(KT_GCC_PA + KT_GCC_PAGE_EN, 0x1000);
+		kg.gcc_halt = ml_io_map(KT_GCC_PA + KT_GCC_PAGE_HALT, 0x1000);
+	}
+	if (kg.gcc_en == 0 || kg.gcc_halt == 0) {
+		printf("KEBAB TOUCH: cannot map the GCC pages; clock state unknown\n");
+		return;
+	}
+	en = kt_rd(kg.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN);
+	kebab_geni_trace("KEBAB TOUCH: GCC 0x%05x = 0x%08x: wrap1_s5 %u m_ahb %u s_ahb %u\n",
+	    KT_GCC_ENABLE, en, (en & KT_GCC_EN_S5) != 0,
+	    (en & KT_GCC_EN_M_AHB) != 0, (en & KT_GCC_EN_S_AHB) != 0);
+	m_ahb = kt_rd(kg.gcc_halt, KT_GCC_HALT_M_AHB - KT_GCC_PAGE_HALT);
+	s_ahb = kt_rd(kg.gcc_halt, KT_GCC_HALT_S_AHB - KT_GCC_PAGE_HALT);
+	s5 = kt_rd(kg.gcc_halt, KT_GCC_HALT_WRAP1_S5 - KT_GCC_PAGE_HALT);
+	kebab_geni_trace("KEBAB TOUCH: GCC halt m_ahb 0x%08x s_ahb 0x%08x wrap1_s5 0x%08x\n",
+	    m_ahb, s_ahb, s5);
+}
+
+
+static void
+kt_geni_probe(void)
+{
+	uint32_t rev;
+
+	rev = kt_se_rd(GENI_FW_REVISION_RO);
+	kebab_geni_trace("KEBAB TOUCH: probe wrapper QUP_HW_VER 0x%08x\n",
+	    kg.wrap != 0 ? kt_rd(kg.wrap, QUP_HW_VER) : 0u);
+	kebab_geni_trace("KEBAB TOUCH: probe GENI_FW_REVISION_RO 0x%08x protocol %u\n",
+	    rev, (rev & FW_REV_PROTOCOL_MSK) >> FW_REV_PROTOCOL_SHFT);
+	kebab_geni_trace("KEBAB TOUCH: probe GENI_STATUS 0x%08x M_IRQ_STATUS 0x%08x "
+	    "S_IRQ_STATUS 0x%08x\n", kt_se_rd(SE_GENI_STATUS),
+	    kt_se_rd(SE_GENI_M_IRQ_STATUS), kt_se_rd(SE_GENI_S_IRQ_STATUS));
+	kebab_geni_trace("KEBAB TOUCH: probe DMA_MODE_EN 0x%08x CGC_CTRL 0x%08x\n",
+	    kt_se_rd(SE_GENI_DMA_MODE_EN), kt_se_rd(GENI_CGC_CTRL));
+	kebab_geni_trace("KEBAB TOUCH: probe TX_WATERMARK 0x%08x M_IRQ_EN 0x%08x\n",
+	    kt_se_rd(SE_GENI_TX_WATERMARK_REG), kt_se_rd(SE_GENI_M_IRQ_EN));
+	kebab_geni_trace("KEBAB TOUCH: probe SER_M_CLK_CFG 0x%08x SCL_COUNTERS 0x%08x\n",
+	    kt_se_rd(GENI_SER_M_CLK_CFG), kt_se_rd(SE_I2C_SCL_COUNTERS));
+	kebab_geni_trace("KEBAB TOUCH: probe TX_FIFO_STATUS 0x%08x RX_FIFO_STATUS 0x%08x\n",
+	    kt_se_rd(SE_GENI_TX_FIFO_STATUS), kt_se_rd(SE_GENI_RX_FIFO_STATUS));
+}
+
+
+static void
+kt_pins_probe(void)
+{
+	static const uint32_t pins[] = {
+		KT_PIN_SDA, KT_PIN_SCL, KT_PIN_RESET, KT_PIN_IRQ
+	};
+	uint32_t i;
+
+	for (i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
+		kebab_geni_trace("KEBAB TOUCH: probe pin %u ctl 0x%08x io 0x%08x\n",
+		    pins[i], kt_rd(kg.tlmm, TLMM_CTL(pins[i])),
+		    kt_rd(kg.tlmm, TLMM_IO(pins[i])));
+	}
+}
+
+
+static bool
+kt_bb_level(uint32_t pin)
+{
+	return (kt_rd(kg.tlmm, TLMM_IO(pin)) & 1u) != 0;
+}
+
+
+static void
+kt_bb_line(uint32_t pin, bool high)
+{
+	uint32_t ctl = kt_rd(kg.tlmm, TLMM_CTL(pin));
+
+	if (!high) {
+		kt_wr(kg.tlmm, TLMM_IO(pin), 0);
+	}
+	ctl &= ~(TLMM_MUX_MSK | TLMM_PULL_MSK | TLMM_DRV_MSK | TLMM_OE);
+	ctl |= 3u;                      /* pull-up, mux 0 == plain GPIO */
+	if (!high) {
+		ctl |= TLMM_OE;
+	}
+	kt_wr(kg.tlmm, TLMM_CTL(pin), ctl);
+}
+
+
+static bool
+kt_bb_clock_high(void)
+{
+	kt_bb_line(KT_PIN_SCL, true);
+	for (uint32_t i = 0; i < KT_BB_STRETCH; i++) {
+		if (kt_bb_level(KT_PIN_SCL)) {
+			return true;
+		}
+		delay(KT_BB_HALF_US);
+	}
+	if (++kt_bb_stretch_bails <= 4) {
+		kebab_geni_trace("KEBAB TOUCH: SCL did not rise within %u us (SDA %u); bailing out of this transaction\n",
+		    KT_BB_STRETCH * KT_BB_HALF_US, kt_bb_level(KT_PIN_SDA));
+	}
+	return false;
+}
+
+
+static bool
+kt_bb_start(void)
+{
+	kt_bb_line(KT_PIN_SDA, true);
+	delay(KT_BB_HALF_US);
+	if (!kt_bb_clock_high() || !kt_bb_level(KT_PIN_SDA)) {
+		return false;
+	}
+	delay(KT_BB_HALF_US);
+	kt_bb_line(KT_PIN_SDA, false);
+	delay(KT_BB_HALF_US);
+	kt_bb_line(KT_PIN_SCL, false);
+	return true;
+}
+
+
+static void
+kt_bb_stop(void)
+{
+	kt_bb_line(KT_PIN_SCL, false);
+	kt_bb_line(KT_PIN_SDA, false);
+	delay(KT_BB_HALF_US);
+	(void)kt_bb_clock_high();
+	delay(KT_BB_HALF_US);
+	kt_bb_line(KT_PIN_SDA, true);
+	delay(KT_BB_HALF_US);
+}
+
+
+static bool
+kt_bb_send(uint8_t byte)
+{
+	for (int bit = 7; bit >= 0; bit--) {
+		kt_bb_line(KT_PIN_SDA, ((byte >> bit) & 1u) != 0);
+		delay(KT_BB_HALF_US);
+		if (!kt_bb_clock_high()) {
+			return false;
+		}
+		delay(KT_BB_HALF_US);
+		kt_bb_line(KT_PIN_SCL, false);
+	}
+	kt_bb_line(KT_PIN_SDA, true);
+	delay(KT_BB_HALF_US);
+	if (!kt_bb_clock_high()) {
+		return false;
+	}
+	delay(KT_BB_HALF_US);
+	bool ack = !kt_bb_level(KT_PIN_SDA);
+	kt_bb_line(KT_PIN_SCL, false);
+	return ack;
+}
+
+
+static bool
+kt_bb_receive(uint8_t *byte, bool ack)
+{
+	uint32_t value = 0;
+
+	kt_bb_line(KT_PIN_SDA, true);
+	for (uint32_t bit = 0; bit < 8; bit++) {
+		delay(KT_BB_HALF_US);
+		if (!kt_bb_clock_high()) {
+			return false;
+		}
+		delay(KT_BB_HALF_US);
+		value = (value << 1) | (kt_bb_level(KT_PIN_SDA) ? 1u : 0u);
+		kt_bb_line(KT_PIN_SCL, false);
+	}
+	kt_bb_line(KT_PIN_SDA, !ack);
+	delay(KT_BB_HALF_US);
+	if (!kt_bb_clock_high()) {
+		return false;
+	}
+	delay(KT_BB_HALF_US);
+	kt_bb_line(KT_PIN_SCL, false);
+	kt_bb_line(KT_PIN_SDA, true);
+	*byte = (uint8_t)value;
+	return true;
+}
+
+
+static int
+kt_bb_fail(const char *what, uint32_t phase)
+{
+	if (kg.errors < 8) {
+		kebab_geni_trace("KEBAB TOUCH: bit-bang %s failed at phase %u (SDA %u SCL %u)\n",
+		    what, phase, kt_bb_level(KT_PIN_SDA),
+		    kt_bb_level(KT_PIN_SCL));
+	}
+	kg.errors++;
+	kt_bb_stop();
+	return -1;
+}
+
+
+static int
+kt_bb_write(const uint8_t *buf, uint32_t len)
+{
+	if (len == 0 || len > 64) {
+		return -1;
+	}
+	kebab_geni_trace("KEBAB TOUCH: bb write %u bytes (first 0x%02x)\n", len, buf[0]);
+	if (!kt_bb_start()) {
+		return kt_bb_fail("start", 0);
+	}
+	if (!kt_bb_send((uint8_t)(KT_I2C_ADDR << 1))) {
+		return kt_bb_fail("address", 1);
+	}
+	for (uint32_t i = 0; i < len; i++) {
+		if (!kt_bb_send(buf[i])) {
+			return kt_bb_fail("write", 2 + i);
+		}
+	}
+	kt_bb_stop();
+	return 0;
+}
+
+
+static int
+kt_bb_read(uint8_t *buf, uint32_t len)
+{
+	if (len == 0 || len > 128) {
+		return -1;
+	}
+	kebab_geni_trace("KEBAB TOUCH: bb read %u bytes\n", len);
+	if (!kt_bb_start()) {
+		return kt_bb_fail("start", 0);
+	}
+	if (!kt_bb_send((uint8_t)((KT_I2C_ADDR << 1) | 1u))) {
+		return kt_bb_fail("address", 1);
+	}
+	for (uint32_t i = 0; i < len; i++) {
+		if (!kt_bb_receive(&buf[i], i + 1 < len)) {
+			return kt_bb_fail("read", 2 + i);
+		}
+	}
+	kt_bb_stop();
+	return 0;
+}
+
+
+static void
+kt_bb_pins_config(void)
+{
+	static const uint32_t pins[] = {
+		KT_PIN_SDA, KT_PIN_SCL, KT_PIN_RESET, KT_PIN_IRQ
+	};
+	uint32_t i;
+
+	for (i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
+		uint32_t ctl;
+		uint32_t io;
+
+		/* Print first: if this read hangs, the last line names the pin. */
+		kebab_geni_trace("KEBAB TOUCH: reading pin %u TLMM_CTL at 0x%08x\n",
+		    pins[i], KT_TLMM_PA + TLMM_TILE_SOUTH +
+		    TLMM_REG_SIZE * pins[i]);
+		ctl = kt_rd(kg.tlmm, TLMM_CTL(pins[i]));
+		io = kt_rd(kg.tlmm, TLMM_IO(pins[i]));
+		kebab_geni_trace("KEBAB TOUCH: bit-bang pin %u ctl 0x%08x (mux %u pull %u drive %u oe %u) io 0x%08x\n",
+		    pins[i], ctl, (ctl & TLMM_MUX_MSK) >> 2, ctl & TLMM_PULL_MSK,
+		    (ctl & TLMM_DRV_MSK) >> 6, (ctl >> 9) & 1u, io);
+	}
+	for (i = 0; i < 2; i++) {
+		uint32_t old = kt_rd(kg.tlmm, TLMM_CTL(pins[i]));
+		uint32_t val = old;
+
+		val &= ~(TLMM_MUX_MSK | TLMM_PULL_MSK | TLMM_DRV_MSK |
+		    TLMM_OE);
+		val |= 3u;              /* mux 0 GPIO, pull-up, released */
+		kebab_geni_trace("KEBAB TOUCH: writing pin %u ctl 0x%08x -> 0x%08x\n",
+		    pins[i], old, val);
+		kt_wr(kg.tlmm, TLMM_CTL(pins[i]), val);
+		kebab_geni_trace("KEBAB TOUCH: pin %u readback 0x%08x\n", pins[i],
+		    kt_rd(kg.tlmm, TLMM_CTL(pins[i])));
+	}
+}
+
+
+static uint32_t
+kt_i2c_param(void)
+{
+	return ((uint32_t)KT_I2C_ADDR << SLV_ADDR_SHFT) & SLV_ADDR_MSK;
+}
+
+
+static int
+kt_i2c_error(uint32_t status)
+{
+	if ((status & M_GP_IRQ_1_NACK) != 0) {
+		printf("KEBAB TOUCH: no ACK from 0x%02x (M_IRQ_STATUS 0x%08x)\n",
+		    KT_I2C_ADDR, status);
+	} else {
+		printf("KEBAB TOUCH: I2C error, M_IRQ_STATUS 0x%08x GENI_STATUS 0x%08x\n",
+		    status, kt_se_rd(SE_GENI_STATUS));
+	}
+	/*
+	 * Keep the status word as the evidence and only clear it after the
+	 * decision to recover, so a failed run still shows why it failed.
+	 */
+	if ((kt_se_rd(SE_GENI_STATUS) & M_GENI_CMD_ACTIVE) != 0) {
+		(void)kt_se_recover("i2c error");
+	} else {
+		kt_se_wr(SE_GENI_M_IRQ_CLEAR, status);
+	}
+	return -1;
+}
+
+
+static bool
+kt_se_recover(const char *why)
+{
+	uint32_t status = 0;
+	uint32_t i;
+
+	status = kt_se_rd(SE_GENI_M_IRQ_STATUS);
+	kebab_geni_trace("KEBAB TOUCH: recover (%s): GENI_STATUS 0x%08x M_IRQ_STATUS 0x%08x\n",
+	    why, kt_se_rd(SE_GENI_STATUS), status);
+	if ((kt_se_rd(SE_GENI_STATUS) & M_GENI_CMD_ACTIVE) == 0) {
+		kt_se_wr(SE_GENI_TX_WATERMARK_REG, 0);
+		kt_se_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
+		return true;
+	}
+
+	kt_se_wr(SE_GENI_M_CMD_CTRL_REG, M_GENI_CMD_CANCEL_REQ);
+	for (i = 0; i < 100; i++) {
+		status = kt_se_rd(SE_GENI_M_IRQ_STATUS);
+		if ((status & (M_CMD_CANCEL | M_CMD_DONE)) != 0 ||
+		    (kt_se_rd(SE_GENI_STATUS) & M_GENI_CMD_ACTIVE) == 0) {
+			break;
+		}
+		delay(100);
+	}
+	if ((kt_se_rd(SE_GENI_STATUS) & M_GENI_CMD_ACTIVE) != 0) {
+		kt_se_wr(SE_GENI_M_CMD_CTRL_REG, M_GENI_CMD_ABORT_REQ);
+		for (i = 0; i < 100; i++) {
+			status = kt_se_rd(SE_GENI_M_IRQ_STATUS);
+			if ((status & M_CMD_ABORT) != 0 ||
+			    (kt_se_rd(SE_GENI_STATUS) & M_GENI_CMD_ACTIVE) == 0) {
+				break;
+			}
+			delay(100);
+		}
+	}
+	status = kt_se_rd(SE_GENI_M_IRQ_STATUS);
+	kt_se_wr(SE_GENI_TX_WATERMARK_REG, 0);
+	kt_se_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
+	if ((kt_se_rd(SE_GENI_STATUS) & M_GENI_CMD_ACTIVE) != 0) {
+		kg.se_dead = true;
+		printf("KEBAB TOUCH: SE still active after cancel and abort "
+		    "(GENI_STATUS 0x%08x, M_IRQ_STATUS 0x%08x); no further I2C "
+		    "this run\n", kt_se_rd(SE_GENI_STATUS), status);
+		return false;
+	}
+	kebab_geni_trace("KEBAB TOUCH: recovered: GENI_STATUS 0x%08x, last status 0x%08x\n",
+	    kt_se_rd(SE_GENI_STATUS), status);
+	return true;
+}
+
+
+int
+kebab_geni_i2c_write(const uint8_t *buf, uint32_t len)
+{
+	uint32_t i;
+	uint32_t status = 0;
+	uint32_t words;
+
+	if (kg.bb) {
+		return kt_bb_write(buf, len);
+	}
+	if (kg.se_dead) {
+		printf("KEBAB TOUCH: SE is marked unusable after a failed "
+		    "recovery; not writing\n");
+		return -1;
+	}
+	if (len == 0 || len > 64) {
+		return -1;
+	}
+	words = (len + 3) / 4;
+	kt_se_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
+	kt_se_wr(SE_I2C_TX_TRANS_LEN, len);
+	kt_se_wr(SE_GENI_M_CMD0, (I2C_WRITE << M_OPCODE_SHFT) | kt_i2c_param());
+	/*
+	 * Arm one word of TX watermark.  Qualcomm's FIFO path writes 1 here
+	 * right after the command word (i2c-qcom-geni.c, "Get FIFO IRQ");
+	 * without it the sequencer never raises the watermark interrupt and
+	 * this driver waits for a status bit that cannot arrive.
+	 */
+	kt_se_wr(SE_GENI_TX_WATERMARK_REG, 1);
+
+	/* The sequencer asks for data by raising the TX watermark. */
+	for (i = 0; i < 100; i++) {
+		status = kt_se_rd(SE_GENI_M_IRQ_STATUS);
+		if ((status & M_ERRORS) != 0) {
+			return kt_i2c_error(status);
+		}
+		if ((status & (M_TX_FIFO_WATERMARK | M_CMD_DONE)) != 0) {
+			break;
+		}
+		delay(100);
+	}
+	if (i == 100) {
+		printf("KEBAB TOUCH: write watermark timeout, status 0x%08x\n",
+		    status);
+		(void)kt_se_recover("write watermark timeout");
+		return -1;
+	}
+
+	for (i = 0; i < words; i++) {
+		uint32_t w = 0;
+		uint32_t b;
+
+		for (b = 0; b < 4 && i * 4 + b < len; b++) {
+			w |= (uint32_t)buf[i * 4 + b] << (8 * b);
+		}
+		kt_se_wr(SE_GENI_TX_FIFO, w);
+	}
+	kt_se_wr(SE_GENI_TX_WATERMARK_REG, 0);
+	kt_se_wr(SE_GENI_M_IRQ_CLEAR, status);
+
+	for (i = 0; i < 200; i++) {
+		status = kt_se_rd(SE_GENI_M_IRQ_STATUS);
+		if ((status & M_ERRORS) != 0) {
+			return kt_i2c_error(status);
+		}
+		if ((status & M_CMD_DONE) != 0) {
+			kt_se_wr(SE_GENI_M_IRQ_CLEAR, status);
+			return 0;
+		}
+		delay(100);
+	}
+	printf("KEBAB TOUCH: write did not complete, status 0x%08x\n", status);
+	(void)kt_se_recover("write completion timeout");
+	return -1;
+}
+
+
+int
+kebab_geni_i2c_read(uint8_t *buf, uint32_t len)
+{
+	uint32_t got = 0;
+	uint32_t i;
+	uint32_t status = 0;
+
+	if (kg.bb) {
+		return kt_bb_read(buf, len);
+	}
+	if (kg.se_dead) {
+		printf("KEBAB TOUCH: SE is marked unusable after a failed "
+		    "recovery; not reading\n");
+		return -1;
+	}
+	if (len == 0 || len > 128) {
+		return -1;
+	}
+	kt_se_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
+	kt_se_wr(SE_I2C_RX_TRANS_LEN, len);
+	kt_se_wr(SE_GENI_M_CMD0, (I2C_READ << M_OPCODE_SHFT) | kt_i2c_param());
+
+	for (i = 0; i < 300; i++) {
+		uint32_t count;
+
+		status = kt_se_rd(SE_GENI_M_IRQ_STATUS);
+		if ((status & M_ERRORS) != 0) {
+			return kt_i2c_error(status);
+		}
+		count = kt_se_rd(SE_GENI_RX_FIFO_STATUS) & RX_FIFO_WC_MSK;
+		while (count-- > 0 && got < len) {
+			uint32_t w = kt_se_rd(SE_GENI_RX_FIFO);
+			uint32_t b;
+
+			for (b = 0; b < 4 && got < len; b++) {
+				buf[got++] = (uint8_t)((w >> (8 * b)) & 0xffu);
+			}
+		}
+		if (status != 0) {
+			kt_se_wr(SE_GENI_M_IRQ_CLEAR, status);
+		}
+		if ((status & M_CMD_DONE) != 0) {
+			break;
+		}
+		delay(100);
+	}
+	if (i == 300) {
+		printf("KEBAB TOUCH: read did not complete, status 0x%08x got %u "
+		    "of %u\n", status, got, len);
+		(void)kt_se_recover("read completion timeout");
+		return -1;
+	}
+	if (got != len) {
+		printf("KEBAB TOUCH: short read, %u of %u bytes\n", got, len);
+		return -1;
+	}
+	return 0;
+}
+
+
+static void
+kebab_touch_se_locked(void)
+{
+	if (kg.se == 0) {
+		kg.se = ml_io_map(KT_SE13_PA_DEFAULT, KT_SE13_SIZE);
+		kg.wrap = ml_io_map(KT_WRAP_PA_DEFAULT, KT_WRAP_SIZE);
+	}
+	if (kg.tlmm == 0) {
+		kg.tlmm = ml_io_map(KT_TLMM_PA + TLMM_TILE_SOUTH, KT_TLMM_SIZE);
+	}
+	if (kg.se == 0 || kg.tlmm == 0) {
+		printf("KEBAB TOUCH: TOUCHSE cannot map SE13 or TLMM\n");
+		return;
+	}
+	/*
+	 * A dead SE is only cleared by a reboot: re-running TOUCHSE into a
+	 * sequencer that failed its own cancel/abort would make the next log
+	 * unattributable, which is exactly what the flag exists to prevent.
+	 */
+	if (kg.se_dead) {
+		printf("KEBAB TOUCH: SE is marked unusable after a failed "
+		    "recovery; reboot before TOUCHSE\n");
+		return;
+	}
+	kg.se_initialized = false;
+	kebab_geni_trace("KEBAB TOUCH: TOUCHSE begin: pins, reset, se_init\n");
+	kt_gcc_probe();
+	if (kg.gcc_en != 0 &&
+	    (kt_rd(kg.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN) & KT_GCC_EN_S5) == 0) {
+		printf("KEBAB TOUCH: S5 clock is off; run TOUCHCLK first\n");
+		return;
+	}
+	kt_pins_config();
+	kt_reset_pulse(1);
+	if (!kt_se_init(100000)) {
+		return;
+	}
+	kg.se_initialized = true;
+	kebab_geni_trace("KEBAB TOUCH: TOUCHSE done; TOUCHPING can be sent\n");
+}
+
+
+static void
+kebab_touch_ping_locked(void)
+{
+	uint8_t zero = 0;
+	int rc;
+
+	if (!kg.se_initialized) {
+		printf("KEBAB TOUCH: TOUCHPING needs a successful TOUCHSE first\n");
+		return;
+	}
+	if (kg.se_dead) {
+		printf("KEBAB TOUCH: SE is marked unusable; reboot to clear it\n");
+		return;
+	}
+	if ((kt_se_rd(SE_GENI_STATUS) & M_GENI_CMD_ACTIVE) != 0) {
+		printf("KEBAB TOUCH: a command is still active; recovering first\n");
+		if (!kt_se_recover("ping precondition")) {
+			return;
+		}
+	}
+	/*
+	 * One data byte.  An address-only write (TX_TRANS_LEN = 0) leaves the
+	 * command active on this SE with no interrupt at all, which is why the
+	 * first attempt never produced an ACK, a NACK or a completion; a write
+	 * with one byte goes through the FIFO path this driver just fixed.
+	 */
+	kebab_geni_trace("KEBAB TOUCH: ping 0x%02x: one byte, FIFO path\n", KT_I2C_ADDR);
+	rc = kebab_geni_i2c_write(&zero, 1);
+	kebab_geni_trace("KEBAB TOUCH: ping 0x%02x: rc %d GENI_STATUS 0x%08x\n",
+	    KT_I2C_ADDR, rc, kt_se_rd(SE_GENI_STATUS));
+	if (rc == 0) {
+		printf("KEBAB TOUCH: ping: ACK, one-byte write completed\n");
+	}
+}
+
+
+static void
+kebab_touch_clock_enable_locked(void)
+{
+	uint32_t en, i;
+
+	if (kg.gcc_en == 0) {
+		kg.gcc_en = ml_io_map(KT_GCC_PA + KT_GCC_PAGE_EN, 0x1000);
+		kg.gcc_halt = ml_io_map(KT_GCC_PA + KT_GCC_PAGE_HALT, 0x1000);
+	}
+	if (kg.gcc_en == 0 || kg.gcc_halt == 0) {
+		printf("KEBAB TOUCH: cannot map the GCC pages\n");
+		return;
+	}
+	kebab_geni_trace("KEBAB TOUCH: TOUCHCLK: S5 RCG at 0x%05x\n", KT_GCC_RCG_S5);
+	for (i = 0; i < KT_GCC_RCG_WORDS; i++) {
+		kebab_geni_trace("KEBAB TOUCH:   RCG+0x%02x = 0x%08x\n", i * 4,
+		    kt_rd(kg.gcc_halt, KT_GCC_RCG_S5 + i * 4 - KT_GCC_PAGE_HALT));
+	}
+	en = kt_rd(kg.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN);
+	kebab_geni_trace("KEBAB TOUCH: TOUCHCLK: 0x%05x 0x%08x -> 0x%08x\n",
+	    KT_GCC_ENABLE, en, en | KT_GCC_EN_S5);
+	kt_wr(kg.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN, en | KT_GCC_EN_S5);
+	kebab_geni_sleep_ms(2);
+	en = kt_rd(kg.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN);
+	kebab_geni_trace("KEBAB TOUCH: TOUCHCLK: 0x%05x now 0x%08x (s5 %u), halt 0x%08x\n",
+	    KT_GCC_ENABLE, en, (en & KT_GCC_EN_S5) != 0,
+	    kt_rd(kg.gcc_halt, KT_GCC_HALT_WRAP1_S5 - KT_GCC_PAGE_HALT));
+}
+
+
+
+uint32_t
+kebab_geni_record_poll_error(void)
+{
+	return ++kg.errors;
+}
+
+int
+kebab_geni_map(uint32_t se_pa, bool bb, uint32_t pins, uint32_t reset, bool raw)
+{
+	kg.bb = bb;
+	kg.se_pa = se_pa;
+	if (!kg.bb) {
+		kebab_geni_trace("KEBAB TOUCH: mapping SE13 0x%08x+0x%x, wrapper 0x%08x+0x%x\n",
+		    se_pa, KT_SE13_SIZE, KT_WRAP_PA_DEFAULT, KT_WRAP_SIZE);
+		kg.se = ml_io_map(se_pa, KT_SE13_SIZE);
+		if (kg.se == 0) {
+			printf("KEBAB TOUCH: cannot map SE13 at 0x%08x\n", se_pa);
+			return -1;
+		}
+		kg.wrap = ml_io_map(KT_WRAP_PA_DEFAULT, KT_WRAP_SIZE);
+	} else {
+		/*
+		 * The bit-bang transport never reads an SE or wrapper register:
+		 * the point of the alternate path is to remove that dependency.
+		 * Only TLMM is mapped.
+		 */
+		kebab_geni_trace("KEBAB TOUCH: transport bit-banged GPIO I2C; QUPv3 SE13 is not used (SDA %u SCL %u reset %u IRQ %u)\n",
+		    KT_PIN_SDA, KT_PIN_SCL, KT_PIN_RESET, KT_PIN_IRQ);
+	}
+	kebab_geni_trace("KEBAB TOUCH: mapping TLMM SOUTH at 0x%08x+0x%x\n",
+	    KT_TLMM_PA + TLMM_TILE_SOUTH, KT_TLMM_SIZE);
+	if (kg.bb || pins != 0 || reset != 0 || raw) {
+		kg.tlmm = ml_io_map(KT_TLMM_PA + TLMM_TILE_SOUTH,
+		    KT_TLMM_SIZE);
+	}
+	kebab_geni_trace("KEBAB TOUCH: MMIO done: se 0x%llx wrap 0x%llx tlmm 0x%llx\n",
+	    (unsigned long long)kg.se, (unsigned long long)kg.wrap,
+	    (unsigned long long)kg.tlmm);
+	return 0;
+}
+
+bool
+kebab_geni_map_default(void)
+{
+	if (kg.se == 0) {
+		kg.se = ml_io_map(KT_SE13_PA_DEFAULT, KT_SE13_SIZE);
+		kg.wrap = ml_io_map(KT_WRAP_PA_DEFAULT, KT_WRAP_SIZE);
+	}
+	if (kg.tlmm == 0) {
+		kg.tlmm = ml_io_map(KT_TLMM_PA + TLMM_TILE_SOUTH, KT_TLMM_SIZE);
+	}
+	return kg.se != 0 && kg.tlmm != 0;
+}
+
+void
+kebab_geni_get_info(struct kebab_geni_info *info)
+{
+	*info = (struct kebab_geni_info) {
+		.resources = { kg.se_pa != 0 ? kg.se_pa : KT_SE13_PA_DEFAULT,
+		    KT_SE13_SIZE, KT_WRAP_PA_DEFAULT, KT_WRAP_SIZE,
+		    KT_TLMM_PA + TLMM_TILE_SOUTH, KT_TLMM_SIZE },
+		.mapped = kg.bb ? kg.tlmm != 0 : kg.se != 0 && kg.tlmm != 0,
+		.bitbang = kg.bb, .initialized = kg.se_initialized, .dead = kg.se_dead,
+	};
+}
+
+void
+kebab_geni_probe_hardware(void)
+{
+	kt_gcc_probe();
+	kt_geni_probe();
+	kt_pins_probe();
+}
+
+bool
+kebab_geni_manual_init(void)
+{
+	kebab_geni_trace("KEBAB TOUCH: TOUCHINIT begin; writes follow\n");
+	kt_gcc_probe();
+	kt_pins_config();
+	kt_reset_pulse(1);
+	if (!kt_se_init(100000)) {
+		return false;
+	}
+	kg.se_initialized = true;
+	return true;
+}
+
+int
+kebab_geni_boot_prepare(uint32_t se_pa, uint32_t hz, uint32_t pins,
+    uint32_t reset, bool raw)
+{
+	if (kg.bb && kg.tlmm == 0) {
+		printf("KEBAB TOUCH: bit-bang transport needs TLMM and it is not mapped\n");
+		return -1;
+	}
+
+	if (!kg.bb) {
+		/*
+		 * The SE13 branch clock is off at boot, and the first GENI
+		 * register group written without it stops the console: 0116
+		 * measured that, and this bring-up hit the same wall at
+		 * "se_init: force default, output ctrl".  TOUCHCLK followed by
+		 * TOUCHSE has been working from the console, so the boot path
+		 * runs the same step in the same place instead of being a
+		 * variant that is known to hang.  A GCC that cannot be mapped is
+		 * not fatal here: the bootloader may have left the clock on, and
+		 * the reads below are harmless either way.
+		 */
+		kebab_touch_clock_enable_locked();
+		kebab_geni_trace("KEBAB TOUCH: reading wrapper/SE revision registers\n");
+		printf("KEBAB TOUCH: S3908 on QUPv3 SE13 at 0x%08x (I2C 0x%02x, %u Hz)"
+		    ", wrapper 0x%08x\n", se_pa, KT_I2C_ADDR, hz,
+		    KT_WRAP_PA_DEFAULT);
+		printf("KEBAB TOUCH: wrapper QUP_HW_VER 0x%08x, SE13 GENI_FW_REVISION_RO "
+		    "0x%08x\n", kg.wrap != 0 ? kt_rd(kg.wrap, QUP_HW_VER) : 0u,
+		    kt_se_rd(GENI_FW_REVISION_RO));
+	}
+
+	kebab_geni_trace("KEBAB TOUCH: configuring pins (%s)\n",
+	    kg.bb ? "bit-bang GPIO" : "qup13");
+	if (kg.tlmm != 0 && kg.bb) {
+		kt_bb_pins_config();
+	} else if (kg.tlmm != 0 && pins != 0) {
+		kt_pins_config();
+	}
+	kebab_geni_trace("KEBAB TOUCH: pins done, reset pulse next\n");
+	if (kg.tlmm != 0 && reset != 0) {
+		kt_reset_pulse(reset);
+	}
+	/*
+	 * The pulse already waited 200 ms after the release edge; this is the
+	 * explicit delay the first transfer is gated on.  With the rails up it
+	 * makes the order rail settle -> reset -> boot time, which is the order
+	 * the chip is specified to see.
+	 */
+	kebab_geni_sleep_ms(KT_RESET_SETTLE_MS);
+	kebab_geni_trace("KEBAB TOUCH: reset pulse done, waited %u ms\n",
+	    KT_RESET_SETTLE_MS);
+	if (raw) {
+		kt_dump_regs("before init");
+	}
+
+	if (!kg.bb && !kt_se_init(hz)) {
+		if (raw) {
+			kt_dump_regs("after failed init");
+		}
+		return -1;
+	}
+	if (raw) {
+		kt_dump_regs("after init");
+	}
+	return 0;
+}
+
+void
+kebab_touch_se(void)
+{
+	kebab_geni_transaction_lock();
+	kebab_touch_se_locked();
+	kebab_geni_transaction_unlock();
+}
+
+void
+kebab_touch_ping(void)
+{
+	kebab_geni_transaction_lock();
+	kebab_touch_ping_locked();
+	kebab_geni_transaction_unlock();
+}
+
+void
+kebab_touch_clock_enable(void)
+{
+	kebab_geni_transaction_lock();
+	kebab_touch_clock_enable_locked();
+	kebab_geni_transaction_unlock();
+}
+
+int
+kebab_geni_read_status(struct kebab_geni_status *status)
+{
+	if (status == NULL) { return -1; }
+	kebab_geni_transaction_lock();
+	bzero(status, sizeof(*status));
+	kebab_geni_get_info(&status->info);
+	if (!status->info.mapped) { kebab_geni_transaction_unlock(); return -1; }
+	if (!kg.bb) {
+		status->protocol = (kt_se_rd(GENI_FW_REVISION_RO) & FW_REV_PROTOCOL_MSK) >> FW_REV_PROTOCOL_SHFT;
+		status->sequencer = kt_se_rd(SE_GENI_STATUS);
+		status->master_irq = kt_se_rd(SE_GENI_M_IRQ_STATUS);
+	}
+	kebab_geni_transaction_unlock();
+	return 0;
+}
+#endif /* KEBAB */

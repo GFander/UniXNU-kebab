@@ -1,0 +1,40 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,10 @@
+ bsd/dev/kebab_vol.c			standard
+ bsd/dev/kebab_spmi.c			standard
+ bsd/dev/kebab_spmi_bus.c			standard
++bsd/dev/kebab_spmi_pon.c			standard
++bsd/dev/kebab_spmi_keys.c			standard
++bsd/dev/kebab_spmi_power.c			standard
++bsd/dev/kebab_rpmh.c			standard
+ bsd/dev/kebab_spmi_pon.c			standard
+ bsd/dev/kebab_spmi_keys.c			standard
+ bsd/dev/kebab_spmi_power.c			standard
+--- a/bsd/dev/kebab_spmi_bus.c
++++ b/bsd/dev/kebab_spmi_bus.c
+@@ -505,4 +505,3 @@
+ }
+ 
+ #endif /* KEBAB */
+-
+--- a/bsd/dev/kebab_spmi_bus.h
++++ b/bsd/dev/kebab_spmi_bus.h
+@@ -1,6 +1,7 @@
+ #ifndef _KEBAB_SPMI_BUS_H
+ #define _KEBAB_SPMI_BUS_H
+ #include <sys/types.h>
++#include <stdbool.h>
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+--- a/bsd/dev/kebab_spmi_clients.h
++++ b/bsd/dev/kebab_spmi_clients.h
+@@ -1,6 +1,7 @@
+ #ifndef _KEBAB_SPMI_CLIENTS_H
+ #define _KEBAB_SPMI_CLIENTS_H
+ #include <sys/types.h>
++#include <stdbool.h>
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
