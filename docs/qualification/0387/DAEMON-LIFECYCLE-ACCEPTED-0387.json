@@ -1,0 +1,108 @@
+{
+  "version": "0387",
+  "observation_scope_accepted": true,
+  "full_goal_complete": false,
+  "source": {
+    "common": 269,
+    "host": 4,
+    "files": 5239,
+    "exact": true
+  },
+  "native_sha256": "7c2ef66249ccf420160f09a3c6111f541014e402d73abf695d5622424388251d",
+  "boot_log_sha256": "700cf90c147fc54f9728d7e37fd0532d862ac3b9fea3abda4f7fbfa1ac03743a",
+  "snapshots": [
+    {
+      "file": "0387-processes-a.log",
+      "sha256": "4b1b94f2f98db2ac78a1f186269bb98a4c652a0033c6d6c2bfe3cf7652a3d673",
+      "start": "2026-10-31T03:19:21",
+      "count": 158
+    },
+    {
+      "file": "0387-processes-b.log",
+      "sha256": "e64703ed80eced51a783ae2d63791390df2903c3e8cb6d3a6a9aac35fc27bd4b",
+      "start": "2026-10-31T03:20:37",
+      "count": 157
+    }
+  ],
+  "snapshot_separation_seconds": 76.0,
+  "same_pids_observed": {
+    "ReportCrash": {
+      "pid": 150,
+      "parent": 1,
+      "state": 2
+    },
+    "coreduetd": {
+      "pid": 133,
+      "parent": 1,
+      "state": 2
+    },
+    "securityd": {
+      "pid": 129,
+      "parent": 1,
+      "state": 2
+    },
+    "tccd": {
+      "pid": 38,
+      "parent": 1,
+      "state": 2
+    },
+    "navd": {
+      "pid": 81,
+      "parent": 1,
+      "state": 2
+    },
+    "lockdownd": {
+      "pid": 74,
+      "parent": 1,
+      "state": 2
+    },
+    "backboardd": {
+      "pid": 57,
+      "parent": 1,
+      "state": 2
+    },
+    "locationd": {
+      "pid": 63,
+      "parent": 1,
+      "state": 2
+    },
+    "watchdogd": {
+      "pid": 51,
+      "parent": 1,
+      "state": 2
+    },
+    "mediaserverd": {
+      "pid": 29,
+      "parent": 1,
+      "state": 2
+    },
+    "configd": {
+      "pid": 36,
+      "parent": 1,
+      "state": 2
+    }
+  },
+  "ordinary_zero_status_exits": [
+    "bluetoothd",
+    "fairplayd.H2"
+  ],
+  "symbolication": "original local symbols plus actual export trie; subtract four only for saved return addresses",
+  "preserved": [
+    "original watchdog actual heartbeats",
+    "hardware roots",
+    "encrypted Data C/D",
+    "original MKB_INIT",
+    "defaults lifecycle"
+  ],
+  "remaining": [
+    "real Bluetooth power/firmware/UART/HCI/iOS integration/scan/connect",
+    "AKS device-state and genuine A/B file-key services",
+    "other actual daemon failures",
+    "latest guide review, GPU/display/input and usable SpringBoard"
+  ],
+  "daemon_functionality_qualified": false,
+  "bluetooth_functional": false,
+  "raw_logs_published": false,
+  "last_readonly_data_fsck": "0385 (unchanged substrate; no new filesystem check claimed)",
+  "github_uploaded": false
+}
