@@ -1,0 +1,65 @@
+{
+  "source_repository": "LineageOS/android_kernel_oneplus_sm8250",
+  "commit": "98a7970af93b7e01ee77156e7fa0eb7e059a57f0",
+  "uart": {
+    "engine": 6,
+    "mmio": 10059776,
+    "bytes": 16384,
+    "gic_spi": 607,
+    "cts": 16,
+    "rts": 17,
+    "tx": 18,
+    "rx": 19,
+    "function": "qup6",
+    "mux_index": 1,
+    "wake_byte": 253
+  },
+  "gpio": {
+    "tile": "NORTH",
+    "tlmm_base": 251658240,
+    "tile_offset": 9437184,
+    "pin_stride": 4096,
+    "bt_enable": 21,
+    "sw_ctrl": 124
+  },
+  "sources": [
+    "arch/arm64/boot/dts/vendor/qcom/kona-qupv3.dtsi",
+    "arch/arm64/boot/dts/vendor/qcom/kona-pinctrl.dtsi",
+    "arch/arm64/boot/dts/vendor/oplus/kebab/kona-mtp.dtsi",
+    "drivers/pinctrl/qcom/pinctrl-kona.c",
+    "drivers/clk/qcom/gcc-kona.c"
+  ],
+  "only_static_contract": true,
+  "mmio_written": false,
+  "hardware_uart_verified": false,
+  "radio_enabled": false,
+  "clocks": {
+    "gcc_base": 1048576,
+    "vote_register": 335880,
+    "se6_enable_bit": 16,
+    "se6_halt_register": 96044,
+    "se6_cmd_rcgr": 96048,
+    "master_ahb_bit": 6,
+    "master_ahb_halt": 94212,
+    "slave_ahb_bit": 7,
+    "slave_ahb_halt": 94216,
+    "hardware_clock_state_read": false
+  },
+  "rails": {
+    "aon_dig": {
+      "supply": "pm8150_s6",
+      "min_uv": 950000,
+      "max_uv": 950000
+    },
+    "rfa1": {
+      "supply": "pm8150_s5",
+      "min_uv": 1900000,
+      "max_uv": 2040000
+    },
+    "rfa2": {
+      "supply": "pm8150a_s8",
+      "min_uv": 1350000,
+      "max_uv": 1350000
+    }
+  }
+}

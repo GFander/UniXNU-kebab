@@ -1,7 +1,7 @@
 from pathlib import Path
 import json,hashlib,re,sys,subprocess
 r=Path(__file__).resolve().parent;b=r.parent/'p1-run/prelink-fix';v=sys.argv[1]
-assert v in ('0372','0373','0376','0378','0380','0382','0383','0384','0386','0387','0388','0389','0390')
+assert v in ('0372','0373','0376','0378','0380','0382','0383','0384','0386','0387','0388','0389','0390','0391','0393','0394','0395','0396','0397','0399')
 raw=(r/(v+'-media-boot.log')).read_bytes();s=raw.decode();digest=hashlib.sha256(raw).hexdigest()
 assert json.loads((r/(v+'-capture-provenance.json')).read_text())['sha256']==digest
 for needle in ['KEBAB NONCE ROOT: restoring opaque keyblob; generation skipped',
