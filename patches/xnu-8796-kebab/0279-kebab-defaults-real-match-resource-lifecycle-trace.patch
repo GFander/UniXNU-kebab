@@ -1,0 +1,153 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7154,6 +7154,8 @@
+  if (kebab_apfs_probe_error) panic("kebab APFS probe failed: %d", kebab_apfs_probe_error);
+  extern void kebab_rtc_initialize(void);
+  kebab_rtc_initialize();
++ extern void kebab_defaults_report(void);
++ kebab_defaults_report();
+  int owner_dsc_prepare_error = kebab_dsc_after_mount();
+  if (owner_dsc_prepare_error) panic("kebab owner DSC prepare failed: %d", owner_dsc_prepare_error);
+  if(tool_mode>=2){
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -3790,9 +3790,38 @@
+  * called on the provider instance
+  */
+ 
++#if defined(KEBAB)
++/* Bounded RAM-only lifecycle evidence. No refcount, resource, scheduling,
++ * match, deadline or watchdog-policy changes. Early events survive until USB. */
++static thread_t kebab_defaults_thread;
++static uint32_t kebab_defaults_events;
++static struct {uint32_t ready;char text[384];} kebab_defaults_trace[96];
++static void
++kebab_defaults_note(const char *format,...)
++{
++ uint32_t slot=__atomic_fetch_add(&kebab_defaults_events,1,__ATOMIC_RELAXED);
++ if(slot>=96)return;
++ va_list args;va_start(args,format);vsnprintf(kebab_defaults_trace[slot].text,384,format,args);va_end(args);
++ __atomic_store_n(&kebab_defaults_trace[slot].ready,1,__ATOMIC_RELEASE);
++}
++extern "C" void
++kebab_defaults_report(void)
++{
++ uint32_t total=__atomic_load_n(&kebab_defaults_events,__ATOMIC_ACQUIRE);
++ printf("KEBAB DEFAULTS: trace total=%u capacity=96; observations only\n",total);
++ for(uint32_t i=0;i<total&&i<96;i++)if(__atomic_load_n(&kebab_defaults_trace[i].ready,__ATOMIC_ACQUIRE))
++  printf("KEBAB DEFAULTS[%u]: %s\n",i,kebab_defaults_trace[i].text);
++}
++#endif
++
+ void
+ IOService::probeCandidates( OSOrderedSet * matches )
+ {
++#if defined(KEBAB)
++ bool kebabDefaults=!strcmp(getName(),"defaults");
++ if(kebabDefaults){__atomic_store_n(&kebab_defaults_thread,current_thread(),__ATOMIC_RELEASE);kebab_defaults_note("probe enter thread=%p class=%s busy=%u",current_thread(),getMetaClass()->getClassName(),getBusyState());}
++#endif
++
+ 	OSDictionary        *       match = NULL;
+ 	OSSymbol            *       symbol;
+ 	IOService           *       inst;
+@@ -3938,7 +3967,14 @@
+ 			}
+ 
+ 			// Check to see if driver reloc has been loaded.
++#if defined(KEBAB)
++ if(kebabDefaults){OSString *c=OSDynamicCast(OSString,match->getObject(gIOClassKey));OSString *k=OSDynamicCast(OSString,match->getObject(gIOModuleIdentifierKey));kebab_defaults_note("module enter class=%s bundle=%s",c?c->getCStringNoCopy():"?",k?k->getCStringNoCopy():"?");}
++#endif
+ 			needReloc = (false == gIOCatalogue->isModuleLoaded( match, &kextRef ));
++#if defined(KEBAB)
++ if(kebabDefaults)kebab_defaults_note("module leave needReloc=%u",needReloc);
++#endif
++
+ 			if (needReloc) {
+ #if IOMATCHDEBUG
+ 				if (debugFlags & kIOLogCatalogue) {
+@@ -4046,7 +4082,14 @@
+ 					    inst->getMetaClass()->getClassName(), getName());
+ 				}
+ #endif
++#if defined(KEBAB)
++ if(kebabDefaults)kebab_defaults_note("driver probe enter %s score=%d",inst->getMetaClass()->getClassName(),score);
++#endif
+ 				newInst = inst->probe( this, &score );
++#if defined(KEBAB)
++ if(kebabDefaults)kebab_defaults_note("driver probe leave %s accepted=%u score=%d",inst->getMetaClass()->getClassName(),newInst!=NULL,score);
++#endif
++
+ 				inst->detach( this );
+ 				if (NULL == newInst) {
+ #if IOMATCHDEBUG
+@@ -4216,6 +4259,10 @@
+ 	if (startDict) {
+ 		startDict->release();
+ 	}
++
++#if defined(KEBAB)
++ if(kebabDefaults){kebab_defaults_note("probe leave busy=%u moduleStall=%u",getBusyState(),needReloc);__atomic_store_n(&kebab_defaults_thread,(thread_t)NULL,__ATOMIC_RELEASE);}
++#endif
+ }
+ 
+ /*
+@@ -4680,6 +4727,10 @@
+ bool
+ IOService::startCandidate( IOService * service )
+ {
++#if defined(KEBAB)
++ if(!strcmp(getName(),"defaults"))kebab_defaults_note("startCandidate enter %s busy=%u",service->getMetaClass()->getClassName(),getBusyState());
++#endif
++
+ 	bool                ok;
+ 	OSObject          * obj;
+ 	OSObject          * prop;
+@@ -4848,7 +4899,14 @@
+ 		clock_get_uptime(&startTime);
+ 	}
+ 
++#if defined(KEBAB)
++ if(!strcmp(getName(),"defaults"))kebab_defaults_note("driver start enter %s",service->getMetaClass()->getClassName());
++#endif
+ 	ok = service->start(this);
++#if defined(KEBAB)
++ if(!strcmp(getName(),"defaults"))kebab_defaults_note("driver start leave %s result=%u",service->getMetaClass()->getClassName(),ok);
++#endif
++
+ 
+ 	if (recordTime) {
+ 		clock_get_uptime(&endTime);
+@@ -5372,6 +5430,10 @@
+ 				next->lockForArbitration();
+ 			}
+ 			count = next->__state[1] & kIOServiceBusyStateMask;
++#if defined(KEBAB)
++ if(!strcmp(next->getName(),"defaults"))kebab_defaults_note("busy before=%u delta=%d origin=%s class=%s caller=%p thread=%p",count,delta,getName(),getMetaClass()->getClassName(),__builtin_return_address(0),current_thread());
++#endif
++
+ 			wasQuiet = (0 == count);
+ 			if (((delta < 0) && wasQuiet) || ((delta > 0) && (kIOServiceBusyMax == count))) {
+ 				OSReportWithBacktrace("%s: bad busy count (%d,%d)\n", next->getName(), (uint32_t)count, (int)delta);
+@@ -5686,6 +5748,9 @@
+ 		}
+ 
+ 		IOLog("%s\n", panicString);
++#if defined(KEBAB)
++ if(strnstr(panicString,"defaults",panicStringLen))kebab_defaults_report();
++#endif
+ 		if (dopanic) {
+ 			panic("%s", panicString);
+ 		} else if (!loops) {
+@@ -6446,6 +6511,12 @@
+ 		return NULL;
+ 	}
+ 
++#if defined(KEBAB)
++ if(__atomic_load_n(&kebab_defaults_thread,__ATOMIC_ACQUIRE)==current_thread()){
++  OSSerialize *xml=OSSerialize::withCapacity(512);
++  if(xml){if(matching->serialize(xml))kebab_defaults_note("wait thread=%p timeout=%llu matching=%s",current_thread(),timeout,xml->text());xml->release();}
++ }
++#endif
+ 	result = NULL;
+ 	cancelArgs.ref = &result;
+ 	cancelArgs.canceled = false;

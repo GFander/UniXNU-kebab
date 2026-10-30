@@ -1,0 +1,8 @@
+{
+  "passed": true,
+  "actual_queue_worker_stop": true,
+  "descriptors_and_backend_mocked": true,
+  "real_host_threads_mutex_cv": true,
+  "source_sha256": "5b12070756cab2d3a650384548cc18d871c14793c1e6925fdac01ad087eabb60",
+  "output": "PASS 264 actual queue/worker/stop burst, callback reentry, backend failure and ownership cases; IOStorage descriptors/backing reads mocked, real host mutex/CV threads; no hardware proof\n"
+}

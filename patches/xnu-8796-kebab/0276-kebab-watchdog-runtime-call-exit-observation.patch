@@ -1,0 +1,101 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -1787,6 +1787,7 @@
+ 		    (unsigned long long)imgp->ip_csflags,
+ 		    (unsigned long long)load_result.csflags,
+ 		    (unsigned long long)p->user_stack);
++        printf("KEBAB EXEC HEADER: pid=%d main=0x%llx\n",proc_getpid(p),(unsigned long long)load_result.mach_header);
+ #endif /* KEBAB */
+ 		ap = p->user_stack;
+ 		error = exec_copyout_strings(imgp, &ap);
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1338,6 +1338,13 @@
+ {
+ 	os_reason_t exit_reason = OS_REASON_NULL;
+ 	kern_return_t kr = KERN_SUCCESS;
++#if defined(KEBAB)
++ if(!strcmp(p->p_comm,"watchdogd")){
++  char reason[160]={};size_t done=0;int copied=reason_string?copyinstr(reason_string,reason,sizeof(reason),&done):0;
++  printf("KEBAB WATCHDOG ABORT: pid=%d namespace=%u code=0x%llx reason=%s copy=%d\n",proc_getpid(p),reason_namespace,(unsigned long long)reason_code,reason,copied);
++ }
++#endif
++
+ 
+ 	if (internal_flags & OS_REASON_IFLAG_USER_FAULT) {
+ 		uint32_t old_value = atomic_load_explicit(&p->p_user_faults,
+--- a/bsd/kern/kern_sig.c
++++ b/bsd/kern/kern_sig.c
+@@ -1092,6 +1092,26 @@
+ }
+ 
+ 
++#if defined(KEBAB)
++#include <arm/thread.h>
++#include <arm64/proc_reg.h>
++/* Syscall-context bounded user stack observation. Signals are not changed. */
++static void
++kebab_watchdog_signal_trace(proc_t p,int signum)
++{
++ if(signum!=SIGTRAP||strcmp(p->p_comm,"watchdogd"))return;
++ arm_saved_state_t *state=get_user_regs(current_thread());
++ if(!state)return;
++ uint64_t fp=get_saved_state_reg(state,29);
++ printf("KEBAB WATCHDOG SIGNAL: pid=%d pc=0x%llx lr=0x%llx fp=0x%llx\n",proc_getpid(p),(unsigned long long)get_saved_state_pc(state),(unsigned long long)get_saved_state_lr(state),(unsigned long long)fp);
++ for(unsigned i=0;i<8&&fp&&!(fp&15);i++){
++  uint64_t pair[2]={};int error=copyin((user_addr_t)fp,pair,sizeof(pair));
++  if(error)break;
++  printf("KEBAB WATCHDOG FRAME: pid=%d depth=%u fp=0x%llx lr=0x%llx\n",proc_getpid(p),i,(unsigned long long)fp,(unsigned long long)pair[1]);
++  if(pair[0]<=fp||pair[0]-fp>1048576)break;fp=pair[0];
++ }
++}
++#endif
+ int
+ __pthread_kill(__unused proc_t p, struct __pthread_kill_args *uap,
+     __unused int32_t *retval)
+@@ -1099,6 +1119,9 @@
+ 	thread_t target_act;
+ 	int error = 0;
+ 	int signum = uap->sig;
++#if defined(KEBAB)
++ kebab_watchdog_signal_trace(p,signum);
++#endif
+ 	struct uthread *uth;
+ 
+ 	target_act = (thread_t)port_name_to_thread(uap->thread_port,
+--- a/iokit/Kernel/arm/kebab_watchdog_impl.h
++++ b/iokit/Kernel/arm/kebab_watchdog_impl.h
+@@ -53,7 +53,7 @@
+             panic("KEBAB WATCHDOG software deadline expired: beats=%llu now=%llx deadline=%llx",
+                 sequence, now, deadline);
+         uint64_t polls=kebab_watchdog_state[2];
+-        if(polls<=3 || !(polls%30)) IOLog("KEBAB WATCHDOG: clients=%llu polls=%llu beats=%llu enabled=%u remaining=%lld\\n",kebab_watchdog_state[1],polls,sequence,enabled,(long long)(deadline-now));
++        if(polls<=3 || !(polls%30)) IOLog("KEBAB WATCHDOG: clients=%llu polls=%llu beats=%llu enabled=%u remaining=%lld\n",kebab_watchdog_state[1],polls,sequence,enabled,(long long)(deadline-now));
+         if (__atomic_load_n(&self->armed, __ATOMIC_ACQUIRE)) self->schedule();
+     }
+     void schedule() {
+@@ -89,7 +89,7 @@
+         IOReturn result = IOWatchdog::newUserClient(task, security, type, properties, client);
+         if (result == kIOReturnSuccess && client && *client) {
+             __atomic_add_fetch(&kebab_watchdog_state[1], 1, __ATOMIC_RELAXED);
+-            IOLog("KEBAB WATCHDOG: original user-client accepted type=%u\\n",type);
++            IOLog("KEBAB WATCHDOG: original user-client accepted type=%u\n",type);
+         }
+         return result;
+     }
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -6345,6 +6345,13 @@
+ 	if (defaultLocking) {
+ 		IORWLockUnlock(&lock);
+ 	}
++#if defined(KEBAB)
++ if(!strcmp(getMetaClass()->getClassName(),"IOWatchdogUserClient")){
++  static uint32_t reports;
++  if(__atomic_fetch_add(&reports,1,__ATOMIC_RELAXED)<32)
++   IOLog("KEBAB WATCHDOG METHOD: selector=%u scalar=%u/%u struct=%u/%u result=0x%x out0=0x%llx\n",selector,args->scalarInputCount,args->scalarOutputCount,args->structureInputSize,args->structureOutputSize,ret,(unsigned long long)((args->scalarOutput&&args->scalarOutputCount)?args->scalarOutput[0]:0));
++ }
++#endif
+ 	return ret;
+ }
+ 

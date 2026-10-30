@@ -1,0 +1,261 @@
+--- a/bsd/dev/kebab_install.c
++++ b/bsd/dev/kebab_install.c
+@@ -67,6 +67,9 @@
+ #define KI_STREAM_HDR     32u
+ #define KI_ENTRY_HDR      192u
+ #define KI_ENTRY_MAGIC    0x544e454bu   /* 'KENT' */
++#include "../kern/kebab_apfs_probe.h"
++#include "kebab_cryptex_stage.h"
++
+ #define KI_STREAM_MAGIC   0x5453494bu   /* 'KIST' */
+ #define KI_VERSION        2u
+ #define KI_VERSION_MIN    1u
+@@ -229,6 +232,52 @@
+ 	struct ki_entry e;
+ } ki;
+ 
++/* Uploads go to one non-live staging slot, never the nonce record or System. */
++static bool ki_cryptex;
++static vnode_t ki_cryptex_mount_root;
++
++static bool
++ki_cryptex_requested(void)
++{
++ uint32_t on = 0;
++ return PE_parse_boot_argn("kebab_install_cryptex", &on, sizeof(on)) && on == 1;
++}
++
++static int
++ki_cryptex_check_vnode(vnode_t file)
++{
++ struct kebab_volume_identity system, preboot;
++ int error = kebab_lookup_apfs_preboot(&system, &preboot);
++ if (error) return error;
++ mount_t root = vnode_mount(rootvnode), target = vnode_mount(file);
++ if (!root || !target || root == target || !(vfs_flags(root) & MNT_RDONLY) ||
++     strcmp(vfs_statfs(root)->f_fstypename, "apfs") || strcmp(vfs_statfs(target)->f_fstypename, "apfs")) return EINVAL;
++ vnode_t device = vfs_devvp(root);
++ dev_t actual = device ? vnode_specrdev(device) : NODEV;
++ if (device) vnode_put(device);
++ if (actual != makedev(system.major_number, system.minor_number)) return EINVAL;
++ device = vfs_devvp(target);actual = device ? vnode_specrdev(device) : NODEV;
++ if (device) vnode_put(device);
++ return actual == makedev(preboot.major_number, preboot.minor_number) ? 0 : EINVAL;
++}
++
++static int
++ki_cryptex_pin_mount(void)
++{
++ uint32_t rw = 0;
++ PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
++ if (rw != 1) return EROFS;
++ vnode_t anchor = NULLVP;
++ int error = vnode_lookup("/private/preboot", VNODE_LOOKUP_NOFOLLOW, &anchor, vfs_context_current());
++ if (error) return error;
++ error = ki_cryptex_check_vnode(anchor);
++ if (!error && (!vnode_isdir(anchor) || (vfs_flags(vnode_mount(anchor)) & MNT_RDONLY))) error = EROFS;
++ if (error) { vnode_put(anchor);return error; }
++ ki_cryptex_mount_root = anchor;
++ return 0;
++}
++
++
+ /* ------------------------------------------------------------- utilities */
+ 
+ static uint16_t
+@@ -374,7 +423,8 @@
+ static bool
+ ki_path_ok_any(const char *path, uint32_t len)
+ {
+-	return ki_path_ok(path, len, true) || ki_path_ok(path, len, false);
++	return ki_path_ok(path, len, true) || ki_path_ok(path, len, false) ||
++	    (ki_cryptex_requested() && !strcmp(path, KEBAB_CRYPTEX_STAGE_PATH));
+ }
+ 
+ /* --------------------------------------------------------- vnode helpers */
+@@ -620,7 +670,7 @@
+ 	uint64_t off = 0;
+ 	int error;
+ 
+-	error = vnode_lookup(path, 0, &vp, ctx);
++	error = vnode_lookup(path, !strcmp(path, KEBAB_CRYPTEX_STAGE_PATH) ? VNODE_LOOKUP_NOFOLLOW : 0, &vp, ctx);
+ 	if (error) {
+ 		return error;
+ 	}
+@@ -628,6 +678,7 @@
+ 		vnode_put(vp);
+ 		return EINVAL;
+ 	}
++	if (!strcmp(path, KEBAB_CRYPTEX_STAGE_PATH) && (error = ki_cryptex_check_vnode(vp))) { vnode_put(vp);return error; }
+ 	size = ubc_getsize(vp);
+ 	if (size < 0) {
+ 		vnode_put(vp);
+@@ -809,7 +860,7 @@
+ 		(void)ubc_msync(vp, 0, size, NULL,
+ 		    UBC_PUSHALL | UBC_INVALIDATE | UBC_SYNC);
+ 	}
+-	if (s->size <= KI_COLD_FULL_MAX) {
++	if (s->size <= KI_COLD_FULL_MAX || ki_cryptex) {
+ 		uint64_t have = 0;
+ 
+ 		vnode_put(vp);
+@@ -1075,7 +1126,7 @@
+ 	if (rootvnode == NULLVP || rootvnode->v_mount == NULL) {
+ 		return ENODEV;
+ 	}
+-	sfs = vfs_statfs(rootvnode->v_mount);
++	sfs = vfs_statfs(ki_cryptex && ki_cryptex_mount_root ? vnode_mount(ki_cryptex_mount_root) : rootvnode->v_mount);
+ 	if (sfs == NULL || sfs->f_bsize == 0) {
+ 		return ENODEV;
+ 	}
+@@ -1198,6 +1249,7 @@
+ 		e->opened = false;
+ 		e->vp = NULLVP;
+ 	}
++	if (ki_cryptex_mount_root) { vnode_put(ki_cryptex_mount_root);ki_cryptex_mount_root = NULLVP; }
+ 	ki.active = false;
+ 	ki.state = KI_S_DONE;
+ 	ki.hdr_got = 0;
+@@ -1259,7 +1311,7 @@
+ 	e->vp = NULLVP;
+ 	memcpy(e->path, ki.hdr + KI_HDR_PATH_OFF, plen);
+ 	e->path[plen] = 0;
+-	if (!ki_path_ok(e->path, plen, ki.skel)) {
++	if (!(ki_cryptex ? !strcmp(e->path, KEBAB_CRYPTEX_STAGE_PATH) : ki_path_ok(e->path, plen, ki.skel))) {
+ 		printf("FAIL %s rejected: outside the %s allowlist or "
+ 		    "malformed\n", e->path, ki.skel ? "skeleton" : "install");
+ 		ki_abort("destination refused", 0);
+@@ -1276,6 +1328,10 @@
+ 	e->wire = wire;
+ 	e->wire_left = wire;
+ 	memcpy(e->sha, ki.hdr + KI_HDR_SHA_OFF, sizeof(e->sha));
++	if (ki_cryptex && !kebab_cryptex_stage_contract(e->path, size, wire, e->mode, e->flags, e->sha)) {
++		ki_abort("fixed Cryptex source contract", 0);return;
++	}
++
+ 
+ 	if (ki.version < 2 && (eflags & KI_F_TYPE)) {
+ 		printf("FAIL %s: a v%u stream cannot carry a DIR/LINK entry\n",
+@@ -1389,6 +1445,9 @@
+ 			return;
+ 		}
+ 	}
++	if (ki_cryptex && !ki.dry && error != ENOENT) {
++		ki_abort("Cryptex staging slot already exists or cannot be inspected", error ? error : EEXIST);return;
++	}
+ 	if (!ki.dry) {
+ 		/*
+ 		 * Space check.  A destination that already exists and is about
+@@ -1410,14 +1469,14 @@
+ 			ki_abort("not enough space", 0);
+ 			return;
+ 		}
+-		error = ki_mkdirs(e->path, ctx);
++		error = ki_cryptex ? 0 : ki_mkdirs(e->path, ctx);
+ 		if (error) {
+ 			printf("FAIL %s cannot create parent directories "
+ 			    "(error %d)\n", e->path, error);
+ 			ki_abort("mkdir failed", error);
+ 			return;
+ 		}
+-		error = vnode_open(e->path, O_CREAT | O_TRUNC | FWRITE, e->mode,
++		error = vnode_open(e->path, O_CREAT | (ki_cryptex ? (O_EXCL | O_NOFOLLOW) : O_TRUNC) | FWRITE, e->mode,
+ 		    0, &e->vp, ctx);
+ 		if (error) {
+ 			printf("FAIL %s cannot open for writing (error %d)\n",
+@@ -1426,6 +1485,8 @@
+ 			return;
+ 		}
+ 		e->opened = true;
++		if (ki_cryptex && (error = ki_cryptex_check_vnode(e->vp))) { ki_abort("Cryptex mount changed", error);return; }
++
+ 		if (e->vp->v_type != VREG) {
+ 			printf("FAIL %s is not a regular file\n", e->path);
+ 			ki_abort("not a regular file", 0);
+@@ -1762,6 +1823,11 @@
+ 			return;
+ 		}
+ 	}
++	ki_cryptex = ki_cryptex_requested();
++	if (ki_cryptex) {
++		int mount_error = ki_cryptex_pin_mount();
++		if (mount_error) { printf("INST refused: Cryptex mount contract (%d)\n", mount_error);return; }
++	}
+ 	memset(&ki.e, 0, sizeof(ki.e));
+ 	ki.e.vp = NULLVP;
+ 	memset(ki.samples, 0, sizeof(ki.samples));
+@@ -1786,7 +1852,7 @@
+ 	ki.free_before = 0;
+ 	ki.vh_bsize = 0;
+ 	ki.free_before_valid = false;
+-	if (!dry) {
++	if (!dry && !ki_cryptex) {
+ 		uint32_t blocks = 0;
+ 
+ 		if (ki_read_vh(&ki.vh_bsize, &blocks, &ki.free_before) == 0) {
+@@ -1833,7 +1899,7 @@
+ 		ki.failed += (uint32_t)ki_sync_media("stream end", true);
+ 	}
+ 	if (ki.failed == 0) {
+-		ki_report_free_delta();
++		if (!ki_cryptex) ki_report_free_delta();
+ 	}
+ 	ms = (ki_now_ns() - ki.ns_start) / 1000000ull;
+ 	if (ki.failed == 0) {
+@@ -1921,6 +1987,10 @@
+ 			}
+ 			ki.entries_total = ki_le32(ki.hdr + 8);
+ 			ki.usize_total = ki_le64(ki.hdr + 16);
++			if (ki_cryptex && (ki.entries_total != 1 || ki.usize_total != KEBAB_CRYPTEX_STAGE_BYTES || ki.stream_flags != 0)) {
++				ki_abort("single stored Cryptex stream required", 0);return;
++			}
++
+ 			if (ki_le32(ki.hdr + 12) != KI_STREAM_HDR) {
+ 				ki_abort("unexpected stream header size", 0);
+ 				return;
+--- /dev/null
++++ b/bsd/dev/kebab_cryptex_stage.h
+@@ -0,0 +1,17 @@
++/* Fixed, immutable source identity for the 20H392 SystemOS staging slot. */
++#ifndef KEBAB_CRYPTEX_STAGE_H
++#define KEBAB_CRYPTEX_STAGE_H
++#define KEBAB_CRYPTEX_STAGE_PATH "/private/preboot/.hios-systemos-v1.apfs"
++#define KEBAB_CRYPTEX_STAGE_BYTES 2743074816ULL
++static const unsigned char kebab_cryptex_stage_sha256[32] = {
++ 0x9c,0xd7,0x38,0xf3,0xb0,0x16,0x90,0x55,0x54,0x9d,0xf8,0x4a,0xd6,0xd8,0xd1,0x3e,
++ 0x50,0xa2,0xda,0x39,0xaf,0x61,0x8c,0xe0,0x52,0x2c,0xa4,0xe0,0x6d,0xf8,0x68,0x49
++};
++static bool
++kebab_cryptex_stage_contract(const char *path, uint64_t size, uint64_t wire,
++    unsigned mode, unsigned flags, const uint8_t *sha)
++{
++ return !strcmp(path, KEBAB_CRYPTEX_STAGE_PATH) && size == KEBAB_CRYPTEX_STAGE_BYTES &&
++     wire == size && mode == 0600 && flags == 0 && !memcmp(sha, kebab_cryptex_stage_sha256, 32);
++}
++#endif
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -153,11 +153,11 @@
+ {
+  uint32_t mode = 0, rw = 0;
+  if (!PE_parse_boot_argn("kebab_apfs_probe", &mode, sizeof(mode)) || !mode) return 0;
+- if (mode > 5 || !scratch) return EINVAL;
++ if (mode > 6 || !scratch) return EINVAL;
+  unsigned nonce_root=0;
+  PE_parse_boot_argn("kebab_nonce_root",&nonce_root,sizeof(nonce_root));
+- if ((mode==4 && nonce_root!=1) || (mode==5 && nonce_root!=2) || (mode<4 && nonce_root)) return EINVAL;
+- bool write_file = (mode == 2 || mode == 4);
++ if ((mode==4 && nonce_root!=1) || (mode==5 && nonce_root!=2) || ((mode<4 || mode==6) && nonce_root)) return EINVAL;
++ bool write_file = (mode == 2 || mode == 4 || mode == 6);
+  PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
+  if ((write_file && rw != 1) || (!write_file && rw)) return EINVAL;
+  mount_t original_root = vnode_mount(rootvnode);
+@@ -208,7 +208,7 @@
+      major(actual), minor(actual), (vfs_flags(mounted) & MNT_RDONLY) != 0,
+      (vfs_flags(original_root) & MNT_RDONLY) != 0, error ? "FAIL" : "PASS");
+  if (!error && mode != 1) error = kebab_apfs_proof_file(mounted, mode==2);
+- if (!error && mode>=4) error=kebab_nonce_record_file(mounted,mode==4);
++ if (!error && (mode==4 || mode==5)) error=kebab_nonce_record_file(mounted,mode==4);
+  if (write_file) {
+   /* Flush even after a failed file operation, before a diagnostic panic. */
+   int filesystem_error = VFS_SYNC(mounted, MNT_WAIT, vfs_context_current());

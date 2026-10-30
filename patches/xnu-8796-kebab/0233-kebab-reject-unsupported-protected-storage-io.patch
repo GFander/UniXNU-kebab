@@ -1,0 +1,83 @@
+--- a/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
++++ b/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
+@@ -62,6 +62,8 @@
+ #include <kern/thread.h>
+ 
+ extern "C" {
++#include <sys/buf.h>
++#include <sys/cprotect.h>
+ #include "../../../bsd/dev/kebab_ufs.h"
+ #include "../../../bsd/dev/kebab_cryptex_media.h"
+ }
+@@ -386,6 +388,27 @@
+ 	return kIOReturnSuccess;
+ }
+ 
++/* Original 20H392 IOStorageFamily writes buf_attr at +0x18 and forwards
++ * the same 32-byte attributes to doAsyncReadWrite; adjustedOffset is +0x10. */
++static_assert(sizeof(IOStorageAttributes) == 32, "target storage attributes size");
++static_assert(offsetof(IOStorageAttributes, options) == 0, "target storage options");
++static_assert(offsetof(IOStorageAttributes, priority) == 2, "target storage priority");
++static_assert(offsetof(IOStorageAttributes, adjustedOffset) == 16, "target storage offset");
++static_assert(offsetof(IOStorageAttributes, bufattr) == 24, "target storage bufattr");
++
++static IOReturn
++kebab_blockstorage_crypto_guard(const IOStorageAttributes *attributes)
++{
++ if (attributes != NULL && attributes->bufattr != NULL &&
++     (bufattr_cpx(attributes->bufattr) != NULL ||
++     bufattr_rawencrypted(attributes->bufattr))) {
++  /* No content-key backend yet: accepting this would silently lose crypto.
++   * Raw encrypted requests also await an explicit audited handling path. */
++  return kIOReturnUnsupported;
++ }
++ return kIOReturnSuccess;
++}
++
+ IOReturn
+ KebabBlockStorageDevice::doAsyncReadWrite(IOMemoryDescriptor *buffer,
+     UInt64 block, UInt64 nblks, IOStorageAttributes *attributes,
+@@ -395,7 +418,8 @@
+ 	UInt64 offset, length, done;
+ 	bool write;
+ 
+-	(void)attributes;
++	status = kebab_blockstorage_crypto_guard(attributes);
++	if (status != kIOReturnSuccess) return status;
+ 	if (buffer == NULL || nblks == 0 || block >= fBlockCount ||
+ 	    nblks > fBlockCount - block) {
+ 		return kIOReturnBadArgument;
+@@ -833,6 +857,22 @@
+ 	bool passed = read == kIOReturnSuccess && result.calls == 1 &&
+ 	    result.status == kIOReturnSuccess && result.bytes == blockSize &&
+ 	    result.mediaPresent && magic == 0x4253584e; /* NXSB, read only */
++	bufattr_t protectedAttributes = bufattr_alloc();
++	cpx_t protectedContext = cpx_alloc(16, false);
++	bool protectedPassed = false;
++	if (protectedAttributes != NULL && protectedContext != NULL) {
++		bufattr_setcpx(protectedAttributes, protectedContext);
++		IOStorageAttributes attributes = {};
++		attributes.bufattr = protectedAttributes;
++		IOReturn rejected = device->doAsyncReadWrite(data, 0, 1, &attributes, &completion);
++		protectedPassed = rejected == kIOReturnUnsupported && result.calls == 1;
++		bufattr_setcpx(protectedAttributes, NULL);
++	}
++	if (protectedContext != NULL) cpx_free(protectedContext);
++	if (protectedAttributes != NULL) bufattr_free(protectedAttributes);
++	passed &= protectedPassed;
++	IOLog("KEBAB DRIVER TEST: native CPX protected I/O rejection %s\n",
++	    protectedPassed ? "PASS" : "FAIL");
+ 	data->setLength((vm_size_t)blockSize - 1);
+ 	IOReturn shortBuffer = device->doAsyncReadWrite(data, 0, 1, NULL, &completion);
+ 	data->setLength((vm_size_t)blockSize);
+--- a/bsd/sys/cprotect.h
++++ b/bsd/sys/cprotect.h
+@@ -35,7 +35,7 @@
+ #include <sys/param.h>
+ #include <sys/buf.h>
+ #include <sys/kdebug.h>
+-#include <crypto/aes.h>
++#include <libkern/crypto/aes.h>
+ #include <stdbool.h>
+ #include <uuid/uuid.h>
+ #include <libkern/crypto/sha1.h>

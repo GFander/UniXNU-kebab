@@ -1,0 +1,106 @@
+--- a/bsd/kern/kebab_qsee_probe.c
++++ b/bsd/kern/kebab_qsee_probe.c
+@@ -121,7 +121,7 @@
+ static bool
+ qsee_log_interesting(const char *line)
+ {
+-	static const char *const words[]={"fail","err","rpmb","sfs","drbg","crypto","cmnlib","rng","km","qsee","listener"};
++	static const char *const words[]={"fail","err","rpmb","sfs","drbg","crypto","cmnlib","rng","km","qsee","listener","time"};
+ 	for (unsigned w=0; w<sizeof(words)/sizeof(words[0]); w++) {
+ 		for (unsigned i=0; line[i]; i++) {
+ 			unsigned n=0;
+@@ -209,6 +209,78 @@
+ 	qsee_log_report();
+ }
+ 
++
++/* This is an HLOS calendar service, as in Qualcomm's time_msg.h/atime.c.
++ * It makes no claim to a secure hardware clock. Current boards have no RTC
++ * calendar driver yet: the test image carries a freshly measured host UTC
++ * anchor, advanced by monotonic elapsed time from listener initialization.
++ * Packaging/boot delay remains calibration uncertainty (about one minute).
++ * No clock/ROT/rollback provisioning is performed in the secure world.
++ */
++static vm_offset_t qsee_time_page;
++static uint64_t qsee_time_epoch,qsee_time_started;
++static bool qsee_time_ready;
++
++static bool
++qsee_time_start(bool bridged)
++{
++	int enabled=0;
++	PE_parse_boot_argn("kebab_qsee_time",&enabled,sizeof(enabled));
++	if (enabled!=1) return true;
++	uint64_t epoch=0;
++	PE_parse_boot_argn("kebab_qsee_utc",&epoch,sizeof(epoch));
++	if (epoch<1704067200ull || epoch>4102444800ull) {
++		printf("KEBAB QSEE TIME: no valid host UTC calibration; not registered\n"); return false;
++	}
++	if (qsee_available(0x32000201)!=1 || qsee_available(0x32000203)!=1) return false;
++	vm_offset_t page=0;
++	if (kmem_alloc_contig(kernel_map,&page,0x8000,PAGE_MASK,0,0,
++	    KMA_DATA|KMA_ZERO|KMA_PERMANENT,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS) return false;
++	ppnum_t pn=pmap_find_phys(kernel_pmap,(addr64_t)page);
++	uint64_t pa=ptoa_64(pn);
++	if (!pn || (page&PAGE_MASK) || (pa&PAGE_MASK) || pmap_find_phys(kernel_pmap,(addr64_t)page+PAGE_SIZE)!=pn+1) return false;
++	if (bridged) {
++		struct qsee_result b=qsee_call(0x42000c1e,4,pa|6,pa|6,0x8000|0x200,3);
++		printf("KEBAB QSEE TIME: bridge status=%d result=0x%llx\n",b.status,b.value);
++		if (b.status || b.value) return false;
++	}
++	qsee_cache(page,true);qsee_cache(page+PAGE_SIZE,true);
++	struct qsee_result b=qsee_call(0x72000201,0x83,0xb,pa,0x8000,0);
++	printf("KEBAB QSEE TIME: register status=%d result=0x%llx\n",b.status,b.value);
++	if (b.status || b.value) return false;
++	qsee_time_page=page; qsee_time_epoch=epoch;
++	qsee_time_started=mach_absolute_time(); qsee_time_ready=true;
++	printf("KEBAB QSEE TIME: HLOS host-calibrated UTC anchor=%llu; producer page/bridge retained\n",epoch);
++	return true;
++}
++
++static struct qsee_result
++qsee_time_resume(struct qsee_result r)
++{
++	for (unsigned round=0; round<8 && !r.status && r.value==1; round++) {
++		/* Never answer an unknown listener, response type or command. */
++		if (!qsee_time_ready || r.type!=0xee02 || r.data!=0xb) break;
++		uint64_t now=mach_absolute_time(),elapsed=0;
++		if (now<qsee_time_started) break;
++		absolutetime_to_nanoseconds(now-qsee_time_started,&elapsed);
++		if (elapsed>=86400ull*1000000000ull) break;
++		qsee_cache(qsee_time_page,false);qsee_cache(qsee_time_page+PAGE_SIZE,false);
++		uint32_t *words=(uint32_t *)qsee_time_page;
++		uint32_t command=words[0];
++		if (command!=0x302 && command!=0x305) {
++			printf("KEBAB QSEE TIME: unsupported time command 0x%x; call retained\n",command); break;
++		}
++		/* packed command + uint32 seconds + uint32 nanos + int32 result. */
++		words[1]=(uint32_t)(qsee_time_epoch+elapsed/1000000000ull);
++		words[2]=(uint32_t)(elapsed%1000000000ull);words[3]=0;
++		qsee_cache(qsee_time_page,true);qsee_cache(qsee_time_page+PAGE_SIZE,true);
++		printf("KEBAB QSEE TIME: served listener=0xb cmd=0x%x host-calibrated UTC\n",command);
++		r=qsee_call(0x72000203,2,0xb,0,0,0);
++		printf("KEBAB QSEE TIME: resume status=%d result=0x%llx type=0x%llx data=0x%llx\n",r.status,r.value,r.type,r.data);
++	}
++	return r;
++}
++
+ /* Hardware-wrapped storage-key experiment. No key bytes or hashes are logged.
+  * The active CBOR commands and tag layout were audited in this board's pinned
+  * libqtikeymaster4.so. STORAGE_KEY and RAW export follow the platform contract.
+@@ -236,6 +308,7 @@
+ 	extended[0]=pa+0x2000; extended[1]=0x1800;
+ 	qsee_cache(page,true);
+ 	struct qsee_result r=qsee_call(0x70000001,0x885,app,pa+0x100,bytes,pa+0x80);
++	r=qsee_time_resume(r);
+ 	if (!qsee_pending(r)) qsee_cache(page,false);
+ 	return r;
+ }
+@@ -548,6 +621,7 @@
+ 		} else if (r.value!=4) return; /* Documented not-supported result. */
+ 	}
+ 	if (!qsee_log_start(bridged)) return;
++	if (!qsee_time_start(bridged)) return;
+ 	static const char *const names[]={"keymaster","keymaster64","km4","keymint","hios-no-such-app"};
+ 	bool outstanding=false;
+ 	for (unsigned i=0; i<sizeof(names)/sizeof(names[0]); i++) {

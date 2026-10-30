@@ -1,0 +1,202 @@
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -292,7 +292,7 @@
+  int error=writable?kebab_ufs_sync():0;kdf_live=false;kebab_file_keys_cancel();
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+  if(tool==7)printf("KEBAB DATA FSCK: original signed checker exit=%d UFS sync=%d (readonly: flush skipped); live Root/class context revoked\n",status,error);
+- else if(tool==9)printf("KEBAB DATA USERLAND: original init exit=%d; readonly Root/class context revoked\n",status);
++ else if(tool==9||tool==12)printf("KEBAB DATA USERLAND: original init exit=%d UFS sync=%d; live Root/class context revoked\n",status,error);
+  else printf("KEBAB DATA FORMAT: signed formatter exit=%d UFS sync=%d; live Root/class context revoked; encrypted mount not yet qualified\n",status,error);
+ }
+ #endif
+--- a/bsd/kern/kebab_device_classbag_impl.h
++++ b/bsd/kern/kebab_device_classbag_impl.h
+@@ -2,11 +2,12 @@
+  * proof bag. Factory no-passcode policy only; no SEP/passcode equivalence. */
+ static uint8_t kdb_class_c[32],kdb_class_d[32],kdb_identifier[16];
+ static bool kdb_ready;
++static uint8_t kdb_record[4096];
+ 
+ static void
+ kdb_clear_locked(void)
+ {
+- kdc_clear_locked();kdb_ready=false;kfk_wipe(kdb_class_c,32);kfk_wipe(kdb_class_d,32);kfk_wipe(kdb_identifier,16);
++ kdc_clear_locked();kdb_ready=false;kfk_wipe(kdb_record,sizeof(kdb_record));kfk_wipe(kdb_class_c,32);kfk_wipe(kdb_class_d,32);kfk_wipe(kdb_identifier,16);
+ }
+ 
+ static bool
+@@ -82,7 +83,7 @@
+   if(!kdb_nonzero(plain+16,16)||!kdb_nonzero(plain+32,32)||!kdb_nonzero(plain+64,32)||
+       !kdb_nonzero(plain+96,16)||!memcmp(plain+32,plain+64,32))error=(int)kIOReturnNotPermitted;
+  }
+- if(!error){memcpy(kdb_identifier,plain+16,16);memcpy(kdb_class_c,plain+32,32);memcpy(kdb_class_d,plain+64,32);kdb_ready=true;}
++ if(!error){memcpy(kdb_identifier,plain+16,16);memcpy(kdb_class_c,plain+32,32);memcpy(kdb_class_d,plain+64,32);memcpy(kdb_record,record,4096);kdb_ready=true;}
+  lck_mtx_unlock(&kfk_lock);
+  kfk_wipe(header,sizeof(header));kfk_wipe(sealed,sizeof(sealed));kfk_wipe(plain,sizeof(plain));kfk_wipe(kek,sizeof(kek));return error;
+ }
+@@ -93,3 +94,16 @@
+  if(!kfk_context())return false;
+  lck_mtx_lock(&kfk_lock);bool ready=kfk_ready&&kdb_ready;lck_mtx_unlock(&kfk_lock);return ready;
+ }
++
++/* Export only the already-authenticated sealed bank, never its plaintext
++ * C/D keys. Root cancellation and failed authentication revoke this copy. */
++int
++kebab_device_classbag_export(void *output,unsigned bytes)
++{
++ if(!kfk_context()||bytes!=4096||!kfk_range(output,bytes)||
++     kfk_overlap(output,bytes,kdb_record,sizeof(kdb_record)))return (int)kIOReturnBadArgument;
++ lck_mtx_lock(&kfk_lock);
++ int error=(kfk_ready&&kdb_ready)?0:(int)kIOReturnNotReady;
++ if(!error)memcpy(output,kdb_record,4096);
++ lck_mtx_unlock(&kfk_lock);return error;
++}
+--- a/bsd/kern/kebab_file_keys.h
++++ b/bsd/kern/kebab_file_keys.h
+@@ -32,6 +32,7 @@
+ int kebab_device_classbag_create(const uint8_t[16],const uint8_t[16],void *,unsigned);
+ int kebab_device_classbag_open(const uint8_t[16],const uint8_t[16],const void *,unsigned);
+ bool kebab_device_classbag_available(void);
++int kebab_device_classbag_export(void *,unsigned);
+ int kebab_keybag_d_create(const uint8_t uuid[16], void *, unsigned);
+ int kebab_keybag_d_open(const uint8_t uuid[16], const void *, unsigned);
+ int kebab_file_key_new(const struct kebab_aks_credential *, uint32_t,
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7162,6 +7162,11 @@
+   extern int kebab_data_mount_probe(proc_t,user_addr_t);
+   int checked=kebab_data_mount_probe(p,(user_addr_t)scratch_addr);
+   if(checked)panic("KEBAB DATA USERLAND: cold encrypted Data prerequisites failed %d",checked);
++  if(tool_mode==12){
++   extern int kebab_aks_userclient_start(void);
++   checked=kebab_aks_userclient_start();
++   if(checked)panic("KEBAB AKS UC: live bank/native user-client publication failed %d",checked);
++  }
+   printf("KEBAB DATA USERLAND: genuine encrypted Data mounted; hardware Root/class bank and native FS/FV services live; original launchd handoff, storage profile verified\n");
+  }
+  if(tool_mode==11||tool_mode==13){
+--- /dev/null
++++ b/iokit/Kernel/arm/kebab_aks_userclient_impl.h
+@@ -0,0 +1,103 @@
++/* Original iOS16 IOServiceOpen/IOConnect ABI, backed by the live hardware-root
++ * factory C/D bag. This is not the upstream empty/offline state stand-in. */
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOMemoryDescriptor.h>
++
++static const uint8_t kuc_data_uuid[16]={0x61,0x70,0x66,0x73,0x75,0x75,0x69,0x64,0,0x40,0x76,0x6f,0x6c,0x75,0x6d,1};
++static bool
++kuc_ready(void)
++{
++ return kebab_file_keys_available()&&kebab_device_classbag_available()&&
++     kebab_volume_class_available(kuc_data_uuid,3)&&kebab_volume_class_available(kuc_data_uuid,4);
++}
++
++class AppleKeyStoreUserClient final : public IOUserClient {
++ OSDeclareDefaultStructors(AppleKeyStoreUserClient)
++ bool opened=false;
++public:
++ IOReturn clientClose() override {opened=false;terminate();return kIOReturnSuccess;}
++ IOReturn externalMethod(uint32_t selector,IOExternalMethodArguments *a,IOExternalMethodDispatch *,OSObject *,void *) override;
++};
++OSDefineMetaClassAndStructors(AppleKeyStoreUserClient,IOUserClient)
++
++IOReturn
++AppleKeyStoreUserClient::externalMethod(uint32_t selector,IOExternalMethodArguments *a,IOExternalMethodDispatch *,OSObject *,void *)
++{
++ IOReturn result=kIOReturnUnsupported;
++ if(!a)return kIOReturnBadArgument;
++ const unsigned in=a->scalarInputCount,out=a->scalarOutputCount,si=a->structureInputSize;
++ if(a->asyncWakePort||a->asyncReferenceCount||a->structureVariableOutputData)result=kIOReturnBadArgument;
++ else if(!kuc_ready())result=kIOReturnNotReady;
++ else if(selector==0){
++  if(in||out||si||a->structureInputDescriptor||a->structureOutputSize||a->structureOutputDescriptor)result=kIOReturnBadArgument;
++  else{opened=true;result=kIOReturnSuccess;}
++ }else if(!opened)result=kIOReturnNotOpen;
++ else if(selector==14){
++  if(in||out!=1||!a->scalarOutput||si||a->structureInputDescriptor||a->structureOutputSize||a->structureOutputDescriptor)result=kIOReturnBadArgument;
++  else{a->scalarOutput[0]=0;a->scalarOutputCount=1;result=kIOReturnSuccess;}
++ }else if(selector==7){
++  if(in!=1||!a->scalarInput||a->scalarInput[0]||out!=1||!a->scalarOutput||si||a->structureInputDescriptor||a->structureOutputSize||a->structureOutputDescriptor)result=kIOReturnBadArgument;
++  else{a->scalarOutput[0]=4;a->scalarOutputCount=1;result=kIOReturnSuccess;}
++ }else if(selector==3){
++  if(in!=1||!a->scalarInput||a->scalarInput[0]||out||si||a->structureInputDescriptor||
++      (a->structureOutputDescriptor&&a->structureOutput))result=kIOReturnBadArgument;
++  else{
++   size_t capacity=a->structureOutputDescriptor?a->structureOutputDescriptor->getLength():a->structureOutputSize;
++   if(capacity<4096||(!a->structureOutputDescriptor&&!a->structureOutput))result=kIOReturnNoSpace;
++   else{
++    uint8_t *record=static_cast<uint8_t *>(IOMalloc(4096));
++    if(!record)result=kIOReturnNoMemory;
++    else{
++     result=(IOReturn)kebab_device_classbag_export(record,4096);
++     if(result==kIOReturnSuccess){
++      if(a->structureOutputDescriptor){
++       if(a->structureOutputDescriptor->writeBytes(0,record,4096)!=4096)result=kIOReturnIOError;
++       else a->structureOutputDescriptorSize=4096;
++      }else{memcpy(a->structureOutput,record,4096);a->structureOutputSize=4096;}
++     }
++     bzero(record,4096);IOFree(record,4096);
++    }
++   }
++  }
++ }
++ IOLog("KEBAB AKS UC: selector=%u scalar=%u/%u struct-in=%u result=%x; hardware factory C/D only\n",selector,in,out,si,result);
++ return result;
++}
++
++class AppleKeyStore final : public IOService {
++ OSDeclareDefaultStructors(AppleKeyStore)
++ IOReturn makeClient(task_t task,void *security,UInt32 type,OSDictionary *properties,IOUserClient **out){
++  if(out)*out=nullptr;
++  if(!out||!task||type)return kIOReturnBadArgument;
++  if(IOUserClient::clientHasPrivilege(task,kIOClientPrivilegeAdministrator)!=kIOReturnSuccess)return kIOReturnNotPrivileged;
++  if(!kuc_ready())return kIOReturnNotReady;
++  AppleKeyStoreUserClient *client=new AppleKeyStoreUserClient;
++  if(!client)return kIOReturnNoMemory;
++  if(!client->initWithTask(task,security,type,properties)){client->release();return kIOReturnError;}
++  if(!client->attach(this)){client->release();return kIOReturnError;}
++  if(!client->start(this)){client->detach(this);client->release();return kIOReturnError;}
++  IOLog("KEBAB AKS UC: root client opened; original ABI, authenticated durable hardware bag available\n");
++  *out=client;return kIOReturnSuccess;
++ }
++public:
++ IOReturn newUserClient(task_t t,void *s,UInt32 n,OSDictionary *p,IOUserClient **out) override{return makeClient(t,s,n,p,out);}
++ IOReturn newUserClient(task_t t,void *s,UInt32 n,IOUserClient **out) override{return makeClient(t,s,n,nullptr,out);}
++};
++OSDefineMetaClassAndStructors(AppleKeyStore,IOService)
++static AppleKeyStore *kuc_provider;
++extern "C" int kebab_aks_userclient_start(void);
++extern "C" int
++kebab_aks_userclient_start(void)
++{
++ if(!kuc_ready())return EPERM;
++ if(kuc_provider)return 0;
++ IOService *resources=IOService::getResourceService();if(!resources)return ENXIO;
++ AppleKeyStore *provider=new AppleKeyStore;if(!provider)return ENOMEM;
++ if(!provider->init(nullptr)){provider->release();return ENOMEM;}
++ if(!provider->attach(resources)){provider->release();return EIO;}
++ if(!provider->start(resources)){provider->detach(resources);provider->release();return EIO;}
++ provider->setName("AppleKeyStore");provider->setProperty("HiOSHardwareRootFactoryCD",true);
++ provider->registerService();kuc_provider=provider;
++ IOLog("KEBAB AKS UC: published /IOResources/AppleKeyStore; native bank handle0, no SEP/passcode claim\n");
++ return 0;
++}
+--- a/iokit/Kernel/arm/KebabKeyStore.cpp
++++ b/iokit/Kernel/arm/KebabKeyStore.cpp
+@@ -1,7 +1,7 @@
+ #include <pexpert/arm64/board_config.h>
+ #if defined(KEBAB)
+ /* Native routing for audited FS23-slot/FV11-slot tables. Only audited
+- * implemented operations are exposed. No Apple SEP identity or user client. */
++ * implemented operations are exposed. No Apple SEP identity. The separate native user client exposes only audited operations. */
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IOLib.h>
+@@ -43,6 +43,7 @@
+ static KebabKeyStore *kfk_provider; /* Immutable resource/table: retained until reset. */
+ #include "kebab_loaded_file_probe_impl.h"
+ #include "kebab_filevault_provider_impl.h"
++#include "kebab_aks_userclient_impl.h"
+ 
+ IOReturn
+ KebabKeyStore::callPlatformFunction(const OSSymbol *name,bool wait,void *a,void *b,void *c,void *d)

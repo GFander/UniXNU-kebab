@@ -1,0 +1,15 @@
+--- a/bsd/kern/kebab_dyldcache.c
++++ b/bsd/kern/kebab_dyldcache.c
+@@ -431,7 +431,11 @@
+ 		vnode_put(vp);
+ 		return error;
+ 	}
+-	size = ubc_getsize(vp);
++	off_t cached_size = ubc_getsize(vp);
++	error = vnode_size(vp, &size, vfs_context_current());
++	if (error) { vnode_put(vp); return error; }
++	if (cached_size != size) printf("KEBAB DSC: %s: VFS logical size %llu, prior UBC size %llu\n",
++	    name, (unsigned long long)size, (unsigned long long)cached_size);
+ 	if (size < (off_t)KEBAB_DSC_HEADER_SIZE) {
+ 		vnode_put(vp);
+ 		return EINVAL;

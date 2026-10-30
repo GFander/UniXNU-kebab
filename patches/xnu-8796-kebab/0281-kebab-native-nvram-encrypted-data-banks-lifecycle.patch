@@ -1,0 +1,201 @@
+--- a/bsd/dev/kebab_cryptex_media.c
++++ b/bsd/dev/kebab_cryptex_media.c
+@@ -347,6 +347,7 @@
+ #include "kebab_data_template_impl.h"
+ #include "kebab_systembag_init_impl.h"
+ #include "kebab_rtc_offset_impl.h"
++#include "kebab_nvram_store_impl.h"
+ 
+ int
+ kebab_cryptex_tool_verify(void)
+--- a/bsd/dev/kebab_nvram_store_impl.h
++++ b/bsd/dev/kebab_nvram_store_impl.h
+@@ -0,0 +1,82 @@
++/* Fixed two-bank CHRP NVRAM file on already qualified encrypted Data.
++ * Original IODTNVRAM permission/serialization/sync machinery stays in charge.
++ * root0600 classD protects access; CHRP/Adler checks corruption, not rollback.
++ */
++#define KNV_PATH "/private/var/db/hios-nvram-banks-v1"
++#define KNV_BANK 8192u
++static LCK_MTX_DECLARE(knv_lock,&kcm_group);
++static uint8_t knv_banks[2][KNV_BANK];
++static bool knv_ready;
++extern int kebab_nvram_publish(const uint8_t *,unsigned);
++int kebab_nvram_prepare(void);
++int kebab_nvram_read(unsigned,unsigned,void *,unsigned);
++int kebab_nvram_write(unsigned,const void *,unsigned);
++
++static uint32_t knv_word(const uint8_t *p){uint32_t n;memcpy(&n,p,4);return n;}
++static uint32_t knv_adler(const uint8_t *p,unsigned n){uint32_t a=1,b=0;for(unsigned i=0;i<n;i++){a=(a+p[i])%65521;b=(b+a)%65521;}return (b<<16)|a;}
++static uint8_t knv_sum(const uint8_t *p){unsigned sum=p[0];for(unsigned i=2;i<16;i++)sum+=p[i];while(sum>255)sum=(sum&255)+(sum>>8);return (uint8_t)sum;}
++static void knv_header(uint8_t *p,unsigned bytes,const char *name){p[0]=0x70;uint16_t units=bytes/16;memcpy(p+2,&units,2);strlcpy((char*)p+4,name,12);p[1]=knv_sum(p);}
++static void knv_make(uint8_t *p,uint32_t generation){
++ bzero(p,KNV_BANK);knv_header(p,32,"nvram");knv_header(p+32,4096,"common");knv_header(p+4128,4064,"system");
++ memcpy(p+20,&generation,4);uint32_t adler=knv_adler(p+20,KNV_BANK-20);memcpy(p+16,&adler,4);
++}
++static bool knv_valid(const uint8_t *p){
++ if(p[0]!=0x70||p[1]!=knv_sum(p)||p[2]!=2||p[3]||memcmp(p+4,"nvram\0\0\0\0\0\0\0",12)||!knv_word(p+20)||knv_word(p+16)!=knv_adler(p+20,KNV_BANK-20))return false;
++ // Fixed partition bounds must match those provisioned, including names.
++ for(unsigned i=0;i<2;i++){const uint8_t *h=p+(i?4128:32);uint16_t len;memcpy(&len,h+2,2);
++  if(h[0]!=0x70||h[1]!=knv_sum(h)||len!=(i?254:256)||memcmp(h+4,i?"system\0\0\0\0\0\0":"common\0\0\0\0\0\0",12))return false;}
++ return true;
++}
++static int knv_metadata(vnode_t file){
++ mount_t data=vnode_mount(file);
++ if(!vnode_isreg(file)||data==kcm_system||kcm_device(data)!=makedev(1,3)||!(vfs_flags(data)&MNT_CPROTECT)||(vfs_flags(data)&MNT_RDONLY)||strcmp(vfs_statfs(data)->f_fstypename,"apfs"))return EAUTH;
++ struct vnode_attr a;VATTR_INIT(&a);VATTR_WANTED(&a,va_uid);VATTR_WANTED(&a,va_gid);VATTR_WANTED(&a,va_mode);VATTR_WANTED(&a,va_flags);VATTR_WANTED(&a,va_nlink);VATTR_WANTED(&a,va_data_size);VATTR_WANTED(&a,va_dataprotect_class);
++ int error=vnode_getattr(file,&a,vfs_context_current());if(error)return error;
++ if(!VATTR_IS_SUPPORTED(&a,va_uid)||!VATTR_IS_SUPPORTED(&a,va_gid)||!VATTR_IS_SUPPORTED(&a,va_mode)||!VATTR_IS_SUPPORTED(&a,va_flags)||!VATTR_IS_SUPPORTED(&a,va_nlink)||!VATTR_IS_SUPPORTED(&a,va_data_size)||!VATTR_IS_SUPPORTED(&a,va_dataprotect_class)||a.va_uid||a.va_gid||(a.va_mode&07777)!=0600||a.va_flags||a.va_nlink!=1||a.va_data_size!=2*KNV_BANK||a.va_dataprotect_class!=4)return EAUTH;
++ return 0;
++}
++static int knv_open(vnode_t *file,bool write){
++ vnode_t point=NULLVP;int error=vnode_lookup("/private/var",VNODE_LOOKUP_NOFOLLOW,&point,vfs_context_current());if(error)return error;
++ mount_t data=vnode_mount(point);vnode_put(point);error=kdi_lookup(KNV_PATH,file,data,false);if(error)return error;
++ error=knv_metadata(*file);if(!error)error=VNOP_OPEN(*file,FREAD|(write?FWRITE:0),vfs_context_current());
++ if(error){vnode_put(*file);*file=NULLVP;}return error;
++}
++int kebab_nvram_read(unsigned bank,unsigned offset,void *out,unsigned size){
++ if(bank>=2||!out||offset>KNV_BANK||size>KNV_BANK-offset)return EINVAL;
++ lck_mtx_lock(&knv_lock);int error=knv_ready?0:ENXIO;if(!error)memcpy(out,knv_banks[bank]+offset,size);lck_mtx_unlock(&knv_lock);return error;
++}
++int kebab_nvram_write(unsigned bank,const void *in,unsigned size){
++ if(bank>=2||!in||size!=KNV_BANK||!knv_valid(in))return EINVAL;
++ lck_mtx_lock(&knv_lock);vnode_t file=NULLVP;int error=knv_ready?0:ENXIO;
++ if(!error)error=knv_open(&file,true);
++ if(!error){int residual=0;error=vn_rdwr(UIO_WRITE,file,(caddr_t)in,KNV_BANK,bank*KNV_BANK,UIO_SYSSPACE,IO_SYNC|IO_NOCACHE,vfs_context_ucred(vfs_context_current()),&residual,NULL);
++  if(!error&&residual)error=EIO;if(!error)error=VNOP_FSYNC(file,MNT_WAIT,vfs_context_current());if(!error)error=kebab_ufs_sync();
++  if(!error)memcpy(knv_banks[bank],in,KNV_BANK);
++ }
++ if(file){int closed=VNOP_CLOSE(file,FREAD|FWRITE,vfs_context_current());vnode_put(file);if(!error)error=closed;}
++ lck_mtx_unlock(&knv_lock);printf("KEBAB NVRAM: durable bank=%u generation=%u write=%d; no variables logged\n",bank,knv_word((const uint8_t*)in+20),error);return error;
++}
++int kebab_nvram_prepare(void){
++ if(!kebab_image4_live_nonce_profile())return EPERM;
++ lck_mtx_lock(&knv_lock);if(knv_ready){lck_mtx_unlock(&knv_lock);return EALREADY;}
++ vnode_t file=NULLVP;int error=knv_open(&file,false);bool created=false;
++ if(error==ENOENT){error=kdi_new(KNV_PATH,&file);created=!error;
++  if(!error&&(kcm_device(vnode_mount(file))!=makedev(1,3)||(vfs_flags(vnode_mount(file))&MNT_RDONLY)))error=EAUTH;
++  if(!error){knv_make(knv_banks[0],1);knv_make(knv_banks[1],2);int residual=0;error=vn_rdwr(UIO_WRITE,file,(caddr_t)knv_banks,sizeof(knv_banks),0,UIO_SYSSPACE,IO_SYNC|IO_NOCACHE,vfs_context_ucred(vfs_context_current()),&residual,NULL);
++   if(!error&&residual)error=EIO;if(!error)error=VNOP_FSYNC(file,MNT_WAIT,vfs_context_current());if(!error)error=VFS_SYNC(vnode_mount(file),MNT_WAIT,vfs_context_current());if(!error)error=kebab_ufs_sync();}
++ }
++ if(!error)error=knv_metadata(file);
++ if(!error){int residual=0;error=vn_rdwr(UIO_READ,file,(caddr_t)knv_banks,sizeof(knv_banks),0,UIO_SYSSPACE,IO_NOCACHE,vfs_context_ucred(vfs_context_current()),&residual,NULL);if(!error&&residual)error=EIO;}
++ if(file){int closed=created?vnode_close(file,FREAD|FWRITE,vfs_context_current()):VNOP_CLOSE(file,FREAD,vfs_context_current());if(!created)vnode_put(file);if(!error)error=closed;}
++ bool valid0=!error&&knv_valid(knv_banks[0]),valid1=!error&&knv_valid(knv_banks[1]);unsigned current=0;
++ if(!error&&!valid0&&!valid1)error=EAUTH;
++ if(!error&&valid0&&valid1&&knv_word(knv_banks[0]+20)==knv_word(knv_banks[1]+20)&&memcmp(knv_banks[0],knv_banks[1],KNV_BANK))error=EAUTH;
++ if(!error){current=valid1&&(!valid0||knv_word(knv_banks[1]+20)>knv_word(knv_banks[0]+20))?1:0;
++  // Original CHRP bank selection validates headers alone; do not expose a
++  // torn bank with a still-valid header but a bad payload Adler checksum.
++  if(!valid0)bzero(knv_banks[0],KNV_BANK);if(!valid1)bzero(knv_banks[1],KNV_BANK);knv_ready=true;}
++ lck_mtx_unlock(&knv_lock);
++ printf("KEBAB NVRAM: encrypted Data banks %s error=%d valid=%u/%u current=%u generation=%u root0600 classD\n",created?"durably initialized":"cold restored",error,valid0,valid1,current,error?0:knv_word(knv_banks[current]+20));
++ if(!error)error=kebab_nvram_publish(knv_banks[current],current);
++ return error;
++}
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7173,6 +7173,10 @@
+    extern int kebab_rtc_offset_enable_store(void);
+    checked=kebab_rtc_offset_enable_store();
+    if(checked)panic("KEBAB RTC: durable offset init failed %d",checked);
++   extern int kebab_nvram_prepare(void);
++   checked=kebab_nvram_prepare();
++   if(checked)panic("KEBAB NVRAM: native persistent controller preparation failed %d",checked);
++   kebab_defaults_report();
+    checked=kebab_systembag_prepare(p,(user_addr_t)scratch_addr);
+    if(checked)panic("KEBAB SYSTEM BAG: original disk envelope init/auth failed %d",checked);
+    checked=kebab_aks_userclient_start();
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -19,6 +19,9 @@
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
++#include <sys/errno.h>
++#include <IOKit/IONVRAM.h>
++#include <IOKit/nvram/IONVRAMController.h>
+ #include <kern/clock.h>
+ #include "../../../bsd/dev/kebab_spmi_bus.h"
+ #include "../../../bsd/dev/kebab_spmi_clients.h"
+@@ -106,6 +109,61 @@
+ };
+ 
+ OSDefineMetaClassAndStructors(KebabPlatformExpert, IODTPlatformExpert);
++
++/* Actual native NVRAM format/controller, backed by two durable encrypted-Data
++ * banks. No Apple hardware NVRAM, firmware variable or rollback claim. */
++extern "C" int kebab_nvram_read(unsigned,unsigned,void *,unsigned);
++extern "C" int kebab_nvram_write(unsigned,const void *,unsigned);
++class KebabNVRAM : public IONVRAMController {
++ OSDeclareDefaultStructors(KebabNVRAM)
++ unsigned bank=0;
++public:
++ IOReturn select(uint32_t n) override {if(n>=2)return kIOReturnBadArgument;bank=n;return kIOReturnSuccess;}
++ IOReturn eraseBank(void) override {return kIOReturnUnsupported;} // File banks are overwritten, not flash-erased.
++ IOReturn read(IOByteCount offset,UInt8 *out,IOByteCount size) override {
++  if(offset>8192||size>8192-offset||!out)return kIOReturnBadArgument;
++  return kebab_nvram_read(bank,(unsigned)offset,out,(unsigned)size)?kIOReturnIOError:kIOReturnSuccess;
++ }
++ IOReturn write(IOByteCount offset,UInt8 *in,IOByteCount size) override {
++  if(offset||size!=8192||!in)return kIOReturnBadArgument;
++  return kebab_nvram_write(bank,in,(unsigned)size)?kIOReturnIOError:kIOReturnSuccess;
++ }
++};
++OSDefineMetaClassAndStructors(KebabNVRAM, IONVRAMController)
++extern "C" int kebab_nvram_publish(const uint8_t *,unsigned);
++int kebab_nvram_publish(const uint8_t *image,unsigned current)
++{
++ static bool published;
++ if(published||!image||current>=2)return EINVAL;
++ IOPlatformExpert *platform=IOService::getPlatform();
++ IORegistryEntry *root=IORegistryEntry::fromPath("/",gIODTPlane);
++ IORegistryEntry *chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);
++ IORegistryEntry *options=IORegistryEntry::fromPath("/options",gIODTPlane);
++ if(!platform||!root||!chosen||options){OSSafeReleaseNULL(root);OSSafeReleaseNULL(chosen);OSSafeReleaseNULL(options);return EAUTH;}
++ uint32_t size=8192,count=2;
++ bool ok=chosen->setProperty("nvram-bank-size",&size,sizeof(size))&&chosen->setProperty("nvram-bank-count",&count,sizeof(count))&&
++   chosen->setProperty("nvram-current-bank",&current,sizeof(current))&&chosen->setProperty("nvram-proxy-data",const_cast<uint8_t *>(image),size);
++ options=new IORegistryEntry;
++ ok=ok&&options&&options->init();
++ if(ok){options->setName("options");ok=options->attachToParent(root,gIODTPlane);}
++ OSSafeReleaseNULL(options);root->release();chosen->release();if(!ok)return ENOMEM;
++ platform->publishNVRAM();
++ options=IORegistryEntry::fromPath("/options",gIODTPlane);
++ IODTNVRAM *native=OSDynamicCast(IODTNVRAM,options);
++ if(!native){OSSafeReleaseNULL(options);return EAUTH;}
++
++
++
++ options->release();
++ KebabNVRAM *controller=new KebabNVRAM;
++ if(!controller||!controller->init()||!controller->attach(platform)||!controller->start(platform)){OSSafeReleaseNULL(controller);return ENOMEM;}
++ controller->setProperty("HiOSEncryptedDataBacked",true);
++ controller->setProperty("HiOSHardwareRollbackProtection",false);
++ controller->setProperty("HiOSDurableBankBytes",8192,32);
++ controller->setName("KebabNVRAM");controller->registerService();published=true;
++ IOLog("KEBAB NVRAM: native IODTNVRAM/controller published after durable Data banks; bank=%u\n",current);
++ return 0;
++}
+ 
+ bool
+ KebabPlatformExpert::start(IOService *provider)
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -1854,6 +1854,16 @@
+ void
+ IODTPlatformExpert::registerNVRAMController( IONVRAMController * nvram )
+ {
++#if defined(KEBAB)
++ /* KEBAB loads the actual Data-backed proxy after encrypted Data is mounted,
++  * later than its custom top-level nub enumeration. Adopt only native options. */
++ if (!dtNVRAM) {
++  IORegistryEntry *entry=IORegistryEntry::fromPath("/options",gIODTPlane);
++  dtNVRAM=OSDynamicCast(IODTNVRAM,entry);
++  if (!dtNVRAM) {OSSafeReleaseNULL(entry);return;}
++  // Keep the original platform lifetime reference, as in processTopLevel.
++ }
++#endif
+ 	if (dtNVRAM) {
+ 		dtNVRAM->registerNVRAMController(nvram);
+ 	}

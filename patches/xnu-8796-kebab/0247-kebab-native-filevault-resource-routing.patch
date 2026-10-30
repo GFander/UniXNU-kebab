@@ -1,0 +1,180 @@
+--- a/iokit/Kernel/arm/KebabKeyStore.cpp
++++ b/iokit/Kernel/arm/KebabKeyStore.cpp
+@@ -1,6 +1,6 @@
+ #include <pexpert/arm64/board_config.h>
+ #if defined(KEBAB)
+-/* Native resource routing for the audited23-slot target table. Only the five
++/* Native routing for audited FS23-slot/FV11-slot tables. Only audited
+  * implemented operations are exposed. No Apple SEP identity or user client. */
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOPlatformExpert.h>
+@@ -37,15 +37,20 @@
+ };
+ OSDefineMetaClassAndStructors(KebabKeyStore,IOService)
+ static KebabKeyStore *kfk_provider; /* Immutable resource/table: retained until reset. */
++#include "kebab_filevault_provider_impl.h"
+ 
+ IOReturn
+ KebabKeyStore::callPlatformFunction(const OSSymbol *name,bool wait,void *a,void *b,void *c,void *d)
+ {
+  (void)wait;
+- if(!name || !name->isEqualTo("AKSFileSystemKeyServices"))return kIOReturnUnsupported;
++ if(!name)return kIOReturnUnsupported;
++ bool filesystem=name->isEqualTo("AKSFileSystemKeyServices");
++ bool filevault=kfv_enabled && name->isEqualTo("AKSFileVaultServices");
++ if(!filesystem && !filevault)return kIOReturnUnsupported;
+  if(!a || ((uintptr_t)a&7) || b || c || d)return kIOReturnBadArgument;
+  if(!kebab_file_keys_available())return kIOReturnNotReady;
+- const void *table=&kfk_services;memcpy(a,&table,sizeof(table));return kIOReturnSuccess;
++ const void *table=filesystem?static_cast<const void *>(&kfk_services):static_cast<const void *>(&kfv_services);
++ memcpy(a,&table,sizeof(table));return kIOReturnSuccess;
+ }
+ 
+ #if DEVELOPMENT || DEBUG
+@@ -129,6 +134,13 @@
+  IOReturn result=platform->callPlatformFunction("AKSFileSystemKeyServices",false,&table,nullptr,nullptr,nullptr);
+  int error=result==kIOReturnNotReady && table==sentinel?0:EIO;
+  IOLog("KEBAB AKS FS: erased Root context returns NotReady without table output %s (%d)\n",error?"FAIL":"PASS",error);
++ if(kfv_enabled) {
++  sentinel=&kfv_services;table=sentinel;
++  result=platform->callPlatformFunction("AKSFileVaultServices",true,&table,nullptr,nullptr,nullptr);
++  int fv_error=result==kIOReturnNotReady && table==sentinel?0:EIO;
++  if(!error)error=fv_error;
++  IOLog("KEBAB AKS FV: erased Root returns NotReady without table output %s (%d)\n",fv_error?"FAIL":"PASS",fv_error);
++ }
+  return error;
+ }
+ #endif
+--- a/bsd/kern/kebab_file_keys.h
++++ b/bsd/kern/kebab_file_keys.h
+@@ -57,5 +57,6 @@
+ int kebab_volume_key_unwrap(const struct kebab_fv_credential *,const void *,const void *,
+     const struct kebab_fv_wrapped_key *,struct kebab_fv_raw_key *);
+ int kebab_volume_keys_selftest(void);
++int kebab_volume_key_length(const struct kebab_fv_credential *,uint32_t,uint64_t *);
+ #undef KEBAB_KEY_STATIC_ASSERT
+ #endif
+--- a/bsd/kern/kebab_volume_keys_impl.h
++++ b/bsd/kern/kebab_volume_keys_impl.h
+@@ -104,3 +104,16 @@
+  printf("KEBAB VOLUME KEYS: Root/UUID-backed VEK32 envelope/tamper %s (%d); no FileVault publication or Data format\n",error?"FAIL":"PASS",error);
+  return error;
+ }
++
++/* Original FV +0x20 selector1 requests wrapped-VEK capacity. Other selectors
++ * are not inferred from the separate APFS container operation selector2. */
++int
++kebab_volume_key_length(const struct kebab_fv_credential *cred, uint32_t selector, uint64_t *output)
++{
++ if(!kfk_context() || !kfk_range(cred,sizeof(*cred)) || !kfk_range(output,sizeof(*output)) ||
++    ((uintptr_t)output&7) || kfk_overlap(cred,sizeof(*cred),output,sizeof(*output)))return (int)kIOReturnBadArgument;
++ if(!kfv_credential(cred) || selector!=1)return (int)kIOReturnUnsupported;
++ lck_mtx_lock(&kfk_lock);int error=kfk_ready?0:(int)kIOReturnNotReady;
++ if(!error)*output=96;
++ lck_mtx_unlock(&kfk_lock);return error;
++}
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -19,6 +19,7 @@
+ #define KEBAB_APFS_PROOF_PATH "/private/preboot/.hios-apfs-proof-v1"
+ extern int kebab_ufs_sync(void);
+ extern int kebab_aks_fs_publish_test(void);
++extern int kebab_aks_fv_publish_test(void);
+ extern int kebab_aks_fs_quiesce_test(void);
+ extern int kebab_cryptex_prepare_directories(mount_t);
+ extern int kebab_boot_firmware_prepare(mount_t);
+@@ -167,6 +168,8 @@
+  if ((mode==4 && nonce_root!=1) || (mode==5 && nonce_root!=2) || ((mode<4 || mode>=6) && nonce_root)) return EINVAL;
+  unsigned aks=0;PE_parse_boot_argn("kebab_aks_fs",&aks,sizeof(aks));
+  if(aks && (aks!=1 || mode!=13))return EINVAL;
++ unsigned fv=0;PE_parse_boot_argn("kebab_aks_fv",&fv,sizeof(fv));
++ if(fv && (fv!=1 || aks!=1 || mode!=13))return EINVAL;
+  unsigned data_key_mode=0;
+  PE_parse_boot_argn("kebab_data_root",&data_key_mode,sizeof(data_key_mode));
+  if ((mode==8 && data_key_mode!=1) || (mode>=9 && data_key_mode!=2) || (mode<8 && data_key_mode)) return EINVAL;
+@@ -234,6 +237,7 @@
+   if(!error && key_test)error=kebab_metadata_keys_selftest();
+   if(!error && key_test)error=kebab_volume_keys_selftest();
+   if(!error && aks)error=kebab_aks_fs_publish_test();
++  if(!error && fv)error=kebab_aks_fv_publish_test();
+   if(!error && (mode==10 || mode==11))error=kfp_record(mounted,mode==10);
+   if(!error && mode>=12)error=kfp_record_impl(mounted,mode==12,true);
+   if(key_test){kebab_file_keys_cancel();int quiesce=aks?kebab_aks_fs_quiesce_test():0;if(!error)error=quiesce;if(aks)printf("KEBAB FILE KEYS: private context erased; AKS provider quiescent\n");else printf("KEBAB FILE KEYS: private context erased; no AKS service published\n");}
+--- a/bsd/kern/kebab_data_root_policy.h
++++ b/bsd/kern/kebab_data_root_policy.h
+@@ -24,6 +24,8 @@
+  if(cpx!=((key_test==5||key_test==6)?1u:0u))return EINVAL;
+  unsigned aks=0;PE_parse_boot_argn("kebab_aks_fs",&aks,sizeof(aks));
+  if(aks && (aks!=1 || key_test!=5))return EINVAL;
++ unsigned fv=0;PE_parse_boot_argn("kebab_aks_fv",&fv,sizeof(fv));
++ if(fv && (fv!=1 || aks!=1 || key_test!=5))return EINVAL;
+  const char *const required[] = { "kebab_data_root", "kebab_apfs_probe", "ufsrw",
+      "kebab_qsee_probe", "kebab_keymaster_version", "kebab_wrapped_key_probe", "kebab_qsee_time" };
+  const unsigned expected[] = { mode, apfs_mode, writable, 1, 1, 1, 1 };
+--- /dev/null
++++ b/iokit/Kernel/arm/kebab_filevault_provider_impl.h
+@@ -0,0 +1,64 @@
++/* Original11-slot FileVault table plus NULL sentinel; only audited operations.
++ * State, commit, class loading/unloading and rewrap deliberately unavailable. */
++struct KebabAKSFileVaultTable {
++ decltype(&kebab_volume_key_new) new_key;
++ decltype(&kebab_volume_key_unwrap) unwrap;
++ void *unsupported10,*unsupported18;
++ decltype(&kebab_volume_key_length) wrapped_length;
++ void *unsupported28_50[6];
++ void *sentinel;
++};
++static_assert(offsetof(KebabAKSFileVaultTable,wrapped_length)==0x20,"original FV length query slot");
++static_assert(offsetof(KebabAKSFileVaultTable,sentinel)==88 && sizeof(KebabAKSFileVaultTable)==96,"original FV11-slot + NULL sentinel");
++static const KebabAKSFileVaultTable kfv_services={kebab_volume_key_new,kebab_volume_key_unwrap,
++ nullptr,nullptr,kebab_volume_key_length,{nullptr},nullptr};
++static bool kfv_enabled;
++
++#if DEVELOPMENT || DEBUG
++static int
++kfv_service_roundtrip(const KebabAKSFileVaultTable *table)
++{
++ struct Work {uint8_t sealed[96],key[64],back[64];};
++ Work *work=static_cast<Work *>(IOMalloc(sizeof(Work)));if(!work)return ENOMEM;
++ bzero(work,sizeof(*work));struct kebab_fv_credential cred={};uint8_t uuid[16];
++ for(unsigned i=0;i<16;++i)uuid[i]=(uint8_t)(0xd0+i);
++ uint64_t capacity=0;
++ int error=table->wrapped_length(&cred,1,&capacity);
++ if(!error && capacity!=96)error=EIO;
++ struct kebab_fv_wrapped_key wrapped={work->sealed,capacity};
++ struct kebab_fv_raw_key raw={work->key,64,0},out={work->back,64,0};
++ if(!error)error=table->new_key(&cred,nullptr,nullptr,uuid,&wrapped,&raw);
++ if(!error)error=table->unwrap(&cred,nullptr,nullptr,&wrapped,&out);
++ if(!error && (wrapped.key_len!=96 || raw.key_len!=32 || out.key_len!=32 ||
++    out.flags || memcmp(work->key,work->back,32)))error=EIO;
++ uint64_t sentinel=0x1122334455667788ULL;capacity=sentinel;
++ if(!error && (table->wrapped_length(&cred,2,&capacity)!=(int)kIOReturnUnsupported || capacity!=sentinel))error=EIO;
++ volatile uint8_t *bytes=reinterpret_cast<volatile uint8_t *>(work);
++ for(size_t i=0;i<sizeof(*work);++i)bytes[i]=0;
++ for(unsigned i=0;i<16;++i)uuid[i]=0;
++ IOFree(work,sizeof(*work));return error;
++}
++#endif
++
++extern "C" int
++kebab_aks_fv_publish_test(void)
++{
++#if DEVELOPMENT || DEBUG
++ if(!kebab_file_keys_available() || !kfk_provider)return EPERM;
++ IOService *platform=IOService::getPlatform();if(!platform)return ENXIO;
++ if(!kfv_enabled) {
++  const void *existing=nullptr;
++  IOReturn result=platform->callPlatformFunction("AKSFileVaultServices",false,&existing,nullptr,nullptr,nullptr);
++  if(result!=kIOReturnUnsupported)return EEXIST;
++  kfv_enabled=true;IOService::publishResource("AKSFileVaultServices",kfk_provider);
++ }
++ const KebabAKSFileVaultTable *table=nullptr;
++ IOReturn result=platform->callPlatformFunction("AKSFileVaultServices",true,&table,nullptr,nullptr,nullptr);
++ int error=result==kIOReturnSuccess && table==&kfv_services?0:EIO;
++ if(!error)error=kfv_service_roundtrip(table);
++ IOLog("KEBAB AKS FV: native platform/11-slot VEK new/unwrap/length %s (%d); state/control/class-load NULL; no Data mount\n",error?"FAIL":"PASS",error);
++ return error;
++#else
++ return EPERM;
++#endif
++}

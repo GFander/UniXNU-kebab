@@ -1,0 +1,28 @@
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1796,6 +1796,14 @@
+ 	}
+ #endif /* DEVELOPMENT */
+ 
++#if defined(KEBAB)
++ if(!strcmp(p->p_comm,"watchdogd")){
++  uintptr_t frames[16]={};struct backtrace_user_info info=BTUINFO_INIT;
++  unsigned count=backtrace_user(frames,16,NULL,&info);
++  printf("KEBAB WATCHDOG CRITICAL: pid=%d user-frames=%u\n",proc_getpid(p),count);
++  for(unsigned i=0;i<count;i++)printf("KEBAB WATCHDOG USER PC: depth=%u pc=0x%llx\n",i,(unsigned long long)frames[i]);
++ }
++#endif
+ 	char *exit_reason_desc = exit_reason_get_string_desc(p->p_exit_reason);
+ 
+ 	if (p->p_exit_reason == OS_REASON_NULL) {
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1101,7 +1101,7 @@
+   * handling unchanged. No dereference of user memory in the trap path. */
+  static uint32_t kebab_brk_reports;
+  if (__atomic_fetch_add(&kebab_brk_reports,1,__ATOMIC_RELAXED)<32) {
+-  kprintf("KEBAB USER BRK: pid=%d pc=0x%llx lr=0x%llx esr=0x%x x0=0x%llx\n",pid_from_task(current_task()),(unsigned long long)get_saved_state_pc(state),(unsigned long long)get_saved_state_lr(state),esr,(unsigned long long)get_saved_state_reg(state,0));
++  printf("KEBAB USER BRK: pid=%d pc=0x%llx lr=0x%llx esr=0x%x x0=0x%llx\n",pid_from_task(current_task()),(unsigned long long)get_saved_state_pc(state),(unsigned long long)get_saved_state_lr(state),esr,(unsigned long long)get_saved_state_reg(state,0));
+  }
+ #endif
+ 	codes[1] = get_saved_state_pc(state);

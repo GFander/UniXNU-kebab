@@ -1,0 +1,250 @@
+--- a/iokit/Kernel/arm/NativeAES.cpp
++++ b/iokit/Kernel/arm/NativeAES.cpp
+@@ -21,6 +21,11 @@
+ volatile uint32_t native_aes_unsupported_key = 0;
+ }
+ 
++// One board provider, one immutable per-boot nonce key. No Apple UID claim.
++static unsigned char native_nonce_key[16] __attribute__((aligned(64)));
++static unsigned native_nonce_state; // 0 unavailable, 1 prepared, 2 published
++static bool native_nonce_selftest;
++
+ class NativeAES : public IOAESAccelerator {
+   OSDeclareDefaultStructors(NativeAES)
+ public:
+@@ -30,7 +35,7 @@
+     return IOService::callPlatformFunction(name, wait, a, b, c, d);
+   }
+   const char *getAlgorithmName() override { return "AES-CBC"; }
+-  bool isKeySupported(unsigned selector) override { return selector == 0; }
++  bool isKeySupported(unsigned selector) override { return selector == 0 || (selector == 2212 && __atomic_load_n(&native_nonce_state, __ATOMIC_ACQUIRE) == 2); }
+   unsigned getSupportedOptions() override { return 1; }
+   IOReturn performAES(void *, void *, task_t, unsigned long long, IOAESIV *,
+                      IOAESOperation, IOAESKeyData *, IOAESCompletion, void *) override;
+@@ -39,6 +44,8 @@
+                      unsigned long long, IOAESCompletion, void *) override;
+ };
+ OSDefineMetaClassAndStructors(NativeAES, IOAESAccelerator)
++static NativeAES *native_nonce_provider; // retained until reset, including failure paths
++
+ 
+ // No padding, hidden device keys, or change to the registered corecrypto modes.
+ static int cbc(const unsigned char *input, unsigned char *output, size_t bytes,
+@@ -151,12 +158,119 @@
+   return result;
+ }
+ 
++
++// Target donor KDF: base-key CBC encryption of the public 16-byte seed, IV=0.
++// This board supplies a 256-bit SCM-derived software secret from a genuine
++// hardware-wrapped key. It is a HiOS device root, not Apple's fused UID.
++static bool deriveNonceKey(const unsigned char root[32], unsigned char output[16])
++{
++  const unsigned char seed[16] = {0x0c,0x31,0xf7,0xdf,0x81,0x92,0x4d,0x03,
++                                 0x8c,0xb4,0x37,0xfa,0x03,0x60,0xf7,0xc9};
++  IOAESKeyData key = {256, {}, 0};
++  unsigned char iv[16] = {};
++  memcpy(key.bytes, root, 32);
++  bool ok = !cbc(seed, output, 16, iv, key, IOAESEncrypt);
++  cc_clear(sizeof(key), &key); cc_clear(sizeof(iv), iv);
++  return ok;
++}
++
++static bool nonceKnownAnswerTest(NativeAES *provider, bool negative)
++{
++  unsigned char root[32], derived[16], input[16], output[16];
++  for (unsigned i=0;i<32;i++) root[i]=static_cast<unsigned char>(i);
++  for (unsigned i=0;i<16;i++) input[i]=static_cast<unsigned char>(i);
++  unsigned char expectedKey[16]={0xdc,0x82,0xe5,0x6c,0x6d,0x61,0x0d,0x77,
++                                0x10,0x46,0x2a,0x90,0x90,0x82,0xcc,0x11};
++  const unsigned char expected[16]={0xb0,0x34,0xaa,0x1f,0xc9,0x96,0xce,0x6e,
++                                   0x5a,0xb1,0x9a,0x9a,0x21,0x9b,0x5f,0xca};
++  if (negative) expectedKey[0]^=1;
++  bool ok=deriveNonceKey(root,derived) && !memcmp(derived,expectedKey,16);
++  IOBufferMemoryDescriptor *source=IOBufferMemoryDescriptor::withCapacity(64,kIODirectionInOut);
++  IOBufferMemoryDescriptor *destination=IOBufferMemoryDescriptor::withCapacity(64,kIODirectionInOut);
++  IOAESKeyData key={128,{},2212}; IOAESIV iv={};
++  struct Completion { unsigned count;int status; } completion={};
++  auto callback=[](void *p,int status){Completion *s=static_cast<Completion *>(p);s->count++;s->status=status;};
++  if (ok && source && destination) {
++    memcpy(native_nonce_key,derived,16);native_nonce_selftest=true;
++    ok=!provider->isKeySupported(2212) && source->writeBytes(16,input,16)==16 &&
++      !provider->performAES(source,destination,16,&iv,IOAESEncrypt,&key,16,32,callback,&completion) &&
++      destination->readBytes(32,output,16)==16 && !memcmp(output,expected,16) &&
++      !memcmp(iv.bytes,expected,16) && completion.count==1 && completion.status==0;
++    cc_clear(sizeof(iv),&iv);
++    ok=ok && !provider->performAES(destination,destination,16,&iv,IOAESDecrypt,&key,32,32,nullptr,nullptr) &&
++      destination->readBytes(32,output,16)==16 && !memcmp(output,input,16) && !memcmp(iv.bytes,expected,16);
++    key.bits=256;
++    ok=ok && provider->performAES(source,destination,16,&iv,IOAESEncrypt,&key,16,32,callback,&completion)==kIOReturnBadArgument && completion.count==1;
++    native_nonce_selftest=false;
++  } else ok=false;
++  cc_clear(sizeof(native_nonce_key),native_nonce_key);
++  cc_clear(sizeof(root),root);cc_clear(sizeof(derived),derived);cc_clear(sizeof(output),output);
++  if(source)source->release();if(destination)destination->release();
++  IOLog("KEBAB AES NONCE: public KDF/selector/CBC/invalid-bits KAT %s negative=%u\n",ok?"PASS":"FAIL",negative);
++  return ok;
++}
++
++extern "C" bool kebab_aes_nonce_prepare(const unsigned char *, unsigned);
++extern "C" bool kebab_aes_nonce_publish(void);
++extern "C" void kebab_aes_nonce_cancel(void);
++extern "C" void kebab_aes_nonce_wipe(void);
++
++bool kebab_aes_nonce_prepare(const unsigned char *root, unsigned size)
++{
++  if(!root || size!=32 || !native_nonce_provider || native_aes_kat_status!=1 ||
++     __atomic_load_n(&native_nonce_state,__ATOMIC_ACQUIRE)) return false;
++  unsigned nonzero=0;for(unsigned i=0;i<32;i++)nonzero|=root[i];if(!nonzero)return false;
++  uint32_t negative=0;PE_parse_boot_argn("kebab_nonce_negative_kat",&negative,sizeof(negative));
++  if(!nonceKnownAnswerTest(native_nonce_provider,negative==1)) return false;
++  unsigned char derived[16];
++  bool derivedOK=deriveNonceKey(root,derived);
++  if(derivedOK)memcpy(native_nonce_key,derived,16);
++  cc_clear(sizeof(derived),derived);
++  if(!derivedOK)return false;
++  __atomic_store_n(&native_nonce_state,1,__ATOMIC_RELEASE);
++  IOLog("KEBAB AES NONCE: hardware-root KDF prepared; service not yet published\n");
++  return true;
++}
++
++bool kebab_aes_nonce_publish(void)
++{
++  if(!native_nonce_provider || __atomic_load_n(&native_nonce_state,__ATOMIC_ACQUIRE)!=1) return false;
++  native_nonce_provider->setProperty("NativeAESSoftwareKeysOnly",false);
++  native_nonce_provider->setProperty("HiOSHardwareWrappedNonceRoot",true);
++  native_nonce_provider->setProperty("HiOSNonceSelector",2212,32);
++  __atomic_store_n(&native_nonce_state,2,__ATOMIC_RELEASE);
++  native_aes_registered=1;
++  native_nonce_provider->registerService();
++  IOLog("KEBAB AES NONCE: NativeAES registered with hardware-root selector 2212\n");
++  return true;
++}
++
++void kebab_aes_nonce_cancel(void)
++{
++  if(__atomic_load_n(&native_nonce_state,__ATOMIC_ACQUIRE)==2) return;
++  cc_clear(sizeof(native_nonce_key),native_nonce_key);
++  __atomic_store_n(&native_nonce_state,0,__ATOMIC_RELEASE);
++}
++
++// Reset path: fixed resident bytes only, no allocation, lock, driver call or SMC.
++void kebab_aes_nonce_wipe(void)
++{
++  volatile unsigned char *bytes=native_nonce_key;
++  for(unsigned i=0;i<sizeof(native_nonce_key);i++)bytes[i]=0;
++  native_nonce_selftest=false;
++  __atomic_store_n(&native_nonce_state,0,__ATOMIC_RELEASE);
++  __asm__ volatile("dc civac, %0" :: "r"(native_nonce_key) : "memory");
++  __asm__ volatile("dsb sy" ::: "memory");
++}
++
+ bool NativeAES::start(IOService *provider)
+ {
+   // CBC qualification does not provide Apple's UID/GID hardware keys.
+   // Keep the incomplete nonce-manager integration explicitly opt-in.
+   uint32_t enabled = 0;
+-  if (!PE_parse_boot_argn("kebab_software_aes", &enabled, sizeof(enabled)) || enabled != 1) return false;
++  PE_parse_boot_argn("kebab_software_aes", &enabled, sizeof(enabled));
++  uint32_t hardware=0;PE_parse_boot_argn("kebab_hardware_nonce",&hardware,sizeof(hardware));
++  if (enabled!=1 && hardware!=1) return false;
+   if (!g_crypto_funcs || !g_crypto_funcs->ccaes_cbc_encrypt || !g_crypto_funcs->ccaes_cbc_decrypt ||
+       !IOService::start(provider)) return false;
+   // The native class is only a subclass of this target's original base.
+@@ -176,6 +290,12 @@
+         native_aes_kat_status, native_aes_interface_status, native_aes_completed,
+         native_aes_unsupported_key, negative == 1);
+   if (native_aes_kat_status != 1) return false;
++  if (hardware==1) {
++    if(native_nonce_provider)return false;
++    native_nonce_provider=this;retain();
++    IOLog("KEBAB AES NONCE: provider waiting for restored hardware keyblob; unregistered\n");
++    return true;
++  }
+   setProperty("NativeAESSoftwareKeysOnly", true);
+   native_aes_registered = 1;
+   registerService();
+@@ -190,7 +310,12 @@
+ {
+   if (!input || !output || !key || !iv || !bytes || (bytes & 15) ||
+       (key->bits != 128 && key->bits != 192 && key->bits != 256)) return kIOReturnBadArgument;
+-  if (key->selector || (operation != IOAESEncrypt && operation != IOAESDecrypt)) {
++  struct SelectedKey { IOAESKeyData value; ~SelectedKey(){cc_clear(sizeof(value),&value);} } selected={*key};
++  if(key->selector==2212 && (native_nonce_selftest || __atomic_load_n(&native_nonce_state,__ATOMIC_ACQUIRE)==2)) {
++    if(key->bits!=128)return kIOReturnBadArgument;
++    selected.value.selector=0;memcpy(selected.value.bytes,native_nonce_key,16);
++  }
++  if (selected.value.selector || (operation != IOAESEncrypt && operation != IOAESDecrypt)) {
+     IOLog("KEBAB AES: rejected selector=%u bits=%u operation=%u bytes=%llu\n",
+           key->selector, key->bits, static_cast<unsigned>(operation), bytes);
+     __atomic_fetch_add(&native_aes_unsupported_key, 1, __ATOMIC_RELAXED);
+@@ -216,7 +341,7 @@
+   for (unsigned long long done = 0; done < bytes; ) {
+     size_t count = static_cast<size_t>(bytes - done > 4096 ? 4096 : bytes - done);
+     if (input->readBytes(inputOffset + done, buffer, count) != count ||
+-        cbc(buffer, buffer, count, chaining, *key, operation) ||
++        cbc(buffer, buffer, count, chaining, selected.value, operation) ||
+         output->writeBytes(outputOffset + done, buffer, count) != count) {
+       result = kIOReturnIOError;
+       break;
+--- a/bsd/dev/kebab_reboot.c
++++ b/bsd/dev/kebab_reboot.c
+@@ -12,6 +12,7 @@
+ #include "kebab_spmi_clients.h"
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ extern void kebab_usb_log_flush(void);
++extern void kebab_aes_nonce_wipe(void);
+ /*
+  * The firmware reset interface lives in KebabPlatformExpert.cpp, next to the
+  * SYSTEM_RESET backend that PEHaltRestart() already uses.  FASTBOOT2 needs
+@@ -103,6 +104,7 @@
+ 	delay(300000);
+ 	/* Early panics can precede the IOPlatformExpert instance. The SMC
+ 	 * backend needs no service lookup, allocation, scheduler or driver lock. */
++	kebab_aes_nonce_wipe();
+ 	rc = panicking ? (int32_t)kebab_psci_call(KEBAB_PSCI_SYSTEM_RESET, 0, 0) :
+ 	    PEHaltRestart(kPERestartCPU);
+ 	kr.restart_armed = false;
+@@ -126,6 +128,7 @@
+ 	/* The reset only returns on failure, so let every line reach the host. */
+ 	kebab_usb_log_flush();
+ 	delay(300000);
++	kebab_aes_nonce_wipe();
+ 	rc = kebab_psci_system_reset2(0, 0);
+ 	printf("KEBAB REBOOT: SYSTEM_RESET2 returned 0x%08x%08x, the machine did not reset\n",
+ 	    (uint32_t)(rc >> 32), (uint32_t)rc);
+--- a/bsd/kern/kebab_qsee_probe.c
++++ b/bsd/kern/kebab_qsee_probe.c
+@@ -367,6 +367,9 @@
+  * HMAC-SHA256 consistency witness. No plaintext root or ephemeral wrapped key
+  * is persisted. The keyed witness is never printed or exported to diagnostics.
+  */
++extern bool kebab_aes_nonce_prepare(const unsigned char *,unsigned);
++extern bool kebab_aes_nonce_publish(void);
++extern void kebab_aes_nonce_cancel(void);
+ static uint8_t *qsee_nonce_record;
+ static unsigned qsee_nonce_mode;
+ static bool qsee_nonce_ok;
+@@ -412,6 +415,9 @@
+ 	volatile uint8_t *wipe=witness;for(unsigned i=0;i<32;i++)wipe[i]=0;
+ 	printf("KEBAB NONCE ROOT: %s consistency witness %s; no key material logged\n",
+ 	    qsee_nonce_mode==1 ? "generated" : "restored",difference ? "FAIL" : "PASS");
++	unsigned hardware=0;PE_parse_boot_argn("kebab_hardware_nonce",&hardware,sizeof(hardware));
++	if (!difference && qsee_nonce_mode==2 && hardware==1)
++		return kebab_aes_nonce_prepare((const unsigned char *)(page+0x3800),32);
+ 	return !difference;
+ }
+ 
+@@ -733,6 +739,12 @@
+ 	qsee_nonce_record=record;qsee_nonce_mode=mode;qsee_nonce_ok=false;
+ 	kebab_qsee_probe();
+ 	bool ok=qsee_nonce_ok;
++	unsigned hardware=0;PE_parse_boot_argn("kebab_hardware_nonce",&hardware,sizeof(hardware));
++	if (mode==2 && hardware==1) {
++		if (ok) ok=kebab_aes_nonce_publish();
++		if (!ok) kebab_aes_nonce_cancel();
++	}
++
+ 	qsee_nonce_record=NULL;qsee_nonce_mode=0;qsee_nonce_ok=false;
+ 	return ok;
+ }

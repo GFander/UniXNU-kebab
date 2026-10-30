@@ -1,0 +1,139 @@
+--- /dev/null
++++ b/bsd/dev/kebab_dma_limits.h
+@@ -0,0 +1,24 @@
++/* Conservative firmware DMA aperture; no SMMU ownership or mapping change. */
++#ifndef KEBAB_DMA_LIMITS_H
++#define KEBAB_DMA_LIMITS_H
++#include <pexpert/pexpert.h>
++#include <mach/vm_param.h>
++static inline bool
++kebab_dma32_requested(void)
++{
++ uint32_t enabled = 0;
++ return PE_parse_boot_argn("kebab_dma32", &enabled, sizeof(enabled)) && enabled == 1;
++}
++static inline ppnum_t
++kebab_dma32_max_pnum(void)
++{
++ return kebab_dma32_requested() ? (ppnum_t)atop_64(UINT32_MAX) : 0;
++}
++static inline bool
++kebab_dma_fits(uint64_t address, uint64_t bytes, unsigned bits)
++{
++ if (!address || !bytes || (bits != 32 && bits != 64)) return false;
++ uint64_t maximum = bits == 32 ? UINT32_MAX : UINT64_MAX;
++ return address <= maximum && bytes - 1 <= maximum - address;
++}
++#endif
+--- a/bsd/dev/kebab_ufs.c
++++ b/bsd/dev/kebab_ufs.c
+@@ -50,6 +50,7 @@
+ #endif
+ 
+ #include "kebab_ufs.h"
++#include "kebab_dma_limits.h"
+ 
+ extern int get_preemption_level(void);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+@@ -1058,7 +1059,7 @@
+ 		printf("KEBAB UFS: this DMA layout requires 16 KiB pages\n");
+ 		return ENXIO;
+ 	}
+-	ppnum_t max_pnum = (cap & CAP_64AS) ? 0 : (ppnum_t)atop_64(UINT32_MAX);
++	ppnum_t max_pnum = (cap & CAP_64AS) && !kebab_dma32_requested() ? 0 : (ppnum_t)atop_64(UINT32_MAX);
+ 	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, max_pnum, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+ 		printf("KEBAB UFS: no contiguous DMA memory\n");
+@@ -1070,7 +1071,7 @@
+ 	}
+ 	su.dma_pa = ptoa_64(pn);
+ 	if ((su.dma & PAGE_MASK) || (su.dma_pa & PAGE_MASK) ||
+-	    (!(cap & CAP_64AS) && su.dma_pa + DMA_SIZE - 1 > UINT32_MAX)) {
++	    !kebab_dma_fits(su.dma_pa, DMA_SIZE, max_pnum ? 32 : 64)) {
+ 		return EINVAL;
+ 	}
+ 	/* kmem_alloc_contig wires contiguous pages; verify before publishing DMA. */
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -32,6 +32,7 @@
+ #include "kebab_install.h"
+ #include "kebab_vol.h"
+ #include "kebab_reboot.h"
++#include "kebab_dma_limits.h"
+ 
+ /*
+  * The installer and the volume writer share one 64 KiB bulk buffer and one
+@@ -2324,13 +2325,14 @@
+ 	kebab_spmi_init();
+ 	/* wired pages need a real tag: VM_KERN_MEMORY_NONE trips an assertion */
+ 	if (kmem_alloc_contig(kernel_map, &ud.dma, UD_SIZE, PAGE_MASK,
+-	    (vm_offset_t)-1, 0, KMA_DATA | KMA_ZERO | KMA_NOFAIL,
++	    kebab_dma32_requested() ? (ppnum_t)atop_64(UINT32_MAX) : (ppnum_t)-1,
++	    0, KMA_DATA | KMA_ZERO | (kebab_dma32_requested() ? 0 : KMA_NOFAIL),
+ 	    VM_KERN_MEMORY_BSD) != KERN_SUCCESS) {
+ 		printf("KEBAB USB: no contiguous DMA memory\n");
+ 		return;
+ 	}
+ 	ud.dma_pa = (uint64_t)ml_vtophys(ud.dma);
+-	if (ud.dma_pa == 0) {
++	if (!kebab_dma_fits(ud.dma_pa, UD_SIZE, kebab_dma32_requested() ? 32 : 64)) {
+ 		printf("KEBAB USB: DMA page has no physical backing\n");
+ 		return;
+ 	}
+--- a/bsd/kern/kebab_qsee_probe.c
++++ b/bsd/kern/kebab_qsee_probe.c
+@@ -7,6 +7,7 @@
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <kern/kalloc.h>
++#include "../dev/kebab_dma_limits.h"
+ #include <libkern/crypto/crypto_internal.h>
+ #include <kern/clock.h>
+ #include <kern/debug.h>
+@@ -100,11 +101,12 @@
+ 	if (available<0) return false;
+ 	if (available!=1) return true;
+ 	vm_offset_t page=0;
+-	if (kmem_alloc_contig(kernel_map,&page,0x8000,PAGE_MASK,0,0,
++	if (kmem_alloc_contig(kernel_map,&page,0x8000,PAGE_MASK,kebab_dma32_max_pnum(),0,
+ 	    KMA_DATA|KMA_ZERO|KMA_PERMANENT,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS) return false;
+ 	ppnum_t pn=pmap_find_phys(kernel_pmap,(addr64_t)page);
+ 	uint64_t pa=ptoa_64(pn);
+-	if (!pn || (page & PAGE_MASK) || (pa & PAGE_MASK) ||
++	if (!pn || !kebab_dma_fits(pa, 0x8000, kebab_dma32_requested() ? 32 : 64) ||
++	    (page & PAGE_MASK) || (pa & PAGE_MASK) ||
+ 	    ptoa_64(pmap_find_phys(kernel_pmap,(addr64_t)(page+PAGE_SIZE)))!=pa+PAGE_SIZE) return false;
+ 	qsee_cache(page,true); qsee_cache(page+PAGE_SIZE,true);
+ 	if (bridged) {
+@@ -235,11 +237,12 @@
+ 	}
+ 	if (qsee_available(0x32000201)!=1 || qsee_available(0x32000203)!=1) return false;
+ 	vm_offset_t page=0;
+-	if (kmem_alloc_contig(kernel_map,&page,0x8000,PAGE_MASK,0,0,
++	if (kmem_alloc_contig(kernel_map,&page,0x8000,PAGE_MASK,kebab_dma32_max_pnum(),0,
+ 	    KMA_DATA|KMA_ZERO|KMA_PERMANENT,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS) return false;
+ 	ppnum_t pn=pmap_find_phys(kernel_pmap,(addr64_t)page);
+ 	uint64_t pa=ptoa_64(pn);
+-	if (!pn || (page&PAGE_MASK) || (pa&PAGE_MASK) || pmap_find_phys(kernel_pmap,(addr64_t)page+PAGE_SIZE)!=pn+1) return false;
++	if (!pn || !kebab_dma_fits(pa, 0x8000, kebab_dma32_requested() ? 32 : 64) ||
++	    (page&PAGE_MASK) || (pa&PAGE_MASK) || pmap_find_phys(kernel_pmap,(addr64_t)page+PAGE_SIZE)!=pn+1) return false;
+ 	if (bridged) {
+ 		struct qsee_result b=qsee_call(0x42000c1e,4,pa|6,pa|6,0x8000|0x200,3);
+ 		printf("KEBAB QSEE TIME: bridge status=%d result=0x%llx\n",b.status,b.value);
+@@ -662,13 +665,14 @@
+ 	if (PAGE_SIZE!=0x4000 || qsee_available(0x02000601)!=1 || qsee_available(0x32000103)!=1) return;
+ 
+ 	vm_offset_t page=0;
+-	if (kmem_alloc_contig(kernel_map,&page,PAGE_SIZE,PAGE_MASK,0,0,
++	if (kmem_alloc_contig(kernel_map,&page,PAGE_SIZE,PAGE_MASK,kebab_dma32_max_pnum(),0,
+ 	    KMA_DATA|KMA_ZERO|KMA_PERMANENT,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS) {
+ 		printf("KEBAB QSEE: no private wired page\n"); return;
+ 	}
+ 	ppnum_t pn=pmap_find_phys(kernel_pmap,(addr64_t)page);
+ 	uint64_t pa=ptoa_64(pn);
+-	if (!pn || (page & PAGE_MASK) || (pa & PAGE_MASK)) {
++	if (!pn || !kebab_dma_fits(pa, PAGE_SIZE, kebab_dma32_requested() ? 32 : 64) ||
++	    (page & PAGE_MASK) || (pa & PAGE_MASK)) {
+ 		printf("KEBAB QSEE: invalid private page mapping\n"); return;
+ 	}
+ 	uint64_t handle=0;

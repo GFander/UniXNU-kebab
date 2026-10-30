@@ -1,0 +1,110 @@
+--- a/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
++++ b/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
+@@ -108,7 +108,8 @@
+ 	};
+ 	bool fFileStorage, fFileStopping, fFileWorkerActive;
+ 	thread_t fFileThread;
+-	unsigned int fFilePending;
++	unsigned int fFilePending, fFileHighWater;
++	UInt64 fFileAccepted, fFileCompleted, fFileFailed;
+ 	FileRequest *fFileHead, *fFileTail;
+ 	static void fileWorker(void *argument, wait_result_t result);
+ 	IOReturn enqueueFileRead(IOMemoryDescriptor *, UInt64, UInt64, IOStorageCompletion *);
+@@ -199,7 +200,7 @@
+ 	OSBoolean *file = properties ? OSDynamicCast(OSBoolean, properties->getObject("KebabCryptex")) : NULL;
+ 	fFileStorage = file && file->isTrue();
+ 	fFileStopping = false; fFileWorkerActive = false; fFileThread = THREAD_NULL;
+-	fFilePending = 0; fFileHead = fFileTail = NULL;
++	fFilePending = fFileHighWater = 0; fFileAccepted = fFileCompleted = fFileFailed = 0; fFileHead = fFileTail = NULL;
+ 	fBlockSize = fFileStorage ? 4096 : kebab_ufs_block_size();
+ 	bytes = fFileStorage ? kebab_cryptex_media_bytes() : kebab_ufs_partition_bytes();
+ 	fWritable = !fFileStorage && kebab_ufs_writable();
+@@ -512,7 +513,10 @@
+ 
+ /* File I/O may sleep and recurse into the backing APFS/UFS stack. Queue it
+  * outside the requesting IOStorage call stack; one worker owns the bounce
+- * buffer. Outstanding allocations are bounded to 32 requests. */
++ * buffer. Each accepted request owns one descriptor, not another data buffer.
++ * IOStorageFamily completes an immediate Busy as a permanent read failure,
++ * not a retry. Queue valid requests subject to real allocation failure; never
++ * sleep for admission while the caller may own an upper storage-family gate. */
+ IOReturn
+ KebabBlockStorageDevice::enqueueFileRead(IOMemoryDescriptor *buffer, UInt64 offset,
+     UInt64 length, IOStorageCompletion *completion)
+@@ -524,15 +528,18 @@
+ 	request->offset = offset; request->length = length; request->completion = *completion;
+ 	IOLockLock(fLock);
+ 	IOReturn status = !fOnline || fFileStopping ? kIOReturnNoDevice :
+-	    fFilePending >= 32 ? kIOReturnBusy : kIOReturnSuccess;
++	    fFilePending == ~0U ? kIOReturnNoResources : kIOReturnSuccess;
++ bool crossedOldLimit=false;
+ 	if (status == kIOReturnSuccess) {
+-		buffer->retain(); fFilePending++;
++		buffer->retain(); fFilePending++;fFileAccepted++;
++  if(fFilePending>fFileHighWater){fFileHighWater=fFilePending;crossedOldLimit=fFileHighWater==33;}
+ 		if (fFileTail) fFileTail->next = request; else fFileHead = request;
+ 		fFileTail = request;
+ 		IOLockWakeup(fLock, &fFileHead, false);
+ 	}
+ 	IOLockUnlock(fLock);
+ 	if (status != kIOReturnSuccess) IOFree(request, sizeof(*request));
++ if(crossedOldLimit)IOLog("KEBAB CRYPTEX QUEUE: pending crossed old32 limit; request accepted, no Busy retry assumption\n");
+ 	return status;
+ }
+ 
+@@ -568,6 +575,14 @@
+ 		/* Complete exactly once without either bridge or backing FS locks. */
+ 		request->completion.action(request->completion.target, request->completion.parameter, status, done);
+ 		request->buffer->release(); IOFree(request, sizeof(*request));
++  IOLockLock(self->fLock);
++  UInt64 completed=++self->fFileCompleted;
++  if(status!=kIOReturnSuccess)self->fFileFailed++;
++  UInt64 accepted=self->fFileAccepted,failed=self->fFileFailed;
++  unsigned pending=self->fFilePending,high=self->fFileHighWater;
++  IOLockUnlock(self->fLock);
++  if((completed>=128 && !(completed&(completed-1))) || (status!=kIOReturnSuccess && failed<=8))
++   IOLog("KEBAB CRYPTEX QUEUE: accepted=%llu completed=%llu failed=%llu pending=%u high=%u last=0x%x bytes=%llu\n",(unsigned long long)accepted,(unsigned long long)completed,(unsigned long long)failed,pending,high,status,(unsigned long long)done);
+ 	}
+ 	IOLockLock(self->fLock);
+ 	self->fFileWorkerActive = false;
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1850,6 +1850,28 @@
+ 	}
+ }
+ 
++#if defined(KEBAB)
++/* First real failure per selected daemon, before corpse resource exhaustion.
++ * Ordinary signals, exit reasons, critical policy and crash handling remain. */
++static void
++kebab_runtime_exit_evidence(proc_t p,int rv,struct uthread *ut)
++{
++ static const char *const names[]={"tccd","mediaserverd","locationd","SpringBoard","notifyd","securityd","configd","lockdownd","powerd","ReportCrash","navd","backboardd","fairplayd.H2"};
++ static uint32_t reported;
++ if(!WTERMSIG(rv) && !PROC_HAS_EXITREASON(p))return;
++ for(unsigned i=0;i<sizeof(names)/sizeof(*names);i++)if(!strcmp(p->p_comm,names[i])){
++  uint32_t bit=1u<<i;if(__atomic_fetch_or(&reported,bit,__ATOMIC_RELAXED)&bit)return;
++  bool own=p==current_proc();
++  printf("KEBAB RUNTIME EXIT: name=%s pid=%d signal=%d status=%d cs=0x%x own=%u exception=%d code=0x%llx subcode=0x%llx reason=%u/0x%llx desc=%.192s\n",p->p_comm,proc_getpid(p),WTERMSIG(rv),WEXITSTATUS(rv),proc_getcsflags(p),own,own?(int)ut->uu_exception:0,own?(unsigned long long)ut->uu_code:0,own?(unsigned long long)ut->uu_subcode:0,p->p_exit_reason?p->p_exit_reason->osr_namespace:0,p->p_exit_reason?(unsigned long long)p->p_exit_reason->osr_code:0,p->p_exit_reason&&exit_reason_get_string_desc(p->p_exit_reason)?exit_reason_get_string_desc(p->p_exit_reason):"none");
++  if(own){uintptr_t frames[12]={};struct backtrace_user_info info=BTUINFO_INIT;unsigned count=backtrace_user(frames,12,NULL,&info);
++   printf("KEBAB RUNTIME FRAMES: name=%s pid=%d count=%u error=%d\n",p->p_comm,proc_getpid(p),count,info.btui_error);
++   for(unsigned j=0;j<count;j++)printf("KEBAB RUNTIME PC: name=%s pid=%d depth=%u pc=0x%llx\n",p->p_comm,proc_getpid(p),j,(unsigned long long)frames[j]);
++  }
++  return;
++ }
++}
++#endif
++
+ void
+ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
+ {
+@@ -1866,6 +1888,9 @@
+ 	if (p->p_crash_behavior != 0 || p == initproc) {
+ 		proc_handle_critical_exit(p, rv);
+ 	}
++#if defined(KEBAB)
++ kebab_runtime_exit_evidence(p,rv,ut);
++#endif
+ 
+ 	/*
+ 	 * Generate a corefile/crashlog if:

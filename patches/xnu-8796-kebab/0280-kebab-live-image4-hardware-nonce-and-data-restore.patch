@@ -1,0 +1,143 @@
+--- a/bsd/kern/kebab_data_setup_policy.h
++++ b/bsd/kern/kebab_data_setup_policy.h
+@@ -26,4 +26,12 @@
+  return EPERM;
+ #endif
+ }
++/* Normal encrypted-Data userland additionally needs the original Image4
++ * nonce accelerator. Maintenance/formatter/fsck profiles stay unchanged. */
++static int
++kebab_image4_live_nonce_profile(void)
++{
++ unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
++ return tool==12 && kdf_policy()==0;
++}
+ #endif
+--- a/bsd/kern/kebab_data_root_file_impl.h
++++ b/bsd/kern/kebab_data_root_file_impl.h
+@@ -3,6 +3,7 @@
+ #include "kebab_data_root_policy.h"
+ #define KDR_PATH "/private/preboot/.hios-data-root-v1"
+ extern bool kebab_qsee_data_root_record(uint8_t *, unsigned, unsigned);
++extern bool kebab_qsee_live_roots_record(uint8_t *, uint8_t *, unsigned);
+ 
+ static int
+ kdr_metadata(vnode_t file, mount_t expected, vfs_context_t context)
+@@ -62,6 +63,7 @@
+  if (error) goto done;
+  SHA256_CTX hash; SHA256_Init(&hash); SHA256_Update(&hash, readback, 4096); SHA256_Final(before, &hash);
+  nonce_measured = true;
++ if (mode==2 && kebab_image4_live_nonce_profile()) memcpy(record,readback,4096);
+  if (mode == 1) {
+   /* Refuse an existing record before generating any independent hardware key. */
+   error = vnode_open(KDR_PATH, O_NOFOLLOW | FREAD, 0, 0, &file, context);
+@@ -92,7 +94,11 @@
+  }
+  error = kdr_read(KDR_PATH, expected, readback, context);
+  if (!error && mode == 1 && memcmp(record, readback, 4096)) error = EAUTH;
+- if (!error && mode == 2 && !kebab_qsee_data_root_record(readback, 4096, 2)) error = EAUTH;
++ if (!error && mode == 2) {
++  bool restored=kebab_image4_live_nonce_profile() ?
++      kebab_qsee_live_roots_record(readback,record,4096) : kebab_qsee_data_root_record(readback,4096,2);
++  if (!restored) error=EAUTH;
++ }
+ done:
+  if (nonce_measured) {
+   int preservation = kdr_read(KEBAB_NONCE_PATH, expected, readback, context);
+--- a/bsd/kern/kebab_qsee_probe.c
++++ b/bsd/kern/kebab_qsee_probe.c
+@@ -377,6 +377,7 @@
+ static uint8_t *qsee_nonce_record;
+ static unsigned qsee_nonce_mode;
+ static bool qsee_nonce_ok;
++static bool qsee_live_roots; /* Only the strict normal-userland entry below. */
+ static const uint8_t qsee_nonce_magic[16]="HIOS-NONCE-ROOT";
+ 
+ static uint32_t
+@@ -420,7 +421,7 @@
+ 	printf("KEBAB NONCE ROOT: %s consistency witness %s; no key material logged\n",
+ 	    qsee_nonce_mode==1 ? "generated" : "restored",difference ? "FAIL" : "PASS");
+ 	unsigned hardware=0;PE_parse_boot_argn("kebab_hardware_nonce",&hardware,sizeof(hardware));
+-	if (!difference && qsee_nonce_mode==2 && hardware==1)
++	if (!difference && qsee_nonce_mode==2 && (hardware==1 || qsee_live_roots))
+ 		return kebab_aes_nonce_prepare((const unsigned char *)(page+0x3800),32);
+ 	return !difference;
+ }
+@@ -588,6 +589,23 @@
+ }
+ 
+ 
++/* Restore independent existing records in the same one-shot QSEE session.
++ * A true transport result alone is NOT authentication. Never proceed to Data
++ * after an uncertain transport or failed nonce witness/preparation. */
++static bool
++qsee_storage_roots(vm_offset_t page, uint64_t pa, uint32_t app)
++{
++ if (!qsee_live_roots) return qsee_storage_probe(page,pa,app);
++ uint8_t *data=qsee_data_record,*nonce=qsee_nonce_record;
++ qsee_data_record=NULL;qsee_data_mode=0;
++ bool safe=qsee_storage_probe(page,pa,app);
++ qsee_data_record=data;qsee_data_mode=2;
++ qsee_nonce_record=NULL;qsee_nonce_mode=0;
++ if (safe && qsee_nonce_ok) safe=qsee_storage_probe(page,pa,app);
++ qsee_nonce_record=nonce;qsee_nonce_mode=2;
++ return safe;
++}
++
+ /* Returns false if firmware may still own the shared page. */
+ static bool
+ qsee_keymaster_version(vm_offset_t page, uint64_t pa, uint32_t app)
+@@ -618,7 +636,7 @@
+ 		printf("KEBAB QSEE: keymaster GET_VERSION validated\n");
+ 		/* Pinned board firmware only; do not guess another TA command ABI. */
+ 		if (reply[1]==4 && reply[2]==1 && reply[3]==4 && reply[4]==558)
+-			return qsee_storage_probe(page,pa,app);
++			return qsee_storage_roots(page,pa,app);
+ 	}
+ 	return true;
+ }
+@@ -780,4 +798,25 @@
+ 	qsee_data_record=NULL;qsee_data_mode=0;qsee_data_ok=false;
+ 	return ok;
+ }
++/* Read-only restore of both already provisioned roots; no generation route.
++ * Publish nonce AES only after BOTH witnesses and shared-page cleanup pass.
++ * Data callbacks still use their existing separate commit/publish lifecycle. */
++bool
++kebab_qsee_live_roots_record(uint8_t *data, uint8_t *nonce, unsigned size)
++{
++ if (!data || !nonce || data==nonce || size!=4096 || !kebab_image4_live_nonce_profile() ||
++     qsee_data_record || qsee_nonce_record || qsee_live_roots ||
++     !qsee_data_layout(data,size) || !qsee_nonce_layout(nonce,size) ||
++     panic_active() || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()) return false;
++ qsee_data_record=data;qsee_data_mode=2;qsee_data_ok=false;
++ qsee_nonce_record=nonce;qsee_nonce_mode=2;qsee_nonce_ok=false;qsee_live_roots=true;
++ kebab_qsee_probe();
++ bool ok=qsee_nonce_ok && qsee_data_ok;
++ if (ok) ok=kebab_aes_nonce_publish();
++ if (!ok) { kebab_aes_nonce_cancel(); kebab_file_keys_cancel(); }
++ qsee_data_record=NULL;qsee_data_mode=0;qsee_data_ok=false;
++ qsee_nonce_record=NULL;qsee_nonce_mode=0;qsee_nonce_ok=false;qsee_live_roots=false;
++ printf("KEBAB LIVE ROOTS: existing nonce+Data hardware restore %s; generation disabled\n",ok?"PASS":"FAIL");
++ return ok;
++}
+ #endif /* KEBAB */
+--- a/iokit/Kernel/arm/NativeAES.cpp
++++ b/iokit/Kernel/arm/NativeAES.cpp
+@@ -12,6 +12,8 @@
+ #include <corecrypto/cc.h>
+ #include <kern/task.h>
+ #include <pexpert/pexpert.h>
++#include <sys/errno.h>
++#include "../../../bsd/kern/kebab_data_setup_policy.h"
+ 
+ extern "C" {
+ volatile uint32_t native_aes_kat_status = 0;
+@@ -270,6 +272,7 @@
+   uint32_t enabled = 0;
+   PE_parse_boot_argn("kebab_software_aes", &enabled, sizeof(enabled));
+   uint32_t hardware=0;PE_parse_boot_argn("kebab_hardware_nonce",&hardware,sizeof(hardware));
++  if (kebab_image4_live_nonce_profile()) hardware=1;
+   if (enabled!=1 && hardware!=1) return false;
+   if (!g_crypto_funcs || !g_crypto_funcs->ccaes_cbc_encrypt || !g_crypto_funcs->ccaes_cbc_decrypt ||
+       !IOService::start(provider)) return false;

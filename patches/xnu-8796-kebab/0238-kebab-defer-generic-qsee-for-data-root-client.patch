@@ -1,0 +1,15 @@
+--- a/bsd/kern/kebab_qsee_probe.c
++++ b/bsd/kern/kebab_qsee_probe.c
+@@ -661,6 +661,12 @@
+ 	int enabled=0;
+ 	PE_parse_boot_argn("kebab_qsee_probe",&enabled,sizeof(enabled));
+ 	if (enabled!=1) return;
++	unsigned data_root=0;
++	PE_parse_boot_argn("kebab_data_root",&data_root,sizeof(data_root));
++	if (data_root && !qsee_data_record) {
++		printf("KEBAB DATA ROOT: generic QSEE probe deferred until fixed-file client is ready\n");
++		return;
++	}
+ 	if (panic_active() || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()) {
+ 		printf("KEBAB QSEE: refused unsafe context\n"); return;
+ 	}

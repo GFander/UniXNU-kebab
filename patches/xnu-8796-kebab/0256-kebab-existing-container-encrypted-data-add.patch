@@ -1,0 +1,107 @@
+--- a/bsd/kern/kebab_apfs_probe.h
++++ b/bsd/kern/kebab_apfs_probe.h
+@@ -12,6 +12,7 @@
+ #endif
+ int kebab_lookup_apfs_preboot(struct kebab_volume_identity *, struct kebab_volume_identity *);
+ int kebab_lookup_apfs_data(struct kebab_volume_identity *, struct kebab_volume_identity *);
++int kebab_lookup_apfs_empty_data_target(struct kebab_volume_identity *, struct kebab_volume_identity *, struct kebab_volume_identity *);
+ void kebab_data_setup_finish(int);
+ #ifdef __cplusplus
+ }
+--- a/bsd/kern/kebab_apfs_tool_impl.h
++++ b/bsd/kern/kebab_apfs_tool_impl.h
+@@ -61,7 +61,7 @@
+ kat_format_arguments(user_addr_t base,user_addr_t *cursor,user64_addr_t argv[12])
+ {
+  int error=kdf_policy();if(error)return error;
+- static const char *const arguments[]={"-E","-W","-R","d","-e","-v","Data","-w",KDF_DEVICE};
++ static const char *const arguments[]={"-A","-E","-W","-R","d","-e","-v","Data","-w",KDF_DEVICE};
+  if(!cursor||*cursor<base||base>UINT64_MAX-4096)return EINVAL;
+  for(unsigned i=0;i<sizeof(arguments)/sizeof(*arguments);++i){
+   size_t bytes=strlen(arguments[i])+1;
+--- a/bsd/kern/kebab_data_target_impl.h
++++ b/bsd/kern/kebab_data_target_impl.h
+@@ -1,16 +1,15 @@
+-/* Formatter target is the one original empty Data volume, never the container.
+- * After recreation changes its UUID this precondition intentionally stops reuse. */
+-#define KDF_DEVICE "/dev/disk1s2"
++/* Add exactly one encrypted Data volume only to the pinned container with
++ * only original System and Preboot. Native lookup rejects any existing Data. */
++#define KDF_DEVICE "/dev/disk1"
+ static int
+ kdf_target_check(void)
+ {
+- struct kebab_volume_identity system,preboot,other,data;
+- int error=kebab_lookup_apfs_preboot(&system,&preboot);
+- if(!error)error=kebab_lookup_apfs_data(&other,&data);
++ struct kebab_volume_identity system,preboot,data;
++ int error=kebab_lookup_apfs_empty_data_target(&system,&preboot,&data);
+  if(error)return error;
+- if(memcmp(&system,&other,sizeof(system))||data.backing_id!=system.backing_id||
+-     data.backing_id!=preboot.backing_id||data.major_number!=1||data.minor_number!=3||
+-     strcmp(data.bsd_name,"disk1s2")||!strcmp(data.bsd_name,system.bsd_name)||
++ if(data.backing_id!=system.backing_id||
++     data.backing_id!=preboot.backing_id||data.major_number!=1||data.minor_number!=1||
++     strcmp(data.bsd_name,"disk1")||!strcmp(data.bsd_name,system.bsd_name)||
+      !strcmp(data.bsd_name,preboot.bsd_name)||!rootvnode||
+      !(vfs_flags(vnode_mount(rootvnode))&MNT_RDONLY))return EAUTH;
+  vnode_t device=vfs_devvp(vnode_mount(rootvnode));
+@@ -20,7 +19,7 @@
+  if(error)return error;
+  if(vnode_vtype(node)!=VBLK||vnode_specrdev(node)!=makedev(data.major_number,data.minor_number))error=EAUTH;
+  vnode_put(node);
+- if(!error)printf("KEBAB DATA FORMAT: target UUID4C56203C-CFE8-4DFF-BF8E-BB48D852C936 %s dev=%u/%u backing=%llx; System/Preboot distinct, System RO\n",
++ if(!error)printf("KEBAB DATA FORMAT: add-Data container UUID0E25F331-6279-458A-9CFE-F39598DA17AA %s dev=%u/%u backing=%llx; exactly System/Preboot, no Data; System RO\n",
+      KDF_DEVICE,data.major_number,data.minor_number,(unsigned long long)data.backing_id);
+  return error;
+ }
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7154,7 +7154,7 @@
+   int tool_error=kat_prepare(p,(user_addr_t)scratch_addr);
+   if(tool_error)panic("KEBAB APFS TOOL: profile/hash/console rejected %d",tool_error);
+   if(tool_mode==1)printf("KEBAB APFS TOOL: exec original newfs_apfs -h; all storage RO, no device argument\n");
+-  else printf("KEBAB DATA FORMAT: exec signed original newfs_apfs -E -W -R d -e -v Data -w /dev/disk1s2; fixed verified Data only\n");
++  else printf("KEBAB DATA FORMAT: exec signed original newfs_apfs -A -E -W -R d -e -v Data -w /dev/disk1; verified container with System/Preboot only\n");
+   tool_error=load_init_program_at_path(p,(user_addr_t)scratch_addr,KAT_PATH);
+   if(!tool_error)return;
+   panic("KEBAB APFS TOOL: original formatter exec failed %d",tool_error);
+--- a/iokit/Kernel/arm/KebabVolumeLookup.cpp
++++ b/iokit/Kernel/arm/KebabVolumeLookup.cpp
+@@ -95,4 +95,36 @@
+      (system->major_number==data->major_number&&system->minor_number==data->minor_number)))error=EINVAL;
+  return error;
+ }
++/* After failed original newfs removed old Data, allow only the one pinned
++ * container with precisely the surviving System and Preboot volumes. */
++extern "C" int
++kebab_lookup_apfs_empty_data_target(struct kebab_volume_identity *system,
++    struct kebab_volume_identity *preboot,struct kebab_volume_identity *container)
++{
++ if(!system||!preboot||!container)return EINVAL;
++ int error=kebab_lookup_apfs_preboot(system,preboot);if(error)return error;
++ OSDictionary *matching=IOService::serviceMatching("IOMedia");if(!matching)return ENOMEM;
++ OSIterator *iterator=IOService::getMatchingServices(matching);matching->release();if(!iterator)return ENOENT;
++ unsigned volumes=0;bool bad=false;
++ while(IOService *media=OSDynamicCast(IOService,iterator->getNextObject())){
++  if(kebab_backing_id(media)!=system->backing_id)continue;
++  OSString *name=OSDynamicCast(OSString,media->getProperty("BSD Name"));
++  OSString *uuid=OSDynamicCast(OSString,media->getProperty("UUID"));
++  OSString *content=OSDynamicCast(OSString,media->getProperty("Content"));
++  const char *text=name?name->getCStringNoCopy():"-",*identity=uuid?uuid->getCStringNoCopy():"-";
++  IOLog("KEBAB DATA INVENTORY: %s UUID=%s Content=%s active=%u backing=%llx\n",text,identity,
++      content?content->getCStringNoCopy():"-",!media->isInactive(),(unsigned long long)system->backing_id);
++  if(strncmp(text,"disk1s",6))continue;
++  ++volumes;
++  bool known=(!strcmp(text,system->bsd_name)&&!strcmp(identity,"DADD93F8-DBBF-4B17-A1DF-0F11E64172F7"))||
++      (!strcmp(text,preboot->bsd_name)&&!strcmp(identity,"EF45F98E-9F6C-43DB-B7C6-F418CA77429B"));
++  if(!known||media->isInactive())bad=true;
++ }
++ if(!iterator->isValid())bad=true;iterator->release();
++ if(bad||volumes!=2)return EAUTH;
++ error=kebab_lookup_uuid("0E25F331-6279-458A-9CFE-F39598DA17AA",container);
++ if(!error&&(strcmp(container->bsd_name,"disk1")||container->backing_id!=system->backing_id||
++     container->backing_id!=preboot->backing_id||container->major_number!=1||container->minor_number!=1))error=EAUTH;
++ return error;
++}
+ #endif

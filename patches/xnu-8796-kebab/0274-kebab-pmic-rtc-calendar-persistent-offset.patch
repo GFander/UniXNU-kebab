@@ -1,0 +1,308 @@
+--- a/bsd/dev/kebab_cryptex_media.c
++++ b/bsd/dev/kebab_cryptex_media.c
+@@ -346,6 +346,7 @@
+ #include "kebab_owner_os_impl.h"
+ #include "kebab_data_template_impl.h"
+ #include "kebab_systembag_init_impl.h"
++#include "kebab_rtc_offset_impl.h"
+ 
+ int
+ kebab_cryptex_tool_verify(void)
+--- a/bsd/dev/kebab_rtc_offset_impl.h
++++ b/bsd/dev/kebab_rtc_offset_impl.h
+@@ -0,0 +1,126 @@
++/* Fixed root-owned class-D record on the already qualified encrypted Data.
++ * Two independent 64-byte SHA256 records tolerate a torn replacement. SHA is
++ * a corruption check, not a MAC; authority is normal root-only VFS access.
++ * This does not claim a rollback-resistant or Apple secure clock. */
++#include <kern/clock.h>
++#define KRC_PATH "/private/var/db/hios-rtc-offset-v1"
++struct krc_record {uint8_t magic[8];uint64_t generation;int64_t offset;uint64_t counter;uint8_t digest[32];};
++_Static_assert(sizeof(struct krc_record)==64,"RTC offset record");
++static LCK_MTX_DECLARE(krc_lock,&kcm_group);
++static bool krc_writable;
++extern int kebab_rtc_offset_snapshot(int64_t *,uint32_t *);
++extern int kebab_rtc_offset_apply(int64_t,uint32_t);
++int kebab_rtc_offset_restore(void);
++int kebab_rtc_offset_enable_store(void);
++int kebab_rtc_offset_store(int64_t);
++
++static bool
++krc_valid(const struct krc_record *record)
++{
++ uint8_t digest[32];SHA256_CTX h;SHA256_Init(&h);SHA256_Update(&h,record,32);SHA256_Final(digest,&h);
++ if(memcmp(record->magic,"HRTC01\0\0",8)||!record->generation||record->counter>UINT32_MAX||
++     record->offset< -4294967295LL||record->offset>4102444800LL)return false;
++ int64_t wall=(int64_t)record->counter+record->offset;
++ return wall>=1577836800LL&&wall<4102444800LL&&!memcmp(digest,record->digest,32);
++}
++
++static int
++krc_metadata(vnode_t file)
++{
++ mount_t data=vnode_mount(file);
++ if(!vnode_isreg(file)||data==kcm_system||!(vfs_flags(data)&MNT_CPROTECT)||
++     strcmp(vfs_statfs(data)->f_fstypename,"apfs")||kcm_device(data)!=makedev(1,3))return EAUTH;
++ struct vnode_attr a;VATTR_INIT(&a);VATTR_WANTED(&a,va_uid);VATTR_WANTED(&a,va_gid);VATTR_WANTED(&a,va_mode);
++ VATTR_WANTED(&a,va_flags);VATTR_WANTED(&a,va_nlink);VATTR_WANTED(&a,va_data_size);VATTR_WANTED(&a,va_dataprotect_class);
++ int error=vnode_getattr(file,&a,vfs_context_current());if(error)return error;
++ if(!VATTR_IS_SUPPORTED(&a,va_uid)||!VATTR_IS_SUPPORTED(&a,va_gid)||!VATTR_IS_SUPPORTED(&a,va_mode)||
++     !VATTR_IS_SUPPORTED(&a,va_flags)||!VATTR_IS_SUPPORTED(&a,va_nlink)||!VATTR_IS_SUPPORTED(&a,va_data_size)||
++     !VATTR_IS_SUPPORTED(&a,va_dataprotect_class)||a.va_uid||a.va_gid||(a.va_mode&07777)!=0600||
++     a.va_flags||a.va_nlink!=1||a.va_data_size!=128||a.va_dataprotect_class!=4)return EAUTH;
++ return 0;
++}
++
++static int
++krc_open(vnode_t *file,bool write)
++{
++ vnode_t point=NULLVP;int error=vnode_lookup("/private/var",VNODE_LOOKUP_NOFOLLOW,&point,vfs_context_current());if(error)return error;
++ mount_t data=vnode_mount(point);vnode_put(point);
++ error=kdi_lookup(KRC_PATH,file,data,false);if(error)return error;
++ error=krc_metadata(*file);
++ if(!error&&write&&(vfs_flags(data)&MNT_RDONLY))error=EROFS;
++ if(!error)error=VNOP_OPEN(*file,FREAD|(write?FWRITE:0),vfs_context_current());
++ if(error){vnode_put(*file);*file=NULLVP;}return error;
++}
++
++static int
++krc_read(vnode_t file,struct krc_record records[2],unsigned *latest)
++{
++ int residual=0;int error=vn_rdwr(UIO_READ,file,(caddr_t)records,128,0,UIO_SYSSPACE,IO_NOCACHE,vfs_context_ucred(vfs_context_current()),&residual,NULL);
++ if(error||residual)return error?error:EIO;
++ bool a=krc_valid(&records[0]),b=krc_valid(&records[1]);
++ if(!a&&!b)return EAUTH;
++ if(a&&b&&records[0].generation==records[1].generation&&memcmp(&records[0],&records[1],64))return EAUTH;
++ *latest=b&&(!a||records[1].generation>records[0].generation)?1:0;return 0;
++}
++
++static void
++krc_make(struct krc_record *record,uint64_t generation,int64_t offset,uint32_t counter)
++{
++ bzero(record,sizeof(*record));memcpy(record->magic,"HRTC01\0\0",8);record->generation=generation;record->offset=offset;record->counter=counter;
++ SHA256_CTX h;SHA256_Init(&h);SHA256_Update(&h,record,32);SHA256_Final(record->digest,&h);
++}
++
++int
++kebab_rtc_offset_restore(void)
++{
++ lck_mtx_lock(&krc_lock);vnode_t file=NULLVP;struct krc_record records[2];unsigned latest=0;
++ int error=krc_open(&file,false);
++ if(error==ENOENT){printf("KEBAB RTC: no saved Data offset; initial host calibration retained, first provisioning pending\n");error=0;}
++ else if(!error){error=krc_read(file,records,&latest);if(!error)error=kebab_rtc_offset_apply(records[latest].offset,(uint32_t)records[latest].counter);}
++ if(file){int closed=VNOP_CLOSE(file,FREAD,vfs_context_current());vnode_put(file);if(!error)error=closed;}
++ bzero(records,sizeof(records));lck_mtx_unlock(&krc_lock);return error;
++}
++
++int
++kebab_rtc_offset_store(int64_t offset)
++{
++ lck_mtx_lock(&krc_lock);if(!krc_writable){lck_mtx_unlock(&krc_lock);return EROFS;}
++ int64_t active=0;uint32_t counter=0;int error=kebab_rtc_offset_snapshot(&active,&counter);
++ if(!error&&active!=offset)error=EAGAIN;
++ vnode_t file=NULLVP;struct krc_record records[2];unsigned latest=0;
++ if(!error)error=krc_open(&file,true);
++ if(!error)error=krc_read(file,records,&latest);
++ bool changed=!error&&records[latest].offset!=offset;
++ if(changed){
++  if(records[latest].generation==UINT64_MAX)error=EOVERFLOW;
++  if(!error){unsigned target=latest^1;krc_make(&records[target],records[latest].generation+1,offset,counter);int residual=0;
++   error=vn_rdwr(UIO_WRITE,file,(caddr_t)&records[target],64,target*64,UIO_SYSSPACE,IO_SYNC|IO_NOCACHE,vfs_context_ucred(vfs_context_current()),&residual,NULL);
++   if(!error&&residual)error=EIO;if(!error)error=VNOP_FSYNC(file,MNT_WAIT,vfs_context_current());
++   if(!error)error=kebab_ufs_sync();
++  }
++ }
++ if(file){int closed=VNOP_CLOSE(file,FREAD|FWRITE,vfs_context_current());vnode_put(file);if(!error)error=closed;}
++ if(!error&&changed)printf("KEBAB RTC: changed offset durable counter=%u offset=%lld\n",counter,offset);
++ bzero(records,sizeof(records));lck_mtx_unlock(&krc_lock);return error;
++}
++
++int
++kebab_rtc_offset_enable_store(void)
++{
++ lck_mtx_lock(&krc_lock);vnode_t file=NULLVP;int error=krc_open(&file,true);bool created=false;
++ if(error==ENOENT){
++  error=kdi_new(KRC_PATH,&file);created=!error;
++  int64_t offset=0;uint32_t counter=0;struct krc_record records[2]={};
++  if(!error)error=kebab_rtc_offset_snapshot(&offset,&counter);
++  if(!error){krc_make(&records[0],1,offset,counter);krc_make(&records[1],2,offset,counter);int residual=0;
++   if(kcm_device(vnode_mount(file))!=makedev(1,3)||(vfs_flags(vnode_mount(file))&MNT_RDONLY))error=EAUTH;
++   if(!error)error=vn_rdwr(UIO_WRITE,file,(caddr_t)records,128,0,UIO_SYSSPACE,IO_SYNC|IO_NOCACHE,vfs_context_ucred(vfs_context_current()),&residual,NULL);
++   if(!error&&residual)error=EIO;if(!error)error=VNOP_FSYNC(file,MNT_WAIT,vfs_context_current());
++   if(!error)error=VFS_SYNC(vnode_mount(file),MNT_WAIT,vfs_context_current());if(!error)error=kebab_ufs_sync();
++  }
++  bzero(records,sizeof(records));
++ }
++ if(file){if(!error)error=krc_metadata(file);int closed=created?vnode_close(file,FREAD|FWRITE,vfs_context_current()):VNOP_CLOSE(file,FREAD|FWRITE,vfs_context_current());if(!created)vnode_put(file);if(!error)error=closed;}
++ if(!error)krc_writable=true;lck_mtx_unlock(&krc_lock);
++ printf("KEBAB RTC: encrypted Data offset %s error=%d; 128B classD root0600, PMIC counter untouched\n",created?"durably initialized":"reused",error);return error;
++}
+--- a/bsd/kern/kebab_data_files_impl.h
++++ b/bsd/kern/kebab_data_files_impl.h
+@@ -131,6 +131,7 @@
+  static const uint8_t uuid[16]={0x61,0x70,0x66,0x73,0x75,0x75,0x69,0x64,0,0x40,0x76,0x6f,0x6c,0x75,0x6d,1};
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));bool refresh=tool==10;bool writable=tool==11||tool==12;
+  int error=kebab_volume_factory_activate(uuid);if(error)return error;
++ if(tool==7||tool==12){extern int kebab_rtc_offset_restore(void);error=kebab_rtc_offset_restore();if(error)return error;}
+  printf("KEBAB DATA CLASSES: authenticated mounted owner; persistent factory C/D activated; no passcode/SEP unlock claim\n");
+  vnode_t preboot=NULLVP;error=vnode_lookup("/private/preboot",VNODE_LOOKUP_NOFOLLOW,&preboot,vfs_context_current());if(error)return error;
+  mount_t saved=vnode_mount(preboot);
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7151,8 +7151,8 @@
+  extern int kebab_apfs_probe_prepare(proc_t, user_addr_t);
+  int kebab_apfs_probe_error = kebab_apfs_probe_prepare(p, (user_addr_t)scratch_addr);
+  if (kebab_apfs_probe_error) panic("kebab APFS probe failed: %d", kebab_apfs_probe_error);
+- extern void kebab_rtc_probe(void);
+- kebab_rtc_probe();
++ extern void kebab_rtc_initialize(void);
++ kebab_rtc_initialize();
+  int owner_dsc_prepare_error = kebab_dsc_after_mount();
+  if (owner_dsc_prepare_error) panic("kebab owner DSC prepare failed: %d", owner_dsc_prepare_error);
+  if(tool_mode>=2){
+@@ -7167,6 +7167,9 @@
+   if(tool_mode==12){
+    extern int kebab_aks_userclient_start(void);
+    extern int kebab_systembag_prepare(proc_t,user_addr_t);
++   extern int kebab_rtc_offset_enable_store(void);
++   checked=kebab_rtc_offset_enable_store();
++   if(checked)panic("KEBAB RTC: durable offset init failed %d",checked);
+    checked=kebab_systembag_prepare(p,(user_addr_t)scratch_addr);
+    if(checked)panic("KEBAB SYSTEM BAG: original disk envelope init/auth failed %d",checked);
+    checked=kebab_aks_userclient_start();
+--- a/iokit/Kernel/arm/kebab_rtc_platform_impl.h
++++ b/iokit/Kernel/arm/kebab_rtc_platform_impl.h
+@@ -0,0 +1,93 @@
++/* PM8150: a read-only RTC counter, with a Data-persisted calendar offset.
++ * Register contract: mainline rtc-pm8xxx.c and pm8150.dtsi (pm8941 layout).
++ * Offset model: upstream ArmDTPlatform/QcomPmicRtc. This is not secure time. */
++static IOLock *krtc_lock;
++static int64_t krtc_offset;
++static bool krtc_initialized;
++extern "C" int kebab_rtc_offset_store(int64_t);
++
++extern "C" int
++kebab_rtc_counter(uint32_t *seconds)
++{
++ if(!seconds)return EINVAL;
++ uint32_t apid=0,raw=0;uint8_t ctrl=0,bytes[4]={},low=0;
++ int error=ENXIO;
++ kebab_spmi_bus_lock();
++ if(kebab_spmi_bus_ready()&&kebab_spmi_reader(0x060,&apid)==0){
++  error=kebab_spmi_obs_read_ex(apid,0,0x6046,kebab_spmi_bus_next_attempt(),false,true,&ctrl);
++  if(!error&&!(ctrl&0x80))error=ENXIO;
++  for(unsigned retry=0;!error&&retry<3;retry++){
++   for(unsigned i=0;i<4&&!error;i++)error=kebab_spmi_obs_read_ex(apid,0,0x6048+i,kebab_spmi_bus_next_attempt(),false,true,&bytes[i]);
++   if(!error)error=kebab_spmi_obs_read_ex(apid,0,0x6048,kebab_spmi_bus_next_attempt(),false,true,&low);
++   if(error||low>=bytes[0])break;
++   if(retry==2)error=EAGAIN;
++  }
++  for(unsigned i=0;i<4;i++)raw|=(uint32_t)bytes[i]<<(8*i);
++ }
++ kebab_spmi_bus_unlock();
++ if(error)return EIO;
++ *seconds=raw;return 0;
++}
++
++void
++KebabPlatformExpert::getUTCTimeOfDay(clock_sec_t *seconds,clock_nsec_t *ns)
++{
++ *seconds=0;*ns=0;
++ if(!krtc_initialized)return;
++ uint32_t counter=0;if(kebab_rtc_counter(&counter))return;
++ IOLockLock(krtc_lock);int64_t wall=(int64_t)counter+krtc_offset;IOLockUnlock(krtc_lock);
++ if(wall>=1577836800LL&&wall<4102444800LL)*seconds=(clock_sec_t)wall;
++}
++
++void
++KebabPlatformExpert::setUTCTimeOfDay(clock_sec_t seconds,clock_nsec_t)
++{
++ if(!krtc_initialized||seconds<1577836800ULL||seconds>=4102444800ULL)return;
++ uint32_t counter=0;if(kebab_rtc_counter(&counter))return;
++ int64_t next=(int64_t)seconds-counter;
++ IOLockLock(krtc_lock);int64_t delta=next-krtc_offset;
++ bool changed=delta>1||delta< -1;if(changed)krtc_offset=next;IOLockUnlock(krtc_lock);
++ /* XNU explicitly permits PESetUTCTimeOfDay to block. Do not hold our state
++  * lock across VFS or modify the read-only PMIC counter. */
++ if(changed){int result=kebab_rtc_offset_store(next);
++  IOLog("KEBAB RTC: calendar set counter=%u offset=%lld persist=%d (no PMIC write)\n",counter,next,result);
++ }
++}
++
++extern "C" int
++kebab_rtc_offset_snapshot(int64_t *offset,uint32_t *counter)
++{
++ if(!krtc_initialized||!offset||!counter)return ENXIO;
++ int error=kebab_rtc_counter(counter);if(error)return error;
++ IOLockLock(krtc_lock);*offset=krtc_offset;IOLockUnlock(krtc_lock);return 0;
++}
++
++extern "C" int
++kebab_rtc_offset_apply(int64_t offset,uint32_t saved)
++{
++ uint32_t counter=0;if(!krtc_initialized||kebab_rtc_counter(&counter))return ENXIO;
++ /* A stopped/reset/wrapped counter needs explicit recalibration. Never turn
++  * a saved delta into a silently wrong date after loss of PMIC power. */
++ int64_t wall=(int64_t)counter+offset;
++ if(counter<saved||wall<1577836800LL||wall>=4102444800LL)return ESTALE;
++ IOLockLock(krtc_lock);krtc_offset=offset;IOLockUnlock(krtc_lock);
++ clock_set_calendar_microtime((clock_sec_t)wall,0);
++ IOLog("KEBAB RTC: restored PM8150 offset=%lld saved-counter=%u counter=%u wall=%lld\n",offset,saved,counter,wall);
++ return 0;
++}
++
++extern "C" void
++kebab_rtc_initialize(void)
++{
++ kebab_spmi_init();
++ uint32_t counter=0;int error=kebab_rtc_counter(&counter);
++ uint64_t epoch=0;PE_parse_boot_argn("kebab_qsee_utc",&epoch,sizeof(epoch));
++ if(error||epoch<1577836800ULL||epoch>=4102444800ULL)panic("KEBAB RTC: PM8150/host calibration unavailable %d",error);
++ krtc_lock=IOLockAlloc();if(!krtc_lock)panic("KEBAB RTC: lock allocation failed");
++ clock_sec_t uptime=0;clock_usec_t us=0;absolutetime_to_microtime(mach_absolute_time(),&uptime,&us);
++ /* Existing fresh owner UTC is an initial development calibration, not a
++  * hardware UTC source. A saved Data offset supersedes it before any RW. */
++ krtc_offset=(int64_t)(epoch+uptime)-counter;krtc_initialized=true;
++ clock_set_calendar_microtime((clock_sec_t)(epoch+uptime),0);
++ IOLog("KEBAB RTC: initial owner-host calibration counter=%u offset=%lld wall=%llu; read-only PM8150, persisted offset takes precedence\n",counter,krtc_offset,epoch+uptime);
++}
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -101,6 +101,8 @@
+ 	bool getTargetName(char *name, int maxLength) APPLE_KEXT_OVERRIDE;
+ 	bool getProductName(char *name, int maxLength) APPLE_KEXT_OVERRIDE;
+ 	int haltRestart(unsigned int type) APPLE_KEXT_OVERRIDE;
++	void getUTCTimeOfDay(clock_sec_t *,clock_nsec_t *) override;
++	void setUTCTimeOfDay(clock_sec_t,clock_nsec_t) override;
+ };
+ 
+ OSDefineMetaClassAndStructors(KebabPlatformExpert, IODTPlatformExpert);
+@@ -306,26 +308,6 @@
+ }
+ 
+ #if defined(KEBAB)
+-/* Read-only PM8150 RTC observation: mainline pm8150.dtsi identifies SID0,
+- * qcom,pm8941-rtc at 0x6000. Never enable or adjust the PMIC counter here. */
+-extern "C" void kebab_rtc_probe(void)
+-{
+- kebab_spmi_init();
+- uint32_t apid=0,raw=0; uint8_t ctrl=0,bytes[4]={},low=0;
+- int error=-1;
+- kebab_spmi_bus_lock();
+- if(kebab_spmi_bus_ready() && kebab_spmi_reader(0x060,&apid)==0) {
+-  error=kebab_spmi_obs_read_ex(apid,0,0x6046,kebab_spmi_bus_next_attempt(),false,false,&ctrl);
+-  for(unsigned retry=0;!error && retry<3;retry++) {
+-   for(unsigned i=0;i<4 && !error;i++)error=kebab_spmi_obs_read_ex(apid,0,0x6048+i,kebab_spmi_bus_next_attempt(),false,false,&bytes[i]);
+-   if(!error)error=kebab_spmi_obs_read_ex(apid,0,0x6048,kebab_spmi_bus_next_attempt(),false,false,&low);
+-   if(error || low>=bytes[0])break;
+-   if(retry==2)error=-2;
+-  }
+-  for(unsigned i=0;i<4;i++)raw|=(uint32_t)bytes[i]<<(8*i);
+- }
+- kebab_spmi_bus_unlock();
+- clock_sec_t secs=0;clock_usec_t usecs=0;clock_get_calendar_microtime(&secs,&usecs);
+- IOLog("KEBAB RTC PROBE: PM8150 sid0 ppID060 apid=%u ctrl=0x%02x seconds=%u rc=%d calendar=%llu.%06u; read-only/no offset applied\n",apid,ctrl,raw,error,(unsigned long long)secs,usecs);
+-}
++#include <sys/errno.h>
++#include "kebab_rtc_platform_impl.h"
+ #endif

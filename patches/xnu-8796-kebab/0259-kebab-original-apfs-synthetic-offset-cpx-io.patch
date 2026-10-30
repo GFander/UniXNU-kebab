@@ -1,0 +1,20 @@
+--- a/iokit/Kernel/arm/kebab_block_crypto_impl.h
++++ b/iokit/Kernel/arm/kebab_block_crypto_impl.h
+@@ -1,5 +1,7 @@
+ /* Opt-in raw32 or authenticated HiOS opaque64 AES128-XTS. Foreign wrapped
+- * blobs, composite/synthetic modes and raw encrypted requests remain refused. */
++ * blobs, composite keys, missing offset-IV and raw encrypted requests remain refused.
++ * Synthetic offset-IV means APFS already supplied cpoff; preserve it exactly
++ * as required by XNU vfs_bio.c, then account for IOStorage split adjustment. */
+ extern "C" int kebab_vek_cpx_handle_open(const uint8_t *,uint8_t *);
+ struct KebabBlockCrypto {
+  uint8_t key[32];
+@@ -25,7 +27,7 @@
+  bool wrapped=cpx_is_sep_wrapped_key(cpx);
+  unsigned key_bytes=wrapped?64u:32u;
+  if(!enabled || cpx_is_composite_key(cpx) ||
+-     cpx_synthetic_offset_for_iv(cpx) || !cpx_use_offset_for_iv(cpx) ||
++     !cpx_use_offset_for_iv(cpx) ||
+      cpx_key_len(cpx)!=key_bytes || cpx_max_key_len(cpx)<key_bytes || !cpx_key(cpx))
+   return kIOReturnUnsupported;
+  UInt64 base=bufattr_cpoff(attr);

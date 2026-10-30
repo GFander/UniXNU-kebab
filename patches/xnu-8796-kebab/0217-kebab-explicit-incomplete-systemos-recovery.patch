@@ -1,0 +1,70 @@
+--- a/bsd/dev/kebab_install.c
++++ b/bsd/dev/kebab_install.c
+@@ -710,6 +710,39 @@
+ 	return 0;
+ }
+ 
++/* The vfs syscall helper accepts a fixed kernel path with UIO_SYSSPACE.
++ * Recovery is separately opted in, on the same pinned maintenance mount. */
++extern int unlink1(vfs_context_t, vnode_t, user_addr_t, enum uio_seg, int);
++static int
++ki_cryptex_discard_partial(uint64_t observed_size, vfs_context_t context)
++{
++ uint32_t enabled = 0;
++ if (!PE_parse_boot_argn("kebab_cryptex_retry_partial", &enabled, sizeof(enabled)) ||
++     enabled != 1 || !ki_cryptex || !ki_cryptex_mount_root) return EEXIST;
++ vnode_t file = NULLVP;
++ int error = vnode_lookup(KEBAB_CRYPTEX_STAGE_PATH, VNODE_LOOKUP_NOFOLLOW, &file, context);
++ if (error) return error;
++ error = ki_cryptex_check_vnode(file);
++ struct vnode_attr attributes;
++ VATTR_INIT(&attributes);
++ VATTR_WANTED(&attributes, va_data_size);
++ VATTR_WANTED(&attributes, va_uid);
++ VATTR_WANTED(&attributes, va_gid);
++ VATTR_WANTED(&attributes, va_mode);
++ VATTR_WANTED(&attributes, va_nlink);
++ if (!error) error = vnode_getattr(file, &attributes, context);
++ if (!error && (!vnode_isreg(file) || (vfs_flags(vnode_mount(file)) & MNT_RDONLY) ||
++     !VATTR_IS_SUPPORTED(&attributes, va_data_size) || !VATTR_IS_SUPPORTED(&attributes, va_uid) ||
++     !VATTR_IS_SUPPORTED(&attributes, va_gid) || !VATTR_IS_SUPPORTED(&attributes, va_mode) ||
++     !VATTR_IS_SUPPORTED(&attributes, va_nlink) || attributes.va_data_size != observed_size ||
++     !kebab_cryptex_partial_contract(attributes.va_data_size, attributes.va_mode,
++         attributes.va_uid, attributes.va_gid, attributes.va_nlink))) error = EINVAL;
++ if (!error) error = unlink1(context, NULLVP, CAST_USER_ADDR_T(KEBAB_CRYPTEX_STAGE_PATH), UIO_SYSSPACE, 0);
++ vnode_put(file);
++ if (!error) printf("INST RECOVER discarded incomplete staging slot bytes=%llu\n", observed_size);
++ return error;
++}
++
+ /* --------------------------------------------------------- durable output */
+ 
+ /* Normal reset must also flush a separately mounted writable APFS volume.
+@@ -1448,6 +1481,11 @@
+ 			ki.state = KI_S_PAYLOAD;
+ 			return;
+ 		}
++	}
++	if (ki_cryptex && !ki.dry && error == 0 && have < KEBAB_CRYPTEX_STAGE_BYTES) {
++		int recovery = ki_cryptex_discard_partial(have, ctx);
++		if (!recovery) { error = ENOENT;e->old_size = 0; }
++		else { ki_abort("Cryptex incomplete slot recovery refused", recovery);return; }
+ 	}
+ 	if (ki_cryptex && !ki.dry && error != ENOENT) {
+ 		ki_abort("Cryptex staging slot already exists or cannot be inspected", error ? error : EEXIST);return;
+--- a/bsd/dev/kebab_cryptex_stage.h
++++ b/bsd/dev/kebab_cryptex_stage.h
+@@ -14,4 +14,13 @@
+  return !strcmp(path, KEBAB_CRYPTEX_STAGE_PATH) && size == KEBAB_CRYPTEX_STAGE_BYTES &&
+      wire == size && mode == 0600 && flags == 0 && !memcmp(sha, kebab_cryptex_stage_sha256, 32);
+ }
++/* Only the owner-created, incomplete fixed scratch file may be discarded.
++ * A complete image, hard link, foreign owner or unexpected mode is refused. */
++static bool
++kebab_cryptex_partial_contract(uint64_t bytes, unsigned mode, unsigned uid,
++    unsigned gid, uint64_t links)
++{
++ return bytes < KEBAB_CRYPTEX_STAGE_BYTES && (mode & 07777) == 0600 &&
++     uid == 0 && gid == 0 && links == 1;
++}
+ #endif

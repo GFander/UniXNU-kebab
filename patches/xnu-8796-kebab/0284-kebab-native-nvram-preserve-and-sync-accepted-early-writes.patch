@@ -1,0 +1,97 @@
+--- a/bsd/dev/kebab_nvram_store_impl.h
++++ b/bsd/dev/kebab_nvram_store_impl.h
+@@ -7,8 +7,11 @@
+ static LCK_MTX_DECLARE(knv_lock,&kcm_group);
+ static uint8_t knv_banks[2][KNV_BANK];
+ static bool knv_ready;
++static int knv_last_error;
++static unsigned knv_durable_writes;
+ extern int kebab_nvram_publish(const uint8_t *,unsigned);
+ int kebab_nvram_prepare(void);
++int kebab_nvram_last_error(void);
+ int kebab_nvram_read(unsigned,unsigned,void *,unsigned);
+ int kebab_nvram_write(unsigned,const void *,unsigned);
+ 
+@@ -45,8 +48,9 @@
+  if(bank>=2||!out||offset>KNV_BANK||size>KNV_BANK-offset)return EINVAL;
+  lck_mtx_lock(&knv_lock);int error=knv_ready?0:ENXIO;if(!error)memcpy(out,knv_banks[bank]+offset,size);lck_mtx_unlock(&knv_lock);return error;
+ }
++int kebab_nvram_last_error(void){lck_mtx_lock(&knv_lock);int error=knv_last_error?knv_last_error:knv_durable_writes?0:EIO;lck_mtx_unlock(&knv_lock);return error;}
+ int kebab_nvram_write(unsigned bank,const void *in,unsigned size){
+- if(bank>=2||!in||size!=KNV_BANK||!knv_valid(in))return EINVAL;
++ if(bank>=2||!in||size!=KNV_BANK||!knv_valid(in)){lck_mtx_lock(&knv_lock);knv_last_error=EINVAL;lck_mtx_unlock(&knv_lock);return EINVAL;}
+  lck_mtx_lock(&knv_lock);vnode_t file=NULLVP;int error=knv_ready?0:ENXIO;
+  if(!error)error=knv_open(&file,true);
+  if(!error){int residual=0;error=vn_rdwr(UIO_WRITE,file,(caddr_t)in,KNV_BANK,bank*KNV_BANK,UIO_SYSSPACE,IO_SYNC|IO_NOCACHE,vfs_context_ucred(vfs_context_current()),&residual,NULL);
+@@ -54,6 +58,7 @@
+   if(!error)memcpy(knv_banks[bank],in,KNV_BANK);
+  }
+  if(file){int closed=VNOP_CLOSE(file,FREAD|FWRITE,vfs_context_current());vnode_put(file);if(!error)error=closed;}
++ if(error)knv_last_error=error;else knv_durable_writes++;
+  lck_mtx_unlock(&knv_lock);printf("KEBAB NVRAM: durable bank=%u generation=%u write=%d; no variables logged\n",bank,knv_word((const uint8_t*)in+20),error);return error;
+ }
+ int kebab_nvram_prepare(void){
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -114,6 +114,7 @@
+  * banks. No Apple hardware NVRAM, firmware variable or rollback claim. */
+ extern "C" int kebab_nvram_read(unsigned,unsigned,void *,unsigned);
+ extern "C" int kebab_nvram_write(unsigned,const void *,unsigned);
++extern "C" int kebab_nvram_last_error(void);
+ class KebabNVRAM : public IONVRAMController {
+  OSDeclareDefaultStructors(KebabNVRAM)
+  unsigned bank=0;
+@@ -144,14 +145,18 @@
+  bool ok=chosen->setProperty("nvram-bank-size",&size,sizeof(size))&&chosen->setProperty("nvram-bank-count",&count,sizeof(count))&&
+    chosen->setProperty("nvram-current-bank",&current,sizeof(current))&&chosen->setProperty("nvram-proxy-data",const_cast<uint8_t *>(image),size);
+  if(ok)ok=native->kebabAdoptProxy(image,size,current);
+- chosen->release();options->release();
+- if(!ok)return EAUTH;
++ chosen->release();
++ if(!ok){options->release();return EAUTH;}
+  platform->publishNVRAM();
+  KebabNVRAM *controller=new KebabNVRAM;
+- if(!controller||!controller->init()||!controller->attach(platform)||!controller->start(platform)){OSSafeReleaseNULL(controller);return ENOMEM;}
++ if(!controller||!controller->init()||!controller->attach(platform)||!controller->start(platform)){OSSafeReleaseNULL(controller);options->release();return ENOMEM;}
+  controller->setProperty("HiOSEncryptedDataBacked",true);
+  controller->setProperty("HiOSHardwareRollbackProtection",false);
+  controller->setProperty("HiOSDurableBankBytes",8192,32);
++ // Bind/sync accepted early writes BEFORE the platform publishes IONVRAM.
++ native->registerNVRAMController(controller);native->sync();
++ int stored=kebab_nvram_last_error();options->release();
++ if(stored){IOLog("KEBAB NVRAM: early writes failed durability=%d; resource withheld\n",stored);return stored;}
+  controller->setName("KebabNVRAM");controller->registerService();published=true;
+  IOLog("KEBAB NVRAM: native IODTNVRAM/controller published after durable Data banks; bank=%u\n",current);
+  return 0;
+--- a/iokit/Kernel/IONVRAMCHRPHandler.cpp
++++ b/iokit/Kernel/IONVRAMCHRPHandler.cpp
+@@ -114,11 +114,27 @@
+  bool kebabLoadProxy(const uint8_t *image,unsigned size,unsigned current) {
+   bool properties=getNVRAMProperties();
+   IOLog("KEBAB NVRAM: adopt guard controller=%u generation=%u vars=%u size=%u current=%u properties=%u native-size=%u count=%u bank=%u\n",_nvramController!=nullptr,_generation,_varDict->getCount(),size,current,properties,_bankSize,_bankCount,_currentBank);
+-  if(_nvramController||_generation||_varDict->getCount()||size!=8192||current>=2||!properties||_bankSize!=size||_bankCount!=2||_currentBank!=current)return false;
++  if(_nvramController||_generation||size!=8192||current>=2||!properties||_bankSize!=size||_bankCount!=2||_currentBank!=current)return false;
++  // Preserve writes already accepted by native NVRAM while the board's
++  // persistent backend was unavailable. Replay in normal variable machinery
++  // after loading disk state; never discard or just clear the busy reference.
++  OSSharedPtr<OSDictionary> pending=OSDictionary::withDictionary(_varDict.get());
++  OSSharedPtr<OSCollectionIterator> iter=pending?OSCollectionIterator::withCollection(pending.get()):nullptr;
++  if(!pending||!iter)return false;
+   IOReturn decoded=unserializeImage(image,size);IOLog("KEBAB NVRAM: adopt decode=0x%x\n",decoded);
+   if(decoded!=kIOReturnSuccess)return false;
+   _commonUsed=0;_systemUsed=0;_newData=false;_reload=false;
+-  return unserializeVariables()==kIOReturnSuccess;
++  if(unserializeVariables()!=kIOReturnSuccess)return false;
++  const OSSymbol *key;
++  unsigned replayed=0;
++  while((key=OSDynamicCast(OSSymbol,iter->getNextObject()))){
++   const char *name;uuid_t guid;parseVariableName(key->getCStringNoCopy(),&guid,&name);
++   IOLog("KEBAB NVRAM: replay accepted early variable name=%s\n",name);
++   if(setVariable(guid,name,pending->getObject(key))!=kIOReturnSuccess)return false;
++   replayed++;
++  }
++  IOLog("KEBAB NVRAM: early variable writes preserved=%u; native serialization pending\n",replayed);
++  return true;
+  }
+ #endif
+ 	virtual IOReturn unserializeVariables(void) APPLE_KEXT_OVERRIDE;

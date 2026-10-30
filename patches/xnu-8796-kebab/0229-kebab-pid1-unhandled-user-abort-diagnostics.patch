@@ -1,0 +1,32 @@
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1503,6 +1503,29 @@
+ 		exc |= EXC_PTRAUTH_BIT;
+ 	}
+ #endif /* __has_feature(ptrauth_calls) */
++
++#if defined(KEBAB)
++ /* Diagnostic only, after normal VM recovery failed. No user-memory read,
++  * exception suppression, register change, or signal-policy modification. */
++ if (pid_from_task(current_task()) == 1) {
++  uint32_t enabled = 0;
++  PE_parse_boot_argn("kebab_user_fault", &enabled, sizeof(enabled));
++  if (enabled == 1) {
++   static uint32_t reported;
++   if (__atomic_fetch_add(&reported, 1, __ATOMIC_RELAXED) < 8) {
++    kprintf("KEBAB USER ABORT: pc=0x%llx lr=0x%llx sp=0x%llx far=0x%llx esr=0x%x vm=0x%llx\n",
++        (unsigned long long)get_saved_state_pc(state),
++        (unsigned long long)get_saved_state_lr(state),
++        (unsigned long long)get_saved_state_sp(state),
++        (unsigned long long)fault_addr, esr, (unsigned long long)codes[0]);
++    for (unsigned i = 0; i < 8; i += 2)
++     kprintf("KEBAB USER REGS: x%u=0x%llx x%u=0x%llx\n", i,
++         (unsigned long long)get_saved_state_reg(state, i), i + 1,
++         (unsigned long long)get_saved_state_reg(state, i + 1));
++   }
++  }
++ }
++#endif
+ 	exception_triage(exc, codes, numcodes);
+ 	__builtin_unreachable();
+ }

@@ -1,0 +1,52 @@
+--- a/config/MASTER.arm64.kebab
++++ b/config/MASTER.arm64.kebab
+@@ -30,7 +30,7 @@
+ #  BSD_RELEASE =    [ BSD_BASE ]
+ #  BSD_DEV =        [ BSD_BASE config_vnguard ]
+ #  BSD_DEBUG =      [ BSD_BASE config_vnguard ]
+-#  FILESYS_BASE =   [ devfs kebab_hfs fdesc fifo fs_compression config_protect config_mnt_rootsnap config_rosv_startup config_mount_vm config_mount_prebootrecovery config_basesystemroot config_fse quota namedstreams config_imgsrc_access config_triggers config_ext_resolver config_searchfs config_volfs config_appledouble nullfs config_mnt_suid config_firmlinks config_dataless_files config_union_mounts config_file_leases ]
++#  FILESYS_BASE =   [ devfs fdesc fifo fs_compression config_protect config_mnt_rootsnap config_rosv_startup config_mount_vm config_mount_prebootrecovery config_basesystemroot config_fse quota namedstreams config_imgsrc_access config_triggers config_ext_resolver config_searchfs config_volfs config_appledouble nullfs config_mnt_suid config_firmlinks config_dataless_files config_union_mounts config_file_leases ]
+ #  FILESYS_RELEASE= [ FILESYS_BASE ]
+ #  FILESYS_DEV =    [ FILESYS_BASE config_iocount_trace ]
+ #  FILESYS_DEBUG =  [ FILESYS_BASE config_iocount_trace ]
+@@ -112,4 +112,4 @@
+ 
+ options   CONFIG_RESLIDE_SHARED_CACHE		# <reslide_shared_cache>
+ options   CONFIG_KERNEL_TBI		# <kernel_tbi>
+-options		KEBAB_HFS	# Built-in Apple OSS HFS (KEBAB)	# <kebab_hfs>
++# HFS+ is retained in source for legacy builds; the APFS profile excludes it.
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -740,13 +740,8 @@
+ 	bsd_init_kprintf("calling vfsinit\n");
+ 	vfsinit();
+ 
+-#if defined(KEBAB)
+-	/*
+-	 * Built-in HFS must be registered before vfs_mountroot() walks vfsconf.
+-	 * Guarded on KEBAB alone: if the filesystem ever stops being compiled in,
+-	 * that must fail at link time rather than silently leave no root
+-	 * filesystem registered.
+-	 */
++#if defined(KEBAB) && defined(KEBAB_HFS)
++	/* Legacy builds register HFS+ before vfs_mountroot(). */
+ 	extern void kebab_hfs_register(void);
+ 	kebab_hfs_register();
+ #endif
+@@ -942,10 +937,15 @@
+ 		 * Retrying in a tight loop only buries the first attempt, so stop.
+ 		 */
+ 		{
++#if defined(KEBAB_HFS)
+ 			extern int kebab_hfs_fsadd_result;
++			const int hfs_registration = kebab_hfs_fsadd_result;
++#else
++			const int hfs_registration = -1;
++#endif
+ 			extern char kebab_mountroot_trace[192];
+ 			panic("KEBAB: cannot mount root, errno = %d, hfs_reg=%d, tried[%s]",
+-			    err, kebab_hfs_fsadd_result, kebab_mountroot_trace);
++			    err, hfs_registration, kebab_mountroot_trace);
+ 		}
+ #endif
+ 		rootdevice[0] = '\0';

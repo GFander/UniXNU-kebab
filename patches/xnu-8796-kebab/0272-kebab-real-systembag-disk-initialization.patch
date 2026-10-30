@@ -1,0 +1,123 @@
+--- a/bsd/dev/kebab_cryptex_media.c
++++ b/bsd/dev/kebab_cryptex_media.c
+@@ -345,6 +345,7 @@
+ 
+ #include "kebab_owner_os_impl.h"
+ #include "kebab_data_template_impl.h"
++#include "kebab_systembag_init_impl.h"
+ 
+ int
+ kebab_cryptex_tool_verify(void)
+--- /dev/null
++++ b/bsd/dev/kebab_systembag_init_impl.h
+@@ -0,0 +1,90 @@
++/* Provision the real already-authenticated backend bank into the original
++ * keybagd no-effaceable-storage plist envelope. No key generation or raw IO. */
++#include "kebab_systembag_plist_contract.h"
++#define KSI_PATH "/private/var/keybags/systembag.kb"
++#define KSI_STAGE "/private/var/keybags/systembag.kb.writing"
++int kebab_systembag_prepare(proc_t,user_addr_t);
++
++static int
++ksi_metadata(vnode_t file,mount_t expected,bool directory)
++{
++ if(vnode_mount(file)!=expected||vnode_vtype(file)!=(directory?VDIR:VREG))return EAUTH;
++ struct vnode_attr a;VATTR_INIT(&a);VATTR_WANTED(&a,va_uid);VATTR_WANTED(&a,va_gid);
++ VATTR_WANTED(&a,va_mode);VATTR_WANTED(&a,va_flags);VATTR_WANTED(&a,va_nlink);
++ VATTR_WANTED(&a,va_data_size);VATTR_WANTED(&a,va_dataprotect_class);
++ int error=vnode_getattr(file,&a,vfs_context_current());if(error)return error;
++ if(!VATTR_IS_SUPPORTED(&a,va_uid)||!VATTR_IS_SUPPORTED(&a,va_gid)||!VATTR_IS_SUPPORTED(&a,va_mode)||
++     !VATTR_IS_SUPPORTED(&a,va_flags)||a.va_uid||a.va_gid||a.va_flags||
++     (a.va_mode&07777)!=(directory?0700:0600))return EAUTH;
++ if(!directory&&(!VATTR_IS_SUPPORTED(&a,va_nlink)||!VATTR_IS_SUPPORTED(&a,va_data_size)||
++     !VATTR_IS_SUPPORTED(&a,va_dataprotect_class)||a.va_nlink!=1||a.va_data_size!=KSI_BYTES||a.va_dataprotect_class!=4))return EAUTH;
++ return 0;
++}
++
++static int
++ksi_read(const char *path,mount_t data,const uint8_t *expected,uint8_t *back)
++{
++ vnode_t file=NULLVP;int error=kdi_lookup(path,&file,data,false);if(error)return error;
++ error=ksi_metadata(file,data,false);
++ if(!error){
++  error=VNOP_OPEN(file,FREAD,vfs_context_current());
++  if(!error){int residual=0;error=vn_rdwr(UIO_READ,file,(caddr_t)back,KSI_BYTES,0,UIO_SYSSPACE,IO_NOCACHE,vfs_context_ucred(vfs_context_current()),&residual,NULL);
++   if(!error&&(residual||memcmp(back,expected,KSI_BYTES)))error=EAUTH;
++   int closed=VNOP_CLOSE(file,FREAD,vfs_context_current());if(!error)error=closed;
++  }
++ }
++ vnode_put(file);return error;
++}
++
++int
++kebab_systembag_prepare(proc_t p,user_addr_t scratch)
++{
++ unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
++ if(tool!=12||kdf_policy()||!p||proc_getpid(p)!=1||!scratch||koos_identity()||
++     !kebab_file_keys_available()||!kebab_device_classbag_available())return EPERM;
++ struct kebab_volume_identity system,identity;int error=kebab_lookup_apfs_live_data(&system,&identity);if(error)return error;
++ vnode_t point=NULLVP;error=vnode_lookup("/private/var",VNODE_LOOKUP_NOFOLLOW,&point,vfs_context_current());if(error)return error;
++ mount_t data=vnode_mount(point);vnode_t device=vfs_devvp(data);dev_t actual=device?vnode_specrdev(device):NODEV;
++ if(device)vnode_put(device);vnode_put(point);
++ if(data==kcm_system||(vfs_flags(data)&MNT_RDONLY)||!(vfs_flags(data)&MNT_CPROTECT)||
++     actual!=makedev(identity.major_number,identity.minor_number)||strcmp(vfs_statfs(data)->f_fstypename,"apfs"))return EAUTH;
++ struct Work{uint8_t record[4096],expected[KSI_BYTES],back[KSI_BYTES];};
++ struct Work *w=kalloc_data(sizeof(*w),Z_WAITOK|Z_ZERO);if(!w)return ENOMEM;
++ error=kebab_device_classbag_export(w->record,4096);
++ if(!error){memcpy(w->expected,ksi_prefix,sizeof(ksi_prefix));memcpy(w->expected+KSI_RECORD_OFFSET,w->record,4096);memcpy(w->expected+KSI_RECORD_OFFSET+4096,ksi_suffix,sizeof(ksi_suffix));}
++ bool created=false,wrote=false,missing=false;
++ if(!error){
++  error=kdi_lookup("/private/var/keybags",&point,data,false);
++  if(error==ENOENT){
++   error=kdi_path(scratch,"/private/var/keybags",0x100);
++   if(!error){struct mkdir_args a={.path=scratch+0x100,.mode=0700};int32_t result=0;error=mkdir(p,&a,&result);}
++   if(!error)error=kdi_lookup("/private/var/keybags",&point,data,false);
++  }
++  if(!error){error=ksi_metadata(point,data,true);vnode_put(point);point=NULLVP;}
++ }
++ if(!error){error=ksi_read(KSI_PATH,data,w->expected,w->back);missing=error==ENOENT;}
++ if(missing){
++  vnode_t file=NULLVP;error=kdi_new(KSI_STAGE,&file);
++  if(!error){
++   wrote=true;int residual=0;
++   if(vnode_mount(file)!=data)error=EAUTH;
++   if(!error)error=vn_rdwr(UIO_WRITE,file,(caddr_t)w->expected,KSI_BYTES,0,UIO_SYSSPACE,IO_SYNC|IO_NOCACHE,vfs_context_ucred(vfs_context_current()),&residual,NULL);
++   if(!error&&residual)error=EIO;
++   if(!error)error=VNOP_FSYNC(file,MNT_WAIT,vfs_context_current());
++   int closed=vnode_close(file,FREAD|FWRITE,vfs_context_current());if(!error)error=closed;
++  }
++  if(!error)error=ksi_read(KSI_STAGE,data,w->expected,w->back);
++  if(!error){
++   error=kdi_path(scratch,KSI_STAGE,0x100);if(!error)error=kdi_path(scratch,KSI_PATH,0x600);
++   if(!error){struct rename_args a={.from=scratch+0x100,.to=scratch+0x600};int32_t result=0;error=rename(p,&a,&result);}
++   if(!error)created=true;
++  }
++ }
++ if(wrote){int synced=VFS_SYNC(data,MNT_WAIT,vfs_context_current());int flushed=kebab_ufs_sync();if(!error)error=synced?synced:flushed;
++  printf("KEBAB SYSTEM BAG: durable filesystem=%d UFS=%d\n",synced,flushed);
++ }
++ if(!error)error=ksi_read(KSI_PATH,data,w->expected,w->back);
++ if(!error)error=koos_identity();
++ printf("KEBAB SYSTEM BAG: %s original plist/real sealed bank %s (%d), bytes=%u classD; no keygen/no SEP claim\n",created?"exclusive initialize":"cold authenticate",error?"FAIL":"PASS",error,KSI_BYTES);
++ bzero(w,sizeof(*w));kfree_data(w,sizeof(*w));return error;
++}
+--- /dev/null
++++ b/bsd/dev/kebab_systembag_plist_contract.h
+@@ -0,0 +1,5 @@
++/* Original KBSecureSaveObjectNoCrypto plist fields, sealed actual bank injected at runtime. */
++static const uint8_t ksi_prefix[]={98,112,108,105,115,116,48,48,210,1,2,3,4,90,75,101,121,66,97,103,75,101,121,115,93,75,101,121,66,97,103,86,101,114,115,105,111,110,79,17,16,0};
++static const uint8_t ksi_suffix[]={81,49,0,8,0,13,0,24,0,38,16,42,0,0,0,0,0,0,2,1,0,0,0,0,0,0,0,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,16,44};
++#define KSI_BYTES 4182u
++#define KSI_RECORD_OFFSET 42u
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7164,6 +7164,9 @@
+   if(checked)panic("KEBAB DATA USERLAND: cold encrypted Data prerequisites failed %d",checked);
+   if(tool_mode==12){
+    extern int kebab_aks_userclient_start(void);
++   extern int kebab_systembag_prepare(proc_t,user_addr_t);
++   checked=kebab_systembag_prepare(p,(user_addr_t)scratch_addr);
++   if(checked)panic("KEBAB SYSTEM BAG: original disk envelope init/auth failed %d",checked);
+    checked=kebab_aks_userclient_start();
+    if(checked)panic("KEBAB AKS UC: live bank/native user-client publication failed %d",checked);
+   }

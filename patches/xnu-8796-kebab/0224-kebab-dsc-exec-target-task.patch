@@ -1,0 +1,110 @@
+--- a/bsd/kern/kebab_dyldcache.c
++++ b/bsd/kern/kebab_dyldcache.c
+@@ -1772,7 +1772,7 @@
+  * bsd_init.
+  */
+ static int
+-kebab_dsc_map_plan(struct kebab_dsc_plan *plan)
++kebab_dsc_map_plan(struct kebab_dsc_plan *plan, task_t target)
+ {
+ 	vm_shared_region_t shared_region = NULL;
+ 	struct _sr_file_mappings *srm = NULL;
+@@ -1781,7 +1781,7 @@
+ 	uint32_t i;
+ 	int error = 0;
+ 
+-	shared_region = vm_shared_region_trim_and_get(current_task());
++	shared_region = vm_shared_region_get(target);
+ 	if (shared_region == NULL) {
+ 		printf("KEBAB DSC: map: current task has no shared region (ENODEV)\n");
+ 		return ENODEV;
+@@ -2064,7 +2064,7 @@
+ 			    "deferred to first exec (ENODEV)\n");
+ 		} else {
+ 			vm_shared_region_deallocate(shared_region);
+-			error = kebab_dsc_map_plan(kebab_dsc_plan);
++			error = kebab_dsc_map_plan(kebab_dsc_plan, current_task());
+ 			if (error != 0) {
+ 				printf("KEBAB DSC: map failed at boot (error %d); "
+ 				    "shared cache NOT mapped\n", error);
+@@ -2090,9 +2090,9 @@
+ }
+ 
+ static int
+-kebab_dsc_owner_region_recheck(void)
+-{
+- vm_shared_region_t region = vm_shared_region_trim_and_get(current_task());
++kebab_dsc_owner_region_recheck(task_t target)
++{
++ vm_shared_region_t region = vm_shared_region_get(target);
+  if (!region) return ENODEV;
+  mach_vm_offset_t start = 0;
+  kern_return_t result = vm_shared_region_start_address(region, &start, NULL);
+@@ -2101,23 +2101,24 @@
+ }
+ 
+ int
+-kebab_dsc_exec_hook(struct proc *p)
++kebab_dsc_exec_hook(struct proc *p, task_t target)
+ {
+  int error;
+  if (!p || proc_getpid(p) != 1) return 0;
++ if (!target) return kebab_dsc_owner_mode ? EINVAL : 0;
+  if (!kebab_dsc_enabled || !kebab_dsc_map_enabled) return 0;
+  if (!kebab_dsc_plan) return kebab_dsc_owner_mode ? EAUTH : 0;
+  if (kebab_dsc_owner_mode) {
+   error = kebab_cryptex_mount_recheck();
+   if (error) return error;
+-  if (kebab_dsc_map_attempted) return kebab_dsc_owner_map_ok ? kebab_dsc_owner_region_recheck() : EAUTH;
++  if (kebab_dsc_map_attempted) return kebab_dsc_owner_map_ok ? kebab_dsc_owner_region_recheck(target) : EAUTH;
+  } else if (kebab_dsc_map_attempted) return 0;
+  kebab_dsc_map_attempted = TRUE;
+- printf("KEBAB DSC: first exec (pid 1): attempting the deferred mapping\n");
+- error = kebab_dsc_map_plan(kebab_dsc_plan);
++ printf("KEBAB DSC: first exec (pid 1): target task differs from caller=%u; attempting deferred mapping\n", target != current_task());
++ error = kebab_dsc_map_plan(kebab_dsc_plan, target);
+  if (!error && kebab_dsc_owner_mode) {
+   error = kebab_cryptex_mount_recheck();
+-  if (!error) error = kebab_dsc_owner_region_recheck();
++  if (!error) error = kebab_dsc_owner_region_recheck(target);
+   if (!error) {
+    kebab_dsc_owner_map_ok = TRUE;
+    if (kebab_dsc_owner_startup) {
+--- a/bsd/kern/kebab_dyldcache.h
++++ b/bsd/kern/kebab_dyldcache.h
+@@ -17,6 +17,7 @@
+ #if defined(KEBAB)
+ 
+ struct proc;
++struct task;
+ 
+ /*
+  * bsd_init: if kebab_dsc is present, parse the cache, log the plan, and
+@@ -33,7 +34,7 @@
+  * current, but before returning to user mode.  Maps the plan once, for pid 1,
+  * and only when kebab_dsc_map=1.
+  */
+-int kebab_dsc_exec_hook(struct proc *p);
++int kebab_dsc_exec_hook(struct proc *p, struct task *target);
+ 
+ /* PID1, after verified original SystemOS mount; legacy/default profiles are inert. */
+ int kebab_dsc_after_mount(void);
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -1967,12 +1967,12 @@
+ 
+ #if defined(KEBAB)
+ 	/*
+-	 * The new address space and its shared region are current here (the
+-	 * switch to the old map is the next statement), which is the first
+-	 * point at which the dyld shared cache can be mapped into it.  Only
++	 * The new address space is current, but exec can still be running on
++	 * the caller task while constructing a replacement task. Pass the
++	 * actual target from vm_map_exec(), not current_task(). Only
+ 	 * pid 1, and only when kebab_dsc_map=1.
+ 	 */
+-	int owner_dsc_error = kebab_dsc_exec_hook(p);
++	int owner_dsc_error = kebab_dsc_exec_hook(p, task);
+ #endif /* KEBAB */
+ 
+ 	vm_map_switch(old_map);

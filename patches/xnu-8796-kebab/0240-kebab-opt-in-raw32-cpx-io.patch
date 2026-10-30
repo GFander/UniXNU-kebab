@@ -1,0 +1,387 @@
+--- a/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
++++ b/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
+@@ -66,6 +66,7 @@
+ #include <sys/cprotect.h>
+ #include "../../../bsd/dev/kebab_ufs.h"
+ #include "../../../bsd/dev/kebab_cryptex_media.h"
++#include "../../../bsd/kern/kebab_file_keys.h"
+ }
+ 
+ #pragma clang diagnostic pop
+@@ -74,6 +75,7 @@
+ extern "C" int kebab_blockstorage_start(void);
+ extern "C" int kebab_blockstorage_rootdev(dev_t *, char *, size_t, IOService **);
+ extern "C" bool kebab_blockstorage_selftest(void);
++extern "C" int kebab_blockstorage_cpx_proof_read(uint64_t,uint64_t,uint64_t,const uint8_t *,const uint8_t *,uint8_t *);
+ 
+ /* Staging buffer for one transfer chunk. A multiple of the 4 KiB UFS block. */
+ #define KEBAB_BLOCK_CHUNK	(64 * 1024)
+@@ -396,18 +398,7 @@
+ static_assert(offsetof(IOStorageAttributes, adjustedOffset) == 16, "target storage offset");
+ static_assert(offsetof(IOStorageAttributes, bufattr) == 24, "target storage bufattr");
+ 
+-static IOReturn
+-kebab_blockstorage_crypto_guard(const IOStorageAttributes *attributes)
+-{
+- if (attributes != NULL && attributes->bufattr != NULL &&
+-     (bufattr_cpx(attributes->bufattr) != NULL ||
+-     bufattr_rawencrypted(attributes->bufattr))) {
+-  /* No content-key backend yet: accepting this would silently lose crypto.
+-   * Raw encrypted requests also await an explicit audited handling path. */
+-  return kIOReturnUnsupported;
+- }
+- return kIOReturnSuccess;
+-}
++#include "kebab_block_crypto_impl.h"
+ 
+ IOReturn
+ KebabBlockStorageDevice::doAsyncReadWrite(IOMemoryDescriptor *buffer,
+@@ -418,8 +409,6 @@
+ 	UInt64 offset, length, done;
+ 	bool write;
+ 
+-	status = kebab_blockstorage_crypto_guard(attributes);
+-	if (status != kIOReturnSuccess) return status;
+ 	if (buffer == NULL || nblks == 0 || block >= fBlockCount ||
+ 	    nblks > fBlockCount - block) {
+ 		return kIOReturnBadArgument;
+@@ -440,6 +429,12 @@
+ 	if (buffer->getLength() < length) {
+ 		return kIOReturnBadArgument;
+ 	}
++ unsigned cpxEnabled=0;
++ PE_parse_boot_argn("kebab_cpx_xts",&cpxEnabled,sizeof(cpxEnabled));
++ KebabBlockCrypto crypto;
++ status=kebab_block_crypto_prepare(attributes,length,cpxEnabled==1 && !fFileStorage,crypto);
++ if(status!=kIOReturnSuccess)return status;
++ if(crypto.active && (offset&4095))return kIOReturnBadArgument;
+ 	if (fFileStorage) {
+ 		return enqueueFileRead(buffer, offset, length, completion);
+ 	}
+@@ -460,11 +455,15 @@
+ 				status = kIOReturnUnderrun;
+ 				break;
+ 			}
++   if(crypto.active && kebab_xts128_crypt(crypto.key,crypto.unit+(done>>12),
++       fBounce,fBounce,chunk,true)) { status=kIOReturnIOError;break; }
+ 			error = kebab_ufs_raw_write(offset + done, fBounce,
+ 			    (uint32_t)chunk);
+ 		} else {
+ 			error = kebab_ufs_raw_read(offset + done, fBounce,
+ 			    (uint32_t)chunk);
++   if(error==0 && crypto.active && kebab_xts128_crypt(crypto.key,crypto.unit+(done>>12),
++       fBounce,fBounce,chunk,false)) { status=kIOReturnIOError;break; }
+ 			if (error == 0 &&
+ 			    buffer->writeBytes(done, fBounce, chunk) != chunk) {
+ 				status = kIOReturnOverrun;
+@@ -475,10 +474,17 @@
+ 			status = statusForError(error);
+ 			break;
+ 		}
++  if(crypto.active)bzero(fBounce,KEBAB_BLOCK_CHUNK);
+ 		done += chunk;
+ 	}
++ if(crypto.active)bzero(fBounce,KEBAB_BLOCK_CHUNK);
+ 	IOLockUnlock(fLock);
+ 
++ if(crypto.active) {
++  volatile uint8_t *bytes=crypto.key;
++  for(unsigned i=0;i<sizeof(crypto.key);++i)bytes[i]=0;
++  crypto.unit=0;crypto.active=false;
++ }
+ 	/* Accepted requests complete exactly once, outside both bridge/backend
+ 	 * locks. Immediate validation/offline rejection never calls completion.
+ 	 * Execution remains synchronous polling; NULL completion keeps the old
+@@ -888,4 +894,6 @@
+ 	return passed;
+ }
+ 
++#include "kebab_block_cpx_proof_impl.h"
++
+ #endif /* KEBAB */
+--- a/bsd/kern/kebab_file_keys.h
++++ b/bsd/kern/kebab_file_keys.h
+@@ -4,6 +4,11 @@
+ #include <stdint.h>
+ #include <stddef.h>
+ #include <stdbool.h>
++#ifdef __cplusplus
++#define KEBAB_KEY_STATIC_ASSERT static_assert
++#else
++#define KEBAB_KEY_STATIC_ASSERT _Static_assert
++#endif
+ struct kebab_aks_credential { uint8_t bytes[80]; };
+ struct kebab_aks_raw_key {
+  void *key;
+@@ -13,10 +18,10 @@
+  uint32_t flags;
+ };
+ struct kebab_aks_wrapped_key { void *key; uint32_t key_len, dp_class; };
+-_Static_assert(sizeof(struct kebab_aks_credential)==80, "target private credential");
+-_Static_assert(sizeof(struct kebab_aks_raw_key)==32 && offsetof(struct kebab_aks_raw_key, iv_key)==16 &&
++KEBAB_KEY_STATIC_ASSERT(sizeof(struct kebab_aks_credential)==80, "target private credential");
++KEBAB_KEY_STATIC_ASSERT(sizeof(struct kebab_aks_raw_key)==32 && offsetof(struct kebab_aks_raw_key, iv_key)==16 &&
+     offsetof(struct kebab_aks_raw_key, flags)==28, "target raw output ABI");
+-_Static_assert(sizeof(struct kebab_aks_wrapped_key)==16 && offsetof(struct kebab_aks_wrapped_key, dp_class)==12,
++KEBAB_KEY_STATIC_ASSERT(sizeof(struct kebab_aks_wrapped_key)==16 && offsetof(struct kebab_aks_wrapped_key, dp_class)==12,
+     "target wrapped output ABI");
+ #define KEBAB_KEYBAG_D_BYTES 88u
+ #define KEBAB_FILE_KEY_BYTES 96u
+@@ -33,4 +38,5 @@
+     const struct kebab_aks_wrapped_key *, struct kebab_aks_wrapped_key *);
+ int kebab_xts128_crypt(const uint8_t key[32], uint64_t unit, const void *, void *, size_t, bool);
+ int kebab_file_keys_selftest(void);
++#undef KEBAB_KEY_STATIC_ASSERT
+ #endif
+--- a/bsd/kern/kebab_file_keys_probe_impl.h
++++ b/bsd/kern/kebab_file_keys_probe_impl.h
+@@ -1,5 +1,6 @@
+ /* Fixed encrypted diagnostic record, not the real Data volume or an AKS shim. */
+ #include "kebab_file_keys.h"
++extern int kebab_blockstorage_cpx_proof_read(uint64_t,uint64_t,uint64_t,const uint8_t *,const uint8_t *,uint8_t *);
+ #define KFK_PROOF_PATH "/private/preboot/.hios-file-keys-proof-v1"
+ #define KFK_PROOF_BYTES 12288u
+ static const uint8_t kfp_uuid[16]={0x70,0x75,0x62,0x6c,0x69,0x63,0x41,0x11,0x90,0x11,0x22,0x33,0x44,0x55,0x66,0x77};
+@@ -32,23 +33,25 @@
+ }
+ 
+ static void
+-kfp_header(uint8_t *record)
++kfp_header(uint8_t *record, bool cpx_proof)
+ {
+  bzero(record,4096);memcpy(record,"HIOS-FILE-PROOF",16);
+- uint32_t fields[]={1,KFK_PROOF_BYTES};memcpy(record+16,fields,sizeof(fields));
++ uint32_t fields[]={cpx_proof?2u:1u,KFK_PROOF_BYTES};memcpy(record+16,fields,sizeof(fields));
+  memcpy(record+24,kfp_uuid,16);
+- uint64_t crypto=0x1020304050607080ull,unit=0x123456789abcdefull;
++ uint64_t crypto=0x1020304050607080ull,unit=cpx_proof?0x123456789abull:0x123456789abcdefull;
+  memcpy(record+40,&crypto,8);memcpy(record+48,&unit,8);
+  const uint32_t sizes[]={4,88,96,8192};memcpy(record+56,sizes,sizeof(sizes));
+  record[72]=1;
+ }
+ 
+ static int
+-kfp_record(mount_t expected, bool create)
++kfp_record_impl(mount_t expected, bool create, bool cpx_proof)
+ {
+  if(kdr_policy(2) || !expected || !rootvnode || expected==vnode_mount(rootvnode) ||
+      !(vfs_flags(vnode_mount(rootvnode))&MNT_RDONLY) || strcmp(vfs_statfs(expected)->f_fstypename,"apfs") ||
+      (((vfs_flags(expected)&MNT_RDONLY)!=0)==create))return EROFS;
++ const char *path=cpx_proof?"/private/preboot/.hios-cpx-proof-v2":KFK_PROOF_PATH;
++ uint64_t unit=cpx_proof?0x123456789abull:0x123456789abcdefull;
+  struct kfp_work { uint8_t record[KFK_PROOF_BYTES],readback[KFK_PROOF_BYTES],plain[8192],back[8192],key[64],iv[16]; };
+  struct kfp_work *w=kalloc_data(sizeof(*w),Z_WAITOK|Z_ZERO);
+  if(!w)return ENOMEM;
+@@ -58,17 +61,17 @@
+  if(error)goto done;
+  measured=true;
+  if(create) {
+-  error=vnode_open(KFK_PROOF_PATH,O_NOFOLLOW|FREAD,0,0,&file,context);
++  error=vnode_open(path,O_NOFOLLOW|FREAD,0,0,&file,context);
+   if(!error){int ignored=vnode_close(file,FREAD,context);(void)ignored;file=NULLVP;error=EEXIST;goto done;}
+   if(error!=ENOENT)goto done;
+-  error=0;kfp_header(w->record);
++  error=0;kfp_header(w->record,cpx_proof);
+  } else {
+-  error=vnode_open(KFK_PROOF_PATH,O_NOFOLLOW|FREAD,0,0,&file,context);if(error)goto done;
++  error=vnode_open(path,O_NOFOLLOW|FREAD,0,0,&file,context);if(error)goto done;
+   error=kfp_metadata(file,expected,context);
+   if(!error){int residual=0;error=vn_rdwr(UIO_READ,file,(caddr_t)w->record,KFK_PROOF_BYTES,0,UIO_SYSSPACE,IO_NOCACHE,vfs_context_ucred(context),&residual,NULL);if(!error&&residual)error=EIO;}
+   int close_error=vnode_close(file,FREAD,context);file=NULLVP;if(!error)error=close_error;
+   if(error)goto done;
+-  kfp_header(w->readback);
++  kfp_header(w->readback,cpx_proof);
+   if(memcmp(w->record,w->readback,128)){error=EAUTH;goto done;}
+   for(unsigned i=128+88+96;i<4096;++i)if(w->record[i]){error=EAUTH;goto done;}
+  }
+@@ -81,11 +84,28 @@
+  if(create?kebab_file_key_new(&cred,4,&raw,&wrapped):kebab_file_key_unwrap(&cred,&wrapped,&raw)){error=EAUTH;goto done;}
+  for(unsigned i=0;i<8192;++i)w->plain[i]=(uint8_t)(i*13+i/251);
+  if(create) {
+-  if(kebab_xts128_crypt(w->key,0x123456789abcdefull,w->plain,w->record+4096,8192,true)){error=EIO;goto done;}
++  if(kebab_xts128_crypt(w->key,unit,w->plain,w->record+4096,8192,true)){error=EIO;goto done;}
+   if(!memcmp(w->plain,w->record+4096,8192)){error=EAUTH;goto done;}
+  }
+- if(kebab_xts128_crypt(w->key,0x123456789abcdefull,w->record+4096,w->back,8192,false)||memcmp(w->plain,w->back,8192)){error=EAUTH;goto done;}
++ if(kebab_xts128_crypt(w->key,unit,w->record+4096,w->back,8192,false)||memcmp(w->plain,w->back,8192)){error=EAUTH;goto done;}
+  printf("KEBAB FILE KEYS: hardware-root keybag/file-key/XTS %s PASS bytes=8192; synthetic volume only\n",create?"encrypt/read":"cold decrypt");
++ if(cpx_proof && !create) {
++  error=vnode_open(path,O_NOFOLLOW|FREAD,0,0,&file,context);if(error)goto done;
++  error=kfp_metadata(file,expected,context);
++  int blocksize=vfs_devblocksize(expected);
++  if(!error && blocksize!=512 && blocksize!=4096)error=EINVAL;
++  for(unsigned i=0;!error && i<2;++i) {
++   daddr64_t block=-1;size_t run=0;
++   error=VNOP_BLOCKMAP(file,4096+(off_t)i*4096,4096,&block,&run,NULL,VNODE_READ|VNODE_BLOCKMAP_NO_TRACK,context);
++   if(!error && (block<0 || run<4096 || (uint64_t)block>UINT64_MAX/(unsigned)blocksize))error=EINVAL;
++   if(!error)error=kebab_blockstorage_cpx_proof_read((uint64_t)block*(unsigned)blocksize,
++       unit<<12,(uint64_t)i*4096,w->key,w->record+4096+i*4096,w->back+i*4096);
++   if(!error && memcmp(w->back+i*4096,w->plain+i*4096,4096))error=EAUTH;
++  }
++  int close_error=vnode_close(file,FREAD,context);file=NULLVP;if(!error)error=close_error;
++  printf("KEBAB CPX PROOF: mapped ciphertext/native CPX/split-offset read %s (%d); no physical writes\n",error?"FAIL":"PASS",error);
++  if(error)goto done;
++ }
+  /* In-memory negative test, never modifying the stored proof. */
+  w->record[128+88]^=1;memset(w->key,0xa5,64);raw.key_len=64;raw.iv_key_len=16;
+  int rejected=kebab_file_key_unwrap(&cred,&wrapped,&raw);
+@@ -94,12 +114,12 @@
+  for(unsigned i=0;i<64;++i)if(w->key[i]!=0xa5){error=EAUTH;goto done;}
+  printf("KEBAB FILE KEYS: wrapped-key tamper rejected, no partial raw output PASS\n");
+  if(create) {
+-  error=vnode_open(KFK_PROOF_PATH,O_CREAT|O_EXCL|O_NOFOLLOW|FWRITE,0600,0,&file,context);if(error)goto done;
++  error=vnode_open(path,O_CREAT|O_EXCL|O_NOFOLLOW|FWRITE,0600,0,&file,context);if(error)goto done;
+   if(!vnode_isreg(file)||vnode_mount(file)!=expected)error=EAUTH;
+   if(!error){int residual=0;error=vn_rdwr(UIO_WRITE,file,(caddr_t)w->record,KFK_PROOF_BYTES,0,UIO_SYSSPACE,IO_SYNC|IO_NOCACHE,vfs_context_ucred(context),&residual,NULL);if(!error&&residual)error=EIO;int sync_error=VNOP_FSYNC(file,MNT_WAIT,context);if(!error)error=sync_error;}
+   int close_error=vnode_close(file,FWRITE,context);file=NULLVP;if(!error)error=close_error;
+   if(error)goto done;
+-  error=vnode_open(KFK_PROOF_PATH,O_NOFOLLOW|FREAD,0,0,&file,context);if(error)goto done;
++  error=vnode_open(path,O_NOFOLLOW|FREAD,0,0,&file,context);if(error)goto done;
+   error=kfp_metadata(file,expected,context);
+   if(!error){int residual=0;error=vn_rdwr(UIO_READ,file,(caddr_t)w->readback,KFK_PROOF_BYTES,0,UIO_SYSSPACE,IO_NOCACHE,vfs_context_ucred(context),&residual,NULL);if(!error&&residual)error=EIO;}
+   close_error=vnode_close(file,FREAD,context);file=NULLVP;if(!error)error=close_error;
+@@ -113,3 +133,5 @@
+  for(size_t i=0;i<sizeof(*w);++i)bytes[i]=0;
+  kfree_data(w,sizeof(*w));return error;
+ }
++
++static int kfp_record(mount_t expected, bool create) { return kfp_record_impl(expected,create,false); }
+--- a/bsd/kern/kebab_data_root_policy.h
++++ b/bsd/kern/kebab_data_root_policy.h
+@@ -17,9 +17,11 @@
+  }
+  unsigned key_test=0;
+  PE_parse_boot_argn("kebab_file_keys_test",&key_test,sizeof(key_test));
+- if(key_test>3 || (key_test && mode!=2))return EINVAL;
+- unsigned apfs_mode=key_test>=2?(key_test==2?10u:11u):(mode==1?8u:9u);
+- unsigned writable=(mode==1||key_test==2)?1u:0u;
++ if(key_test>5 || (key_test && mode!=2))return EINVAL;
++ unsigned apfs_mode=key_test>=4?(key_test==4?12u:13u):key_test>=2?(key_test==2?10u:11u):(mode==1?8u:9u);
++ unsigned writable=(mode==1||key_test==2||key_test==4)?1u:0u;
++ unsigned cpx=0;PE_parse_boot_argn("kebab_cpx_xts",&cpx,sizeof(cpx));
++ if(cpx!=(key_test==5?1u:0u))return EINVAL;
+  const char *const required[] = { "kebab_data_root", "kebab_apfs_probe", "ufsrw",
+      "kebab_qsee_probe", "kebab_keymaster_version", "kebab_wrapped_key_probe", "kebab_qsee_time" };
+  const unsigned expected[] = { mode, apfs_mode, writable, 1, 1, 1, 1 };
+--- a/bsd/kern/kebab_data_root_file_impl.h
++++ b/bsd/kern/kebab_data_root_file_impl.h
+@@ -46,7 +46,7 @@
+  int error = kdr_policy(mode);
+  if (error) return error;
+  unsigned key_test=0;PE_parse_boot_argn("kebab_file_keys_test",&key_test,sizeof(key_test));
+- bool writing=(mode==1 || (mode==2 && key_test==2));
++ bool writing=(mode==1 || (mode==2 && (key_test==2 || key_test==4)));
+  if (!expected || !rootvnode || expected == vnode_mount(rootvnode) ||
+      strcmp(vfs_statfs(expected)->f_fstypename, "apfs") ||
+      !(vfs_flags(vnode_mount(rootvnode)) & MNT_RDONLY) ||
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -159,7 +159,7 @@
+ {
+  uint32_t mode = 0, rw = 0;
+  if (!PE_parse_boot_argn("kebab_apfs_probe", &mode, sizeof(mode)) || !mode) return 0;
+- if (mode > 11 || !scratch) return EINVAL;
++ if (mode > 13 || !scratch) return EINVAL;
+  unsigned nonce_root=0;
+  PE_parse_boot_argn("kebab_nonce_root",&nonce_root,sizeof(nonce_root));
+  if ((mode==4 && nonce_root!=1) || (mode==5 && nonce_root!=2) || ((mode<4 || mode>=6) && nonce_root)) return EINVAL;
+@@ -167,7 +167,7 @@
+  PE_parse_boot_argn("kebab_data_root",&data_key_mode,sizeof(data_key_mode));
+  if ((mode==8 && data_key_mode!=1) || (mode>=9 && data_key_mode!=2) || (mode<8 && data_key_mode)) return EINVAL;
+  if ((mode>=8) && kdr_policy(data_key_mode)) return EPERM;
+- bool write_file = (mode == 2 || mode == 4 || mode == 6 || mode == 7 || mode == 8 || mode == 10);
++ bool write_file = (mode == 2 || mode == 4 || mode == 6 || mode == 7 || mode == 8 || mode == 10 || mode == 12);
+  PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
+  if ((write_file && rw != 1) || (!write_file && rw)) return EINVAL;
+  mount_t original_root = vnode_mount(rootvnode);
+@@ -227,7 +227,8 @@
+   unsigned key_test=0;PE_parse_boot_argn("kebab_file_keys_test",&key_test,sizeof(key_test));
+   if(!error && key_test)error=kebab_file_keys_commit();
+   if(!error && key_test)error=kebab_file_keys_selftest();
+-  if(!error && mode>=10)error=kfp_record(mounted,mode==10);
++  if(!error && (mode==10 || mode==11))error=kfp_record(mounted,mode==10);
++  if(!error && mode>=12)error=kfp_record_impl(mounted,mode==12,true);
+   if(key_test){kebab_file_keys_cancel();printf("KEBAB FILE KEYS: private context erased; no AKS service published\n");}
+   int proof_error = kebab_apfs_proof_file(mounted, false);
+   if (!error) error = proof_error;
+@@ -244,6 +245,8 @@
+  if (!error && mode==8) panic("KEBAB DATA ROOT: independent opaque record durable; no Data mount/userland started");
+  if (!error && mode==9) panic("KEBAB DATA ROOT: cold hardware restore verified; no Data mount/userland started");
+  if (!error && mode==10) panic("KEBAB FILE KEYS: durable encrypted proof written; no Data mount/userland started");
++ if (!error && mode==12) panic("KEBAB CPX PROOF: v2 ciphertext durable; cold driver read pending");
++ if (!error && mode==13) panic("KEBAB CPX PROOF: cold driver read verified; Data encryption still pending");
+  if (!error && mode==11) panic("KEBAB FILE KEYS: cold encrypted proof verified; no Data mount/userland started");
+  if (!error && !write_file) error = kebab_cryptex_mount_prepare(p, scratch);
+  return error;
+--- /dev/null
++++ b/iokit/Kernel/arm/kebab_block_crypto_impl.h
+@@ -0,0 +1,36 @@
++/* Opt-in raw32 AES128-XTS path. Never interpret SEP/composite/raw ciphertext. */
++struct KebabBlockCrypto {
++ uint8_t key[32];
++ UInt64 unit;
++ bool active;
++ KebabBlockCrypto() : unit(0), active(false) { bzero(key,sizeof(key)); }
++ ~KebabBlockCrypto() {
++  volatile uint8_t *bytes=key;
++  for(unsigned i=0;i<sizeof(key);++i)bytes[i]=0;
++  unit=0;active=false;
++ }
++};
++
++static IOReturn
++kebab_block_crypto_prepare(const IOStorageAttributes *attributes, UInt64 length,
++    bool enabled, KebabBlockCrypto &crypto)
++{
++ if(!attributes || !attributes->bufattr)return kIOReturnSuccess;
++ bufattr_t attr=attributes->bufattr;
++ if(bufattr_rawencrypted(attr))return kIOReturnUnsupported;
++ cpx_t cpx=bufattr_cpx(attr);
++ if(!cpx)return kIOReturnSuccess;
++ if(!enabled || cpx_is_sep_wrapped_key(cpx) || cpx_is_composite_key(cpx) ||
++     cpx_synthetic_offset_for_iv(cpx) || !cpx_use_offset_for_iv(cpx) ||
++     cpx_key_len(cpx)!=32 || cpx_max_key_len(cpx)<32 || !cpx_key(cpx))
++  return kIOReturnUnsupported;
++ UInt64 base=bufattr_cpoff(attr);
++ if(!length || (length&4095) || base>UINT64_MAX-attributes->adjustedOffset)
++  return kIOReturnBadArgument;
++ base+=attributes->adjustedOffset;
++ if((base&4095) || length-1>UINT64_MAX-base)return kIOReturnBadArgument;
++ /* Copy before any backend operation. The original CPX/attributes are never
++  * retained across I/O or completion; this bridge executes synchronously. */
++ memcpy(crypto.key,cpx_key(cpx),32);crypto.unit=base>>12;crypto.active=true;
++ return kIOReturnSuccess;
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/kebab_block_cpx_proof_impl.h
+@@ -0,0 +1,30 @@
++/* Read-only diagnostic: verify mapping ciphertext before exercising CPX. */
++extern "C" int
++kebab_blockstorage_cpx_proof_read(uint64_t offset, uint64_t protection_offset,
++    uint64_t adjusted, const uint8_t key[32], const uint8_t cipher[4096], uint8_t plain[4096])
++{
++ KebabBlockStorageDevice *device=kebab_block_device;
++ bool readonly=false;
++ unsigned enabled=0;PE_parse_boot_argn("kebab_cpx_xts",&enabled,sizeof(enabled));
++ if(enabled!=1 || !device || !key || !cipher || !plain || (offset&4095) ||
++     device->reportWriteProtection(&readonly)!=kIOReturnSuccess || !readonly)return EINVAL;
++ IOBufferMemoryDescriptor *buffer=IOBufferMemoryDescriptor::withOptions(kIODirectionIn,4096,PAGE_SIZE);
++ bufattr_t attr=bufattr_alloc();cpx_t cpx=cpx_alloc(32,false);
++ int error=ENOMEM;
++ if(buffer && attr && cpx) {
++  IOReturn result=device->doAsyncReadWrite(buffer,offset>>12,1,NULL,NULL);
++  if(result==kIOReturnSuccess && !memcmp(buffer->getBytesNoCopy(),cipher,4096)) {
++   memcpy(cpx_key(cpx),key,32);cpx_set_key_len(cpx,32);cpx_set_use_offset_for_iv(cpx,true);
++   bufattr_setcpx(attr,cpx);bufattr_setcpoff(attr,protection_offset);
++   IOStorageAttributes attributes={};attributes.bufattr=attr;attributes.adjustedOffset=adjusted;
++   bzero(buffer->getBytesNoCopy(),4096);
++   result=device->doAsyncReadWrite(buffer,offset>>12,1,&attributes,NULL);
++   error=result==kIOReturnSuccess?0:EIO;
++   if(!error)memcpy(plain,buffer->getBytesNoCopy(),4096);
++  } else error=result==kIOReturnSuccess?EAUTH:EIO;
++ }
++ if(attr){bufattr_setcpx(attr,NULL);bufattr_free(attr);}
++ if(cpx){cpx_flush(cpx);cpx_free(cpx);}
++ if(buffer){bzero(buffer->getBytesNoCopy(),4096);buffer->release();}
++ return error;
++}

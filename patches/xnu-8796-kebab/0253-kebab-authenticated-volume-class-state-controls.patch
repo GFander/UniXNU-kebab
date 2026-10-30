@@ -1,0 +1,265 @@
+--- a/bsd/kern/kebab_file_keys.c
++++ b/bsd/kern/kebab_file_keys.c
+@@ -89,6 +89,7 @@
+  return error;
+ }
+ 
++static void kdc_clear_locked(void);
+ #include "kebab_device_classbag_impl.h"
+ 
+ int
+@@ -277,6 +278,7 @@
+ 
+ #include "kebab_metadata_keys_impl.h"
+ #include "kebab_volume_keys_impl.h"
++#include "kebab_volume_control_impl.h"
+ #include "kebab_cpx_handles_impl.h"
+ #include "kebab_volume_wrapped_impl.h"
+ #include "kebab_apfs_metadata_native_impl.h"
+--- a/bsd/kern/kebab_file_keys.h
++++ b/bsd/kern/kebab_file_keys.h
+@@ -71,6 +71,16 @@
+     struct kebab_fv_wrapped_key *,struct kebab_fv_raw_key *);
+ int kebab_volume_key_unwrap_wrapped(const struct kebab_fv_credential *,const void *,const void *,
+     const struct kebab_fv_wrapped_key *,struct kebab_fv_raw_key *);
++/* Original FV state is88B; only authenticated vendor-VEK type/IDs/version
++ * are populated. All unsupported optional capability fields remain zero. */
++struct kebab_fv_blob_state { uint8_t bytes[88]; };
++KEBAB_KEY_STATIC_ASSERT(sizeof(struct kebab_fv_blob_state)==88,"original FV blob-state output");
++int kebab_volume_blob_state(const struct kebab_fv_credential *,const struct kebab_fv_wrapped_key *,
++    struct kebab_fv_blob_state *);
++int kebab_volume_set_protection(const struct kebab_fv_credential *,uint32_t,uint64_t,
++    const struct kebab_fv_wrapped_key *,const struct kebab_fv_wrapped_key *,
++    struct kebab_fv_wrapped_key *,struct kebab_fv_wrapped_key *);
++bool kebab_volume_class_available(const uint8_t[16],uint32_t);
+ int kebab_volume_keys_selftest(void);
+ int kebab_vek_cpx_handle_create(const uint8_t[16],const uint8_t[32],uint8_t[64]);
+ int kebab_vek_cpx_handle_open(const uint8_t[64],uint8_t[32]);
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -168,9 +168,9 @@
+  PE_parse_boot_argn("kebab_nonce_root",&nonce_root,sizeof(nonce_root));
+  if ((mode==4 && nonce_root!=1) || (mode==5 && nonce_root!=2) || ((mode<4 || mode>=6) && nonce_root)) return EINVAL;
+  unsigned aks=0;PE_parse_boot_argn("kebab_aks_fs",&aks,sizeof(aks));
+- if(aks && (aks!=1 || mode!=13))return EINVAL;
++ if(aks && (aks!=1 || (mode!=13 && mode!=16)))return EINVAL;
+  unsigned fv=0;PE_parse_boot_argn("kebab_aks_fv",&fv,sizeof(fv));
+- if(fv && (fv!=1 || aks!=1 || mode!=13))return EINVAL;
++ if(fv && (fv!=1 || aks!=1 || (mode!=13 && mode!=16)))return EINVAL;
+  unsigned handles=0;PE_parse_boot_argn("kebab_cpx_handles",&handles,sizeof(handles));
+  if(handles && (handles!=1 || mode!=13))return EINVAL;
+  unsigned data_key_mode=0;
+@@ -239,11 +239,12 @@
+   if(!error && key_test)error=kebab_file_keys_selftest();
+   if(!error && key_test)error=kebab_metadata_keys_selftest();
+   if(!error && key_test)error=kebab_volume_keys_selftest();
++  if(!error && mode>=15)error=kdb_file(mounted,mode==15);
++  if(!error && mode==16 && aks)error=kfp_record(mounted,false);
+   if(!error && aks)error=kebab_aks_fs_publish_test();
+   if(!error && fv)error=kebab_aks_fv_publish_test();
+   if(!error && (mode==10 || mode==11))error=kfp_record(mounted,mode==10);
+   if(!error && mode>=12 && mode<=14)error=kfp_record_impl(mounted,mode==12,true);
+-  if(!error && mode>=15)error=kdb_file(mounted,mode==15);
+   if(key_test){kebab_file_keys_cancel();if(kebab_device_classbag_available()&&!error)error=EAUTH;int quiesce=aks?kebab_aks_fs_quiesce_test():0;if(!error)error=quiesce;if(aks)printf("KEBAB FILE KEYS: private context erased; AKS provider quiescent\n");else printf("KEBAB FILE KEYS: private context erased; no AKS service published\n");}
+   int proof_error = kebab_apfs_proof_file(mounted, false);
+   if (!error) error = proof_error;
+--- a/bsd/kern/kebab_data_root_policy.h
++++ b/bsd/kern/kebab_data_root_policy.h
+@@ -23,9 +23,9 @@
+  unsigned cpx=0;PE_parse_boot_argn("kebab_cpx_xts",&cpx,sizeof(cpx));
+  if(cpx!=((key_test==5||key_test==6)?1u:0u))return EINVAL;
+  unsigned aks=0;PE_parse_boot_argn("kebab_aks_fs",&aks,sizeof(aks));
+- if(aks && (aks!=1 || key_test!=5))return EINVAL;
++ if(aks && (aks!=1 || (key_test!=5 && key_test!=8)))return EINVAL;
+  unsigned fv=0;PE_parse_boot_argn("kebab_aks_fv",&fv,sizeof(fv));
+- if(fv && (fv!=1 || aks!=1 || key_test!=5))return EINVAL;
++ if(fv && (fv!=1 || aks!=1 || (key_test!=5 && key_test!=8)))return EINVAL;
+  unsigned handles=0;PE_parse_boot_argn("kebab_cpx_handles",&handles,sizeof(handles));
+  if(handles && (handles!=1 || key_test!=5))return EINVAL;
+  const char *const required[] = { "kebab_data_root", "kebab_apfs_probe", "ufsrw",
+--- a/bsd/kern/kebab_device_classbag_impl.h
++++ b/bsd/kern/kebab_device_classbag_impl.h
+@@ -6,7 +6,7 @@
+ static void
+ kdb_clear_locked(void)
+ {
+- kdb_ready=false;kfk_wipe(kdb_class_c,32);kfk_wipe(kdb_class_d,32);kfk_wipe(kdb_identifier,16);
++ kdc_clear_locked();kdb_ready=false;kfk_wipe(kdb_class_c,32);kfk_wipe(kdb_class_d,32);kfk_wipe(kdb_identifier,16);
+ }
+ 
+ static bool
+--- a/iokit/Kernel/arm/kebab_filevault_provider_impl.h
++++ b/iokit/Kernel/arm/kebab_filevault_provider_impl.h
+@@ -1,17 +1,21 @@
+ /* Original11-slot FileVault table plus NULL sentinel; only audited operations.
+- * State, commit, class loading/unloading and rewrap deliberately unavailable. */
++ * Authenticated factory C/D state/commit/load/unload; rewrap unavailable. */
+ struct KebabAKSFileVaultTable {
+  decltype(&kebab_volume_key_new_wrapped) new_key;
+  decltype(&kebab_volume_key_unwrap_wrapped) unwrap;
+  void *unsupported10,*unsupported18;
+  decltype(&kebab_volume_key_length) wrapped_length;
+- void *unsupported28_50[6];
++ void *unsupported28,*unsupported30;
++ decltype(&kebab_volume_blob_state) state;
++ decltype(&kebab_volume_set_protection) control;
++ void *unsupported48,*unsupported50;
+  void *sentinel;
+ };
+ static_assert(offsetof(KebabAKSFileVaultTable,wrapped_length)==0x20,"original FV length query slot");
+ static_assert(offsetof(KebabAKSFileVaultTable,sentinel)==88 && sizeof(KebabAKSFileVaultTable)==96,"original FV11-slot + NULL sentinel");
+ static const KebabAKSFileVaultTable kfv_services={kebab_volume_key_new_wrapped,kebab_volume_key_unwrap_wrapped,
+- nullptr,nullptr,kebab_volume_key_length,{nullptr},nullptr};
++ nullptr,nullptr,kebab_volume_key_length,nullptr,nullptr,kebab_volume_blob_state,kebab_volume_set_protection,nullptr,nullptr,nullptr};
++static_assert(offsetof(KebabAKSFileVaultTable,state)==0x38 && offsetof(KebabAKSFileVaultTable,control)==0x40,"original FV state/control slots");
+ static bool kfv_enabled;
+ 
+ #if DEVELOPMENT || DEBUG
+@@ -34,6 +38,26 @@
+  if(!error)error=kebab_vek_cpx_handle_open(work->key,work->decoded);
+  if(!error)error=kebab_vek_cpx_handle_open(work->back,work->other);
+  if(!error && memcmp(work->decoded,work->other,32))error=EIO;
++ if(!error && kebab_device_classbag_available()) {
++  struct kebab_fv_blob_state state;memset(&state,0xa5,sizeof(state));
++  if(table->control(&cred,5,0,nullptr,nullptr,&wrapped,nullptr))error=EIO;
++  if(!error && (!kebab_volume_class_available(uuid,3)||!kebab_volume_class_available(uuid,4)))error=EIO;
++  if(!error)error=table->state(&cred,&wrapped,&state);
++  uint32_t type=0,version=0;memcpy(&type,state.bytes,4);memcpy(&version,state.bytes+40,4);
++  if(!error && (type!=1||version!=1||memcmp(state.bytes+4,uuid,16)||memcmp(state.bytes+20,uuid,16)))error=EIO;
++  if(!error)error=table->control(nullptr,19,0,nullptr,nullptr,&wrapped,nullptr);
++  if(!error && (kebab_volume_class_available(uuid,3)||kebab_volume_class_available(uuid,4)))error=EIO;
++  if(!error)error=table->control(&cred,18,0,nullptr,nullptr,&wrapped,nullptr);
++  if(!error && (!kebab_volume_class_available(uuid,3)||!kebab_volume_class_available(uuid,4)))error=EIO;
++  work->sealed[95]^=1;memset(&state,0xa5,sizeof(state));
++  int rejected=table->state(&cred,&wrapped,&state);work->sealed[95]^=1;
++  if(!error && rejected!=(int)kIOReturnNotPermitted)error=EIO;
++  for(unsigned i=0;!error&&i<sizeof(state);++i)if(state.bytes[i]!=0xa5)error=EIO;
++  if(!error)error=table->control(nullptr,19,0,nullptr,nullptr,&wrapped,nullptr);
++  if(!error && (kebab_volume_class_available(uuid,3)||kebab_volume_class_available(uuid,4)))error=EIO;
++  bzero(&state,sizeof(state));
++  IOLog("KEBAB AKS FV: authenticated factory VEK state/commit/load/unload and C/D availability %s (%d); no Data mount\n",error?"FAIL":"PASS",error);
++ }
+  uint64_t sentinel=0x1122334455667788ULL;capacity=sentinel;
+  if(!error && (table->wrapped_length(&cred,2,&capacity)!=(int)kIOReturnUnsupported || capacity!=sentinel))error=EIO;
+  volatile uint8_t *bytes=reinterpret_cast<volatile uint8_t *>(work);
+@@ -59,7 +83,7 @@
+  IOReturn result=platform->callPlatformFunction("AKSFileVaultServices",true,&table,nullptr,nullptr,nullptr);
+  int error=result==kIOReturnSuccess && table==&kfv_services?0:EIO;
+  if(!error)error=kfv_service_roundtrip(table);
+- IOLog("KEBAB AKS FV: native platform/11-slot opaque64 VEK new/unwrap/length %s (%d); state/control/class-load NULL; no Data mount\n",error?"FAIL":"PASS",error);
++ IOLog("KEBAB AKS FV: native platform/11-slot opaque64 VEK new/unwrap/length %s (%d); state/control factory-gated; no Data mount\n",error?"FAIL":"PASS",error);
+  return error;
+ #else
+  return EPERM;
+--- /dev/null
++++ b/bsd/kern/kebab_volume_control_impl.h
+@@ -0,0 +1,109 @@
++/* Original FV state/control ABI for our authenticated vendor VEK format.
++ * Factory no-passcode C/D policy only. No foreign blob, passcode, SEP capability
++ * or unknown control is acknowledged. One active owner volume at a time. */
++static uint8_t kdc_uuid[16],kdc_record_hash[32],kdc_c[32],kdc_d[32];
++static bool kdc_registered,kdc_loaded;
++
++static void
++kdc_clear_locked(void)
++{
++ kdc_registered=kdc_loaded=false;kfk_wipe(kdc_uuid,16);kfk_wipe(kdc_record_hash,32);
++ kfk_wipe(kdc_c,32);kfk_wipe(kdc_d,32);
++}
++
++static bool
++kdc_parameters(const struct kebab_fv_credential *parameters)
++{
++ if(!parameters)return true; /* Original class-unload caller passes NULL. */
++ if(!kfk_range(parameters,sizeof(*parameters)))return false;
++ unsigned nonzero=0;for(unsigned i=0;i<sizeof(*parameters);++i)nonzero|=parameters->bytes[i];
++ return nonzero==0;
++}
++
++static int
++kdc_authenticated_locked(const uint8_t sealed[96],uint8_t key[32])
++{
++ if(!kfk_ready||!kdb_ready)return (int)kIOReturnNotReady;
++ return kfv_open_locked(sealed,key);
++}
++
++static void
++kdc_derive_locked(const uint8_t uuid[16],uint32_t cls,uint8_t output[32])
++{
++ static const uint8_t domain[]="UniXNU.kebab.volume-class.v1";
++ uint8_t context[sizeof(domain)+36];
++ memcpy(context,domain,sizeof(domain));memcpy(context+sizeof(domain),kdb_identifier,16);
++ memcpy(context+sizeof(domain)+16,uuid,16);memcpy(context+sizeof(domain)+32,&cls,4);
++ g_crypto_funcs->cchmac_fn(g_crypto_funcs->ccsha256_di,32,cls==3?kdb_class_c:kdb_class_d,
++     sizeof(context),context,output);kfk_wipe(context,sizeof(context));
++}
++
++bool
++kebab_volume_class_available(const uint8_t uuid[16],uint32_t cls)
++{
++ if(!kfk_context()||!kfk_range(uuid,16)||(cls!=3&&cls!=4))return false;
++ lck_mtx_lock(&kfk_lock);
++ bool ready=kfk_ready&&kdb_ready&&kdc_registered&&kdc_loaded&&!memcmp(uuid,kdc_uuid,16);
++ lck_mtx_unlock(&kfk_lock);return ready;
++}
++
++int
++kebab_volume_blob_state(const struct kebab_fv_credential *parameters,
++    const struct kebab_fv_wrapped_key *wrapped,struct kebab_fv_blob_state *output)
++{
++ if(!kfk_context()||!kfk_range(wrapped,sizeof(*wrapped))||!kfk_range(output,sizeof(*output))||
++     wrapped->key_len!=96||!kfk_range(wrapped->key,96))return (int)kIOReturnBadArgument;
++ if(!kdc_parameters(parameters))return (int)kIOReturnUnsupported;
++ if(kfk_overlap(output,sizeof(*output),wrapped,sizeof(*wrapped))||
++     kfk_overlap(output,sizeof(*output),wrapped->key,96)||
++     kfk_overlap(wrapped,sizeof(*wrapped),wrapped->key,96)||
++     (parameters&&(kfk_overlap(output,sizeof(*output),parameters,sizeof(*parameters))||
++     kfk_overlap(wrapped,sizeof(*wrapped),parameters,sizeof(*parameters))||
++     kfk_overlap(wrapped->key,96,parameters,sizeof(*parameters)))))return (int)kIOReturnBadArgument;
++ uint8_t sealed[96],key[32]={0};struct kebab_fv_blob_state state={{0}};
++ memcpy(sealed,wrapped->key,96);lck_mtx_lock(&kfk_lock);
++ int error=kdc_authenticated_locked(sealed,key);
++ if(!error){
++  const uint32_t type=1,version=1; /* Official FV state producer: VEK1, KEK2. */
++  memcpy(state.bytes,&type,4);memcpy(state.bytes+4,sealed,16);memcpy(state.bytes+20,sealed,16);
++  memcpy(state.bytes+40,&version,4);
++  /* Flags/capabilities/SiDP fields remain zero: this backend has none of the
++   * Apple SEP, credential, migration or hardware-volume features they encode.
++   * Availability is a separate real loaded-state query, never an invented bit. */
++  memcpy(output,&state,sizeof(state));
++ }
++ lck_mtx_unlock(&kfk_lock);kfk_wipe(sealed,sizeof(sealed));kfk_wipe(key,sizeof(key));kfk_wipe(&state,sizeof(state));return error;
++}
++
++int
++kebab_volume_set_protection(const struct kebab_fv_credential *parameters,uint32_t operation,uint64_t flags,
++    const struct kebab_fv_wrapped_key *auxiliary,const struct kebab_fv_wrapped_key *passphrase,
++    struct kebab_fv_wrapped_key *wrapped,struct kebab_fv_wrapped_key *result)
++{
++ if(!kfk_context())return (int)kIOReturnNotPermitted;
++ if(operation!=5&&operation!=18&&operation!=19)return (int)kIOReturnUnsupported;
++ if(flags||auxiliary||passphrase||result||!kdc_parameters(parameters))return (int)kIOReturnUnsupported;
++ if(!kfk_range(wrapped,sizeof(*wrapped))||wrapped->key_len!=96||!kfk_range(wrapped->key,96)||
++     kfk_overlap(wrapped,sizeof(*wrapped),wrapped->key,96)||
++     (parameters&&(kfk_overlap(parameters,sizeof(*parameters),wrapped,sizeof(*wrapped))||
++     kfk_overlap(parameters,sizeof(*parameters),wrapped->key,96))))return (int)kIOReturnBadArgument;
++ uint8_t sealed[96],key[32]={0},hash[32]={0},c[32]={0},d[32]={0};
++ memcpy(sealed,wrapped->key,96);
++ SHA256_CTX digest;SHA256_Init(&digest);SHA256_Update(&digest,sealed,96);SHA256_Final(hash,&digest);
++ lck_mtx_lock(&kfk_lock);
++ int error=kdc_authenticated_locked(sealed,key);
++ if(!error&&kdc_registered&&(memcmp(kdc_uuid,sealed,16)||memcmp(kdc_record_hash,hash,32)))error=(int)kIOReturnNotPermitted;
++ if(!error&&operation==19){
++  if(!kdc_registered)error=(int)kIOReturnNotReady;
++  else{kdc_loaded=false;kfk_wipe(kdc_c,32);kfk_wipe(kdc_d,32);}
++ }else if(!error){
++  /* Both commit and cold class-load establish actual UUID-bound keys from
++   * independently random device classes in the authenticated durable bank. */
++  kdc_derive_locked(sealed,3,c);kdc_derive_locked(sealed,4,d);
++  memcpy(kdc_c,c,32);memcpy(kdc_d,d,32);memcpy(kdc_uuid,sealed,16);memcpy(kdc_record_hash,hash,32);
++  kdc_registered=kdc_loaded=true;
++ }
++ lck_mtx_unlock(&kfk_lock);
++ kfk_wipe(sealed,sizeof(sealed));kfk_wipe(key,sizeof(key));kfk_wipe(hash,sizeof(hash));
++ kfk_wipe(c,sizeof(c));kfk_wipe(d,sizeof(d));kfk_wipe(&digest,sizeof(digest));return error;
++}

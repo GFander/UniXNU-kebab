@@ -1,0 +1,25 @@
+{
+  "passed": true,
+  "source_sha256": "ce57996a545a31c1cec16d3f339f1247478f7c2e9d91865e32398e400f6c3a02",
+  "cases": 30,
+  "mutation_refusals": 3,
+  "hardware_and_original_iokit_mocked": true,
+  "results": {
+    "production": {
+      "exit": 0,
+      "output": "PASS 30 actual C++ watchdog lifecycle/deadline/refusal cases; original APIs explicitly mocked\n"
+    },
+    "ignore-deadline": {
+      "exit": 4294967295,
+      "output": "ignore-deadline: /home/albert/platform-watchdog-test/ignore-deadline.cpp:315: int main(): Assertion `caught&&!originalLock.held&&interrupts' failed.\n"
+    },
+    "ignore-refusal": {
+      "exit": 4294967295,
+      "output": "ignore-refusal: /home/albert/platform-watchdog-test/ignore-refusal.cpp:307: int main(): Assertion `watchdog->newUserClient(nullptr,nullptr,1,nullptr,&client)==kIOReturnNotPrivileged&&!client' failed.\n"
+    },
+    "async-race": {
+      "exit": 4294967295,
+      "output": "async-race: /home/albert/platform-watchdog-test/async-race.cpp:301: int main(): Assertion `kebab_watchdog_prepare()==ENXIO&&kebab_watchdog_detail==-ENXIO' failed.\n"
+    }
+  }
+}

@@ -1,0 +1,79 @@
+--- a/iokit/Kernel/arm/KebabSPMI.cpp
++++ b/iokit/Kernel/arm/KebabSPMI.cpp
+@@ -10,6 +10,8 @@
+ #if defined(KEBAB)
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <libkern/c++/OSNumber.h>
+ #include <libkern/c++/OSArray.h>
+ #include <libkern/c++/OSData.h>
+ #include <pexpert/pexpert.h>
+@@ -215,6 +217,8 @@
+ public:
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	IOReturn getState(uint8_t state[2]);
++	IOReturn setProperties(OSObject *properties) override;
++	void stop(IOService *provider) override;
+ };
+ OSDefineMetaClassAndStructors(KebabPon, IOService);
+ bool
+@@ -228,7 +232,19 @@
+ 	if (!valid) { IOService::stop(provider); return false; }
+ 	setName("KebabPon");
+ 	setProperty("normal-state-query", true);
+-	registerService();
++ /* This existing driver is the primary PM8150 PON service. Only advertise
++  * the standard PMU identity after a real, bounded observer read confirms
++  * the expected Gen2 PON block. No Apple PMU or persistent latch claim. */
++ uint8_t state[2]={};
++ IOReturn observed=getState(state);
++ if(observed==kIOReturnSuccess&&(state[0]==4||state[0]==5)){
++  if(!setProperty("IOPMUPrimary",1,32)||!setProperty("IOPMUBootStagePersistent",false)){
++   removeProperty("IOPMUPrimary");IOService::stop(provider);return false;
++  }
++  setProperty("PMICModel","PM8150");
++  IOLog("KEBAB PMU: primary PM8150 PON observed subtype=%u spare=0x%x; boot stages volatile, no PMIC writes\n",state[0],state[1]);
++ }else IOLog("KEBAB PMU: primary identity withheld, PON observation error=0x%x subtype=%u\n",observed,state[0]);
++ registerService(kIOServiceSynchronous);
+ 	IOLog("KEBAB SPMI IOKIT: KebabPon matched usid0/peripheral08\n");
+ 	return true;
+ }
+@@ -239,6 +255,37 @@
+ 	IOReturn status = bus == NULL ? kIOReturnNoDevice : bus->ponState(state);
+ 	OSSafeReleaseNULL(bus);
+ 	return status;
++}
++
++/* IOPMUBootStage is a real volatile boot-progress property here. It is not
++ * translated into Apple AON or a guessed PMIC register. Only privileged
++ * callers may change the one supported, bounded property. */
++IOReturn
++KebabPon::setProperties(OSObject *properties)
++{
++ IOReturn privilege=IOUserClient::clientHasPrivilege(current_task(),kIOClientPrivilegeAdministrator);
++ if(privilege!=kIOReturnSuccess)return privilege;
++ OSDictionary *dictionary=OSDynamicCast(OSDictionary,properties);
++ if(!dictionary)return kIOReturnBadArgument;
++ if(dictionary->getCount()!=1||!dictionary->getObject("IOPMUBootStage"))return kIOReturnUnsupported;
++ OSNumber *number=OSDynamicCast(OSNumber,dictionary->getObject("IOPMUBootStage"));
++ if(!number||number->unsigned64BitValue()>255)return kIOReturnBadArgument;
++ OSNumber *primary=OSDynamicCast(OSNumber,getProperty("IOPMUPrimary"));
++ if(!primary||primary->unsigned32BitValue()!=1)return kIOReturnNotReady;
++ uint8_t state[2]={};IOReturn observed=getState(state);
++ if(observed!=kIOReturnSuccess)return observed;
++ if(state[0]!=4&&state[0]!=5)return kIOReturnNoDevice;
++ uint32_t stage=number->unsigned32BitValue();
++ if(!setProperty("IOPMUBootStage",stage,32))return kIOReturnNoMemory;
++ IOLog("KEBAB PMU: boot stage=%u recorded in live PM8150 service (volatile/no PMIC write)\n",stage);
++ return kIOReturnSuccess;
++}
++
++void
++KebabPon::stop(IOService *provider)
++{
++ removeProperty("IOPMUPrimary");
++ IOService::stop(provider);
+ }
+ 
+ class KebabPmicKeys : public IOService {

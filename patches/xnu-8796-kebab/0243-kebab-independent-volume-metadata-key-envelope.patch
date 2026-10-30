@@ -1,0 +1,183 @@
+--- a/bsd/kern/kebab_file_keys.c
++++ b/bsd/kern/kebab_file_keys.c
+@@ -52,13 +52,13 @@
+ }
+ 
+ /* RFC3394, using the already-qualified constant-time native AES provider.
+- * Sizes are bounded to the two private envelopes (and public KAT input). */
++ * Sizes are bounded to private file/keybag/metadata envelopes and public KAT input. */
+ static int
+ kfk_wrap(const uint8_t kek[32], const uint8_t *input, size_t bytes, uint8_t *output, bool encrypt)
+ {
+  if (!kfk_range(input, bytes) || !kfk_range(output, encrypt?bytes+8:bytes-8) ||
+-     bytes%8 || bytes<(encrypt?16u:24u) || bytes>(encrypt?88u:96u)) return (int)kIOReturnBadArgument;
+- uint8_t work[96]={0}, block[16]={0};
++     bytes%8 || bytes<(encrypt?16u:24u) || bytes>(encrypt?120u:128u)) return (int)kIOReturnBadArgument;
++ uint8_t work[128]={0}, block[16]={0};
+  aes_encrypt_ctx enc; aes_decrypt_ctx dec;
+  kfk_wipe(&enc,sizeof(enc)); kfk_wipe(&dec,sizeof(dec));
+  unsigned n=(unsigned)(encrypt?bytes/8:bytes/8-1);
+@@ -264,6 +264,8 @@
+  if (!error) { memmove(output->key,input->key,96);output->key_len=96;output->dp_class=4; }
+  lck_mtx_unlock(&kfk_lock);kfk_wipe(plain,sizeof(plain));return error;
+ }
++
++#include "kebab_metadata_keys_impl.h"
+ 
+ int
+ kebab_xts128_crypt(const uint8_t key[32], uint64_t unit, const void *input, void *output, size_t bytes, bool encrypt)
+--- a/bsd/kern/kebab_file_keys.h
++++ b/bsd/kern/kebab_file_keys.h
+@@ -38,5 +38,10 @@
+     const struct kebab_aks_wrapped_key *, struct kebab_aks_wrapped_key *);
+ int kebab_xts128_crypt(const uint8_t key[32], uint64_t unit, const void *, void *, size_t, bool);
+ int kebab_file_keys_selftest(void);
++int kebab_metadata_key_wrap(const struct kebab_aks_credential *, uint32_t,
++    const struct kebab_aks_raw_key *, struct kebab_aks_wrapped_key *);
++int kebab_metadata_key_unwrap(const struct kebab_aks_credential *, const struct kebab_aks_wrapped_key *,
++    struct kebab_aks_raw_key *);
++int kebab_metadata_keys_selftest(void);
+ #undef KEBAB_KEY_STATIC_ASSERT
+ #endif
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -227,6 +227,7 @@
+   unsigned key_test=0;PE_parse_boot_argn("kebab_file_keys_test",&key_test,sizeof(key_test));
+   if(!error && key_test)error=kebab_file_keys_commit();
+   if(!error && key_test)error=kebab_file_keys_selftest();
++  if(!error && key_test)error=kebab_metadata_keys_selftest();
+   if(!error && (mode==10 || mode==11))error=kfp_record(mounted,mode==10);
+   if(!error && mode>=12)error=kfp_record_impl(mounted,mode==12,true);
+   if(key_test){kebab_file_keys_cancel();printf("KEBAB FILE KEYS: private context erased; no AKS service published\n");}
+--- /dev/null
++++ b/bsd/kern/kebab_metadata_keys_impl.h
+@@ -0,0 +1,129 @@
++/* Private volume-metadata envelopes for the audited +0x38/+0x48 descriptor
++ * boundary. Numeric14 only, metadata credentials only, no AKS publication or
++ * Class C unlock claim. This is a HiOS format, not Apple's SEP serialization. */
++static bool
++kfk_meta_credential(const struct kebab_aks_credential *cred)
++{
++ if(!kfk_range(cred,sizeof(*cred)))return false;
++ unsigned nonzero=0;
++ for(unsigned i=0;i<80;++i) {
++  if(i>=22 && i<38)nonzero|=cred->bytes[i];
++  else if(cred->bytes[i])return false;
++ }
++ return nonzero!=0;
++}
++
++static bool
++kfk_meta_buffers(const struct kebab_aks_credential *cred, const struct kebab_aks_raw_key *raw,
++    const struct kebab_aks_wrapped_key *wrapped)
++{
++ if(!kfk_range(cred,sizeof(*cred)) || !kfk_range(raw,sizeof(*raw)) ||
++     !kfk_range(wrapped,sizeof(*wrapped)) || raw->key_len<16 || raw->key_len>64 ||
++     raw->iv_key_len>64 || !kfk_range(raw->key,raw->key_len) ||
++     (raw->iv_key_len && !kfk_range(raw->iv_key,raw->iv_key_len)) ||
++     wrapped->key_len<64 || wrapped->key_len>128 || !kfk_range(wrapped->key,wrapped->key_len))return false;
++ const void *regions[]={cred,raw,wrapped,raw->key,raw->iv_key,wrapped->key};
++ const size_t sizes[]={sizeof(*cred),sizeof(*raw),sizeof(*wrapped),raw->key_len,raw->iv_key_len,wrapped->key_len};
++ for(unsigned i=0;i<6;++i)for(unsigned j=i+1;j<6;++j)
++  if(sizes[i] && sizes[j] && kfk_overlap(regions[i],sizes[i],regions[j],sizes[j]))return false;
++ return true;
++}
++
++static bool
++kfk_meta_length(unsigned key, unsigned iv)
++{
++ return (key==16 || key==32 || key==64) && (iv==0 || iv==16);
++}
++
++static int
++kfk_meta_kek(const struct kebab_aks_credential *cred, uint8_t output[32])
++{
++ if(!kfk_ready || !g_crypto_funcs || !g_crypto_funcs->ccsha256_di ||
++     !g_crypto_funcs->cchmac_fn)return (int)kIOReturnNotReady;
++ static const uint8_t domain[]="UniXNU.kebab.metadata-KEK.v1";
++ uint8_t input[sizeof(domain)+16];
++ memcpy(input,domain,sizeof(domain));memcpy(input+sizeof(domain),cred->bytes+22,16);
++ g_crypto_funcs->cchmac_fn(g_crypto_funcs->ccsha256_di,32,kfk_root_kek,sizeof(input),input,output);
++ kfk_wipe(input,sizeof(input));return 0;
++}
++
++static void
++kfk_meta_header(uint8_t output[40], const struct kebab_aks_credential *cred, unsigned key, unsigned iv)
++{
++ bzero(output,40);memcpy(output,"KM01\1\0",6);memcpy(output+8,cred->bytes+22,16);
++ output[32]=14;output[36]=(uint8_t)key;output[38]=(uint8_t)iv;
++}
++
++int
++kebab_metadata_key_wrap(const struct kebab_aks_credential *cred, uint32_t selector,
++    const struct kebab_aks_raw_key *raw, struct kebab_aks_wrapped_key *wrapped)
++{
++ if(!kfk_context() || !kfk_meta_buffers(cred,raw,wrapped))return (int)kIOReturnBadArgument;
++ if(selector!=14 || !kfk_meta_credential(cred) || raw->flags ||
++     !kfk_meta_length(raw->key_len,raw->iv_key_len))return (int)kIOReturnUnsupported;
++ size_t bytes=40u+raw->key_len+raw->iv_key_len;
++ if(wrapped->key_len<bytes+8)return (int)kIOReturnBadArgument;
++ uint8_t plain[120]={0},sealed[128]={0},kek[32]={0};
++ kfk_meta_header(plain,cred,raw->key_len,raw->iv_key_len);
++ memcpy(plain+40,raw->key,raw->key_len);
++ if(raw->iv_key_len)memcpy(plain+40+raw->key_len,raw->iv_key,raw->iv_key_len);
++ lck_mtx_lock(&kfk_lock);int error=kfk_meta_kek(cred,kek);
++ if(!error)error=kfk_wrap(kek,plain,bytes,sealed,true);
++ if(!error){memcpy(wrapped->key,sealed,bytes+8);wrapped->key_len=(uint32_t)(bytes+8);wrapped->dp_class=14;}
++ lck_mtx_unlock(&kfk_lock);
++ kfk_wipe(plain,sizeof(plain));kfk_wipe(sealed,sizeof(sealed));kfk_wipe(kek,sizeof(kek));return error;
++}
++
++int
++kebab_metadata_key_unwrap(const struct kebab_aks_credential *cred,
++    const struct kebab_aks_wrapped_key *wrapped, struct kebab_aks_raw_key *raw)
++{
++ if(!kfk_context() || !kfk_meta_buffers(cred,raw,wrapped))return (int)kIOReturnBadArgument;
++ if(wrapped->dp_class!=14 || !kfk_meta_credential(cred))return (int)kIOReturnUnsupported;
++ uint8_t plain[120]={0},expected[40]={0},kek[32]={0};
++ lck_mtx_lock(&kfk_lock);int error=kfk_meta_kek(cred,kek);
++ if(!error)error=kfk_wrap(kek,wrapped->key,wrapped->key_len,plain,false);
++ unsigned key=plain[36],iv=plain[38];
++ if(!error && (!kfk_meta_length(key,iv) || wrapped->key_len!=40u+key+iv+8 ||
++     raw->key_len<key || raw->iv_key_len<iv))error=(int)kIOReturnBadArgument;
++ if(!error) {
++  kfk_meta_header(expected,cred,key,iv);unsigned difference=0;
++  for(unsigned i=0;i<40;++i)difference|=plain[i]^expected[i];
++  if(difference)error=(int)kIOReturnNotPermitted;
++ }
++ if(!error) {
++  memcpy(raw->key,plain+40,key);if(iv)memcpy(raw->iv_key,plain+40+key,iv);
++  raw->key_len=key;raw->iv_key_len=iv;raw->flags=0;
++ }
++ lck_mtx_unlock(&kfk_lock);kfk_wipe(plain,sizeof(plain));kfk_wipe(expected,sizeof(expected));kfk_wipe(kek,sizeof(kek));return error;
++}
++
++int
++kebab_metadata_keys_selftest(void)
++{
++ struct { uint8_t key[64],iv[16],sealed[128],back[64],back_iv[16]; } *work=kalloc_data(sizeof(*work),Z_WAITOK|Z_ZERO);
++ if(!work)return (int)kIOReturnNoMemory;
++ struct kebab_aks_credential cred={{0}};for(unsigned i=0;i<16;++i)cred.bytes[22+i]=(uint8_t)(0x30+i);
++ for(unsigned i=0;i<64;++i)work->key[i]=(uint8_t)i;
++ for(unsigned i=0;i<16;++i)work->iv[i]=(uint8_t)(0x90+i);
++ int error=0;
++ for(unsigned index=0;!error && index<3;++index)for(unsigned has_iv=0;!error && has_iv<2;++has_iv) {
++  const unsigned lengths[]={16,32,64};unsigned bytes=lengths[index],iv=has_iv?16u:0u;
++  struct kebab_aks_raw_key input={work->key,bytes,work->iv,iv,0};
++  struct kebab_aks_wrapped_key wrapped={work->sealed,128,0};
++  struct kebab_aks_raw_key output={work->back,64,work->back_iv,16,0};
++  error=kebab_metadata_key_wrap(&cred,14,&input,&wrapped);
++  if(!error)error=kebab_metadata_key_unwrap(&cred,&wrapped,&output);
++  if(!error && (output.key_len!=bytes || output.iv_key_len!=iv ||
++      memcmp(work->key,work->back,bytes) || (iv && memcmp(work->iv,work->back_iv,iv))))error=(int)kIOReturnError;
++  if(!error) {
++   work->sealed[0]^=1;memset(work->back,0xa5,64);output.key_len=64;output.iv_key_len=16;
++   int rejected=kebab_metadata_key_unwrap(&cred,&wrapped,&output);work->sealed[0]^=1;
++   if(!rejected)error=(int)kIOReturnError;
++   for(unsigned i=0;i<64;++i)if(work->back[i]!=0xa5)error=(int)kIOReturnError;
++  }
++ }
++ kfk_wipe(work,sizeof(*work));kfree_data(work,sizeof(*work));
++ printf("KEBAB METADATA KEYS: Root-backed numeric14 volume wrap/unwrap/tamper %s (%d); no AKS publication\n",error?"FAIL":"PASS",error);
++ return error;
++}

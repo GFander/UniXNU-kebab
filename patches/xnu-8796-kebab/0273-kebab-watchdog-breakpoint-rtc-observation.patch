@@ -1,0 +1,69 @@
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -19,6 +19,9 @@
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
++#include <kern/clock.h>
++#include "../../../bsd/dev/kebab_spmi_bus.h"
++#include "../../../bsd/dev/kebab_spmi_clients.h"
+ 
+ /* the driver is C; these have to be declared before use */
+ extern "C" bool kebab_usb_console_ready(void);
+@@ -301,3 +304,28 @@
+ 	}
+ 	return IODTPlatformExpert::haltRestart(type);
+ }
++
++#if defined(KEBAB)
++/* Read-only PM8150 RTC observation: mainline pm8150.dtsi identifies SID0,
++ * qcom,pm8941-rtc at 0x6000. Never enable or adjust the PMIC counter here. */
++extern "C" void kebab_rtc_probe(void)
++{
++ kebab_spmi_init();
++ uint32_t apid=0,raw=0; uint8_t ctrl=0,bytes[4]={},low=0;
++ int error=-1;
++ kebab_spmi_bus_lock();
++ if(kebab_spmi_bus_ready() && kebab_spmi_reader(0x060,&apid)==0) {
++  error=kebab_spmi_obs_read_ex(apid,0,0x6046,kebab_spmi_bus_next_attempt(),false,false,&ctrl);
++  for(unsigned retry=0;!error && retry<3;retry++) {
++   for(unsigned i=0;i<4 && !error;i++)error=kebab_spmi_obs_read_ex(apid,0,0x6048+i,kebab_spmi_bus_next_attempt(),false,false,&bytes[i]);
++   if(!error)error=kebab_spmi_obs_read_ex(apid,0,0x6048,kebab_spmi_bus_next_attempt(),false,false,&low);
++   if(error || low>=bytes[0])break;
++   if(retry==2)error=-2;
++  }
++  for(unsigned i=0;i<4;i++)raw|=(uint32_t)bytes[i]<<(8*i);
++ }
++ kebab_spmi_bus_unlock();
++ clock_sec_t secs=0;clock_usec_t usecs=0;clock_get_calendar_microtime(&secs,&usecs);
++ IOLog("KEBAB RTC PROBE: PM8150 sid0 ppID060 apid=%u ctrl=0x%02x seconds=%u rc=%d calendar=%llu.%06u; read-only/no offset applied\n",apid,ctrl,raw,error,(unsigned long long)secs,usecs);
++}
++#endif
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7151,6 +7151,8 @@
+  extern int kebab_apfs_probe_prepare(proc_t, user_addr_t);
+  int kebab_apfs_probe_error = kebab_apfs_probe_prepare(p, (user_addr_t)scratch_addr);
+  if (kebab_apfs_probe_error) panic("kebab APFS probe failed: %d", kebab_apfs_probe_error);
++ extern void kebab_rtc_probe(void);
++ kebab_rtc_probe();
+  int owner_dsc_prepare_error = kebab_dsc_after_mount();
+  if (owner_dsc_prepare_error) panic("kebab owner DSC prepare failed: %d", owner_dsc_prepare_error);
+  if(tool_mode>=2){
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1096,6 +1096,14 @@
+ 	}
+ #endif /* __has_feature(ptrauth_calls) */
+ 
++#if defined(KEBAB)
++ /* Bounded EL0 breakpoint evidence, with ordinary signal/critical-exit
++  * handling unchanged. No dereference of user memory in the trap path. */
++ static uint32_t kebab_brk_reports;
++ if (__atomic_fetch_add(&kebab_brk_reports,1,__ATOMIC_RELAXED)<32) {
++  kprintf("KEBAB USER BRK: pid=%d pc=0x%llx lr=0x%llx esr=0x%x x0=0x%llx\n",pid_from_task(current_task()),(unsigned long long)get_saved_state_pc(state),(unsigned long long)get_saved_state_lr(state),esr,(unsigned long long)get_saved_state_reg(state,0));
++ }
++#endif
+ 	codes[1] = get_saved_state_pc(state);
+ 	exception_triage(exception, codes, numcodes);
+ 	__builtin_unreachable();

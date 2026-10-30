@@ -1,0 +1,60 @@
+--- a/bsd/kern/kebab_qsee_probe.c
++++ b/bsd/kern/kebab_qsee_probe.c
+@@ -81,6 +81,37 @@
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
++/* Returns false if firmware may still own the shared page. */
++static bool
++qsee_keymaster_version(vm_offset_t page, uint64_t pa, uint32_t app)
++{
++	int enabled=0;
++	PE_parse_boot_argn("kebab_keymaster_version",&enabled,sizeof(enabled));
++	if (enabled!=1) return true;
++	int available=qsee_available(0x30000001);
++	if (available<0) return false; /* Do not issue another SMC after an uncertain query. */
++	if (available!=1) return true;
++	/* QSEE five-argument SMC ABI: arg3 onward occupy seven LE64 slots. */
++	bzero((void *)page,PAGE_SIZE);
++	*(uint32_t *)(page+0x100)=0x200; /* KEYMASTER_GET_VERSION. */
++	memset((void *)(page+0x200),0xa5,20);
++	uint64_t *extended=(uint64_t *)(page+0x300);
++	extended[0]=pa+0x200; extended[1]=20;
++	qsee_cache(page,true);
++	struct qsee_result r=qsee_call(0x70000001,0x885,app,pa+0x100,4,pa+0x300);
++	printf("KEBAB QSEE: keymaster GET_VERSION status=%d result=0x%llx type=0x%llx attempts=%u\n",
++	    r.status,r.value,r.type,r.attempts);
++	if (r.status==1 || (!r.status && r.value!=0 && r.value!=UINT32_MAX)) return false;
++	qsee_cache(page,false);
++	if (r.status || r.value) return true;
++	const uint32_t *reply=(const uint32_t *)(page+0x200);
++	printf("KEBAB QSEE: keymaster reply status=%d protocol=%u.%u app=%u.%u\n",
++	    (int32_t)reply[0],reply[1],reply[2],reply[3],reply[4]);
++	if (!reply[0] && reply[1]>=2 && reply[1]<256 && reply[2]<65536 && reply[3]<65536 && reply[4]<65536)
++		printf("KEBAB QSEE: keymaster GET_VERSION validated; no key operations\n");
++	return true;
++}
++
+ void kebab_qsee_probe(void);
+ void
+ kebab_qsee_probe(void)
+@@ -94,7 +125,7 @@
+ 	static bool attempted;
+ 	if (attempted) { printf("KEBAB QSEE: already attempted\n"); return; }
+ 	attempted=true;
+-	printf("KEBAB QSEE: fixed lookup begin; no app load, send, key or RPMB operation\n");
++	printf("KEBAB QSEE: fixed lookup begin; optional GET_VERSION; no app load, key or RPMB operation\n");
+ 	if (PAGE_SIZE!=0x4000 || qsee_available(0x02000601)!=1 || qsee_available(0x32000103)!=1) return;
+ 
+ 	vm_offset_t page=0;
+@@ -141,6 +172,10 @@
+ 		/* Success requires QSEE success, APP_ID tag and a nonzero 32-bit ID. */
+ 		if (!r.status && !r.value && r.type==0xee01 && r.data && r.data<=UINT32_MAX)
+ 			printf("KEBAB QSEE: found app=%s id=%llu; command ABI still unqualified\n",names[i],r.data);
++		if (!r.status && !r.value && r.type==0xee01 && r.data && r.data<=UINT32_MAX &&
++		    !strcmp(names[i],"keymaster64") && !qsee_keymaster_version(page,pa,(uint32_t)r.data)) {
++			outstanding=true; break;
++		}
+ 		if (r.status) break; /* No retry after transport errors. */
+ 	}
+ 	if (outstanding) {

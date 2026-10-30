@@ -1,5 +1,17 @@
 # UniXNU-kebab
 
+## 当前实机验收：0386（2026-10-31）
+
+当前进度以[最新状态](docs/STATUS.md)、[Sandbox/watchdog验收](docs/SANDBOX-WATCHDOG-20261031.md)和[源码回放与实机证据](docs/qualification/0386/README.md)为准。
+
+原版APFS和真实加密Data、硬件Root/nonce、原版MKB_INIT及C/D文件、持久RTC/NVRAM、原版watchdog监控均已通过对应实测。新接通原版Sandbox与真实Kebab平台watchdog类授权：原任务允许、无关服务拒绝。A/B密钥和若干原版AKS接口、剩余daemon行为及GPU/显示/输入仍需开发，尚未到达可用SpringBoard。
+
+这里公开268个板级补丁、4个Mac构建补丁以及5239源文件的独立回放证据，不分发固件/IPSW、原版闭源组件、设备密钥或私人Data。`board.toml`的早期standalone入口未参与本次端到端prelink实机验收；源码回放通过也不能代替boot镜像实测。
+
+以下保留早期移植记录，其中HFS+、单核和当时阻塞点是历史状态，请勿把它们当作最新验收结果。
+
+---
+
 一加 8T（kebab，SM8250）的 UniXNU 设备仓库：**16 KiB 页**的 XNU 移植，目标是用
 iPhone X 的身份启动 iOS 16.7.16 用户态。
 

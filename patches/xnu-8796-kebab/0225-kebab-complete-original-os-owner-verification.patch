@@ -1,0 +1,433 @@
+--- a/bsd/dev/kebab_cryptex_media.c
++++ b/bsd/dev/kebab_cryptex_media.c
+@@ -298,6 +298,8 @@
+  return error;
+ }
+ 
++#include "kebab_owner_os_impl.h"
++
+ int
+ kebab_cryptex_boot_files_verify(void)
+ {
+@@ -306,6 +308,7 @@
+  int error = kebab_cryptex_mount_recheck();
+  if (!error) error = kcm_verify_boot_file("/sbin/launchd", 541600, launchd);
+  if (!error) error = kcm_verify_boot_file("/usr/lib/dyld", 922912, dyld);
++ if (!error) error = koos_verify();
+  if (!error) error = kebab_cryptex_mount_recheck();
+  printf("KEBAB OWNER DSC: original launchd/dyld SHA and RO roots %s (%d)\n",
+      error ? "FAIL" : "PASS", error);
+--- a/bsd/dev/kebab_cryptex_media.h
++++ b/bsd/dev/kebab_cryptex_media.h
+@@ -10,6 +10,8 @@
+ int kebab_cryptex_blockstorage_volume(dev_t *device, char *name, size_t capacity);
+ int kebab_cryptex_mount_recheck(void);
+ int kebab_cryptex_boot_files_verify(void);
++/* Requires complete original OS Merkle verification, not two boot files. */
++int kebab_cryptex_os_recheck(void);
+ #ifndef __cplusplus
+ int kebab_cryptex_vnode_recheck(vnode_t);
+ #endif
+--- /dev/null
++++ b/bsd/dev/kebab_owner_os_anchor.h
+@@ -0,0 +1,2 @@
++#define KOOS_EXPECTED_NODES 318071u
++static const uint8_t koos_expected_root[32] = {0x27,0xa9,0xaa,0x1b,0x7f,0x9a,0xf2,0x1f,0x72,0xc8,0xb4,0x7b,0x3e,0xe4,0x0f,0xf6,0x33,0x9f,0x6b,0x4a,0x55,0xec,0x2a,0xdc,0x6f,0x17,0x40,0xcb,0x1f,0xe1,0x64,0x68};
+--- /dev/null
++++ b/bsd/dev/kebab_owner_os_contract.h
+@@ -0,0 +1,40 @@
++/* Canonical original-OS Merkle encoding, independent of C struct padding.
++ * Caller supplies SHA256_CTX and SHA256_Init/Update/Final, uint types. */
++#ifndef KEBAB_OWNER_OS_CONTRACT_H
++#define KEBAB_OWNER_OS_CONTRACT_H
++struct koos_metadata {
++ uint32_t kind, mode, uid, gid, flags;
++ uint64_t size, rdev;
++};
++static inline void
++koos_u32(SHA256_CTX *hash, uint32_t value)
++{
++ uint8_t data[4];
++ for (unsigned i = 0; i < 4; ++i) data[i] = value >> (i * 8);
++ SHA256_Update(hash, data, sizeof(data));
++}
++static inline void
++koos_u64(SHA256_CTX *hash, uint64_t value)
++{
++ uint8_t data[8];
++ for (unsigned i = 0; i < 8; ++i) data[i] = value >> (i * 8);
++ SHA256_Update(hash, data, sizeof(data));
++}
++static inline void
++koos_node(const struct koos_metadata *node, const uint8_t content[32],
++    const uint8_t attributes[32], const uint8_t children[32], uint8_t digest[32])
++{
++ static const char domain[] = "HiOS original OS node v1";
++ SHA256_CTX hash;
++ SHA256_Init(&hash);
++ SHA256_Update(&hash, domain, sizeof(domain));
++ koos_u32(&hash, node->kind); koos_u32(&hash, node->mode);
++ koos_u32(&hash, node->uid); koos_u32(&hash, node->gid);
++ koos_u32(&hash, node->flags);
++ koos_u64(&hash, node->size); koos_u64(&hash, node->rdev);
++ SHA256_Update(&hash, content, 32);
++ SHA256_Update(&hash, attributes, 32);
++ SHA256_Update(&hash, children, 32);
++ SHA256_Final(digest, &hash);
++}
++#endif
+--- /dev/null
++++ b/bsd/dev/kebab_owner_os_impl.h
+@@ -0,0 +1,325 @@
++/* Included only by kebab_cryptex_media.c. No writable or cross-mount view. */
++#include <sys/dirent.h>
++#include <sys/xattr.h>
++#include <sys/uio_internal.h>
++#include "kebab_owner_os_contract.h"
++#include "kebab_owner_os_anchor.h"
++
++#define KOOS_DEPTH 128u
++#define KOOS_CHILDREN 32768u
++#define KOOS_NAMES_BYTES (64u * 1024u)
++struct koos_child { char name[256]; uint8_t digest[32]; };
++struct koos_frame {
++ char path[MAXPATHLEN];
++ struct koos_metadata metadata;
++ uint8_t content[32], attributes[32];
++ struct koos_child *children;
++ uint32_t count, capacity, index;
++};
++struct koos_scan {
++ struct koos_frame *frames;
++ uint8_t *buffer;
++ uio_t uio;
++ uint64_t bytes, xattr_bytes;
++ uint32_t nodes;
++};
++static uint32_t koos_verified;
++static vnode_t koos_root;
++
++static int
++koos_identity(void)
++{
++ return rootvnode && rootvnode == kcm_owned_root &&
++     vnode_mount(rootvnode) == kcm_system && kcm_mount_readonly(kcm_system) &&
++     !kebab_cryptex_mount_recheck() ? 0 : EAUTH;
++}
++
++static int
++koos_lookup(const char *path, vnode_t *result, vfs_context_t context)
++{
++ struct nameidata name;
++ NDINIT(&name, LOOKUP, OP_LOOKUP, NOFOLLOW | NOCROSSMOUNT,
++     UIO_SYSSPACE, CAST_USER_ADDR_T(path), context);
++ name.ni_flag |= NAMEI_NOFOLLOW_ANY;
++ int error = namei(&name);
++ if (error) return error;
++ *result = name.ni_vp;
++ nameidone(&name);
++ if (!*result || vnode_mount(*result) != kcm_system) {
++  if (*result) vnode_put(*result);
++  *result = NULLVP;
++  return EAUTH;
++ }
++ return 0;
++}
++
++static int
++koos_child_compare(const void *left, const void *right)
++{
++ return strcmp(((const struct koos_child *)left)->name,
++     ((const struct koos_child *)right)->name);
++}
++
++static int
++koos_directory(struct koos_scan *scan, struct koos_frame *frame, vnode_t vnode,
++    vfs_context_t context)
++{
++ int error = VNOP_OPEN(vnode, FREAD, context);
++ if (error) return error;
++ int eof = 0;
++ off_t offset = 0;
++ while (!error && !eof) {
++  off_t previous = offset;
++  int count = 0;
++  uio_reset(scan->uio, offset, UIO_SYSSPACE, UIO_READ);
++  error = uio_addiov(scan->uio, (uintptr_t)scan->buffer, KCM_CHUNK);
++  if (error) break;
++  error = VNOP_READDIR(vnode, scan->uio, 0, &eof, &count, context);
++  if (error) break;
++  if (uio_resid(scan->uio) < 0 || uio_resid(scan->uio) > KCM_CHUNK) { error = EIO; break; }
++  size_t used = KCM_CHUNK - uio_resid(scan->uio);
++  offset = uio_offset(scan->uio);
++  if (!eof && (!used || previous == offset)) { error = EIO; break; }
++  for (size_t at = 0; !error && at < used; ) {
++   size_t header = offsetof(struct dirent, d_name);
++   if (used - at < header) { error = EIO; break; }
++   struct dirent entry;
++   memcpy(&entry, scan->buffer + at, header);
++   const char *name = (const char *)scan->buffer + at + header;
++   if (entry.d_reclen < header || entry.d_reclen > used - at ||
++       !entry.d_namlen || entry.d_namlen >= sizeof(frame->children[0].name) ||
++       entry.d_namlen + header >= entry.d_reclen || name[entry.d_namlen] ||
++       strnlen(name, entry.d_namlen) != entry.d_namlen ||
++       memchr(name, '/', entry.d_namlen)) { error = EIO; break; }
++   at += entry.d_reclen;
++   if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
++   if (frame->count == KOOS_CHILDREN) { error = E2BIG; break; }
++   if (frame->count == frame->capacity) {
++    uint32_t capacity = frame->capacity ? frame->capacity * 2 : 32;
++    struct koos_child *children = kalloc_data(capacity * sizeof(*children), Z_WAITOK | Z_ZERO);
++    if (!children) { error = ENOMEM; break; }
++    if (frame->children) {
++     memcpy(children, frame->children, frame->count * sizeof(*children));
++     kfree_data(frame->children, frame->capacity * sizeof(*children));
++    }
++    frame->children = children;
++    frame->capacity = capacity;
++   }
++   strlcpy(frame->children[frame->count++].name, name, sizeof(frame->children[0].name));
++  }
++ }
++ int closed = VNOP_CLOSE(vnode, FREAD, context);
++ if (!error) error = closed;
++ if (!error && frame->count) {
++  qsort(frame->children, frame->count, sizeof(frame->children[0]), koos_child_compare);
++  for (uint32_t i = 1; i < frame->count; ++i)
++   if (!strcmp(frame->children[i - 1].name, frame->children[i].name)) return EIO;
++ }
++ return error;
++}
++
++static int
++koos_attributes(struct koos_scan *scan, vnode_t vnode, uint8_t digest[32], vfs_context_t context)
++{
++ SHA256_CTX hash;
++ SHA256_Init(&hash);
++ size_t names_size = 0;
++ const int options = XATTR_NOSECURITY | XATTR_SHOWCOMPRESSION | XATTR_NODEFAULT;
++ int error = vn_listxattr(vnode, NULL, &names_size, options, context);
++ if (error || names_size > KOOS_NAMES_BYTES) return error ? error : E2BIG;
++ const size_t allocated_names = names_size;
++ char *names = kalloc_data(names_size + 1, Z_WAITOK | Z_ZERO);
++ if (!names) return ENOMEM;
++ if (names_size) {
++  uio_reset(scan->uio, 0, UIO_SYSSPACE, UIO_READ);
++  error = uio_addiov(scan->uio, (uintptr_t)names, names_size);
++  if (!error) error = vn_listxattr(vnode, scan->uio, &names_size, options, context);
++  if (!error && (uio_resid(scan->uio) || names_size != allocated_names)) error = EIO;
++ }
++ /* At most 256 native xattrs, each name bounded by XATTR_MAXNAMELEN. */
++ char *ordered[256];
++ uint32_t count = 0;
++ for (size_t at = 0; !error && at < names_size; ) {
++  size_t length = strnlen(names + at, names_size - at);
++  if (!length || length > XATTR_MAXNAMELEN || length >= names_size - at || count == 256) { error = EIO; break; }
++  ordered[count++] = names + at;
++  at += length + 1;
++ }
++ for (uint32_t i = 1; i < count; ++i) {
++  char *value = ordered[i]; uint32_t at = i;
++  while (at && strcmp(ordered[at - 1], value) > 0) { ordered[at] = ordered[at - 1]; --at; }
++  ordered[at] = value;
++ }
++ koos_u32(&hash, count);
++ for (uint32_t i = 0; !error && i < count; ++i) {
++  if (i && !strcmp(ordered[i - 1], ordered[i])) { error = EIO; break; }
++  size_t bytes = 0;
++  error = vn_getxattr(vnode, ordered[i], NULL, &bytes, options, context);
++  if (error) break;
++  if (bytes > (1u << 30) || (bytes > KCM_CHUNK && strcmp(ordered[i], XATTR_RESOURCEFORK_NAME))) { error = E2BIG; break; }
++  koos_u32(&hash, (uint32_t)strlen(ordered[i]));
++  SHA256_Update(&hash, ordered[i], strlen(ordered[i]));
++  koos_u64(&hash, bytes);
++  for (size_t offset = 0; !error && offset < bytes; ) {
++   size_t amount = bytes - offset > KCM_CHUNK ? KCM_CHUNK : bytes - offset;
++   size_t actual = amount;
++   uio_reset(scan->uio, offset, UIO_SYSSPACE, UIO_READ);
++   error = uio_addiov(scan->uio, (uintptr_t)scan->buffer, amount);
++   if (!error) error = vn_getxattr(vnode, ordered[i], scan->uio, &actual, options, context);
++   if (!error && uio_resid(scan->uio)) error = EIO;
++   if (!error) SHA256_Update(&hash, scan->buffer, amount);
++   offset += amount;
++  }
++  scan->xattr_bytes += bytes;
++ }
++ if (!error) SHA256_Final(digest, &hash);
++ kfree_data(names, allocated_names + 1);
++ return error;
++}
++
++static int
++koos_visit(struct koos_scan *scan, struct koos_frame *frame, vfs_context_t context)
++{
++ vnode_t file = NULLVP;
++ int error = koos_lookup(frame->path, &file, context);
++ if (error) return error;
++ struct vnode_attr attr;
++ VATTR_INIT(&attr);
++ VATTR_WANTED(&attr, va_type); VATTR_WANTED(&attr, va_mode);
++ VATTR_WANTED(&attr, va_uid); VATTR_WANTED(&attr, va_gid);
++ VATTR_WANTED(&attr, va_flags); VATTR_WANTED(&attr, va_data_size);
++ VATTR_WANTED(&attr, va_rdev);
++ error = vnode_getattr(file, &attr, context);
++ if (!error && (!VATTR_IS_SUPPORTED(&attr, va_type) || !VATTR_IS_SUPPORTED(&attr, va_mode) ||
++     !VATTR_IS_SUPPORTED(&attr, va_uid) || !VATTR_IS_SUPPORTED(&attr, va_gid) ||
++     !VATTR_IS_SUPPORTED(&attr, va_flags))) error = EAUTH;
++ struct koos_metadata *metadata = &frame->metadata;
++ if (!error) {
++  metadata->kind = attr.va_type == VDIR ? 1 : attr.va_type == VREG ? 2 : attr.va_type == VLNK ? 3 : 4;
++  /* The original image contains no device/socket/fifo nodes. */
++  if (metadata->kind == 4) error = EAUTH;
++  metadata->mode = attr.va_mode & 07777; metadata->uid = attr.va_uid;
++  metadata->gid = attr.va_gid; metadata->flags = attr.va_flags;
++  if (metadata->kind == 2 || metadata->kind == 3) {
++   if (!VATTR_IS_SUPPORTED(&attr, va_data_size)) error = EAUTH;
++   metadata->size = attr.va_data_size;
++  } else if (metadata->kind == 4) {
++   if (!VATTR_IS_SUPPORTED(&attr, va_rdev)) error = EAUTH;
++   metadata->rdev = attr.va_rdev;
++  }
++ }
++ if (!error) error = koos_attributes(scan, file, frame->attributes, context);
++ if (!error && metadata->kind == 1) error = koos_directory(scan, frame, file, context);
++ if (!error && metadata->kind == 2) {
++  error = VNOP_OPEN(file, FREAD, context);
++  if (!error) {
++   SHA256_CTX hash; SHA256_Init(&hash);
++   for (uint64_t offset = 0; !error && offset < metadata->size; ) {
++    int amount = metadata->size - offset > KCM_CHUNK ? KCM_CHUNK : (int)(metadata->size - offset);
++    int residual = 0;
++    error = vn_rdwr(UIO_READ, file, (caddr_t)scan->buffer, amount, offset, UIO_SYSSPACE,
++        IO_NOCACHE, vfs_context_ucred(context), &residual, NULL);
++    if (!error && residual) error = EIO;
++    if (!error) SHA256_Update(&hash, scan->buffer, amount);
++    offset += amount;
++    scan->bytes += amount;
++   }
++   if (!error) SHA256_Final(frame->content, &hash);
++   int closed = VNOP_CLOSE(file, FREAD, context);
++   if (!error) error = closed;
++  }
++ }
++ if (!error && metadata->kind == 3) {
++  if (metadata->size > KCM_CHUNK) error = E2BIG;
++  else {
++   uio_reset(scan->uio, 0, UIO_SYSSPACE, UIO_READ);
++   error = uio_addiov(scan->uio, (uintptr_t)scan->buffer, metadata->size);
++   if (!error) error = VNOP_READLINK(file, scan->uio, context);
++   if (!error && uio_resid(scan->uio)) error = EIO;
++   if (!error) { SHA256_CTX hash; SHA256_Init(&hash); SHA256_Update(&hash, scan->buffer, metadata->size); SHA256_Final(frame->content, &hash); }
++  }
++ }
++ vnode_put(file);
++ if (!error && ++scan->nodes > KOOS_EXPECTED_NODES) error = EAUTH;
++ if (!error && !(scan->nodes % 4096)) printf("KEBAB OWNER OS: verified %u/%u entries, bytes=%llu xattrs=%llu\n",
++     scan->nodes, KOOS_EXPECTED_NODES, scan->bytes, scan->xattr_bytes);
++ return error;
++}
++
++static int
++koos_verify(void)
++{
++ uint32_t enabled = 0;
++ PE_parse_boot_argn("kebab_owner_os", &enabled, sizeof(enabled));
++ if (!enabled) return 0;
++ if (enabled != 1 || koos_identity()) return EAUTH;
++ if (__atomic_load_n(&koos_verified, __ATOMIC_ACQUIRE)) return koos_root == rootvnode ? 0 : EAUTH;
++ struct koos_scan scan = {0};
++ scan.frames = kalloc_data(KOOS_DEPTH * sizeof(*scan.frames), Z_WAITOK | Z_ZERO);
++ scan.buffer = kalloc_data(KCM_CHUNK, Z_WAITOK);
++ scan.uio = uio_create(1, 0, UIO_SYSSPACE, UIO_READ);
++ int error = !scan.frames || !scan.buffer || !scan.uio ? ENOMEM : 0;
++ uint32_t depth = 0;
++ uint8_t root[32] = {0};
++ if (!error) strlcpy(scan.frames[0].path, "/", sizeof(scan.frames[0].path));
++ vfs_context_t context = vfs_context_current();
++ while (!error) {
++  struct koos_frame *frame = &scan.frames[depth];
++  if (!frame->metadata.kind) {
++   error = koos_visit(&scan, frame, context);
++   if (error) { printf("KEBAB OWNER OS: visit rejected %s (%d)\n", frame->path, error); break; }
++  }
++  if (frame->index < frame->count) {
++   if (depth + 1 == KOOS_DEPTH) { error = E2BIG; break; }
++   struct koos_frame *next = &scan.frames[depth + 1];
++   memset(next, 0, sizeof(*next));
++   int count = snprintf(next->path, sizeof(next->path), "%s%s%s", frame->path,
++       depth ? "/" : "", frame->children[frame->index].name);
++   if (count < 0 || count >= sizeof(next->path)) { error = ENAMETOOLONG; break; }
++   ++depth;
++   continue;
++  }
++  uint8_t children[32] = {0}, node[32];
++  if (frame->metadata.kind == 1) {
++   SHA256_CTX hash; SHA256_Init(&hash); koos_u32(&hash, frame->count);
++   for (uint32_t i = 0; i < frame->count; ++i) {
++    koos_u32(&hash, (uint32_t)strlen(frame->children[i].name));
++    SHA256_Update(&hash, frame->children[i].name, strlen(frame->children[i].name));
++    SHA256_Update(&hash, frame->children[i].digest, 32);
++   }
++   SHA256_Final(children, &hash);
++  }
++  koos_node(&frame->metadata, frame->content, frame->attributes, children, node);
++  if (frame->children) kfree_data(frame->children, frame->capacity * sizeof(*frame->children));
++  frame->children = NULL;
++  if (!depth) { memcpy(root, node, 32); break; }
++  --depth;
++  struct koos_frame *parent = &scan.frames[depth];
++  memcpy(parent->children[parent->index++].digest, node, 32);
++ }
++ if (!error && (scan.nodes != KOOS_EXPECTED_NODES || memcmp(root, koos_expected_root, 32))) error = EAUTH;
++ if (!error) error = koos_identity();
++ if (scan.frames) {
++  for (uint32_t i = 0; i < KOOS_DEPTH; ++i) if (scan.frames[i].children)
++   kfree_data(scan.frames[i].children, scan.frames[i].capacity * sizeof(struct koos_child));
++  kfree_data(scan.frames, KOOS_DEPTH * sizeof(*scan.frames));
++ }
++ if (scan.buffer) kfree_data(scan.buffer, KCM_CHUNK);
++ if (scan.uio) uio_free(scan.uio);
++ if (!error) {
++  koos_root = rootvnode;
++  __atomic_store_n(&koos_verified, 1, __ATOMIC_RELEASE);
++ }
++ printf("KEBAB OWNER OS: complete original 20H392 tree %s (%d), nodes=%u bytes=%llu xattrs=%llu root=",
++     error ? "FAIL" : "PASS", error, scan.nodes, scan.bytes, scan.xattr_bytes);
++ for (unsigned i = 0; i < 32; ++i) printf("%02x", root[i]);
++ printf("\n");
++ return error;
++}
++
++int
++kebab_cryptex_os_recheck(void)
++{
++ if (!__atomic_load_n(&koos_verified, __ATOMIC_ACQUIRE) || koos_root != rootvnode) return EAUTH;
++ return koos_identity();
++}
+--- a/bsd/kern/kebab_dyldcache.c
++++ b/bsd/kern/kebab_dyldcache.c
+@@ -1783,7 +1783,7 @@
+ 
+ 	shared_region = vm_shared_region_get(target);
+ 	if (shared_region == NULL) {
+-		printf("KEBAB DSC: map: current task has no shared region (ENODEV)\n");
++		printf("KEBAB DSC: map: target task has no shared region (ENODEV)\n");
+ 		return ENODEV;
+ 	}
+ 
+@@ -2084,6 +2084,7 @@
+  if (kebab_dsc_owner_mode != 1 || kebab_dsc_owner_startup > 1 || !kebab_dsc_enabled ||
+      (kebab_dsc_owner_startup && (!kebab_dsc_map_enabled || dyld_flags))) return EINVAL;
+  int error = kebab_cryptex_boot_files_verify();
++ if (!error && kebab_dsc_owner_startup) error = kebab_cryptex_os_recheck();
+  if (!error) error = kebab_dsc_prepare_plan();
+  printf("KEBAB OWNER DSC: post-mount original split plan %s (%d)\n", error ? "FAIL" : "PASS", error);
+  return error;
+@@ -2110,6 +2111,7 @@
+  if (!kebab_dsc_plan) return kebab_dsc_owner_mode ? EAUTH : 0;
+  if (kebab_dsc_owner_mode) {
+   error = kebab_cryptex_mount_recheck();
++  if (!error && kebab_dsc_owner_startup) error = kebab_cryptex_os_recheck();
+   if (error) return error;
+   if (kebab_dsc_map_attempted) return kebab_dsc_owner_map_ok ? kebab_dsc_owner_region_recheck(target) : EAUTH;
+  } else if (kebab_dsc_map_attempted) return 0;

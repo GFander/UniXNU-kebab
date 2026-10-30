@@ -1,0 +1,87 @@
+--- a/bsd/kern/kebab_dyldcache.c
++++ b/bsd/kern/kebab_dyldcache.c
+@@ -1771,8 +1771,40 @@
+  * vm_map_exec(); consequently it is called from kern_exec for pid 1, not from
+  * bsd_init.
+  */
++/* Same original CodeDirectory installation path as F_ADDFILESIGS. The
++ * owner media is already fully measured and immutable. Never fabricate CS
++ * validity, platform status, trust entries, or page hashes. */
+ static int
+-kebab_dsc_map_plan(struct kebab_dsc_plan *plan, task_t target)
++kebab_dsc_load_signature(vnode_t file, const struct kebab_dsc_header *header,
++    uint64_t file_size, uint32_t platform)
++{
++ int error = kebab_cryptex_vnode_recheck(file);
++ if (error) return error;
++ uint64_t offset = header->code_signature_offset;
++ uint64_t bytes = header->code_signature_size;
++ if (!offset || !bytes || bytes > (40u * 1024u * 1024u) ||
++     offset > file_size || bytes > file_size - offset) return EINVAL;
++ struct cs_blob *blob = ubc_cs_blob_get(file, CPU_TYPE_ANY, CPU_SUBTYPE_ANY, 0);
++ if (!blob) {
++  vm_address_t address = 0;
++  vm_size_t allocated = (vm_size_t)bytes;
++  if (ubc_cs_blob_allocate(&address, &allocated) != KERN_SUCCESS || allocated < bytes) {
++   if (address) ubc_cs_blob_deallocate(address, allocated);
++   return ENOMEM;
++  }
++  memset((void *)address, 0, allocated);
++  error = kebab_dsc_read_at(file, (void *)address, (size_t)bytes, (off_t)offset);
++  if (!error) error = ubc_cs_blob_add(file, platform, CPU_TYPE_ANY, CPU_SUBTYPE_ANY,
++      0, &address, allocated, NULL, 0, &blob);
++  if (address) ubc_cs_blob_deallocate(address, allocated);
++  if (error) return error;
++ }
++ if (!blob || !ubc_cs_is_range_codesigned(file, 0, offset)) return EAUTH;
++ return kebab_cryptex_vnode_recheck(file);
++}
++
++static int
++kebab_dsc_map_plan(struct kebab_dsc_plan *plan, task_t target, uint32_t platform)
+ {
+ 	vm_shared_region_t shared_region = NULL;
+ 	struct _sr_file_mappings *srm = NULL;
+@@ -1830,6 +1862,15 @@
+ 			vnode_put(vp);
+ 			error = EINVAL;
+ 			goto fail;
++		}
++
++		if (kebab_dsc_owner_mode) {
++			error = kebab_dsc_load_signature(vp, &h, (uint64_t)size, platform);
++			if (error) {
++				printf("KEBAB DSC: original signature %s rejected (%d)\n", f->name, error);
++				vnode_put(vp);
++				goto fail;
++			}
+ 		}
+ 
+ 		srm[i].fd = 0;          /* not -1: this is a file-backed mapping */
+@@ -1847,6 +1888,8 @@
+ 			goto fail;
+ 		}
+ 	}
++
++	if (kebab_dsc_owner_mode) printf("KEBAB DSC: %u original CodeDirectory signatures installed and ranges checked\n", plan->file_count);
+ 
+ 	if (kebab_dsc_verbose) {
+ 		printf("KEBAB DSC: map: slide 0x%llx; mapping %u files / %u mappings "
+@@ -2064,7 +2107,7 @@
+ 			    "deferred to first exec (ENODEV)\n");
+ 		} else {
+ 			vm_shared_region_deallocate(shared_region);
+-			error = kebab_dsc_map_plan(kebab_dsc_plan, current_task());
++			error = kebab_dsc_map_plan(kebab_dsc_plan, current_task(), proc_platform(current_proc()));
+ 			if (error != 0) {
+ 				printf("KEBAB DSC: map failed at boot (error %d); "
+ 				    "shared cache NOT mapped\n", error);
+@@ -2117,7 +2160,7 @@
+  } else if (kebab_dsc_map_attempted) return 0;
+  kebab_dsc_map_attempted = TRUE;
+  printf("KEBAB DSC: first exec (pid 1): target task differs from caller=%u; attempting deferred mapping\n", target != current_task());
+- error = kebab_dsc_map_plan(kebab_dsc_plan, target);
++ error = kebab_dsc_map_plan(kebab_dsc_plan, target, proc_platform(p));
+  if (!error && kebab_dsc_owner_mode) {
+   error = kebab_cryptex_mount_recheck();
+   if (!error) error = kebab_dsc_owner_region_recheck(target);

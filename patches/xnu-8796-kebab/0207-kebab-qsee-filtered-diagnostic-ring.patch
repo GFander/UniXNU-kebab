@@ -1,0 +1,134 @@
+--- a/bsd/kern/kebab_qsee_probe.c
++++ b/bsd/kern/kebab_qsee_probe.c
+@@ -80,6 +80,115 @@
+ 	}
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
++
++/* Optional fresh secure-world log registration, matching kona tz_log's 32KiB
++ * legacy ring. The producer page and bridge remain wired until reset.
++ */
++static vm_offset_t qsee_log_page;
++static bool qsee_log_ready;
++
++static bool
++qsee_log_start(bool bridged)
++{
++	int enabled=0;
++	PE_parse_boot_argn("kebab_qsee_log",&enabled,sizeof(enabled));
++	if (enabled!=1) return true;
++	int available=qsee_available(0x32000106);
++	if (available<0) return false;
++	if (available!=1) return true;
++	vm_offset_t page=0;
++	if (kmem_alloc_contig(kernel_map,&page,0x8000,PAGE_MASK,0,0,
++	    KMA_DATA|KMA_ZERO|KMA_PERMANENT,VM_KERN_MEMORY_IOKIT)!=KERN_SUCCESS) return false;
++	ppnum_t pn=pmap_find_phys(kernel_pmap,(addr64_t)page);
++	uint64_t pa=ptoa_64(pn);
++	if (!pn || (page & PAGE_MASK) || (pa & PAGE_MASK) ||
++	    ptoa_64(pmap_find_phys(kernel_pmap,(addr64_t)(page+PAGE_SIZE)))!=pa+PAGE_SIZE) return false;
++	qsee_cache(page,true); qsee_cache(page+PAGE_SIZE,true);
++	if (bridged) {
++		struct qsee_result r=qsee_call(0x42000c1e,4,pa|6,pa|6,0x8000|0x200,3);
++		printf("KEBAB QSEE LOG: bridge-create status=%d result=%llu\n",r.status,r.value);
++		if (r.status || r.value) return false;
++	}
++	struct qsee_result r=qsee_call(0x72000106,0x22,pa,0x8000,0,0);
++	printf("KEBAB QSEE LOG: register status=%d result=0x%llx; page retained until reset\n",r.status,r.value);
++	if (r.status || r.value) return false;
++	qsee_log_page=page; qsee_log_ready=true;
++	return true;
++}
++
++static bool
++qsee_log_interesting(const char *line)
++{
++	static const char *const words[]={"fail","error","rpmb","sfs","drbg","crypto","cmnlib","rng"};
++	for (unsigned w=0; w<sizeof(words)/sizeof(words[0]); w++) {
++		for (unsigned i=0; line[i]; i++) {
++			unsigned n=0;
++			while (words[w][n] && line[i+n]) {
++				char c=line[i+n]; if (c>='A' && c<='Z') c+='a'-'A';
++				if (c!=words[w][n]) break;
++				n++;
++			}
++			if (!words[w][n]) return true;
++		}
++	}
++	return false;
++}
++
++static bool
++qsee_log_hex(char c)
++{
++	return (c>='0' && c<='9') || (c>='a' && c<='f') || (c>='A' && c<='F');
++}
++
++static void
++qsee_log_redact(char *line)
++{
++	for (unsigned i=0; line[i]; ) {
++		unsigned end=i;
++		while (qsee_log_hex(line[end])) end++;
++		if (end-i>=16) for (unsigned j=i; j<end; j++) line[j]='*';
++		if (end==i) i++; else i=end;
++	}
++	/* Hex byte dumps may be separated by spaces. */
++	for (unsigned i=0; line[i]; i++) {
++		unsigned end=i,count=0;
++		while (line[end] && line[end+1] && qsee_log_hex(line[end]) && qsee_log_hex(line[end+1])) {
++			count++; end+=2;
++			if (line[end]!=' ') break;
++			end++;
++		}
++		if (count>=4) for (unsigned j=i; j<end; j++) if (qsee_log_hex(line[j])) line[j]='*';
++	}
++}
++
++static void
++qsee_log_report(void)
++{
++	if (!qsee_log_ready) return;
++	qsee_cache(qsee_log_page,false); qsee_cache(qsee_log_page+PAGE_SIZE,false);
++	const volatile uint16_t *position=(const volatile uint16_t *)qsee_log_page;
++	uint16_t wrap=position[0],offset=position[1];
++	const unsigned ring_size=0x8000-4;
++	printf("KEBAB QSEE LOG: snapshot wrap=%u offset=%u; filtered/redacted diagnostics\n",wrap,offset);
++	if (offset>=ring_size) { printf("KEBAB QSEE LOG: rejected ring position\n"); return; }
++	unsigned bytes=wrap ? ring_size : offset, start=wrap ? offset : 0;
++	const volatile uint8_t *ring=(const volatile uint8_t *)(qsee_log_page+4);
++	char line[192]; unsigned used=0,printed=0;
++	for (unsigned i=0; i<=bytes && printed<24; i++) {
++		uint8_t c=i==bytes ? '\n' : ring[(start+i)%ring_size];
++		if (c=='\n' || used==sizeof(line)-1) {
++			line[used]=0;
++			if (qsee_log_interesting(line)) {
++				qsee_log_redact(line); printf("KEBAB QSEE LOG: %s\n",line); printed++;
++			}
++			used=0;
++			if (c=='\n') continue;
++		}
++		line[used++]=(c>=32 && c<=126) ? c : ' ';
++	}
++	printf("KEBAB QSEE LOG: snapshot end; producer storage retained\n");
++}
++
+ 
+ /* Hardware-wrapped storage-key experiment. No key bytes or hashes are logged.
+  * The active CBOR commands and tag layout were audited in this board's pinned
+@@ -302,6 +411,7 @@
+ 		    difference ? "FAIL" : "PASS");
+ 	}
+ done:
++	qsee_log_report();
+ 	qsee_erase(page);
+ 	printf("KEBAB QSEE: hardware-wrapped experiment end; volatile key material erased\n");
+ 	return true;
+@@ -386,6 +496,7 @@
+ 			handle=r.type; bridged=true;
+ 		} else if (r.value!=4) return; /* Documented not-supported result. */
+ 	}
++	if (!qsee_log_start(bridged)) return;
+ 	static const char *const names[]={"keymaster","keymaster64","km4","keymint","hios-no-such-app"};
+ 	bool outstanding=false;
+ 	for (unsigned i=0; i<sizeof(names)/sizeof(names[0]); i++) {

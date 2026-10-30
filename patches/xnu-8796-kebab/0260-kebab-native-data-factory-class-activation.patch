@@ -1,0 +1,66 @@
+--- a/bsd/kern/kebab_volume_control_impl.h
++++ b/bsd/kern/kebab_volume_control_impl.h
+@@ -2,12 +2,12 @@
+  * Factory no-passcode C/D policy only. No foreign blob, passcode, SEP capability
+  * or unknown control is acknowledged. One active owner volume at a time. */
+ static uint8_t kdc_uuid[16],kdc_record_hash[32],kdc_c[32],kdc_d[32];
+-static bool kdc_registered,kdc_loaded;
++static bool kdc_registered,kdc_loaded,kdc_native_factory;
+ 
+ static void
+ kdc_clear_locked(void)
+ {
+- kdc_registered=kdc_loaded=false;kfk_wipe(kdc_uuid,16);kfk_wipe(kdc_record_hash,32);
++ kdc_registered=kdc_loaded=kdc_native_factory=false;kfk_wipe(kdc_uuid,16);kfk_wipe(kdc_record_hash,32);
+  kfk_wipe(kdc_c,32);kfk_wipe(kdc_d,32);
+ }
+ 
+@@ -36,6 +36,30 @@
+  memcpy(context+sizeof(domain)+16,uuid,16);memcpy(context+sizeof(domain)+32,&cls,4);
+  g_crypto_funcs->cchmac_fn(g_crypto_funcs->ccsha256_di,32,cls==3?kdb_class_c:kdb_class_d,
+      sizeof(context),context,output);kfk_wipe(context,sizeof(context));
++}
++
++/* Trusted boot policy invokes this ONLY after the pinned real Data has
++ * mounted through original APFS and authenticated its encrypted root tree.
++ * Authenticated device bank policy1 is factory/no-passcode C/D. This is not an
++ * Apple FV blob/SEP unlock and cannot take over a different live FV owner. */
++int
++kebab_volume_factory_activate(const uint8_t uuid[16])
++{
++ static const uint8_t owner[16]={0x61,0x70,0x66,0x73,0x75,0x75,0x69,0x64,0x00,0x40,0x76,0x6f,0x6c,0x75,0x6d,0x01};
++ if(!kfk_context()||!kfk_range(uuid,16))return (int)kIOReturnBadArgument;
++ if(memcmp(uuid,owner,16))return (int)kIOReturnNotPermitted;
++ uint8_t c[32]={0},d[32]={0};
++ lck_mtx_lock(&kfk_lock);int error=(int)kIOReturnNotReady;
++ if(kfk_ready&&kdb_ready){
++  error=0;
++  if(kdc_registered&&(!kdc_native_factory||memcmp(uuid,kdc_uuid,16)))error=(int)kIOReturnNotPermitted;
++  if(!error){
++   kdc_derive_locked(uuid,3,c);kdc_derive_locked(uuid,4,d);
++   memcpy(kdc_c,c,32);memcpy(kdc_d,d,32);memcpy(kdc_uuid,uuid,16);
++   kfk_wipe(kdc_record_hash,32);kdc_registered=kdc_loaded=kdc_native_factory=true;
++  }
++ }
++ lck_mtx_unlock(&kfk_lock);kfk_wipe(c,32);kfk_wipe(d,32);return error;
+ }
+ 
+ bool
+@@ -92,6 +116,7 @@
+  SHA256_CTX digest;SHA256_Init(&digest);SHA256_Update(&digest,sealed,96);SHA256_Final(hash,&digest);
+  lck_mtx_lock(&kfk_lock);
+  int error=kdc_authenticated_locked(sealed,key);
++ if(!error&&kdc_native_factory)error=(int)kIOReturnNotPermitted;
+  if(!error&&kdc_registered&&(memcmp(kdc_uuid,sealed,16)||memcmp(kdc_record_hash,hash,32)))error=(int)kIOReturnNotPermitted;
+  if(!error&&operation==19){
+   if(!kdc_registered)error=(int)kIOReturnNotReady;
+--- a/bsd/kern/kebab_file_keys.h
++++ b/bsd/kern/kebab_file_keys.h
+@@ -87,6 +87,7 @@
+ int kebab_volume_set_protection(const struct kebab_fv_credential *,uint32_t,uint64_t,
+     const struct kebab_fv_wrapped_key *,const struct kebab_fv_wrapped_key *,
+     struct kebab_fv_wrapped_key *,struct kebab_fv_wrapped_key *);
++int kebab_volume_factory_activate(const uint8_t[16]);
+ bool kebab_volume_class_available(const uint8_t[16],uint32_t);
+ int kebab_volume_keys_selftest(void);
+ int kebab_vek_cpx_handle_create(const uint8_t[16],const uint8_t[32],uint8_t[64]);

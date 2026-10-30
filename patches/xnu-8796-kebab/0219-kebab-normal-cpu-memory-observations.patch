@@ -1,0 +1,48 @@
+--- a/iokit/Kernel/arm/KebabDriverDiagnostics.cpp
++++ b/iokit/Kernel/arm/KebabDriverDiagnostics.cpp
+@@ -6,6 +6,11 @@
+ #include <IOKit/IOLib.h>
+ #include <libkern/c++/OSIterator.h>
+ #include "KebabDriverManifest.h"
++#include <machine/machine_routines.h>
++#include <pexpert/arm64/boot.h>
++extern "C" bool kebab_cpu_irq_snapshot(unsigned int, uint64_t *, uint64_t *);
++extern "C" boolean_t kebab_cpu_signal_is_enabled(unsigned int);
++extern "C" boot_args *BootArgs;
+ 
+ struct KebabDriverManifestEntry {
+ 	const char *group, *service, *scope;
+@@ -20,6 +25,19 @@
+ extern "C" void
+ kebab_driver_report(void)
+ {
++	const ml_topology_info_t *topology = ml_get_topology_info();
++	IOLog("KEBAB SMP: selected=%u limit=%u; SMP observation, no AMP/frequency-policy claim\n",
++	    topology->num_cpus, KEBAB_SMP_MAX_CPUS);
++	for (unsigned int cpu = 0; cpu < topology->num_cpus; cpu++) {
++		uint64_t timer = 0, sgi = 0;
++		bool valid = kebab_cpu_irq_snapshot(cpu, &timer, &sgi);
++		IOLog("KEBAB SMP: cpu=%u mpidr=0x%x cluster=%u type=%u signal=%u timer=%llu sgi=%llu valid=%u\n",
++		    cpu, topology->cpus[cpu].phys_id, topology->cpus[cpu].cluster_id,
++		    (unsigned)topology->cpus[cpu].cluster_type,
++		    (unsigned)kebab_cpu_signal_is_enabled(cpu), timer, sgi, valid);
++	}
++	if (BootArgs) IOLog("KEBAB MEMORY: physBase=0x%llx boot_mem=%llu actual=%llu max_mem=%llu\n",
++	    BootArgs->physBase, BootArgs->memSize, BootArgs->memSizeActual, max_mem);
+ 	IOLog("KEBAB DRV: manifest v1; registry state is observed now; C entries have no service\n");
+ 	for (unsigned i = 0; i < sizeof(manifest) / sizeof(manifest[0]); i++) {
+ 		const KebabDriverManifestEntry &entry = manifest[i];
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -175,7 +175,11 @@
+ 
+ 	// Mark this PE to be awake
+ 	uint32_t gicr_waker = gicr_read32(GICR_WAKER);
++#if defined(KEBAB)
+ 	if (gicr_waker & (GICR_WAKER_PROCESSORSLEEP | GICR_WAKER_CHILDRENASLEEP)) {
++#else
++	if (gicr_waker & GICR_WAKER_CHILDRENASLEEP) {
++#endif
+ 		gicr_waker &= ~GICR_WAKER_PROCESSORSLEEP;
+ 
+ 		gicr_write32(GICR_WAKER, gicr_waker);

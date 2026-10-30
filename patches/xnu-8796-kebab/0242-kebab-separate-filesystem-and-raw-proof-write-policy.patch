@@ -1,0 +1,11 @@
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -169,7 +169,7 @@
+  if ((mode>=8) && kdr_policy(data_key_mode)) return EPERM;
+  bool write_file = (mode == 2 || mode == 4 || mode == 6 || mode == 7 || mode == 8 || mode == 10 || mode == 12);
+  PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
+- if ((write_file && rw != 1) || (!write_file && rw)) return EINVAL;
++ if (rw != ((write_file || mode==14)?1u:0u)) return EINVAL;
+  mount_t original_root = vnode_mount(rootvnode);
+  if (!(vfs_flags(original_root) & MNT_RDONLY) || strcmp(vfs_statfs(original_root)->f_fstypename, "apfs")) return EINVAL;
+  struct kebab_volume_identity system, data;

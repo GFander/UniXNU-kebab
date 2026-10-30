@@ -1,0 +1,443 @@
+--- a/bsd/dev/kebab_cryptex_media.c
++++ b/bsd/dev/kebab_cryptex_media.c
+@@ -25,6 +25,10 @@
+ static vnode_t kcm_file;
+ static mount_t kcm_backing, kcm_system;
+ static uint32_t kcm_vid, kcm_ready;
++static mount_t kcm_owned_mount;
++static vnode_t kcm_owned_root;
++static dev_t kcm_owned_device = NODEV;
++static uint32_t kcm_owned_ready;
+ static LCK_GRP_DECLARE(kcm_group, "kebab_cryptex");
+ static LCK_MTX_DECLARE(kcm_prepare_lock, &kcm_group);
+ 
+@@ -238,6 +242,76 @@
+  return error;
+ }
+ 
++
++int
++kebab_cryptex_vnode_recheck(vnode_t file)
++{
++ if (!__atomic_load_n(&kcm_owned_ready, __ATOMIC_ACQUIRE) || file == NULLVP ||
++     rootvnode != kcm_owned_root || vnode_mount(rootvnode) != kcm_system ||
++     vnode_mount(file) != kcm_owned_mount || !kcm_mount_readonly(kcm_owned_mount) ||
++     !kcm_mount_readonly(kcm_system) || !kcm_mount_readonly(kcm_backing) ||
++     kcm_device(kcm_owned_mount) != kcm_owned_device ||
++     kebab_cryptex_media_bytes() != KEBAB_CRYPTEX_STAGE_BYTES) return EAUTH;
++ return 0;
++}
++
++int
++kebab_cryptex_mount_recheck(void)
++{
++ vnode_t root = NULLVP;
++ int error = vnode_lookup(KEBAB_CRYPTEX_MOUNT_PATH, VNODE_LOOKUP_NOFOLLOW,
++     &root, vfs_context_current());
++ if (error) return error;
++ error = vnode_isdir(root) ? kebab_cryptex_vnode_recheck(root) : EAUTH;
++ vnode_put(root);
++ return error;
++}
++
++static int
++kcm_verify_boot_file(const char *path, off_t bytes, const uint8_t expected[32])
++{
++ vnode_t file = NULLVP;
++ vfs_context_t context = vfs_context_current();
++ int error = vnode_open(path, O_NOFOLLOW | FREAD, 0, 0, &file, context);
++ if (error) return error;
++ uint8_t *buffer = NULL, digest[32];
++ if (!vnode_isreg(file) || vnode_mount(file) != kcm_system ||
++     !kcm_mount_readonly(kcm_system) || ubc_getsize(file) != bytes) error = EAUTH;
++ if (!error) buffer = kalloc_data(KCM_CHUNK, Z_WAITOK);
++ if (!error && !buffer) error = ENOMEM;
++ SHA256_CTX hash;
++ SHA256_Init(&hash);
++ for (off_t offset = 0; !error && offset < bytes; ) {
++  int count = bytes - offset > (off_t)KCM_CHUNK ? KCM_CHUNK : (int)(bytes - offset);
++  int residual = 0;
++  error = vn_rdwr(UIO_READ, file, (caddr_t)buffer, count, offset, UIO_SYSSPACE,
++      IO_NOCACHE, vfs_context_ucred(context), &residual, NULL);
++  if (!error && residual) error = EIO;
++  if (!error) SHA256_Update(&hash, buffer, count);
++  offset += count;
++ }
++ SHA256_Final(digest, &hash);
++ if (!error && memcmp(digest, expected, 32)) error = EAUTH;
++ if (buffer) kfree_data(buffer, KCM_CHUNK);
++ int closed = vnode_close(file, FREAD, context);
++ if (!error) error = closed;
++ return error;
++}
++
++int
++kebab_cryptex_boot_files_verify(void)
++{
++ static const uint8_t launchd[32] = {0x12,0x37,0x0e,0x5e,0xe3,0x5b,0xf2,0x8a,0xe4,0x79,0xb6,0xc4,0xb4,0x45,0x5f,0x4f,0x46,0x93,0xab,0x80,0x3e,0x37,0xc5,0xeb,0x30,0x32,0x53,0x7c,0x18,0xca,0xc6,0x1c};
++ static const uint8_t dyld[32] = {0x58,0x06,0x83,0x45,0x64,0xfe,0x64,0x62,0xae,0x98,0x1d,0x09,0x15,0xd6,0x12,0xb1,0xeb,0x2f,0x6f,0x16,0x88,0x22,0xb5,0xd2,0x78,0xbe,0xe5,0x62,0x54,0x93,0x37,0x57};
++ int error = kebab_cryptex_mount_recheck();
++ if (!error) error = kcm_verify_boot_file("/sbin/launchd", 541600, launchd);
++ if (!error) error = kcm_verify_boot_file("/usr/lib/dyld", 922912, dyld);
++ if (!error) error = kebab_cryptex_mount_recheck();
++ printf("KEBAB OWNER DSC: original launchd/dyld SHA and RO roots %s (%d)\n",
++     error ? "FAIL" : "PASS", error);
++ return error;
++}
++
+ int kebab_cryptex_mount_prepare(proc_t, user_addr_t);
+ int
+ kebab_cryptex_mount_prepare(proc_t process, user_addr_t scratch)
+@@ -290,6 +364,12 @@
+   if (!kcm_mount_readonly(actual) || actual == kcm_backing || kcm_device(actual) != selected ||
+       vnode_mount(rootvnode) != system || !kcm_mount_readonly(system) ||
+       !kcm_mount_readonly(kcm_backing) || !kebab_cryptex_media_bytes()) error = EAUTH;
++  if (!error) {
++   kcm_owned_mount = actual;
++   kcm_owned_root = rootvnode;
++   kcm_owned_device = selected;
++   __atomic_store_n(&kcm_owned_ready, 1, __ATOMIC_RELEASE);
++  }
+   vnode_put(destination);
+  }
+  printf("KEBAB CRYPTEX: mounted fixed original SystemOS UUID/dev_t/RO %s (%d)\n", error ? "FAIL" : "PASS", error);
+--- a/bsd/dev/kebab_cryptex_media.h
++++ b/bsd/dev/kebab_cryptex_media.h
+@@ -8,4 +8,9 @@
+ int kebab_cryptex_media_read(uint64_t offset, void *buffer, uint32_t length);
+ int kebab_cryptex_blockstorage_start(void);
+ int kebab_cryptex_blockstorage_volume(dev_t *device, char *name, size_t capacity);
++int kebab_cryptex_mount_recheck(void);
++int kebab_cryptex_boot_files_verify(void);
++#ifndef __cplusplus
++int kebab_cryptex_vnode_recheck(vnode_t);
+ #endif
++#endif
+--- a/bsd/kern/kebab_dyldcache.c
++++ b/bsd/kern/kebab_dyldcache.c
+@@ -75,6 +75,7 @@
+ #include <vm/vm_shared_region.h>
+ 
+ #include "kebab_dyldcache.h"
++#include "../dev/kebab_cryptex_media.h"
+ 
+ #if defined(KEBAB)
+ 
+@@ -311,6 +312,10 @@
+ };
+ 
+ static struct kebab_dsc_plan *kebab_dsc_plan;
++static uint32_t kebab_dsc_owner_mode, kebab_dsc_owner_startup;
++static boolean_t kebab_dsc_owner_map_ok;
++extern uint64_t dyld_flags;
++extern void commpage_update_dyld_flags(uint64_t);
+ static char kebab_dsc_dir[KEBAB_DSC_PATH_MAX];
+ static boolean_t kebab_dsc_enabled;
+ static boolean_t kebab_dsc_map_enabled;
+@@ -422,6 +427,10 @@
+ 		vnode_put(vp);
+ 		return EINVAL;
+ 	}
++	if (kebab_dsc_owner_mode && (error = kebab_cryptex_vnode_recheck(vp)) != 0) {
++		vnode_put(vp);
++		return error;
++	}
+ 	size = ubc_getsize(vp);
+ 	if (size < (off_t)KEBAB_DSC_HEADER_SIZE) {
+ 		vnode_put(vp);
+@@ -462,6 +471,10 @@
+ 	if (dvp->v_type != VDIR) {
+ 		vnode_put(dvp);
+ 		return ENOTDIR;
++	}
++	if (kebab_dsc_owner_mode && (error = kebab_cryptex_vnode_recheck(dvp)) != 0) {
++		vnode_put(dvp);
++		return error;
+ 	}
+ 	error = VNOP_OPEN(dvp, FREAD, ctx);
+ 	if (error != 0) {
+@@ -1924,63 +1937,14 @@
+ 
+ #pragma mark - entry points
+ 
+-void
+-kebab_dsc_boot(void)
+-{
+-	char arg[KEBAB_DSC_PATH_MAX];
+-	uint32_t map = 0;
+-	uint32_t verbose = 0;
+-	uint64_t slide = 0;
+-	int error;
+-
+-	/*
+-	 * This is a string argument, not a number.  PE_parse_boot_argn() treats
+-	 * "kebab_dsc=1" as numeric and argnumcpy() stores a 32-bit integer in
+-	 * the char buffer, so the old check compared "\x01" against "1" and
+-	 * silently ignored the switch.  PE_parse_boot_arg_str() forces the
+-	 * string form; both "kebab_dsc=1" and an absolute directory work.
+-	 */
+-	if (!PE_parse_boot_arg_str("kebab_dsc", arg, sizeof(arg)) ||
+-	    arg[0] == '\0') {
+-		return;
+-	}
+-	if (strcmp(arg, "0") == 0) {
+-		return;
+-	}
+-	if (strcmp(arg, "1") == 0) {
+-		strlcpy(kebab_dsc_dir, KEBAB_DSC_DEFAULT_DIR, sizeof(kebab_dsc_dir));
+-	} else {
+-		strlcpy(kebab_dsc_dir, arg, sizeof(kebab_dsc_dir));
+-	}
+-	if (kebab_dsc_dir[0] != '/') {
+-		printf("KEBAB DSC: kebab_dsc=%s is not an absolute directory; ignored\n",
+-		    kebab_dsc_dir);
+-		return;
+-	}
+-	/* kebab_dsc_map is a genuine numeric switch: 1 enables the mapping. */
+-	if (PE_parse_boot_argn("kebab_dsc_map", &map, sizeof(map))) {
+-		kebab_dsc_map_enabled = (map != 0);
+-	}
+-	if (PE_parse_boot_argn("kebab_dsc_slide", &slide, sizeof(slide))) {
+-		kebab_dsc_slide_requested = TRUE;
+-		kebab_dsc_slide_arg = slide;
+-	}
+-	if (PE_parse_boot_argn("kebab_dsc_verbose", &verbose, sizeof(verbose))) {
+-		kebab_dsc_verbose = (verbose != 0);
+-	}
+-
+-	kebab_dsc_enabled = TRUE;
+-	printf("KEBAB DSC: enabled for \"%s\"; kebab_dsc_map=%u "
+-	    "kebab_dsc_slide=0x%llx%s kebab_dsc_verbose=%u\n", kebab_dsc_dir,
+-	    kebab_dsc_map_enabled ? 1 : 0,
+-	    (unsigned long long)kebab_dsc_slide_arg,
+-	    kebab_dsc_slide_requested ? "" : " (default)",
+-	    kebab_dsc_verbose ? 1 : 0);
+-
++static int
++kebab_dsc_prepare_plan(void)
++{
++ int error;
+ 	kebab_dsc_plan = kalloc_data(sizeof(*kebab_dsc_plan), Z_WAITOK | Z_ZERO);
+ 	if (kebab_dsc_plan == NULL) {
+ 		printf("KEBAB DSC: cannot allocate plan; shared cache NOT mapped\n");
+-		return;
++		return ENOMEM;
+ 	}
+ 	error = kebab_dsc_build_plan(kebab_dsc_dir, kebab_dsc_plan);
+ 	if (error != 0) {
+@@ -1994,10 +1958,86 @@
+ 		kebab_dsc_log_plan_failure(kebab_dsc_plan);
+ 		kfree_data(kebab_dsc_plan, sizeof(*kebab_dsc_plan));
+ 		kebab_dsc_plan = NULL;
++		return error;
++	}
++	kebab_dsc_log_plan(kebab_dsc_plan);
++
++ if (kebab_dsc_owner_mode) {
++  static const uint8_t uuid[16] = {0x8f,0x97,0x04,0x52,0xc9,0xe3,0x3e,0x88,0xb1,0x14,0xfe,0xb1,0x86,0x4b,0xc9,0xe0};
++  if (memcmp(kebab_dsc_plan->main_uuid, uuid, 16) ||
++      kebab_dsc_plan->file_count != 43 || kebab_dsc_plan->subcache_count != 42) {
++   kfree_data(kebab_dsc_plan, sizeof(*kebab_dsc_plan));
++   kebab_dsc_plan = NULL;
++   return EAUTH;
++  }
++ }
++ return 0;
++}
++
++void
++kebab_dsc_boot(void)
++{
++	char arg[KEBAB_DSC_PATH_MAX];
++	uint32_t map = 0;
++	uint32_t verbose = 0;
++	uint64_t slide = 0;
++	int error;
++
++	PE_parse_boot_argn("kebab_owner_dsc", &kebab_dsc_owner_mode, sizeof(kebab_dsc_owner_mode));
++	PE_parse_boot_argn("kebab_owner_startup", &kebab_dsc_owner_startup, sizeof(kebab_dsc_owner_startup));
++	/*
++	 * This is a string argument, not a number.  PE_parse_boot_argn() treats
++	 * "kebab_dsc=1" as numeric and argnumcpy() stores a 32-bit integer in
++	 * the char buffer, so the old check compared "\x01" against "1" and
++	 * silently ignored the switch.  PE_parse_boot_arg_str() forces the
++	 * string form; both "kebab_dsc=1" and an absolute directory work.
++	 */
++	if (!PE_parse_boot_arg_str("kebab_dsc", arg, sizeof(arg)) ||
++	    arg[0] == '\0') {
+ 		return;
+ 	}
+-	kebab_dsc_log_plan(kebab_dsc_plan);
+-
++	if (strcmp(arg, "0") == 0) {
++		return;
++	}
++	if (kebab_dsc_owner_mode && strcmp(arg, "1")) return;
++	if (strcmp(arg, "1") == 0) {
++		strlcpy(kebab_dsc_dir, kebab_dsc_owner_mode ?
++		    KEBAB_CRYPTEX_MOUNT_PATH "/System/Library/Caches/com.apple.dyld" : KEBAB_DSC_DEFAULT_DIR,
++		    sizeof(kebab_dsc_dir));
++	} else {
++		strlcpy(kebab_dsc_dir, arg, sizeof(kebab_dsc_dir));
++	}
++	if (kebab_dsc_dir[0] != '/') {
++		printf("KEBAB DSC: kebab_dsc=%s is not an absolute directory; ignored\n",
++		    kebab_dsc_dir);
++		return;
++	}
++	/* kebab_dsc_map is a genuine numeric switch: 1 enables the mapping. */
++	if (PE_parse_boot_argn("kebab_dsc_map", &map, sizeof(map))) {
++		kebab_dsc_map_enabled = (map != 0);
++	}
++	if (PE_parse_boot_argn("kebab_dsc_slide", &slide, sizeof(slide))) {
++		kebab_dsc_slide_requested = TRUE;
++		kebab_dsc_slide_arg = slide;
++	}
++	if (PE_parse_boot_argn("kebab_dsc_verbose", &verbose, sizeof(verbose))) {
++		kebab_dsc_verbose = (verbose != 0);
++	}
++
++	kebab_dsc_enabled = TRUE;
++	printf("KEBAB DSC: enabled for \"%s\"; kebab_dsc_map=%u "
++	    "kebab_dsc_slide=0x%llx%s kebab_dsc_verbose=%u\n", kebab_dsc_dir,
++	    kebab_dsc_map_enabled ? 1 : 0,
++	    (unsigned long long)kebab_dsc_slide_arg,
++	    kebab_dsc_slide_requested ? "" : " (default)",
++	    kebab_dsc_verbose ? 1 : 0);
++
++	if (kebab_dsc_owner_mode) {
++		printf("KEBAB OWNER DSC: plan deferred until verified original SystemOS RO mount\n");
++		return;
++	}
++	error = kebab_dsc_prepare_plan();
++	if (error) return;
+ 	if (!kebab_dsc_map_enabled) {
+ 		printf("KEBAB DSC: dry run: plan only (slide 0x%llx), nothing "
+ 		    "mapped (kebab_dsc_map=0)\n",
+@@ -2032,31 +2072,63 @@
+ 	}
+ }
+ 
+-void
++
++int
++kebab_dsc_after_mount(void)
++{
++ if (!kebab_dsc_owner_mode && !kebab_dsc_owner_startup) return 0;
++ if (kebab_dsc_owner_mode != 1 || kebab_dsc_owner_startup > 1 || !kebab_dsc_enabled ||
++     (kebab_dsc_owner_startup && (!kebab_dsc_map_enabled || dyld_flags))) return EINVAL;
++ int error = kebab_cryptex_boot_files_verify();
++ if (!error) error = kebab_dsc_prepare_plan();
++ printf("KEBAB OWNER DSC: post-mount original split plan %s (%d)\n", error ? "FAIL" : "PASS", error);
++ return error;
++}
++
++static int
++kebab_dsc_owner_region_recheck(void)
++{
++ vm_shared_region_t region = vm_shared_region_trim_and_get(current_task());
++ if (!region) return ENODEV;
++ mach_vm_offset_t start = 0;
++ kern_return_t result = vm_shared_region_start_address(region, &start, NULL);
++ vm_shared_region_deallocate(region);
++ return result == KERN_SUCCESS && start == kebab_dsc_plan->region_start + kebab_dsc_plan->slide ? 0 : EAUTH;
++}
++
++int
+ kebab_dsc_exec_hook(struct proc *p)
+ {
+-	int error;
+-
+-	if (!kebab_dsc_enabled || !kebab_dsc_map_enabled ||
+-	    kebab_dsc_map_attempted || kebab_dsc_plan == NULL) {
+-		return;
+-	}
+-	if (p == NULL || proc_getpid(p) != 1) {
+-		return;
+-	}
+-	kebab_dsc_map_attempted = TRUE;
+-	printf("KEBAB DSC: first exec (pid 1): attempting the deferred mapping\n");
+-	error = kebab_dsc_map_plan(kebab_dsc_plan);
+-	if (error != 0) {
+-		printf("KEBAB DSC: mapping failed (error %d); shared cache NOT mapped\n",
+-		    error);
+-		if (!kebab_dsc_verbose) {
+-			kebab_dsc_log_plan_failure(kebab_dsc_plan);
+-		}
+-	} else {
+-		printf("KEBAB DSC: mapping complete; dyld will find the cache already "
+-		    "in the shared region\n");
+-	}
++ int error;
++ if (!p || proc_getpid(p) != 1) return 0;
++ if (!kebab_dsc_enabled || !kebab_dsc_map_enabled) return 0;
++ if (!kebab_dsc_plan) return kebab_dsc_owner_mode ? EAUTH : 0;
++ if (kebab_dsc_owner_mode) {
++  error = kebab_cryptex_mount_recheck();
++  if (error) return error;
++  if (kebab_dsc_map_attempted) return kebab_dsc_owner_map_ok ? kebab_dsc_owner_region_recheck() : EAUTH;
++ } else if (kebab_dsc_map_attempted) return 0;
++ kebab_dsc_map_attempted = TRUE;
++ printf("KEBAB DSC: first exec (pid 1): attempting the deferred mapping\n");
++ error = kebab_dsc_map_plan(kebab_dsc_plan);
++ if (!error && kebab_dsc_owner_mode) {
++  error = kebab_cryptex_mount_recheck();
++  if (!error) error = kebab_dsc_owner_region_recheck();
++  if (!error) {
++   kebab_dsc_owner_map_ok = TRUE;
++   if (kebab_dsc_owner_startup) {
++    /* Development owner route on actual verified media; not an IM4M result. */
++    dyld_flags |= UINT64_C(8);
++    commpage_update_dyld_flags(dyld_flags);
++    printf("KEBAB OWNER DSC: actual mapping/RO identity PASS; owner startup flags=0x%llx\n", dyld_flags);
++   }
++  }
++ }
++ if (error) {
++  printf("KEBAB DSC: mapping failed (error %d); shared cache NOT mapped\n", error);
++  if (!kebab_dsc_verbose) kebab_dsc_log_plan_failure(kebab_dsc_plan);
++ } else printf("KEBAB DSC: mapping complete; dyld will find the cache already in the shared region\n");
++ return kebab_dsc_owner_mode ? error : 0;
+ }
+ 
+ #endif /* KEBAB */
+--- a/bsd/kern/kebab_dyldcache.h
++++ b/bsd/kern/kebab_dyldcache.h
+@@ -33,7 +33,10 @@
+  * current, but before returning to user mode.  Maps the plan once, for pid 1,
+  * and only when kebab_dsc_map=1.
+  */
+-void kebab_dsc_exec_hook(struct proc *p);
++int kebab_dsc_exec_hook(struct proc *p);
++
++/* PID1, after verified original SystemOS mount; legacy/default profiles are inert. */
++int kebab_dsc_after_mount(void);
+ 
+ #endif /* KEBAB */
+ 
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -1972,10 +1972,13 @@
+ 	 * point at which the dyld shared cache can be mapped into it.  Only
+ 	 * pid 1, and only when kebab_dsc_map=1.
+ 	 */
+-	kebab_dsc_exec_hook(p);
++	int owner_dsc_error = kebab_dsc_exec_hook(p);
+ #endif /* KEBAB */
+ 
+ 	vm_map_switch(old_map);
++#if defined(KEBAB)
++	if (owner_dsc_error) panic("kebab owner DSC map failed: %d", owner_dsc_error);
++#endif
+ 
+ 	/*
+ 	 * Reset signal state.
+@@ -7126,6 +7129,8 @@
+  extern int kebab_apfs_probe_prepare(proc_t, user_addr_t);
+  int kebab_apfs_probe_error = kebab_apfs_probe_prepare(p, (user_addr_t)scratch_addr);
+  if (kebab_apfs_probe_error) panic("kebab APFS probe failed: %d", kebab_apfs_probe_error);
++ int owner_dsc_prepare_error = kebab_dsc_after_mount();
++ if (owner_dsc_prepare_error) panic("kebab owner DSC prepare failed: %d", owner_dsc_prepare_error);
+ #endif
+ #if CONFIG_MEMORYSTATUS
+ 	(void) memorystatus_init_at_boot_snapshot();

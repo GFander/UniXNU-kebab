@@ -1,0 +1,240 @@
+--- a/bsd/kern/kebab_apfs_file_native_impl.h
++++ b/bsd/kern/kebab_apfs_file_native_impl.h
+@@ -13,7 +13,7 @@
+ static int
+ kfn_class_locked(const uint8_t uuid[16],uint32_t cls,const uint8_t **key)
+ {
+- if(cls!=3&&cls!=4)return (int)kIOReturnUnsupported;
++ if(cls!=3&&cls!=4){static unsigned reports;if(reports++<8)printf("KEBAB APFS FILE: unsupported requested class=0x%x\n",cls);return (int)kIOReturnUnsupported;}
+  if(!kfk_ready||!kdb_ready||!kdc_registered||!kdc_loaded)return (int)kIOReturnNotReady;
+  if(memcmp(uuid,kdc_uuid,16))return (int)kIOReturnNotPermitted;
+  *key=cls==3?kdc_c:kdc_d;return 0;
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -182,7 +182,7 @@
+  bool write_file = (mode == 2 || mode == 4 || mode == 6 || mode == 7 || mode == 8 || mode == 10 || mode == 12 || mode == 15);
+  PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+- if (rw != ((write_file || mode==14 || (mode==17&&tool==2))?1u:0u)) return EINVAL;
++ if (rw != ((write_file || mode==14 || (mode==17&&(tool==2||tool==4)))?1u:0u)) return EINVAL;
+  mount_t original_root = vnode_mount(rootvnode);
+  if (!(vfs_flags(original_root) & MNT_RDONLY) || strcmp(vfs_statfs(original_root)->f_fstypename, "apfs")) return EINVAL;
+  struct kebab_volume_identity system, data;
+--- a/bsd/kern/kebab_apfs_tool_impl.h
++++ b/bsd/kern/kebab_apfs_tool_impl.h
+@@ -12,7 +12,7 @@
+ {
+ #if DEVELOPMENT || DEBUG
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+- if(tool==2||tool==3)return kdf_policy();
++ if(tool==2||tool==3||tool==4||tool==6)return kdf_policy();
+  static const char *const names[]={"kebab_apfs_tool","ufsrw","rootrw","ufsmedia_root",
+   "kebab_apfs_probe","kebab_owner_fast","kebab_owner_startup","kebab_owner_dsc",
+   "kebab_owner_os","kebab_dsc","kebab_dsc_map","kebab_cryptex_media","kebab_boot_firmware",
+--- /dev/null
++++ b/bsd/kern/kebab_data_files_impl.h
+@@ -0,0 +1,135 @@
++#include <sys/namei.h>
++/* Real original APFS C/D files. No private wrapped-key fixture is stored here. */
++#define KDP_BYTES 65559u
++extern int kebab_ufs_raw_read(uint64_t,void *,uint32_t);
++
++static int
++kdp_metadata(vnode_t file,mount_t expected,uint32_t cls,uint64_t bytes,vfs_context_t context)
++{
++ if(!vnode_isreg(file)||vnode_mount(file)!=expected)return EAUTH;
++ struct vnode_attr attr;VATTR_INIT(&attr);
++ VATTR_WANTED(&attr,va_uid);VATTR_WANTED(&attr,va_mode);VATTR_WANTED(&attr,va_nlink);
++ VATTR_WANTED(&attr,va_flags);VATTR_WANTED(&attr,va_data_size);VATTR_WANTED(&attr,va_dataprotect_class);
++ int error=VNOP_GETATTR(file,&attr,context);if(error)return error;
++ if(!VATTR_IS_SUPPORTED(&attr,va_uid)||!VATTR_IS_SUPPORTED(&attr,va_mode)||
++     !VATTR_IS_SUPPORTED(&attr,va_nlink)||!VATTR_IS_SUPPORTED(&attr,va_flags)||
++     !VATTR_IS_SUPPORTED(&attr,va_data_size)||!VATTR_IS_SUPPORTED(&attr,va_dataprotect_class)||
++     attr.va_uid||attr.va_nlink!=1||attr.va_flags||(attr.va_mode&07777)!=0600||
++     attr.va_data_size!=bytes||attr.va_dataprotect_class!=cls)return EAUTH;
++ return 0;
++}
++
++/* Same class-at-create contract as original open_dprotected_np/open1_dprotected:
++ * pass va_dataprotect_class into vn_open_auth, rather than inherit a different
++ * root-directory class before a later setattr. */
++static int
++kdp_create(const char *path,uint32_t cls,vnode_t *file,vfs_context_t context)
++{
++ struct nameidata *nd=kalloc_type(struct nameidata,Z_WAITOK|Z_ZERO);if(!nd)return ENOMEM;
++ struct vnode_attr attr;VATTR_INIT(&attr);VATTR_SET(&attr,va_mode,0600);VATTR_SET(&attr,va_dataprotect_class,cls);
++ int flags=O_CREAT|O_EXCL|O_NOFOLLOW|FREAD|FWRITE;
++ NDINIT(nd,LOOKUP,OP_OPEN,NOFOLLOW,UIO_SYSSPACE,CAST_USER_ADDR_T(path),context);
++ int error=vn_open_auth(nd,&flags,&attr,NULLVP);*file=error?NULLVP:nd->ni_vp;
++ kfree_type(struct nameidata,nd);return error;
++}
++
++static int
++kdp_file(mount_t expected,const char *path,uint32_t cls,bool create)
++{
++ struct Work{uint8_t plain[KDP_BYTES],back[KDP_BYTES],cipher[4096];};
++ struct Work *w=kalloc_data(sizeof(*w),Z_WAITOK|Z_ZERO);if(!w)return ENOMEM;
++ vfs_context_t context=vfs_context_current();vnode_t file=NULLVP;int error=0;
++ for(unsigned i=0;i<KDP_BYTES;++i)w->plain[i]=(uint8_t)(i*17+(i>>7)+cls*29);
++ if(create){
++  error=kdp_create(path,cls,&file,context);
++  if(error)goto done;
++  if(!vnode_isreg(file)||vnode_mount(file)!=expected)error=EAUTH;
++  if(!error)error=kdp_metadata(file,expected,cls,0,context);
++  if(!error){
++   int residual=0;error=vn_rdwr(UIO_WRITE,file,(caddr_t)w->plain,KDP_BYTES,0,UIO_SYSSPACE,
++       IO_SYNC|IO_NOCACHE,vfs_context_ucred(context),&residual,NULL);
++   if(!error&&residual)error=EIO;
++  }
++  int sync_error=VNOP_FSYNC(file,MNT_WAIT,context);if(!error)error=sync_error;
++  int closed=vnode_close(file,FREAD|FWRITE,context);file=NULLVP;if(!error)error=closed;
++  if(error)goto done;
++ }
++ error=vnode_open(path,O_NOFOLLOW|FREAD,0,0,&file,context);if(error)goto done;
++ error=kdp_metadata(file,expected,cls,KDP_BYTES,context);
++ if(!error){
++  int residual=0;error=vn_rdwr(UIO_READ,file,(caddr_t)w->back,KDP_BYTES,0,UIO_SYSSPACE,
++      IO_NOCACHE,vfs_context_ucred(context),&residual,NULL);
++  if(!error&&residual)error=EIO;
++ }
++ if(!error&&memcmp(w->plain,w->back,KDP_BYTES))error=EAUTH;
++ int blocksize=vfs_devblocksize(expected);
++ if(!error&&blocksize!=512&&blocksize!=4096)error=EINVAL;
++ for(unsigned i=0;!error&&i<2;++i){
++  off_t logical=i?61440:0;daddr64_t block=-1;size_t run=0;
++  error=VNOP_BLOCKMAP(file,logical,4096,&block,&run,NULL,VNODE_READ|VNODE_BLOCKMAP_NO_TRACK,context);
++  if(!error&&(block<0||run<4096||(uint64_t)block>UINT64_MAX/(unsigned)blocksize))error=EINVAL;
++  if(!error)error=kebab_ufs_raw_read((uint64_t)block*(unsigned)blocksize,w->cipher,4096);
++  if(!error&&!memcmp(w->cipher,w->plain+logical,4096))error=EAUTH;
++  if(!error){
++   uint8_t digest[32];SHA256_CTX hash;SHA256_Init(&hash);SHA256_Update(&hash,w->cipher,4096);SHA256_Final(digest,&hash);
++   printf("KEBAB DATA FILE: class=%u logical=%llu ciphertext-sha256=",cls,(unsigned long long)logical);
++   for(unsigned j=0;j<32;++j)printf("%02x",digest[j]);printf(" differs from plaintext\n");
++   bzero(digest,sizeof(digest));
++  }
++ }
++ if(!error){
++  uint8_t digest[32];SHA256_CTX hash;SHA256_Init(&hash);SHA256_Update(&hash,w->back,KDP_BYTES);SHA256_Final(digest,&hash);
++  printf("KEBAB DATA FILE: %s class=%u bytes=%u original APFS protected IO sha256=",create?"write/read":"cold-read",cls,KDP_BYTES);
++  for(unsigned j=0;j<32;++j)printf("%02x",digest[j]);printf(" PASS\n");bzero(digest,sizeof(digest));
++ }
++done:
++ if(file){int closed=vnode_close(file,FREAD,context);if(!error)error=closed;}
++ printf("KEBAB DATA FILE: fixed %s class=%u %s (%d)\n",create?"exclusive create":"cold restore",cls,error?"FAIL":"PASS",error);
++ bzero(w,sizeof(*w));kfree_data(w,sizeof(*w));return error;
++}
++
++static int
++kdp_preserve(mount_t preboot,uint8_t *scratch,uint8_t digest[32])
++{
++ uint8_t old[32];int error=kfp_preservation(preboot,scratch,old);if(error)return error;
++ error=kdr_read(KDB_PATH,preboot,scratch,vfs_context_current());
++ if(!error){SHA256_CTX hash;SHA256_Init(&hash);SHA256_Update(&hash,old,32);SHA256_Update(&hash,scratch,4096);SHA256_Final(digest,&hash);}
++ bzero(old,sizeof(old));bzero(scratch,4096);return error;
++}
++
++static int
++kdp_files(proc_t p,user_addr_t scratch,mount_t mounted,bool create)
++{
++ static const uint8_t uuid[16]={0x61,0x70,0x66,0x73,0x75,0x75,0x69,0x64,0,0x40,0x76,0x6f,0x6c,0x75,0x6d,1};
++ int error=kebab_volume_factory_activate(uuid);if(error)return error;
++ printf("KEBAB DATA CLASSES: authenticated mounted owner; persistent factory C/D activated; no passcode/SEP unlock claim\n");
++ vnode_t preboot=NULLVP;error=vnode_lookup("/private/preboot",VNODE_LOOKUP_NOFOLLOW,&preboot,vfs_context_current());if(error)return error;
++ mount_t saved=vnode_mount(preboot);
++ if(!(vfs_flags(saved)&MNT_RDONLY)||saved==mounted)error=EAUTH;
++ uint8_t *work=kalloc_data(4096,Z_WAITOK|Z_ZERO),before[32]={0},after[32]={0};
++ bool measured=false;
++ if(!work){vnode_put(preboot);return ENOMEM;}
++ if(!error)error=kdp_preserve(saved,work,before);if(!error)measured=true;
++ if(!error&&create){
++  uint8_t payload[0x150]={0};user64_addr_t spec=scratch+0x160;uint16_t normal=1;uint32_t anonymous=UINT32_MAX;
++  memcpy(payload,&spec,8);memcpy(payload+16,&normal,2);memcpy(payload+0x144,&anonymous,4);memcpy(payload+0x148,&anonymous,4);
++  struct mount_args request={.type=scratch+0x100,.path=scratch+0x120,.flags=MNT_UPDATE,.data=scratch+0x200};int32_t result=0;
++  if((error=copyout("apfs",request.type,5))||(error=copyout("/private/var",request.path,13))||
++      (error=copyout("/dev/disk1s2",spec,13))||(error=copyout(payload,request.data,sizeof(payload))))goto done;
++  error=mount(p,&request,&result);
++  printf("KEBAB DATA FILE: original Data RW update error=%d\n",error);
++  if(!error&&(vfs_flags(mounted)&MNT_RDONLY))error=EROFS;
++  if(!error&&!(vfs_flags(vnode_mount(rootvnode))&MNT_RDONLY))error=EAUTH;
++ }
++ if(!error)error=kdp_file(mounted,"/private/var/.hios-cp-c-v1",3,create);
++ if(!error)error=kdp_file(mounted,"/private/var/.hios-cp-d-v1",4,create);
++done:
++ if(create){
++  int synced=VFS_SYNC(mounted,MNT_WAIT,vfs_context_current());int flushed=kebab_ufs_sync();
++  printf("KEBAB DATA FILE: durable filesystem=%d UFS=%d\n",synced,flushed);if(!error)error=synced?synced:flushed;
++ }
++ if(measured){int preserved=kdp_preserve(saved,work,after);if(!preserved&&memcmp(before,after,32))preserved=EAUTH;
++  printf("KEBAB DATA FILE: Preboot nonce/Root/device-bank preserved=%u\n",!preserved);if(!error)error=preserved;}
++ vnode_put(preboot);bzero(work,4096);kfree_data(work,4096);bzero(before,32);bzero(after,32);
++ return error;
++}
+--- a/bsd/kern/kebab_data_mount_impl.h
++++ b/bsd/kern/kebab_data_mount_impl.h
+@@ -1,9 +1,11 @@
++#include "kebab_data_files_impl.h"
+ /* No formatter or writes: cold keybag/native APFS mount on the new Data UUID. */
++int kebab_data_mount_probe(proc_t,user_addr_t);
+ int
+ kebab_data_mount_probe(proc_t p,user_addr_t scratch)
+ {
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+- if(tool!=3||kdf_policy()||!p||proc_getpid(p)!=1||!scratch||!kdf_live||
++ if((tool!=3&&tool!=4&&tool!=6)||kdf_policy()||!p||proc_getpid(p)!=1||!scratch||!kdf_live||
+      !kebab_file_keys_available()||!kebab_device_classbag_available())return EPERM;
+  struct kebab_volume_identity system,data;
+  int error=kebab_lookup_apfs_live_data(&system,&data);if(error)return error;
+@@ -39,5 +41,7 @@
+      vnode_mount(rootvnode)!=original||!(vfs_flags(original)&MNT_RDONLY))error=EAUTH;
+  printf("KEBAB DATA MOUNT: mounted /private/var dev=%u/%u readonly=%u System-readonly=%u identity=%s\n",
+      major(actual),minor(actual),(vfs_flags(mounted)&MNT_RDONLY)!=0,(vfs_flags(original)&MNT_RDONLY)!=0,error?"FAIL":"PASS");
+- vnode_put(point);return error;
++ vnode_put(point);
++ if(!error&&(tool==4||tool==6))error=kdp_files(p,scratch,mounted,tool==4);
++ return error;
+ }
+--- a/bsd/kern/kebab_data_setup_policy.h
++++ b/bsd/kern/kebab_data_setup_policy.h
+@@ -7,7 +7,7 @@
+ {
+ #if DEVELOPMENT || DEBUG
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+- if(tool!=2&&tool!=3)return EPERM;
++ if(tool!=2&&tool!=3&&tool!=4&&tool!=6)return EPERM;
+  static const char *const names[]={"kebab_apfs_tool","ufsrw","rootrw","ufsmedia_root","cpus",
+   "kebab_apfs_probe","kebab_data_root","kebab_file_keys_test","kebab_aks_fs","kebab_aks_fv","kebab_cpx_xts",
+   "kebab_owner_fast","kebab_owner_startup","kebab_owner_dsc","kebab_owner_os","kebab_dsc","kebab_dsc_map",
+@@ -16,7 +16,7 @@
+   "kebab_hardware_nonce","kebab_cpx_handles","kebab_aes_key_probe","kebab_cryptex_dirs"};
+  static const unsigned expected[]={2,1,0,2,8,17,2,9,1,1,1,1,1,1,1,1,1,1,2,1,1,1,1,0,0,0,0,0,0,0};
+  for(unsigned i=0;i<sizeof(expected)/sizeof(*expected);++i){
+-  unsigned value=0;PE_parse_boot_argn(names[i],&value,sizeof(value));unsigned wanted=expected[i];if(i==0)wanted=tool;if(i==1&&tool==3)wanted=0;
++  unsigned value=0;PE_parse_boot_argn(names[i],&value,sizeof(value));unsigned wanted=expected[i];if(i==0)wanted=tool;if(i==1&&(tool==3||tool==6))wanted=0;
+   if(value!=wanted)return EPERM;
+  }
+  return 0;
+--- a/bsd/kern/kebab_device_classbag_file_impl.h
++++ b/bsd/kern/kebab_device_classbag_file_impl.h
+@@ -38,7 +38,7 @@
+  if(!error)error=kebab_device_classbag_open(kdb_container_uuid,kdb_system_uuid,w->readback,4096);
+  if(!error&&!kebab_device_classbag_available())error=EAUTH;
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+- if(!error&&tool!=2&&tool!=3){
++ if(!error&&tool!=2&&tool!=3&&tool!=4&&tool!=6){
+   /* Failed authentication must revoke cached class material, then valid
+    * durable bytes must restore it. Never touch the stored record. */
+   w->readback[129]^=1;
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7149,9 +7149,10 @@
+  if (kebab_apfs_probe_error) panic("kebab APFS probe failed: %d", kebab_apfs_probe_error);
+  int owner_dsc_prepare_error = kebab_dsc_after_mount();
+  if (owner_dsc_prepare_error) panic("kebab owner DSC prepare failed: %d", owner_dsc_prepare_error);
+- if(tool_mode==3){
++ if(tool_mode==3||tool_mode==4||tool_mode==6){
+   extern int kebab_data_mount_probe(proc_t,user_addr_t);
+   int mounted=kebab_data_mount_probe(p,(user_addr_t)scratch_addr);
++  if(tool_mode!=3)panic("KEBAB DATA FILES: original protected C/D %s %s (%d); fsck/full regression still pending",tool_mode==4?"write/read":"cold-read",mounted?"FAIL":"PASS",mounted);
+   panic("KEBAB DATA MOUNT: original encrypted Data read-only mount %s (%d); real protected RW/cold/fsck still pending",mounted?"FAIL":"PASS",mounted);
+  }
+  if(tool_mode) {

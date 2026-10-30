@@ -1,0 +1,54 @@
+--- a/bsd/kern/kebab_qsee_probe.c
++++ b/bsd/kern/kebab_qsee_probe.c
+@@ -173,26 +173,43 @@
+ 	qsee_erase(page);
+ 	uint32_t *request=(uint32_t *)(page+0x100);
+ 	uint32_t *response=(uint32_t *)(page+0x2000);
+-	/* Normal Keymaster Configure for the HiOS namespace. OS version is
+-	 * the actual 16.7.16 userland (160716); Android patch month is undeclared
+-	 * (0). These are key-blob version bindings, not Android/Apple attestation.
+-	 * No root-of-trust, boot-state, vendor/boot patch or rollback command.
++	/* The board HAL queries date-format support before adding vendor patch.
++	 * Public, measured vendor/build.prop from the installed LOS full package:
++	 * 2024-10-05. No current-date guess or Android patch claim for HiOS.
++	 */
++	request[0]=0x215; /* KEYMASTER_GET_DATE_SUPPORT, fixed legacy 12-byte request. */
++	memset(response,0xa5,0x1800);
++	struct qsee_result r=qsee_storage_send(page,pa,app,12);
++	printf("KEBAB QSEE: date-support transport=%d result=0x%llx\n",r.status,r.value);
++	if (qsee_pending(r)) return false;
++	if (r.status || r.value) goto done;
++	int32_t date_status=(int32_t)response[0];
++	printf("KEBAB QSEE: date-support reply=%d\n",date_status);
++	if (date_status!=0 && date_status!=-40) goto done;
++	uint32_t vendor_patch=date_status==0 ? 20241005 : 202410;
++	bzero(request,0x1000-0x100);
++	/* Same three tags used by the board HAL. HiOS 16.7.16 is the real
++	 * userland version; Android OS patch month remains undeclared (0).
++	 * Vendor value is firmware metadata. No ROT/boot-state/rollback write.
+ 	 */
+ 	request[0]=0x2116;
+ 	uint8_t *encoded=(uint8_t *)(request+1);
+-	unsigned used=qsee_cbor_header(encoded,5,3);
++	unsigned used=qsee_cbor_header(encoded,5,4);
+ 	used+=qsee_cbor_header(encoded+used,0,22);
+-	used+=qsee_cbor_header(encoded+used,0,2);
++	used+=qsee_cbor_header(encoded+used,0,3);
+ 	used+=qsee_cbor_header(encoded+used,0,0x300002c1);
+ 	used+=qsee_cbor_header(encoded+used,0,160716);
+ 	used+=qsee_cbor_header(encoded+used,0,0x300002c2);
+ 	used+=qsee_cbor_header(encoded+used,0,0);
++	used+=qsee_cbor_header(encoded+used,0,0x300002ce);
++	used+=qsee_cbor_header(encoded+used,0,vendor_patch);
+ 	memset(response,0xa5,0x1800);
+-	struct qsee_result r=qsee_storage_send(page,pa,app,4+used);
++	r=qsee_storage_send(page,pa,app,4+used);
+ 	printf("KEBAB QSEE: HiOS configure transport=%d result=0x%llx\n",r.status,r.value);
+ 	if (qsee_pending(r)) return false;
+ 	if (r.status || r.value) goto done;
+-	printf("KEBAB QSEE: HiOS configure reply=%d OS_VERSION=160716 OS_PATCHLEVEL=0\n",(int32_t)response[0]);
++	printf("KEBAB QSEE: HiOS configure reply=%d OS_VERSION=160716 OS_PATCHLEVEL=0 VENDOR_PATCHLEVEL=%u\n",
++	    (int32_t)response[0],vendor_patch);
+ 	if (response[0]) goto done;
+ 	bzero(request,0x1000-0x100);
+ 	/* Active 4.1/4.558 path: command followed by a definite CBOR map.

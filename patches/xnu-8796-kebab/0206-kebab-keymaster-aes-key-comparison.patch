@@ -1,0 +1,41 @@
+--- a/bsd/kern/kebab_qsee_probe.c
++++ b/bsd/kern/kebab_qsee_probe.c
+@@ -215,16 +215,23 @@
+ 	/* Active 4.1/4.558 path: command followed by a definite CBOR map.
+ 	 * Label22 is parameter count; repeated PURPOSE labels preserve the set.
+ 	 */
++	int aes_only=0;
++	PE_parse_boot_argn("kebab_aes_key_probe",&aes_only,sizeof(aes_only));
+ 	const uint32_t params[][2]={
+ 		{0x10000002,32}, {0x30000003,256},
+-		{0x20000001,0}, {0x20000001,1}, {0x700002d2,1},
++		{0x20000001,0}, {0x20000001,1},
++		{aes_only==1 ? 0x700001f7u : 0x700002d2u,1}, /* NO_AUTH vs STORAGE */
++		{0x20000004,2}, {0x20000006,1}, {0x70000007,1}, /* CBC, no pad, caller IV */
+ 	};
++	unsigned param_count=aes_only==1 ? 8 : 5;
++	printf("KEBAB QSEE: key generation route=%s; firmware-generated keys only\n",
++	    aes_only==1 ? "ordinary AES" : "storage wrapped");
+ 	request[0]=0x2108;
+ 	encoded=(uint8_t *)(request+1);
+-	used=qsee_cbor_header(encoded,5,6);
++	used=qsee_cbor_header(encoded,5,param_count+1);
+ 	used+=qsee_cbor_header(encoded+used,0,22);
+-	used+=qsee_cbor_header(encoded+used,0,5);
+-	for (unsigned i=0; i<5; i++) {
++	used+=qsee_cbor_header(encoded+used,0,param_count);
++	for (unsigned i=0; i<param_count; i++) {
+ 		used+=qsee_cbor_header(encoded+used,0,params[i][0]);
+ 		if ((params[i][0]>>28)==7) encoded[used++]=0xf5;
+ 		else used+=qsee_cbor_header(encoded+used,0,params[i][1]);
+@@ -239,6 +246,10 @@
+ 	/* New keyblob ABI preserves the complete returned CBOR object. */
+ 	uint32_t blob_size=response[1];
+ 	memcpy((void *)(page+0x1000),response+2,blob_size);
++	if (aes_only==1) {
++		printf("KEBAB QSEE: ordinary AES generated; cryptographic use and persistence unqualified\n");
++		goto done;
++	}
+ 	/* Export the same long-term key twice, then derive twice. Only equality
+ 	 * of the returned software secrets is reported; no raw-key fallback.
+ 	 */
