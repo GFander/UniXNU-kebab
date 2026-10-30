@@ -17,4 +17,4 @@
 
 下一顺序：补齐真实密钥和daemon功能 → 结合最新构建重新审核GPU/显示/输入指南 → 实现对应驱动并实机验证 → 可见可用SpringBoard。全部目标仍在进行，每个后续验收小目标整理并上传一次。
 
-已发布源码检查点：[801f64859479](https://github.com/GFander/UniXNU-kebab/commit/801f648594796822d45ef904447dbe37e2fee817)（ios16分支）；[发布核对](qualification/0386/publication.json)。完整SpringBoard目标仍在进行。
+已发布源码检查点：[9f48d5969d63](https://github.com/GFander/UniXNU-kebab/commit/9f48d5969d63128914b37c94145555e7a5d93610)（ios16分支，蓝牙固件只读读取）；[发布核对](qualification/0398/publication.json)。完整SpringBoard目标仍在进行。

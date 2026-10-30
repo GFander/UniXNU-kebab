@@ -14,3 +14,5 @@ python3 scripts/tests/run-bt-firmware.py --loader scripts/tests/bt-firmware-0396
 这不是蓝牙功能验收：控制器版本、上电、UART、HCI、固件下载、iOS消费接口和真实扫描/连接/数据交换尚未实现或验证。不会发布假服务或地址来消除bluetoothd的退出。参见[硬件功能门槛](../../BLUETOOTH-BRINGUP-20261031.md)。
 
 只发布源码、必要哈希和收据；不分发闭源HAL、固件字节、原版组件/IPSW、地址/校准、设备密钥、私人Data或原始日志。
+
+已发布源码检查点：[9f48d5969d63](https://github.com/GFander/UniXNU-kebab/commit/9f48d5969d63128914b37c94145555e7a5d93610)；[远端核对与清单](publication.json)。

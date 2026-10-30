@@ -28,3 +28,5 @@
 4. 与真实对端验证 BLE 扫描、连接、GATT 数据，经典蓝牙业务、重连、开关和重启。音频另验真实音频链路。
 
 闭源 HAL、固件字节、校准、设备地址及原始私有日志不随代码发布。保留现有硬件 Root/nonce、真实加密 Data、原版 system bag、watchdog 和 daily-fast 策略。完整 A/B/口令/SEP、剩余 daemon 及可用 SpringBoard 仍未完成。
+
+源码已发布：[9f48d5969d63](https://github.com/GFander/UniXNU-kebab/commit/9f48d5969d63128914b37c94145555e7a5d93610)（ios16），远端已核对。
