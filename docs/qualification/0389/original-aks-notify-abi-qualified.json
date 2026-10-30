@@ -1,0 +1,43 @@
+{
+  "qualified": true,
+  "original_kernelcache_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "original_cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+  "native_contract": "provider-owned notification-registration flag; not key availability or a fabricated device-state reply",
+  "provider_flag_offset": 164,
+  "semantics": {
+    "set_selector": 102,
+    "read_selector": 103,
+    "read_scalar_input_count": 0,
+    "read_scalar_output_count": 1,
+    "initial_state": 0,
+    "set_state": 1
+  },
+  "methods": [
+    {
+      "selector": 102,
+      "entry": "0xfffffff0060d8f0c",
+      "instructions_checked": 5,
+      "code_sha256": "631d207a67bf4b4f7ee77d0106376121fde16547580f9dc56d4df4bdd818070b"
+    },
+    {
+      "selector": 103,
+      "entry": "0xfffffff0060d8f20",
+      "instructions_checked": 9,
+      "code_sha256": "c9ac1855c2f3cb6bc63b0cdbf98a1b2830492e100efa07d2773fd48e3211cecf"
+    }
+  ],
+  "original_wrappers": [
+    {
+      "selector": 102,
+      "va": "0x1ae401b0c",
+      "code_sha256": "555c140d54243f9dd53f2a369a2b337aae9ef72da1aaa01882450037972b7b45"
+    },
+    {
+      "selector": 103,
+      "va": "0x1ae401b58",
+      "code_sha256": "65f7ffd1c674d6e1e2c8e934e8caac144ca4b936b57d66d1bd17965ea84ba881"
+    }
+  ],
+  "hardware_key_operation_claim": false,
+  "full_aks_compatibility": false
+}

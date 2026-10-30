@@ -1,0 +1,72 @@
+--- a/iokit/Kernel/arm/kebab_aks_userclient_impl.h
++++ b/iokit/Kernel/arm/kebab_aks_userclient_impl.h
+@@ -2,6 +2,7 @@
+  * factory C/D bag. This is not the upstream empty/offline state stand-in. */
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOMemoryDescriptor.h>
++#include <libkern/OSAtomic.h>
+ 
+ static const uint8_t kuc_data_uuid[16]={0x61,0x70,0x66,0x73,0x75,0x75,0x69,0x64,0,0x40,0x76,0x6f,0x6c,0x75,0x6d,1};
+ static bool
+@@ -12,6 +13,8 @@
+ }
+ 
+ #include "kebab_aks_cookie_impl.h"
++
++static IOReturn kuc_notify_method(IOService *,uint32_t,IOExternalMethodArguments *);
+ 
+ class AppleKeyStoreUserClient final : public IOUserClient {
+  OSDeclareDefaultStructors(AppleKeyStoreUserClient)
+@@ -34,7 +37,9 @@
+   if(in||out||si||a->structureInputDescriptor||a->structureOutputSize||a->structureOutputDescriptor)result=kIOReturnBadArgument;
+   else{opened=true;result=kIOReturnSuccess;}
+  }else if(!opened)result=kIOReturnNotOpen;
+- else if(selector==65||selector==68){
++ else if(selector==102||selector==103){
++  result=kuc_notify_method(getProvider(),selector,a);
++ }else if(selector==65||selector==68){
+   result=kuc_cookie_method(selector,a);
+  }else if(selector==14){
+   if(in||out!=1||!a->scalarOutput||si||a->structureInputDescriptor||a->structureOutputSize||a->structureOutputDescriptor)result=kIOReturnBadArgument;
+@@ -70,6 +75,9 @@
+ 
+ class AppleKeyStore final : public IOService {
+  OSDeclareDefaultStructors(AppleKeyStore)
++ /* Original selectors102/103 store one provider-owned notification flag.
++  * This records registration, not class-key availability or unlock success. */
++ volatile SInt32 notificationState=0;
+  IOReturn makeClient(task_t task,void *security,UInt32 type,OSDictionary *properties,IOUserClient **out){
+   if(out)*out=nullptr;
+   if(!out||!task||type)return kIOReturnBadArgument;
+@@ -84,10 +92,31 @@
+   *out=client;return kIOReturnSuccess;
+  }
+ public:
++ void markNotificationsRegistered(){(void)OSCompareAndSwap(0,1,&notificationState);}
++ bool notificationsRegistered(){return OSAddAtomic(0,&notificationState)!=0;}
+  IOReturn newUserClient(task_t t,void *s,UInt32 n,OSDictionary *p,IOUserClient **out) override{return makeClient(t,s,n,p,out);}
+  IOReturn newUserClient(task_t t,void *s,UInt32 n,IOUserClient **out) override{return makeClient(t,s,n,nullptr,out);}
+ };
+ OSDefineMetaClassAndStructors(AppleKeyStore,IOService)
++
++static IOReturn
++kuc_notify_method(IOService *service,uint32_t selector,IOExternalMethodArguments *a)
++{
++ if(a->scalarInputCount||a->structureInputSize||a->structureInputDescriptor||
++     a->structureOutputSize||a->structureOutputDescriptor)return kIOReturnBadArgument;
++ if(selector==102){
++  if(a->scalarOutputCount)return kIOReturnBadArgument;
++ }else if(selector==103){
++  if(a->scalarOutputCount!=1||!a->scalarOutput)return kIOReturnBadArgument;
++ }else return kIOReturnUnsupported;
++ AppleKeyStore *provider=OSDynamicCast(AppleKeyStore,service);
++ if(!provider)return kIOReturnNotReady;
++ if(selector==102)provider->markNotificationsRegistered();
++ bool state=provider->notificationsRegistered();
++ if(selector==103){a->scalarOutput[0]=state?1:0;a->scalarOutputCount=1;}
++ IOLog("KEBAB AKS NOTIFY: selector=%u provider-state=%u; registration flag only\n",selector,state?1:0);
++ return kIOReturnSuccess;
++}
+ static AppleKeyStore *kuc_provider;
+ extern "C" int kebab_aks_userclient_start(void);
+ extern "C" int

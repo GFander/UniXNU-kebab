@@ -25,3 +25,17 @@
 5. 经蓝牙开关、冷启动、持续流量及错误恢复回归；保留控制器事件和对端证据，继续验证硬件密钥、加密Data与watchdog。
 
 当前全部蓝牙硬件功能门槛仍未通过；本报告是定位与开发约束，不是蓝牙完成收据。原版二进制、固件、校准信息、设备地址和私有日志不随源码发布。
+
+## 本机 LOS 固件链审计补充
+
+本地 `lineage-24.0-20261016-nightly-kebab-signed.zip` 已按 AOSP OTA 描述格式只提取 vendor 分区；263个操作的数据块哈希及最终549879808字节分区哈希逐一吻合。OTA SHA为 `e8d823da5208712379a29e913dbfde65a202162637dfdf2ef7c7c57b8c2bf975`，vendor SHA为 `f17cfaa173f95e22d806dc31db1e4dc11930e9c931b9151b8ee05c7ffab745f4`。这是固定输入和完整性证据，不宣称额外完成了OTA签名验证。
+
+从该分区的真实 QTI HAL 与 fstab 核对到：
+
+- 用户态串口是 `/dev/ttyHS0`，电源控制接口为 `/dev/btpower`；存在IBS WAKE_IND=0xFD、WAKE_ACK=0xFC、SLEEP_IND=0xFE握手，不能只实现裸H4而忽略实际休眠/唤醒状态。
+- HAL包含Hastings2.0及 `htbtfw20.tlv`、`htnv20.bin` 等配置分支；具体选择仍须读本机控制器版本，不能凭文件名直接加载。
+- `/vendor/bt_firmware` 是独立bluetooth槽分区的只读VFAT挂载点。vendor镜像中的这个目录为空，不代表固件缺失，更不能从别的设备随意补固件。
+- 本机bootloader实际返回当前槽b、`bluetooth_b` 大小0x100000；但明确不支持fastboot fetch，因此尚未读取该分区内容。未格式化、写入或替换该分区；调查后恢复正常0390固件。
+- `libbtnv.so` 指向 `/mnt/vendor/persist/bluetooth/.bt_nv.bin`；实际地址/记录尚未读取。未来应只读核对本机记录，不覆盖persist，也不生成一个地址来掩盖硬件未接通。
+
+下一步为原生UFS增加固定蓝牙固件分区的只读加载器，验证GPT、VFAT边界和文件内容，在真实UART/电源与iOS消费接口接入后再进行RF扫描/连接验收。所有校准、私有地址和闭源HAL/固件仅保留在所有者工作台，源码发布只含审计工具及必要元数据。

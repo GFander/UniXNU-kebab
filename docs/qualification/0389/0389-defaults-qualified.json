@@ -1,0 +1,108 @@
+{
+  "version": "0389",
+  "defaults_matching_complete": true,
+  "actual_log_sha256": "155c163417b9eb76ba098df2ddeef03a0ea6cea63af2031cfcb4d53da1917937",
+  "native_sha256": "25ee2e0c11059b4c8249819d036339cf1fcb287d060ac492a63176a27fdd259d",
+  "real_apple_image4_start_succeeded": true,
+  "actual_busy_reference_released": true,
+  "busy_lifecycle": [
+    [
+      0,
+      0,
+      1,
+      "defaults"
+    ],
+    [
+      11,
+      1,
+      1,
+      "AppleImage4"
+    ],
+    [
+      14,
+      2,
+      -1,
+      "defaults"
+    ],
+    [
+      15,
+      1,
+      -1,
+      "AppleImage4"
+    ]
+  ],
+  "final_busy_state": 0,
+  "actual_waits": [
+    "IOAESAccelerator",
+    "IOResources/IONVRAM",
+    "IODTNVRAM"
+  ],
+  "hardware_nonce_and_data_restored_without_generation": true,
+  "native_nvram_existing_proxy_adopted": true,
+  "nvram_encrypted_data_banks_cold_restored": true,
+  "nvram_restored_bank": 1,
+  "nvram_restored_generation": 70,
+  "nvram_hardware_or_rollback_claim": false,
+  "nvram_durable_write_calls": 2,
+  "watchdog_enabled": true,
+  "original_iokit_monitoring_preserved": true,
+  "watchdog_heartbeat_times": [
+    38.42,
+    38.42,
+    48.427,
+    58.409,
+    68.429,
+    78.436,
+    88.397,
+    98.392,
+    108.434,
+    118.435,
+    128.436,
+    138.414,
+    148.403,
+    158.453,
+    168.45,
+    178.46,
+    188.454,
+    198.406,
+    208.421,
+    218.431
+  ],
+  "original_locked_observations": [
+    [
+      60.534,
+      30,
+      4
+    ],
+    [
+      90.58,
+      60,
+      7
+    ],
+    [
+      120.63,
+      90,
+      10
+    ],
+    [
+      150.653,
+      120,
+      13
+    ],
+    [
+      180.655,
+      150,
+      16
+    ],
+    [
+      210.736,
+      180,
+      19
+    ]
+  ],
+  "systembag_and_hardware_c_d_preserved": true,
+  "rtc_record_reused": true,
+  "panic": [],
+  "full_ios_or_springboard": false,
+  "gpu_display_input_started": false
+}

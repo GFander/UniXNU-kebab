@@ -1,0 +1,57 @@
+{
+  "vendor_extraction": {
+    "input_ota": "lineage-24.0-20261016-nightly-kebab-signed.zip",
+    "input_sha256": "e8d823da5208712379a29e913dbfde65a202162637dfdf2ef7c7c57b8c2bf975",
+    "partition": "vendor",
+    "partition_bytes": 549879808,
+    "partition_sha256": "f17cfaa173f95e22d806dc31db1e4dc11930e9c931b9151b8ee05c7ffab745f4",
+    "manifest_sha256": "f4e33f5bcf6bacf674c420d6eeada587154b78fd8287a3850d809ad46efecf54",
+    "operations": 263,
+    "operation_types": {
+      "8": 256,
+      "1": 6,
+      "0": 1
+    },
+    "every_data_blob_verified": true,
+    "final_partition_hash_verified": true,
+    "no_phone_writes": true,
+    "bluetooth_hardware_verified": false
+  },
+  "selected_private_input_hashes": [
+    {
+      "path": "/etc/init/android.hardware.bluetooth@1.0-service-qti.rc",
+      "bytes": 417,
+      "sha256": "b4fabb4ad49d13da8f7152b7f0831b51d57f0f6dfd4c13a41d6a9699a5508085"
+    },
+    {
+      "path": "/lib64/hw/android.hardware.bluetooth@1.0-impl-qti.so",
+      "bytes": 643312,
+      "sha256": "ebbd74fd02be1978f9d07aa9c5defa7952385269bd982d05376e40cb84d1569b"
+    },
+    {
+      "path": "/lib64/libbtnv.so",
+      "bytes": 15768,
+      "sha256": "8e98c145267eaffef41a9382e353d83ef56bb1733f32d7d0a71f8a6e711762cb"
+    },
+    {
+      "path": "/bin/hw/android.hardware.bluetooth@1.0-service-qti",
+      "bytes": 20080,
+      "sha256": "339978ada70003a290ea2f694042c68938f808c9683f8eac894cb7ed07d17d67"
+    },
+    {
+      "path": "/etc/fstab.qcom",
+      "bytes": 5369,
+      "sha256": "cfff508e86f5ec9cc162d399a813c159afeb6203721eb00faff1d5f4f9aa953e"
+    }
+  ],
+  "firmware_partition": {
+    "slot": "b",
+    "name": "bluetooth_b",
+    "bytes": 1048576,
+    "fastboot_fetch_supported": false,
+    "partition_read": false
+  },
+  "actual_controller_verified": false,
+  "device_address_read": false,
+  "closed_inputs_published": false
+}
