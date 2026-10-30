@@ -104,5 +104,30 @@
   "bluetooth_functional": false,
   "raw_logs_published": false,
   "last_readonly_data_fsck": "0385 (unchanged substrate; no new filesystem check claimed)",
-  "github_uploaded": false
+  "github_uploaded": true,
+  "publication": {
+    "commit": "f1ac728abf7d1ad5fe63c1579a0d07ef4a0df134",
+    "remote_commit": "f1ac728abf7d1ad5fe63c1579a0d07ef4a0df134",
+    "branch": "ios16",
+    "pushed": true,
+    "files": [
+      "docs/BLUETOOTH-BRINGUP-20261031.md",
+      "docs/DAEMON-LIFECYCLE-20261031.md",
+      "docs/STATUS.md",
+      "docs/qualification/0387/0387-defaults-qualified.json",
+      "docs/qualification/0387/0387-systembag-qualified.json",
+      "docs/qualification/0387/DAEMON-LIFECYCLE-ACCEPTED-0387.json",
+      "docs/qualification/0387/README.md",
+      "docs/qualification/0387/all-mac-source-0387.json",
+      "docs/qualification/0387/all-source-replay-0387.json",
+      "patches/xnu-8796-kebab/0290-kebab-complete-daemon-lifecycle-evidence.patch",
+      "scripts/boot123-20261029/analyse-runtime-crashes.py",
+      "scripts/boot123-20261029/audit-original-bluetooth.py",
+      "scripts/boot123-20261029/cache_readonly.py",
+      "scripts/boot123-20261029/qualify-daemon-lifecycle.py",
+      "scripts/boot123-20261029/symbolicate-runtime-cache.py"
+    ],
+    "url": "https://github.com/GFander/UniXNU-kebab/commit/f1ac728abf7d1ad5fe63c1579a0d07ef4a0df134",
+    "scope": "diagnostic completeness; not Bluetooth or all-daemon functionality"
+  }
 }
