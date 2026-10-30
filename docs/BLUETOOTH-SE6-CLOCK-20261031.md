@@ -31,3 +31,5 @@ SE6实际参数0x20102864/0x20204800分别为TX16字、RX32字、每字32位。0
 0404原版只读fsck退出0、DataOK、crypto-io启用、无新增警告和修复；0405已恢复正常并回归超过180秒。见[实机收据](qualification/0404/README.md)。仍保留daily-fast和0341完整System/SystemOS参考，不每次重扫全部系统。
 
 下一步是实际UART字节收发、正确的供电/复位与版本匹配、原版iOS消费接口，再与真实对端验证扫描、连接和数据交换。蓝牙、完整A/B/口令/SEP、剩余daemon和可用SpringBoard均未完成，GPU/显示/输入新开发尚未开始。
+
+源码已发布：[a8fa16a256f2](https://github.com/GFander/UniXNU-kebab/commit/a8fa16a256f29f8dbe5a5de104738b76da7000bf)（ios16），远端已核对。

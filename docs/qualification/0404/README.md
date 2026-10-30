@@ -16,3 +16,5 @@ python3 scripts/tests/run-bt-hardware.py --source scripts/tests/bt-hardware-0402
 **蓝牙仍不可用。** 本项证明SoC串口前置资源，尚无QCA控制器上电、HCI、原版iOS消费接口或真实扫描/连接/数据交换。继续实际硬件开发，不能靠服务名称或停止报错代替。
 
 仅发布源码、必要哈希和收据；不发布闭源组件、固件、原始镜像/日志、地址/校准、设备密钥或私人Data。
+
+已发布源码检查点：[a8fa16a256f2](https://github.com/GFander/UniXNU-kebab/commit/a8fa16a256f29f8dbe5a5de104738b76da7000bf)；[远端核对与清单](publication.json)。
