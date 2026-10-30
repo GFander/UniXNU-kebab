@@ -14,3 +14,5 @@
 详见[Sandbox/watchdog报告](SANDBOX-WATCHDOG-20261031.md)、[实机收据与公共源码回放](qualification/0386/README.md)、[上一轮崩溃分类](USERLAND-CRASHES-20261031.md)。源代码、构建通过和实机行为是独立验收项，不能相互替代。
 
 下一顺序：补齐真实密钥和daemon功能 → 结合最新构建重新审核GPU/显示/输入指南 → 实现对应驱动并实机验证 → 可见可用SpringBoard。全部目标仍在进行，每个后续验收小目标整理并上传一次。
+
+已发布源码检查点：[801f64859479](https://github.com/GFander/UniXNU-kebab/commit/801f648594796822d45ef904447dbe37e2fee817)（ios16分支）；[发布核对](qualification/0386/publication.json)。完整SpringBoard目标仍在进行。
