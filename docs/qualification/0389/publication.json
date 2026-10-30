@@ -1,0 +1,33 @@
+{
+  "commit": "cb91f5d2bb58bfc3f4f52ef26f97fd5b4fba576e",
+  "remote_commit": "cb91f5d2bb58bfc3f4f52ef26f97fd5b4fba576e",
+  "branch": "ios16",
+  "pushed": true,
+  "reviewed_staged_paths": [
+    "README.md",
+    "docs/AKS-NOTIFY-20261031.md",
+    "docs/BLUETOOTH-BRINGUP-20261031.md",
+    "docs/STATUS.md",
+    "docs/qualification/0389/0388-defaults-qualified.json",
+    "docs/qualification/0389/0388-systembag-qualified.json",
+    "docs/qualification/0389/0389-defaults-qualified.json",
+    "docs/qualification/0389/0389-systembag-qualified.json",
+    "docs/qualification/0389/AKS-NOTIFY-ACCEPTED-0389.json",
+    "docs/qualification/0389/README.md",
+    "docs/qualification/0389/all-mac-source-0388.json",
+    "docs/qualification/0389/all-source-replay-0388.json",
+    "docs/qualification/0389/bluetooth-reference-inputs.json",
+    "docs/qualification/0389/original-aks-notify-abi-qualified.json",
+    "docs/qualification/0389/test-aks-notification-state-result.json",
+    "patches/xnu-8796-kebab/0291-kebab-real-aks-notification-state.patch",
+    "scripts/boot123-20261029/analyse-defaults-lifecycle.py",
+    "scripts/boot123-20261029/analyse-systembag.py",
+    "scripts/boot123-20261029/audit-original-aks-notify.py",
+    "scripts/boot123-20261029/extract-bluetooth-vendor-reference.py",
+    "scripts/boot123-20261029/qualify-aks-notification-runtime.py",
+    "scripts/tests/aks-notification-0388.cpp",
+    "scripts/tests/run-aks-notification.py"
+  ],
+  "url": "https://github.com/GFander/UniXNU-kebab/commit/cb91f5d2bb58bfc3f4f52ef26f97fd5b4fba576e",
+  "scope": "original102/103 notification state; no Bluetooth or full AKS claim"
+}

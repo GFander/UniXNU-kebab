@@ -115,5 +115,51 @@
   "bluetooth_functional": false,
   "all_daemon_errors_fixed": false,
   "most_recent_independent_readonly_data_fsck": "0385; no new fsck claimed for this one-header state change",
-  "github_uploaded": false
+  "github_uploaded": true,
+  "publication": {
+    "commit": "cb91f5d2bb58bfc3f4f52ef26f97fd5b4fba576e",
+    "remote_commit": "cb91f5d2bb58bfc3f4f52ef26f97fd5b4fba576e",
+    "branch": "ios16",
+    "pushed": true,
+    "reviewed_staged_paths": [
+      "README.md",
+      "docs/AKS-NOTIFY-20261031.md",
+      "docs/BLUETOOTH-BRINGUP-20261031.md",
+      "docs/STATUS.md",
+      "docs/qualification/0389/0388-defaults-qualified.json",
+      "docs/qualification/0389/0388-systembag-qualified.json",
+      "docs/qualification/0389/0389-defaults-qualified.json",
+      "docs/qualification/0389/0389-systembag-qualified.json",
+      "docs/qualification/0389/AKS-NOTIFY-ACCEPTED-0389.json",
+      "docs/qualification/0389/README.md",
+      "docs/qualification/0389/all-mac-source-0388.json",
+      "docs/qualification/0389/all-source-replay-0388.json",
+      "docs/qualification/0389/bluetooth-reference-inputs.json",
+      "docs/qualification/0389/original-aks-notify-abi-qualified.json",
+      "docs/qualification/0389/test-aks-notification-state-result.json",
+      "patches/xnu-8796-kebab/0291-kebab-real-aks-notification-state.patch",
+      "scripts/boot123-20261029/analyse-defaults-lifecycle.py",
+      "scripts/boot123-20261029/analyse-systembag.py",
+      "scripts/boot123-20261029/audit-original-aks-notify.py",
+      "scripts/boot123-20261029/extract-bluetooth-vendor-reference.py",
+      "scripts/boot123-20261029/qualify-aks-notification-runtime.py",
+      "scripts/tests/aks-notification-0388.cpp",
+      "scripts/tests/run-aks-notification.py"
+    ],
+    "url": "https://github.com/GFander/UniXNU-kebab/commit/cb91f5d2bb58bfc3f4f52ef26f97fd5b4fba576e",
+    "scope": "original102/103 notification state; no Bluetooth or full AKS claim"
+  },
+  "normal_default": {
+    "version": "0390",
+    "normal_default_restored": true,
+    "native_sha256": "25ee2e0c11059b4c8249819d036339cf1fcb287d060ac492a63176a27fdd259d",
+    "boot_sha256": "64f4ae776c29f40bea71647456e42f558eebacce74005138d63c29abc84084c7",
+    "actual_log_sha256": "f0a7e18f533974e96ffbdca6ce753d0cf72bd71cf0feb3b1ee4f649b5b2c3cd6",
+    "normal_tool12": true,
+    "hardware_roots_cd_mkb_defaults_retained": true,
+    "original_watchdog_last_heartbeat": 257.831,
+    "panic": [],
+    "bluetooth_functional": false,
+    "full_goal_complete": false
+  }
 }
