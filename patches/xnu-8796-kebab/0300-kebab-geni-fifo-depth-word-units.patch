@@ -1,0 +1,58 @@
+--- a/bsd/dev/kebab_bluetooth.c
++++ b/bsd/dev/kebab_bluetooth.c
+@@ -11,6 +11,7 @@
+ #include <machine/machine_routines.h>
+ #include "kebab_bluetooth.h"
+ #include "kebab_geni.h"
++#include "kebab_geni_registers.h"
+ #include "kebab_bt_hw_impl.h"
+ #include "kebab_bt_clock_impl.h"
+ extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
+@@ -67,6 +68,8 @@
+   printf("KEBAB BTHW: GCC offset=%05x value=%08x\n",kbh_clock_offsets[i],status.clock[i]);
+  for(unsigned i=0;i<12;++i)if(status.se_valid&(1u<<i))
+   printf("KEBAB BTHW: SE6 offset=%03x value=%08x\n",kbh_se_offsets[i],status.se[i]);
++ if((status.se_valid&0xc0)==0xc0)
++  printf("KEBAB BTHW: TX FIFO depth=%u words width=%u bits; RX depth=%u words width=%u bits\n",kebab_geni_fifo_depth_words(status.se[6]),kebab_geni_fifo_width_bits(status.se[6]),kebab_geni_fifo_depth_words(status.se[7]),kebab_geni_fifo_width_bits(status.se[7]));
+  if(error==EAGAIN)printf("KEBAB BTHW: SE6 registers deferred: required votes or running/valid HWCG clock state absent\n");
+  printf("KEBAB BTHW: no GPIO/clock/power/controller writes; HCI and radio functionality not established\n");
+ }
+--- a/bsd/dev/kebab_geni.c
++++ b/bsd/dev/kebab_geni.c
+@@ -10,6 +10,7 @@
+ #include <stdarg.h>
+ #include <sys/systm.h>
+ #include "kebab_geni.h"
++#include "kebab_geni_registers.h"
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ extern bool kebab_usb_console_ready(void);
+ extern void kebab_usb_log_flush(void);
+@@ -430,8 +431,8 @@
+ 	kt_se_wr(SE_GENI_DMA_MODE_EN, kt_se_rd(SE_GENI_DMA_MODE_EN) & ~1u);
+ 	kt_se_wr(SE_GSI_EVENT_EN, 0);
+ 
+-	/* Watermarks, sized from the SE's own TX FIFO width. */
+-	depth = (kt_se_rd(SE_HW_PARAM_0) >> 24) & 0x3fu;
++	/* Watermarks count words; PARAM0 bits29:24 are the word width in bits. */
++	depth = kebab_geni_fifo_depth_words(kt_se_rd(SE_HW_PARAM_0));
+ 	if (depth == 0 || depth > 32) {
+ 		depth = 16;
+ 	}
+--- /dev/null
++++ b/bsd/dev/kebab_geni_registers.h
+@@ -0,0 +1,15 @@
++/* Shared GENI register field units, not a transport or userspace ABI.
++ * qcom-geni-se.h at LineageOS SM8250 98a7970: PARAM0 TX / PARAM1 RX use
++ * bits21:16 for FIFO depth in words and bits29:24 for word width in bits. */
++#ifndef KEBAB_GENI_REGISTERS_H
++#define KEBAB_GENI_REGISTERS_H
++#include <stdint.h>
++static inline uint32_t kebab_geni_fifo_depth_words(uint32_t param)
++{
++ return (param>>16)&0x3f;
++}
++static inline uint32_t kebab_geni_fifo_width_bits(uint32_t param)
++{
++ return (param>>24)&0x3f;
++}
++#endif

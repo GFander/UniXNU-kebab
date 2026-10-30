@@ -1,14 +1,14 @@
 # UniXNU-kebab
 
-## 当前实机验收：0398；正常默认0399（2026-10-31）
+## 当前实机验收：0404；正常默认0405（2026-10-31）
 
-新增本机蓝牙固件分区只读加载器：0396/0397实际读取patch/NVM并重复校验，0398原版只读Data检查通过。此项接通真实固件字节来源；控制器、UART/HCI、扫描和连接仍未完成，[范围报告](docs/BLUETOOTH-FIRMWARE-20261031.md)。
+新增真实SE6时钟准备与状态读取，0402及完整重启0403均验证首次获取、重复调用和UART微码/FIFO参数；修正既有GENI把字宽当深度的错误。0404原版只读Data检查通过。控制器供电、UART字节收发、HCI及蓝牙真实业务仍未完成，[范围报告](docs/BLUETOOTH-SE6-CLOCK-20261031.md)。
 
-当前进度以[最新状态](docs/STATUS.md)、[Sandbox/watchdog验收](docs/SANDBOX-WATCHDOG-20261031.md)和[最新源码回放与实机证据](docs/qualification/0398/README.md)为准。
+当前进度以[最新状态](docs/STATUS.md)、[Sandbox/watchdog验收](docs/SANDBOX-WATCHDOG-20261031.md)和[最新源码回放与实机证据](docs/qualification/0404/README.md)为准。
 
 原版APFS和真实加密Data、硬件Root/nonce、原版MKB_INIT及C/D文件、持久RTC/NVRAM、原版watchdog监控均已通过对应实测。新接通原版Sandbox与真实Kebab平台watchdog类授权：原任务允许、无关服务拒绝。A/B密钥和若干原版AKS接口、剩余daemon行为及GPU/显示/输入仍需开发，尚未到达可用SpringBoard。
 
-这里公开276个板级补丁、4个Mac构建补丁以及5241源文件的独立回放证据，不分发固件/IPSW、原版闭源组件、设备密钥或私人Data。`board.toml`的早期standalone入口未参与本次端到端prelink实机验收；源码回放通过也不能代替boot镜像实测。
+这里公开279个板级补丁、4个Mac构建补丁以及5246源文件的独立回放证据，不分发固件/IPSW、原版闭源组件、设备密钥或私人Data。`board.toml`的早期standalone入口未参与本次端到端prelink实机验收；源码回放通过也不能代替boot镜像实测。
 
 以下保留早期移植记录，其中HFS+、单核和当时阻塞点是历史状态，请勿把它们当作最新验收结果。
 

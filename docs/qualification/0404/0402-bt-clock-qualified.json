@@ -1,0 +1,48 @@
+{
+  "version": "0402",
+  "source_version": "0402",
+  "native_sha256": "f15261dde02049a29796378de51c5503b20bc48e7c16a18cd533642001049074",
+  "actual_log_sha256": "96b1fff49352ca70f0f31e53ce2e768b6d26bb72be26b88f0d08a9d794fe1ab3",
+  "clock_prerequisite_qualified": true,
+  "calls": [
+    {
+      "error": 0,
+      "before": 104629184,
+      "after": 104694720,
+      "added": 65536,
+      "owned": 65536,
+      "polls": 2,
+      "attempted": 1,
+      "restored": 0,
+      "quarantined": 0
+    },
+    {
+      "error": 0,
+      "before": 104694720,
+      "after": 104694720,
+      "added": 0,
+      "owned": 65536,
+      "polls": 1,
+      "attempted": 0,
+      "restored": 0,
+      "quarantined": 0
+    }
+  ],
+  "only_new_bit16_acquired": true,
+  "hardware_gated_slave_ahb_preserved": true,
+  "unchanged_gpio_and_controller_reset": true,
+  "actual_geni_protocol": 2,
+  "geni_protocol_name": "UART",
+  "geni_microcode_revision": 3,
+  "tx_fifo_depth_words": 16,
+  "rx_fifo_depth_words": 32,
+  "fifo_word_bits": 32,
+  "systembag_and_hardware_c_d_preserved": true,
+  "original_watchdog_enabled": true,
+  "explicit_console_invocation": true,
+  "automatic_driver_start": false,
+  "controller_hci_communication": false,
+  "bluetooth_functional": false,
+  "touch_transport_or_input_requalified": false,
+  "full_springboard": false
+}

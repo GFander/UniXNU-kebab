@@ -1,0 +1,500 @@
+{
+  "scope": "actual fixed SE6 clock preparation/status and GENI FIFO word-unit correction; not Bluetooth functionality",
+  "accepted": true,
+  "native_sha256": "f15261dde02049a29796378de51c5503b20bc48e7c16a18cd533642001049074",
+  "source_version": "0402",
+  "common_patches": 279,
+  "host_patches": 4,
+  "all_source_files": 5246,
+  "first_and_complete_restart": {
+    "0402": {
+      "version": "0402",
+      "source_version": "0402",
+      "native_sha256": "f15261dde02049a29796378de51c5503b20bc48e7c16a18cd533642001049074",
+      "actual_log_sha256": "96b1fff49352ca70f0f31e53ce2e768b6d26bb72be26b88f0d08a9d794fe1ab3",
+      "clock_prerequisite_qualified": true,
+      "calls": [
+        {
+          "error": 0,
+          "before": 104629184,
+          "after": 104694720,
+          "added": 65536,
+          "owned": 65536,
+          "polls": 2,
+          "attempted": 1,
+          "restored": 0,
+          "quarantined": 0
+        },
+        {
+          "error": 0,
+          "before": 104694720,
+          "after": 104694720,
+          "added": 0,
+          "owned": 65536,
+          "polls": 1,
+          "attempted": 0,
+          "restored": 0,
+          "quarantined": 0
+        }
+      ],
+      "only_new_bit16_acquired": true,
+      "hardware_gated_slave_ahb_preserved": true,
+      "unchanged_gpio_and_controller_reset": true,
+      "actual_geni_protocol": 2,
+      "geni_protocol_name": "UART",
+      "geni_microcode_revision": 3,
+      "tx_fifo_depth_words": 16,
+      "rx_fifo_depth_words": 32,
+      "fifo_word_bits": 32,
+      "systembag_and_hardware_c_d_preserved": true,
+      "original_watchdog_enabled": true,
+      "explicit_console_invocation": true,
+      "automatic_driver_start": false,
+      "controller_hci_communication": false,
+      "bluetooth_functional": false,
+      "touch_transport_or_input_requalified": false,
+      "full_springboard": false
+    },
+    "0403": {
+      "version": "0403",
+      "source_version": "0402",
+      "native_sha256": "f15261dde02049a29796378de51c5503b20bc48e7c16a18cd533642001049074",
+      "actual_log_sha256": "d640794378865d011255b4d1e5a7683216326a3a4db6ce170513fccc62fadd5e",
+      "clock_prerequisite_qualified": true,
+      "calls": [
+        {
+          "error": 0,
+          "before": 104629184,
+          "after": 104694720,
+          "added": 65536,
+          "owned": 65536,
+          "polls": 2,
+          "attempted": 1,
+          "restored": 0,
+          "quarantined": 0
+        },
+        {
+          "error": 0,
+          "before": 104694720,
+          "after": 104694720,
+          "added": 0,
+          "owned": 65536,
+          "polls": 1,
+          "attempted": 0,
+          "restored": 0,
+          "quarantined": 0
+        }
+      ],
+      "only_new_bit16_acquired": true,
+      "hardware_gated_slave_ahb_preserved": true,
+      "unchanged_gpio_and_controller_reset": true,
+      "actual_geni_protocol": 2,
+      "geni_protocol_name": "UART",
+      "geni_microcode_revision": 3,
+      "tx_fifo_depth_words": 16,
+      "rx_fifo_depth_words": 32,
+      "fifo_word_bits": 32,
+      "systembag_and_hardware_c_d_preserved": true,
+      "original_watchdog_enabled": true,
+      "explicit_console_invocation": true,
+      "automatic_driver_start": false,
+      "controller_hci_communication": false,
+      "bluetooth_functional": false,
+      "touch_transport_or_input_requalified": false,
+      "full_springboard": false
+    }
+  },
+  "substrate_regressions": {
+    "0402": {
+      "version": "0402",
+      "defaults_matching_complete": true,
+      "actual_log_sha256": "96b1fff49352ca70f0f31e53ce2e768b6d26bb72be26b88f0d08a9d794fe1ab3",
+      "native_sha256": "f15261dde02049a29796378de51c5503b20bc48e7c16a18cd533642001049074",
+      "real_apple_image4_start_succeeded": true,
+      "actual_busy_reference_released": true,
+      "busy_lifecycle": [
+        [
+          0,
+          0,
+          1,
+          "defaults"
+        ],
+        [
+          11,
+          1,
+          1,
+          "AppleImage4"
+        ],
+        [
+          14,
+          2,
+          -1,
+          "defaults"
+        ],
+        [
+          15,
+          1,
+          -1,
+          "AppleImage4"
+        ]
+      ],
+      "final_busy_state": 0,
+      "actual_waits": [
+        "IOAESAccelerator",
+        "IOResources/IONVRAM",
+        "IODTNVRAM"
+      ],
+      "hardware_nonce_and_data_restored_without_generation": true,
+      "native_nvram_existing_proxy_adopted": true,
+      "nvram_encrypted_data_banks_cold_restored": true,
+      "nvram_restored_bank": 1,
+      "nvram_restored_generation": 130,
+      "nvram_hardware_or_rollback_claim": false,
+      "nvram_durable_write_calls": 2,
+      "watchdog_enabled": true,
+      "original_iokit_monitoring_preserved": true,
+      "watchdog_heartbeat_times": [
+        38.262,
+        38.262,
+        48.264,
+        58.299,
+        68.263,
+        78.271,
+        88.293,
+        98.302,
+        108.328,
+        118.281,
+        128.279,
+        138.296,
+        148.316,
+        158.326,
+        168.293,
+        178.323,
+        188.324,
+        198.322,
+        208.327
+      ],
+      "original_locked_observations": [
+        [
+          60.438,
+          30,
+          4
+        ],
+        [
+          90.492,
+          60,
+          7
+        ],
+        [
+          120.525,
+          90,
+          10
+        ],
+        [
+          150.513,
+          120,
+          13
+        ],
+        [
+          180.57,
+          150,
+          16
+        ]
+      ],
+      "systembag_and_hardware_c_d_preserved": true,
+      "rtc_record_reused": true,
+      "panic": [],
+      "full_ios_or_springboard": false,
+      "gpu_display_input_started": false
+    },
+    "0403": {
+      "version": "0403",
+      "defaults_matching_complete": true,
+      "actual_log_sha256": "d640794378865d011255b4d1e5a7683216326a3a4db6ce170513fccc62fadd5e",
+      "native_sha256": "f15261dde02049a29796378de51c5503b20bc48e7c16a18cd533642001049074",
+      "real_apple_image4_start_succeeded": true,
+      "actual_busy_reference_released": true,
+      "busy_lifecycle": [
+        [
+          0,
+          0,
+          1,
+          "defaults"
+        ],
+        [
+          11,
+          1,
+          1,
+          "AppleImage4"
+        ],
+        [
+          14,
+          2,
+          -1,
+          "defaults"
+        ],
+        [
+          15,
+          1,
+          -1,
+          "AppleImage4"
+        ]
+      ],
+      "final_busy_state": 0,
+      "actual_waits": [
+        "IOAESAccelerator",
+        "IOResources/IONVRAM",
+        "IODTNVRAM"
+      ],
+      "hardware_nonce_and_data_restored_without_generation": true,
+      "native_nvram_existing_proxy_adopted": true,
+      "nvram_encrypted_data_banks_cold_restored": true,
+      "nvram_restored_bank": 0,
+      "nvram_restored_generation": 135,
+      "nvram_hardware_or_rollback_claim": false,
+      "nvram_durable_write_calls": 2,
+      "watchdog_enabled": true,
+      "original_iokit_monitoring_preserved": true,
+      "watchdog_heartbeat_times": [
+        41.248,
+        41.248,
+        51.259,
+        61.263,
+        71.278,
+        81.284,
+        91.296,
+        101.276,
+        111.295,
+        121.239,
+        131.272,
+        141.262,
+        151.281,
+        161.281,
+        171.275,
+        181.291,
+        191.294,
+        201.259,
+        211.257,
+        221.315,
+        231.256,
+        241.289,
+        251.259,
+        261.32,
+        271.274,
+        281.268,
+        291.279,
+        301.293,
+        311.305,
+        321.303
+      ],
+      "original_locked_observations": [
+        [
+          60.577,
+          30,
+          3
+        ],
+        [
+          90.609,
+          60,
+          6
+        ],
+        [
+          120.678,
+          90,
+          9
+        ],
+        [
+          150.718,
+          120,
+          12
+        ],
+        [
+          180.733,
+          150,
+          15
+        ],
+        [
+          210.757,
+          180,
+          18
+        ],
+        [
+          240.785,
+          210,
+          21
+        ],
+        [
+          270.838,
+          240,
+          24
+        ],
+        [
+          300.854,
+          270,
+          27
+        ]
+      ],
+      "systembag_and_hardware_c_d_preserved": true,
+      "rtc_record_reused": true,
+      "panic": [],
+      "full_ios_or_springboard": false,
+      "gpu_display_input_started": false
+    },
+    "0405": {
+      "version": "0405",
+      "defaults_matching_complete": true,
+      "actual_log_sha256": "ce691c39956b85418b302a6a5f1e327edc75e41df7c9be35e5d997062189e3f9",
+      "native_sha256": "f15261dde02049a29796378de51c5503b20bc48e7c16a18cd533642001049074",
+      "real_apple_image4_start_succeeded": true,
+      "actual_busy_reference_released": true,
+      "busy_lifecycle": [
+        [
+          0,
+          0,
+          1,
+          "defaults"
+        ],
+        [
+          11,
+          1,
+          1,
+          "AppleImage4"
+        ],
+        [
+          14,
+          2,
+          -1,
+          "defaults"
+        ],
+        [
+          15,
+          1,
+          -1,
+          "AppleImage4"
+        ]
+      ],
+      "final_busy_state": 0,
+      "actual_waits": [
+        "IOAESAccelerator",
+        "IOResources/IONVRAM",
+        "IODTNVRAM"
+      ],
+      "hardware_nonce_and_data_restored_without_generation": true,
+      "native_nvram_existing_proxy_adopted": true,
+      "nvram_encrypted_data_banks_cold_restored": true,
+      "nvram_restored_bank": 1,
+      "nvram_restored_generation": 140,
+      "nvram_hardware_or_rollback_claim": false,
+      "nvram_durable_write_calls": 2,
+      "watchdog_enabled": true,
+      "original_iokit_monitoring_preserved": true,
+      "watchdog_heartbeat_times": [
+        38.37,
+        38.37,
+        48.365,
+        58.357,
+        68.362,
+        78.364,
+        88.371,
+        98.378,
+        108.324,
+        118.332,
+        128.382,
+        138.333,
+        148.345,
+        158.387,
+        168.388,
+        178.336,
+        188.342,
+        198.394,
+        208.396,
+        218.394,
+        228.345,
+        238.371
+      ],
+      "original_locked_observations": [
+        [
+          60.483,
+          30,
+          4
+        ],
+        [
+          90.503,
+          60,
+          7
+        ],
+        [
+          120.515,
+          90,
+          10
+        ],
+        [
+          150.525,
+          120,
+          13
+        ],
+        [
+          180.592,
+          150,
+          16
+        ],
+        [
+          210.59,
+          180,
+          19
+        ],
+        [
+          240.622,
+          210,
+          22
+        ]
+      ],
+      "systembag_and_hardware_c_d_preserved": true,
+      "rtc_record_reused": true,
+      "panic": [],
+      "full_ios_or_springboard": false,
+      "gpu_display_input_started": false
+    }
+  },
+  "independent_readonly_fsck": {
+    "version": "0404",
+    "baseline_version": "0343",
+    "full_content_reference_version": "0341",
+    "full_content_reference_log_sha256": "53ac7d3d421f291827fd4b5840ec529842a71d7130c3dd3117c9d38888925639",
+    "original_signed_fsck_exit": 0,
+    "read_only_no_repairs": true,
+    "original_crypto_io_enabled": true,
+    "original_data_volume_ok": true,
+    "warnings": [
+      "container has been mounted by APFS version 2236.141.1, which is newer than 2142.140.9.704.1",
+      "disabling overallocation repairs by default; use -o to override"
+    ],
+    "unexpected_warnings": [],
+    "original_os_build_initialized": true,
+    "complete_original_os": true,
+    "complete_original_systemos": true,
+    "current_boot_development_fast": true,
+    "original_dsc_map_signatures": true,
+    "original_firmware": true,
+    "real_cold_c_d_file_checks": true,
+    "actual_log_sha256": "ff2cc734336ee2cc3732afe1c5741cdc0dc4a858c2677771d21a2007519eaab8",
+    "accepted": true
+  },
+  "normal_default_restored": "0405",
+  "firmware_reader_unchanged_since_qualified_0396": true,
+  "physical_controller_power_or_hci": false,
+  "uart_byte_exchange": false,
+  "bluetooth_functional": false,
+  "gpio_rail_rcg_uart_programming": false,
+  "explicit_console_clock_invocation_only": true,
+  "full_stop_sleep_power_management_qualified": false,
+  "touch_full_transport_or_input_requalified": false,
+  "actual_geni_protocol": 2,
+  "geni_microcode_revision": 3,
+  "controller_rom_version_unknown": true,
+  "hardware_root_nonce_encrypted_data_and_original_watchdog_preserved": true,
+  "full_aks_ab_sep_or_passcode_claim": false,
+  "gpu_display_input_development_started": false,
+  "usable_springboard": false,
+  "github_pushed": false
+}
