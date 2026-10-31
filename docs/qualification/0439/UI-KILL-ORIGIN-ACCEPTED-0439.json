@@ -1,0 +1,155 @@
+{
+  "accepted": true,
+  "version": "0439",
+  "scope": "Bounded observation of permitted positive-PID kill(2) requests identifies backboardd before the real SpringBoard SIGKILL; termination cause remains open",
+  "native_sha256": "90da57dc1aee91ea2efe060b375320f466ce8a50b151675eb08f8efc0a2265d4",
+  "native_bytes": 18897608,
+  "actual_log_sha256": "591882088460292455d26b8e5c3a695be8de3d6b9329b23183318a50969980bc",
+  "source_replay": {
+    "common": 305,
+    "host": 4,
+    "files": 5261,
+    "all_equal": true
+  },
+  "observed_requests": [
+    {
+      "seconds": 81.474,
+      "request": 1,
+      "sender": "backboardd",
+      "sender_pid": 57,
+      "target": "SpringBoard",
+      "target_pid": 27,
+      "signal": 9
+    }
+  ],
+  "correlated_first_springboard_exit_seconds": 81.474,
+  "actual_delivery_inferred_from_separate_exit_evidence": true,
+  "request_marker_alone_proves_delivery": false,
+  "root_cause_repaired": false,
+  "all_signal_routes_covered": false,
+  "observer_event_cap": 16,
+  "original_actions_credentials_and_reference_lifetime_preserved": true,
+  "host_tests": {
+    "passed": true,
+    "source_sha256": "1e8628975301eedc90f582eed71b71160655fd38621782d5103eea1946910470",
+    "fixture_sha256": "896cd2d6451eac6351c30f4ff807f144b67bf35920fcc15c0354cf5f1502fad8",
+    "original_body_unchanged_except_observer_call": true,
+    "comparison_cases": 592,
+    "concurrent_requests": 1024,
+    "event_cap": 16,
+    "signal_action_and_credential_objects_are_models": true,
+    "behavioral_mutants_refused": 6,
+    "all_signal_routes_covered": false
+  },
+  "hardware_security_regression": {
+    "version": "0439",
+    "defaults_matching_complete": true,
+    "actual_log_sha256": "591882088460292455d26b8e5c3a695be8de3d6b9329b23183318a50969980bc",
+    "native_sha256": "90da57dc1aee91ea2efe060b375320f466ce8a50b151675eb08f8efc0a2265d4",
+    "real_apple_image4_start_succeeded": true,
+    "actual_busy_reference_released": true,
+    "busy_lifecycle": [
+      [
+        0,
+        0,
+        1,
+        "defaults"
+      ],
+      [
+        11,
+        1,
+        1,
+        "AppleImage4"
+      ],
+      [
+        14,
+        2,
+        -1,
+        "defaults"
+      ],
+      [
+        15,
+        1,
+        -1,
+        "AppleImage4"
+      ]
+    ],
+    "final_busy_state": 0,
+    "actual_waits": [
+      "IOAESAccelerator",
+      "IOResources/IONVRAM",
+      "IODTNVRAM"
+    ],
+    "hardware_nonce_and_data_restored_without_generation": true,
+    "native_nvram_existing_proxy_adopted": true,
+    "nvram_encrypted_data_banks_cold_restored": true,
+    "nvram_restored_bank": 1,
+    "nvram_restored_generation": 308,
+    "nvram_hardware_or_rollback_claim": false,
+    "nvram_durable_write_calls": 2,
+    "watchdog_enabled": true,
+    "original_iokit_monitoring_preserved": true,
+    "watchdog_heartbeat_times": [
+      41.918,
+      41.918,
+      51.919,
+      61.878,
+      71.921,
+      81.913,
+      91.911,
+      101.906,
+      111.905,
+      121.888,
+      131.928,
+      141.925,
+      151.919,
+      161.902,
+      171.9,
+      181.946,
+      191.934
+    ],
+    "original_locked_observations": [
+      [
+        63.746,
+        30,
+        4
+      ],
+      [
+        93.782,
+        60,
+        7
+      ],
+      [
+        123.835,
+        90,
+        10
+      ],
+      [
+        153.854,
+        120,
+        13
+      ],
+      [
+        183.883,
+        150,
+        16
+      ]
+    ],
+    "systembag_and_hardware_c_d_preserved": true,
+    "rtc_record_reused": true,
+    "panic": [],
+    "full_ios_or_springboard": false,
+    "gpu_display_input_started": true
+  },
+  "original_selector29_success_preserved": true,
+  "physical_touch_qualified": false,
+  "manual_touch_deferred_by_user": true,
+  "gpu_qualified": false,
+  "real_presentation_qualified": false,
+  "usable_springboard": false,
+  "bluetooth_deferred": true,
+  "development_fast": true,
+  "last_independent_ro_data_fsck": "0416",
+  "last_full_system_systemos_check": "0341",
+  "next": "Capture the actual sending thread call path and resolve the original BKSystemShellSentinel conditions; do not remove its kill or disable watchdog"
+}

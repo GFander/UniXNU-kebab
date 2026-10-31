@@ -1,0 +1,13 @@
+# SpringBoard SIGKILL 请求来源：0439
+
+0439在实机捕获原版backboardd PID57于81.474秒向SpringBoard PID27发出kill(2)/SIGKILL9；同一时间，独立退出记录显示SpringBoard PID27以signal9、reason2/9结束。此前退出线程在MobileGestalt/open中的PC并不能说明是谁终止了它；本次确认了请求发送者，尚未确认backboardd作出该决定的原因，也没有修复或取消该终止。
+
+0326只修改kern_sig.c，在原版正PID kill(2)路径的cansignal成功后、原psignal前记录发送方与目标。原权限检查、返回值、信号动作、引用释放、进程组和广播路径保留。只记录SpringBoard/PreBoard的SIGKILL，饱和原子计数最多每次启动16条；不拦截、不授权、不丢弃信号。日志措辞明确仅为获准请求：目标可能同时退出，必须用PID关联独立退出证据，单条请求不能证明信号已送达。观察不覆盖进程组、广播、terminate_with_payload、task_terminate和其他内核终止路径。
+
+匹配只读20H392原版backboardd（SHA7aa6f8bf5ea2c3634fb8c8916a4e9c3c84508de78eccf57ca65c1ae4f676267c，UUID70b72340737a39738b474e9970f4ecb9）静态分析找到两个调用原版_kill stub的位置0x10005e104与0x10005e31c。两处均传signal9，关联“Killing %{public}@.”日志，位于BKSystemShellSentinel相邻函数区域。但本次没有取得发送线程调用栈，不能把实机请求武断归到其中某一处，也不能直接称为watchdog超时。运行时该可执行文件UUID尚未独立读取，静态匹配的限制保留。
+
+305common+4host两套独立回放、5261源码文件一致，kern_sig目标编译和全量内核构建通过，207原版HID槽位检查通过。公开测试先验证完整当前源码SHA，移除唯一新增helper和调用必须逐字节还原0438整个kern_sig.c；再编译完整前后kill函数及当前helper，在明确的进程、凭据、信号、组委托模型下比较592种情况。8线程共1024请求验证16条饱和上限且原信号继续投递；ASAN/UBSAN通过，六个行为变异必须断言失败。这些host模型不是实机权限证明、TSAN或全部信号路径证明。
+
+实机保留原硬件Root/nonce、原版MKB/systembag、真实加密Data C/D、RTC/NVRAM、defaults和原版watchdog，正常回归超过180秒；0438修复的原版selector29调用继续返回0。没有改分区、重建包/密钥、禁用监控或屏蔽crashed日志。development-fast继续使用，独立ROData fsck为0416，完整System/SystemOS内容证明为0341。
+
+后续应在已确认发送者的基础上解析实际调用路径及原版系统shell生命周期条件，再修复真实依赖。SpringBoard仍有后续崩溃，GPU/Metal和真实呈现尚未验收。用户暂时不在手机旁，真实触摸点按/滑动/双指/释放采样保持待完成，回来后再做，不计为通过。蓝牙继续延期到可用SpringBoard之后。
