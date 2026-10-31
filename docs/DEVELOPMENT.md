@@ -4,7 +4,7 @@
 
 ## 实际构建路线
 
-当前验收路线使用 Apple OSS XNU 8796.141.3，16 KiB 页，板级 `KEBAB`，DEVELOPMENT ARM64；共同补丁按 `patches/xnu-8796-kebab/*.patch` 文件名排序，再应用四个 `patches/hosts/macos-dxb-13.5/*.patch` 主机补丁。0460 的 5,261 项源码清单不覆盖外部 Xcode、SDK、KDK、供体二进制和私有设备输入。
+当前验收路线使用 Apple OSS XNU 8796.141.3，16 KiB 页，板级 `KEBAB`，DEVELOPMENT ARM64；共同补丁按 `patches/xnu-8796-kebab/*.patch` 文件名排序，再应用四个 `patches/hosts/macos-dxb-13.5/*.patch` 主机补丁。0470源码（0471复用）的5,278 项源码清单不覆盖外部 Xcode、SDK、KDK、供体二进制和私有设备输入。
 
 Mac 全量构建使用固定主机环境与 prepared-source 流程；prelink 使用固定 20H392 kernelcache、原版组件身份与各次 ABI 资格。Windows 端载荷打包、ADT 变换、策略数据适配、回读及刷机门控另有独立步骤。历史环境与命令保留在 [BUILD-BASELINE-20261029.md](BUILD-BASELINE-20261029.md) 和 [FIRMWARE.md](FIRMWARE.md)，不能直接把旧版本号或旧卷号用于当前设备。
 

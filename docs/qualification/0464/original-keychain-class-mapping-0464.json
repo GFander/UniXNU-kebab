@@ -1,0 +1,63 @@
+{
+  "read_only": true,
+  "original_securityd_sha256": "844d488d12708ba540b1ab3fd47455ee7f863270e2feda062cf8c787f9381693",
+  "original_uuid": "b5796c2e72983f4580c7c8e8e23fbbfc",
+  "function_start": "0x1000edaf4",
+  "function_end": "0x1000edc50",
+  "function_sha256": "08ee43d8cb940781a277e684158caf95f7f85eb5ae52526c8e14dcd38dcdacf6",
+  "CFEqual_stub_checked": true,
+  "mapping": [
+    {
+      "keyclass": 6,
+      "protection_symbol": "_kSecAttrAccessibleWhenUnlocked",
+      "original_compare_site": "0x1000edb38",
+      "original_return_site": "0x1000edb40",
+      "original_import_cell": "0x10027d9b8"
+    },
+    {
+      "keyclass": 7,
+      "protection_symbol": "_kSecAttrAccessibleAfterFirstUnlock",
+      "original_compare_site": "0x1000edb90",
+      "original_return_site": "0x1000edb98",
+      "original_import_cell": "0x10027d990"
+    },
+    {
+      "keyclass": 8,
+      "protection_symbol": "_kSecAttrAccessibleAlwaysPrivate",
+      "original_compare_site": "0x1000edbb0",
+      "original_return_site": "0x1000edbb8",
+      "original_import_cell": "0x10027d9a0"
+    },
+    {
+      "keyclass": 9,
+      "protection_symbol": "_kSecAttrAccessibleWhenUnlockedThisDeviceOnly",
+      "original_compare_site": "0x1000edbd0",
+      "original_return_site": "0x1000edbd8",
+      "original_import_cell": "0x10027d9c0"
+    },
+    {
+      "keyclass": 10,
+      "protection_symbol": "_kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly",
+      "original_compare_site": "0x1000edbf0",
+      "original_return_site": "0x1000edbf8",
+      "original_import_cell": "0x10027d998"
+    },
+    {
+      "keyclass": 11,
+      "protection_symbol": "_kSecAttrAccessibleAlwaysThisDeviceOnlyPrivate",
+      "original_compare_site": "0x1000edc10",
+      "original_return_site": "0x1000edc18",
+      "original_import_cell": "0x10027d9a8"
+    },
+    {
+      "keyclass": 12,
+      "protection_symbol": "_kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly",
+      "original_compare_site": "0x1000edc30",
+      "original_return_site": "0x1000edc38",
+      "original_import_cell": "0x10027d9b0"
+    }
+  ],
+  "runtime_executable_uuid_independently_read": false,
+  "physical_test": false,
+  "keychain_classes_are_not_APFS_file_classes": true
+}

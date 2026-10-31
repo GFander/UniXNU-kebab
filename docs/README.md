@@ -2,6 +2,8 @@
 
 当前能力以[首页](../README.md)和[STATUS](STATUS.md)为准。阶段文档保留当时状态，必须结合日期、版本和原始收据阅读；不要把较早的“下一步”覆盖到后续验收。
 
+最新主线：[0464–0465 原版 keychain C/D](KEYCHAIN-CD-20261031.md)、[0463 密码学基础与 AKS 调用](CLASS-B-CRYPTO-20261031.md)、[0461–0462 数据库 I/O](LOCATION-DATABASE-IO-20261031.md)及[真实 B 类开发要求](CLASS-B-BACKEND-NEXT-20261031.md)。
+
 ## 当前入口
 
 | 文档 | 用途 |
@@ -89,9 +91,31 @@
 - [STANDARDIZATION-RESULT-20261029.md](STANDARDIZATION-RESULT-20261029.md)
 - [STORAGE-PLAN.md](STORAGE-PLAN.md)
 
+- [B类真实存储、数据库与六类keychain重启恢复](CLASS-B-STORAGE-20261101.md)
+
+- [B类加密缓存、新旧文件与keychain重启恢复](CLASS-B-CPX-20261101.md)
+
+- [A类保护、锁定准入与原密钥重启恢复](CLASS-A-STORAGE-20261101.md)
+
 ## 原始证据与测试
 
-- [0460 正常运行/源码/接收端观测](qualification/0460/)
+- [0471完整重启验收](qualification/0471/)
+- [0470 A类后端、源码与测试](qualification/0470/)
+
+- [0469重启验收](qualification/0469/)
+- [0468加密CPX、源码与测试](qualification/0468/)
+
+- [0467 B存储/keychain冷恢复](qualification/0467/)
+- [0466 B后端、源码与测试](qualification/0466/)
+
+- [0465 原版 keychain 完整重启恢复](qualification/0465/)
+- [0464 原版 keychain 后端、授权、源码与测试](qualification/0464/)
+
+- [0463 原生密码学自检、AKS 元数据与源码](qualification/0463/)
+
+- [0462 正常运行/源码/失败读写观测](qualification/0462/)
+- [0461 路径与类别观测](qualification/0461/)
+- [0460 原版接收端观测](qualification/0460/)
 - [0459 本地身份与保护文件生命周期](qualification/0459/)
 - [0459 人工触摸记录](qualification/0459-touch/)
 - [平台历史收据补充公开](qualification/platform-history/)

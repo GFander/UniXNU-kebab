@@ -1,0 +1,19 @@
+{
+  "upstream": "https://www.bearssl.org/bearssl-0.6.tar.gz",
+  "archive_sha256": "6705bba1714961b41a728dfc5debbe348d2966c117649392f8c8139efc83ff14",
+  "files": {
+    "ec_c25519_m31.c": {
+      "upstream_path": "bearssl-0.6/src/ec/ec_c25519_m31.c",
+      "upstream_sha256": "4464d0071c554bb60a78c561497ec685b74e54b68848b074c2db9ec9b7cde92f",
+      "adapted_sha256": "4ef0fbaaddafb6262c0510dcae657377aa05fd7b3c80431056d1ec0efd654aa8",
+      "change": "wipe15scalar/fieldarrays after output"
+    },
+    "ccopy.c": {
+      "upstream_path": "bearssl-0.6/src/codec/ccopy.c",
+      "upstream_sha256": "5163871149faa35a4ba026a915743065238fc94cc4312f02867a4f50ff2631f8",
+      "adapted_sha256": "5163871149faa35a4ba026a915743065238fc94cc4312f02867a4f50ff2631f8",
+      "change": "byte-identical"
+    }
+  },
+  "local_reference_matches": true
+}

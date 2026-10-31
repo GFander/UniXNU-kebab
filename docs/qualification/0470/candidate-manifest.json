@@ -1,0 +1,48 @@
+{
+  "parent_version": "0468",
+  "candidate": "0470",
+  "assembly_only": true,
+  "physical_test": false,
+  "changes": {
+    "bsd/kern/kebab_keybag_state_impl.h": {
+      "before": "266c5d138cf91e9880909ab784f315755d8bfda0fdbadc96a648aac22ed1c694",
+      "after": "c848ad427e0fc25989314fc4914db6f170d081b2916ed7b7892cee02502c1803"
+    },
+    "bsd/kern/kebab_keybag_events_impl.h": {
+      "before": "6e2fd71b505dc678a940904ef18dc048627e85358eab482c8ae5e35acad9a792",
+      "after": "fe5193cab6406167e0e885251aa62d1fd91966ad02af3024a3035669e3684dec"
+    },
+    "bsd/kern/kebab_keychain_keys_impl.h": {
+      "before": "7665dca9cb94a970a5a20731a8d35fa948f7d655e04adde00058ab2c2417268b",
+      "after": "6dc785342ea63d0fd17f5c75801a0e2b1151889d56476729f06d7397d25a72a9"
+    },
+    "bsd/kern/kebab_cpx_handles_impl.h": {
+      "before": "23f5c9426fca111774f12310e2ea35c608226e335ac5e3e1681315947ea4c7d1",
+      "after": "88001d71b568c985f6529263341775cf0e1dbb3c2a33f7613df9a471d5f9ddec"
+    },
+    "bsd/kern/kebab_apfs_file_native_impl.h": {
+      "before": "ecb43ce24a917435c27ddeaa68dd589c635abe5f700c0d2e06e5ce3fde98d3fb",
+      "after": "021f8616a8b972fd7427e85306b7fbb13ab85189483ad8cf3b2e7f9243940e18"
+    },
+    "bsd/kern/kebab_apfs_file_b_impl.h": {
+      "before": "15b1a89b0dfea7453b1a236f7582fc620e702bb7c11e2b2a7d81455564689b64",
+      "after": "83519046102f5e0031d7b4bf34f02c726284989259b02bb3b531f1d74215a970"
+    },
+    "bsd/kern/kebab_data_files_impl.h": {
+      "before": "2e72ceda701e6539d135469851712e610b96fbe88a40040627951bb170bdfcb0",
+      "after": "4a9954857e6fc400f64a582d4fbe041cd352b6495c0b7967d4e42416f6576d48"
+    },
+    "bsd/kern/kebab_a_state_impl.h": {
+      "before": null,
+      "after": "6af5abf0b9748856c4a437bf708d127d4c395897f811473d98c0e94928a0cedb"
+    },
+    "bsd/kern/kebab_a_cpx_impl.h": {
+      "before": null,
+      "after": "90a76fb59a517a62ea5f79a6f60532a31680548a4717862c41a50958f3bcc2fc"
+    },
+    "bsd/kern/kebab_a_file_probe_impl.h": {
+      "before": null,
+      "after": "208c94d8a8e1be46cbf0bbe8f1167eb626cd73c6cf8a13dbd64f1d355d359473"
+    }
+  }
+}

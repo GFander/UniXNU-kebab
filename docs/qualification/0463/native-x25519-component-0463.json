@@ -1,0 +1,25 @@
+{
+  "passed": true,
+  "component_only": true,
+  "physical_test": false,
+  "classB_backend_implemented": false,
+  "whole_native_build_performed": false,
+  "active_native_unchanged": "0462",
+  "source_sha256": {
+    "kebab_x25519.c": "bbad950f49ff284468e7f863d2a33a8e5cbd189ad66e2842515022a5c837634a",
+    "ec_c25519_m31.c": "4ef0fbaaddafb6262c0510dcae657377aa05fd7b3c80431056d1ec0efd654aa8",
+    "ccopy.c": "5163871149faa35a4ba026a915743065238fc94cc4312f02867a4f50ff2631f8",
+    "inner.h": "4a7e65d4ad64a5820ae4278a26015ff82011a7960bd9ceea6b40c4d903704fd8"
+  },
+  "actual_kernel_compiler_record_sha256": "81a81ea41dec1dd2064932761ad2f27332c2124d898f47f1d3c785542c68378a",
+  "native_object_sha256": "1ae9d6ccb137fc7be3b0a6d66fadc04e85473301b64509acc73cf9782c8d1445",
+  "native_object_bytes": 74992,
+  "no_test_wipe_callback_or_bearssl_symbol_collision": true,
+  "undefined_symbols": [
+    "___memcpy_chk",
+    "___stack_chk_fail",
+    "___stack_chk_guard",
+    "_bzero"
+  ],
+  "kernel_arm64_mgeneral_regs_only": true
+}

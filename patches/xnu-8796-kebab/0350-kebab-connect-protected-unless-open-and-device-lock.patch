@@ -1,0 +1,764 @@
+--- a/bsd/kern/kebab_file_keys.c
++++ b/bsd/kern/kebab_file_keys.c
+@@ -92,7 +92,9 @@
+ #include "kebab_class_b_math_impl.h"
+ 
+ static void kdc_clear_locked(void);
++static void kbs_clear_locked(void);
+ #include "kebab_device_classbag_impl.h"
++#include "kebab_keybag_state_impl.h"
+ #include "kebab_keychain_keys_impl.h"
+ 
+ int
+@@ -283,6 +285,7 @@
+ #include "kebab_metadata_keys_impl.h"
+ #include "kebab_volume_keys_impl.h"
+ #include "kebab_volume_control_impl.h"
++#include "kebab_keybag_events_impl.h"
+ #include "kebab_cpx_handles_impl.h"
+ #include "kebab_volume_wrapped_impl.h"
+ #include "kebab_apfs_metadata_native_impl.h"
+--- a/bsd/kern/kebab_device_classbag_impl.h
++++ b/bsd/kern/kebab_device_classbag_impl.h
+@@ -7,7 +7,7 @@
+ static void
+ kdb_clear_locked(void)
+ {
+- kdc_clear_locked();kdb_ready=false;kfk_wipe(kdb_record,sizeof(kdb_record));kfk_wipe(kdb_class_c,32);kfk_wipe(kdb_class_d,32);kfk_wipe(kdb_identifier,16);
++ kbs_clear_locked();kdc_clear_locked();kdb_ready=false;kfk_wipe(kdb_record,sizeof(kdb_record));kfk_wipe(kdb_class_c,32);kfk_wipe(kdb_class_d,32);kfk_wipe(kdb_identifier,16);
+ }
+ 
+ static bool
+--- a/bsd/kern/kebab_file_keys.h
++++ b/bsd/kern/kebab_file_keys.h
+@@ -44,6 +44,14 @@
+ /* Original keychain CK/DK/CKU/DKU only; separate from APFS classes. */
+ int kebab_keychain_key_crypt(int32_t,uint32_t,const void *,unsigned,void *,unsigned,bool);
+ 
++/* Factory-no-passcode lock state and class-B native raw CPX lifecycle. */
++int kebab_device_keybag_bootstrap(void);
++int kebab_device_keybag_get_lock_state(uint32_t *);
++int kebab_device_keybag_set_locked(bool);
++bool kebab_apfs_b_volume_seen(void);
++bool kebab_apfs_b_volume_matches(const uint8_t[16]);
++bool kebab_apfs_b_raw_io_available(void);
++void kebab_apfs_b_note_cpx_destroy(const void *,unsigned,const char *);
+ int kebab_device_classbag_export(void *,unsigned);
+ int kebab_device_classbag_cookie(const uint8_t[16],void *,unsigned);
+ int kebab_keybag_d_create(const uint8_t uuid[16], void *, unsigned);
+--- a/bsd/kern/kebab_device_classbag_file_impl.h
++++ b/bsd/kern/kebab_device_classbag_file_impl.h
+@@ -51,6 +51,9 @@
+  if(measured){int preserve=kfp_preservation(expected,w->readback,after);
+   if(!preserve&&memcmp(before,after,32))preserve=EAUTH;
+   printf("KEBAB DEVICE BAG: original nonce/Root records preserved=%u\n",!preserve);if(!error)error=preserve;}
++ /* After the final authenticated reopen and preservation test, once per
++  * kernel boot. Later bank reopen never silently restores unlocked state. */
++ if(!error)error=kebab_device_keybag_bootstrap();
+  printf("KEBAB DEVICE BAG: %s %s (%d); C/D random independent keys, factory no-passcode, no Data mount\n",
+      create?"exclusive durable readback":"cold authenticated restore",error?"FAIL":"PASS",error);
+  volatile uint8_t *bytes=(volatile uint8_t*)w;
+--- a/bsd/kern/kebab_apfs_file_native_impl.h
++++ b/bsd/kern/kebab_apfs_file_native_impl.h
+@@ -54,10 +54,13 @@
+      (create||wrapped->key_len==96);
+ }
+ 
++#include "kebab_apfs_file_b_impl.h"
++
+ int
+ kebab_apfs_file_key_new(const struct kebab_aks_credential *credential,uint32_t cls,
+     struct kebab_aks_raw_key *raw,struct kebab_aks_wrapped_key *wrapped)
+ {
++ if(cls==2)return kbn_new(credential,raw,wrapped);
+  if(!kfk_context()||!kfn_buffers(credential,raw,wrapped,true))return (int)kIOReturnBadArgument;
+  if(!kfn_credential(credential)||raw->flags||(cls!=3&&cls!=4))return (int)kIOReturnUnsupported;
+  uint8_t uuid[16],material[48]={0},plain[88]={0},sealed[96]={0},kek[32]={0},token[64]={0};
+@@ -77,6 +80,7 @@
+ kebab_apfs_file_key_unwrap(const struct kebab_aks_credential *credential,
+     const struct kebab_aks_wrapped_key *wrapped,struct kebab_aks_raw_key *raw)
+ {
++ if(kfk_range(wrapped,sizeof(*wrapped))&&wrapped->dp_class==2)return kbn_unwrap(credential,wrapped,raw);
+  if(!kfk_context()||!kfn_buffers(credential,raw,wrapped,false))return (int)kIOReturnBadArgument;
+  uint32_t cls=wrapped->dp_class;
+  if(!kfn_credential(credential)||(cls!=3&&cls!=4))return (int)kIOReturnUnsupported;
+@@ -97,6 +101,7 @@
+ kebab_apfs_file_key_rewrap(const struct kebab_aks_credential *credential,uint32_t cls,
+     const struct kebab_aks_wrapped_key *input,struct kebab_aks_wrapped_key *output)
+ {
++ if(cls==2||(kfk_range(input,sizeof(*input))&&input->dp_class==2))return kbn_rewrap(credential,cls,input,output);
+  if(!kfk_context()||!kfk_range(credential,sizeof(*credential))||!kfk_range(input,sizeof(*input))||
+      !kfk_range(output,sizeof(*output))||input->key_len!=96||output->key_len<96||output->key_len>128||
+      !kfk_range(input->key,96)||!kfk_range(output->key,output->key_len))return (int)kIOReturnBadArgument;
+@@ -146,6 +151,6 @@
+  }
+  if(!kfn_credential(credential))return (int)kIOReturnUnsupported;
+  const uint8_t *key=NULL;lck_mtx_lock(&kfk_lock);
+- int error=kfn_class_locked(credential->bytes+22,cls,&key);
++ int error=cls==2?kbn_ready_locked(credential->bytes+22,false):kfn_class_locked(credential->bytes+22,cls,&key);
+  lck_mtx_unlock(&kfk_lock);return error; /* Original slot returns IOReturn, not bool. */
+ }
+--- a/bsd/kern/kebab_keychain_keys_impl.h
++++ b/bsd/kern/kebab_keychain_keys_impl.h
+@@ -1,7 +1,7 @@
+ /* Device-bound keychain key wrapping, separate from APFS file class keys.
+  * Exact original securityd mapping:7=CK,8=DK,10=CKU,11=DKU. Only the
+- * authenticated factory-no-passcode bank is supported. AK/AKU/AKPU need
+- * their own real lock/passcode lifecycle; unknown/generation classes refuse.
++ * authenticated factory-no-passcode bank is supported. AK/AKU share the real device lock lifecycle; AKPU needs
++ * a passcode lifecycle; unknown/generation classes refuse.
+  * No new bag, record, class downgrade, software Root or plaintext persistence.
+  * This header is included after kebab_device_classbag_impl.h in its C owner. */
+ int
+@@ -11,7 +11,7 @@
+  if(!kfk_context()||bag||!kfk_range(input,input_bytes)||!kfk_range(output,output_bytes)||
+      input_bytes!=(encrypt?32u:40u)||output_bytes!=(encrypt?40u:32u)||
+      kfk_overlap(input,input_bytes,output,output_bytes))return (int)kIOReturnBadArgument;
+- if(cls!=7&&cls!=8&&cls!=10&&cls!=11)return (int)kIOReturnUnsupported;
++ if(cls!=6&&cls!=7&&cls!=8&&cls!=9&&cls!=10&&cls!=11)return (int)kIOReturnUnsupported;
+  /* The kernel-only API must not alias secret owner storage, even on errors. */
+  const void *private_ranges[]={kfk_root_kek,kfk_class_d,kfk_uuid,kdb_record,kdb_class_c,kdb_class_d,kdb_identifier};
+  const size_t private_bytes[]={sizeof(kfk_root_kek),sizeof(kfk_class_d),sizeof(kfk_uuid),sizeof(kdb_record),sizeof(kdb_class_c),sizeof(kdb_class_d),sizeof(kdb_identifier)};
+@@ -31,6 +31,9 @@
+  if(!error&&(version!=1||policy!=KEBAB_DEVICE_BAG_FACTORY_NO_PASSCODE||
+      !kdb_nonzero(kdb_identifier,16)||!kdb_nonzero(kdb_class_c,32)||
+      !kdb_nonzero(kdb_class_d,32)||!memcmp(kdb_class_c,kdb_class_d,32)))error=(int)kIOReturnNotReady;
++ /* AK/AKU are available only in the actual unlocked, authenticated
++  * factory bag. Existing CK/DK/CKU/DKU derivation and ciphertext unchanged. */
++ if(!error&&(cls==6||cls==9)&&(!kbs_ready||!kbs_bootstrap_done||!kbs_unlocked||!kbs_factory_locked()))error=(int)kIOReturnNotPermitted;
+  if(!error){
+   memcpy(context,domain,sizeof(domain));memcpy(context+sizeof(domain),kdb_identifier,16);
+   memcpy(context+sizeof(domain)+16,kdb_record+24,32);
+--- a/bsd/kern/kebab_class_b_math_impl.h
++++ b/bsd/kern/kebab_class_b_math_impl.h
+@@ -27,6 +27,6 @@
+  if(ok){memset(output,0xa5,32);ok=!kebab_x25519(output,scalar,zero);for(unsigned i=0;i<32;++i)ok=ok&&(output[i]==0xa5);}
+  kfk_wipe(output,sizeof(output));kfk_wipe(zero,sizeof(zero));
+  __atomic_store_n(&kcb_math_state,ok?2u:3u,__ATOMIC_RELEASE);
+- printf("KEBAB CLASS-B CRYPTO: X25519/ConcatKDF KAT %s; math only, classB services unavailable\n",ok?"PASS":"FAIL");
++ printf("KEBAB CLASS-B CRYPTO: X25519/ConcatKDF KAT %s; math only, service/lock readiness checked separately\n",ok?"PASS":"FAIL");
+  return ok;
+ }
+--- a/bsd/kern/kebab_data_files_impl.h
++++ b/bsd/kern/kebab_data_files_impl.h
+@@ -175,6 +175,8 @@
+  if(!error){SHA256_CTX hash;SHA256_Init(&hash);SHA256_Update(&hash,old,32);SHA256_Update(&hash,scratch,4096);SHA256_Final(digest,&hash);}
+  bzero(old,sizeof(old));bzero(scratch,4096);return error;
+ }
++
++#include "kebab_b_file_probe_impl.h"
+ 
+ static int
+ kdp_files(proc_t p,user_addr_t scratch,mount_t mounted,bool create,bool rewrap)
+@@ -224,6 +226,7 @@
+  }
+  if(!error)error=kdp_file(mounted,"/private/var/.hios-cp-c-v1",3,create||refresh,rewrap);
+  if(!error)error=kdp_file(mounted,"/private/var/.hios-cp-d-v1",4,create||refresh,rewrap);
++ if(!error&&tool==12)error=kbp_files(mounted);
+ done:
+  if(create||rewrap||refresh||writable){
+   int synced=VFS_SYNC(mounted,MNT_WAIT,vfs_context_current());int flushed=kebab_ufs_sync();
+--- a/iokit/Kernel/arm/kebab_aks_userclient_impl.h
++++ b/iokit/Kernel/arm/kebab_aks_userclient_impl.h
+@@ -43,12 +43,13 @@
+   if(a->structureOutputDescriptor->writeBytes(0,state,bytes)!=bytes)return kIOReturnIOError;
+   a->structureOutputDescriptorSize=(uint32_t)bytes;
+  }else{memcpy(a->structureOutput,state,bytes);a->structureOutputSize=bytes;}
+- IOLog("KEBAB AKS STATE: authenticated factory policy=%u available-classes=0x%x sls=3 ss=4; C/D only, no A/B/passcode/SEP\n",
++ IOLog("KEBAB AKS STATE: authenticated factory policy=%u available-classes=0x%x sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP\n",
+      status.policy,status.available_classes);
+  return kIOReturnSuccess;
+ }
+ 
+ #include "kebab_aks_keychain_impl.h"
++#include "kebab_aks_device_lock_impl.h"
+ 
+ static IOReturn kuc_notify_method(IOService *,uint32_t,IOExternalMethodArguments *);
+ 
+@@ -59,6 +60,7 @@
+   * expose public status only; no selector can promote this access role. */
+  bool administrative=false;
+  bool keychainAccess=false;
++ bool deviceAccess=false;
+  bool opened=false;
+ public:
+  IOReturn clientClose() override {opened=false;terminate();return kIOReturnSuccess;}
+@@ -79,7 +81,9 @@
+   else{opened=true;result=kIOReturnSuccess;}
+  }else if(!opened)result=kIOReturnNotOpen;
+  else if((selector==10||selector==11)&&!keychainAccess)result=kIOReturnNotPrivileged;
+- else if(!administrative&&selector!=7&&selector!=14&&selector!=17&&selector!=10&&selector!=11)result=kIOReturnNotPrivileged;
++ else if((selector==12||selector==13)&&!deviceAccess)result=kIOReturnNotPrivileged;
++ else if(!administrative&&selector!=7&&selector!=14&&selector!=17&&selector!=10&&selector!=11&&selector!=12&&selector!=13)result=kIOReturnNotPrivileged;
++ else if(selector==12||selector==13){result=kuc_device_lock_method(selector,a);}
+  else if(selector==10||selector==11){
+   result=kuc_keychain_method(selector,a);
+  }
+@@ -94,7 +98,8 @@
+   else{a->scalarOutput[0]=0;a->scalarOutputCount=1;result=kIOReturnSuccess;}
+  }else if(selector==7){
+   if(in!=1||!a->scalarInput||a->scalarInput[0]||out!=1||!a->scalarOutput||si||a->structureInputDescriptor||a->structureOutputSize||a->structureOutputDescriptor)result=kIOReturnBadArgument;
+-  else{a->scalarOutput[0]=4;a->scalarOutputCount=1;result=kIOReturnSuccess;}
++  else{uint32_t state=0;result=(IOReturn)kebab_device_keybag_get_lock_state(&state);
++   if(result==kIOReturnSuccess){a->scalarOutput[0]=state;a->scalarOutputCount=1;}}
+  }else if(selector==3){
+   if(in!=1||!a->scalarInput||a->scalarInput[0]||out||si||a->structureInputDescriptor||
+       (a->structureOutputDescriptor&&a->structureOutput))result=kIOReturnBadArgument;
+@@ -125,8 +130,8 @@
+   if(report<16)IOLog("KEBAB AKS WRAP-META: selector=%u pid=%d bag64=0x%llx class64=0x%llx administrative=%u result=%x; key bytes never logged\n",
+       selector,proc_selfpid(),(unsigned long long)a->scalarInput[0],(unsigned long long)a->scalarInput[1],administrative?1u:0u,result);
+  }
+- IOLog("KEBAB AKS UC: selector=%u scalar=%u/%u struct-in=%u result=%x; hardware factory C/D only; struct-out=%llu desc=%u/%u\n",selector,in,out,si,result,(unsigned long long)a->structureOutputSize,a->structureInputDescriptor!=nullptr,a->structureOutputDescriptor!=nullptr);
+- IOLog("KEBAB AKS ACCESS: selector=%u role=%s result=%x\n",selector,administrative?"administrative":keychainAccess?"keychain":"read-only-status",result);
++ IOLog("KEBAB AKS UC: selector=%u scalar=%u/%u struct-in=%u result=%x; hardware factory bag; struct-out=%llu desc=%u/%u\n",selector,in,out,si,result,(unsigned long long)a->structureOutputSize,a->structureInputDescriptor!=nullptr,a->structureOutputDescriptor!=nullptr);
++ IOLog("KEBAB AKS ACCESS: selector=%u role=%s result=%x\n",selector,administrative?"administrative":keychainAccess?"keychain":deviceAccess?"device-lock":"read-only-status",result);
+  return result;
+ }
+ 
+@@ -155,6 +160,11 @@
+    client->keychainAccess=(entitlement==kOSBooleanTrue);
+    if(entitlement)entitlement->release();
+   }
++  {
++   OSObject *entitlement=IOUserClient::copyClientEntitlement(task,"com.apple.keystore.device");
++   client->deviceAccess=(entitlement==kOSBooleanTrue);
++   if(entitlement)entitlement->release();
++  }
+   if(!client->attach(this)){client->release();return kIOReturnError;}
+   if(!client->start(this)){client->detach(this);client->release();return kIOReturnError;}
+   IOLog("KEBAB AKS UC: %s client opened; original ABI, authenticated durable hardware bag available\n",administrative?"administrative":"read-only status");
+--- a/iokit/Kernel/arm/kebab_block_crypto_impl.h
++++ b/iokit/Kernel/arm/kebab_block_crypto_impl.h
+@@ -3,6 +3,7 @@
+  * Synthetic offset-IV means APFS already supplied cpoff; preserve it exactly
+  * as required by XNU vfs_bio.c, then account for IOStorage split adjustment. */
+ extern "C" int kebab_vek_cpx_handle_open(const uint8_t *,uint8_t *);
++extern "C" bool kebab_apfs_b_raw_io_available(void);
+ struct KebabBlockCrypto {
+  uint8_t key[32];
+  UInt64 unit;
+@@ -40,7 +41,10 @@
+  if(wrapped) {
+   int error=kebab_vek_cpx_handle_open(static_cast<const uint8_t *>(cpx_key(cpx)),crypto.key);
+   if(error)return static_cast<IOReturn>(error);
+- } else memcpy(crypto.key,cpx_key(cpx),32);
++ } else {
++  if(!kebab_apfs_b_raw_io_available())return kIOReturnNotReady;
++  memcpy(crypto.key,cpx_key(cpx),32);
++ }
+  crypto.unit=base>>12;crypto.active=true;
+  return kIOReturnSuccess;
+ }
+--- a/bsd/vfs/vfs_vnops.c
++++ b/bsd/vfs/vfs_vnops.c
+@@ -844,6 +844,14 @@
+ 	if (!vnode_isspec(vp)) {
+ 		(void)vnode_rele_ext(vp, flags, 0);
+ 	}
++
++#if defined(KEBAB)
++	{
++		extern int kebab_b_file_close(vnode_t, vfs_context_t);
++		int protected_close = kebab_b_file_close(vp, ctx);
++		if (!error) error = protected_close;
++	}
++#endif
+ 
+ 	if (flusherror) {
+ 		error = flusherror;
+--- a/bsd/vfs/vfs_cprotect.c
++++ b/bsd/vfs/vfs_cprotect.c
+@@ -26,7 +26,11 @@
+  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+  */
+ 
++#include <pexpert/arm64/board_config.h>
+ #include <sys/cprotect.h>
++#if defined(KEBAB)
++extern void kebab_apfs_b_note_cpx_destroy(const void *,unsigned,const char *);
++#endif
+ #include <sys/malloc.h>
+ #include <sys/mount_internal.h>
+ #include <sys/filio.h>
+@@ -199,6 +203,9 @@
+ void
+ cpx_free(cpx_t cpx)
+ {
++#if defined(KEBAB)
++	kebab_apfs_b_note_cpx_destroy(cpx->cpx_cached_key,cpx->cpx_key_len,"free");
++#endif
+ #if DEBUG
+ 	assert(cpx->cpx_magic1 == cpx_magic1);
+ 	assert(*PTR_ADD(uint32_t *, cpx, cpx_sizex(cpx) - 4) == cpx_magic2);
+@@ -385,6 +392,9 @@
+ void
+ cpx_flush(cpx_t cpx)
+ {
++#if defined(KEBAB)
++	kebab_apfs_b_note_cpx_destroy(cpx->cpx_cached_key,cpx->cpx_key_len,"flush");
++#endif
+ 	bzero(cpx->cpx_cached_key, cpx->cpx_max_key_len);
+ 	if (cpx->cpx_iv_aes_ctx_ptr) {
+ 		bzero(cpx->cpx_iv_aes_ctx_ptr, sizeof(aes_encrypt_ctx));
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -672,3 +672,4 @@
+ bsd/kern/kebab_scm_probe.c			standard
+ bsd/kern/kebab_qsee_probe.c			standard
+ bsd/kern/kebab_file_keys.c			standard
++bsd/kern/kebab_b_file_lifecycle.c			standard
+--- /dev/null
++++ b/bsd/kern/kebab_keybag_state_impl.h
+@@ -0,0 +1,109 @@
++/* Hardware-Root/bank-bound factory-no-passcode class-B private/public state.
++ * Caller holds kfk_lock for *_locked helpers. Persistent DCB1 bytes and
++ * random C/D keys are not changed. Lock destroys the cached B private key;
++ * public-only new-file encryption remains possible until bank revocation. */
++static uint8_t kbs_private[32],kbs_public[32];
++static uint8_t kbs_binding[56];
++static bool kbs_ready,kbs_unlocked,kbs_bootstrap_done;
++static uint64_t kbs_generation;
++/* Public identity metadata, retained across revocation to deny old raw I/O
++ * under a different bank and to purge B vnodes when they subsequently close. */
++static uint32_t kbs_raw_seen;
++static uint8_t kbs_raw_bank[16],kbs_raw_volume[16];
++
++static void
++kbs_clear_locked(void)
++{
++ kbs_ready=false;kbs_unlocked=false;++kbs_generation;
++ kfk_wipe(kbs_private,sizeof(kbs_private));kfk_wipe(kbs_public,sizeof(kbs_public));kfk_wipe(kbs_binding,sizeof(kbs_binding));
++}
++
++static bool
++kbs_factory_locked(void)
++{
++ uint32_t version,policy;memcpy(&version,kdb_record+16,4);memcpy(&policy,kdb_record+60,4);
++ bool ready=kfk_ready&&kdb_ready&&version==1&&policy==KEBAB_DEVICE_BAG_FACTORY_NO_PASSCODE&&
++     kdb_nonzero(kdb_identifier,16)&&kdb_nonzero(kdb_class_c,32)&&kdb_nonzero(kdb_class_d,32)&&
++     memcmp(kdb_class_c,kdb_class_d,32);
++ if(ready&&kbs_ready)ready=!memcmp(kbs_binding,kdb_identifier,16)&&!memcmp(kbs_binding+16,kdb_record+24,32)&&
++     !memcmp(kbs_binding+48,kdb_record+16,4)&&!memcmp(kbs_binding+52,kdb_record+60,4);
++ return ready;
++}
++
++static int
++kbs_restore_locked(void)
++{
++ kfk_wipe(kbs_private,sizeof(kbs_private));kbs_unlocked=false;++kbs_generation;
++ if(!kbs_factory_locked()||!kcb_math_selftest())return (int)kIOReturnNotReady;
++ static const uint8_t domain[]="UniXNU.kebab.protected-unless-open.class-key.v1";
++ uint8_t context[sizeof(domain)+56],secret[32]={0},pub[32]={0},base[32]={9};
++ memcpy(context,domain,sizeof(domain));memcpy(context+sizeof(domain),kdb_identifier,16);
++ memcpy(context+sizeof(domain)+16,kdb_record+24,32);
++ memcpy(context+sizeof(domain)+48,kdb_record+16,4);memcpy(context+sizeof(domain)+52,kdb_record+60,4);
++ g_crypto_funcs->cchmac_fn(g_crypto_funcs->ccsha256_di,32,kfk_root_kek,sizeof(context),context,secret);
++ int error=kdb_nonzero(secret,32)&&kebab_x25519(pub,secret,base)?0:(int)kIOReturnError;
++ if(!error){
++  memcpy(kbs_private,secret,32);memcpy(kbs_public,pub,32);
++  memcpy(kbs_binding,kdb_identifier,16);memcpy(kbs_binding+16,kdb_record+24,32);
++  memcpy(kbs_binding+48,kdb_record+16,4);memcpy(kbs_binding+52,kdb_record+60,4);
++  kbs_ready=true;kbs_unlocked=true;++kbs_generation;
++ }
++ kfk_wipe(context,sizeof(context));kfk_wipe(secret,sizeof(secret));kfk_wipe(pub,sizeof(pub));kfk_wipe(base,sizeof(base));
++ return error;
++}
++
++int
++kebab_device_keybag_bootstrap(void)
++{
++ if(!kfk_context())return (int)kIOReturnBadArgument;
++ lck_mtx_lock(&kfk_lock);
++ int error=kbs_bootstrap_done?(kbs_ready&&kbs_factory_locked()?0:(int)kIOReturnNotReady):kbs_restore_locked();
++ if(!error)kbs_bootstrap_done=true;
++ lck_mtx_unlock(&kfk_lock);
++ printf("KEBAB KEYBAG BOOT: authenticated no-passcode bootstrap result=%x; existing bank retained\n",error);
++ return error;
++}
++
++int
++kebab_device_keybag_get_lock_state(uint32_t *output)
++{
++ if(!kfk_context()||!kfk_range(output,sizeof(*output))||
++     kfk_overlap(output,4,kbs_private,32)||kfk_overlap(output,4,kbs_public,32)||
++     kfk_overlap(output,4,kfk_root_kek,32)||kfk_overlap(output,4,kdb_record,4096)||
++     kfk_overlap(output,4,kdb_class_c,32)||kfk_overlap(output,4,kdb_class_d,32))return (int)kIOReturnBadArgument;
++ lck_mtx_lock(&kfk_lock);
++ int error=kbs_factory_locked()&&kbs_ready&&kbs_bootstrap_done?0:(int)kIOReturnNotReady;
++ if(!error)*output=kbs_unlocked?4u:5u; /* original bit0 locked, bit2 been-unlocked */
++ lck_mtx_unlock(&kfk_lock);return error;
++}
++
++/* Only call after validating the live Data UUID and successful crypto. */
++static int
++kbs_bind_raw_locked(const uint8_t volume[16])
++{
++ if(__atomic_load_n(&kbs_raw_seen,__ATOMIC_ACQUIRE)){
++  return memcmp(kbs_raw_bank,kdb_identifier,16)||memcmp(kbs_raw_volume,volume,16)?(int)kIOReturnNotPermitted:0;
++ }
++ memcpy(kbs_raw_bank,kdb_identifier,16);memcpy(kbs_raw_volume,volume,16);
++ __atomic_store_n(&kbs_raw_seen,1u,__ATOMIC_RELEASE);return 0;
++}
++
++bool
++kebab_apfs_b_volume_seen(void)
++{
++ return __atomic_load_n(&kbs_raw_seen,__ATOMIC_ACQUIRE)!=0;
++}
++
++bool
++kebab_apfs_b_volume_matches(const uint8_t volume[16])
++{
++ return kfk_range(volume,16)&&kebab_apfs_b_volume_seen()&&!memcmp(volume,kbs_raw_volume,16);
++}
++
++void
++kebab_apfs_b_note_cpx_destroy(const void *key,unsigned bytes,const char *operation)
++{
++ if(bytes!=32||!kebab_apfs_b_volume_seen())return;
++ static uint32_t reports;uint32_t n=__atomic_fetch_add(&reports,1u,__ATOMIC_RELAXED);
++ if(n<64)printf("KEBAB CPX RAW32 DESTROY: operation=%s key-address=%p bytes=32; no key bytes logged\n",operation,key);
++}
+--- /dev/null
++++ b/bsd/kern/kebab_keybag_events_impl.h
+@@ -0,0 +1,44 @@
++/* Included after native Data class mapping definitions. No VFS operation is
++ * invoked while holding kfk_lock. A separate event mutex serializes lock/
++ * unlock broadcasts. The stock callback is a broadcast, not a per-FS ack. */
++static LCK_MTX_DECLARE(kbs_event_lock,&kfk_group);
++
++bool
++kebab_apfs_b_raw_io_available(void)
++{
++ if(!kebab_apfs_b_volume_seen())return true; /* retain earlier raw32 probe scope */
++ if(!kfk_context())return false;
++ lck_mtx_lock(&kfk_lock);
++ bool ready=kbs_factory_locked()&&kdc_registered&&kdc_loaded&&
++     !memcmp(kbs_raw_bank,kdb_identifier,16)&&!memcmp(kbs_raw_volume,kdc_uuid,16);
++ lck_mtx_unlock(&kfk_lock);return ready; /* B lock does not revoke already-open I/O */
++}
++
++int
++kebab_device_keybag_set_locked(bool locked)
++{
++ if(!kfk_context())return (int)kIOReturnBadArgument;
++ uint8_t volume[16]={0};uint64_t generation=0;
++ lck_mtx_lock(&kbs_event_lock);lck_mtx_lock(&kfk_lock);
++ int error=kbs_factory_locked()&&kbs_bootstrap_done&&kdc_registered&&kdc_loaded?0:(int)kIOReturnNotReady;
++ if(!error){
++  if(locked){kfk_wipe(kbs_private,32);kbs_unlocked=false;++kbs_generation;}
++  else error=kbs_restore_locked();
++  if(!error){memcpy(volume,kdc_uuid,16);generation=kbs_generation;}
++ }
++ lck_mtx_unlock(&kfk_lock);
++ int broadcast=0;
++ if(!error){
++  broadcast=cp_key_store_action_for_volume(volume,locked?CP_ACTION_LOCKED:CP_ACTION_UNLOCKED);
++  lck_mtx_lock(&kfk_lock);
++  if(!kbs_factory_locked()||generation!=kbs_generation)error=(int)kIOReturnNotReady;
++  else if(broadcast){
++   error=(int)kIOReturnIOError;
++   if(!locked){kfk_wipe(kbs_private,32);kbs_unlocked=false;++kbs_generation;}
++  }
++  lck_mtx_unlock(&kfk_lock);
++ }
++ lck_mtx_unlock(&kbs_event_lock);
++ printf("KEBAB KEYBAG EVENT: requested=%s broadcast=%d result=%x; no per-filesystem ack claimed\n",locked?"locked":"unlocked",broadcast,error);
++ kfk_wipe(volume,sizeof(volume));return error;
++}
+--- /dev/null
++++ b/bsd/kern/kebab_apfs_file_b_impl.h
+@@ -0,0 +1,127 @@
++/* Protected Unless Open: ephemeral Curve25519 public32 || AES-KW96(KF03).
++ * The authenticated inner88 binds exact UUID/revision/crypto_id/class and
++ * key32/IV16. CPX receives honest raw32, not a stateless wrapped token.
++ * Existing C/D KF02/HT01 encoding is left untouched. Caller holds kfk_lock
++ * in helpers ending _locked. No VFS/IOKit call occurs under that lock. */
++static int
++kbn_ready_locked(const uint8_t volume[16],bool private_required)
++{
++ if(!kbs_factory_locked()||!kbs_ready||!kdc_registered||!kdc_loaded)return (int)kIOReturnNotReady;
++ if(memcmp(volume,kdc_uuid,16))return (int)kIOReturnNotPermitted;
++ if(private_required&&!kbs_unlocked)return (int)kIOReturnNotPermitted;
++ if(!kdb_nonzero(kbs_public,32)||(private_required&&!kdb_nonzero(kbs_private,32)))return (int)kIOReturnNotReady;
++ return 0;
++}
++
++static void
++kbn_plain(uint8_t plain[88],const struct kebab_aks_credential *cred,const uint8_t material[48])
++{
++ kfn_plain(plain,cred,2,material);memcpy(plain,"KF03",4);
++}
++
++static bool
++kbn_identity(const uint8_t plain[88],const struct kebab_aks_credential *cred)
++{
++ uint8_t expected[88],zero[48]={0};kbn_plain(expected,cred,zero);
++ unsigned diff=0;for(unsigned i=0;i<40;i++)diff|=plain[i]^expected[i];
++ kfk_wipe(expected,sizeof(expected));kfk_wipe(zero,sizeof(zero));return !diff;
++}
++
++static int
++kbn_seal_locked(const struct kebab_aks_credential *cred,const uint8_t material[48],uint8_t output[128])
++{
++ int error=kbn_ready_locked(cred->bytes+22,false);if(error)return error;
++ uint8_t scalar[32]={0},pub[32]={0},shared[32]={0},kek[32]={0},plain[88]={0},sealed[128]={0},base[32]={9};
++ read_random(scalar,32);
++ if(!kdb_nonzero(scalar,32)||!kebab_x25519(pub,scalar,base)||
++     !kebab_x25519(shared,scalar,kbs_public)||
++     !kebab_class_b_concat_kdf(kek,shared,pub,kbs_public,kcb_sha256))error=(int)kIOReturnError;
++ if(!error){kbn_plain(plain,cred,material);memcpy(sealed,pub,32);error=kfk_wrap(kek,plain,88,sealed+32,true);}
++ if(!error)memcpy(output,sealed,128);
++ kfk_wipe(scalar,sizeof(scalar));kfk_wipe(pub,sizeof(pub));kfk_wipe(shared,sizeof(shared));kfk_wipe(kek,sizeof(kek));
++ kfk_wipe(plain,sizeof(plain));kfk_wipe(sealed,sizeof(sealed));kfk_wipe(base,sizeof(base));return error;
++}
++
++static int
++kbn_open_locked(const struct kebab_aks_credential *cred,const uint8_t input[128],uint8_t plain[88])
++{
++ int error=kbn_ready_locked(cred->bytes+22,true);if(error)return error;
++ uint8_t shared[32]={0},kek[32]={0},result[88]={0};
++ if(!kebab_x25519(shared,kbs_private,input)||
++     !kebab_class_b_concat_kdf(kek,shared,input,kbs_public,kcb_sha256))error=(int)kIOReturnNotPermitted;
++ if(!error)error=kfk_wrap(kek,input+32,96,result,false);
++ if(!error)memcpy(plain,result,88);
++ kfk_wipe(shared,sizeof(shared));kfk_wipe(kek,sizeof(kek));kfk_wipe(result,sizeof(result));return error;
++}
++
++static int
++kbn_new(const struct kebab_aks_credential *cred,struct kebab_aks_raw_key *raw,struct kebab_aks_wrapped_key *wrapped)
++{
++ if(!kfk_context()||!kmd_buffers(cred,raw,wrapped,true)||wrapped->key_len<128)return (int)kIOReturnBadArgument;
++ if(!kfn_credential(cred)||raw->flags)return (int)kIOReturnUnsupported;
++ uint8_t material[48]={0},sealed[128]={0};
++ lck_mtx_lock(&kfk_lock);int error=kbn_ready_locked(cred->bytes+22,false);
++ if(!error){read_random(material,48);if(!kdb_nonzero(material,32)||!kdb_nonzero(material+32,16))error=(int)kIOReturnError;}
++ if(!error)error=kbn_seal_locked(cred,material,sealed);
++ if(!error)error=kbs_bind_raw_locked(cred->bytes+22);
++ if(!error){
++  memcpy(wrapped->key,sealed,128);memcpy(raw->key,material,32);memcpy(raw->iv_key,material+32,16);
++  wrapped->key_len=128;wrapped->dp_class=2;raw->key_len=32;raw->iv_key_len=16;raw->flags=0;
++ }
++ lck_mtx_unlock(&kfk_lock);
++ uint64_t crypto_id;memcpy(&crypto_id,cred->bytes,sizeof(crypto_id));
++ printf("KEBAB APFS B NEW: crypto-id=%llu raw-address=%p result=%x; raw32/IV16, no key bytes logged\n",
++     (unsigned long long)crypto_id,raw->key,error);
++ kfk_wipe(material,sizeof(material));kfk_wipe(sealed,sizeof(sealed));return error;
++}
++
++static int
++kbn_unwrap(const struct kebab_aks_credential *cred,const struct kebab_aks_wrapped_key *wrapped,struct kebab_aks_raw_key *raw)
++{
++ if(!kfk_context()||!kmd_buffers(cred,raw,wrapped,true)||wrapped->key_len!=128)return (int)kIOReturnBadArgument;
++ if(!kfn_credential(cred))return (int)kIOReturnUnsupported;
++ uint8_t sealed[128],plain[88]={0};memcpy(sealed,wrapped->key,128);
++ lck_mtx_lock(&kfk_lock);int error=kbn_open_locked(cred,sealed,plain);
++ if(!error&&!kbn_identity(plain,cred))error=(int)kIOReturnNotPermitted;
++ if(!error)error=kbs_bind_raw_locked(cred->bytes+22);
++ if(!error){memcpy(raw->key,plain+40,32);memcpy(raw->iv_key,plain+72,16);raw->key_len=32;raw->iv_key_len=16;raw->flags=0;}
++ lck_mtx_unlock(&kfk_lock);
++ uint64_t crypto_id;memcpy(&crypto_id,cred->bytes,sizeof(crypto_id));
++ printf("KEBAB APFS B UNWRAP: crypto-id=%llu raw-address=%p result=%x; no key bytes logged\n",
++     (unsigned long long)crypto_id,raw->key,error);
++ kfk_wipe(sealed,sizeof(sealed));kfk_wipe(plain,sizeof(plain));return error;
++}
++
++static int
++kbn_rewrap(const struct kebab_aks_credential *cred,uint32_t target,
++    const struct kebab_aks_wrapped_key *input,struct kebab_aks_wrapped_key *output)
++{
++ if(!kfk_context()||!kfk_range(cred,sizeof(*cred))||!kfk_range(input,sizeof(*input))||!kfk_range(output,sizeof(*output)))return (int)kIOReturnBadArgument;
++ uint32_t source=input->dp_class;unsigned inbytes=source==2?128u:96u,outbytes=target==2?128u:96u;
++ if((source!=2&&source!=3&&source!=4)||(target!=2&&target!=3&&target!=4)||!kfn_credential(cred))return (int)kIOReturnUnsupported;
++ if(input->key_len!=inbytes||output->key_len<outbytes||output->key_len>128||!kfk_range(input->key,inbytes)||!kfk_range(output->key,output->key_len))return (int)kIOReturnBadArgument;
++ const void *headers[]={cred,input,output};const size_t sizes[]={sizeof(*cred),sizeof(*input),sizeof(*output)};
++ for(unsigned i=0;i<3;i++)if(kfk_overlap(input->key,inbytes,headers[i],sizes[i])||kfk_overlap(output->key,output->key_len,headers[i],sizes[i]))return (int)kIOReturnBadArgument;
++ if((input!=output&&kfk_overlap(input,sizeof(*input),output,sizeof(*output)))||
++     kfk_overlap(cred,sizeof(*cred),input,sizeof(*input))||kfk_overlap(cred,sizeof(*cred),output,sizeof(*output))||
++     (input->key!=output->key&&kfk_overlap(input->key,inbytes,output->key,output->key_len)))return (int)kIOReturnBadArgument;
++ uint8_t sealed[128]={0},plain[88]={0},result[128]={0},kek[32]={0};
++ struct kebab_aks_credential original=*cred;memcpy(sealed,input->key,inbytes);
++ lck_mtx_lock(&kfk_lock);int error;
++ if(source==2)error=kbn_open_locked(cred,sealed,plain);
++ else{error=kfn_kek_locked(cred->bytes+22,source,kek);if(!error)error=kfk_wrap(kek,sealed,96,plain,false);}
++ /* As in qualified C/D rewrap, APFS supplies the new target crypto_id.
++  * Authenticate the old envelope before using its old id for identity checks. */
++ if(!error){memcpy(original.bytes,plain+24,8);if(!(source==2?kbn_identity(plain,&original):kfn_identity(plain,&original,source)))error=(int)kIOReturnNotPermitted;}
++ if(!error){
++  if(target==2)error=kbn_seal_locked(cred,plain+40,result);
++  else{
++   error=kfn_kek_locked(cred->bytes+22,target,kek);
++   if(!error){uint8_t next[88];kfn_plain(next,cred,target,plain+40);error=kfk_wrap(kek,next,88,result,true);kfk_wipe(next,sizeof(next));}
++  }
++ }
++ if(!error){memcpy(output->key,result,outbytes);output->key_len=outbytes;output->dp_class=target;}
++ lck_mtx_unlock(&kfk_lock);
++ printf("KEBAB APFS B REWRAP: source=%u target=%u result=%x; existing material retained\n",source,target,error);
++ kfk_wipe(sealed,sizeof(sealed));kfk_wipe(plain,sizeof(plain));kfk_wipe(result,sizeof(result));kfk_wipe(kek,sizeof(kek));kfk_wipe(&original,sizeof(original));return error;
++}
+--- /dev/null
++++ b/bsd/kern/kebab_b_file_lifecycle.c
+@@ -0,0 +1,63 @@
++/* Software CPX class-B lifecycle for the one authenticated HiOS Data volume.
++ * Called after VNOP_CLOSE and its use-reference drop, while the caller still
++ * owns an iocount. Recycle marks a live vnode; standard VFS reclaim waits for
++ * other descriptors/mappings/I/O, then original APFS frees its CPX objects.
++ * Native cpx_zone/AES-context zones clear their memory on free. */
++#include <pexpert/arm64/board_config.h>
++#if defined(KEBAB)
++#include <sys/systm.h>
++#include <sys/vnode.h>
++#include <sys/vnode_internal.h>
++#include <sys/mount.h>
++#include <sys/mount_internal.h>
++#include <sys/ubc.h>
++#include <sys/cprotect.h>
++#include <sys/content_protection.h>
++#include "kebab_file_keys.h"
++#include "kebab_apfs_probe.h"
++
++int kebab_b_file_close(vnode_t,vfs_context_t);
++int
++kebab_b_file_close(vnode_t vnode,vfs_context_t context)
++{
++ if(!vnode||!kebab_apfs_b_volume_seen()||!vnode_isreg(vnode))return 0;
++ mount_t mount=vnode_mount(vnode);if(!mount)return 0;
++ const struct vfsstatfs *stat=vfs_statfs(mount);
++ if(!stat||strcmp(stat->f_fstypename,"apfs")||!(vfs_flags(mount)&MNT_CPROTECT)||
++     strcmp(stat->f_mntonname,"/private/var"))return 0;
++ struct vfs_attr volume;VFSATTR_INIT(&volume);VFSATTR_WANTED(&volume,f_uuid);
++ int volume_error=vfs_getattr(mount,&volume,context);
++ bool identified=!volume_error&&VFSATTR_IS_SUPPORTED(&volume,f_uuid);
++ if(identified){if(!kebab_apfs_b_volume_matches(volume.f_uuid))return 0;}
++ else{
++  /* The mount path alone is not identity. On attribute failure, resolve
++   * the pinned live Data/System IOMedia UUIDs and common backing, then
++   * compare both runtime dev_t values and the original readonly root. */
++  struct kebab_volume_identity system,data;
++  if(kebab_lookup_apfs_live_data(&system,&data)||!rootvnode)return 0;
++  mount_t root=vnode_mount(rootvnode);
++  if(!root||root==mount||!(vfs_flags(root)&MNT_RDONLY))return 0;
++  vnode_t device=vfs_devvp(mount);dev_t actual=device?vnode_specrdev(device):NODEV;
++  if(device)vnode_put(device);
++  if(actual!=makedev(data.major_number,data.minor_number))return 0;
++  device=vfs_devvp(root);actual=device?vnode_specrdev(device):NODEV;
++  if(device)vnode_put(device);
++  if(actual!=makedev(system.major_number,system.minor_number))return 0;
++ }
++ struct vnode_attr attributes;VATTR_INIT(&attributes);VATTR_WANTED(&attributes,va_dataprotect_class);
++ int attribute_error=vnode_getattr(vnode,&attributes,context);
++ bool class_known=!attribute_error&&VATTR_IS_SUPPORTED(&attributes,va_dataprotect_class);
++ if(class_known&&attributes.va_dataprotect_class!=PROTECTION_CLASS_B)return 0;
++ /* Keep pending writes and open mappings usable. If this is the last user,
++  * sync successfully before asking VFS to reclaim; preserve real errors.
++  * A marked but still-used vnode is reclaimed after its final reference. */
++ int busy=vnode_isinuse(vnode,0),sync_error=0;
++ if(!busy&&!(vfs_flags(mount)&MNT_RDONLY))sync_error=VNOP_FSYNC(vnode,MNT_WAIT,context);
++ if(sync_error){printf("KEBAB B CLOSE: sync-error=%d; raw key retained for pending I/O\n",sync_error);return sync_error;}
++ int immediate=vnode_recycle(vnode);
++ static uint32_t reports;uint32_t n=__atomic_fetch_add(&reports,1u,__ATOMIC_RELAXED);
++ if(n<64)printf("KEBAB B CLOSE: class-known=%u class=%u busy=%d volume-error=%d attr-error=%d recycle-immediate=%d; final VFS release owns reclaim\n",
++     class_known?1u:0u,class_known?attributes.va_dataprotect_class:0u,busy,volume_error,attribute_error,immediate);
++ return 0;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/kebab_aks_device_lock_impl.h
+@@ -0,0 +1,15 @@
++/* Original bag0 lock13 and unlock12 [bag,user-secret-address,secret-length].
++ * This backend has authenticated factory-no-passcode policy only: unlock
++ * accepts zero length only, never dereferences the user pointer. Empty
++ * NSData may supply a non-NULL address; it still contains no secret bytes.
++ * Provider-assigned com.apple.keystore.device capability is required. */
++static IOReturn
++kuc_device_lock_method(uint32_t selector,IOExternalMethodArguments *a)
++{
++ const unsigned count=selector==12?3u:1u;
++ if((selector!=12&&selector!=13)||a->scalarInputCount!=count||!a->scalarInput||
++     a->scalarInput[0]||a->scalarOutputCount||a->structureInputSize||a->structureInputDescriptor||
++     a->structureOutputSize||a->structureOutputDescriptor)return kIOReturnBadArgument;
++ if(selector==12&&a->scalarInput[2])return kIOReturnUnsupported;
++ return (IOReturn)kebab_device_keybag_set_locked(selector==13);
++}
+--- /dev/null
++++ b/bsd/kern/kebab_b_file_probe_impl.h
+@@ -0,0 +1,79 @@
++/* Fixed private known-pattern B files, original APFS and native VFS only.
++ * No original database or old C/D file is changed. The first boot creates
++ * each missing proof exclusively; later boots restore its existing envelope. */
++static int
++kbp_io(vnode_t file,mount_t expected,uint8_t *plain,uint8_t *back,bool write)
++{
++ vfs_context_t context=vfs_context_current();int error=kdp_metadata(file,expected,2,write?0:KDP_BYTES,context);
++ if(write&&!error){
++  int residual=0;error=vn_rdwr(UIO_WRITE,file,(caddr_t)plain,KDP_BYTES,0,UIO_SYSSPACE,
++      IO_SYNC|IO_NOCACHE,vfs_context_ucred(context),&residual,NULL);
++  if(!error&&residual)error=EIO;
++ }
++ if(!error&&write)error=VNOP_FSYNC(file,MNT_WAIT,context);
++ if(!error){
++  int residual=0;error=vn_rdwr(UIO_READ,file,(caddr_t)back,KDP_BYTES,0,UIO_SYSSPACE,
++      IO_NOCACHE,vfs_context_ucred(context),&residual,NULL);
++  if(!error&&(residual||memcmp(plain,back,KDP_BYTES)))error=EAUTH;
++ }
++ return error;
++}
++
++static int
++kbp_files(mount_t expected)
++{
++ const char *path="/private/var/.hios-cp-b-v1",*locked_path="/private/var/.hios-cp-b-locked-v1";
++ vfs_context_t context=vfs_context_current();vnode_t file=NULLVP;
++ int error=vnode_open(path,O_NOFOLLOW|FREAD,0,0,&file,context);bool create=error==ENOENT;
++ if(file){int closed=vnode_close(file,FREAD,context);file=NULLVP;if(!error)error=closed;}
++ if(error&&!create)return error;
++ error=kdp_file(expected,path,2,create,false);if(error)return error;
++ error=vnode_open(locked_path,O_NOFOLLOW|FREAD,0,0,&file,context);bool create_locked=error==ENOENT;
++ if(file){int closed=vnode_close(file,FREAD,context);file=NULLVP;if(!error)error=closed;}
++ if(error&&!create_locked)return error;
++ struct Work{uint8_t plain[KDP_BYTES],back[KDP_BYTES];};
++ struct Work *w=kalloc_data(sizeof(*w),Z_WAITOK|Z_ZERO);if(!w)return ENOMEM;
++ for(unsigned i=0;i<KDP_BYTES;i++)w->plain[i]=(uint8_t)(i*17+(i>>7)+2*29);
++ error=vnode_open(path,O_NOFOLLOW|FREAD|FWRITE,0,0,&file,context);
++ if(!error)error=kdp_metadata(file,expected,2,KDP_BYTES,context);
++ if(!error)error=kebab_device_keybag_set_locked(true);
++ uint32_t state=0;if(!error)error=kebab_device_keybag_get_lock_state(&state);
++ if(!error&&state!=5)error=EAUTH;
++ /* The existing open vnode must retain its raw CPX for real I/O while locked. */
++ if(!error)error=kbp_io(file,expected,w->plain,w->back,false);
++ if(!error){
++  int residual=0;error=vn_rdwr(UIO_WRITE,file,(caddr_t)w->plain,KDP_BYTES,0,UIO_SYSSPACE,
++      IO_SYNC|IO_NOCACHE,vfs_context_ucred(context),&residual,NULL);
++  if(!error&&residual)error=EIO;
++  if(!error)error=VNOP_FSYNC(file,MNT_WAIT,context);
++ }
++ printf("KEBAB B PROBE: locked existing-open protected read/write=%d state=%u\n",error,state);
++ if(file){int closed=vnode_close(file,FREAD|FWRITE,context);file=NULLVP;if(!error)error=closed;}
++ if(!error){
++  int denied=vnode_open(path,O_NOFOLLOW|FREAD,0,0,&file,context);
++  printf("KEBAB B PROBE: locked after-last-close original reopen=%d; expected EPERM/EACCES\n",denied);
++  if(file){int closed=vnode_close(file,FREAD,context);file=NULLVP;(void)closed;}
++  if(denied!=EPERM&&denied!=EACCES)error=EAUTH;
++ }
++ if(!error&&create_locked){
++  error=kdp_create(locked_path,2,&file,context);
++  if(!error)error=kbp_io(file,expected,w->plain,w->back,true);
++  if(file){int closed=vnode_close(file,FREAD|FWRITE,context);file=NULLVP;if(!error)error=closed;}
++  printf("KEBAB B PROBE: locked exclusive create/write/read/fsync/close=%d; public-key-only path\n",error);
++ }
++ if(!error){
++  int denied=vnode_open(locked_path,O_NOFOLLOW|FREAD,0,0,&file,context);
++  printf("KEBAB B PROBE: locked public-created file reopen=%d; expected EPERM/EACCES\n",denied);
++  if(file){int closed=vnode_close(file,FREAD,context);file=NULLVP;(void)closed;}
++  if(denied!=EPERM&&denied!=EACCES)error=EAUTH;
++ }
++ /* Genuine C/D must remain readable through the same original APFS while locked. */
++ if(!error)error=kdp_file(expected,"/private/var/.hios-cp-c-v1",3,false,false);
++ if(!error)error=kdp_file(expected,"/private/var/.hios-cp-d-v1",4,false,false);
++ int unlocked=kebab_device_keybag_set_locked(false);if(!error)error=unlocked;
++ if(!error){error=kebab_device_keybag_get_lock_state(&state);if(!error&&state!=4)error=EAUTH;}
++ if(!error)error=kdp_file(expected,path,2,false,false);
++ if(!error)error=kdp_file(expected,locked_path,2,false,false);
++ printf("KEBAB B PROBE: private file lifecycle %s (%d), unlock=%x; existing bank/C,D retained\n",error?"FAIL":"PASS",error,unlocked);
++ bzero(w,sizeof(*w));kfree_data(w,sizeof(*w));return error;
++}

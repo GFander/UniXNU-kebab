@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "physical_test": false,
+  "actual_production_core": true,
+  "independent_A_KF04_HA01_vectors": true,
+  "compiled_behavioral_mutants": 10,
+  "summary": "PASS 1561 actual A/core assertions: independent key/KF04/HA01 vectors, tamper/identity/AES/RNG/lock/revoke tests; Root/VFS/locks/RNG explicit models, cached APFS admission NOT tested here",
+  "preserved_B": "PASS 1874 actual B/keychain/bank assertions: independent EC/KDF/KW envelope, tamper/identity/AES/RNG faults, locked create, locked unwrap refusal, unlock recovery, revoke/race, C/D preservation; VFS/Root/locks/RNG explicit host models",
+  "models": [
+    "hardware Root restoration",
+    "VFS lock broadcast",
+    "mutex ownership",
+    "RNG"
+  ],
+  "original_APFS_cached_access_denial_unqualified": true,
+  "fixture_sha256": {
+    "class-a-backend-production-test.c": "74ec2490b66a0c5293550852a9f82f7237c8f94a134304cc94ac0de88bc176f8",
+    "class-b-preservation-production-test.c": "49cfb6304c7e954dafabe895b3342e66432f0ca77434bc03d33961f372abece2"
+  }
+}

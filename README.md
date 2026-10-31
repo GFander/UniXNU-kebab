@@ -2,7 +2,7 @@
 
 在 **一加 8T（kebab / Qualcomm SM8250）** 上移植 XNU，运行原版 **iOS 16.7.16（20H392）用户态**。项目采用 Mu-Silicium UEFI、DarwinBoot、自编译的 XNU 8796.141.3 和供体原版组件的 prelink 路线，参考 [UniXNU 移植指南](https://unixnu.com/zh/porting/) 与 [UniXNU-sheng](https://github.com/UniXNU/UniXNU-sheng)。
 
-**截至 2026-10-31：原版 iOS 用户态、硬件密钥后端、真实加密 Data、8 核和原版 HID 触摸已经有实机证据；尚未显示可用的 SpringBoard。** 当前主线开发分支为 [`ios16`](https://github.com/GFander/UniXNU-kebab/tree/ios16)。本页汇总立项以来的成果，历史阶段的“已完成”不代表整台手机的对应功能已完成。
+**截至 2026-11-01：原版 iOS 用户态、硬件密钥后端、真实加密 Data、8 核和原版 HID 触摸已经有实机证据；尚未显示可用的 SpringBoard。** 当前主线开发分支为 [`ios16`](https://github.com/GFander/UniXNU-kebab/tree/ios16)。本页汇总立项以来的成果，历史阶段的“已完成”不代表整台手机的对应功能已完成。
 
 ## 当前基线
 
@@ -11,18 +11,18 @@
 | 实机 | OnePlus 8T，12 GB / 256 GB 机型；实际交给 XNU 的连续内存约 7.998 GiB |
 | CPU / 内核 | 8 核上线；ARM64、16 KiB 页、XNU 8796.141.3 / Darwin 22.6.0 |
 | 用户态来源 | iPhone X / D22AP，iOS 16.7.16，build 20H392；不是对 A11 硬件的完整模拟 |
-| 最近正常启动验收 | **0460**；最新人工触摸验收 **0459** |
-| 源码核对 | 324 个共同补丁 + 4 个 Mac 主机补丁，5,261 个源码文件与实际构建输入一致 |
-| 当前阻塞 | 原版 `locationd` 数据库初始化进入 `SQLITE_IOERR` 重试；迁移、system-shell check-in 和图形呈现尚未完成 |
+| 最近正常启动验收 | **0471**（复用0470内核，A类锁定准入与原密钥重启恢复）；最新人工触摸验收 **0459** |
+| 源码核对 | 331 个共同补丁 + 4 个 Mac 主机补丁，5,278 个源码文件与实际构建输入一致 |
+| 当前阻塞 | A/B/C/D加密文件和旧keychain恢复已有有界实测；完整密钥接口、迁移、system-shell check-in 与图形呈现尚未完成 |
 | 桌面 / 刷新率 | SpringBoard 进程已执行，尚无可用桌面；面板目标 120 Hz，真实时序尚未验证 |
 
-最近实机源码检查点：[4662532](https://github.com/GFander/UniXNU-kebab/commit/466253282294f3f88478bac78bbbec8e6001b90f)。0460 原生内核 SHA-256：
+最新验收见[A类锁定准入与原密钥重启恢复](docs/CLASS-A-STORAGE-20261101.md)。0470/0471原生内核SHA-256：
 
 ```text
-25ab228e22dc4ac29cea74b887f1097ef3409fa8440549e25f4aac60dc642156
+c0a8b2f44a3eed4eb43f9658d8325d3377620266e4a7026c582855e7d63c8ee2
 ```
 
-详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0460 实机验收记录](docs/qualification/0460/0460-qualified-runtime.json)。编译、源码回放、实机测试分别记录，互不替代。
+详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0471实机重启记录](docs/qualification/0471/0471-A-qualified.json)。编译、源码回放、实机测试分别记录，互不替代。
 
 ## 已达成的功能
 
@@ -32,11 +32,11 @@
 
 | 功能 | 已经实际做到 | 验证边界与资料 |
 | --- | --- | --- |
-| 完整引导交接 | 原厂 bootloader → `boot_b` → Mu-Silicium UEFI → DarwinBoot → XNU → 原版 launchd；GOP 可显示内核与 panic 文本 | 当前是设备专用实验链；[早期引导记录](docs/BRING-UP-STATE.md)、[正常启动日志](docs/qualification/0460/0460-media-boot.log) |
+| 完整引导交接 | 原厂 bootloader → `boot_b` → Mu-Silicium UEFI → DarwinBoot → XNU → 原版 launchd；GOP 可显示内核与 panic 文本 | 当前是设备专用实验链；[早期引导记录](docs/BRING-UP-STATE.md)、[正常启动日志](docs/qualification/0462/0462-media-boot.log) |
 | XNU 平台接入 | 板级 PlatformExpert、设备树、GICv3、架构定时器、异常、调度、Mach/BSD、内置 pthread 接入并运行真实用户进程 | 不是完整 Apple SoC 电源管理；[驱动标准化](docs/DRIVER-STANDARDIZATION-20261029.md) |
 | 8 核与大内存 | PSCI 次级核启动，8 个物理 affinity 的定时器中断、SGI 和本核回调验收；实际可用窗口 8 GiB−2 MiB | 12 GiB 全量、多 bank 接管、AMP 调度、DVFS、挂起/唤醒和系统负载压力尚未验收；[平台证据](docs/PLATFORM-BASELINE-20261029.md) |
 | 原版用户态加载 | 原版 launchd/dyld 执行、共享缓存映射、动态配置及依赖接入，后续原版系统服务运行 | 仍有 daemon 失败和系统迁移等待；[用户态资料](docs/IOS-USERLAND.md)、[CoreLocation 现场](docs/CORELOCATION-WAIT-20261031.md) |
-| 内核 USB 控制台 | DWC3 设备模式 CDC-ACM 输出，正常命令与有界诊断，实际完整传输超过 16 KiB 环容量的线程报告 | 不是 UEFI 通用 USB、主机模式或 Type-C 全功能；[0460 报告](docs/CORELOCATION-WAIT-20261031.md) |
+| 内核 USB 控制台 | DWC3 设备模式 CDC-ACM 输出，正常命令与有界诊断，实际完整传输超过 16 KiB 环容量的线程报告 | 不是 UEFI 通用 USB、主机模式或 Type-C 全功能；[0462 报告](docs/CORELOCATION-WAIT-20261031.md) |
 | panic 与恢复 | 原生 panic、stackshot、回溯及 USB panic 命令；正常同步 FASTBOOT 与已覆盖的 panic FASTBOOT 路径验证 | 内核/USB 尚未启动、控制器完全失去响应等情况不能保证软件恢复；[历史恢复测试](docs/BRING-UP-STATE.md)、[标准化验收](docs/STANDARDIZATION-RESULT-20261029.md) |
 | KDP 调试前置 | 历史阶段已接入 CDC-ACM serial KDP，保存 LLDB/线上协议与调试记录 | 这是独立开发模式；不声称所有当前多核场景可继续执行或已重复验收；[历史测试](docs/BRING-UP-STATE.md) |
 | 开发诊断与复现 | 固定对象/UUID 的进程与线程采样、退出原因追踪、源码逐文件回放、ABI 检查、打包回读、带哈希的实机记录 | 诊断成功不等于被诊断服务已修复；[开发与验证流程](docs/DEVELOPMENT.md) |
@@ -47,11 +47,15 @@
 | --- | --- | --- |
 | UFS 块存储 | 使用真实内部 UFS，识别 GPT/userdata，读写、同步与 SCSI cache flush 接入；IOStorage ABI 核对 | 当前仍含轮询及继承固件状态的路径；完整 IRQ/SMMU/电源生命周期尚未完成；[存储与驱动审计](docs/DRIVER-AUDIT-20261029.md) |
 | 原版 APFS | prelink 原版 APFS；真实容器上使用 System、Preboot 和加密 Data，System 保持只读；受控 Preboot 持久写与重启读取通过 | 早期 HFS+ 根卷属于历史；当前路线为 APFS；[Data phase 2](docs/DATA-PHASE2-QUALIFIED-0351.md) |
-| Cryptex / SystemOS | 原始 SystemOS 只读介质、挂载身份、共享缓存及相关库路径接通，原版代码从中加载 | owner 内容策略与原版 trust-cache 交接不等于 Apple IM4M/SSV 认证；[启动日志](docs/qualification/0460/0460-media-boot.log)、[Cryptex 库测试](scripts/tests/cryptex-libraries-0378.cpp) |
-| 硬件 Root 与 nonce 2212 | 经 Qualcomm QSEE/Keymaster 硬件封装密钥恢复 Root，派生专用 Image4 nonce key，原版 ignition 路径继续启动；复位恢复、认证与失败拒绝已有实测 | 不是 Apple 熔丝 UID/SEP；不声称 UFS ICE 硬件数据加密或物理断电安全验收；[最新密钥回归证据](docs/qualification/0460/0460-systembag-qualified.json) |
-| 软件密码学基础 | 内核所需哈希/HMAC、PRNG/DRBG、AES-CBC 与 APFS 所用 XTS 路径接入，正反向/已知答案与真实加密文件验证 | 密钥来源的硬件保护和数据运算实现是两件事，不把软件 AES 称为硬件加速；[平台与密钥里程碑](docs/PLATFORM-BASELINE-20261029.md)、[加密 Data](docs/LOCAL-IDENTITY-AND-PROTECTED-DATA-LIFECYCLE-20261031.md) |
-| 原版 APFS 密钥接口 | FS/FV、卷控制、metadata/每文件密钥与 CPX I/O 接通；原版工具创建并挂载真实加密 Data | 当前为硬件 Root 支撑的 factory 无口令 C/D 策略，未实现全类别；[Data 与密钥生命周期](docs/LOCAL-IDENTITY-AND-PROTECTED-DATA-LIFECYCLE-20261031.md) |
-| C/D 类加密文件 | 真实文件写入、同步、复位后读取、受控 class rewrap；旧明文与原始密文样本保持；私有测试文件的类别生命周期已修复 | 不能推导 A/B 类、锁屏口令、完整 keychain 或 SEP 可用；[0459 验收](docs/qualification/0459/0459-qualified-runtime.json)、[0460 回归](docs/qualification/0460/0460-systembag-qualified.json) |
+| Cryptex / SystemOS | 原始 SystemOS 只读介质、挂载身份、共享缓存及相关库路径接通，原版代码从中加载 | owner 内容策略与原版 trust-cache 交接不等于 Apple IM4M/SSV 认证；[启动日志](docs/qualification/0462/0462-media-boot.log)、[Cryptex 库测试](scripts/tests/cryptex-libraries-0378.cpp) |
+| 硬件 Root 与 nonce 2212 | 经 Qualcomm QSEE/Keymaster 硬件封装密钥恢复 Root，派生专用 Image4 nonce key，原版 ignition 路径继续启动；复位恢复、认证与失败拒绝已有实测 | 不是 Apple 熔丝 UID/SEP；不声称 UFS ICE 硬件数据加密或物理断电安全验收；[最新密钥回归证据](docs/qualification/0462/0462-systembag-qualified.json) |
+| 软件密码学基础 | 内核所需哈希/HMAC、PRNG/DRBG、AES-CBC 与 APFS 所用 XTS 路径接入；X25519/ConcatKDF、B类实际包封与冷恢复通过；B类加密CPX和原版锁定准入已实测，非全RAM擦除验收 | 密钥来源的硬件保护和数据运算实现是两件事，不把软件 AES 称为硬件加速；[密码学基础](docs/CLASS-B-CRYPTO-20261031.md)、[平台与密钥里程碑](docs/PLATFORM-BASELINE-20261029.md)、[加密 Data](docs/LOCAL-IDENTITY-AND-PROTECTED-DATA-LIFECYCLE-20261031.md) |
+| 原版 APFS 密钥接口 | FS/FV、卷控制、metadata/每文件密钥与 CPX I/O 接通；原版工具创建并挂载真实加密 Data | 硬件Root支撑factory无口令C/D及派生B后端，未实现全类别/口令/SEP；B缓存改为内部加密句柄；[Data 与密钥生命周期](docs/LOCAL-IDENTITY-AND-PROTECTED-DATA-LIFECYCLE-20261031.md) |
+| 原版 keychain C/D | 严格 AMFI entitlement，原版 securityd 的 7/8/10/11 类 AES256 密钥真实包封/解封，完整内核重启后从原持久记录恢复 | 此行仅为早期C/D证据；后续AK/AKU见下行，口令/完整keychain/Apple SEP未完成；[0464–0465 验收](docs/KEYCHAIN-CD-20261031.md) |
+| A类完整保护（factory无PIN） | 原版APFS真实加密写读、锁定已打开缓存/非缓存读写零传输、解锁恢复及完整重启旧密钥/原密文恢复 | 非口令/SEP或全AKS；[0470–0471](docs/CLASS-A-STORAGE-20261101.md) |
+| B类加密存储与数据库 | 原版APFS真实B文件写读/锁定准入与完整重启恢复，原版locationd B数据库/journal同步成功 | B内部加密CPX与重启恢复通过，迁移未完成；[0468–0469](docs/CLASS-B-CPX-20261101.md) |
+| keychain AK/AKU | 原版AK6包封/解封、AKU9包封及完整重启后类别6–11旧记录恢复 | factory无口令与有限AES密钥profile，非完整keychain或Apple SEP；[实机边界](docs/CLASS-B-STORAGE-20261101.md) |
+| C/D 类加密文件 | 真实文件写入、同步、复位后读取、受控 class rewrap；旧明文与原始密文样本保持；私有测试文件的类别生命周期已修复 | 此行仅为C/D证据，A/B见独立验收；锁屏口令、完整keychain和SEP未完成；[0459 验收](docs/qualification/0459/0459-qualified-runtime.json)、[0462 回归](docs/qualification/0462/0462-systembag-qualified.json) |
 | 真实 Data 内容与 phase 2 | 恢复 9,624 项固定初始布局、约 511 MB 逻辑文件；FactoryData/Pearl 布局、原版挂载 phase 2 及正常卸载已有实测 | 不伪造校准数据、不预设 setup 完成；原版首次系统迁移仍未完成；[恢复与验收](docs/DATA-PHASE2-QUALIFIED-0351.md) |
 | keybagd / system bag | 原版 `MKB_INIT` 完成；真实持久化 systembag envelope、认证 cookie 与实际 Data 映射，重启复用原 bank | envelope 内是本后端真实封装记录，不是 Apple SEP blob；用户态 AKS 仅已覆盖接口可用；[原版 keybagd 验收](docs/KEYBAGD-BOOTSTRAP-0356.md) |
 | RTC / 系统日历 | PMIC RTC 读取、持久日历偏移与重启恢复，解决早期系统时间回退引发的时间警告 | 不是可信时间、抗回滚或完整低功耗时钟验收；[时钟报告](docs/WATCHDOG-CLOCK-20261030.md) |
@@ -76,12 +80,13 @@
 ## 尚未达成
 
 - **可见、可交互 SpringBoard**：进程执行和同 PID 存活不是桌面验收；系统迁移与 shell check-in 仍有等待。
-- **当前数据库故障**：0460 三次实机采样确认原版 locationd 进入 SQLite I/O 错误后的 5 秒重试，实际数据库路径和失败操作尚未确定。不能据此认定是权限、损坏或缺失密钥。0461 是诊断候选，尚未实机验收。
+- **密钥与迁移后续依赖**：A/B/C/D与六类keychain已有有界证据；仍需补实际原版接口并解除迁移/桌面登记等待。见[最新证据与边界](docs/CLASS-A-STORAGE-20261101.md)。
 - **真实图形加速与呈现**：A650/Metal、CoreAnimation 到屏幕的完整链路、DPU/DSI 时序和物理 120 Hz 尚未验收；软件定时器或 FrontBoard 上报值不算物理 vsync。
-- **完整 AppleKeyStore/安全能力**：A/B 类、口令、完整 keychain、多用户及 SEP 兼容尚未完成；未知接口真实返回错误。
+- **完整原版keychain**：类别6–11的有限AES密钥profile和旧记录重启恢复通过；口令、其他接口和完整锁生命周期验收仍未完成。见[最新实机报告](docs/CLASS-B-STORAGE-20261101.md)。
+- **完整 AppleKeyStore/安全能力**：锁屏口令、完整keychain/AKS、多用户及SEP兼容尚未完成；A/B限定factory无PIN，非全RAM擦除证明；未知接口真实返回错误。
 - **完整手机外设体验**：蓝牙无线功能、Wi-Fi、蜂窝、音频、相机、传感器、完整充电/电池/热管理与休眠唤醒，没有本项目的完整可用验收。
 
-后续顺序为：定位实际 I/O 故障 → 完成原版迁移与 shell 登记 → 修复阻塞主线的 daemon 功能 → 推进并验证真实图形呈现和 GUI 输入 → 可用 SpringBoard → 恢复蓝牙任务。不通过隐藏日志、停止 watchdog 或伪造成功缩小问题。
+后续顺序为：硬化B类缓存与补齐实际密钥/I/O依赖 → 完成原版迁移与 shell 登记 → 修复阻塞主线的 daemon 功能 → 推进并验证真实图形呈现和 GUI 输入 → 可用 SpringBoard → 恢复蓝牙任务。不通过隐藏日志、停止 watchdog 或伪造成功缩小问题。
 
 ## 从立项到当前的里程碑
 
@@ -96,7 +101,12 @@
 | 0357–0386 时钟与授权 | RTC 日历、持久 NVRAM/defaults 资源生命周期、原版 watchdog 与板级 Sandbox 策略匹配 |
 | 0387–0424 外设研究 | AKS/daemon 诊断及蓝牙固件、时钟、UART、供电资源和板型证据；蓝牙功能延期 |
 | 0425–0443 HID / 显示前置 | 原版 HID 闭包、真实音量键、触摸协议；真实显示枚举、区域与缩放修复 |
-| 0445–0460 原版迁移追踪 | 修复 factory 状态服务、安装器目录和本地身份解析、保护文件生命周期；真实触摸验收；定位 locationd 原版数据库重试 |
+| 0445–0462 原版迁移追踪 | 修复 factory 状态服务、安装器目录和本地身份解析、保护文件生命周期；真实触摸验收；定位 locationd 原版 B 类 journal 写入 EPERM 和密钥服务缺口 |
+| 0463 密码学与 AKS 取证 | X25519/ConcatKDF 主机及原生已知答案通过，取得原版 wrap/unwrap ABI 和 securityd 拒绝证据；真实 B 类/keychain 仍待实现 |
+| 0464–0465 原版 keychain C/D | 硬件 Root/bank 用途隔离 KEK、严格原版 entitlement、原版包封/解封和完整重启恢复通过；B 类、A/AKU、迁移及桌面仍未完成 |
+| 0466–0467 B存储与keychain | 原版B文件/数据库真实加密I/O与冷恢复、原版keychain6–11旧记录恢复；明文缓存清除和迁移仍待完成 |
+| 0468–0469 B加密缓存 | APFS接收opaque64；新旧B文件、锁定准入和六类keychain跨重启恢复；非全RAM/迁移/桌面验收 |
+| 0470–0471 A类保护 | 原版缓存/直接I/O锁定拒绝，原key与原密文完整重启恢复；完整密钥接口/迁移/桌面仍未完成 |
 
 阶段编号是构建/验收序列，表中包含诊断与回归；不表示每个编号都新增了完整功能。更详细的历史与精确边界见[文档索引](docs/README.md)。
 
@@ -120,7 +130,7 @@ docs/qualification/               分阶段固定哈希的验收资料
 docs/history/                     已替代的首页、交接和早期草稿
 ```
 
-本仓库仍保留历史格式的 `board.toml`，其中 standalone、单核等设置不描述目前的完整 prelink 实机流程。**不能把旧入口当作一键重建当前 0460 的配方。** 官方格式 2、结构化 `porting.toml`/CI 和统一构建入口的迁移仍未完成；详见[仓库整理与规范差距](docs/REPOSITORY-LAYOUT.md)。
+本仓库仍保留历史格式的 `board.toml`，其中 standalone、单核等设置不描述目前的完整 prelink 实机流程。**不能把旧入口当作一键重建当前0471的配方。** 官方格式 2、结构化 `porting.toml`/CI 和统一构建入口的迁移仍未完成；详见[仓库整理与规范差距](docs/REPOSITORY-LAYOUT.md)。
 
 ## 获取源码与验证
 
@@ -136,9 +146,9 @@ git clone https://github.com/apple-oss-distributions/xnu.git ../apple-xnu
 mkdir -p .cache/qualification
 python3 scripts/qualification/replay-xnu.py \
   --repo . --xnu-source ../apple-xnu \
-  --manifest docs/qualification/0460/all-mac-source-0460.json \
-  --receipt .cache/qualification/replay-0460.json \
-  --cache .cache --expected-common 324
+  --manifest docs/qualification/0470/all-mac-source-0470.json \
+  --receipt .cache/qualification/replay-0470.json \
+  --cache .cache --expected-common 331
 ```
 
 校验已公开的真实触摸记录：

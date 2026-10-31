@@ -1,0 +1,19 @@
+{
+  "passed": true,
+  "physical_test": false,
+  "production_code_tested": true,
+  "independent_B_vector": true,
+  "independent_HB01_RFC3394_HMAC_vector": true,
+  "APFS_receives_ciphertext_only": true,
+  "original_FS_locked_descriptor_admission_requires_physical_requalification": true,
+  "behavioral_mutants_rejected": 12,
+  "explicit_models": [
+    "hardware Root restoration",
+    "VFS lock broadcast",
+    "mutex ownership",
+    "RNG",
+    "native CPX teardown not executed"
+  ],
+  "summary": "PASS 1874 actual B/keychain/bank assertions: independent EC/KDF/KW envelope, tamper/identity/AES/RNG faults, locked create, locked unwrap refusal, unlock recovery, revoke/race, C/D preservation; VFS/Root/locks/RNG explicit host models",
+  "fixture_sha256": "fd4bae67ba3613d99d35269f8e1430e5802e842da2316bd14932af1a841ac4b5"
+}

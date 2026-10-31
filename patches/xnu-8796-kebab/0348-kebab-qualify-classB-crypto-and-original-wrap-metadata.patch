@@ -1,0 +1,1019 @@
+--- a/bsd/kern/kebab_file_keys.c
++++ b/bsd/kern/kebab_file_keys.c
+@@ -89,6 +89,8 @@
+  return error;
+ }
+ 
++#include "kebab_class_b_math_impl.h"
++
+ static void kdc_clear_locked(void);
+ #include "kebab_device_classbag_impl.h"
+ 
+@@ -97,6 +99,7 @@
+ {
+  if (!kfk_context() || !secret || bytes!=32 || !g_crypto_funcs ||
+      !g_crypto_funcs->ccsha256_di || !g_crypto_funcs->cchmac_fn) return (int)kIOReturnBadArgument;
++ (void)kcb_math_selftest();
+  /* A separate domain from the root-record witness. Class keys are random
+   * per bag, never derived directly from a stable volume UUID. */
+  static const uint8_t domain[]="UniXNU.kebab.keybag-KEK.v1";
+--- a/iokit/Kernel/arm/kebab_aks_userclient_impl.h
++++ b/iokit/Kernel/arm/kebab_aks_userclient_impl.h
+@@ -3,6 +3,7 @@
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOMemoryDescriptor.h>
+ #include <libkern/OSAtomic.h>
++#include <sys/proc.h>
+ 
+ static const uint8_t kuc_data_uuid[16]={0x61,0x70,0x66,0x73,0x75,0x75,0x69,0x64,0,0x40,0x76,0x6f,0x6c,0x75,0x6d,1};
+ static bool
+@@ -109,6 +110,14 @@
+    }
+   }
+  }
++ /* Fixed metadata only: original raw key/crypto buffers are never read. */
++ static uint32_t wrap_reports;
++ if((selector==10||selector==11)&&in==2&&a->scalarInput&&
++     __atomic_load_n(&wrap_reports,__ATOMIC_RELAXED)<16){
++  uint32_t report=__atomic_fetch_add(&wrap_reports,1u,__ATOMIC_RELAXED);
++  if(report<16)IOLog("KEBAB AKS WRAP-META: selector=%u pid=%d bag64=0x%llx class64=0x%llx administrative=%u result=%x; no key buffer read\n",
++      selector,proc_selfpid(),(unsigned long long)a->scalarInput[0],(unsigned long long)a->scalarInput[1],administrative?1u:0u,result);
++ }
+  IOLog("KEBAB AKS UC: selector=%u scalar=%u/%u struct-in=%u result=%x; hardware factory C/D only; struct-out=%llu desc=%u/%u\n",selector,in,out,si,result,(unsigned long long)a->structureOutputSize,a->structureInputDescriptor!=nullptr,a->structureOutputDescriptor!=nullptr);
+  IOLog("KEBAB AKS ACCESS: selector=%u role=%s result=%x\n",selector,administrative?"administrative":"read-only-status",result);
+  return result;
+--- a/libkern/conf/files
++++ b/libkern/conf/files
+@@ -99,6 +99,7 @@
+ libkern/crypto/kebab_aes_ct_dec.c	optional crypto
+ libkern/crypto/kebab_aes_ct_cbcenc.c	optional crypto
+ libkern/crypto/kebab_aes_ct_cbcdec.c	optional crypto
++libkern/crypto/kebab_curve25519/kebab_x25519.c	optional crypto
+ libkern/crypto/kebab_sha2big.c	optional crypto_sha2
+ libkern/crypto/kebab_dec64be.c	optional crypto_sha2
+ libkern/crypto/kebab_enc64be.c	optional crypto_sha2
+--- /dev/null
++++ b/bsd/kern/kebab_class_b_math_impl.h
+@@ -0,0 +1,32 @@
++/* Math readiness only. Does not generate a key, change bag state, publish
++ * class availability or replace any existing C/D result. Public KAT inputs. */
++extern int kebab_x25519(uint8_t[32],const uint8_t[32],const uint8_t[32]);
++extern int kebab_class_b_concat_kdf(uint8_t[32],const uint8_t[32],const uint8_t[32],const uint8_t[32],int(*)(const uint8_t*,size_t,uint8_t[32]));
++static uint32_t kcb_math_state;
++static int
++kcb_sha256(const uint8_t *input,size_t bytes,uint8_t output[32])
++{
++ if(!g_crypto_funcs||!g_crypto_funcs->ccsha256_di||!g_crypto_funcs->ccdigest_fn)return 0;
++ g_crypto_funcs->ccdigest_fn(g_crypto_funcs->ccsha256_di,(unsigned long)bytes,input,output);return 1;
++}
++static int
++kcb_math_selftest(void)
++{
++ uint32_t state=__atomic_load_n(&kcb_math_state,__ATOMIC_ACQUIRE),expected=0;
++ if(state>=2)return state==2;
++ if(!__atomic_compare_exchange_n(&kcb_math_state,&expected,1,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return 0;
++ static const uint8_t scalar[32]={0xa5,0x46,0xe3,0x6b,0xf0,0x52,0x7c,0x9d,0x3b,0x16,0x15,0x4b,0x82,0x46,0x5e,0xdd,0x62,0x14,0x4c,0x0a,0xc1,0xfc,0x5a,0x18,0x50,0x6a,0x22,0x44,0xba,0x44,0x9a,0xc4};
++ static const uint8_t point[32]={0xe6,0xdb,0x68,0x67,0x58,0x30,0x30,0xdb,0x35,0x94,0xc1,0xa4,0x24,0xb1,0x5f,0x7c,0x72,0x66,0x24,0xec,0x26,0xb3,0x35,0x3b,0x10,0xa9,0x03,0xa6,0xd0,0xab,0x1c,0x4c};
++ static const uint8_t shared[32]={0xc3,0xda,0x55,0x37,0x9d,0xe9,0xc6,0x90,0x8e,0x94,0xea,0x4d,0xf2,0x8d,0x08,0x4f,0x32,0xec,0xcf,0x03,0x49,0x1c,0x71,0xf7,0x54,0xb4,0x07,0x55,0x77,0xa2,0x85,0x52};
++ static const uint8_t ephemeral[32]={0x1c,0x9f,0xd8,0x8f,0x45,0x60,0x6d,0x93,0x2a,0x80,0xc7,0x18,0x24,0xae,0x15,0x1d,0x15,0xd7,0x3e,0x77,0xde,0x38,0xe8,0xe0,0x00,0x85,0x2e,0x61,0x4f,0xae,0x70,0x19};
++ static const uint8_t peer[32]={0xe6,0xdb,0x68,0x67,0x58,0x30,0x30,0xdb,0x35,0x94,0xc1,0xa4,0x24,0xb1,0x5f,0x7c,0x72,0x66,0x24,0xec,0x26,0xb3,0x35,0x3b,0x10,0xa9,0x03,0xa6,0xd0,0xab,0x1c,0x4c};
++ static const uint8_t derived[32]={0x11,0x77,0xaa,0x99,0x70,0xc8,0x0b,0x7d,0xe6,0xaa,0xf7,0xa6,0xcf,0x6c,0xd7,0x1a,0x69,0x78,0x89,0xd2,0xb6,0x4b,0x93,0x07,0x50,0x49,0x9d,0x16,0x48,0xe5,0x40,0xda};
++ uint8_t output[32]={0},zero[32]={0};
++ int ok=kebab_x25519(output,scalar,point)&&!memcmp(output,shared,32);
++ if(ok)ok=kebab_class_b_concat_kdf(output,shared,ephemeral,peer,kcb_sha256)&&!memcmp(output,derived,32);
++ if(ok){memset(output,0xa5,32);ok=!kebab_x25519(output,scalar,zero);for(unsigned i=0;i<32;++i)ok=ok&&(output[i]==0xa5);}
++ kfk_wipe(output,sizeof(output));kfk_wipe(zero,sizeof(zero));
++ __atomic_store_n(&kcb_math_state,ok?2u:3u,__ATOMIC_RELEASE);
++ printf("KEBAB CLASS-B CRYPTO: X25519/ConcatKDF KAT %s; math only, classB services unavailable\n",ok?"PASS":"FAIL");
++ return ok;
++}
+--- /dev/null
++++ b/libkern/crypto/kebab_curve25519/ccopy.c
+@@ -0,0 +1,44 @@
++/*
++ * Copyright (c) 2016 Thomas Pornin <pornin@bolet.org>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining 
++ * a copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sublicense, and/or sell copies of the Software, and to
++ * permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be 
++ * included in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, 
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND 
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#include "inner.h"
++
++/* see inner.h */
++void
++br_ccopy(uint32_t ctl, void *dst, const void *src, size_t len)
++{
++	unsigned char *d;
++	const unsigned char *s;
++
++	d = dst;
++	s = src;
++	while (len -- > 0) {
++		uint32_t x, y;
++
++		x = *s ++;
++		y = *d;
++		*d = MUX(ctl, x, y);
++		d ++;
++	}
++}
+--- /dev/null
++++ b/libkern/crypto/kebab_curve25519/ec_c25519_m31.c
+@@ -0,0 +1,784 @@
++/*
++ * Copyright (c) 2017 Thomas Pornin <pornin@bolet.org>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining 
++ * a copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sublicense, and/or sell copies of the Software, and to
++ * permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be 
++ * included in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, 
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND 
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#include "inner.h"
++
++/* obsolete
++#include <stdio.h>
++#include <stdlib.h>
++static void
++print_int(const char *name, const uint32_t *x)
++{
++	size_t u;
++	unsigned char tmp[40];
++
++	printf("%s = ", name);
++	for (u = 0; u < 9; u ++) {
++		if (x[u] > 0x3FFFFFFF) {
++			printf("INVALID:");
++			for (u = 0; u < 9; u ++) {
++				printf(" %08X", x[u]);
++			}
++			printf("\n");
++			return;
++		}
++	}
++	memset(tmp, 0, sizeof tmp);
++	for (u = 0; u < 9; u ++) {
++		uint64_t w;
++		int j, k;
++
++		w = x[u];
++		j = 30 * (int)u;
++		k = j & 7;
++		if (k != 0) {
++			w <<= k;
++			j -= k;
++		}
++		k = j >> 3;
++		for (j = 0; j < 8; j ++) {
++			tmp[39 - k - j] |= (unsigned char)w;
++			w >>= 8;
++		}
++	}
++	for (u = 8; u < 40; u ++) {
++		printf("%02X", tmp[u]);
++	}
++	printf("\n");
++}
++*/
++
++/*
++ * If BR_NO_ARITH_SHIFT is undefined, or defined to 0, then we _assume_
++ * that right-shifting a signed negative integer copies the sign bit
++ * (arithmetic right-shift). This is "implementation-defined behaviour",
++ * i.e. it is not undefined, but it may differ between compilers. Each
++ * compiler is supposed to document its behaviour in that respect. GCC
++ * explicitly defines that an arithmetic right shift is used. We expect
++ * all other compilers to do the same, because underlying CPU offer an
++ * arithmetic right shift opcode that could not be used otherwise.
++ */
++#if BR_NO_ARITH_SHIFT
++#define ARSH(x, n)   (((uint32_t)(x) >> (n)) \
++                    | ((-((uint32_t)(x) >> 31)) << (32 - (n))))
++#else
++#define ARSH(x, n)   ((*(int32_t *)&(x)) >> (n))
++#endif
++
++/*
++ * Convert an integer from unsigned little-endian encoding to a sequence of
++ * 30-bit words in little-endian order. The final "partial" word is
++ * returned.
++ */
++static uint32_t
++le8_to_le30(uint32_t *dst, const unsigned char *src, size_t len)
++{
++	uint32_t acc;
++	int acc_len;
++
++	acc = 0;
++	acc_len = 0;
++	while (len -- > 0) {
++		uint32_t b;
++
++		b = *src ++;
++		if (acc_len < 22) {
++			acc |= b << acc_len;
++			acc_len += 8;
++		} else {
++			*dst ++ = (acc | (b << acc_len)) & 0x3FFFFFFF;
++			acc = b >> (30 - acc_len);
++			acc_len -= 22;
++		}
++	}
++	return acc;
++}
++
++/*
++ * Convert an integer (30-bit words, little-endian) to unsigned
++ * little-endian encoding. The total encoding length is provided; all
++ * the destination bytes will be filled.
++ */
++static void
++le30_to_le8(unsigned char *dst, size_t len, const uint32_t *src)
++{
++	uint32_t acc;
++	int acc_len;
++
++	acc = 0;
++	acc_len = 0;
++	while (len -- > 0) {
++		if (acc_len < 8) {
++			uint32_t w;
++
++			w = *src ++;
++			*dst ++ = (unsigned char)(acc | (w << acc_len));
++			acc = w >> (8 - acc_len);
++			acc_len += 22;
++		} else {
++			*dst ++ = (unsigned char)acc;
++			acc >>= 8;
++			acc_len -= 8;
++		}
++	}
++}
++
++/*
++ * Multiply two integers. Source integers are represented as arrays of
++ * nine 30-bit words, for values up to 2^270-1. Result is encoded over
++ * 18 words of 30 bits each.
++ */
++static void
++mul9(uint32_t *d, const uint32_t *a, const uint32_t *b)
++{
++	/*
++	 * Maximum intermediate result is no more than
++	 * 10376293531797946367, which fits in 64 bits. Reason:
++	 *
++	 *   10376293531797946367 = 9 * (2^30-1)^2 + 9663676406
++	 *   10376293531797946367 < 9663676407 * 2^30
++	 *
++	 * Thus, adding together 9 products of 30-bit integers, with
++	 * a carry of at most 9663676406, yields an integer that fits
++	 * on 64 bits and generates a carry of at most 9663676406.
++	 */
++	uint64_t t[17];
++	uint64_t cc;
++	int i;
++
++	t[ 0] = MUL31(a[0], b[0]);
++	t[ 1] = MUL31(a[0], b[1])
++		+ MUL31(a[1], b[0]);
++	t[ 2] = MUL31(a[0], b[2])
++		+ MUL31(a[1], b[1])
++		+ MUL31(a[2], b[0]);
++	t[ 3] = MUL31(a[0], b[3])
++		+ MUL31(a[1], b[2])
++		+ MUL31(a[2], b[1])
++		+ MUL31(a[3], b[0]);
++	t[ 4] = MUL31(a[0], b[4])
++		+ MUL31(a[1], b[3])
++		+ MUL31(a[2], b[2])
++		+ MUL31(a[3], b[1])
++		+ MUL31(a[4], b[0]);
++	t[ 5] = MUL31(a[0], b[5])
++		+ MUL31(a[1], b[4])
++		+ MUL31(a[2], b[3])
++		+ MUL31(a[3], b[2])
++		+ MUL31(a[4], b[1])
++		+ MUL31(a[5], b[0]);
++	t[ 6] = MUL31(a[0], b[6])
++		+ MUL31(a[1], b[5])
++		+ MUL31(a[2], b[4])
++		+ MUL31(a[3], b[3])
++		+ MUL31(a[4], b[2])
++		+ MUL31(a[5], b[1])
++		+ MUL31(a[6], b[0]);
++	t[ 7] = MUL31(a[0], b[7])
++		+ MUL31(a[1], b[6])
++		+ MUL31(a[2], b[5])
++		+ MUL31(a[3], b[4])
++		+ MUL31(a[4], b[3])
++		+ MUL31(a[5], b[2])
++		+ MUL31(a[6], b[1])
++		+ MUL31(a[7], b[0]);
++	t[ 8] = MUL31(a[0], b[8])
++		+ MUL31(a[1], b[7])
++		+ MUL31(a[2], b[6])
++		+ MUL31(a[3], b[5])
++		+ MUL31(a[4], b[4])
++		+ MUL31(a[5], b[3])
++		+ MUL31(a[6], b[2])
++		+ MUL31(a[7], b[1])
++		+ MUL31(a[8], b[0]);
++	t[ 9] = MUL31(a[1], b[8])
++		+ MUL31(a[2], b[7])
++		+ MUL31(a[3], b[6])
++		+ MUL31(a[4], b[5])
++		+ MUL31(a[5], b[4])
++		+ MUL31(a[6], b[3])
++		+ MUL31(a[7], b[2])
++		+ MUL31(a[8], b[1]);
++	t[10] = MUL31(a[2], b[8])
++		+ MUL31(a[3], b[7])
++		+ MUL31(a[4], b[6])
++		+ MUL31(a[5], b[5])
++		+ MUL31(a[6], b[4])
++		+ MUL31(a[7], b[3])
++		+ MUL31(a[8], b[2]);
++	t[11] = MUL31(a[3], b[8])
++		+ MUL31(a[4], b[7])
++		+ MUL31(a[5], b[6])
++		+ MUL31(a[6], b[5])
++		+ MUL31(a[7], b[4])
++		+ MUL31(a[8], b[3]);
++	t[12] = MUL31(a[4], b[8])
++		+ MUL31(a[5], b[7])
++		+ MUL31(a[6], b[6])
++		+ MUL31(a[7], b[5])
++		+ MUL31(a[8], b[4]);
++	t[13] = MUL31(a[5], b[8])
++		+ MUL31(a[6], b[7])
++		+ MUL31(a[7], b[6])
++		+ MUL31(a[8], b[5]);
++	t[14] = MUL31(a[6], b[8])
++		+ MUL31(a[7], b[7])
++		+ MUL31(a[8], b[6]);
++	t[15] = MUL31(a[7], b[8])
++		+ MUL31(a[8], b[7]);
++	t[16] = MUL31(a[8], b[8]);
++
++	/*
++	 * Propagate carries.
++	 */
++	cc = 0;
++	for (i = 0; i < 17; i ++) {
++		uint64_t w;
++
++		w = t[i] + cc;
++		d[i] = (uint32_t)w & 0x3FFFFFFF;
++		cc = w >> 30;
++	}
++	d[17] = (uint32_t)cc;
++}
++
++/*
++ * Square a 270-bit integer, represented as an array of nine 30-bit words.
++ * Result uses 18 words of 30 bits each.
++ */
++static void
++square9(uint32_t *d, const uint32_t *a)
++{
++	uint64_t t[17];
++	uint64_t cc;
++	int i;
++
++	t[ 0] = MUL31(a[0], a[0]);
++	t[ 1] = ((MUL31(a[0], a[1])) << 1);
++	t[ 2] = MUL31(a[1], a[1])
++		+ ((MUL31(a[0], a[2])) << 1);
++	t[ 3] = ((MUL31(a[0], a[3])
++		+ MUL31(a[1], a[2])) << 1);
++	t[ 4] = MUL31(a[2], a[2])
++		+ ((MUL31(a[0], a[4])
++		+ MUL31(a[1], a[3])) << 1);
++	t[ 5] = ((MUL31(a[0], a[5])
++		+ MUL31(a[1], a[4])
++		+ MUL31(a[2], a[3])) << 1);
++	t[ 6] = MUL31(a[3], a[3])
++		+ ((MUL31(a[0], a[6])
++		+ MUL31(a[1], a[5])
++		+ MUL31(a[2], a[4])) << 1);
++	t[ 7] = ((MUL31(a[0], a[7])
++		+ MUL31(a[1], a[6])
++		+ MUL31(a[2], a[5])
++		+ MUL31(a[3], a[4])) << 1);
++	t[ 8] = MUL31(a[4], a[4])
++		+ ((MUL31(a[0], a[8])
++		+ MUL31(a[1], a[7])
++		+ MUL31(a[2], a[6])
++		+ MUL31(a[3], a[5])) << 1);
++	t[ 9] = ((MUL31(a[1], a[8])
++		+ MUL31(a[2], a[7])
++		+ MUL31(a[3], a[6])
++		+ MUL31(a[4], a[5])) << 1);
++	t[10] = MUL31(a[5], a[5])
++		+ ((MUL31(a[2], a[8])
++		+ MUL31(a[3], a[7])
++		+ MUL31(a[4], a[6])) << 1);
++	t[11] = ((MUL31(a[3], a[8])
++		+ MUL31(a[4], a[7])
++		+ MUL31(a[5], a[6])) << 1);
++	t[12] = MUL31(a[6], a[6])
++		+ ((MUL31(a[4], a[8])
++		+ MUL31(a[5], a[7])) << 1);
++	t[13] = ((MUL31(a[5], a[8])
++		+ MUL31(a[6], a[7])) << 1);
++	t[14] = MUL31(a[7], a[7])
++		+ ((MUL31(a[6], a[8])) << 1);
++	t[15] = ((MUL31(a[7], a[8])) << 1);
++	t[16] = MUL31(a[8], a[8]);
++
++	/*
++	 * Propagate carries.
++	 */
++	cc = 0;
++	for (i = 0; i < 17; i ++) {
++		uint64_t w;
++
++		w = t[i] + cc;
++		d[i] = (uint32_t)w & 0x3FFFFFFF;
++		cc = w >> 30;
++	}
++	d[17] = (uint32_t)cc;
++}
++
++/*
++ * Perform a "final reduction" in field F255 (field for Curve25519)
++ * The source value must be less than twice the modulus. If the value
++ * is not lower than the modulus, then the modulus is subtracted and
++ * this function returns 1; otherwise, it leaves it untouched and it
++ * returns 0.
++ */
++static uint32_t
++reduce_final_f255(uint32_t *d)
++{
++	uint32_t t[9];
++	uint32_t cc;
++	int i;
++
++	memcpy(t, d, sizeof t);
++	cc = 19;
++	for (i = 0; i < 9; i ++) {
++		uint32_t w;
++
++		w = t[i] + cc;
++		cc = w >> 30;
++		t[i] = w & 0x3FFFFFFF;
++	}
++	cc = t[8] >> 15;
++	t[8] &= 0x7FFF;
++	CCOPY(cc, d, t, sizeof t);
++	return cc;
++}
++
++/*
++ * Perform a multiplication of two integers modulo 2^255-19.
++ * Operands are arrays of 9 words, each containing 30 bits of data, in
++ * little-endian order. Input value may be up to 2^256-1; on output, value
++ * fits on 256 bits and is lower than twice the modulus.
++ */
++static void
++f255_mul(uint32_t *d, const uint32_t *a, const uint32_t *b)
++{
++	uint32_t t[18];
++	uint64_t cc, w;
++	int i;
++
++	/*
++	 * Compute raw multiplication. All result words fit in 30 bits
++	 * each; upper word (t[17]) must fit on 2 bits, since the product
++	 * of two 256-bit integers must fit on 512 bits.
++	 */
++	mul9(t, a, b);
++
++	/*
++	 * Modular reduction: each high word is added where necessary.
++	 * Since the modulus is 2^255-19 and word 9 corresponds to
++	 * offset 9*30 = 270, word 9+k must be added to word k with
++	 * a factor of 19*2^15 = 622592. The extra bits in word 8 are also
++	 * added that way.
++	 */
++	cc = MUL31(t[8] >> 15, 19);
++	t[8] &= 0x7FFF;
++	for (i = 0; i < 9; i ++) {
++		w = (uint64_t)t[i] + cc + MUL31(t[i + 9], 622592);
++		t[i] = (uint32_t)w & 0x3FFFFFFF;
++		cc = w >> 30;
++	}
++	cc = MUL31(w >> 15, 19);
++	t[8] &= 0x7FFF;
++	for (i = 0; i < 9; i ++) {
++		w = t[i] + cc;
++		d[i] = (uint32_t)w & 0x3FFFFFFF;
++		cc = w >> 30;
++	}
++}
++
++/*
++ * Perform a squaring of an integer modulo 2^255-19.
++ * Operands are arrays of 9 words, each containing 30 bits of data, in
++ * little-endian order. Input value may be up to 2^256-1; on output, value
++ * fits on 256 bits and is lower than twice the modulus.
++ */
++static void
++f255_square(uint32_t *d, const uint32_t *a)
++{
++	uint32_t t[18];
++	uint64_t cc, w;
++	int i;
++
++	/*
++	 * Compute raw squaring. All result words fit in 30 bits
++	 * each; upper word (t[17]) must fit on 2 bits, since the square
++	 * of a 256-bit integers must fit on 512 bits.
++	 */
++	square9(t, a);
++
++	/*
++	 * Modular reduction: each high word is added where necessary.
++	 * Since the modulus is 2^255-19 and word 9 corresponds to
++	 * offset 9*30 = 270, word 9+k must be added to word k with
++	 * a factor of 19*2^15 = 622592. The extra bits in word 8 are also
++	 * added that way.
++	 */
++	cc = MUL31(t[8] >> 15, 19);
++	t[8] &= 0x7FFF;
++	for (i = 0; i < 9; i ++) {
++		w = (uint64_t)t[i] + cc + MUL31(t[i + 9], 622592);
++		t[i] = (uint32_t)w & 0x3FFFFFFF;
++		cc = w >> 30;
++	}
++	cc = MUL31(w >> 15, 19);
++	t[8] &= 0x7FFF;
++	for (i = 0; i < 9; i ++) {
++		w = t[i] + cc;
++		d[i] = (uint32_t)w & 0x3FFFFFFF;
++		cc = w >> 30;
++	}
++}
++
++/*
++ * Add two values in F255. Partial reduction is performed (down to less
++ * than twice the modulus).
++ */
++static void
++f255_add(uint32_t *d, const uint32_t *a, const uint32_t *b)
++{
++	/*
++	 * Since operand words fit on 30 bits, we can use 32-bit
++	 * variables throughout.
++	 */
++	int i;
++	uint32_t cc, w;
++
++	cc = 0;
++	for (i = 0; i < 9; i ++) {
++		w = a[i] + b[i] + cc;
++		d[i] = w & 0x3FFFFFFF;
++		cc = w >> 30;
++	}
++	cc = MUL15(w >> 15, 19);
++	d[8] &= 0x7FFF;
++	for (i = 0; i < 9; i ++) {
++		w = d[i] + cc;
++		d[i] = w & 0x3FFFFFFF;
++		cc = w >> 30;
++	}
++}
++
++/*
++ * Subtract one value from another in F255. Partial reduction is
++ * performed (down to less than twice the modulus).
++ */
++static void
++f255_sub(uint32_t *d, const uint32_t *a, const uint32_t *b)
++{
++	/*
++	 * We actually compute a - b + 2*p, so that the final value is
++	 * necessarily positive.
++	 */
++	int i;
++	uint32_t cc, w;
++
++	cc = (uint32_t)-38;
++	for (i = 0; i < 9; i ++) {
++		w = a[i] - b[i] + cc;
++		d[i] = w & 0x3FFFFFFF;
++		cc = ARSH(w, 30);
++	}
++	cc = MUL15((w + 0x10000) >> 15, 19);
++	d[8] &= 0x7FFF;
++	for (i = 0; i < 9; i ++) {
++		w = d[i] + cc;
++		d[i] = w & 0x3FFFFFFF;
++		cc = w >> 30;
++	}
++}
++
++/*
++ * Multiply an integer by the 'A24' constant (121665). Partial reduction
++ * is performed (down to less than twice the modulus).
++ */
++static void
++f255_mul_a24(uint32_t *d, const uint32_t *a)
++{
++	int i;
++	uint64_t cc, w;
++
++	cc = 0;
++	for (i = 0; i < 9; i ++) {
++		w = MUL31(a[i], 121665) + cc;
++		d[i] = (uint32_t)w & 0x3FFFFFFF;
++		cc = w >> 30;
++	}
++	cc = MUL31((uint32_t)(w >> 15), 19);
++	d[8] &= 0x7FFF;
++	for (i = 0; i < 9; i ++) {
++		w = (uint64_t)d[i] + cc;
++		d[i] = w & 0x3FFFFFFF;
++		cc = w >> 30;
++	}
++}
++
++static const unsigned char GEN[] = {
++	0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
++};
++
++static const unsigned char ORDER[] = {
++	0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
++	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
++	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
++	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
++};
++
++static const unsigned char *
++api_generator(int curve, size_t *len)
++{
++	(void)curve;
++	*len = 32;
++	return GEN;
++}
++
++static const unsigned char *
++api_order(int curve, size_t *len)
++{
++	(void)curve;
++	*len = 32;
++	return ORDER;
++}
++
++static size_t
++api_xoff(int curve, size_t *len)
++{
++	(void)curve;
++	*len = 32;
++	return 0;
++}
++
++static void
++cswap(uint32_t *a, uint32_t *b, uint32_t ctl)
++{
++	int i;
++
++	ctl = -ctl;
++	for (i = 0; i < 9; i ++) {
++		uint32_t aw, bw, tw;
++
++		aw = a[i];
++		bw = b[i];
++		tw = ctl & (aw ^ bw);
++		a[i] = aw ^ tw;
++		b[i] = bw ^ tw;
++	}
++}
++
++static uint32_t
++api_mul(unsigned char *G, size_t Glen,
++	const unsigned char *kb, size_t kblen, int curve)
++{
++	uint32_t x1[9], x2[9], x3[9], z2[9], z3[9];
++	uint32_t a[9], aa[9], b[9], bb[9];
++	uint32_t c[9], d[9], e[9], da[9], cb[9];
++	unsigned char k[32];
++	uint32_t swap;
++	int i;
++
++	(void)curve;
++
++	/*
++	 * Points are encoded over exactly 32 bytes. Multipliers must fit
++	 * in 32 bytes as well.
++	 * RFC 7748 mandates that the high bit of the last point byte must
++	 * be ignored/cleared.
++	 */
++	if (Glen != 32 || kblen > 32) {
++		return 0;
++	}
++	G[31] &= 0x7F;
++
++	/*
++	 * Initialise variables x1, x2, z2, x3 and z3. We set all of them
++	 * into Montgomery representation.
++	 */
++	x1[8] = le8_to_le30(x1, G, 32);
++	memcpy(x3, x1, sizeof x1);
++	memset(z2, 0, sizeof z2);
++	memset(x2, 0, sizeof x2);
++	x2[0] = 1;
++	memset(z3, 0, sizeof z3);
++	z3[0] = 1;
++
++	memcpy(k, kb, kblen);
++	memset(k + kblen, 0, (sizeof k) - kblen);
++	k[0] &= 0xF8;
++	k[31] &= 0x7F;
++	k[31] |= 0x40;
++
++	/* obsolete
++	print_int("x1", x1);
++	*/
++
++	swap = 0;
++	for (i = 254; i >= 0; i --) {
++		uint32_t kt;
++
++		kt = (k[i >> 3] >> (i & 7)) & 1;
++		swap ^= kt;
++		cswap(x2, x3, swap);
++		cswap(z2, z3, swap);
++		swap = kt;
++
++		/* obsolete
++		print_int("x2", x2);
++		print_int("z2", z2);
++		print_int("x3", x3);
++		print_int("z3", z3);
++		*/
++
++		f255_add(a, x2, z2);
++		f255_square(aa, a);
++		f255_sub(b, x2, z2);
++		f255_square(bb, b);
++		f255_sub(e, aa, bb);
++		f255_add(c, x3, z3);
++		f255_sub(d, x3, z3);
++		f255_mul(da, d, a);
++		f255_mul(cb, c, b);
++
++		/* obsolete
++		print_int("a ", a);
++		print_int("aa", aa);
++		print_int("b ", b);
++		print_int("bb", bb);
++		print_int("e ", e);
++		print_int("c ", c);
++		print_int("d ", d);
++		print_int("da", da);
++		print_int("cb", cb);
++		*/
++
++		f255_add(x3, da, cb);
++		f255_square(x3, x3);
++		f255_sub(z3, da, cb);
++		f255_square(z3, z3);
++		f255_mul(z3, z3, x1);
++		f255_mul(x2, aa, bb);
++		f255_mul_a24(z2, e);
++		f255_add(z2, z2, aa);
++		f255_mul(z2, e, z2);
++
++		/* obsolete
++		print_int("x2", x2);
++		print_int("z2", z2);
++		print_int("x3", x3);
++		print_int("z3", z3);
++		*/
++	}
++	cswap(x2, x3, swap);
++	cswap(z2, z3, swap);
++
++	/*
++	 * Inverse z2 with a modular exponentiation. This is a simple
++	 * square-and-multiply algorithm; we mutualise most non-squarings
++	 * since the exponent contains almost only ones.
++	 */
++	memcpy(a, z2, sizeof z2);
++	for (i = 0; i < 15; i ++) {
++		f255_square(a, a);
++		f255_mul(a, a, z2);
++	}
++	memcpy(b, a, sizeof a);
++	for (i = 0; i < 14; i ++) {
++		int j;
++
++		for (j = 0; j < 16; j ++) {
++			f255_square(b, b);
++		}
++		f255_mul(b, b, a);
++	}
++	for (i = 14; i >= 0; i --) {
++		f255_square(b, b);
++		if ((0xFFEB >> i) & 1) {
++			f255_mul(b, z2, b);
++		}
++	}
++	f255_mul(x2, x2, b);
++	reduce_final_f255(x2);
++	le30_to_le8(G, 32, x2);
++	kebab_x25519_wipe(x1, sizeof x1);
++	kebab_x25519_wipe(x2, sizeof x2);
++	kebab_x25519_wipe(x3, sizeof x3);
++	kebab_x25519_wipe(z2, sizeof z2);
++	kebab_x25519_wipe(z3, sizeof z3);
++	kebab_x25519_wipe(a, sizeof a);
++	kebab_x25519_wipe(aa, sizeof aa);
++	kebab_x25519_wipe(b, sizeof b);
++	kebab_x25519_wipe(bb, sizeof bb);
++	kebab_x25519_wipe(c, sizeof c);
++	kebab_x25519_wipe(d, sizeof d);
++	kebab_x25519_wipe(e, sizeof e);
++	kebab_x25519_wipe(da, sizeof da);
++	kebab_x25519_wipe(cb, sizeof cb);
++	kebab_x25519_wipe(k, sizeof k);
++	return 1;
++}
++
++static size_t
++api_mulgen(unsigned char *R,
++	const unsigned char *x, size_t xlen, int curve)
++{
++	const unsigned char *G;
++	size_t Glen;
++
++	G = api_generator(curve, &Glen);
++	memcpy(R, G, Glen);
++	api_mul(R, Glen, x, xlen, curve);
++	return Glen;
++}
++
++static uint32_t
++api_muladd(unsigned char *A, const unsigned char *B, size_t len,
++	const unsigned char *x, size_t xlen,
++	const unsigned char *y, size_t ylen, int curve)
++{
++	/*
++	 * We don't implement this method, since it is used for ECDSA
++	 * only, and there is no ECDSA over Curve25519 (which instead
++	 * uses EdDSA).
++	 */
++	(void)A;
++	(void)B;
++	(void)len;
++	(void)x;
++	(void)xlen;
++	(void)y;
++	(void)ylen;
++	(void)curve;
++	return 0;
++}
++
++/* see bearssl_ec.h */
++const br_ec_impl br_ec_c25519_m31 = {
++	(uint32_t)0x20000000,
++	&api_generator,
++	&api_order,
++	&api_xoff,
++	&api_mul,
++	&api_mulgen,
++	&api_muladd
++};
+--- /dev/null
++++ b/libkern/crypto/kebab_curve25519/inner.h
+@@ -0,0 +1,30 @@
++/* Minimal kernel compatibility declarations for the two pinned BearSSL files.
++ * Multiplication and MUX are the selected upstream constant-time macros;
++ * no point arithmetic is reimplemented here. */
++#ifndef KEBAB_X25519_INNER_H
++#define KEBAB_X25519_INNER_H
++#if defined(KERNEL)
++#include <sys/types.h>
++#include <libkern/libkern.h>
++#else
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++#endif
++#define MUL31(x,y) ((uint64_t)(x)*(uint64_t)(y))
++#define MUL15(x,y) ((uint32_t)(x)*(uint32_t)(y))
++#define MUX(c,x,y) ((y)^(-(uint32_t)(c)&((x)^(y))))
++#define CCOPY br_ccopy
++typedef struct {
++ uint32_t supported_curves;
++ const unsigned char*(*generator)(int,size_t*);
++ const unsigned char*(*order)(int,size_t*);
++ size_t(*xoff)(int,size_t*);
++ uint32_t(*mul)(unsigned char*,size_t,const unsigned char*,size_t,int);
++ size_t(*mulgen)(unsigned char*,const unsigned char*,size_t,int);
++ uint32_t(*muladd)(unsigned char*,const unsigned char*,size_t,const unsigned char*,size_t,const unsigned char*,size_t,int);
++} br_ec_impl;
++static void kebab_x25519_wipe(void*,size_t);
++void br_ccopy(uint32_t,void*,const void*,size_t);
++extern const br_ec_impl br_ec_c25519_m31;
++#endif
+--- /dev/null
++++ b/libkern/crypto/kebab_curve25519/kebab_x25519.c
+@@ -0,0 +1,60 @@
++/* X25519 math primitive for the pending real classB backend.
++ * No key generation, storage, class policy or AKS registration occurs here.
++ * Inputs are RFC7748 little-endian32. Output is committed only for a nonzero
++ * shared value; exact/partial input aliasing is supported via stack copies. */
++#define br_ccopy kebab_x25519_ccopy
++#define br_ec_c25519_m31 kebab_x25519_m31
++#include "inner.h"
++int kebab_x25519(uint8_t[32],const uint8_t[32],const uint8_t[32]);
++typedef int (*kebab_class_b_sha256_fn)(const uint8_t*,size_t,uint8_t[32]);
++int kebab_class_b_concat_kdf(uint8_t[32],const uint8_t[32],const uint8_t[32],const uint8_t[32],kebab_class_b_sha256_fn);
++#if defined(KEBAB_X25519_WIPE_AUDIT)
++void kebab_x25519_wipe_observed(const void*,size_t);
++#endif
++static void
++kebab_x25519_wipe(void *memory,size_t bytes)
++{
++ size_t count=bytes;volatile uint8_t *p=memory;
++ while(bytes--)*p++=0;
++ __asm__ volatile("" ::: "memory");
++#if defined(KEBAB_X25519_WIPE_AUDIT)
++ kebab_x25519_wipe_observed(memory,count);
++#else
++ (void)count;
++#endif
++}
++#include "ccopy.c"
++#include "ec_c25519_m31.c"
++int
++kebab_x25519(uint8_t output[32],const uint8_t scalar[32],const uint8_t point[32])
++{
++ if(!output||!scalar||!point)return 0;
++ uint8_t work[32],secret[32];
++ memcpy(work,point,32);memcpy(secret,scalar,32);
++ uint32_t ok=br_ec_c25519_m31.mul(work,32,secret,32,29),nonzero=0;
++ for(unsigned i=0;i<32;i++)nonzero|=work[i];
++ ok &= (nonzero != 0);
++ if(ok)memcpy(output,work,32);
++ kebab_x25519_wipe(work,sizeof(work));kebab_x25519_wipe(secret,sizeof(secret));
++ return (int)ok;
++}
++
++/* Provider-owned classB KDF transcript: BE32(1)||Z32||PartyU32||PartyV32.
++ * SHA256, fixed32 public fields, AlgorithmID omitted. This is a declared
++ * backend encoding, not a claim to decode Apple SEP wrapped-key blobs. */
++int
++kebab_class_b_concat_kdf(uint8_t output[32],const uint8_t shared[32],
++    const uint8_t ephemeral_public[32],const uint8_t class_public[32],
++    kebab_class_b_sha256_fn hash)
++{
++ if(!output||!shared||!ephemeral_public||!class_public||!hash)return 0;
++ unsigned nonzero=0;
++ for(unsigned i=0;i<32;i++)nonzero|=shared[i];
++ if(!nonzero)return 0;
++ uint8_t input[100]={0,0,0,1},digest[32]={0};
++ memcpy(input+4,shared,32);memcpy(input+36,ephemeral_public,32);memcpy(input+68,class_public,32);
++ int ok=(hash(input,sizeof(input),digest)==1);
++ if(ok)memcpy(output,digest,32);
++ kebab_x25519_wipe(input,sizeof(input));kebab_x25519_wipe(digest,sizeof(digest));
++ return ok?1:0;
++}

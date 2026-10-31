@@ -1,0 +1,66 @@
+{
+  "qualified_wrapper_selectors": true,
+  "read_only": true,
+  "cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+  "kernelcache_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "io_connect_call_method": {
+    "original_export": "0x18e5526e4",
+    "wrapper_branch_stub": "0x1afb862c4",
+    "three_stub_instructions_checked": true
+  },
+  "selector10": {
+    "function": "aks_wrap_key",
+    "scalar_input_count": 2,
+    "scalar_input_order": [
+      "signed keybag handle",
+      "signed key class"
+    ],
+    "structure_input": "caller raw key and caller length",
+    "scalar_output_count": 1,
+    "scalar_output": "returned key class",
+    "structure_output": "caller wrapped buffer and caller capacity",
+    "is_classB_public_key_query": false
+  },
+  "selector11": {
+    "function": "aks_unwrap_key",
+    "scalar_input_count": 2,
+    "scalar_input_order": [
+      "signed keybag handle",
+      "signed key class"
+    ],
+    "structure_input": "caller wrapped key and caller length",
+    "scalar_output_count": 0,
+    "structure_output": "caller raw buffer and caller capacity"
+  },
+  "selector13": {
+    "function": "aks_lock_bag",
+    "scalar_input_count": 1,
+    "scalar_input": "signed keybag handle"
+  },
+  "original_wrapper_code_sha256": {
+    "_aks_wrap_key": "db1e501c6c55765dc8da6c4b3563a0cf0fed2a0b064d0ca380a518a03438128c",
+    "_aks_unwrap_key": "a27492b2e9f55ddc3a736e024807ca8ce8c35e57f509b6095440c78a2520017b",
+    "_aks_lock_bag": "19eeb7daf7f282a5b2fa69b33f361a521e61b7455639403c6023eebd933d6be7"
+  },
+  "kernel_windows": [
+    {
+      "selector": 10,
+      "entry": "0xfffffff0060d6b1c",
+      "window_sha256": "0ea6e16538e34ef58aa4cb70225477e67aa52004fff7999f34bc1959cafe701e"
+    },
+    {
+      "selector": 11,
+      "entry": "0xfffffff0060d6c08",
+      "window_sha256": "1352d47e900d8896b39ea34e7cc5537a7bf13c847bf2b50c16678776ef45d5f0"
+    },
+    {
+      "selector": 13,
+      "entry": "0xfffffff0060d6dcc",
+      "window_sha256": "4c87abd6547c9558f572b000aa42b04c41d7cd81dda767b3167e83e7f2e384fd"
+    }
+  ],
+  "exact_live_key_class_and_bag_values_known": true,
+  "kernel_provider_implementation_qualified": false,
+  "hardware_feature_implemented": false,
+  "live_metadata_receipt": "0463-qualified-runtime.json"
+}

@@ -1,0 +1,15 @@
+{
+  "passed": true,
+  "component_only": true,
+  "physical_test": false,
+  "root_locks_context_rng_and_CPX_teardown_explicit_models": true,
+  "actual_pinned_bank_and_AES_code": true,
+  "independent_RFC3394_and_domain_HMAC_vectors": 4,
+  "behavioral_mutants_rejected": 9,
+  "production_fixture_sha256": "eed32c91334b2cbf59b0a148714a1cacd825045013e4102a8041d3e23a395d04",
+  "current_public_header_sha256": "0bc57bffa4fad2a192e0417a55b5e82709d1fbfb79f467a47dedcc1fe486bafb",
+  "summary": "PASS 2754 keychain core assertions; real bank create/open/revoke, 4 independent wraps, class/root/bag binding, faults/output preservation; original C/D record unchanged",
+  "classB_implemented": false,
+  "AK_AKU_passcode_implemented": false,
+  "securityd_authorization_changed": false
+}

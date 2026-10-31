@@ -1,0 +1,26 @@
+{
+  "passed": true,
+  "old_sources_byte_exact_without_insertions": {
+    "bsd/kern/kebab_file_keys.c": "96d204072e22f85d294ba3ec1d2fbd2ffd561ba5d9e5007dc572dff7aef34396",
+    "iokit/Kernel/arm/kebab_aks_userclient_impl.h": "276e8ad4818c7bd98f340425b9caabf729549aae80171ee6f06774dcfc46fe6e",
+    "libkern/conf/files": "3c74f4e18a439187f894cf486c4f2d2e609f500020d4e6a4cbb9076136edfb88"
+  },
+  "actual_source_sha256": {
+    "bsd/kern/kebab_file_keys.c": "58572ebce7bcbb9b51f7fb246ab30fa19de2f8f35913b2b9991c0f6bd0e4a97d",
+    "iokit/Kernel/arm/kebab_aks_userclient_impl.h": "d6b9110d85aa31b08862ce57703f10808f30f16a3387ec441b71ce8d2846debb",
+    "libkern/conf/files": "eaa5348a7e1b2fc892c585d99ef1c9bc3820d525f56014782e186207c60c2235"
+  },
+  "complete_client_and_KAT_tested": true,
+  "all_prior_selector_access_marshalling_tests_retained": true,
+  "wrap_metadata_capped16": true,
+  "key_buffers_unmodified": true,
+  "read_admin_roles_unchanged": true,
+  "actual_crypto_algorithms_host": true,
+  "iokit_and_root_backend_explicit_models": true,
+  "hardware_classB_implemented": false,
+  "physical_test": false,
+  "fixture_sha256": {
+    "aks-wrap-meta-production-test.cpp": "d5150783e9a8732f140a6eaf56e11d03fa628ce47fe1051e0232ef148a498452",
+    "runtime-math-production-test.c": "6c59387e15faf0221f42e059deee5a4c5f980e2121876ee1418c8c311947ba94"
+  }
+}
