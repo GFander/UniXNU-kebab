@@ -1,0 +1,240 @@
+{
+  "accepted": true,
+  "version": "0441",
+  "scope": "Current-sender saved LR plus bounded original unwinder identifies the dispatched block created by original _lock_blockSystemApp; reason for entering the blocked state remains open",
+  "native_sha256": "419bd9070c18e6003215fbd054d99eece6709ad30bd975e4086ee67724855c57",
+  "native_bytes": 18930376,
+  "actual_log_sha256": "9cfc238005459442a6628fb6d6b80d48d89d042b172de951c078bb3c099cfd2e",
+  "source_replay": {
+    "common": 307,
+    "host": 4,
+    "files": 5261,
+    "all_equal": true
+  },
+  "request": {
+    "seconds": 85.12,
+    "request": 1,
+    "sender": "backboardd",
+    "sender_pid": 57,
+    "target": "SpringBoard",
+    "target_pid": 27,
+    "signal": 9
+  },
+  "independent_exit_seconds": 85.12,
+  "saved_lr_resolution": {
+    "request": 1,
+    "sender": "backboardd",
+    "pid": 57,
+    "depth": 1,
+    "kind": "saved-lr",
+    "pc": "0x1025ba320",
+    "lookup_pc": "0x1025ba31c",
+    "return_address_adjusted": true,
+    "image": "/usr/libexec/backboardd",
+    "unslid_pc": "0x10005e31c",
+    "symbol": "sub_0x10005e22c",
+    "offset": "0xf0",
+    "static_binary_uuid": "70b72340737a39738b474e9970f4ecb9",
+    "runtime_binary_uuid_independently_read": false
+  },
+  "primary_static_reference": {
+    "read_only": true,
+    "original_binary_sha256": "7aa6f8bf5ea2c3634fb8c8916a4e9c3c84508de78eccf57ca65c1ae4f676267c",
+    "original_binary_uuid": "70b72340737a39738b474e9970f4ecb9",
+    "runtime_binary_uuid_independently_read": false,
+    "block_creator": "-[BKSystemShellSentinel _lock_blockSystemApp]",
+    "creator_address": "0x10005d1a0",
+    "block_invoke": "0x10005e22c",
+    "actual_kill_call": "0x10005e31c",
+    "dispatch_stub": "0x1000916bc",
+    "dispatch_import": "_dispatch_async",
+    "kill_import": "_kill",
+    "kill_stub": "0x100091854",
+    "checks": [
+      {
+        "address": "0x10005d304",
+        "mnemonic": "adr",
+        "operands": "x8, #0x10005e22c",
+        "instruction_sha256": "c97fabcc1331cb274688ac20574f43626ea51463d9fc596725414750f3e37d89"
+      },
+      {
+        "address": "0x10005d330",
+        "mnemonic": "bl",
+        "operands": "#0x1000916bc",
+        "instruction_sha256": "ab828e0fcedf9c2a50a5df8a0908f7f3fcd6992648a4f1dbd3c4cd31a2040916"
+      },
+      {
+        "address": "0x10005e318",
+        "mnemonic": "mov",
+        "operands": "w1, #9",
+        "instruction_sha256": "ef10d0c594324944b95ad92802a10bb86ca01c5f1061b97d3a49d8af72b15edd"
+      },
+      {
+        "address": "0x10005e31c",
+        "mnemonic": "bl",
+        "operands": "#0x100091854",
+        "instruction_sha256": "4ba7055746038beabf795621c0f2b7bca235aa739a098c03767dea8e76b40798"
+      }
+    ],
+    "condition_that_called_block_system_app_not_yet_proven": true
+  },
+  "sender_state_api": "original thread_get_state(current_thread(), ARM_THREAD_STATE64)",
+  "original_signal_action_and_permission_preserved": true,
+  "event_cap": 16,
+  "frame_cap": 12,
+  "root_cause_repaired": false,
+  "all_signal_routes_covered": false,
+  "original_frame_chain_omits_immediate_lr": true,
+  "condition_that_requested_block_system_app_not_yet_proven": true,
+  "host_caller_test": {
+    "passed": true,
+    "source_sha256": "afa001d62876d57c8aea410c0a715b7b60dbdadcb9ab6364b4da6e1c1918f966",
+    "parent_sha256": "1e8628975301eedc90f582eed71b71160655fd38621782d5103eea1946910470",
+    "fixture_sha256": "2af3ea764ea3d461cdea70cc0e49be8cd578748de71a3c5ad93a7061419d7d76",
+    "complete_parent_file_recovered_by_removing_only_trace": true,
+    "complete_kill_body_unchanged": true,
+    "comparison_cases": 592,
+    "concurrent_requests": 1024,
+    "event_cap": 16,
+    "frame_cap": 12,
+    "empty_and_partial_errors_preserve_signal": true,
+    "behavioral_mutants_refused": 4,
+    "host_backtrace_is_explicit_model": true,
+    "not_tsan": true,
+    "all_signal_routes_covered": false
+  },
+  "host_link_test": {
+    "passed": true,
+    "source_sha256": "ed13ebef348496cc478e1663c7b9e758596d612169706d7b877c183371e07616",
+    "parent_sha256": "afa001d62876d57c8aea410c0a715b7b60dbdadcb9ab6364b4da6e1c1918f966",
+    "fixture_sha256": "4f8192e4723d55fd023e01b5a475e00e89379646879490d26cdb8c742684e49e",
+    "complete_parent_file_restored_by_removing_only_site": true,
+    "complete_kill_body_unchanged": true,
+    "comparison_cases": 592,
+    "concurrent_requests": 1024,
+    "event_cap": 16,
+    "frame_cap": 12,
+    "state_failure_and_wrong_count_do_not_stop_signal": true,
+    "behavioral_mutants_refused": 4,
+    "thread_state_and_backtrace_are_explicit_host_models": true,
+    "all_signal_routes_covered": false
+  },
+  "hardware_security_regression": {
+    "version": "0441",
+    "defaults_matching_complete": true,
+    "actual_log_sha256": "9cfc238005459442a6628fb6d6b80d48d89d042b172de951c078bb3c099cfd2e",
+    "native_sha256": "419bd9070c18e6003215fbd054d99eece6709ad30bd975e4086ee67724855c57",
+    "real_apple_image4_start_succeeded": true,
+    "actual_busy_reference_released": true,
+    "busy_lifecycle": [
+      [
+        0,
+        0,
+        1,
+        "defaults"
+      ],
+      [
+        11,
+        1,
+        1,
+        "AppleImage4"
+      ],
+      [
+        14,
+        2,
+        -1,
+        "defaults"
+      ],
+      [
+        15,
+        1,
+        -1,
+        "AppleImage4"
+      ]
+    ],
+    "final_busy_state": 0,
+    "actual_waits": [
+      "IOAESAccelerator",
+      "IOResources/IONVRAM",
+      "IODTNVRAM"
+    ],
+    "hardware_nonce_and_data_restored_without_generation": true,
+    "native_nvram_existing_proxy_adopted": true,
+    "nvram_encrypted_data_banks_cold_restored": true,
+    "nvram_restored_bank": 1,
+    "nvram_restored_generation": 318,
+    "nvram_hardware_or_rollback_claim": false,
+    "nvram_durable_write_calls": 2,
+    "watchdog_enabled": true,
+    "original_iokit_monitoring_preserved": true,
+    "watchdog_heartbeat_times": [
+      45.579,
+      45.579,
+      55.575,
+      65.562,
+      75.556,
+      85.558,
+      95.575,
+      105.562,
+      115.565,
+      125.559,
+      135.593,
+      145.595,
+      155.575,
+      165.556,
+      175.557,
+      185.614,
+      195.609,
+      205.601,
+      215.593
+    ],
+    "original_locked_observations": [
+      [
+        63.873,
+        30,
+        3
+      ],
+      [
+        93.89,
+        60,
+        6
+      ],
+      [
+        123.93,
+        90,
+        9
+      ],
+      [
+        153.953,
+        120,
+        12
+      ],
+      [
+        183.993,
+        150,
+        15
+      ],
+      [
+        213.971,
+        180,
+        18
+      ]
+    ],
+    "systembag_and_hardware_c_d_preserved": true,
+    "rtc_record_reused": true,
+    "panic": [],
+    "full_ios_or_springboard": false,
+    "gpu_display_input_started": true
+  },
+  "original_selector29_success_preserved": true,
+  "physical_touch_qualified": false,
+  "manual_touch_deferred_by_user": true,
+  "gpu_qualified": false,
+  "real_presentation_qualified": false,
+  "usable_springboard": false,
+  "bluetooth_deferred": true,
+  "last_independent_ro_data_fsck": "0416",
+  "last_full_system_systemos_check": "0341",
+  "development_fast": true,
+  "next": "Find the original request/condition entering blockSystemApp, preserve the original blocking/termination policy, and repair its real unmet prerequisite"
+}

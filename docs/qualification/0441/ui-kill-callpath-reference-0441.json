@@ -1,0 +1,41 @@
+{
+  "read_only": true,
+  "original_binary_sha256": "7aa6f8bf5ea2c3634fb8c8916a4e9c3c84508de78eccf57ca65c1ae4f676267c",
+  "original_binary_uuid": "70b72340737a39738b474e9970f4ecb9",
+  "runtime_binary_uuid_independently_read": false,
+  "block_creator": "-[BKSystemShellSentinel _lock_blockSystemApp]",
+  "creator_address": "0x10005d1a0",
+  "block_invoke": "0x10005e22c",
+  "actual_kill_call": "0x10005e31c",
+  "dispatch_stub": "0x1000916bc",
+  "dispatch_import": "_dispatch_async",
+  "kill_import": "_kill",
+  "kill_stub": "0x100091854",
+  "checks": [
+    {
+      "address": "0x10005d304",
+      "mnemonic": "adr",
+      "operands": "x8, #0x10005e22c",
+      "instruction_sha256": "c97fabcc1331cb274688ac20574f43626ea51463d9fc596725414750f3e37d89"
+    },
+    {
+      "address": "0x10005d330",
+      "mnemonic": "bl",
+      "operands": "#0x1000916bc",
+      "instruction_sha256": "ab828e0fcedf9c2a50a5df8a0908f7f3fcd6992648a4f1dbd3c4cd31a2040916"
+    },
+    {
+      "address": "0x10005e318",
+      "mnemonic": "mov",
+      "operands": "w1, #9",
+      "instruction_sha256": "ef10d0c594324944b95ad92802a10bb86ca01c5f1061b97d3a49d8af72b15edd"
+    },
+    {
+      "address": "0x10005e31c",
+      "mnemonic": "bl",
+      "operands": "#0x100091854",
+      "instruction_sha256": "4ba7055746038beabf795621c0f2b7bca235aa739a098c03767dea8e76b40798"
+    }
+  ],
+  "condition_that_called_block_system_app_not_yet_proven": true
+}

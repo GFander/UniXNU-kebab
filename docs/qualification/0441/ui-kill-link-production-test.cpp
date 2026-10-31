@@ -1,0 +1,246 @@
+
+#include <cassert>
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <cerrno>
+#include <mutex>
+#include <thread>
+#include <vector>
+#include <array>
+using u_int=unsigned;using int32_t=std::int32_t;
+#define KEBAB 1
+#define __unused
+#define AUDIT_ARG(...) ((void)0)
+static constexpr int SIGKILL=9,NSIG=32,MAXCOMLEN=16;
+struct proc{int pid;const char *name;std::atomic<int>refs{1};};using proc_t=proc *;using kauth_cred_t=int;
+struct kill_args{int pid,signum,posix;};
+static proc sender{51,"runningboardd"},springboard{27,"SpringBoard"},preboard{131,"PreBoard"},other{85,"other"},zombie{888,"SpringBoard"};
+static bool allow=true;static std::atomic<unsigned>signals{},finds{},releases{},checks{},groups{};
+static std::array<int,4>groupArguments{};
+static kauth_cred_t kauth_cred_get(){return 1;}
+static proc_t lookup(int pid){for(auto p:{&sender,&springboard,&preboard,&other,&zombie})if(p->pid==pid)return p;return nullptr;}
+static proc_t proc_find(int pid){finds++;auto p=lookup(pid);if(p&&p!=&zombie){p->refs++;return p;}return nullptr;}
+static proc_t pzfind(int pid){return pid==zombie.pid?&zombie:nullptr;}
+static void proc_rele(proc_t p){assert(p&&p->refs>1);p->refs--;releases++;}
+static bool cansignal(proc_t cp,kauth_cred_t c,proc_t p,int){assert(cp==&sender&&c==1&&p->refs>1);checks++;return allow;}
+static void psignal(proc_t p,int signum){assert(p&&p->refs>1&&signum>0&&signum<NSIG);signals++;}
+static int killpg1(proc_t cp,int sig,int pg,int all,int posix){assert(cp==&sender);groups++;groupArguments={sig,pg,all,posix};return 77;}
+static int proc_pid(proc_t p){assert(p);return p->pid;}
+static void proc_name(int pid,char *to,unsigned n){auto p=lookup(pid);assert(p);assert(p==&sender||p->refs>1);snprintf(to,n,"%s",p->name);}
+struct Event{unsigned slot;int from,to,signal;};static std::mutex eventLock;static std::vector<Event>events;
+static void event_print(const char *format,unsigned slot,const char *from,int frompid,const char *to,int topid,int sig){
+ assert(strstr(format,"permission passed, delivery not proven"));assert(!strcmp(from,sender.name));assert(topid==springboard.pid||topid==preboard.pid);assert(!strcmp(to,lookup(topid)->name));assert(lookup(topid)->refs>1);
+ std::lock_guard<std::mutex>l(eventLock);events.push_back({slot,frompid,topid,sig});
+}
+
+struct backtrace_user_info { int btui_error; };
+#define BTUINFO_INIT {}
+static thread_local unsigned trace_mode=2;
+static std::atomic<unsigned>trace_calls{},trace_headers{},trace_pcs{},trace_errors{};
+static unsigned backtrace_user(uintptr_t *frames,unsigned max,const void *ctl,backtrace_user_info *info){
+ assert(max==12&&!ctl);trace_calls++;info->btui_error=trace_mode==2?0:EFAULT;
+ unsigned count=trace_mode==0?0:(trace_mode==1?2:12);
+ for(unsigned i=0;i<count;i++)frames[i]=0x100010000ull+4*i;
+ return count;
+}
+static void event_print(const char *format,unsigned slot,const char *from,int pid,unsigned count,int error){
+ assert(strstr(format,"current sender, bounded to12")&&slot>=1&&slot<=16&&!strcmp(from,sender.name)&&pid==sender.pid);
+ assert(count==(trace_mode==0?0u:(trace_mode==1?2u:12u))&&error==(trace_mode==2?0:EFAULT));
+ trace_headers++;if(error)trace_errors++;
+}
+static void event_print(const char *format,unsigned slot,const char *from,int pid,unsigned depth,unsigned long long pc){
+ assert(strstr(format,"KEBAB UI KILL PC:")&&slot>=1&&slot<=16&&!strcmp(from,sender.name)&&pid==sender.pid);
+ assert(depth<12&&pc==0x100010000ull+4*depth);trace_pcs++;
+}
+
+struct arm_thread_state64_t { uint64_t pc,lr,fp; };
+using mach_msg_type_number_t=unsigned;using kern_return_t=int;using thread_state_t=unsigned *;
+static constexpr unsigned ARM_THREAD_STATE64_COUNT=68;static constexpr int ARM_THREAD_STATE64=6,KERN_SUCCESS=0;
+static std::atomic<unsigned>site_calls{},site_success{},site_errors{};
+static int current_thread(){return 1234;}
+static kern_return_t thread_get_state(int thread,int flavor,thread_state_t state,mach_msg_type_number_t *count){
+ assert(thread==current_thread()&&flavor==ARM_THREAD_STATE64&&*count==ARM_THREAD_STATE64_COUNT);site_calls++;
+ auto saved=reinterpret_cast<arm_thread_state64_t *>(state);assert(saved->pc==0&&saved->lr==0&&saved->fp==0);
+ if(trace_mode==0){*count=0;return 5;}
+ if(trace_mode==1){*count=ARM_THREAD_STATE64_COUNT-1;return KERN_SUCCESS;}
+ *saved={0x1c2618b44ull,0x10005e108ull,0x16f000000ull};return KERN_SUCCESS;
+}
+static void event_print(const char *format,unsigned request,const char *sender_name,int pid,int result,unsigned count){
+ assert(strstr(format,"KEBAB UI KILL SITE ERROR:")&&request>=1&&request<=16&&!strcmp(sender_name,sender.name)&&pid==sender.pid);
+ assert((trace_mode==0&&result==5&&count==0)||(trace_mode==1&&result==0&&count==ARM_THREAD_STATE64_COUNT-1));site_errors++;
+}
+static void event_print(const char *format,unsigned request,const char *sender_name,int pid,unsigned long long pc,unsigned long long lr,unsigned long long fp){
+ assert(strstr(format,"current sender only")&&request>=1&&request<=16&&!strcmp(sender_name,sender.name)&&pid==sender.pid);
+ assert(trace_mode==2&&pc==0x1c2618b44ull&&lr==0x10005e108ull&&fp==0x16f000000ull);site_success++;
+}
+#define printf event_print
+static void
+kebab_ui_kill_current_site(unsigned request, const char *sender, int pid)
+{
+    arm_thread_state64_t saved = {};
+    mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+    kern_return_t result = thread_get_state(current_thread(), ARM_THREAD_STATE64,
+        (thread_state_t)&saved, &count);
+    if (result != KERN_SUCCESS || count != ARM_THREAD_STATE64_COUNT) {
+        printf("KEBAB UI KILL SITE ERROR: request=%u sender=%s pid=%d result=0x%x count=%u\n",
+            request, sender, pid, result, count);
+        return;
+    }
+    printf("KEBAB UI KILL SITE: request=%u sender=%s pid=%d saved-pc=0x%llx lr=0x%llx fp=0x%llx; current sender only\n",
+        request, sender, pid, (unsigned long long)saved.pc,
+        (unsigned long long)saved.lr, (unsigned long long)saved.fp);
+}
+
+static void
+kebab_ui_kill_request(proc_t sender, proc_t target, int signum)
+{
+    if (signum != SIGKILL) return;
+    char target_name[MAXCOMLEN + 1] = {};
+    proc_name(proc_pid(target), target_name, sizeof(target_name));
+    if (strcmp(target_name, "SpringBoard") && strcmp(target_name, "PreBoard")) return;
+    static unsigned reported;
+    unsigned slot = __atomic_load_n(&reported, __ATOMIC_RELAXED);
+    do {
+        if (slot >= 16) return;
+    } while (!__atomic_compare_exchange_n(&reported, &slot, slot + 1, false,
+        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+    char sender_name[MAXCOMLEN + 1] = {};
+    proc_name(proc_pid(sender), sender_name, sizeof(sender_name));
+    printf("KEBAB UI KILL: accepted kill(2) request=%u sender=%s pid=%d target=%s pid=%d signal=%d; permission passed, delivery not proven\n",
+        slot + 1, sender_name, proc_pid(sender), target_name, proc_pid(target), signum);
+    /* This is the current sender's syscall, with interrupts enabled and no
+     * proc/task lock held. Use XNU's bounded user unwinder, not foreign thread
+     * reads. A failed/partial trace is evidence only: still send the signal. */
+    kebab_ui_kill_current_site(slot + 1, sender_name, proc_pid(sender));
+    uintptr_t frames[12] = {};
+    struct backtrace_user_info info = BTUINFO_INIT;
+    unsigned count = backtrace_user(frames, 12, NULL, &info);
+    printf("KEBAB UI KILL FRAMES: request=%u sender=%s pid=%d count=%u error=%d; current sender, bounded to12\n",
+        slot + 1, sender_name, proc_pid(sender), count, info.btui_error);
+    for (unsigned i = 0; i < count; i++) {
+        printf("KEBAB UI KILL PC: request=%u sender=%s pid=%d depth=%u pc=0x%llx\n",
+            slot + 1, sender_name, proc_pid(sender), i, (unsigned long long)frames[i]);
+    }
+}
+int
+kill_before(proc_t cp, struct kill_args *uap, __unused int32_t *retval)
+{
+	proc_t p;
+	kauth_cred_t uc = kauth_cred_get();
+	int posix = uap->posix;         /* !0 if posix behaviour desired */
+
+	AUDIT_ARG(pid, uap->pid);
+	AUDIT_ARG(signum, uap->signum);
+
+	if ((u_int)uap->signum >= NSIG) {
+		return EINVAL;
+	}
+	if (uap->pid > 0) {
+		/* kill single process */
+		if ((p = proc_find(uap->pid)) == NULL) {
+			if ((p = pzfind(uap->pid)) != NULL) {
+				/*
+				 * POSIX 1003.1-2001 requires returning success when killing a
+				 * zombie; see Rationale for kill(2).
+				 */
+				return 0;
+			}
+			return ESRCH;
+		}
+		AUDIT_ARG(process, p);
+		if (!cansignal(cp, uc, p, uap->signum)) {
+			proc_rele(p);
+			return EPERM;
+		}
+		if (uap->signum) {
+			psignal(p, uap->signum);
+		}
+		proc_rele(p);
+		return 0;
+	}
+	switch (uap->pid) {
+	case -1: /* broadcast signal */
+		return killpg1(cp, uap->signum, 0, 1, posix);
+	case 0: /* signal own process group */
+		return killpg1(cp, uap->signum, 0, 0, posix);
+	default: /* negative explicit process group */
+		return killpg1(cp, uap->signum, -(uap->pid), 0, posix);
+	}
+	/* NOTREACHED */
+}
+
+int
+kill_after(proc_t cp, struct kill_args *uap, __unused int32_t *retval)
+{
+	proc_t p;
+	kauth_cred_t uc = kauth_cred_get();
+	int posix = uap->posix;         /* !0 if posix behaviour desired */
+
+	AUDIT_ARG(pid, uap->pid);
+	AUDIT_ARG(signum, uap->signum);
+
+	if ((u_int)uap->signum >= NSIG) {
+		return EINVAL;
+	}
+	if (uap->pid > 0) {
+		/* kill single process */
+		if ((p = proc_find(uap->pid)) == NULL) {
+			if ((p = pzfind(uap->pid)) != NULL) {
+				/*
+				 * POSIX 1003.1-2001 requires returning success when killing a
+				 * zombie; see Rationale for kill(2).
+				 */
+				return 0;
+			}
+			return ESRCH;
+		}
+		AUDIT_ARG(process, p);
+		if (!cansignal(cp, uc, p, uap->signum)) {
+			proc_rele(p);
+			return EPERM;
+		}
+		if (uap->signum) {
+#if defined(KEBAB)
+			kebab_ui_kill_request(cp, p, uap->signum);
+#endif
+			psignal(p, uap->signum);
+		}
+		proc_rele(p);
+		return 0;
+	}
+	switch (uap->pid) {
+	case -1: /* broadcast signal */
+		return killpg1(cp, uap->signum, 0, 1, posix);
+	case 0: /* signal own process group */
+		return killpg1(cp, uap->signum, 0, 0, posix);
+	default: /* negative explicit process group */
+		return killpg1(cp, uap->signum, -(uap->pid), 0, posix);
+	}
+	/* NOTREACHED */
+}
+
+#undef printf
+static void balance(){for(auto p:{&sender,&springboard,&preboard,&other,&zombie})assert(p->refs==1);}
+static auto snapshot(){return std::array<unsigned,5>{signals.load(),finds.load(),releases.load(),checks.load(),groups.load()};}
+static void reset(){signals=finds=releases=checks=groups=0;groupArguments={};balance();}
+int main(){
+ int32_t value=123;kill_args k{27,SIGKILL,1};allow=false;assert(kill_after(&sender,&k,&value)==EPERM&&events.empty()&&!signals);balance();
+ trace_mode=0;allow=true;assert(!kill_after(&sender,&k,&value)&&signals==1&&events.size()==1&&events[0].from==51&&events[0].to==27&&events[0].signal==9&&value==123);balance();
+ trace_mode=1;k.pid=131;assert(!kill_after(&sender,&k,&value)&&signals==2&&events.size()==2);balance();
+ trace_mode=2;k.pid=85;assert(!kill_after(&sender,&k,&value)&&signals==3&&events.size()==2);balance();
+ // Compare complete original/current syscall behavior and all delegated groups.
+ for(bool permission:{false,true})for(int pid:{27,131,85,999,888,0,-1,-7})for(int sig=-2;sig<=NSIG+2;sig++){
+  allow=permission;kill_args a{pid,sig,1};reset();int expected=kill_before(&sender,&a,&value);auto counters=snapshot();auto args=groupArguments;balance();
+  reset();int actual=kill_after(&sender,&a,&value);assert(actual==expected&&snapshot()==counters&&groupArguments==args&&value==123);balance();
+ }
+ allow=true;reset();std::vector<std::thread>workers;
+ for(unsigned i=0;i<8;i++)workers.emplace_back([&]{kill_args a{27,9,1};for(unsigned j=0;j<128;j++){int32_t rv=17;assert(!kill_after(&sender,&a,&rv)&&rv==17);}});
+ for(auto&t:workers)t.join();balance();assert(signals==1024&&events.size()==16);
+ unsigned seen=0;for(auto e:events){assert(e.slot>=1&&e.slot<=16&&e.from==51&&e.signal==9);unsigned bit=1u<<(e.slot-1);assert(!(seen&bit));seen|=bit;}assert(seen==0xffff);
+ for(unsigned i=0;i<32;i++){kill_args a{131,9,1};assert(!kill_after(&sender,&a,&value));}balance();assert(events.size()==16&&signals==1056);
+ assert(trace_calls==16&&trace_headers==16&&trace_errors==2&&trace_pcs==170);
+ assert(site_calls==16&&site_success==14&&site_errors==2);
+ puts("PASS complete original-vs-current kill(2):592permission/signal/PID cases, reference/group/return preservation, selected accepted UI requests and concurrent16event cap; signal/credential/proc objects explicitly modeled");
+}
