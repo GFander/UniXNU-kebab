@@ -19,3 +19,5 @@
 固定主参考：[Command DB](https://github.com/LineageOS/android_kernel_oneplus_sm8250/blob/98a7970af93b7e01ee77156e7fa0eb7e059a57f0/drivers/soc/qcom/cmd-db.c)、[板级资源](https://github.com/LineageOS/android_kernel_oneplus_sm8250/blob/98a7970af93b7e01ee77156e7fa0eb7e059a57f0/arch/arm64/boot/dts/vendor/qcom/kona-regulators.dtsi)、[实际 RPMh 聚合驱动](https://github.com/LineageOS/android_kernel_oneplus_sm8250/blob/98a7970af93b7e01ee77156e7fa0eb7e059a57f0/drivers/regulator/rpmh-regulator.c)、[蓝牙上电流程](https://github.com/LineageOS/android_kernel_oneplus_sm8250/blob/98a7970af93b7e01ee77156e7fa0eb7e059a57f0/drivers/bluetooth/bluetooth-power.c)。
 
 收据：[qualification/0422/README.md](qualification/0422/README.md)。
+
+源码已发布并经GitHub API核对：[486af471a5b1](https://github.com/GFander/UniXNU-kebab/commit/486af471a5b1c09f0e23d96d4233df328dde92cf)。实际公开测试入口已从该仓库运行通过；蓝牙整体仍未完成。
