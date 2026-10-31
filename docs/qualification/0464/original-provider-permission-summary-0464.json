@@ -1,0 +1,33 @@
+{
+  "read_only": true,
+  "kernelcache_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "windows": [
+    {
+      "label": "keychain-classifier",
+      "start": "0xfffffff0060dc9b8",
+      "bytes": 128,
+      "sha256": "db54fe8ae2043ba88f74723147a0ed0644350acffb28326a65efd0c75c561a88"
+    },
+    {
+      "label": "entitlement-helper",
+      "start": "0xfffffff0060d23f8",
+      "bytes": 164,
+      "sha256": "52fba7e17cdcfa03da1782f70ba683a84662787772b2424b1bd0e71b842da571"
+    },
+    {
+      "label": "wrap-non13",
+      "start": "0xfffffff0060d9f5c",
+      "bytes": 56,
+      "sha256": "5d8068441eb71b455085246f495bceb44c3680747b744f428577125faacb971b"
+    },
+    {
+      "label": "unwrap-non13",
+      "start": "0xfffffff0060da128",
+      "bytes": 56,
+      "sha256": "58418f3f780a2f699eb7e72aabfd888378cf95473c79bafc60db4f586bdc4a73"
+    }
+  ],
+  "wrap_unwrap_checks_client_flag_mask8_at_offset244": true,
+  "entitlement_initializer_evidence": "../0463/original-keystore-entitlement-references-0463.json",
+  "full_original_provider_or_SEP_implemented": false
+}

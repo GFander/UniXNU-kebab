@@ -1,0 +1,174 @@
+--- a/bsd/kern/kebab_file_keys.c
++++ b/bsd/kern/kebab_file_keys.c
+@@ -93,6 +93,7 @@
+ 
+ static void kdc_clear_locked(void);
+ #include "kebab_device_classbag_impl.h"
++#include "kebab_keychain_keys_impl.h"
+ 
+ int
+ kebab_file_keys_prepare(const uint8_t *secret, unsigned bytes)
+--- a/bsd/kern/kebab_file_keys.h
++++ b/bsd/kern/kebab_file_keys.h
+@@ -40,6 +40,9 @@
+  uint32_t version, policy, available_classes;
+ };
+ int kebab_device_classbag_get_status(struct kebab_device_classbag_status *);
++
++/* Original keychain CK/DK/CKU/DKU only; separate from APFS classes. */
++int kebab_keychain_key_crypt(int32_t,uint32_t,const void *,unsigned,void *,unsigned,bool);
+ 
+ int kebab_device_classbag_export(void *,unsigned);
+ int kebab_device_classbag_cookie(const uint8_t[16],void *,unsigned);
+--- a/iokit/Kernel/arm/kebab_aks_userclient_impl.h
++++ b/iokit/Kernel/arm/kebab_aks_userclient_impl.h
+@@ -48,6 +48,8 @@
+  return kIOReturnSuccess;
+ }
+ 
++#include "kebab_aks_keychain_impl.h"
++
+ static IOReturn kuc_notify_method(IOService *,uint32_t,IOExternalMethodArguments *);
+ 
+ class AppleKeyStoreUserClient final : public IOUserClient {
+@@ -56,6 +58,7 @@
+  /* Set once by the provider after initWithTask. Unprivileged connections
+   * expose public status only; no selector can promote this access role. */
+  bool administrative=false;
++ bool keychainAccess=false;
+  bool opened=false;
+ public:
+  IOReturn clientClose() override {opened=false;terminate();return kIOReturnSuccess;}
+@@ -75,7 +78,11 @@
+   if(in||out||si||a->structureInputDescriptor||a->structureOutputSize||a->structureOutputDescriptor)result=kIOReturnBadArgument;
+   else{opened=true;result=kIOReturnSuccess;}
+  }else if(!opened)result=kIOReturnNotOpen;
+- else if(!administrative&&selector!=7&&selector!=14&&selector!=17)result=kIOReturnNotPrivileged;
++ else if((selector==10||selector==11)&&!keychainAccess)result=kIOReturnNotPrivileged;
++ else if(!administrative&&selector!=7&&selector!=14&&selector!=17&&selector!=10&&selector!=11)result=kIOReturnNotPrivileged;
++ else if(selector==10||selector==11){
++  result=kuc_keychain_method(selector,a);
++ }
+  else if(selector==102||selector==103){
+   result=kuc_notify_method(getProvider(),selector,a);
+  }else if(selector==65||selector==68){
+@@ -110,16 +117,16 @@
+    }
+   }
+  }
+- /* Fixed metadata only: original raw key/crypto buffers are never read. */
++ /* Fixed metadata only: key bytes are never logged. */
+  static uint32_t wrap_reports;
+  if((selector==10||selector==11)&&in==2&&a->scalarInput&&
+      __atomic_load_n(&wrap_reports,__ATOMIC_RELAXED)<16){
+   uint32_t report=__atomic_fetch_add(&wrap_reports,1u,__ATOMIC_RELAXED);
+-  if(report<16)IOLog("KEBAB AKS WRAP-META: selector=%u pid=%d bag64=0x%llx class64=0x%llx administrative=%u result=%x; no key buffer read\n",
++  if(report<16)IOLog("KEBAB AKS WRAP-META: selector=%u pid=%d bag64=0x%llx class64=0x%llx administrative=%u result=%x; key bytes never logged\n",
+       selector,proc_selfpid(),(unsigned long long)a->scalarInput[0],(unsigned long long)a->scalarInput[1],administrative?1u:0u,result);
+  }
+  IOLog("KEBAB AKS UC: selector=%u scalar=%u/%u struct-in=%u result=%x; hardware factory C/D only; struct-out=%llu desc=%u/%u\n",selector,in,out,si,result,(unsigned long long)a->structureOutputSize,a->structureInputDescriptor!=nullptr,a->structureOutputDescriptor!=nullptr);
+- IOLog("KEBAB AKS ACCESS: selector=%u role=%s result=%x\n",selector,administrative?"administrative":"read-only-status",result);
++ IOLog("KEBAB AKS ACCESS: selector=%u role=%s result=%x\n",selector,administrative?"administrative":keychainAccess?"keychain":"read-only-status",result);
+  return result;
+ }
+ 
+@@ -140,6 +147,14 @@
+   if(!client)return kIOReturnNoMemory;
+   if(!client->initWithTask(task,security,type,properties)){client->release();return kIOReturnError;}
+   client->administrative=administrative;
++  {
++   /* Strict AMFI OSBoolean entitlement; root status does not grant this role.
++    * Capability is immutable and enables only selectors10/11, not bag admin.
++    * This translation unit uses the retained raw OSPtr compatibility ABI. */
++   OSObject *entitlement=IOUserClient::copyClientEntitlement(task,"com.apple.keystore.access-keychain-keys");
++   client->keychainAccess=(entitlement==kOSBooleanTrue);
++   if(entitlement)entitlement->release();
++  }
+   if(!client->attach(this)){client->release();return kIOReturnError;}
+   if(!client->start(this)){client->detach(this);client->release();return kIOReturnError;}
+   IOLog("KEBAB AKS UC: %s client opened; original ABI, authenticated durable hardware bag available\n",administrative?"administrative":"read-only status");
+--- /dev/null
++++ b/bsd/kern/kebab_keychain_keys_impl.h
+@@ -0,0 +1,46 @@
++/* Device-bound keychain key wrapping, separate from APFS file class keys.
++ * Exact original securityd mapping:7=CK,8=DK,10=CKU,11=DKU. Only the
++ * authenticated factory-no-passcode bank is supported. AK/AKU/AKPU need
++ * their own real lock/passcode lifecycle; unknown/generation classes refuse.
++ * No new bag, record, class downgrade, software Root or plaintext persistence.
++ * This header is included after kebab_device_classbag_impl.h in its C owner. */
++int
++kebab_keychain_key_crypt(int32_t bag,uint32_t cls,const void *input,unsigned input_bytes,
++    void *output,unsigned output_bytes,bool encrypt)
++{
++ if(!kfk_context()||bag||!kfk_range(input,input_bytes)||!kfk_range(output,output_bytes)||
++     input_bytes!=(encrypt?32u:40u)||output_bytes!=(encrypt?40u:32u)||
++     kfk_overlap(input,input_bytes,output,output_bytes))return (int)kIOReturnBadArgument;
++ if(cls!=7&&cls!=8&&cls!=10&&cls!=11)return (int)kIOReturnUnsupported;
++ /* The kernel-only API must not alias secret owner storage, even on errors. */
++ const void *private_ranges[]={kfk_root_kek,kfk_class_d,kfk_uuid,kdb_record,kdb_class_c,kdb_class_d,kdb_identifier};
++ const size_t private_bytes[]={sizeof(kfk_root_kek),sizeof(kfk_class_d),sizeof(kfk_uuid),sizeof(kdb_record),sizeof(kdb_class_c),sizeof(kdb_class_d),sizeof(kdb_identifier)};
++ for(unsigned i=0;i<sizeof(private_ranges)/sizeof(private_ranges[0]);++i){
++  if(kfk_overlap(input,input_bytes,private_ranges[i],private_bytes[i])||
++      kfk_overlap(output,output_bytes,private_ranges[i],private_bytes[i]))return (int)kIOReturnBadArgument;
++ }
++ static const uint8_t domain[]="UniXNU.kebab.device-keychain.RFC3394.v1";
++ /* Domain including NUL, authenticated bag ID, container/System IDs,
++  * record version/policy and exact keychain class. This is a backend-owned
++  * format:40 bytes of RFC3394 ciphertext, not an Apple SEP wrapped blob. */
++ uint8_t context[sizeof(domain)+16+32+12]={0},kek[32]={0},result[40]={0};
++ lck_mtx_lock(&kfk_lock);
++ uint32_t version,policy;
++ memcpy(&version,kdb_record+16,4);memcpy(&policy,kdb_record+60,4);
++ int error=(kfk_ready&&kdb_ready)?0:(int)kIOReturnNotReady;
++ if(!error&&(version!=1||policy!=KEBAB_DEVICE_BAG_FACTORY_NO_PASSCODE||
++     !kdb_nonzero(kdb_identifier,16)||!kdb_nonzero(kdb_class_c,32)||
++     !kdb_nonzero(kdb_class_d,32)||!memcmp(kdb_class_c,kdb_class_d,32)))error=(int)kIOReturnNotReady;
++ if(!error){
++  memcpy(context,domain,sizeof(domain));memcpy(context+sizeof(domain),kdb_identifier,16);
++  memcpy(context+sizeof(domain)+16,kdb_record+24,32);
++  memcpy(context+sizeof(domain)+48,&version,4);memcpy(context+sizeof(domain)+52,&policy,4);
++  memcpy(context+sizeof(domain)+56,&cls,4);
++  g_crypto_funcs->cchmac_fn(g_crypto_funcs->ccsha256_di,32,kfk_root_kek,sizeof(context),context,kek);
++  error=kfk_wrap(kek,input,input_bytes,result,encrypt);
++  if(!error)memcpy(output,result,output_bytes);
++ }
++ lck_mtx_unlock(&kfk_lock);
++ kfk_wipe(context,sizeof(context));kfk_wipe(kek,sizeof(kek));kfk_wipe(result,sizeof(result));
++ return error;
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/kebab_aks_keychain_impl.h
+@@ -0,0 +1,33 @@
++/* Original 20H392 aks_wrap_key/aks_unwrap_key packet, AES256 key profile.
++ * Authorization is assigned by the provider from AMFI entitlements, not here.
++ * Wrapped bytes are backend-owned RFC3394, opaque to original userland.
++ * Other key lengths/personas/bags/classes are not silently transformed. */
++static IOReturn
++kuc_keychain_method(uint32_t selector,IOExternalMethodArguments *a)
++{
++ const bool encrypt=selector==10;
++ if((selector!=10&&selector!=11)||a->scalarInputCount!=2||!a->scalarInput||
++     a->scalarInput[0]||a->scalarInput[1]>UINT32_MAX||
++     a->scalarOutputCount!=(encrypt?1u:0u)||(encrypt&&!a->scalarOutput)||
++     a->structureInputDescriptor||!a->structureInput||
++     a->structureInputSize!=(encrypt?32u:40u)||
++     (a->structureOutputDescriptor&&a->structureOutput))return kIOReturnBadArgument;
++ const unsigned bytes=encrypt?40u:32u;
++ const uint32_t cls=(uint32_t)a->scalarInput[1];
++ size_t capacity=a->structureOutputDescriptor?a->structureOutputDescriptor->getLength():a->structureOutputSize;
++ if(capacity<bytes||(!a->structureOutputDescriptor&&!a->structureOutput))return kIOReturnNoSpace;
++ uint8_t output[40]={};
++ IOReturn result=(IOReturn)kebab_keychain_key_crypt(0,cls,
++     a->structureInput,a->structureInputSize,output,bytes,encrypt);
++ if(result==kIOReturnSuccess){
++  if(a->structureOutputDescriptor){
++   if(a->structureOutputDescriptor->writeBytes(0,output,bytes)!=bytes)result=kIOReturnIOError;
++   else a->structureOutputDescriptorSize=bytes;
++  }else{memcpy(a->structureOutput,output,bytes);a->structureOutputSize=bytes;}
++  if(result==kIOReturnSuccess&&encrypt){a->scalarOutput[0]=cls;a->scalarOutputCount=1;}
++ }
++ bzero(output,sizeof(output));
++ IOLog("KEBAB AKS KEYCHAIN: selector=%u class=%u bytes=%u/%u result=%x; key bytes never logged\n",
++     selector,cls,a->structureInputSize,bytes,result);
++ return result;
++}

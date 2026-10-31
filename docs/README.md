@@ -2,7 +2,7 @@
 
 当前能力以[首页](../README.md)和[STATUS](STATUS.md)为准。阶段文档保留当时状态，必须结合日期、版本和原始收据阅读；不要把较早的“下一步”覆盖到后续验收。
 
-最新主线：[0463 密码学基础与 AKS 调用](CLASS-B-CRYPTO-20261031.md)、[0461–0462 数据库 I/O](LOCATION-DATABASE-IO-20261031.md)及[真实 B 类开发要求](CLASS-B-BACKEND-NEXT-20261031.md)。
+最新主线：[0464–0465 原版 keychain C/D](KEYCHAIN-CD-20261031.md)、[0463 密码学基础与 AKS 调用](CLASS-B-CRYPTO-20261031.md)、[0461–0462 数据库 I/O](LOCATION-DATABASE-IO-20261031.md)及[真实 B 类开发要求](CLASS-B-BACKEND-NEXT-20261031.md)。
 
 ## 当前入口
 
@@ -92,6 +92,9 @@
 - [STORAGE-PLAN.md](STORAGE-PLAN.md)
 
 ## 原始证据与测试
+
+- [0465 原版 keychain 完整重启恢复](qualification/0465/)
+- [0464 原版 keychain 后端、授权、源码与测试](qualification/0464/)
 
 - [0463 原生密码学自检、AKS 元数据与源码](qualification/0463/)
 

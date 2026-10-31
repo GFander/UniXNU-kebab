@@ -1,0 +1,28 @@
+{
+  "parent_version": "0463",
+  "candidate": "0464",
+  "applied_to_build_tree": false,
+  "physical_test": false,
+  "changes": {
+    "bsd/kern/kebab_file_keys.c": {
+      "before": "58572ebce7bcbb9b51f7fb246ab30fa19de2f8f35913b2b9991c0f6bd0e4a97d",
+      "after": "266dfeba94943833fce2ea381009c69188aef7f654b78ca1aca86023106c0791"
+    },
+    "bsd/kern/kebab_file_keys.h": {
+      "before": "912ddb21d8acad631df4cffc68436e13eda6ac1a65902a29ec68855e29ae0518",
+      "after": "0bc57bffa4fad2a192e0417a55b5e82709d1fbfb79f467a47dedcc1fe486bafb"
+    },
+    "iokit/Kernel/arm/kebab_aks_userclient_impl.h": {
+      "before": "d6b9110d85aa31b08862ce57703f10808f30f16a3387ec441b71ce8d2846debb",
+      "after": "1dad411f77af815ded6f9e9929862e06530ce871cee3d6a86065b1b7c1f763ea"
+    },
+    "bsd/kern/kebab_keychain_keys_impl.h": {
+      "before": null,
+      "after": "3524081cc9c5782b90e224afb977fb16f5171b6086b6372e9a03a2d8198c8bf2"
+    },
+    "iokit/Kernel/arm/kebab_aks_keychain_impl.h": {
+      "before": null,
+      "after": "19fab1dfc0f5114355b154d6442677874b38cb6f563cbeadf4ecfd171f6b4673"
+    }
+  }
+}

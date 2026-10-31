@@ -2,6 +2,9 @@
 
 入口证据见 [0461–0462 实机数据库 I/O](LOCATION-DATABASE-IO-20261031.md)及
 [0463 密码学基础与原版 AKS 调用](CLASS-B-CRYPTO-20261031.md)。
+0464–0465 更新：[原版 keychain C/D](KEYCHAIN-CD-20261031.md)的严格 entitlement、
+硬件 Root/bank 支撑 wrap/unwrap 及完整重启恢复已经完成；AK/AKU 和 B 类文件仍待实现。
+
 本页是未完成工程要求，不是功能验收。现有硬件 Root、持久 C/D bank、systembag、
 所有旧加密 Data 与原始密文证明必须保留。
 
@@ -11,11 +14,13 @@
 new-key Unsupported；C 类数据库实际同步成功。当前本机文件回调、DCB1持久bank和
 CPX句柄仅支持C/D，不能满足原版classB请求。原版SQLite重试位置仍见于实际线程栈。
 
-0463 已确认原版 selector10/11 是 wrap/unwrap，13 是 lock bag，核对了包装器字段；
-实测 securityd 的 bag0、类值7/9/10/11请求被当前非管理角色拒绝。X25519/ConcatKDF
-基础及原生 KAT 通过，但未形成文件或 keychain 服务。尚未确认所有 B 类公钥/密钥包请求、
-原版 APFS 的 wrapped 格式/大小、完整 open/close/lock 接口及 keychain 类别映射和授权链。
-这些必须继续按 20H392 供体核对，不能把不同接口的类别编号混用。
+0463 已确认原版 selector10/11 是 wrap/unwrap，13 是 lock bag，核对了包装器字段。
+0464–0465 已按原版 CFEqual/返回分支确认 keychain6..12，接通 7/8/10/11 的严格
+entitlement、硬件 Root/bank 用途隔离包封/解封及完整重启恢复。6/9 类仍被真实拒绝，
+不降级为 C/D；12 类需要口令，当前 factory 无口令策略不提供。
+仍需核对 B 类公钥/密钥包请求、原版 APFS 的 wrapped 格式/大小、完整 open/close/lock
+接口及剩余 keychain 锁/解锁授权与状态。这些必须继续按 20H392 供体核对。
+X25519/ConcatKDF 基础和原生 KAT 已通过，但尚未形成 B 类文件服务。
 不能将相邻日志当作已经取得同一IPC transaction或所有内核调用的完整因果栈。
 
 ## 实现要求

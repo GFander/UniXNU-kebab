@@ -11,18 +11,18 @@
 | 实机 | OnePlus 8T，12 GB / 256 GB 机型；实际交给 XNU 的连续内存约 7.998 GiB |
 | CPU / 内核 | 8 核上线；ARM64、16 KiB 页、XNU 8796.141.3 / Darwin 22.6.0 |
 | 用户态来源 | iPhone X / D22AP，iOS 16.7.16，build 20H392；不是对 A11 硬件的完整模拟 |
-| 最近正常启动验收 | **0463**；最新人工触摸验收 **0459** |
-| 源码核对 | 327 个共同补丁 + 4 个 Mac 主机补丁，5,266 个源码文件与实际构建输入一致 |
+| 最近正常启动验收 | **0465**（复用 0464 内核，验证重启恢复）；最新人工触摸验收 **0459** |
+| 源码核对 | 328 个共同补丁 + 4 个 Mac 主机补丁，5,268 个源码文件与实际构建输入一致 |
 | 当前阻塞 | 原版 locationd 的 B 类 journal 写入 EPERM；真实 B 类密钥服务、迁移、system-shell check-in 和图形呈现尚未完成 |
 | 桌面 / 刷新率 | SpringBoard 进程已执行，尚无可用桌面；面板目标 120 Hz，真实时序尚未验证 |
 
-最新验收见[密码学基础与原版 AKS 报告](docs/CLASS-B-CRYPTO-20261031.md)。0463 原生内核 SHA-256：
+最新验收见[原版 keychain C/D 及重启恢复](docs/KEYCHAIN-CD-20261031.md)。0464/0465 原生内核 SHA-256：
 
 ```text
-469ab3317049befa87da2a3fa84aa322d58379a997cbee72a9e2c7c79bc06545
+67cb6e899b8c1e145ce4b185249aca31181a5701fd0656b6b57f75b3a9a7bbc1
 ```
 
-详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0463 实机验收记录](docs/qualification/0463/0463-qualified-runtime.json)。编译、源码回放、实机测试分别记录，互不替代。
+详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0465 实机重启验收记录](docs/qualification/0465/0465-qualified-runtime.json)。编译、源码回放、实机测试分别记录，互不替代。
 
 ## 已达成的功能
 
@@ -51,6 +51,7 @@
 | 硬件 Root 与 nonce 2212 | 经 Qualcomm QSEE/Keymaster 硬件封装密钥恢复 Root，派生专用 Image4 nonce key，原版 ignition 路径继续启动；复位恢复、认证与失败拒绝已有实测 | 不是 Apple 熔丝 UID/SEP；不声称 UFS ICE 硬件数据加密或物理断电安全验收；[最新密钥回归证据](docs/qualification/0462/0462-systembag-qualified.json) |
 | 软件密码学基础 | 内核所需哈希/HMAC、PRNG/DRBG、AES-CBC 与 APFS 所用 XTS 路径接入；新增 X25519/ConcatKDF 独立向量与原生 KAT 通过，B 类服务仍未完成 | 密钥来源的硬件保护和数据运算实现是两件事，不把软件 AES 称为硬件加速；[密码学基础](docs/CLASS-B-CRYPTO-20261031.md)、[平台与密钥里程碑](docs/PLATFORM-BASELINE-20261029.md)、[加密 Data](docs/LOCAL-IDENTITY-AND-PROTECTED-DATA-LIFECYCLE-20261031.md) |
 | 原版 APFS 密钥接口 | FS/FV、卷控制、metadata/每文件密钥与 CPX I/O 接通；原版工具创建并挂载真实加密 Data | 当前为硬件 Root 支撑的 factory 无口令 C/D 策略，未实现全类别；[Data 与密钥生命周期](docs/LOCAL-IDENTITY-AND-PROTECTED-DATA-LIFECYCLE-20261031.md) |
+| 原版 keychain C/D | 严格 AMFI entitlement，原版 securityd 的 7/8/10/11 类 AES256 密钥真实包封/解封，完整内核重启后从原持久记录恢复 | 不是完整 keychain、A/AKU/口令或 Apple SEP；[0464–0465 验收](docs/KEYCHAIN-CD-20261031.md) |
 | C/D 类加密文件 | 真实文件写入、同步、复位后读取、受控 class rewrap；旧明文与原始密文样本保持；私有测试文件的类别生命周期已修复 | 不能推导 A/B 类、锁屏口令、完整 keychain 或 SEP 可用；[0459 验收](docs/qualification/0459/0459-qualified-runtime.json)、[0462 回归](docs/qualification/0462/0462-systembag-qualified.json) |
 | 真实 Data 内容与 phase 2 | 恢复 9,624 项固定初始布局、约 511 MB 逻辑文件；FactoryData/Pearl 布局、原版挂载 phase 2 及正常卸载已有实测 | 不伪造校准数据、不预设 setup 完成；原版首次系统迁移仍未完成；[恢复与验收](docs/DATA-PHASE2-QUALIFIED-0351.md) |
 | keybagd / system bag | 原版 `MKB_INIT` 完成；真实持久化 systembag envelope、认证 cookie 与实际 Data 映射，重启复用原 bank | envelope 内是本后端真实封装记录，不是 Apple SEP blob；用户态 AKS 仅已覆盖接口可用；[原版 keybagd 验收](docs/KEYBAGD-BOOTSTRAP-0356.md) |
@@ -78,7 +79,7 @@
 - **可见、可交互 SpringBoard**：进程执行和同 PID 存活不是桌面验收；系统迁移与 shell check-in 仍有等待。
 - **当前数据库故障**：0462 实机确认原版 locationd 的 B 类数据库 journal 带偏移写入返回 EPERM，紧邻原版 APFS 的 class2 新文件密钥失败；原版 SQLite 仍重试。本机后端目前只支持 C/D，真实 B 类服务与生命周期尚未实现；不能用 chmod 或降级保护类别替代。见[实机证据](docs/LOCATION-DATABASE-IO-20261031.md)与[下一步要求](docs/CLASS-B-BACKEND-NEXT-20261031.md)。
 - **真实图形加速与呈现**：A650/Metal、CoreAnimation 到屏幕的完整链路、DPU/DSI 时序和物理 120 Hz 尚未验收；软件定时器或 FrontBoard 上报值不算物理 vsync。
-- **原版 keychain 接口**：0463 已核对 AKS 10/11 的 wrap/unwrap 包装器 ABI，并捕获 securityd 的真实拒绝；授权链、类别映射和硬件支撑后端尚未接通，不能把数学自检当作服务成功。见[0463 报告](docs/CLASS-B-CRYPTO-20261031.md)。
+- **完整原版 keychain**：0464–0465 已接通硬件 Root/bank 支撑的 CK/DK/CKU/DKU、严格 entitlement 与原版 wrap/unwrap，完整重启恢复通过；32 字节 AES 密钥 profile 已验收。AK/AKU 锁生命周期、口令、其他接口及完整 keychain 仍未完成。见[实机报告](docs/KEYCHAIN-CD-20261031.md)。
 - **完整 AppleKeyStore/安全能力**：A/B 类、口令、完整 keychain、多用户及 SEP 兼容尚未完成；未知接口真实返回错误。
 - **完整手机外设体验**：蓝牙无线功能、Wi-Fi、蜂窝、音频、相机、传感器、完整充电/电池/热管理与休眠唤醒，没有本项目的完整可用验收。
 
@@ -99,6 +100,7 @@
 | 0425–0443 HID / 显示前置 | 原版 HID 闭包、真实音量键、触摸协议；真实显示枚举、区域与缩放修复 |
 | 0445–0462 原版迁移追踪 | 修复 factory 状态服务、安装器目录和本地身份解析、保护文件生命周期；真实触摸验收；定位 locationd 原版 B 类 journal 写入 EPERM 和密钥服务缺口 |
 | 0463 密码学与 AKS 取证 | X25519/ConcatKDF 主机及原生已知答案通过，取得原版 wrap/unwrap ABI 和 securityd 拒绝证据；真实 B 类/keychain 仍待实现 |
+| 0464–0465 原版 keychain C/D | 硬件 Root/bank 用途隔离 KEK、严格原版 entitlement、原版包封/解封和完整重启恢复通过；B 类、A/AKU、迁移及桌面仍未完成 |
 
 阶段编号是构建/验收序列，表中包含诊断与回归；不表示每个编号都新增了完整功能。更详细的历史与精确边界见[文档索引](docs/README.md)。
 
@@ -122,7 +124,7 @@ docs/qualification/               分阶段固定哈希的验收资料
 docs/history/                     已替代的首页、交接和早期草稿
 ```
 
-本仓库仍保留历史格式的 `board.toml`，其中 standalone、单核等设置不描述目前的完整 prelink 实机流程。**不能把旧入口当作一键重建当前 0463 的配方。** 官方格式 2、结构化 `porting.toml`/CI 和统一构建入口的迁移仍未完成；详见[仓库整理与规范差距](docs/REPOSITORY-LAYOUT.md)。
+本仓库仍保留历史格式的 `board.toml`，其中 standalone、单核等设置不描述目前的完整 prelink 实机流程。**不能把旧入口当作一键重建当前 0465 的配方。** 官方格式 2、结构化 `porting.toml`/CI 和统一构建入口的迁移仍未完成；详见[仓库整理与规范差距](docs/REPOSITORY-LAYOUT.md)。
 
 ## 获取源码与验证
 
@@ -138,9 +140,9 @@ git clone https://github.com/apple-oss-distributions/xnu.git ../apple-xnu
 mkdir -p .cache/qualification
 python3 scripts/qualification/replay-xnu.py \
   --repo . --xnu-source ../apple-xnu \
-  --manifest docs/qualification/0463/all-mac-source-0463.json \
-  --receipt .cache/qualification/replay-0463.json \
-  --cache .cache --expected-common 327
+  --manifest docs/qualification/0464/all-mac-source-0464.json \
+  --receipt .cache/qualification/replay-0464.json \
+  --cache .cache --expected-common 328
 ```
 
 校验已公开的真实触摸记录：
