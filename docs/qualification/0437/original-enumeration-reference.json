@@ -1,0 +1,228 @@
+{
+  "cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+  "image": "/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer",
+  "consumer": "___IOMobileFramebufferCreateDisplayList_block_invoke",
+  "consumer_address": "0x1af229980",
+  "consumer_sha256": "0c41425bcec679f08f510d6e3da715be41faffb50a075ef7cfdec46b84620180",
+  "path": "IODeviceTree:/arm-io",
+  "property": "device_type",
+  "accepted_values": [
+    "display-subsystem",
+    "ext-display-subsystem"
+  ],
+  "compiled_literal_comparison_address": "0x1af229abc",
+  "expected_count_increment": "0x1af229b50",
+  "zero_count_skips_matching_branch": "0x1af229cec",
+  "runtime_main_waits": [
+    {
+      "tid": 399,
+      "kind": "saved pc",
+      "symbol": "___semwait_signal",
+      "offset": "0x8",
+      "image": "/usr/lib/system/libsystem_kernel.dylib"
+    },
+    {
+      "tid": 399,
+      "kind": "lr",
+      "symbol": "_nanosleep",
+      "offset": "0xd4",
+      "image": "/usr/lib/system/libsystem_c.dylib"
+    },
+    {
+      "tid": 399,
+      "kind": "frame[0]",
+      "symbol": "_usleep",
+      "offset": "0x3c",
+      "image": "/usr/lib/system/libsystem_c.dylib"
+    },
+    {
+      "tid": 399,
+      "kind": "frame[1]",
+      "symbol": "___CAMetalContextCreate_block_invoke",
+      "offset": "0xd8",
+      "image": "/System/Library/Frameworks/QuartzCore.framework/QuartzCore"
+    },
+    {
+      "tid": 399,
+      "kind": "frame[2]",
+      "symbol": "__dispatch_client_callout",
+      "offset": "0xc",
+      "image": "/usr/lib/system/libdispatch.dylib"
+    },
+    {
+      "tid": 399,
+      "kind": "frame[3]",
+      "symbol": "__dispatch_once_callout",
+      "offset": "0x18",
+      "image": "/usr/lib/system/libdispatch.dylib"
+    },
+    {
+      "tid": 399,
+      "kind": "frame[4]",
+      "symbol": "_CAMetalContextCreate",
+      "offset": "0x54",
+      "image": "/System/Library/Frameworks/QuartzCore.framework/QuartzCore"
+    },
+    {
+      "tid": 399,
+      "kind": "frame[5]",
+      "symbol": "__ZN2CA12WindowServer10EAGLServer8rendererEv",
+      "offset": "0x60",
+      "image": "/System/Library/Frameworks/QuartzCore.framework/QuartzCore"
+    },
+    {
+      "tid": 399,
+      "kind": "frame[6]",
+      "symbol": "__ZN2CA12WindowServer10EAGLServerC1EPNS0_12IOMFBDisplayEPK10__CFString",
+      "offset": "0x774",
+      "image": "/System/Library/Frameworks/QuartzCore.framework/QuartzCore"
+    },
+    {
+      "tid": 399,
+      "kind": "frame[7]",
+      "symbol": "__ZN2CA12WindowServer12AppleDisplay10new_serverEv",
+      "offset": "0x48",
+      "image": "/System/Library/Frameworks/QuartzCore.framework/QuartzCore"
+    },
+    {
+      "tid": 399,
+      "kind": "saved pc",
+      "symbol": "_mach_msg2_trap",
+      "offset": "0x8",
+      "image": "/usr/lib/system/libsystem_kernel.dylib"
+    },
+    {
+      "tid": 399,
+      "kind": "lr",
+      "symbol": "_mach_msg2_internal",
+      "offset": "0x48",
+      "image": "/usr/lib/system/libsystem_kernel.dylib"
+    },
+    {
+      "tid": 399,
+      "kind": "frame[0]",
+      "symbol": "_mach_msg_overwrite",
+      "offset": "0x1e0",
+      "image": "/usr/lib/system/libsystem_kernel.dylib"
+    },
+    {
+      "tid": 399,
+      "kind": "frame[1]",
+      "symbol": "_mach_msg",
+      "offset": "0x10",
+      "image": "/usr/lib/system/libsystem_kernel.dylib"
+    },
+    {
+      "tid": 399,
+      "kind": "frame[2]",
+      "symbol": "___CFRunLoopServiceMachPort",
+      "offset": "0x98",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+    },
+    {
+      "tid": 399,
+      "kind": "frame[3]",
+      "symbol": "___CFRunLoopRun",
+      "offset": "0x4b4",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+    },
+    {
+      "tid": 399,
+      "kind": "frame[4]",
+      "symbol": "_CFRunLoopRunSpecific",
+      "offset": "0x244",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+    },
+    {
+      "tid": 399,
+      "kind": "frame[5]",
+      "symbol": "sub_0x100009664",
+      "offset": "0x7d8",
+      "image": "/usr/libexec/backboardd"
+    },
+    {
+      "tid": 399,
+      "kind": "frame[6]",
+      "symbol": "start",
+      "offset": "0x740",
+      "image": "/usr/lib/dyld"
+    }
+  ],
+  "runtime_springboard_frames": [
+    {
+      "depth": 0,
+      "symbol": "___open",
+      "offset": "0x8",
+      "image": "/usr/lib/system/libsystem_kernel.dylib"
+    },
+    {
+      "depth": 1,
+      "symbol": "_MGIsQuestionValid",
+      "offset": "0x1c4",
+      "image": "/usr/lib/libMobileGestalt.dylib"
+    },
+    {
+      "depth": 2,
+      "symbol": "_MGIsQuestionValid",
+      "offset": "0x770",
+      "image": "/usr/lib/libMobileGestalt.dylib"
+    },
+    {
+      "depth": 3,
+      "symbol": "__dispatch_client_callout",
+      "offset": "0xc",
+      "image": "/usr/lib/system/libdispatch.dylib"
+    },
+    {
+      "depth": 4,
+      "symbol": "__dispatch_once_callout",
+      "offset": "0x18",
+      "image": "/usr/lib/system/libdispatch.dylib"
+    },
+    {
+      "depth": 5,
+      "symbol": "_MGGetSInt64Answer",
+      "offset": "0x168",
+      "image": "/usr/lib/libMobileGestalt.dylib"
+    },
+    {
+      "depth": 6,
+      "image": "/usr/lib/libMobileGestalt.dylib"
+    },
+    {
+      "depth": 7,
+      "symbol": "_is_restore_os",
+      "offset": "0x84",
+      "image": "/usr/lib/libMobileGestalt.dylib"
+    },
+    {
+      "depth": 8,
+      "symbol": "_MGGetFloat32Answer",
+      "offset": "0x28",
+      "image": "/usr/lib/libMobileGestalt.dylib"
+    },
+    {
+      "depth": 9,
+      "symbol": "-[CADisplayMode preferredScale]",
+      "offset": "0x3c",
+      "image": "/System/Library/Frameworks/QuartzCore.framework/QuartzCore"
+    },
+    {
+      "depth": 10,
+      "symbol": "-[FBSDisplayMode _initWithCADisplayMode:scale:rotation:]",
+      "offset": "0x5c",
+      "image": "/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices"
+    },
+    {
+      "depth": 11,
+      "symbol": "-[FBSDisplayConfiguration _initWithImmutableDisplay:originalDisplay:assertIfInvalid:]",
+      "offset": "0x288",
+      "image": "/System/Library/PrivateFrameworks/FrontBoardServices.framework/FrontBoardServices"
+    }
+  ],
+  "selector29_original_wrapper_address": "0x1af228eec",
+  "selector29_original_wrapper_struct_output_bytes": 8,
+  "selector29_value_semantics_not_yet_verified": true,
+  "older_primary_type_hint": "https://gist.github.com/anthonya1999/e0bffcac15b6b208126d",
+  "older_type_hint_not_current_version_proof": true
+}

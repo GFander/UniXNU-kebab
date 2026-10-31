@@ -1,0 +1,15 @@
+# 原版 GOP 显示枚举接通：0437
+
+本轮修复了真实显示的设备树声明缺失。0436仅有自制framebuffer服务，原版backboardd未调用它；0437复用完全相同的native与prelink，只增加 /arm-io/kebab-display，device_type为display-subsystem，compatible为unixnu,kebab-gop-display。它代表已有的固件GOP屏幕，不添加Apple硬件、MMIO、中断或SMMU资源，不创建假的CADisplay，也不声称GPU或呈现已完成。
+
+匹配UUID的原版iOS16 IOMobileFramebufferCreateDisplayList实现会遍历IODeviceTree:/arm-io的孩子，读取device_type；其编译器把display-subsystem比较编成立即数，而非对字符串地址的直接引用。只有期望数量大于已匹配数量才进入匹配线程。0436该计数为0；0437补足已有物理屏幕的单个描述。原native驱动已向真实provider发布canvas-width/height四字节数据，原匹配服务与provider路线保留。
+
+实机发生了可区分的行为变化：backboardd现在真实打开framebuffer，调用selector57/15/22/8/28/29/33/79/74。此前的主CADisplay断言没有复现，SpringBoard实际调用栈已进入CADisplayMode preferredScale及FBSDisplayMode/FBSDisplayConfiguration，而非仅依据“不报错”推断成功。
+
+显示初始化也暴露出新的未完成项。首次backboardd采样进入AppleDisplay::new_server、EAGLServer构造/renderer、CAMetalContextCreate等待路径；稍后的第二次采样已回到CFRunLoop，所以不能声称Metal永久卡住，更不能把返回事件循环当作GPU已可用。真实GPU/Metal功能仍待开发。selector29原版包装明确要求8字节，自制驱动现有16字节矩形会返回NoSpace；其真实数值语义尚待原版调用方/驱动验证，不能凭旧头文件或猜测填值。selector79/74的unsupported仍真实可见。SpringBoard随后发生SIGKILL；捕获栈位于MobileGestalt文件打开/preferredScale调用路径，不能据此认定打开文件就是终止原因。没有屏蔽这些崩溃或错误。
+
+ADT工具会核对整个旧树的字节往返，并证明删除新增节点后复原全部旧内容，其余FAT文件在变换步骤均字节相同。拒绝已有另一物理屏幕、重复节点或带额外资源的同名节点；再次应用相同声明保持幂等。公开测试使用虚构的非密钥fixture，验证保留旧树及六个非法描述拒绝；native与prelink的SHA均与0436相同，源码303common+4host/5260精确回放资格沿用同一构建。
+
+0437的原硬件Root/nonce、原版MKB/systembag、真实加密Data C/D、RTC/NVRAM、defaults及原版watchdog回归通过超过180秒，后续DRV也确认触摸HID ready/error0且没有触点报告。没有格式化、生成新密钥/包或替换安全后端。正常development-fast保留；独立ROData fsck仍为0416，完整System/SystemOS内容证明为0341。
+
+触摸手动采样继续等待用户回来；蓝牙仍延期。当前验收范围只是真实设备声明与原版显示枚举接通，尚无GPU、真实像素呈现或可用SpringBoard资格。
