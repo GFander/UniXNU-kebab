@@ -1,0 +1,15 @@
+# 原版显示模式缩放配置修复：0443
+
+0442首次读取到原版FBSDisplayMode的实际失败对象：1080×2400、preferredScale=0、scaleOverride=0、refreshRate=60Hz，gamut/HDR/rotation均0。PreBoard与后续SpringBoard相同，前8次均记录。原版校验在preferredScale=0时调用BSFloatIsZero检查scaleOverride；两个缩放同时为0会进入原版fatal分支。因此这轮快速崩溃具有具体参数原因，不能归咎于所有AKS错误或直接删除断言。
+
+原版CADisplayMode.preferredScale在该模式路径查询MobileGestalt的main-screen-scale；匹配的原libMobileGestalt在0x19c560a90读取IODeviceTree:/chosen的display-scale，并由原整数属性读取函数处理。实际0442刷入ADT中chosen节点存在，但display-scale缺失。0443补入32位小端整数3，声明现有3x UI布局策略。它是无量纲UI缩放，不是面板物理密度、刷新率或Apple硬件身份。当前make-kebab-adt.py虽有相关历史配置，已部署载荷仍缺失；本次以真实载荷为准，没有批量重生成设备树。
+
+0443沿用0442同一原生内核（SHA88ac9dbc48b5f9033986d7d0106fcd01532f2fde37d1a6b46b82df593247123a），控制变更只补入该chosen属性，并按既有流程更新时间/owner清单。移除新增属性必须逐字节还原此前ADT，其他FAT文件也逐项比较。GPU、MMIO、中断、触摸和密钥相关属性未借此扩展。实际公开测试执行生产变换器与复用的原ADT codec，验证整数3、完整旧树保持、幂等，以及9种无效输入拒绝；Linux独立目录运行结果与Windows一致。
+
+用于定位的0329仅在正常BSD退出上下文观察当前UI进程，按匹配PC、原版类地址/ISA mask核对对象，再读取原实例大小73字节。原类元数据和9个ivar偏移均取自匹配20H392只读缓存；ISA mask也由该缓存libobjc调试常量独立核对，另参考[Apple官方objc4 ISA定义](https://github.com/apple-oss-distributions/objc4/blob/objc4-876/runtime/isa.h)。两次读取之间再次核对ISA，错误明确报告，不读取分配器填充，不从trap路径读取用户内存。最多8次事件。原断言、信号、关键进程退出和watchdog策略保留。目标编译、全量构建、308common+4host两套逐文件回放/5261文件一致、207原HID槽位通过；13组host隔离情形和6个行为变异检验读取保护/失败路径/并发上限。host Mach/copyin/proc为明确模型；移除新增观测及单个调用可完整还原父版kern_exit.c。
+
+实机0443未再出现旧FBS零缩放断言或PreBoard/SpringBoard快速crashed循环。原进程快照在156.375秒和369.556秒显示重启后的SpringBoard PID192及PreBoard PID191均以相同PID存在；原watchdog持续超过300秒，硬件Root/nonce、原MKB/systembag、加密Data C/D、RTC/NVRAM/defaults通过。原selector29继续成功。当前没有直接采集成功返回的FBS模式对象，进程存在也不等于UI可用；还需读取两者实际线程等待与呈现依赖。首次backboardd blockSystemApp对SpringBoard27的SIGKILL仍原样发生，此处没有把它称作已解决。
+
+用户补充面板规格120Hz，已记录为硬件目标。60Hz是当前原FrontBoard上报/软件路径读值，不能作为物理面板上限；现有CPU定时器16667us也不能证明真实面板vsync。此次UI缩放修复未实现或验收120Hz，后续需核对真实DPU/面板时序。用户目前不在手机旁，触摸采样待回来后完成；GPU/真实呈现和可用SpringBoard未验收，蓝牙继续延期。
+
+继续采用development-fast；最近独立ROData fsck仍0416，完整System/SystemOS内容证明0341。没有因普通内核测试重复全内容校验。

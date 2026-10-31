@@ -1,0 +1,37 @@
+{
+  "read_only_primary_cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+  "consumer": "/usr/lib/libMobileGestalt.dylib",
+  "path": "IODeviceTree:/chosen",
+  "property": "display-scale",
+  "type": "32bit integer from original CFNumber/CFData consumer",
+  "consumer_site": "0x19c560a90",
+  "property_query_call": "0x19c560aa8",
+  "integer_helper": "0x19c57c95c",
+  "integer_CFNumberGetValue_type": 9,
+  "handler_code_sha256": "4e5ffb886548528cc660fbfb97b66be1d2ca8f7fa6a8f05dd38eb0e100334f6c",
+  "integer_helper_code_sha256": "3277e4da0e9898448a5f43a2dfd919bc9964d9c11eb96ac9e2c5a684c15fa4c4",
+  "ca_preferred_scale_getter": "0x18836b7a8",
+  "ca_calls_MGGetFloat32Answer": "0x18836b7e4",
+  "ca_key": "main-screen-scale",
+  "fbs_validity_PC": "0x19b91abd4",
+  "zero_scale_test": "BSFloatIsZero",
+  "zero_scale_test_actual_address": "0x18dd4dd40",
+  "declared_scale": 3,
+  "scale_is_ui_policy_not_density_or_refresh": true,
+  "adt_sha256": {
+    "0442": "026f34bf5924115876fb77b91ff3e95e0343abdd64a3fb832ab58112875a5e0b",
+    "0443": "6b41af9caf458a26a35dd778a6d60ea679c783c13dc5e6d387bdbdec6547728d"
+  },
+  "scale_before_after": {
+    "0442": [],
+    "0443": [
+      [
+        "display-scale",
+        "03000000"
+      ]
+    ]
+  },
+  "user_panel_refresh_target_hz": 120,
+  "current_observed_frontboard_hz": 60,
+  "hardware_120hz_measured": false
+}

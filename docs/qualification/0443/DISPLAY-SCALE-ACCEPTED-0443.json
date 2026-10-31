@@ -1,0 +1,279 @@
+{
+  "accepted": true,
+  "version": "0443",
+  "scope": "Declare missing chosen display-scale as original integer3; same-native regression has no old FBS zero-scale assertions and both later UI PIDs survive beyond300s; successful mode object/GUI not directly sampled",
+  "native_source_version": "0442",
+  "native_sha256": "88ac9dbc48b5f9033986d7d0106fcd01532f2fde37d1a6b46b82df593247123a",
+  "native_bytes": 18897664,
+  "actual_log_sha256": "e6cab19039915d1d34a8c03a3d847244727490fb0fe5841aa636b495b111c3f1",
+  "baseline_log_sha256": "a167a552533e531cf0e5180723550ea267241678c1f2901551f317715db511c6",
+  "source_replay": {
+    "version": "0442",
+    "common": 308,
+    "host": 4,
+    "files": 5261,
+    "all_equal": true
+  },
+  "adt_only_candidate": true,
+  "original_predicate_and_userland_unchanged": true,
+  "property": "/chosen/display-scale",
+  "type": "little-endian32bit integer",
+  "value": 3,
+  "original_missing_property_reference": {
+    "read_only_primary_cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+    "consumer": "/usr/lib/libMobileGestalt.dylib",
+    "path": "IODeviceTree:/chosen",
+    "property": "display-scale",
+    "type": "32bit integer from original CFNumber/CFData consumer",
+    "consumer_site": "0x19c560a90",
+    "property_query_call": "0x19c560aa8",
+    "integer_helper": "0x19c57c95c",
+    "integer_CFNumberGetValue_type": 9,
+    "handler_code_sha256": "4e5ffb886548528cc660fbfb97b66be1d2ca8f7fa6a8f05dd38eb0e100334f6c",
+    "integer_helper_code_sha256": "3277e4da0e9898448a5f43a2dfd919bc9964d9c11eb96ac9e2c5a684c15fa4c4",
+    "ca_preferred_scale_getter": "0x18836b7a8",
+    "ca_calls_MGGetFloat32Answer": "0x18836b7e4",
+    "ca_key": "main-screen-scale",
+    "fbs_validity_PC": "0x19b91abd4",
+    "zero_scale_test": "BSFloatIsZero",
+    "zero_scale_test_actual_address": "0x18dd4dd40",
+    "declared_scale": 3,
+    "scale_is_ui_policy_not_density_or_refresh": true,
+    "adt_sha256": {
+      "0442": "026f34bf5924115876fb77b91ff3e95e0343abdd64a3fb832ab58112875a5e0b",
+      "0443": "6b41af9caf458a26a35dd778a6d60ea679c783c13dc5e6d387bdbdec6547728d"
+    },
+    "scale_before_after": {
+      "0442": [],
+      "0443": [
+        [
+          "display-scale",
+          "03000000"
+        ]
+      ]
+    },
+    "user_panel_refresh_target_hz": 120,
+    "current_observed_frontboard_hz": 60,
+    "hardware_120hz_measured": false
+  },
+  "actual_old_mode": {
+    "width": 1080,
+    "height": 2400,
+    "preferredScale": 0,
+    "scaleOverride": 0,
+    "refreshRate": 60,
+    "gamut": 0,
+    "hdr": 0,
+    "rotation": 0,
+    "virtual": false
+  },
+  "old_mode_events": 8,
+  "new_old_mode_failure_events": 0,
+  "successful_mode_object_directly_sampled": false,
+  "ui_same_pid_snapshots": {
+    "SpringBoard": [
+      {
+        "seconds": 156.375,
+        "pid": 192,
+        "state": 2
+      },
+      {
+        "seconds": 369.556,
+        "pid": 192,
+        "state": 2
+      }
+    ],
+    "PreBoard": [
+      {
+        "seconds": 156.375,
+        "pid": 191,
+        "state": 2
+      },
+      {
+        "seconds": 369.556,
+        "pid": 191,
+        "state": 2
+      }
+    ]
+  },
+  "process_liveness_does_not_qualify_gui": true,
+  "initial_system_app_block_kill_remains": true,
+  "hardware_security_regression": {
+    "version": "0443",
+    "defaults_matching_complete": true,
+    "actual_log_sha256": "e6cab19039915d1d34a8c03a3d847244727490fb0fe5841aa636b495b111c3f1",
+    "native_sha256": "88ac9dbc48b5f9033986d7d0106fcd01532f2fde37d1a6b46b82df593247123a",
+    "real_apple_image4_start_succeeded": true,
+    "actual_busy_reference_released": true,
+    "busy_lifecycle": [
+      [
+        0,
+        0,
+        1,
+        "defaults"
+      ],
+      [
+        11,
+        1,
+        1,
+        "AppleImage4"
+      ],
+      [
+        14,
+        2,
+        -1,
+        "defaults"
+      ],
+      [
+        15,
+        1,
+        -1,
+        "AppleImage4"
+      ]
+    ],
+    "final_busy_state": 0,
+    "actual_waits": [
+      "IOAESAccelerator",
+      "IOResources/IONVRAM",
+      "IODTNVRAM"
+    ],
+    "hardware_nonce_and_data_restored_without_generation": true,
+    "native_nvram_existing_proxy_adopted": true,
+    "nvram_encrypted_data_banks_cold_restored": true,
+    "nvram_restored_bank": 1,
+    "nvram_restored_generation": 328,
+    "nvram_hardware_or_rollback_claim": false,
+    "nvram_durable_write_calls": 2,
+    "watchdog_enabled": true,
+    "original_iokit_monitoring_preserved": true,
+    "watchdog_heartbeat_times": [
+      64.32,
+      64.32,
+      74.315,
+      84.317,
+      94.335,
+      104.288,
+      114.301,
+      124.294,
+      134.348,
+      144.343,
+      154.34,
+      164.292,
+      174.339,
+      184.344,
+      194.327,
+      204.315,
+      214.313,
+      224.325,
+      234.315,
+      244.317,
+      254.344,
+      264.336,
+      274.359,
+      284.319,
+      294.338,
+      304.334,
+      314.325,
+      324.346,
+      334.368,
+      344.356
+    ],
+    "original_locked_observations": [
+      [
+        93.958,
+        60,
+        4
+      ],
+      [
+        123.982,
+        90,
+        7
+      ],
+      [
+        153.965,
+        120,
+        10
+      ],
+      [
+        184.033,
+        150,
+        13
+      ],
+      [
+        214.064,
+        180,
+        16
+      ],
+      [
+        244.069,
+        210,
+        19
+      ],
+      [
+        274.109,
+        240,
+        22
+      ],
+      [
+        304.148,
+        270,
+        25
+      ],
+      [
+        334.179,
+        300,
+        28
+      ],
+      [
+        364.158,
+        330,
+        31
+      ]
+    ],
+    "systembag_and_hardware_c_d_preserved": true,
+    "rtc_record_reused": true,
+    "panic": [],
+    "full_ios_or_springboard": false,
+    "gpu_display_input_started": true
+  },
+  "observer_test": {
+    "passed": true,
+    "source_sha256": "ca758aac652bffbf429c2f628cae4b981155a035e33dd9ddc24928925954dc79",
+    "parent_sha256": "aad07e5c5cbc7c7428e4f5f8126220017863b6accbfa5cbacdd8721c0ce13637",
+    "fixture_sha256": "c64a1012a184b3a16816fc95988495ff11e732433aa39c965f0eeb6c6f3ce298",
+    "whole_parent_file_restored_by_removing_only_observer": true,
+    "cases": 13,
+    "behavioral_mutants_refused": 6,
+    "event_cap": 8,
+    "object_read_bytes": 73,
+    "proc_state_and_copyin_are_explicit_models": true,
+    "original_policy_unchanged": true
+  },
+  "adt_test": {
+    "passed": true,
+    "transformer_sha256": "919b72de2738f38111a24441f32d192df1fd1194034b4796eb3bd1487d63489a",
+    "codec_sha256": "22e0a76d437cb6971d8194288868e568e3e07271090362990b365a574290cf33",
+    "exact_old_tree_preserved": true,
+    "idempotent": true,
+    "invalid_inputs_rejected": 9,
+    "property": "/chosen/display-scale",
+    "type": "little-endian32bit integer",
+    "value": 3,
+    "dimensionless_ui_scale_not_panel_refresh": true,
+    "device_images_or_keys_used": false,
+    "hardware_refresh_qualified": false
+  },
+  "user_panel_refresh_target_hz": 120,
+  "current_observed_frontboard_hz": 60,
+  "hardware_120hz_mode_qualified": false,
+  "physical_touch_qualified": false,
+  "manual_touch_deferred_by_user": true,
+  "gpu_qualified": false,
+  "real_presentation_qualified": false,
+  "usable_springboard": false,
+  "bluetooth_deferred": true,
+  "development_fast": true,
+  "last_independent_ro_data_fsck": "0416",
+  "last_full_system_systemos_check": "0341",
+  "next": "Read actual SpringBoard/PreBoard thread waits to locate the remaining initialization/rendering dependency; preserve original blocked-app policy and genuine hardware keys"
+}
