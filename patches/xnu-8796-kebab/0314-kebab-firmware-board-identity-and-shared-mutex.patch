@@ -1,0 +1,355 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -665,6 +665,7 @@
+ bsd/dev/kebab_geni.c			standard
+ bsd/dev/kebab_bluetooth.c			standard
+ bsd/dev/kebab_bt_uart.c			standard
++bsd/dev/kebab_board.c			standard
+ 
+ bsd/kern/kebab_bootdiag.c			standard
+ bsd/kern/kebab_apfs_probe.c			standard
+--- /dev/null
++++ b/bsd/dev/kebab_board.c
+@@ -0,0 +1,106 @@
++/* Firmware-provided board identity. One local mutex and the actual shared
++ * TCSR lock3 protect the fixed SMEM_PROJECT reader. No SMEM/power writes.
++ */
++#if defined(KEBAB)
++#include <sys/types.h>
++#include <sys/errno.h>
++#include <sys/systm.h>
++#include <sys/proc_internal.h>
++#include <kern/debug.h>
++#include <kern/clock.h>
++#include <kern/locks.h>
++#include <libkern/libkern.h>
++#include <machine/machine_routines.h>
++#include <vm/memory_types.h>
++#include <arm/memory_types.h>
++#include "kebab_board.h"
++#include "kebab_board_impl.h"
++extern int get_preemption_level(void);
++/* Mach-private declarations, exact ARM64 ABI in machine_routines.h. */
++extern vm_offset_t ml_io_map_unmappable(vm_offset_t,vm_size_t,uint32_t);
++extern void ml_io_unmap(vm_offset_t,vm_size_t);
++static LCK_GRP_DECLARE(kbb_group,"kebab-board");
++static LCK_MTX_DECLARE(kbb_mutex,&kbb_group);
++static struct { vm_offset_t memory,mutex;struct kbb_owner owner; } kbb_native;
++static int
++kbb_native_memory(void *context,uint32_t off,uint32_t *value)
++{
++ (void)context;
++ if(!value||!kbb_native.memory||!kbb_native.owner.held||ml_get_interrupts_enabled()||
++    (off&3u)||off>KBB_SMEM_SIZE-4u)return EINVAL;
++ __asm__ volatile("dsb sy" ::: "memory");
++ *value=*(volatile uint32_t *)(kbb_native.memory+off);
++ __asm__ volatile("dsb sy" ::: "memory");return 0;
++}
++static int
++kbb_native_lock_read(void *context,uint32_t *value)
++{
++ (void)context;
++ if(!value||!kbb_native.mutex||ml_get_interrupts_enabled())return EINVAL;
++ __asm__ volatile("dsb sy" ::: "memory");
++ *value=*(volatile uint32_t *)(kbb_native.mutex+KBB_MUTEX3);
++ __asm__ volatile("dsb sy" ::: "memory");return 0;
++}
++static int
++kbb_native_lock_write(void *context,uint32_t value)
++{
++ (void)context;
++ if(!kbb_native.mutex||ml_get_interrupts_enabled()||value>1u||
++    (!value&&!kbb_native.owner.held)||(value&&kbb_native.owner.dead))return EINVAL;
++ __asm__ volatile("dsb sy" ::: "memory");
++ *(volatile uint32_t *)(kbb_native.mutex+KBB_MUTEX3)=value;
++ __asm__ volatile("dsb sy" ::: "memory");return 0;
++}
++static uint64_t
++kbb_native_now(void *context)
++{
++ (void)context;uint64_t ticks,ns;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);return ns/1000u;
++}
++static void kbb_native_wait(void *context){(void)context;delay(1);}
++static int
++kbb_native_query(struct kebab_board_info *info,struct kbb_status *status)
++{
++ if(!info||!status)return EINVAL;
++ memset(info,0,sizeof(*info));memset(status,0,sizeof(*status));
++ if(panic_active()||ml_at_interrupt_context()||get_preemption_level()||!ml_get_interrupts_enabled())return EBUSY;
++ if(__atomic_load_n(&initproc,__ATOMIC_ACQUIRE)==PROC_NULL)return EAGAIN;
++ lck_mtx_lock(&kbb_mutex);
++ int error=EBUSY;
++ if(kbb_native.owner.dead||kbb_native.owner.held)goto done;
++ /* The permanent I/O submap is only8MiB. Temporary normal-context mappings
++  * use kernel_map and are removed after every query, including errors.
++  * Both resources are16KiB aligned/sized for this kernel's actual page size. */
++ kbb_native.memory=ml_io_map_unmappable(KBB_SMEM_PA,KBB_SMEM_SIZE,VM_WIMG_WCOMB);
++ if(!kbb_native.memory){error=ENOMEM;goto done;}
++ kbb_native.mutex=ml_io_map_unmappable(KBB_MUTEX_PA,KBB_MUTEX_SIZE,VM_WIMG_IO);
++ if(!kbb_native.mutex){error=ENOMEM;goto unmap;}
++ {
++  const struct kbb_io io={kbb_native_memory,kbb_native_lock_read,kbb_native_lock_write,
++      kbb_native_now,kbb_native_wait,NULL,&kbb_native.owner};
++  boolean_t saved=ml_set_interrupts_enabled(FALSE);
++  error=kbb_query(&io,info,status);
++  ml_set_interrupts_enabled(saved);
++ }
++ ml_io_unmap(kbb_native.mutex,KBB_MUTEX_SIZE);kbb_native.mutex=0;
++unmap:
++ ml_io_unmap(kbb_native.memory,KBB_SMEM_SIZE);kbb_native.memory=0;
++done:
++ status->quarantined=kbb_native.owner.dead;
++ lck_mtx_unlock(&kbb_mutex);return error;
++}
++int
++kebab_board_read_info(struct kebab_board_info *info)
++{
++ struct kbb_status status;return kbb_native_query(info,&status);
++}
++void
++kebab_board_report(void)
++{
++ struct kebab_board_info info;struct kbb_status status;
++ int error=kbb_native_query(&info,&status);
++ printf("KEBAB BTBOARD: SMEM=%08x+%x item=135 version=%08x error=%d\n",KBB_SMEM_PA,KBB_SMEM_SIZE,status.smem_version,error);
++ if(!error)printf("KEBAB BTBOARD: OCDT=%u project=%u dtsi=%u bytes=%u cached=%u\n",info.ocdt_version,info.project,info.dtsi,info.record_bytes,info.cached);
++ printf("KEBAB BTBOARD: TCSR3 attempts=%u acquired=%u released=%u owner=%u/%u reads=%u last=%x parse=%d cleanup=%d quarantined=%u\n",status.attempts,status.acquired,status.released,status.owner_before,status.owner_after,status.reads,status.last_offset,status.parse_error,status.cleanup_error,status.quarantined);
++ printf("KEBAB BTBOARD: end error=%d fixed board metadata only; no SMEM/rail/GPIO writes\n",error);
++}
++#endif
+--- /dev/null
++++ b/bsd/dev/kebab_board.h
+@@ -0,0 +1,18 @@
++/* Native board identity, read from firmware SMEM_PROJECT135. No user ABI. */
++#ifndef KEBAB_BOARD_H
++#define KEBAB_BOARD_H
++#include <sys/types.h>
++#include <stdbool.h>
++struct kebab_board_info {
++ uint32_t smem_version, ocdt_version, project, dtsi, record_bytes;
++ bool cached;
++};
++#ifdef __cplusplus
++extern "C" {
++#endif
++int kebab_board_read_info(struct kebab_board_info *);
++void kebab_board_report(void);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/bsd/dev/kebab_board_impl.h
+@@ -0,0 +1,182 @@
++/* Fixed SMEM_PROJECT query and TCSR lock3, per LineageOS98a7970
++ * smem.c, qcom_hwspinlock.c and oplus_project_data_ocdt.h.
++ * Only metadata and the first12 bytes of item135 are read. No allocation,
++ * SMEM writes, arbitrary item API, serial numbers or calibration dumping.
++ */
++#ifndef KEBAB_BOARD_IMPL_H
++#define KEBAB_BOARD_IMPL_H
++#define KBB_SMEM_PA 0x80900000u
++#define KBB_SMEM_SIZE 0x200000u
++#define KBB_MUTEX_PA 0x01f40000u
++#define KBB_MUTEX_SIZE 0x4000u
++#define KBB_MUTEX3 0x3000u
++struct kbb_owner { bool held, dead; };
++struct kbb_status {
++ uint32_t attempts, reads, last_offset, owner_before, owner_after, smem_version;
++ int parse_error, cleanup_error;
++ bool acquired, released, quarantined;
++};
++struct kbb_io {
++ int (*memory)(void *,uint32_t,uint32_t *);
++ int (*lock_read)(void *,uint32_t *);
++ int (*lock_write)(void *,uint32_t);
++ uint64_t (*now)(void *);
++ void (*wait)(void *);
++ void *context;
++ struct kbb_owner *owner;
++};
++struct kbb_reader {
++ const struct kbb_io *io;
++ struct kbb_status *status;
++ uint64_t started;
++};
++static int
++kbb_word(struct kbb_reader *r,uint32_t off,uint32_t *out)
++{
++ if(!out||(off&3u)||off>KBB_SMEM_SIZE-4u)return EINVAL;
++ if(++r->status->reads>16384u||r->io->now(r->io->context)-r->started>10000u)return ETIMEDOUT;
++ r->status->last_offset=off;
++ return r->io->memory(r->io->context,off,out);
++}
++static int
++kbb_payload(struct kbb_reader *r,uint32_t off,uint32_t size,bool cached,
++    struct kebab_board_info *out)
++{
++ if(size<12u||size>KBB_SMEM_SIZE||off>KBB_SMEM_SIZE-size)return EINVAL;
++ struct kebab_board_info found;memset(&found,0,sizeof(found));int error;
++ if((error=kbb_word(r,off,&found.ocdt_version))||
++    (error=kbb_word(r,off+4u,&found.project))||
++    (error=kbb_word(r,off+8u,&found.dtsi)))return error;
++ if(found.ocdt_version!=1u&&found.ocdt_version!=2u)return ENOTSUP;
++ found.smem_version=r->status->smem_version;found.record_bytes=size;found.cached=cached;
++ *out=found;return 0;
++}
++static int
++kbb_project(struct kbb_reader *r,struct kebab_board_info *out)
++{
++ uint32_t initialized,reserved,version;int error;
++ if((error=kbb_word(r,192,&initialized))||(error=kbb_word(r,204,&reserved))||
++    (error=kbb_word(r,92,&version)))return error;
++ r->status->smem_version=version;
++ if(initialized!=1u||reserved)return EINVAL;
++ if((version>>16)==11u){
++  /* Legacy global TOC: fixed item135, no allocation/free heap changes. */
++  uint32_t allocated,offset,size,base,used,available,at=208u+135u*16u;
++  if((error=kbb_word(r,196,&used))||(error=kbb_word(r,200,&available)))return error;
++  if(used<208u+512u*16u||used>KBB_SMEM_SIZE||available>KBB_SMEM_SIZE-used)return EINVAL;
++  if((error=kbb_word(r,at,&allocated))||(error=kbb_word(r,at+4u,&offset))||
++     (error=kbb_word(r,at+8u,&size))||(error=kbb_word(r,at+12u,&base)))return error;
++  if(!allocated)return ENOENT;
++  if((base&0xfffffffcu)!=0u&&(base&0xfffffffcu)!=KBB_SMEM_PA)return ENOTSUP;
++  if(offset<208u+512u*16u||size>used||offset>used-size)return EINVAL;
++  return kbb_payload(r,offset,size,false,out);
++ }
++ if((version>>16)!=12u)return ENOTSUP;
++ uint32_t table=KBB_SMEM_SIZE-4096u,magic,table_version,count;
++ if((error=kbb_word(r,table,&magic))||(error=kbb_word(r,table+4u,&table_version))||
++    (error=kbb_word(r,table+8u,&count)))return error;
++ if(magic!=0x434f5424u||table_version!=1u||count>(4096u-32u)/48u)return EINVAL;
++ uint32_t partition=0,size=0,cacheline=0;
++ for(uint32_t i=0;i<count;++i){
++  uint32_t at=table+32u+i*48u,hosts;
++  if((error=kbb_word(r,at+12u,&hosts)))return error;
++  if(hosts!=0xfffefffeu)continue;
++  if(partition)return EEXIST;
++  if((error=kbb_word(r,at,&partition))||(error=kbb_word(r,at+4u,&size))||
++     (error=kbb_word(r,at+16u,&cacheline)))return error;
++  if(partition<4096u||(partition&3u)||size<32u||(size&3u)||
++      partition>table||size>table-partition)return EINVAL;
++ }
++ if(!partition)return ENOENT;
++ uint32_t hosts,actual_size,free_uncached,free_cached;
++ if((error=kbb_word(r,partition,&magic))||(error=kbb_word(r,partition+4u,&hosts))||
++    (error=kbb_word(r,partition+8u,&actual_size))||
++    (error=kbb_word(r,partition+12u,&free_uncached))||
++    (error=kbb_word(r,partition+16u,&free_cached)))return error;
++ if(magic!=0x54525024u||hosts!=0xfffefffeu||actual_size!=size||
++     free_uncached<32u||free_uncached>free_cached||free_cached>size)return EINVAL;
++ /* Prefer uncached item like the original getter; allocation holds the same
++  * remote lock. Walk headers, skip payloads of every unrelated item. */
++ uint32_t at=32u;
++ for(unsigned n=0;at<free_uncached;++n){
++  if(n>=1024u)return E2BIG;
++  if(at>free_uncached||free_uncached-at<16u)return EINVAL;
++  uint32_t tag,bytes,padding;
++  if((error=kbb_word(r,partition+at,&tag))||
++     (error=kbb_word(r,partition+at+4u,&bytes))||
++     (error=kbb_word(r,partition+at+8u,&padding)))return error;
++  uint32_t pad_data=padding&0xffffu,pad_header=padding>>16;
++  if((tag&0xffffu)!=0xa5a5u||bytes<=pad_data||pad_header>free_uncached-at-16u)return EINVAL;
++  uint32_t data=at+16u+pad_header;
++  if(bytes>free_uncached-data)return EINVAL;
++  if((tag>>16)==135u)return kbb_payload(r,partition+data,bytes-pad_data,false,out);
++  at=data+bytes;
++ }
++ if(free_cached==size)return ENOENT;
++ if(cacheline<16u||cacheline>4096u||(cacheline&(cacheline-1u))||size<cacheline)return EINVAL;
++ at=size-cacheline;
++ for(unsigned n=0;at>free_cached;++n){
++  if(n>=1024u)return E2BIG;
++  if(at>size-16u)return EINVAL;
++  uint32_t tag,bytes,padding;
++  if((error=kbb_word(r,partition+at,&tag))||
++     (error=kbb_word(r,partition+at+4u,&bytes))||
++     (error=kbb_word(r,partition+at+8u,&padding)))return error;
++  uint32_t pad_data=padding&0xffffu;
++  if((tag&0xffffu)!=0xa5a5u||bytes<=pad_data||bytes>at||bytes>at-free_cached)return EINVAL;
++  uint32_t data=at-bytes;
++  if((tag>>16)==135u)return kbb_payload(r,partition+data,bytes-pad_data,true,out);
++  if(data<cacheline)return EINVAL;
++  at=data-cacheline;
++ }
++ return ENOENT;
++}
++static int
++kbb_query(const struct kbb_io *io,struct kebab_board_info *out,struct kbb_status *status)
++{
++ if(!out||!status)return EINVAL;
++ memset(out,0,sizeof(*out));memset(status,0,sizeof(*status));
++ if(!io||!io->memory||!io->lock_read||!io->lock_write||!io->now||!io->wait||!io->owner)return EINVAL;
++ if(io->owner->dead||io->owner->held)return EBUSY;
++ uint32_t owner;int error=io->lock_read(io->context,&owner);
++ if(error)return error;
++ status->owner_before=owner;
++ /* APPS PID1 before our attempt is not ours: never inherit/clear it. */
++ if(owner==1u)return EBUSY;
++ uint64_t started=io->now(io->context);
++ for(unsigned n=0;n<1000u;++n){
++  ++status->attempts;
++  error=io->lock_write(io->context,1u);
++  if(error){io->owner->dead=true;break;}
++  error=io->lock_read(io->context,&owner);
++  if(error){io->owner->dead=true;break;}
++  if(owner==1u){io->owner->held=true;status->acquired=true;break;}
++  if(io->now(io->context)-started>=1000u)break;
++  io->wait(io->context);
++ }
++ if(!status->acquired){
++  /* A failed write may nevertheless have acquired the lock. Release only
++   * when readback proves APPS ownership, preserving the delivery error. */
++  if(io->owner->dead){uint32_t seen;if(!io->lock_read(io->context,&seen)&&seen==1u){io->owner->held=true;status->acquired=true;}}
++  if(!status->acquired)return error?error:ETIMEDOUT;
++ }
++ struct kebab_board_info found;memset(&found,0,sizeof(found));
++ if(!error){struct kbb_reader reader={io,status,io->now(io->context)};error=kbb_project(&reader,&found);}
++ status->parse_error=error;
++ int cleanup=io->lock_read(io->context,&owner);
++ if(!cleanup&&owner!=1u)cleanup=EIO;
++ if(!cleanup){
++  cleanup=io->lock_write(io->context,0u);
++  if(cleanup)io->owner->dead=true;
++  uint32_t seen;int readback=io->lock_read(io->context,&seen);
++  if(!readback&&seen!=1u){status->owner_after=seen;status->released=true;io->owner->held=false;}
++  if(readback&&!cleanup)cleanup=readback;
++  if(!status->released&&!cleanup)cleanup=EIO;
++ }
++ status->cleanup_error=cleanup;
++ if(!status->released)io->owner->dead=true;
++ if(cleanup&&!error)error=cleanup;
++ if(!error)*out=found;
++ return error;
++}
++#endif
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -276,6 +276,8 @@
+ #define UD_REBOOT_BTCLK_PREPARE 36u
+ #define UD_REBOOT_BTUART_LOOPBACK 37u
+ #define UD_REBOOT_BTPWR_REPORT 38u
++#define UD_REBOOT_BTBOARD_REPORT 39u
++extern void kebab_board_report(void);
+ extern void kebab_bluetooth_power_report(void);
+ extern void kebab_bluetooth_uart_loopback(void);
+ extern void kebab_bluetooth_clock_prepare(void);
+@@ -1451,6 +1453,9 @@
+ 		}
+ 		/* BTPWR contains the older PWR token. Match the specific command
+ 		 * before the completion scanner can find that suffix. */
++		if (ud_command_seen(buf, received, "BTBOARD?\n", sizeof("BTBOARD?\n") - 1)) {
++			return UD_REBOOT_BTBOARD_REPORT;
++		}
+ 		if (ud_command_seen(buf, received, "BTPWR?\n", sizeof("BTPWR?\n") - 1)) {
+ 			return UD_REBOOT_BTPWR_REPORT;
+ 		}
+@@ -1737,6 +1742,8 @@
+ 		kebab_pid1_report();
+ 	} else if (command == UD_REBOOT_QSEELOG_REPORT) {
+ 		kebab_qsee_log_report();
++	} else if (command == UD_REBOOT_BTBOARD_REPORT) {
++		kebab_board_report();
+ 	} else if (command == UD_REBOOT_BTPWR_REPORT) {
+ 		kebab_bluetooth_power_report();
+ 	} else if (command == UD_REBOOT_BTUART_LOOPBACK) {

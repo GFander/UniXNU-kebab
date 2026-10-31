@@ -1,3 +1,7 @@
+最新阶段：0423/0424 实机板型与共享锁收尾验收通过；正常默认0424。293 common +4 host /5252源文件一致。
+
+按用户最新安排，蓝牙从现在起延期到GPU、显示、输入和可用SpringBoard之后。实际板型19805、供电拓扑、内部UART、固件/资源只读采集及测试证据已保存；控制器/HCI/RF仍未完成，蓝牙不可用。见[归档与恢复入口](docs/BLUETOOTH-DEFERRED-20261031.md)及[本轮实机/源码证据](docs/qualification/0424/README.md)。下列旧阶段顺序与“待读取板型”描述属于历史，以上述归档为准。
+
 当前阶段验收：0422；正常默认0422。292 common +4 host /5249 源码一致。
 
 真实蓝牙供电资源只读发现与等价别名检查已通过0421/0422完整重启实测。控制器供电、HCI、扫描/连接/数据仍未完成，蓝牙整体不可用。见[本阶段范围](docs/BLUETOOTH-POWER-DISCOVERY-20261031.md)、[LineageOS对照](docs/BLUETOOTH-LINEAGE-COMPARISON-20261031.md)和[源码/实机证据](docs/qualification/0422/README.md)。

@@ -1,0 +1,315 @@
+{
+  "accepted": true,
+  "scope": "Fixed actual SMEM board metadata and TCSR3 arbitration only; NOT Bluetooth functionality",
+  "normal_default": "0424",
+  "native_sha256": "bea59aaf413c87356caadad4c3cd8c2fab52c7b91a62b69fb9e4a228eff11366",
+  "source_version": "0423",
+  "source_replay": {
+    "common": 293,
+    "host": 4,
+    "files": 5252,
+    "all_equal": true
+  },
+  "complete_restart_qualification": {
+    "0423": {
+      "version": "0423",
+      "source_version": "0423",
+      "actual_board_metadata_qualified": true,
+      "actual_identity": {
+        "smem_version": "000c0000",
+        "ocdt_version": 1,
+        "project": 19805,
+        "dtsi": 19805,
+        "record_bytes": 100,
+        "cached": false
+      },
+      "successful_queries": 3,
+      "actual_hardware_lock_acquired_and_released": true,
+      "gpio_and_gcc_exactly_preserved": true,
+      "original_root_mkb_c_d_defaults_watchdog_preserved": true,
+      "actual_log_sha256": "603ea91aa1c4fc33acce4981b7c207135b36ab9121a0daec5425d1c5713a3e4f",
+      "native_sha256": "bea59aaf413c87356caadad4c3cd8c2fab52c7b91a62b69fb9e4a228eff11366",
+      "board_specific_rail_binding_qualified": false,
+      "bluetooth_functional": false,
+      "full_springboard": false
+    },
+    "0424": {
+      "version": "0424",
+      "source_version": "0423",
+      "actual_board_metadata_qualified": true,
+      "actual_identity": {
+        "smem_version": "000c0000",
+        "ocdt_version": 1,
+        "project": 19805,
+        "dtsi": 19805,
+        "record_bytes": 100,
+        "cached": false
+      },
+      "successful_queries": 3,
+      "actual_hardware_lock_acquired_and_released": true,
+      "gpio_and_gcc_exactly_preserved": true,
+      "original_root_mkb_c_d_defaults_watchdog_preserved": true,
+      "actual_log_sha256": "a053e5293cedcc6b86a3069f654cd321e8f72b8ed42a11d66015ce7e37930213",
+      "native_sha256": "bea59aaf413c87356caadad4c3cd8c2fab52c7b91a62b69fb9e4a228eff11366",
+      "board_specific_rail_binding_qualified": false,
+      "bluetooth_functional": false,
+      "full_springboard": false
+    }
+  },
+  "original_substrate_regressions": {
+    "0423": {
+      "version": "0423",
+      "defaults_matching_complete": true,
+      "actual_log_sha256": "603ea91aa1c4fc33acce4981b7c207135b36ab9121a0daec5425d1c5713a3e4f",
+      "native_sha256": "bea59aaf413c87356caadad4c3cd8c2fab52c7b91a62b69fb9e4a228eff11366",
+      "real_apple_image4_start_succeeded": true,
+      "actual_busy_reference_released": true,
+      "busy_lifecycle": [
+        [
+          0,
+          0,
+          1,
+          "defaults"
+        ],
+        [
+          11,
+          1,
+          1,
+          "AppleImage4"
+        ],
+        [
+          14,
+          2,
+          -1,
+          "defaults"
+        ],
+        [
+          15,
+          1,
+          -1,
+          "AppleImage4"
+        ]
+      ],
+      "final_busy_state": 0,
+      "actual_waits": [
+        "IOAESAccelerator",
+        "IOResources/IONVRAM",
+        "IODTNVRAM"
+      ],
+      "hardware_nonce_and_data_restored_without_generation": true,
+      "native_nvram_existing_proxy_adopted": true,
+      "nvram_encrypted_data_banks_cold_restored": true,
+      "nvram_restored_bank": 0,
+      "nvram_restored_generation": 233,
+      "nvram_hardware_or_rollback_claim": false,
+      "nvram_durable_write_calls": 2,
+      "watchdog_enabled": true,
+      "original_iokit_monitoring_preserved": true,
+      "watchdog_heartbeat_times": [
+        43.71,
+        43.71,
+        53.76,
+        63.742,
+        73.74,
+        83.738,
+        93.719,
+        103.762,
+        113.757,
+        123.751,
+        133.743,
+        143.738,
+        153.74,
+        163.727,
+        173.751,
+        183.742,
+        193.745,
+        203.78,
+        213.77,
+        223.785,
+        233.741,
+        243.738
+      ],
+      "original_locked_observations": [
+        [
+          60.494,
+          30,
+          3
+        ],
+        [
+          90.533,
+          60,
+          6
+        ],
+        [
+          120.568,
+          90,
+          9
+        ],
+        [
+          150.622,
+          120,
+          12
+        ],
+        [
+          180.62,
+          150,
+          15
+        ],
+        [
+          210.65,
+          180,
+          18
+        ],
+        [
+          240.677,
+          210,
+          21
+        ]
+      ],
+      "systembag_and_hardware_c_d_preserved": true,
+      "rtc_record_reused": true,
+      "panic": [],
+      "full_ios_or_springboard": false,
+      "gpu_display_input_started": false
+    },
+    "0424": {
+      "version": "0424",
+      "defaults_matching_complete": true,
+      "actual_log_sha256": "a053e5293cedcc6b86a3069f654cd321e8f72b8ed42a11d66015ce7e37930213",
+      "native_sha256": "bea59aaf413c87356caadad4c3cd8c2fab52c7b91a62b69fb9e4a228eff11366",
+      "real_apple_image4_start_succeeded": true,
+      "actual_busy_reference_released": true,
+      "busy_lifecycle": [
+        [
+          0,
+          0,
+          1,
+          "defaults"
+        ],
+        [
+          11,
+          1,
+          1,
+          "AppleImage4"
+        ],
+        [
+          14,
+          2,
+          -1,
+          "defaults"
+        ],
+        [
+          15,
+          1,
+          -1,
+          "AppleImage4"
+        ]
+      ],
+      "final_busy_state": 0,
+      "actual_waits": [
+        "IOAESAccelerator",
+        "IOResources/IONVRAM",
+        "IODTNVRAM"
+      ],
+      "hardware_nonce_and_data_restored_without_generation": true,
+      "native_nvram_existing_proxy_adopted": true,
+      "nvram_encrypted_data_banks_cold_restored": true,
+      "nvram_restored_bank": 1,
+      "nvram_restored_generation": 238,
+      "nvram_hardware_or_rollback_claim": false,
+      "nvram_durable_write_calls": 2,
+      "watchdog_enabled": true,
+      "original_iokit_monitoring_preserved": true,
+      "watchdog_heartbeat_times": [
+        43.799,
+        43.8,
+        53.774,
+        63.779,
+        73.773,
+        83.813,
+        93.814,
+        103.815,
+        113.795,
+        123.773,
+        133.785,
+        143.771,
+        153.812,
+        163.773,
+        173.774,
+        183.829,
+        193.823,
+        203.812,
+        213.823,
+        223.827,
+        233.821,
+        243.832,
+        253.792,
+        263.801,
+        273.793
+      ],
+      "original_locked_observations": [
+        [
+          60.529,
+          30,
+          3
+        ],
+        [
+          90.564,
+          60,
+          6
+        ],
+        [
+          120.59,
+          90,
+          9
+        ],
+        [
+          150.628,
+          120,
+          12
+        ],
+        [
+          180.648,
+          150,
+          15
+        ],
+        [
+          210.696,
+          180,
+          18
+        ],
+        [
+          240.735,
+          210,
+          21
+        ],
+        [
+          270.728,
+          240,
+          24
+        ]
+      ],
+      "systembag_and_hardware_c_d_preserved": true,
+      "rtc_record_reused": true,
+      "panic": [],
+      "full_ios_or_springboard": false,
+      "gpu_display_input_started": false
+    }
+  },
+  "host_cases": 81,
+  "host_mutations": 9,
+  "usb_priority_mutations": 1,
+  "temporary_maps_unmapped": true,
+  "shared_hardware_mutex_register_writes": true,
+  "smem_payload_writes": false,
+  "rail_gpio_rsc_or_firmware_writes": false,
+  "controller_initialized": false,
+  "bluetooth_functional": false,
+  "scan_connect_data_qualified": false,
+  "last_independent_readonly_data_fsck": "0416",
+  "new_full_system_hash": false,
+  "development_fast": true,
+  "deferred_by_user": true,
+  "resume_after": "GPU, display, input and physically usable SpringBoard",
+  "resume_at": "Owned/shared RPMh supply votes and PMIC readback using actual19805 profile; then external UART/controller ROM/HCI"
+}
