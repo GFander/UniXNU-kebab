@@ -1,0 +1,72 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -38,7 +38,7 @@
+  *   18 IsMainDisplay -> [1]
+  *   22 SetDisplayDevice [index] -> only 0 (the built-in panel)
+  *   28 GetDotPitch -> [458] (iPhone X ppi, not the 395 ppi panel)
+- *   29 GetDisplayArea -> struct {x, y, w, h} = 0, 0, 1125, 2436
++ *   29 GetDisplayArea -> two Float32: height/dot-pitch, width/dot-pitch
+  *   33 EnableDisableVideoPowerSavings [on] -> [on] (no savings to toggle)
+  *   50 SetBrightnessCorrection, 55 SetMatrix, 68 SetParameter,
+  *   79 GetBlock, 84 SetContrast: unsupported (would have to fake a result)
+@@ -72,6 +72,7 @@
+ 
+ #if defined(KEBAB)
+ #include "KebabUserClientContract.h"
++#include "KebabFramebufferGeometry.h"
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+@@ -951,7 +952,16 @@
+ 		outCount = 1;
+ 		break;
+ 	case kKebabFBGetDisplayArea: {
+-		int32_t area[4] = { 0, 0, (int32_t)fFB->fLogicalW, (int32_t)fFB->fLogicalH };
++		/* Exact donor selector29/virtual+0x5e8 returns two Float32 values,
++		 * height then width, divided by the reported dot-pitch. These use
++		 * this port's existing logical display profile, not a newly measured
++		 * panel size. Encode with integer arithmetic; no kernel FP state. */
++		uint32_t area[2];
++		if (!kebab_fb_display_area(fFB->fLogicalW, fFB->fLogicalH,
++		    KEBAB_FB_DOT_PITCH, area)) {
++			ret = kIOReturnBadArgument;
++			break;
++		}
+ 		ret = kebab_fb_struct_out(args, area, (uint32_t)sizeof(area));
+ 		break;
+ 	}
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabFramebufferGeometry.h
+@@ -0,0 +1,32 @@
++/* Exact IOMobileGraphicsFamily selector29: two binary32 dimensions in
++ * height/width order, each divided by the same reported dot-pitch as sel28.
++ * Only exactly representable positive integer inputs are accepted. Current
++ * GOP/logical geometry and density are far inside this range. No kernel FP. */
++#ifndef KEBAB_FRAMEBUFFER_GEOMETRY_H
++#define KEBAB_FRAMEBUFFER_GEOMETRY_H
++#include <stdint.h>
++
++static inline uint32_t
++kebab_fb_ratio_f32(uint32_t numerator, uint32_t denominator)
++{
++    uint64_t a = numerator, b = denominator;
++    int exponent = 0;
++    while (a < b) { a <<= 1; --exponent; }
++    while (a >= b * 2) { b <<= 1; ++exponent; }
++    uint64_t scaled = a << 23;
++    uint64_t significand = scaled / b, remainder = scaled % b;
++    if (remainder * 2 > b || (remainder * 2 == b && (significand & 1))) ++significand;
++    if (significand == (1ULL << 24)) { significand >>= 1; ++exponent; }
++    return ((uint32_t)(exponent + 127) << 23) | ((uint32_t)significand & 0x7fffffU);
++}
++
++static inline bool
++kebab_fb_display_area(uint32_t width, uint32_t height, uint32_t pitch, uint32_t output[2])
++{
++    if (output == 0 || width == 0 || height == 0 || pitch == 0 ||
++        width > (1U << 24) || height > (1U << 24) || pitch > (1U << 24)) return false;
++    output[0] = kebab_fb_ratio_f32(height, pitch);
++    output[1] = kebab_fb_ratio_f32(width, pitch);
++    return true;
++}
++#endif
