@@ -1,0 +1,10 @@
+{
+  "version": "0456",
+  "accepted": false,
+  "normal_substrate_passed": false,
+  "capture_sha256": "e0fd33041431af95f587669ea8e6777eb03a3c5eab44ea6e987027eb8c210fb9",
+  "failure": "cold class4 proof returns EAUTH80 before userland; class3 passes; hardware roots/devicebag restored; observer commands never tested",
+  "diagnostic_only_native_patch": "0341",
+  "panic_fastboot_actual_pon_imem_ack": true,
+  "next": "0457 exact failure-stage and supported metadata diagnosis, no check bypass"
+}

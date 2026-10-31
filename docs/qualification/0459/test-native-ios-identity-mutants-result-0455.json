@@ -1,0 +1,18 @@
+{
+  "passed": true,
+  "fixture_sha256": "2d847e5dc226eb4125a0ed67c342472f1753b31bc9673c817c1776c4f02cf022",
+  "behavioral_mutations_refused": [
+    "wrong-user-prefix",
+    "wrong-uid-endian",
+    "wrong-guid-endian",
+    "unknown-translation-success",
+    "all-identities-equal",
+    "grant-denied-rights",
+    "grant-unmatched-acl",
+    "ignore-inherit-only",
+    "grant-unlisted-group",
+    "drop-unknown-group-deny",
+    "drop-generic-read-expansion"
+  ],
+  "compile_failures_not_counted": true
+}

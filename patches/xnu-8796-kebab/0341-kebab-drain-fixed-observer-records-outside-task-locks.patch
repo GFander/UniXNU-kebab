@@ -1,0 +1,42 @@
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -91,6 +91,19 @@
+     }
+ }
+ 
++/* These fixed reports run on the normal USB event thread. Drain outside all
++ * task/thread/scheduler locks between bounded thread records, otherwise a fast
++ * multi-thread snapshot can fill the 16KiB TX ring before the event loop runs.
++ * The existing transport flush is bounded and does not promise host delivery;
++ * a disconnected/slow host must still be detected by the capture completion.
++ * Keep the complete frame budgets and normal daemon output unchanged. */
++static void
++kebab_observer_drain(void)
++{
++    extern void kebab_usb_log_flush(void);
++    kebab_usb_log_flush();
++}
++
+ static void
+ kebab_task_threads_report(task_t task, const char *label, bool user_sites, unsigned user_frame_cap)
+ {
+@@ -107,6 +120,7 @@
+ 		}
+ 	}
+ 	task_unlock(task);
++	kebab_observer_drain();
+ 	printf("KEBAB %s: thread snapshot count=%u thread_total=%u (cap32; no suspension)\n", label, count, thread_total);
+ 	for (unsigned i = 0; i < count; i++) {
+ 		thread = observed[i];
+@@ -135,9 +149,11 @@
+ 		}
+ 		if (have_site) kebab_user_wait_report(map, label, tid, &site, user_frame_cap);
+ 		thread_deallocate(thread);
++		kebab_observer_drain();
+ 	}
+ 	if (map != VM_MAP_NULL) vm_map_deallocate(map);
+ 	printf("KEBAB %s: snapshot end; addresses name kernel waits, not user PCs\n", label);
++	kebab_observer_drain();
+ }
+ 
+ void kebab_pid1_task_report(task_t task);

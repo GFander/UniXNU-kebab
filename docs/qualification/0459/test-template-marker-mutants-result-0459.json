@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "fixture_sha256": "07970f6aa36986549f9550a4df50270d7d5ef6f4f40e32bf89b1891367c578d9",
+  "behavioral_mutations_refused": [
+    "accept-unsupported-B",
+    "allow-C-marker-write",
+    "ignore-owner",
+    "ignore-group",
+    "ignore-mode",
+    "check-only-contract-prefix",
+    "ignore-short-read",
+    "accept-incomplete-as-finished",
+    "follow-symlink"
+  ],
+  "compile_failures_not_counted": true
+}

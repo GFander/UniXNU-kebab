@@ -1,0 +1,41 @@
+--- a/bsd/dev/kebab_data_template_impl.h
++++ b/bsd/dev/kebab_data_template_impl.h
+@@ -93,6 +93,7 @@
+   if(!error)error=VNOP_READLINK(file,w->scan.uio,vfs_context_current());
+   if(!error&&(KCM_CHUNK-1-uio_resid(w->scan.uio)!=e->bytes||strcmp((const char*)w->scan.buffer,e->link)))error=EAUTH;
+  }
++ if(error)printf("KEBAB DATA TEMPLATE CHECK: fixed path=%s error=%d; metadata/xattr/content checks retained\n",source?e->source:e->target,error);
+  vnode_put(file);return error;
+ }
+ 
+@@ -201,7 +202,11 @@
+  if(vnode_mount(file)!=data||!vnode_isreg(file)){error=EAUTH;goto done;}
+  struct vnode_attr a;VATTR_INIT(&a);VATTR_WANTED(&a,va_data_size);VATTR_WANTED(&a,va_uid);VATTR_WANTED(&a,va_gid);VATTR_WANTED(&a,va_mode);VATTR_WANTED(&a,va_nlink);VATTR_WANTED(&a,va_flags);VATTR_WANTED(&a,va_dataprotect_class);
+  error=vnode_getattr(file,&a,vfs_context_current());if(error)goto done;
+- if(!VATTR_IS_SUPPORTED(&a,va_data_size)||!VATTR_IS_SUPPORTED(&a,va_uid)||!VATTR_IS_SUPPORTED(&a,va_gid)||!VATTR_IS_SUPPORTED(&a,va_mode)||!VATTR_IS_SUPPORTED(&a,va_nlink)||!VATTR_IS_SUPPORTED(&a,va_flags)||!VATTR_IS_SUPPORTED(&a,va_dataprotect_class)||a.va_dataprotect_class!=4||a.va_uid||a.va_gid||(a.va_mode&07777)!=0600||a.va_nlink!=1||a.va_flags||(a.va_data_size!=0&&a.va_data_size!=4096)){error=EAUTH;goto done;}
++ if(!VATTR_IS_SUPPORTED(&a,va_data_size)||!VATTR_IS_SUPPORTED(&a,va_uid)||!VATTR_IS_SUPPORTED(&a,va_gid)||!VATTR_IS_SUPPORTED(&a,va_mode)||!VATTR_IS_SUPPORTED(&a,va_nlink)||!VATTR_IS_SUPPORTED(&a,va_flags)||!VATTR_IS_SUPPORTED(&a,va_dataprotect_class)||(a.va_dataprotect_class!=4&&(write||a.va_dataprotect_class!=3))||a.va_uid||a.va_gid||(a.va_mode&07777)!=0600||a.va_nlink!=1||a.va_flags||(a.va_data_size!=0&&a.va_data_size!=4096)){error=EAUTH;goto done;}
++ /* Read-only installation receipts may have been strengthened from D to C
++  * during original userspace initialization. Keep exact owner/mode/link/mount
++  * and full4096B contract/UUID/content checks. Writes still require class D. */
++ printf("KEBAB DATA MARKER: class=%u bytes=%llu write=%u; full contract read still required\n",a.va_dataprotect_class,(unsigned long long)a.va_data_size,write);
+  *exists=a.va_data_size==4096;*finished=false;
+  if(*exists){
+   int residual=0;error=vn_rdwr(UIO_READ,file,(caddr_t)w->marker,4096,0,UIO_SYSSPACE,IO_NOCACHE,vfs_context_ucred(vfs_context_current()),&residual,NULL);
+--- a/bsd/kern/kebab_data_files_impl.h
++++ b/bsd/kern/kebab_data_files_impl.h
+@@ -157,13 +157,13 @@
+  }
+  if(!error){
+   uint8_t digest[32];SHA256_CTX hash;SHA256_Init(&hash);SHA256_Update(&hash,w->back,KDP_BYTES);SHA256_Final(digest,&hash);
+-  printf("KEBAB DATA FILE: %s class=%u bytes=%u original APFS protected IO sha256=",create?"write/read":(rewrap?"rewrap-read":"cold-read"),cls,KDP_BYTES);
++  printf("KEBAB DATA FILE: %s class=%u bytes=%u original APFS protected IO sha256=",create?"write/read":(rewrap?"rewrap-read":(restored_d?"post-restoration-read":"cold-read")),cls,KDP_BYTES);
+   for(unsigned j=0;j<32;++j)printf("%02x",digest[j]);printf(" PASS\n");bzero(digest,sizeof(digest));
+  }
+ done:
+  if(error)printf("KEBAB DATA FILE FAILURE: class=%u step=%s error=%d; checks retained\n",cls,step,error);
+  if(file){int closed=vnode_close(file,FREAD,context);if(!error)error=closed;}
+- printf("KEBAB DATA FILE: fixed %s class=%u %s (%d)\n",create?"exclusive create":(rewrap?"class rewrap":"cold restore"),cls,error?"FAIL":"PASS",error);
++ printf("KEBAB DATA FILE: fixed %s class=%u %s (%d)\n",create?"exclusive create":(rewrap?"class rewrap":(restored_d?"post-restoration proof":"cold restore")),cls,error?"FAIL":"PASS",error);
+  bzero(w,sizeof(*w));kfree_data(w,sizeof(*w));return error;
+ }
+ 

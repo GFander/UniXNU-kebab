@@ -1,0 +1,35 @@
+{
+  "native_sha256": "026381abf4219889212f518227ec7dba3058019aa27c2aa33db8022c1631c8f2",
+  "stripped_ctf_sha256": "45f994065f6d4c34f08e0cc0719726748a6106aef8240551715cf2050248d9cb",
+  "donor_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "original_apfs_instructions_checked": 4,
+  "virtual_method_byte_offset": 936,
+  "native_provider_vtable": "0xfffffe0006467050",
+  "native_provider_method": "0xfffffe0006c1ff38",
+  "native_vtable_slot_equal": true,
+  "native_service_table": "0xfffffe0006468300",
+  "table_bytes": 184,
+  "supported_slots": {
+    "0x0": "_kebab_apfs_file_key_unwrap",
+    "0x8": "_kebab_apfs_file_key_rewrap",
+    "0x10": "_kebab_apfs_file_key_new",
+    "0x38": "_kebab_metadata_key_unwrap_wrapped",
+    "0x48": "_kebab_metadata_key_create_wrapped",
+    "0xa8": "_kebab_apfs_file_key_is_available"
+  },
+  "unsupported_null_slots": 17,
+  "all_table_function_pointers_equal": true,
+  "note": "ABI slot and linked function pointers only. Original APFS runtime client, Data keybags/mount/control, class3 and FileVault provider remain unqualified.",
+  "filevault_service_table": "0xfffffe0006467630",
+  "filevault_table_bytes": 88,
+  "filevault_next_entry_null": true,
+  "filevault_supported_slots": {
+    "0x0": "_kebab_volume_key_new_wrapped",
+    "0x8": "_kebab_volume_key_unwrap_wrapped",
+    "0x20": "_kebab_volume_key_length",
+    "0x38": "_kebab_volume_blob_state",
+    "0x40": "_kebab_volume_set_protection"
+  },
+  "filevault_unsupported_null_slots": 6,
+  "filevault_all_function_pointers_equal": true
+}

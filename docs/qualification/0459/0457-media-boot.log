@@ -1,0 +1,434 @@
+[2026-10-31T19:26:01] capturing complete owner verification/startup, maximum 2700s
+[   2.645] KEBAB TOUCH: console window over, starting MMIO
+[   2.645] KEBAB VRM: === boot power: touch rails, one ENABLE each ===
+[   2.645] KEBAB VRM: encode ldoa13 ENABLE -> OK msgid 0x00010108 addr 0x00040c04 data 0x00000001
+[   2.645] KEBAB VRM: whitelist: WRITE_ACK to the ENABLE register of ldoa13 only, slot 0x1
+[   2.645] KEBAB VRM: send ldoa13 -> OK (0)
+[   2.645] KEBAB VRM: phase COMPLETE, CMD_STATUS 0x00010101 (ISSUED 1, COMPL 1)
+[   2.645] KEBAB VRM: ldoa13 ENABLE acknowledged by RPMh; confirm the rail with PWR? before the next step
+[   2.646] KEBAB VRM: boot power: ldoa13 COMPL, phase COMPLETE, CMD_STATUS 0x00010101 (ISSUED 1, COMPL 1), EN 0x00 -> 0x80
+[   2.707] KEBAB VRM: encode ldoc1 ENABLE -> OK msgid 0x00010108 addr 0x00042f04 data 0x00000001
+[   2.707] KEBAB VRM: whitelist: WRITE_ACK to the ENABLE register of ldoc1 only, slot 0x4
+[   2.707] KEBAB VRM: send ldoc1 -> OK (0)
+[   2.707] KEBAB VRM: phase COMPLETE, CMD_STATUS 0x00010101 (ISSUED 1, COMPL 1)
+[   2.707] KEBAB VRM: ldoc1 ENABLE acknowledged by RPMh; confirm the rail with PWR? before the next step
+[   2.707] KEBAB VRM: boot power: ldoc1 COMPL, phase COMPLETE, CMD_STATUS 0x00010101 (ISSUED 1, COMPL 1), EN 0x00 -> 0x80
+[   2.707] KEBAB VRM: boot power: ldoa13 and ldoc1 both read 0x80
+[   2.707] KEBAB TOUCH: both rails up, waited 15 ms before the reset
+[   2.707] KEBAB TOUCH: queue selftest: 64 slots, 192 pushed, 128 dropped without a reader, 64 drained: ok
+[   2.707] KEBAB TOUCH: mapping SE13 0x00a94000+0x4000, wrapper 0x00ac0000+0x2000
+[   2.707] KEBAB TOUCH: mapping TLMM SOUTH at 0x0f500000+0x40000
+[   2.707] KEBAB TOUCH: MMIO done: se 0xfffffe1009f8c000 wrap 0xfffffe1009f90000 tlmm 0xfffffe1009f94000
+[   2.707] KEBAB TOUCH: TOUCHCLK: S5 RCG at 0x18600
+[   2.707] KEBAB TOUCH:   RCG+0x00 = 0x80000000
+[   2.707] KEBAB TOUCH:   RCG+0x04 = 0x00100000
+[   2.707] KEBAB TOUCH:   RCG+0x08 = 0x00000000
+[   2.707] KEBAB TOUCH:   RCG+0x0c = 0x00000000
+[   2.707] KEBAB TOUCH:   RCG+0x10 = 0x00000000
+[   2.707] KEBAB TOUCH:   RCG+0x14 = 0x00000021
+[   2.707] KEBAB TOUCH:   RCG+0x18 = 0x00000000
+[   2.707] KEBAB TOUCH:   RCG+0x1c = 0x00000001
+[   2.707] KEBAB TOUCH: TOUCHCLK: 0x52008 0x063c83c0 -> 0x0e3c83c0
+[   2.707] KEBAB TOUCH: TOUCHCLK: 0x52008 now 0x0e3c83c0 (s5 1), halt 0x00004220
+[   2.708] KEBAB TOUCH: reading wrapper/SE revision registers
+[   2.708] KEBAB TOUCH: S3908 on QUPv3 SE13 at 0x00a94000 (I2C 0x4b, 100000 Hz), wrapper 0x00ac0000
+[   2.708] KEBAB TOUCH: wrapper QUP_HW_VER 0x20050000, SE13 GENI_FW_REVISION_RO 0x00000303
+[   2.708] KEBAB TOUCH: configuring pins (qup13)
+[   2.708] KEBAB TOUCH: qup13 pin 36: reading TLMM_CTL at 0x0f524000
+[   2.708] KEBAB TOUCH: qup13 pin 36: ctl 0x00000001 -> 0x00000004
+[   2.708] KEBAB TOUCH: pin 36 mux qup13, ctl 0x00000001 -> 0x00000004
+[   2.708] KEBAB TOUCH: qup13 pin 37: reading TLMM_CTL at 0x0f525000
+[   2.708] KEBAB TOUCH: qup13 pin 37: ctl 0x00000001 -> 0x00000004
+[   2.708] KEBAB TOUCH: pin 37 mux qup13, ctl 0x00000001 -> 0x00000004
+[   2.708] KEBAB TOUCH: pins done, reset pulse next
+[   2.708] KEBAB TOUCH: reset pin 38 level 0: reading TLMM_CTL/TLMM_IO
+[   2.708] KEBAB TOUCH: reset ctl 0x00000001 io 0x00000001 -> level 0
+[   2.708] KEBAB TOUCH: reset pin 38 level 1: reading TLMM_CTL/TLMM_IO
+[   2.708] KEBAB TOUCH: reset ctl 0x00000200 io 0x00000000 -> level 1
+[   2.708] KEBAB TOUCH: reset pulse (mode 1), ctl 0x00000200 io 0x00000003
+[   2.956] KEBAB TOUCH: reset pulse done, waited 20 ms
+[   2.956] KEBAB TOUCH: se_init: clear IRQs
+[   2.956] KEBAB TOUCH: se_init: force default, output ctrl
+[   2.956] KEBAB TOUCH: se_init: packing + byte granularity
+[   2.956] KEBAB TOUCH: se_init: clock select + SCL counters
+[   2.956] KEBAB TOUCH: TCM identify begin
+[   2.956] KEBAB TOUCH: TCM command 0x02, 0 payload byte(s)
+[   2.956] KEBAB TOUCH: TCM command 0x02 written, waiting for header
+[   2.956] KEBAB TOUCH: command 0x02 answer: code 0x10, 24 payload byte(s), TCM framing validated
+[   2.956] KEBAB TOUCH: answer[0] 01 01 73 33 39 30 38 2d 31 35 2e 30 2e 30 00 00 
+[   2.956] KEBAB TOUCH: answer[16] 00 00 b9 ba 3c 00 00 04 
+[   2.956] KEBAB TOUCH: identify: message 0x10, 24 payload byte(s)
+[   2.956] KEBAB TOUCH: identify payload[0] 01 01 73 33 39 30 38 2d 31 35 2e 30 2e 30 00 00 
+[   2.956] KEBAB TOUCH: identify payload[16] 00 00 b9 ba 3c 00 00 04 
+[   2.956] KEBAB TOUCH: identify: part "s3908-15.0.0", version 0x01, mode 0x01 (application)
+[   2.956] KEBAB TOUCH: identify: build 0x003cbab9
+[   2.956] KEBAB TOUCH: TCM command 0x10, 0 payload byte(s)
+[   2.956] KEBAB TOUCH: TCM command 0x10 written, waiting for header
+[   2.956] KEBAB TOUCH: command 0x10 answer: code 0x0e, 0 payload byte(s), TCM framing validated
+[   2.956] KEBAB TOUCH: boot info: message 0x0e, 0 payload byte(s)
+[   2.956] KEBAB TOUCH: boot info: code 0x0e (not implemented), 0 payload byte(s): this firmware does not report boot status
+[   2.956] KEBAB TOUCH: identity: APPLICATION MODE (mode 0x01), the touch firmware is running
+[   2.956] KEBAB TOUCH: TCM command 0x20, 0 payload byte(s)
+[   2.956] KEBAB TOUCH: TCM command 0x20 written, waiting for header
+[   2.956] KEBAB TOUCH: command 0x20 answer: code 0x1d, 20 payload byte(s), TCM framing validated
+[   2.957] KEBAB TOUCH: answer[0] 00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 
+[   2.957] KEBAB TOUCH: answer[16] 00 00 01 00 
+[   2.957] KEBAB TOUCH: report 0x1d arrived while waiting for command 0x20; read out
+[   2.957] KEBAB TOUCH: command 0x20 answer: code 0x01, 46 payload byte(s), TCM framing validated
+[   2.957] KEBAB TOUCH: answer[0] 01 00 00 00 10 12 4a 00 c0 55 fc 12 80 00 00 01 
+[   2.957] KEBAB TOUCH: answer[16] 45 45 30 31 33 30 32 33 00 00 00 00 00 00 00 00 
+[   2.957] KEBAB TOUCH: answer[32] 37 04 5f 09 0a 00 00 00 10 00 24 00 01 00 
+[   2.957] KEBAB TOUCH: app info: message 0x01, 46 payload byte(s)
+[   2.957] KEBAB TOUCH: app info payload[0] 01 00 00 00 10 12 4a 00 c0 55 fc 12 80 00 00 01 
+[   2.957] KEBAB TOUCH: app info payload[16] 45 45 30 31 33 30 32 33 00 00 00 00 00 00 00 00 
+[   2.957] KEBAB TOUCH: app info payload[32] 37 04 5f 09 0a 00 00 00 10 00 24 00 01 00 
+[   2.957] KEBAB TOUCH: app info: version 0x0001 status 0x0000, max_x 1079 max_y 2399 objects 10 buttons 0 rows 16 cols 36 hybrid 1
+[   2.957] KEBAB TOUCH: app info: static config 4624 bytes, dynamic config 74 bytes, app config 4860 bytes at block 21952
+[   2.957] KEBAB TOUCH: app info: max touch report config 128 bytes, max touch report payload 256 bytes
+[   2.957] KEBAB TOUCH: report program: 13 bytes, 40 bits per contact, 128 bytes sent
+[   2.957] KEBAB TOUCH: report program[0] 01 06 04 07 04 08 0c 09 0c 0a 08 03 00 
+[   2.957] KEBAB TOUCH: TCM command 0x26, 128 payload byte(s)
+[   3.020] KEBAB TOUCH: TCM command 0x26 written, waiting for header
+[   3.020] KEBAB TOUCH: command 0x26 answer: code 0x01, 0 payload byte(s), TCM framing validated
+[   3.020] KEBAB TOUCH: report config: answered code 0x01 (OK), 0 payload byte(s)
+[   3.020] KEBAB TOUCH: report config accepted: 40 bits per contact, z included
+[   3.020] devfs_make_node: not ready for devices!
+[   3.020] KEBAB TOUCH: cdev major 9, but no /dev node
+[   3.020] KEBAB TOUCH: polling for reports, decode on, dump off, move lines every 200 ms
+[   3.020] KEBAB SPMI: key source PPID 0x008 -> observer APID 0x00d (owned by this EE)
+[   3.020] KEBAB SPMI: key source PPID 0x0c5 -> observer APID 0x019 (owned by this EE)
+[   3.020] KEBAB SPMI: key source PPID 0x0c6 -> observer APID 0x01a (owned by this EE)
+[   3.020] KEBAB KEYS: GPIO6 mode=0x00 pull=0x00 en=0x80 -> enabled input with pull-up; GPIO7 mode=0x00 pull=0x00 en=0x80 -> enabled input with pull-up
+[   3.020] KEBAB KEYS: sources: PON RT_STS 0x0810, PM8150 GPIO6 RT_STS 0x0c510, GPIO7 RT_STS 0x0c610, GPIO type 0x0c504 (expected 0x10)
+[   3.020] KEBAB KEYS: first sample pon=0x04 gpio6=0x01 gpio7=0x01 ident=0x10 -> power released, volume-up released, volume-down released
+[   3.020] KEBAB KEYS: queue selftest: 64 slots, 192 pushed, 128 dropped without a reader, 64 drained: ok
+[   3.020] KEBAB KEYS: node publication deferred until devfs is ready
+[   3.020] KEBAB KEYS: polling every 16 ms
+[   3.020] Copyright (c) 1982, 1986, 1989, 1991, 1993
+[   3.020] 	The Regents of the University of California. All rights reserved.
+[   3.020] 
+[   3.020] MAC Framework successfully initialized
+[   3.020] AMFI: PMGRAON latched to: ffffffff
+[   3.020] AMFI: Enabling developer mode since protected data is not available
+[   3.020] AMFI: finished: 1 1
+[   3.020] using 10382 buffer headers and 7239 cluster IO buffer headers
+[  32.992] ktriage_register_subsystem_strings: set subsystem 8 strings
+[  32.992] mcache: 8 CPU(s), 64 bytes CPU cache line size
+[  32.992] mbinit: done [96 MB total pool size, (64/32) split]
+[  32.992] dlil_init: Waiting for all the create dlil kernel threads to get scheduled at least once.
+[  32.992] dlil_init: All the created dlil kernel threads have been scheduled at least once. Proceeding.
+[  33.054] com.apple.AppleFSCompressionTypeZlib kmod start
+[  33.054] ifnet_attach: All kernel threads created for interface lo0 have been scheduled at least once. Proceeding.
+[  33.054] ifnet_attach: Waiting for all kernel threads created for interface gif0 to get scheduled at least once.
+[  33.054] ifnet_attach: All kernel threads created for interface gif0 have been scheduled at least once. Proceeding.
+[  33.054] apfs_module_start:3058: load: com.apple.filesystems.apfs, v2142.140.9, apfs-2142.140.9.704.1, 2025/07/11
+[  33.055] ktriage_register_subsystem_strings: set subsystem 7 strings
+[  33.055] skip attaching fsw to lo0 using legacy TX modelifnet_attach: Waiting for all kernel threads created for interface stf0 to get scheduled at least once.
+[  33.055] ifnet_attach: All kernel threads created for interface stf0 have been scheduled at least once. Proceeding.
+[  33.055] KEBAB AES: ABI aes=0xfffffe000ac49050/288 crypto=0xfffffe000ac490d8/136 service=0xfffffe0006dcb428/136
+[  33.055] KEBAB AES KAT: descriptors=1 completed=1
+[  33.055] KEBAB AES: rejected selector=2001 bits=128 operation=0 bytes=64
+[  33.055] KEBAB AES KAT: unsupported=1 count=1
+[  33.055] KEBAB AES KAT: bounds=1 count=1
+[  33.055] KEBAB AES KAT: input=0xfffffe0006030ca8 native-start=0xfffffe0006004000 prelink-start=0xfffffe0008000000 static-end=0xfffffe000ae50000
+[  33.055] KEBAB AES KAT: raw-encrypt=1 status=0x0 first=7649abac iv=3f completed=2
+[  33.055] KEBAB AES KAT: raw-decrypt=1 status=0x0 first=6bc1bee2 iv=3f completed=3
+[  33.055] KEBAB AES: KAT=1 interface=1 completed=3 unsupported=1 negative=0
+[  33.055] KEBAB AES NONCE: provider waiting for restored hardware keyblob; unregistered
+[  33.055] KEBAB SURF: IOCoreSurfaceRoot registered
+[  33.055] com.apple.AppleFSCompressionTypeZlib load succeeded
+[  33.055] Setting up notifier for CoreAnalyticsHub
+[  33.055] apfs_sysctl_register:1562: done registering sysctls.
+[  33.055] KEBAB UFS: VER 0x300 CAP 0x1587031f HCE 0x1 HCS 0x10f
+[  33.055] KEBAB GENI IOKIT: bus registered; S3908@4b scoped nub; existing transport retained
+[  33.055] KEBAB SPMI IOKIT: bus registered; 3 scoped nubs, C core retains panic mappings
+[  33.055] KEBAB GENI IOKIT: KebabTouch matched S3908@4b; typed state only, no HID
+[  33.055] KEBAB PMU: primary PM8150 PON observed subtype=4 spare=0x0; boot stages volatile, no PMIC writes
+[  33.055] KEBAB SPMI IOKIT: KebabPon matched usid0/peripheral08
+[  33.055] KEBAB SPMI IOKIT: KebabPmicKeys matched usid0/pages08,c5,c6; polling policy retained
+[  33.055] KEBAB HID: transport role=2 waiting for actual backend initialization
+[  33.055] KEBAB SPMI IOKIT: KebabVrm matched RSC policy/readback resources; no IOPM claim
+[  33.055] KEBAB HID: transport role=1 waiting for actual backend initialization
+[  33.055] KEBAB UFS: DMA PA 0x208928000 size 0x104000 (firmware must allow physical DMA)
+[  33.055] KEBAB UFS: /dev/kebabcon ready
+[  33.055] KEBAB UFS: "userdata" on LUN 0: first block 0x2c7420, 229843 MiB, read-write
+[  33.055] KEBAB BLOCK: block storage up: 229843 MiB, 4096-byte blocks, read-write
+[  33.055] KEBAB BLOCK: registered Generic device for 229843 MiB, 4096-byte blocks, read-write; IOMedia child not yet verified
+[  33.055] KEBAB BLOCK: UFS provider ready; selecting APFS volume through root-matching
+[  33.055] Waiting on <dict ID="0"><key>IOProviderClass</key><string ID="1">IOMedia</string><key>IOPropertyMatch</key><dict ID="2"><key>UUID</key><string ID="3">DADD93F8-DBBF-4B17-A1DF-0F11E64172F7</string></dict></dict>
+[  33.055] dev_init:296: disk0 device accelerated crypto: 0 (compiled @ Jul 11 2025 15:52:26)
+[  33.055] dev_init:299: disk0 device_handle block size 4096 block count 58840027 features 0 internal 
+[  33.055] nx_mount:1224: disk0 initializing cache w/hash_size 4096 and cache size 10064
+[  33.115] KEBAB HID: transport role=2 actual backend ready; publish original HID device matching
+[  33.116] KEBAB HID: transport role=1 actual backend ready; publish original HID device matching
+[  33.116] KEBAB HID: original IOHIDDevice started role=2 interval=5000 contacts=10; real snapshots only
+[  33.116] KEBAB HID: original IOHIDDevice started role=1 interval=16000 contacts=0; real snapshots only
+[  33.116] open by IOHIDEventDriver 0x100000169 (0x0)
+[  33.116] open by IOHIDEventDriver 0x10000016a (0x0)
+[  33.116] nx_mount:1553: disk0 checkpoint search: largest xid 40245, best xid 40245 @ 179
+[  33.116] nx_mount:1580: disk0 stable checkpoint indices: desc 178 data 13907
+[  33.116] probe:3995: disk0 Caching extended container info for container disk0
+[  33.116] import_iboot_forwarded_roothash:3317: importing root hash (basesystem ? 0)...
+[  33.116] apfs_extract_root_hash_arm:12140: could not retrieve system-volume-auth-blob from device tree
+[  33.116] import_iboot_forwarded_roothash:3322: apfs_extract_root_hash_and_manifest failed with error: No such file or directory (2)
+[  33.116] Got boot device = IOService:/kebab-ufs0/IOBlockStorageDriver/KEBAB UFS userdata Media/AppleAPFSContainerScheme/AppleAPFSMedia/AppleAPFSContainer/SydneyUpdate20H392.D22D221OS@1
+[  33.116] BSD root: disk1s1, major 1, minor 2
+[  33.116] apfs_vfsop_mountroot:2745: apfs: mountroot called!
+[  33.116] dev_init:296: disk1 device accelerated crypto: 0 (compiled @ Jul 11 2025 15:52:26)
+[  33.116] dev_init:299: disk1 device_handle block size 4096 block count 58840027 features 0 internal 
+[  33.116] nx_mount:1224: disk1 initializing cache w/hash_size 4096 and cache size 10064
+[  33.116] KEBAB HID: report role=1 count=1 time=53662207395 keys=0 active=0x0 original-result=0
+[  33.177] nx_mount:1553: disk1 checkpoint search: largest xid 40245, best xid 40245 @ 179
+[  33.177] nx_mount:1580: disk1 stable checkpoint indices: desc 178 data 13907
+[  33.177] apfs_vfsop_mount:2408: disk1 Promoter has been locked 
+[  33.177] apfs_find_named_root_snapshot_xid:1925: disk1s1 failed to retrieve default root snapshot xid: No such file or directory (2)
+[  33.177] apfs_find_named_root_snapshot_xid:1961: disk1s1 The global payload bytes pointer is NULL
+[  33.177] apfs_vfsop_mount:2447: disk1s1 failed to find named root snapshot: Need authenticator (81)
+[  33.177] apfs_log_mount_unmount:2039: disk1s1 mounting volume SydneyUpdate20H392.D22D221OS, requested by: kernel_task (pid 0); parent: kernel_task (pid 0)
+[  33.177] handle_mount:765: disk1s1 vol-uuid: DADD93F8-DBBF-4B17-A1DF-0F11E64172F7 block size: 4096 block count: 58840027 (unencrypted; flags: 0x1; features: 8.0.12)
+[  33.177] handle_mount:778: disk1s1 setting dev block size to 4096 from 512
+[  33.177] nx_volume_group_update:7903: disk1s1 Volume SydneyUpdate20H392.D22D221OS is not in a volume group
+[  33.177] is_root_hash_authentication_required_ios:456: disk1s1 Release kext, booting xid: 0
+[  33.177] is_root_hash_authentication_required:540: disk1s1 Root Volume, root hash authentication is required
+[  33.177] KEBAB: root volume is not sealed (error 80); continuing
+[  33.177] No POST boot-arg set.
+[  33.177] KEBAB KEYS: /dev/kebab_keys major 21, 24-byte records, 64 slots
+[  33.177] KEBAB DATA ROOT: generic QSEE probe deferred until fixed-file client is ready
+[  33.177] VM Swap Subsystem is ON
+[  33.177] KEBAB CS: no static trust cache at /System/Library/Caches/com.apple.kernelcaches/static.trustcache (error 2); platform binaries will not be recognised
+[  33.177] KEBAB BOOT: prelink index parse on (1)
+[  33.177] KEBAB DSC: enabled for "/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld"; kebab_dsc_map=1 kebab_dsc_slide=0x0 (default) kebab_dsc_verbose=0
+[  33.177] KEBAB OWNER DSC: plan deferred until verified original SystemOS RO mount
+[  33.177] KEBAB APFS PROBE: target uuid=EF45F98E-9F6C-43DB-B7C6-F418CA77429B path=/dev/disk1s3 dev=1/4 backing=100000152 System=1/2 readonly=1
+[  33.177] apfs_log_mount_unmount:2039: disk1s3 mounting volume Preboot, requested by: init (pid 1); parent: kernel_task (pid 0)
+[  33.177] handle_mount:765: disk1s3 vol-uuid: EF45F98E-9F6C-43DB-B7C6-F418CA77429B block size: 4096 block count: 58840027 (unencrypted; flags: 0x1; features: 8.0.2)
+[  33.177] handle_mount:778: disk1s3 setting dev block size to 4096 from 512
+[  33.177] nx_volume_group_update:7897: disk1s3 Volume Preboot role 10 Not a System or data volume
+[  33.177] KEBAB APFS PROBE: mount syscall error=0
+[  33.177] KEBAB APFS PROBE: mounted dev=1/4 readonly=1 System-readonly=1 identity=PASS
+[  33.177] KEBAB APFS PROOF: reboot-read bytes=65559 sha256=3f2f47b49455f2d5cce7d745829440ccf0e8f1beda6c5120641c25213f78c957 PASS
+[  33.177] KEBAB QSEE: fixed lookup begin; experimental key commands require a separate flag
+[  33.177] KEBAB QSEE: capability=0x2000601 status=0 available=1 attempts=1
+[  33.177] KEBAB QSEE: capability=0x32000103 status=0 available=1 attempts=1
+[  33.177] KEBAB QSEE: capability=0x2000c1c status=0 available=1 attempts=1
+[  33.177] KEBAB QSEE: bridge-enable status=0 result=0
+[  33.178] KEBAB QSEE: capability=0x2000c1e status=0 available=1 attempts=1
+[  33.178] KEBAB QSEE: capability=0x2000c1d status=0 available=1 attempts=1
+[  33.178] KEBAB QSEE: bridge-create status=0 result=0
+[  33.178] KEBAB QSEE: capability=0x32000201 status=0 available=1 attempts=1
+[  33.178] KEBAB QSEE: capability=0x32000203 status=0 available=1 attempts=1
+[  33.178] KEBAB QSEE TIME: bridge status=0 result=0x0
+[  33.178] KEBAB QSEE TIME: register status=0 result=0x0
+[  33.178] KEBAB QSEE TIME: HLOS host-calibrated UTC anchor=1793445907; producer page/bridge retained
+[  33.178] KEBAB QSEE: app=keymaster status=0 result=0xffffffff type=0x0 data=0x0 attempts=1
+[  33.178] KEBAB QSEE: app=keymaster64 status=0 result=0x0 type=0xee01 data=0x1 attempts=1
+[  33.178] KEBAB QSEE: found app=keymaster64 id=1; command ABI still unqualified
+[  33.178] KEBAB QSEE: capability=0x30000001 status=0 available=1 attempts=1
+[  33.178] KEBAB QSEE: keymaster GET_VERSION status=0 result=0x0 type=0xee01 attempts=1
+[  33.178] KEBAB QSEE: keymaster reply status=0 protocol=4.1 app=4.558
+[  33.178] KEBAB QSEE: keymaster GET_VERSION validated
+[  33.178] KEBAB QSEE: capability=0x2001007 status=0 available=1 attempts=1
+[  33.178] KEBAB QSEE: hardware-wrapped key experiment begin; volatile only
+[  33.178] KEBAB QSEE: date-support transport=0 result=0x0
+[  33.178] KEBAB QSEE: date-support reply=0
+[  33.178] KEBAB QSEE: HiOS configure transport=0 result=0x0
+[  33.178] KEBAB QSEE: HiOS configure reply=0 OS_VERSION=160716 OS_PATCHLEVEL=0 VENDOR_PATCHLEVEL=20241005
+[  33.178] KEBAB NONCE ROOT: restoring opaque keyblob; generation skipped
+[  33.178] KEBAB QSEE: storage export CBOR trial=0 transport=0 result=0x0
+[  33.178] KEBAB QSEE: storage export CBOR reply=0 bytes=73
+[  33.178] KEBAB QSEE: storage derive trial=0 transport=0 result=0x0
+[  33.178] KEBAB QSEE: storage export CBOR trial=1 transport=0 result=0x0
+[  33.178] KEBAB QSEE: storage export CBOR reply=0 bytes=73
+[  33.178] KEBAB QSEE: storage derive trial=1 transport=0 result=0x0
+[  33.178] KEBAB QSEE: hardware-wrapped repeated derivation PASS; cold-boot identity unqualified
+[  33.178] KEBAB NONCE ROOT: restored consistency witness PASS; no key material logged
+[  33.178] KEBAB AES NONCE: public KDF/selector/CBC/invalid-bits KAT PASS negative=0
+[  33.178] KEBAB AES NONCE: hardware-root KDF prepared; service not yet published
+[  33.178] KEBAB QSEE: hardware-wrapped experiment end; volatile key material erased
+[  33.178] KEBAB QSEE: capability=0x2001007 status=0 available=1 attempts=1
+[  33.178] KEBAB QSEE: hardware-wrapped key experiment begin; volatile only
+[  33.178] KEBAB QSEE: date-support transport=0 result=0x0
+[  33.178] KEBAB QSEE: date-support reply=0
+[  33.178] KEBAB QSEE: HiOS configure transport=0 result=0x0
+[  33.178] KEBAB QSEE: HiOS configure reply=0 OS_VERSION=160716 OS_PATCHLEVEL=0 VENDOR_PATCHLEVEL=20241005
+[  33.178] KEBAB DATA ROOT: restoring opaque keyblob; generation skipped
+[  33.178] KEBAB QSEE: storage export CBOR trial=0 transport=0 result=0x0
+[  33.178] KEBAB QSEE: storage export CBOR reply=0 bytes=73
+[  33.178] KEBAB QSEE: storage derive trial=0 transport=0 result=0x0
+[  33.239] KEBAB QSEE: storage export CBOR trial=1 transport=0 result=0x0
+[  33.239] KEBAB QSEE: storage export CBOR reply=0 bytes=73
+[  33.239] KEBAB QSEE: storage derive trial=1 transport=0 result=0x0
+[  33.239] KEBAB QSEE: hardware-wrapped repeated derivation PASS; cold-boot identity unqualified
+[  33.239] KEBAB DATA ROOT: restored hardware consistency witness PASS; no secret published
+[  33.239] KEBAB QSEE: hardware-wrapped experiment end; volatile key material erased
+[  33.239] KEBAB QSEE: app=km4 status=0 result=0xffffffff type=0x0 data=0x0 attempts=1
+[  33.239] KEBAB QSEE: app=keymint status=0 result=0xffffffff type=0x0 data=0x0 attempts=1
+[  33.239] KEBAB QSEE: app=hios-no-such-app status=0 result=0xffffffff type=0x0 data=0x0 attempts=1
+[  33.239] KEBAB QSEE: bridge-delete status=0 result=0; page retained
+[  33.239] KEBAB QSEE: fixed lookup end; no hardware key qualification
+[  33.239] KEBAB AES NONCE: NativeAES registered with hardware-root selector 2212
+[  33.239] KEBAB LIVE ROOTS: existing nonce+Data hardware restore PASS; generation disabled
+[  33.239] KEBAB DATA ROOT: original nonce record preserved=1
+[  33.239] KEBAB DATA ROOT: cold restore PASS (0); opaque4096B only, no Data mount
+[  33.239] KEBAB DEVICE BAG: original nonce/Root records preserved=1
+[  33.239] KEBAB DEVICE BAG: cold authenticated restore PASS (0); C/D random independent keys, factory no-passcode, no Data mount
+[  33.239] KEBAB AKS LIVE: original FS/FV resources published; hardware Root +persistent bank retained; no test volume registration
+[  33.239] KEBAB APFS PROOF: reboot-read bytes=65559 sha256=3f2f47b49455f2d5cce7d745829440ccf0e8f1beda6c5120641c25213f78c957 PASS
+[  33.239] KEBAB CRYPTEX MEDIA: DEVELOPMENT FAST header/RO identity PASS (0); full SHA skipped
+[  33.239] KEBAB BLOCK: block storage up: 2616 MiB, 4096-byte blocks, read-only
+[  33.239] KEBAB CRYPTEX MEDIA: registered original SystemOS read-only worker-backed media
+[  33.239] dev_init:296: disk2 device accelerated crypto: 0 (compiled @ Jul 11 2025 15:52:26)
+[  33.239] dev_init:299: disk2 device_handle block size 4096 block count 669696 features 0 internal 
+[  33.239] nx_mount:1224: disk2 initializing cache w/hash_size 4096 and cache size 10064
+[  33.239] nx_mount:1553: disk2 checkpoint search: largest xid 24, best xid 24 @ 9
+[  33.239] nx_mount:1580: disk2 stable checkpoint indices: desc 8 data 16
+[  33.239] probe:3995: disk2 Caching extended container info for container disk2
+[  33.239] dev_init:296: disk3 device accelerated crypto: 0 (compiled @ Jul 11 2025 15:52:26)
+[  33.239] dev_init:299: disk3 device_handle block size 4096 block count 669696 features 0 internal 
+[  33.239] nx_mount:1224: disk3 initializing cache w/hash_size 4096 and cache size 10064
+[  33.239] nx_mount:1553: disk3 checkpoint search: largest xid 24, best xid 24 @ 9
+[  33.239] nx_mount:1580: disk3 stable checkpoint indices: desc 8 data 16
+[  33.302] apfs_log_mount_unmount:2039: disk3s1 mounting volume SydneyUpdate20H392.D22D221SystemCryptex, requested by: init (pid 1); parent: kernel_task (pid 0)
+[  33.302] handle_mount:765: disk3s1 vol-uuid: 96096B28-B6DC-4BC7-9D3A-2632A0FE53F1 block size: 4096 block count: 669696 (unencrypted; flags: 0x1; features: 28.0.2)
+[  33.303] handle_mount:778: disk3s1 setting dev block size to 4096 from 512
+[  33.303] nx_volume_group_update:7897: disk3s1 Volume SydneyUpdate20H392.D22D221SystemCryptex role 0 Not a System or data volume
+[  33.303] KEBAB CRYPTEX: original APFS mount uuid=96096B28-B6DC-4BC7-9D3A-2632A0FE53F1 dev=/dev/disk3s1 status=0
+[  33.303] KEBAB CRYPTEX: mounted fixed original SystemOS UUID/dev_t/RO PASS (0)
+[  33.303] KEBAB SPMI: key source PPID 0x060 -> observer APID 0x002 (first mapping)
+[  33.303] KEBAB RTC: initial owner-host calibration counter=620387 offset=1792825573 wall=1793445960; read-only PM8150, persisted offset takes precedence
+[  33.303] KEBAB DEFAULTS: trace total=10 capacity=96; observations only
+[  33.303] KEBAB DEFAULTS[0]: busy before=0 delta=1 origin=defaults class=IOPlatformDevice caller=0xfffffe0006b67c70 thread=0xfffffe24de8bc430
+[  33.303] KEBAB DEFAULTS[1]: probe enter thread=0xfffffe24de7bac10 class=IOPlatformDevice busy=1
+[  33.303] KEBAB DEFAULTS[2]: module enter class=AppleImage4 bundle=com.apple.security.AppleImage4
+[  33.303] KEBAB DEFAULTS[3]: module leave needReloc=0
+[  33.303] KEBAB DEFAULTS[4]: driver probe enter AppleImage4 score=0
+[  33.303] KEBAB DEFAULTS[5]: driver probe leave AppleImage4 accepted=1 score=0
+[  33.303] KEBAB DEFAULTS[6]: startCandidate enter AppleImage4 busy=1
+[  33.303] KEBAB DEFAULTS[7]: driver start enter AppleImage4
+[  33.303] KEBAB DEFAULTS[8]: wait thread=0xfffffe24de7bac10 timeout=18446744073709551615 matching=<dict ID="0"><key>IOProviderClass</key><string ID="1">IOAESAccelerator</string></dict>
+[  33.303] KEBAB DEFAULTS[9]: wait thread=0xfffffe24de7bac10 timeout=18446744073709551615 matching=<dict ID="0"><key>IOProviderClass</key><string ID="1">IOResources</string><key>IOResourceMatch</key><string ID="2">IONVRAM</string></dict>
+[  33.365] KEBAB OWNER OS: DEVELOPMENT FAST: full tree scan skipped; no complete-content proof
+[  33.489] KEBAB OWNER FW: original firmware subtree SHA/metadata/topology/RO PASS (0)
+[  33.489] KEBAB OWNER DSC: original launchd/dyld SHA and RO roots PASS (0)
+[  33.489] KEBAB CRYPTEX QUEUE: accepted=128 completed=128 failed=0 pending=0 high=1 last=0x0 bytes=4096
+[  33.489] KEBAB DSC: dyld_shared_cache_arm64.42.dyldlinkedit: VFS logical size 334102528, prior UBC size 0
+[  33.550] KEBAB DSC: dyld_shared_cache_arm64.symbols: VFS logical size 592101376, prior UBC size 0
+[  33.551] KEBAB CRYPTEX QUEUE: accepted=256 completed=256 failed=0 pending=0 high=1 last=0x0 bytes=4096
+[  33.551] KEBAB DSC: dyld_shared_cache_arm64.28.dyldlinkedit: VFS logical size 19922944, prior UBC size 0
+[  33.551] KEBAB DSC: plan 43 files / 52 mappings, 0xa2de8000 mapped, extent 0xaade8000 (end 0x22ade8000), base 0x180000000, slide 0x0, dynamic config page appended; dir 46 entries, 44 offered, 44 resolved
+[  33.551] KEBAB OWNER DSC: post-mount original split plan PASS (0)
+[  33.551] KEBAB DATA VERSION: verified SystemVersion20H392 -> original kern.osversion/CP version14480188 PASS (0)
+[  33.551] KEBAB DATA MOUNT: cold UUID61706673-7575-6964-0040-766F6C756D01 /dev/disk1s2 dev=1/3; native APFS, all storage RO
+[  33.551] effaceable_is_disabled:10907: ================ no-effaceable-storage is ON ================
+[  33.551] effaceable_is_disabled:10907: ================ no-effaceable-storage is ON ================
+[  33.551] effaceable_is_disabled:10907: ================ no-effaceable-storage is ON ================
+[  33.551] effaceable_is_disabled:10907: ================ no-effaceable-storage is ON ================
+[  33.551] _aks_unwrap_media_class:148: AKS unwrap_media_key_from_class succeeded for tag = 7
+[  33.551] _aks_unwrap_media_class:148: AKS unwrap_media_key_from_class succeeded for tag = 8
+[  33.551] apfs_meta_crypto_state_unwrap:1259: got key for volume 61706673-7575-6964-0040-766F6C756D01
+[  33.551] KEBAB APFS FILE: unsupported requested class=0x1
+[  33.551] apfs_crypto_check_class_availabilty:1466: AKS check_class failed with unexpected error = e00002c7
+[  33.551] apfs_crypto_check_class_availabilty:1466: AKS check_class failed with unexpected error = e00002d8
+[  33.551] apfs_log_mount_unmount:2039: disk1s2 mounting volume Data, requested by: init (pid 1); parent: kernel_task (pid 0)
+[  33.551] handle_mount:765: disk1s2 vol-uuid: 61706673-7575-6964-0040-766F6C756D01 block size: 4096 block count: 58840027 (encrypted; flags: 0x0; features: 8.0.2)
+[  33.612] handle_mount:778: disk1s2 setting dev block size to 4096 from 512
+[  33.613] nx_volume_group_update:7903: disk1s2 Volume Data is not in a volume group
+[  33.613] KEBAB DATA MOUNT: original mount syscall error=0
+[  33.613] KEBAB DATA MOUNT: mounted /private/var dev=1/3 readonly=1 System-readonly=1 identity=PASS
+[  33.613] KEBAB RTC: restored PM8150 offset=1792825531 saved-counter=547760 counter=620388 wall=1793445919
+[  33.613] KEBAB DATA CLASSES: authenticated mounted owner; persistent factory C/D activated; no passcode/SEP unlock claim
+[  33.613] KEBAB DATA FILE: RW update flags=14819080 prior=14809081 preserve-cprotect=1
+[  33.613] apfs_log_mount_unmount:2039: disk1s2 updating mounted volume Data, requested by: init (pid 1); parent: kernel_task (pid 0)
+[  33.613] spaceman_metazone_init:172: disk1 metazone for device 0 of size 1141262 blocks (encrypted: 57698765-58269396 unencrypted: 58269396-58840027)
+[  33.613] spaceman_datazone_init:628: disk1 allocation zone on dev 0 for allocations of 1 blocks starting at paddr 4096000
+[  33.613] spaceman_datazone_init:628: disk1 allocation zone on dev 0 for allocations of 2 blocks starting at paddr 2719744
+[  33.613] spaceman_datazone_init:628: disk1 allocation zone on dev 0 for allocations of 3 blocks starting at paddr 2752512
+[  33.613] spaceman_datazone_init:628: disk1 allocation zone on dev 0 for allocations of 4 blocks starting at paddr 2785280
+[  33.613] KEBAB DATA FILE: original Data RW update error=0
+[  33.613] KEBAB DATA FILE: class=3 logical=0 ciphertext-sha256=d97f5d8d12a5954bcc6c8ec4e77009aef07bd269b7be703186e4c5c5de330a60 differs from plaintext
+[  33.613] KEBAB DATA FILE: class=3 logical=61440 ciphertext-sha256=bbbda2e359c32a168cbeb02a32a3e4015507a481d078cad846f58ac16d015968 differs from plaintext
+[  33.613] KEBAB DATA FILE: cold-read class=3 bytes=65559 original APFS protected IO sha256=55b019a00c0eb6d37414bb68d9610cc285babecd5d11e3e6c3ad4e1fa62cd50b PASS
+[  33.613] KEBAB DATA FILE: fixed cold restore class=3 PASS (0)
+[  33.613] KEBAB DATA FILE META: class=4 uid=0 mode=0100600 nlink=1 flags=0x0 bytes=65559 protection=3 supported=111111
+[  33.613] KEBAB DATA FILE FAILURE: class=4 step=metadata error=80; checks retained
+[  33.613] KEBAB DATA FILE: fixed cold restore class=4 FAIL (80)
+[  33.613] KEBAB DATA FILE: durable filesystem=0 UFS=0
+[  33.613] KEBAB DATA FILE: Preboot nonce/Root/device-bank preserved=1
+[  33.675] panic(cpu 2 caller 0xfffffe000697f794): KEBAB DATA USERLAND: cold encrypted Data prerequisites failed 80 @kern_exec.c:7169
+[  33.675] Debugger message: panic
+[  33.675] Memory ID: 0x0
+[  33.675] OS release type: Not set yet
+[  33.676] OS version: 20H392
+[  33.676] Kernel version: Darwin Kernel Version 22.6.0: Sat Sep  5 21:59:54 UTC 2026; albertlee:6639065
+[  33.676] KernelCache UUID: 28F118CD615B4B3A2EABCF4356498D74
+[  33.676] Kernel UUID: B527E97E-CB1D-3D83-817A-8B3F263E04B4
+[  33.676] Boot session UUID: 2828D763-0C64-431E-9F49-1FF9E03018EF
+[  33.676] iBoot version: kebab-uefi-1.0
+[  33.676] secure boot?: YES
+[  33.676] roots installed: 0
+[  33.676] Paniclog version: 14
+[  33.676] Kernel text base:  0xfffffe0006004000
+[  33.676] mach_absolute_time: 0x3e205b5d
+[  33.737] Epoch Time:        sec       usec
+[  33.738]   Boot    : 0x6ae5d01e 0x00066315
+[  33.738]   Sleep   : 0x00000000 0x00000000
+[  33.738]   Wake    : 0x00000000 0x00000000
+[  33.738]   Calendar: 0x6ae5d01f 0x0001943e
+[  33.738] 
+[  33.738] Zone info:
+[  33.738]   Zone map: 0xfffffe1010624000 - 0xfffffe3010624000
+[  33.738]   . PGZ   : 0xfffffe1010624000 - 0xfffffe1014580000
+[  33.738]   . VM    : 0xfffffe1014580000 - 0xfffffe14e08c8000
+[  33.738]   . RO    : 0xfffffe14e08c8000 - 0xfffffe1679f34000
+[  33.738]   . GEN0  : 0xfffffe1679f34000 - 0xfffffe1b46280000
+[  33.738]   . GEN1  : 0xfffffe1b46280000 - 0xfffffe20125cc000
+[  33.799]   . GEN2  : 0xfffffe20125cc000 - 0xfffffe24de918000
+[  33.799]   . GEN3  : 0xfffffe24de918000 - 0xfffffe29aac64000
+[  33.799]   . DATA  : 0xfffffe29aac64000 - 0xfffffe3010624000
+[  33.799]   Metadata: 0xfffffe1000650000 - 0xfffffe1008650000
+[  33.799]   Bitmaps : 0xfffffe1008650000 - 0xfffffe1009e14000
+[  33.799]   Extra   : 0 - 0
+[  33.799] 
+[  33.799] TPIDRx_ELy = {1: 0xfffffe24de79ec10  0: 0x0000000000000002  0ro: 0x0000000000000000 }
+[  33.799] CORE 0: PC=0xfffffe0006ba3f30, LR=0xfffffe0006ba3ef0, FP=0xfffffe5410a074f0
+[  33.799] CORE 1: PC=0xfffffe0006654240, LR=0xfffffe000665423c, FP=0xfffffe54109d7e80
+[  33.862] CORE 2 is the one that panicked. Check the full backtrace for details.
+[  33.862] CORE 3: PC=0xfffffe0006654240, LR=0xfffffe000665423c, FP=0xfffffe54108c3e80
+[  33.862] CORE 4: PC=0xfffffe0006654240, LR=0xfffffe000665423c, FP=0xfffffe541090be80
+[  33.862] CORE 5: PC=0xfffffe0006654240, LR=0xfffffe000665423c, FP=0xfffffe5410797e80
+[  33.862] CORE 6: PC=0xfffffe0006654240, LR=0xfffffe000665423c, FP=0xfffffe5410953e80
+[  33.862] CORE 7: PC=0xfffffe0006654240, LR=0xfffffe000665423c, FP=0xfffffe5410767e80
+[  33.923] Compressor Info: 0% of compressed pages limit (OK) and 0% of segments limit (OK) with 0 swapfiles and OK swap space
+[  33.923] Panicked task 0xfffffe1679f79df8: 1 pages, 1 threads: pid 1: init
+[  33.923] Panicked thread: 0xfffffe24de79ec10, backtrace: 0xfffffe54106d76a0, tid: 241
+[  33.923] 		  lr: 0xfffffe00064e93a0  fp: 0xfffffe54106d7720
+[  33.923] 		  lr: 0xfffffe000665d6cc  fp: 0xfffffe54106d7740
+[  33.924] 		  lr: 0xfffffe000664df5c  fp: 0xfffffe54106d7790
+[  33.924] 		  lr: 0xfffffe000664cde0  fp: 0xfffffe54106d7860
+[  33.924] 		  lr: 0xfffffe000664c5a4  fp: 0xfffffe54106d7870
+[  33.924] 		  lr: 0xfffffe00064e897c  fp: 0xfffffe54106d7c20
+[  33.924] 		  lr: 0xfffffe00064e9a8c  fp: 0xfffffe54106d7ca0
+[  33.985] 		  lr: 0xfffffe0006c56924  fp: 0xfffffe54106d7cc0
+[  33.985] 		  lr: 0xfffffe000697f794  fp: 0xfffffe54106d7e00
+[  33.985] 		  lr: 0xfffffe000694efac  fp: 0xfffffe54106d7e40
+[  33.985] 		  lr: 0xfffffe00069a0df0  fp: 0xfffffe54106d7e80
+[  33.985] 		  lr: 0xfffffe00064ddda4  fp: 0xfffffe54106d7ee0
+[  33.985] 		  lr: 0xfffffe000664c9c0  fp: 0xfffffe54106d7ef0
+[  33.986] 		  lr: 0xfffffe000664c7fc  fp: 0xfffffe54106d7f20
+[  33.986] 		  lr: 0xfffffe0006652548  fp: 0x0000000000000000
+[  33.986] 
+[  34.174] 
+[  34.175] ** Stackshot Succeeded ** Bytes Traced 8198 (Uncompressed 24592) **
+[  34.299] KEBAB PANIC: USB command loop ready (FASTBOOT/REBOOT/FWLOG?)
+[  34.299] KEBAB EP0 PROBE: progress 0x03140000 seq 3 req 0 phase 20 status 0
+[  34.299] KEBAB EP0 STATE: resets=1 disconnects=0 fences=0 events=7389 acked=29556 discarded=0 cursor=884 takeover=5 tx_complete=3492 line=00c20100000008 controls=3
+[  34.299] KEBAB KDP STATE: host_in=0 in_drop=0 kdp_in=0 kdp_frames=0 kdp_out=0 tx_bytes=34732 owners=3/0/3 depths=1/0
+[  34.299] KEBAB EP0 PROBE: [04]0xe4080600 [05]0xe5040600 [06]0xe6050600 [07]0xe7060600
+[  34.299] KEBAB EP0 PROBE: [08]0xe8070600 [09]0xe9010700 [10]0xea080700 [11]0xeb040700
+[  34.299] KEBAB EP0 PROBE: [12]0xec050700 [13]0xed060700 [14]0xee160700 [15]0xef070700
+[  34.299] KEBAB EP0 PROBE: [16]0xf01a0700 [17]0xf1010500 [18]0xf2020500 [19]0xf3030500
+[  34.299] KEBAB EP0 PROBE: [20]0xf4080500 [21]0xf5040500 [22]0xf61a0500 [23]0xf7050500
+[  34.299] KEBAB EP0 PROBE: [24]0xf8060500 [25]0xf9170500 [26]0xfa070500 [27]0xfb010600
+[  34.299] KEBAB EP0 PROBE: [28]0xfc020600 [29]0xfd030600 [30]0xfe080600 [31]0xff040600
+[  34.299] KEBAB EP0 PROBE: [00]0x00050600 [01]0x01060600 [02]0x02070600 [03]0x03140000
+[  34.299] KEBAB EP0 END

@@ -1,0 +1,57 @@
+{
+  "passed": true,
+  "unicorn_version": "2.1.4",
+  "original_kernel_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "functions": {
+    "uid2guid": {
+      "original_address": "0xfffffff00759c758",
+      "relocated_address": "0x10059c758",
+      "bytes": 40,
+      "sha256": "87d9ad5d12690d8694437c3753d911ba5c5e63328e745de657004da2cce7eff6"
+    },
+    "gid2guid": {
+      "original_address": "0xfffffff00759c80c",
+      "relocated_address": "0x10059c80c",
+      "bytes": 40,
+      "sha256": "ce2bb113144dd1ed54f48f7f3d7e34391ee0188ba9352ba53eacd00ad8ba7bf9"
+    },
+    "guid2uid": {
+      "original_address": "0xfffffff00759c6a0",
+      "relocated_address": "0x10059c6a0",
+      "bytes": 72,
+      "sha256": "38f26e537b0c93ce5ad139563eab7ffb8baf6bb89144b8e14db2f179e3052f58"
+    },
+    "guid2gid": {
+      "original_address": "0xfffffff00759c6e8",
+      "relocated_address": "0x10059c6e8",
+      "bytes": 72,
+      "sha256": "17a4205dbf9b2ce4099346d464fa4d25241fcd27a76f1fcc7c4f50684e6e62e6"
+    },
+    "memcmp": {
+      "original_address": "0xfffffff0072e5904",
+      "relocated_address": "0x1002e5904",
+      "bytes": 48,
+      "sha256": "aeb9965fea058012a11e7fe93b87d007637bb27dc0983a26296d87dbde0fb705"
+    }
+  },
+  "cases": 6400,
+  "positive_cases": 4156,
+  "negative_cases": 2244,
+  "all_output_canaries_preserved": true,
+  "negative_output_unchanged": true,
+  "callee_saved_registers_and_sp_preserved": true,
+  "all_instructions_unchanged": true,
+  "original_memcmp_executed": true,
+  "no_library_or_identity_return_stubs": true,
+  "pc_relative_references_preserved": true,
+  "uniform_page_aligned_va_relocation": {
+    "original_base": "0xfffffff007000000",
+    "emulated_base": "0x100000000"
+  },
+  "read_only_original_program_pages": true,
+  "public_user_prefix": "ffffeeeeddddccccbbbbaaaa00000000",
+  "public_group_prefix": "abcdefabcdefabcdefabcdef00000000",
+  "not_cryptographic_keys": true,
+  "emulation_not_hardware_execution": true,
+  "seconds": 0.192
+}
