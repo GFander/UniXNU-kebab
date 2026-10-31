@@ -1,0 +1,23 @@
+{
+  "passed": true,
+  "fixture_sha256": "810c9a3eeb975e2be7ad3631c2ec417e0dcab48399440d8535845d9c395f52b9",
+  "behavioral_mutations_refused": [
+    "ignore-wrapper-uuid",
+    "wrong-parent",
+    "missing-process-cap",
+    "wrong-wrapper-label",
+    "wrong-dyld-format",
+    "ignore-dyld-count",
+    "ignore-dyld-size",
+    "ignore-dyld-version",
+    "ignore-prefix-change",
+    "ignore-path-prefix",
+    "record-cap513",
+    "selected-cap9",
+    "ignore-mach-header-magic",
+    "ignore-command-count",
+    "ignore-command-extent",
+    "accept-wrong-uuid-command-size"
+  ],
+  "compile_failures_not_counted": true
+}

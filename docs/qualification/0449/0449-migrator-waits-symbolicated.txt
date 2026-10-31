@@ -1,0 +1,371 @@
+MIG 1 133 785 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 1 133 785 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+MIG 1 133 785 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+MIG 1 133 785 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+MIG 1 133 785 frame[2] 0x188353128 __CASGetDisplays 0xa4 /System/Library/Frameworks/QuartzCore.framework/QuartzCore
+MIG 1 133 785 frame[3] 0x1882acbd8 __ZL14query_displaysv 0x54 /System/Library/Frameworks/QuartzCore.framework/QuartzCore
+MIG 1 133 785 frame[4] 0x188312f60 __ZL15ensure_displaysv 0x3c /System/Library/Frameworks/QuartzCore.framework/QuartzCore
+MIG 1 133 785 frame[5] 0x18829de5c +[CADisplay mainDisplay] 0x8 /System/Library/Frameworks/QuartzCore.framework/QuartzCore
+MIG 1 133 785 frame[6] 0x1e8168df8 -[PUIProgressWindow _collectDisplayInfo] 0x134 /System/Library/PrivateFrameworks/ProgressUI.framework/ProgressUI
+MIG 1 133 785 frame[7] 0x1e8168bbc -[PUIProgressWindow initWithOptions:contextLevel:appearance:] 0x1c0 /System/Library/PrivateFrameworks/ProgressUI.framework/ProgressUI
+MIG 1 133 785 frame[8] 0x104c74aa8 sub_0x10000ca74 0x30 original datamigrator
+MIG 1 133 785 frame[9] 0x18db98780 __dispatch_client_callout 0xc /usr/lib/system/libdispatch.dylib
+MIG 1 133 785 frame[10] 0x18db7ab24 __dispatch_async_and_wait_invoke 0x54 /usr/lib/system/libdispatch.dylib
+MIG 1 133 785 frame[11] 0x18db98780 __dispatch_client_callout 0xc /usr/lib/system/libdispatch.dylib
+MIG 1 133 785 frame[12] 0x18db79e10 __dispatch_main_queue_drain 0x374 /usr/lib/system/libdispatch.dylib
+MIG 1 133 785 frame[13] 0x18db79a88 __dispatch_main_queue_callback_4CF$VARIANT$armv81 0x20 /usr/lib/system/libdispatch.dylib
+MIG 1 133 785 frame[14] 0x186e799ac ___CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__ 0x8 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG 1 133 785 frame[15] 0x186e5d648 ___CFRunLoopRun 0x81c /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG 1 133 790 saved pc 0x1c2611ad0 ___ulock_wait 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 1 133 790 lr 0x18db68128 __dlock_wait 0x30 /usr/lib/system/libdispatch.dylib
+MIG 1 133 790 frame[0] 0x18db67f10 __dispatch_thread_event_wait_slow$VARIANT$armv81 0x30 /usr/lib/system/libdispatch.dylib
+MIG 1 133 790 frame[1] 0x18db7acfc ___DISPATCH_WAIT_FOR_QUEUE__ 0x150 /usr/lib/system/libdispatch.dylib
+MIG 1 133 790 frame[2] 0x18db7a8fc __dispatch_sync_f_slow 0x88 /usr/lib/system/libdispatch.dylib
+MIG 1 133 790 frame[3] 0x104c745a8 -[DMMigrator _migrateWithTestMigrationInfrastructureOnly:buildVersion:lastBuildVersion:] 0x1e0 original datamigrator
+MIG 1 133 790 frame[4] 0x104c6dfa0 sub_0x100005f68 0x34 original datamigrator
+MIG 1 133 790 frame[5] 0x18db977a8 __dispatch_call_block_and_release 0x14 /usr/lib/system/libdispatch.dylib
+MIG 1 133 790 frame[6] 0x18db98780 __dispatch_client_callout 0xc /usr/lib/system/libdispatch.dylib
+MIG 1 133 790 frame[7] 0x18db736fc __dispatch_lane_serial_drain$VARIANT$armv81 0x254 /usr/lib/system/libdispatch.dylib
+MIG 1 133 790 frame[8] 0x18db741b0 __dispatch_lane_invoke$VARIANT$armv81 0x178 /usr/lib/system/libdispatch.dylib
+MIG 1 133 790 frame[9] 0x18db7df14 __dispatch_workloop_worker_thread 0x25c /usr/lib/system/libdispatch.dylib
+MIG 1 133 790 frame[10] 0x1d1b9abd0 __pthread_wqthread 0x118 /usr/lib/system/libsystem_pthread.dylib
+MIG 1 133 790 frame[11] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+MIG 1 133 791 saved pc 0x1c2611538 _kevent_id 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 1 133 791 lr 0x18db852cc __dispatch_kq_poll 0xdc /usr/lib/system/libdispatch.dylib
+MIG 1 133 791 frame[0] 0x18db85c78 __dispatch_event_loop_wait_for_ownership$VARIANT$armv81 0x1ac /usr/lib/system/libdispatch.dylib
+MIG 1 133 791 frame[1] 0x18db7ace0 ___DISPATCH_WAIT_FOR_QUEUE__ 0x134 /usr/lib/system/libdispatch.dylib
+MIG 1 133 791 frame[2] 0x18db7a8fc __dispatch_sync_f_slow 0x88 /usr/lib/system/libdispatch.dylib
+MIG 1 133 791 frame[3] 0x104c6ddb8 -[DMMigrationState startMigrationAndOrBlockIfNecessaryWithClientInvocation:buildVersion:lastBuildVersion:migrationStarterBlock:] 0x2d4 original datamigrator
+MIG 1 133 791 frame[4] 0x104c74364 -[DMMigrator migrateCheckingNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:connection:migrationResultHandler:] 0x190 original datamigrator
+MIG 1 133 791 frame[5] 0x104c70fdc -[DMMigratorProxy handleMessage:] 0xd88 original datamigrator
+MIG 1 133 791 frame[6] 0x1c79108b0 -[DMXPCConnection _handleMessage:] 0x90 /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG 1 133 791 frame[7] 0x1d1bef788 __xpc_connection_call_event_handler 0x40 /usr/lib/system/libxpc.dylib
+MIG 1 133 791 frame[8] 0x1d1befb68 __xpc_connection_mach_event 0x3a4 /usr/lib/system/libxpc.dylib
+MIG 1 133 791 frame[9] 0x18db98834 __dispatch_client_callout4 0xc /usr/lib/system/libdispatch.dylib
+MIG 1 133 791 frame[10] 0x18db6b65c __dispatch_mach_msg_invoke$VARIANT$armv81 0x170 /usr/lib/system/libdispatch.dylib
+MIG 1 133 791 frame[11] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 1 133 791 frame[12] 0x18db6c1f8 __dispatch_mach_invoke$VARIANT$armv81 0x1b8 /usr/lib/system/libdispatch.dylib
+MIG 1 133 791 frame[13] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 1 133 791 frame[14] 0x18db741b0 __dispatch_lane_invoke$VARIANT$armv81 0x178 /usr/lib/system/libdispatch.dylib
+MIG 1 133 791 frame[15] 0x18db7df14 __dispatch_workloop_worker_thread 0x25c /usr/lib/system/libdispatch.dylib
+MIG 1 133 830 saved pc 0x1c2611538 _kevent_id 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 1 133 830 lr 0x18db852cc __dispatch_kq_poll 0xdc /usr/lib/system/libdispatch.dylib
+MIG 1 133 830 frame[0] 0x18db85c78 __dispatch_event_loop_wait_for_ownership$VARIANT$armv81 0x1ac /usr/lib/system/libdispatch.dylib
+MIG 1 133 830 frame[1] 0x18db7ace0 ___DISPATCH_WAIT_FOR_QUEUE__ 0x134 /usr/lib/system/libdispatch.dylib
+MIG 1 133 830 frame[2] 0x18db7a8fc __dispatch_sync_f_slow 0x88 /usr/lib/system/libdispatch.dylib
+MIG 1 133 830 frame[3] 0x104c6ddb8 -[DMMigrationState startMigrationAndOrBlockIfNecessaryWithClientInvocation:buildVersion:lastBuildVersion:migrationStarterBlock:] 0x2d4 original datamigrator
+MIG 1 133 830 frame[4] 0x104c74364 -[DMMigrator migrateCheckingNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:connection:migrationResultHandler:] 0x190 original datamigrator
+MIG 1 133 830 frame[5] 0x104c70fdc -[DMMigratorProxy handleMessage:] 0xd88 original datamigrator
+MIG 1 133 830 frame[6] 0x1c79108b0 -[DMXPCConnection _handleMessage:] 0x90 /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG 1 133 830 frame[7] 0x1d1bef788 __xpc_connection_call_event_handler 0x40 /usr/lib/system/libxpc.dylib
+MIG 1 133 830 frame[8] 0x1d1befb68 __xpc_connection_mach_event 0x3a4 /usr/lib/system/libxpc.dylib
+MIG 1 133 830 frame[9] 0x18db98834 __dispatch_client_callout4 0xc /usr/lib/system/libdispatch.dylib
+MIG 1 133 830 frame[10] 0x18db6b65c __dispatch_mach_msg_invoke$VARIANT$armv81 0x170 /usr/lib/system/libdispatch.dylib
+MIG 1 133 830 frame[11] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 1 133 830 frame[12] 0x18db6c1f8 __dispatch_mach_invoke$VARIANT$armv81 0x1b8 /usr/lib/system/libdispatch.dylib
+MIG 1 133 830 frame[13] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 1 133 830 frame[14] 0x18db741b0 __dispatch_lane_invoke$VARIANT$armv81 0x178 /usr/lib/system/libdispatch.dylib
+MIG 1 133 830 frame[15] 0x18db7df14 __dispatch_workloop_worker_thread 0x25c /usr/lib/system/libdispatch.dylib
+MIG 1 133 1001 saved pc 0x1c26114f0 ___workq_kernreturn 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 1 133 1001 lr 0x1d1b9ac1c __pthread_wqthread 0x164 /usr/lib/system/libsystem_pthread.dylib
+MIG 1 133 1001 frame[0] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+MIG 2 133 785 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 2 133 785 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+MIG 2 133 785 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+MIG 2 133 785 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+MIG 2 133 785 frame[2] 0x186e5c148 ___CFRunLoopServiceMachPort 0x98 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG 2 133 785 frame[3] 0x186e5d2e0 ___CFRunLoopRun 0x4b4 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG 2 133 785 frame[4] 0x186e61d20 _CFRunLoopRunSpecific 0x244 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG 2 133 785 frame[5] 0x1811b0ef8 -[NSRunLoop(NSRunLoop) runMode:beforeDate:] 0xcc /System/Library/Frameworks/Foundation.framework/Foundation
+MIG 2 133 785 frame[6] 0x1811b0da4 -[NSRunLoop(NSRunLoop) run] 0x38 /System/Library/Frameworks/Foundation.framework/Foundation
+MIG 2 133 785 frame[7] 0x1d1bf7840 __xpc_objc_main 0x1e8 /usr/lib/system/libxpc.dylib
+MIG 2 133 785 frame[8] 0x1d1bf9968 _xpc_main 0x94 /usr/lib/system/libxpc.dylib
+MIG 2 133 785 frame[9] 0x104c6b404 _main 0x24 original datamigrator
+MIG 2 133 785 frame[10] 0x1a4624344 start 0x740 /usr/lib/dyld
+MIG 2 133 790 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 2 133 790 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+MIG 2 133 790 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+MIG 2 133 790 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+MIG 2 133 790 frame[2] 0x18db6a308 __dispatch_mach_send_and_wait_for_reply 0x210 /usr/lib/system/libdispatch.dylib
+MIG 2 133 790 frame[3] 0x18db6a694 _dispatch_mach_send_with_result_and_wait_for_reply$VARIANT$armv81 0x34 /usr/lib/system/libdispatch.dylib
+MIG 2 133 790 frame[4] 0x1d1bee0ec _xpc_connection_send_message_with_reply_sync 0xe8 /usr/lib/system/libxpc.dylib
+MIG 2 133 790 frame[5] 0x1c790a334 -[DMXPCConnection sendMessageSync:] 0x30 /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG 2 133 790 frame[6] 0x1c790e034 -[DMMigrationPluginWrapperConnection runPluginAtPath:withParameters:completion:] 0x53c /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG 2 133 790 frame[7] 0x104c75ac4 -[DataMigrationPlugin _performOneMigrationWithParameters:needsRetry:] 0x2e8 original datamigrator
+MIG 2 133 790 frame[8] 0x104c756ac -[DataMigrationPlugin performMigrationWithParameters:countOfAttempts:] 0x48 original datamigrator
+MIG 2 133 790 frame[9] 0x104c7344c -[DMMigrator _performMigrationUsingPlugins:pluginCategories:userCategory:buildVersion:lastBuildVersion:] 0x51c original datamigrator
+MIG 2 133 790 frame[10] 0x104c74820 -[DMMigrator _migrateWithTestMigrationInfrastructureOnly:buildVersion:lastBuildVersion:] 0x458 original datamigrator
+MIG 2 133 790 frame[11] 0x104c6dfa0 sub_0x100005f68 0x34 original datamigrator
+MIG 2 133 790 frame[12] 0x18db977a8 __dispatch_call_block_and_release 0x14 /usr/lib/system/libdispatch.dylib
+MIG 2 133 790 frame[13] 0x18db98780 __dispatch_client_callout 0xc /usr/lib/system/libdispatch.dylib
+MIG 2 133 790 frame[14] 0x18db736fc __dispatch_lane_serial_drain$VARIANT$armv81 0x254 /usr/lib/system/libdispatch.dylib
+MIG 2 133 790 frame[15] 0x18db741b0 __dispatch_lane_invoke$VARIANT$armv81 0x178 /usr/lib/system/libdispatch.dylib
+MIG 2 133 791 saved pc 0x1c2611538 _kevent_id 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 2 133 791 lr 0x18db852cc __dispatch_kq_poll 0xdc /usr/lib/system/libdispatch.dylib
+MIG 2 133 791 frame[0] 0x18db85c78 __dispatch_event_loop_wait_for_ownership$VARIANT$armv81 0x1ac /usr/lib/system/libdispatch.dylib
+MIG 2 133 791 frame[1] 0x18db7ace0 ___DISPATCH_WAIT_FOR_QUEUE__ 0x134 /usr/lib/system/libdispatch.dylib
+MIG 2 133 791 frame[2] 0x18db7a8fc __dispatch_sync_f_slow 0x88 /usr/lib/system/libdispatch.dylib
+MIG 2 133 791 frame[3] 0x104c6ddb8 -[DMMigrationState startMigrationAndOrBlockIfNecessaryWithClientInvocation:buildVersion:lastBuildVersion:migrationStarterBlock:] 0x2d4 original datamigrator
+MIG 2 133 791 frame[4] 0x104c74364 -[DMMigrator migrateCheckingNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:connection:migrationResultHandler:] 0x190 original datamigrator
+MIG 2 133 791 frame[5] 0x104c70fdc -[DMMigratorProxy handleMessage:] 0xd88 original datamigrator
+MIG 2 133 791 frame[6] 0x1c79108b0 -[DMXPCConnection _handleMessage:] 0x90 /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG 2 133 791 frame[7] 0x1d1bef788 __xpc_connection_call_event_handler 0x40 /usr/lib/system/libxpc.dylib
+MIG 2 133 791 frame[8] 0x1d1befb68 __xpc_connection_mach_event 0x3a4 /usr/lib/system/libxpc.dylib
+MIG 2 133 791 frame[9] 0x18db98834 __dispatch_client_callout4 0xc /usr/lib/system/libdispatch.dylib
+MIG 2 133 791 frame[10] 0x18db6b65c __dispatch_mach_msg_invoke$VARIANT$armv81 0x170 /usr/lib/system/libdispatch.dylib
+MIG 2 133 791 frame[11] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 2 133 791 frame[12] 0x18db6c1f8 __dispatch_mach_invoke$VARIANT$armv81 0x1b8 /usr/lib/system/libdispatch.dylib
+MIG 2 133 791 frame[13] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 2 133 791 frame[14] 0x18db741b0 __dispatch_lane_invoke$VARIANT$armv81 0x178 /usr/lib/system/libdispatch.dylib
+MIG 2 133 791 frame[15] 0x18db7df14 __dispatch_workloop_worker_thread 0x25c /usr/lib/system/libdispatch.dylib
+MIG 2 133 830 saved pc 0x1c2611538 _kevent_id 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 2 133 830 lr 0x18db852cc __dispatch_kq_poll 0xdc /usr/lib/system/libdispatch.dylib
+MIG 2 133 830 frame[0] 0x18db85c78 __dispatch_event_loop_wait_for_ownership$VARIANT$armv81 0x1ac /usr/lib/system/libdispatch.dylib
+MIG 2 133 830 frame[1] 0x18db7ace0 ___DISPATCH_WAIT_FOR_QUEUE__ 0x134 /usr/lib/system/libdispatch.dylib
+MIG 2 133 830 frame[2] 0x18db7a8fc __dispatch_sync_f_slow 0x88 /usr/lib/system/libdispatch.dylib
+MIG 2 133 830 frame[3] 0x104c6ddb8 -[DMMigrationState startMigrationAndOrBlockIfNecessaryWithClientInvocation:buildVersion:lastBuildVersion:migrationStarterBlock:] 0x2d4 original datamigrator
+MIG 2 133 830 frame[4] 0x104c74364 -[DMMigrator migrateCheckingNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:connection:migrationResultHandler:] 0x190 original datamigrator
+MIG 2 133 830 frame[5] 0x104c70fdc -[DMMigratorProxy handleMessage:] 0xd88 original datamigrator
+MIG 2 133 830 frame[6] 0x1c79108b0 -[DMXPCConnection _handleMessage:] 0x90 /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG 2 133 830 frame[7] 0x1d1bef788 __xpc_connection_call_event_handler 0x40 /usr/lib/system/libxpc.dylib
+MIG 2 133 830 frame[8] 0x1d1befb68 __xpc_connection_mach_event 0x3a4 /usr/lib/system/libxpc.dylib
+MIG 2 133 830 frame[9] 0x18db98834 __dispatch_client_callout4 0xc /usr/lib/system/libdispatch.dylib
+MIG 2 133 830 frame[10] 0x18db6b65c __dispatch_mach_msg_invoke$VARIANT$armv81 0x170 /usr/lib/system/libdispatch.dylib
+MIG 2 133 830 frame[11] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 2 133 830 frame[12] 0x18db6c1f8 __dispatch_mach_invoke$VARIANT$armv81 0x1b8 /usr/lib/system/libdispatch.dylib
+MIG 2 133 830 frame[13] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 2 133 830 frame[14] 0x18db741b0 __dispatch_lane_invoke$VARIANT$armv81 0x178 /usr/lib/system/libdispatch.dylib
+MIG 2 133 830 frame[15] 0x18db7df14 __dispatch_workloop_worker_thread 0x25c /usr/lib/system/libdispatch.dylib
+MIG 2 133 1001 saved pc 0x1c2611538 _kevent_id 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 2 133 1001 lr 0x18db852cc __dispatch_kq_poll 0xdc /usr/lib/system/libdispatch.dylib
+MIG 2 133 1001 frame[0] 0x18db85c78 __dispatch_event_loop_wait_for_ownership$VARIANT$armv81 0x1ac /usr/lib/system/libdispatch.dylib
+MIG 2 133 1001 frame[1] 0x18db7ace0 ___DISPATCH_WAIT_FOR_QUEUE__ 0x134 /usr/lib/system/libdispatch.dylib
+MIG 2 133 1001 frame[2] 0x18db7a8fc __dispatch_sync_f_slow 0x88 /usr/lib/system/libdispatch.dylib
+MIG 2 133 1001 frame[3] 0x104c6ddb8 -[DMMigrationState startMigrationAndOrBlockIfNecessaryWithClientInvocation:buildVersion:lastBuildVersion:migrationStarterBlock:] 0x2d4 original datamigrator
+MIG 2 133 1001 frame[4] 0x104c74364 -[DMMigrator migrateCheckingNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:connection:migrationResultHandler:] 0x190 original datamigrator
+MIG 2 133 1001 frame[5] 0x104c70fdc -[DMMigratorProxy handleMessage:] 0xd88 original datamigrator
+MIG 2 133 1001 frame[6] 0x1c79108b0 -[DMXPCConnection _handleMessage:] 0x90 /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG 2 133 1001 frame[7] 0x1d1bef788 __xpc_connection_call_event_handler 0x40 /usr/lib/system/libxpc.dylib
+MIG 2 133 1001 frame[8] 0x1d1befb68 __xpc_connection_mach_event 0x3a4 /usr/lib/system/libxpc.dylib
+MIG 2 133 1001 frame[9] 0x18db98834 __dispatch_client_callout4 0xc /usr/lib/system/libdispatch.dylib
+MIG 2 133 1001 frame[10] 0x18db6b65c __dispatch_mach_msg_invoke$VARIANT$armv81 0x170 /usr/lib/system/libdispatch.dylib
+MIG 2 133 1001 frame[11] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 2 133 1001 frame[12] 0x18db6c1f8 __dispatch_mach_invoke$VARIANT$armv81 0x1b8 /usr/lib/system/libdispatch.dylib
+MIG 2 133 1001 frame[13] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 2 133 1001 frame[14] 0x18db741b0 __dispatch_lane_invoke$VARIANT$armv81 0x178 /usr/lib/system/libdispatch.dylib
+MIG 2 133 1001 frame[15] 0x18db7df14 __dispatch_workloop_worker_thread 0x25c /usr/lib/system/libdispatch.dylib
+MIG 2 133 1727 saved pc 0x1c2611538 _kevent_id 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 2 133 1727 lr 0x18db852cc __dispatch_kq_poll 0xdc /usr/lib/system/libdispatch.dylib
+MIG 2 133 1727 frame[0] 0x18db85c78 __dispatch_event_loop_wait_for_ownership$VARIANT$armv81 0x1ac /usr/lib/system/libdispatch.dylib
+MIG 2 133 1727 frame[1] 0x18db7ace0 ___DISPATCH_WAIT_FOR_QUEUE__ 0x134 /usr/lib/system/libdispatch.dylib
+MIG 2 133 1727 frame[2] 0x18db7a8fc __dispatch_sync_f_slow 0x88 /usr/lib/system/libdispatch.dylib
+MIG 2 133 1727 frame[3] 0x104c6ddb8 -[DMMigrationState startMigrationAndOrBlockIfNecessaryWithClientInvocation:buildVersion:lastBuildVersion:migrationStarterBlock:] 0x2d4 original datamigrator
+MIG 2 133 1727 frame[4] 0x104c74364 -[DMMigrator migrateCheckingNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:connection:migrationResultHandler:] 0x190 original datamigrator
+MIG 2 133 1727 frame[5] 0x104c70fdc -[DMMigratorProxy handleMessage:] 0xd88 original datamigrator
+MIG 2 133 1727 frame[6] 0x1c79108b0 -[DMXPCConnection _handleMessage:] 0x90 /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG 2 133 1727 frame[7] 0x1d1bef788 __xpc_connection_call_event_handler 0x40 /usr/lib/system/libxpc.dylib
+MIG 2 133 1727 frame[8] 0x1d1befb68 __xpc_connection_mach_event 0x3a4 /usr/lib/system/libxpc.dylib
+MIG 2 133 1727 frame[9] 0x18db98834 __dispatch_client_callout4 0xc /usr/lib/system/libdispatch.dylib
+MIG 2 133 1727 frame[10] 0x18db6b65c __dispatch_mach_msg_invoke$VARIANT$armv81 0x170 /usr/lib/system/libdispatch.dylib
+MIG 2 133 1727 frame[11] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 2 133 1727 frame[12] 0x18db6c1f8 __dispatch_mach_invoke$VARIANT$armv81 0x1b8 /usr/lib/system/libdispatch.dylib
+MIG 2 133 1727 frame[13] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 2 133 1727 frame[14] 0x18db741b0 __dispatch_lane_invoke$VARIANT$armv81 0x178 /usr/lib/system/libdispatch.dylib
+MIG 2 133 1727 frame[15] 0x18db7df14 __dispatch_workloop_worker_thread 0x25c /usr/lib/system/libdispatch.dylib
+MIG 2 133 1739 saved pc 0x1c26114f0 ___workq_kernreturn 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 2 133 1739 lr 0x1d1b9ac1c __pthread_wqthread 0x164 /usr/lib/system/libsystem_pthread.dylib
+MIG 2 133 1739 frame[0] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+MIG-W 1 198 1731 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG-W 1 198 1731 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+MIG-W 1 198 1731 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+MIG-W 1 198 1731 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+MIG-W 1 198 1731 frame[2] 0x186e5c148 ___CFRunLoopServiceMachPort 0x98 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG-W 1 198 1731 frame[3] 0x186e5d2e0 ___CFRunLoopRun 0x4b4 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG-W 1 198 1731 frame[4] 0x186e61d20 _CFRunLoopRunSpecific 0x244 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG-W 1 198 1731 frame[5] 0x1811b0ef8 -[NSRunLoop(NSRunLoop) runMode:beforeDate:] 0xcc /System/Library/Frameworks/Foundation.framework/Foundation
+MIG-W 1 198 1731 frame[6] 0x1811b0da4 -[NSRunLoop(NSRunLoop) run] 0x38 /System/Library/Frameworks/Foundation.framework/Foundation
+MIG-W 1 198 1731 frame[7] 0x1d1bf7840 __xpc_objc_main 0x1e8 /usr/lib/system/libxpc.dylib
+MIG-W 1 198 1731 frame[8] 0x1d1bf9968 _xpc_main 0x94 /usr/lib/system/libxpc.dylib
+MIG-W 1 198 1731 frame[9] 0x1028cac04 _main 0x24 original migrationpluginwrapper
+MIG-W 1 198 1731 frame[10] 0x1a4624344 start 0x740 /usr/lib/dyld
+MIG-W 1 198 1737 saved pc 0x1c2610fc4 _semaphore_timedwait_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG-W 1 198 1737 lr 0x18db67d9c __dispatch_sema4_timedwait$VARIANT$armv81 0x38 /usr/lib/system/libdispatch.dylib
+MIG-W 1 198 1737 frame[0] 0x18db68328 __dispatch_semaphore_wait_slow 0x44 /usr/lib/system/libdispatch.dylib
+MIG-W 1 198 1737 frame[1] 0x10323b26c -[MISystemAppMigrator synchronouslyCancelAllAppStoreRequests] 0xa0 original SystemAppMigrator
+MIG-W 1 198 1737 frame[2] 0x10323c070 -[MISystemAppMigrator performMigration] 0x368 original SystemAppMigrator
+MIG-W 1 198 1737 frame[3] 0x1028ca988 sub_0x1000027b4 0x1d0 original migrationpluginwrapper
+MIG-W 1 198 1737 frame[4] 0x18db98780 __dispatch_client_callout 0xc /usr/lib/system/libdispatch.dylib
+MIG-W 1 198 1737 frame[5] 0x18db7aa50 __dispatch_lane_barrier_sync_invoke_and_complete 0x30 /usr/lib/system/libdispatch.dylib
+MIG-W 1 198 1737 frame[6] 0x1028ca708 -[DMMigrationPluginWrapperProxy handleMessage:] 0x540 original migrationpluginwrapper
+MIG-W 1 198 1737 frame[7] 0x1c79108b0 -[DMXPCConnection _handleMessage:] 0x90 /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG-W 1 198 1737 frame[8] 0x1d1bef788 __xpc_connection_call_event_handler 0x40 /usr/lib/system/libxpc.dylib
+MIG-W 1 198 1737 frame[9] 0x1d1befb68 __xpc_connection_mach_event 0x3a4 /usr/lib/system/libxpc.dylib
+MIG-W 1 198 1737 frame[10] 0x18db98834 __dispatch_client_callout4 0xc /usr/lib/system/libdispatch.dylib
+MIG-W 1 198 1737 frame[11] 0x18db6b65c __dispatch_mach_msg_invoke$VARIANT$armv81 0x170 /usr/lib/system/libdispatch.dylib
+MIG-W 1 198 1737 frame[12] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG-W 1 198 1737 frame[13] 0x18db6c1f8 __dispatch_mach_invoke$VARIANT$armv81 0x1b8 /usr/lib/system/libdispatch.dylib
+MIG-W 1 198 1737 frame[14] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG-W 1 198 1737 frame[15] 0x18db741b0 __dispatch_lane_invoke$VARIANT$armv81 0x178 /usr/lib/system/libdispatch.dylib
+MIG-W 1 198 1800 saved pc 0x1c26114f0 ___workq_kernreturn 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG-W 1 198 1800 lr 0x1d1b9ac1c __pthread_wqthread 0x164 /usr/lib/system/libsystem_pthread.dylib
+MIG-W 1 198 1800 frame[0] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+MIG 3 133 785 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 3 133 785 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+MIG 3 133 785 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+MIG 3 133 785 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+MIG 3 133 785 frame[2] 0x186e5c148 ___CFRunLoopServiceMachPort 0x98 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG 3 133 785 frame[3] 0x186e5d2e0 ___CFRunLoopRun 0x4b4 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG 3 133 785 frame[4] 0x186e61d20 _CFRunLoopRunSpecific 0x244 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG 3 133 785 frame[5] 0x1811b0ef8 -[NSRunLoop(NSRunLoop) runMode:beforeDate:] 0xcc /System/Library/Frameworks/Foundation.framework/Foundation
+MIG 3 133 785 frame[6] 0x1811b0da4 -[NSRunLoop(NSRunLoop) run] 0x38 /System/Library/Frameworks/Foundation.framework/Foundation
+MIG 3 133 785 frame[7] 0x1d1bf7840 __xpc_objc_main 0x1e8 /usr/lib/system/libxpc.dylib
+MIG 3 133 785 frame[8] 0x1d1bf9968 _xpc_main 0x94 /usr/lib/system/libxpc.dylib
+MIG 3 133 785 frame[9] 0x104c6b404 _main 0x24 original datamigrator
+MIG 3 133 785 frame[10] 0x1a4624344 start 0x740 /usr/lib/dyld
+MIG 3 133 790 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 3 133 790 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+MIG 3 133 790 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+MIG 3 133 790 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+MIG 3 133 790 frame[2] 0x18db6a308 __dispatch_mach_send_and_wait_for_reply 0x210 /usr/lib/system/libdispatch.dylib
+MIG 3 133 790 frame[3] 0x18db6a694 _dispatch_mach_send_with_result_and_wait_for_reply$VARIANT$armv81 0x34 /usr/lib/system/libdispatch.dylib
+MIG 3 133 790 frame[4] 0x1d1bee0ec _xpc_connection_send_message_with_reply_sync 0xe8 /usr/lib/system/libxpc.dylib
+MIG 3 133 790 frame[5] 0x1c790a334 -[DMXPCConnection sendMessageSync:] 0x30 /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG 3 133 790 frame[6] 0x1c790e034 -[DMMigrationPluginWrapperConnection runPluginAtPath:withParameters:completion:] 0x53c /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG 3 133 790 frame[7] 0x104c75ac4 -[DataMigrationPlugin _performOneMigrationWithParameters:needsRetry:] 0x2e8 original datamigrator
+MIG 3 133 790 frame[8] 0x104c756ac -[DataMigrationPlugin performMigrationWithParameters:countOfAttempts:] 0x48 original datamigrator
+MIG 3 133 790 frame[9] 0x104c7344c -[DMMigrator _performMigrationUsingPlugins:pluginCategories:userCategory:buildVersion:lastBuildVersion:] 0x51c original datamigrator
+MIG 3 133 790 frame[10] 0x104c74820 -[DMMigrator _migrateWithTestMigrationInfrastructureOnly:buildVersion:lastBuildVersion:] 0x458 original datamigrator
+MIG 3 133 790 frame[11] 0x104c6dfa0 sub_0x100005f68 0x34 original datamigrator
+MIG 3 133 790 frame[12] 0x18db977a8 __dispatch_call_block_and_release 0x14 /usr/lib/system/libdispatch.dylib
+MIG 3 133 790 frame[13] 0x18db98780 __dispatch_client_callout 0xc /usr/lib/system/libdispatch.dylib
+MIG 3 133 790 frame[14] 0x18db736fc __dispatch_lane_serial_drain$VARIANT$armv81 0x254 /usr/lib/system/libdispatch.dylib
+MIG 3 133 790 frame[15] 0x18db741b0 __dispatch_lane_invoke$VARIANT$armv81 0x178 /usr/lib/system/libdispatch.dylib
+MIG 3 133 791 saved pc 0x1c2611538 _kevent_id 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 3 133 791 lr 0x18db852cc __dispatch_kq_poll 0xdc /usr/lib/system/libdispatch.dylib
+MIG 3 133 791 frame[0] 0x18db85c78 __dispatch_event_loop_wait_for_ownership$VARIANT$armv81 0x1ac /usr/lib/system/libdispatch.dylib
+MIG 3 133 791 frame[1] 0x18db7ace0 ___DISPATCH_WAIT_FOR_QUEUE__ 0x134 /usr/lib/system/libdispatch.dylib
+MIG 3 133 791 frame[2] 0x18db7a8fc __dispatch_sync_f_slow 0x88 /usr/lib/system/libdispatch.dylib
+MIG 3 133 791 frame[3] 0x104c6ddb8 -[DMMigrationState startMigrationAndOrBlockIfNecessaryWithClientInvocation:buildVersion:lastBuildVersion:migrationStarterBlock:] 0x2d4 original datamigrator
+MIG 3 133 791 frame[4] 0x104c74364 -[DMMigrator migrateCheckingNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:connection:migrationResultHandler:] 0x190 original datamigrator
+MIG 3 133 791 frame[5] 0x104c70fdc -[DMMigratorProxy handleMessage:] 0xd88 original datamigrator
+MIG 3 133 791 frame[6] 0x1c79108b0 -[DMXPCConnection _handleMessage:] 0x90 /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG 3 133 791 frame[7] 0x1d1bef788 __xpc_connection_call_event_handler 0x40 /usr/lib/system/libxpc.dylib
+MIG 3 133 791 frame[8] 0x1d1befb68 __xpc_connection_mach_event 0x3a4 /usr/lib/system/libxpc.dylib
+MIG 3 133 791 frame[9] 0x18db98834 __dispatch_client_callout4 0xc /usr/lib/system/libdispatch.dylib
+MIG 3 133 791 frame[10] 0x18db6b65c __dispatch_mach_msg_invoke$VARIANT$armv81 0x170 /usr/lib/system/libdispatch.dylib
+MIG 3 133 791 frame[11] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 3 133 791 frame[12] 0x18db6c1f8 __dispatch_mach_invoke$VARIANT$armv81 0x1b8 /usr/lib/system/libdispatch.dylib
+MIG 3 133 791 frame[13] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 3 133 791 frame[14] 0x18db741b0 __dispatch_lane_invoke$VARIANT$armv81 0x178 /usr/lib/system/libdispatch.dylib
+MIG 3 133 791 frame[15] 0x18db7df14 __dispatch_workloop_worker_thread 0x25c /usr/lib/system/libdispatch.dylib
+MIG 3 133 830 saved pc 0x1c2611538 _kevent_id 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 3 133 830 lr 0x18db852cc __dispatch_kq_poll 0xdc /usr/lib/system/libdispatch.dylib
+MIG 3 133 830 frame[0] 0x18db85c78 __dispatch_event_loop_wait_for_ownership$VARIANT$armv81 0x1ac /usr/lib/system/libdispatch.dylib
+MIG 3 133 830 frame[1] 0x18db7ace0 ___DISPATCH_WAIT_FOR_QUEUE__ 0x134 /usr/lib/system/libdispatch.dylib
+MIG 3 133 830 frame[2] 0x18db7a8fc __dispatch_sync_f_slow 0x88 /usr/lib/system/libdispatch.dylib
+MIG 3 133 830 frame[3] 0x104c6ddb8 -[DMMigrationState startMigrationAndOrBlockIfNecessaryWithClientInvocation:buildVersion:lastBuildVersion:migrationStarterBlock:] 0x2d4 original datamigrator
+MIG 3 133 830 frame[4] 0x104c74364 -[DMMigrator migrateCheckingNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:connection:migrationResultHandler:] 0x190 original datamigrator
+MIG 3 133 830 frame[5] 0x104c70fdc -[DMMigratorProxy handleMessage:] 0xd88 original datamigrator
+MIG 3 133 830 frame[6] 0x1c79108b0 -[DMXPCConnection _handleMessage:] 0x90 /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG 3 133 830 frame[7] 0x1d1bef788 __xpc_connection_call_event_handler 0x40 /usr/lib/system/libxpc.dylib
+MIG 3 133 830 frame[8] 0x1d1befb68 __xpc_connection_mach_event 0x3a4 /usr/lib/system/libxpc.dylib
+MIG 3 133 830 frame[9] 0x18db98834 __dispatch_client_callout4 0xc /usr/lib/system/libdispatch.dylib
+MIG 3 133 830 frame[10] 0x18db6b65c __dispatch_mach_msg_invoke$VARIANT$armv81 0x170 /usr/lib/system/libdispatch.dylib
+MIG 3 133 830 frame[11] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 3 133 830 frame[12] 0x18db6c1f8 __dispatch_mach_invoke$VARIANT$armv81 0x1b8 /usr/lib/system/libdispatch.dylib
+MIG 3 133 830 frame[13] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 3 133 830 frame[14] 0x18db741b0 __dispatch_lane_invoke$VARIANT$armv81 0x178 /usr/lib/system/libdispatch.dylib
+MIG 3 133 830 frame[15] 0x18db7df14 __dispatch_workloop_worker_thread 0x25c /usr/lib/system/libdispatch.dylib
+MIG 3 133 1001 saved pc 0x1c2611538 _kevent_id 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 3 133 1001 lr 0x18db852cc __dispatch_kq_poll 0xdc /usr/lib/system/libdispatch.dylib
+MIG 3 133 1001 frame[0] 0x18db85c78 __dispatch_event_loop_wait_for_ownership$VARIANT$armv81 0x1ac /usr/lib/system/libdispatch.dylib
+MIG 3 133 1001 frame[1] 0x18db7ace0 ___DISPATCH_WAIT_FOR_QUEUE__ 0x134 /usr/lib/system/libdispatch.dylib
+MIG 3 133 1001 frame[2] 0x18db7a8fc __dispatch_sync_f_slow 0x88 /usr/lib/system/libdispatch.dylib
+MIG 3 133 1001 frame[3] 0x104c6ddb8 -[DMMigrationState startMigrationAndOrBlockIfNecessaryWithClientInvocation:buildVersion:lastBuildVersion:migrationStarterBlock:] 0x2d4 original datamigrator
+MIG 3 133 1001 frame[4] 0x104c74364 -[DMMigrator migrateCheckingNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:connection:migrationResultHandler:] 0x190 original datamigrator
+MIG 3 133 1001 frame[5] 0x104c70fdc -[DMMigratorProxy handleMessage:] 0xd88 original datamigrator
+MIG 3 133 1001 frame[6] 0x1c79108b0 -[DMXPCConnection _handleMessage:] 0x90 /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG 3 133 1001 frame[7] 0x1d1bef788 __xpc_connection_call_event_handler 0x40 /usr/lib/system/libxpc.dylib
+MIG 3 133 1001 frame[8] 0x1d1befb68 __xpc_connection_mach_event 0x3a4 /usr/lib/system/libxpc.dylib
+MIG 3 133 1001 frame[9] 0x18db98834 __dispatch_client_callout4 0xc /usr/lib/system/libdispatch.dylib
+MIG 3 133 1001 frame[10] 0x18db6b65c __dispatch_mach_msg_invoke$VARIANT$armv81 0x170 /usr/lib/system/libdispatch.dylib
+MIG 3 133 1001 frame[11] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 3 133 1001 frame[12] 0x18db6c1f8 __dispatch_mach_invoke$VARIANT$armv81 0x1b8 /usr/lib/system/libdispatch.dylib
+MIG 3 133 1001 frame[13] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 3 133 1001 frame[14] 0x18db741b0 __dispatch_lane_invoke$VARIANT$armv81 0x178 /usr/lib/system/libdispatch.dylib
+MIG 3 133 1001 frame[15] 0x18db7df14 __dispatch_workloop_worker_thread 0x25c /usr/lib/system/libdispatch.dylib
+MIG 3 133 1727 saved pc 0x1c2611538 _kevent_id 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 3 133 1727 lr 0x18db852cc __dispatch_kq_poll 0xdc /usr/lib/system/libdispatch.dylib
+MIG 3 133 1727 frame[0] 0x18db85c78 __dispatch_event_loop_wait_for_ownership$VARIANT$armv81 0x1ac /usr/lib/system/libdispatch.dylib
+MIG 3 133 1727 frame[1] 0x18db7ace0 ___DISPATCH_WAIT_FOR_QUEUE__ 0x134 /usr/lib/system/libdispatch.dylib
+MIG 3 133 1727 frame[2] 0x18db7a8fc __dispatch_sync_f_slow 0x88 /usr/lib/system/libdispatch.dylib
+MIG 3 133 1727 frame[3] 0x104c6ddb8 -[DMMigrationState startMigrationAndOrBlockIfNecessaryWithClientInvocation:buildVersion:lastBuildVersion:migrationStarterBlock:] 0x2d4 original datamigrator
+MIG 3 133 1727 frame[4] 0x104c74364 -[DMMigrator migrateCheckingNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:connection:migrationResultHandler:] 0x190 original datamigrator
+MIG 3 133 1727 frame[5] 0x104c70fdc -[DMMigratorProxy handleMessage:] 0xd88 original datamigrator
+MIG 3 133 1727 frame[6] 0x1c79108b0 -[DMXPCConnection _handleMessage:] 0x90 /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG 3 133 1727 frame[7] 0x1d1bef788 __xpc_connection_call_event_handler 0x40 /usr/lib/system/libxpc.dylib
+MIG 3 133 1727 frame[8] 0x1d1befb68 __xpc_connection_mach_event 0x3a4 /usr/lib/system/libxpc.dylib
+MIG 3 133 1727 frame[9] 0x18db98834 __dispatch_client_callout4 0xc /usr/lib/system/libdispatch.dylib
+MIG 3 133 1727 frame[10] 0x18db6b65c __dispatch_mach_msg_invoke$VARIANT$armv81 0x170 /usr/lib/system/libdispatch.dylib
+MIG 3 133 1727 frame[11] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 3 133 1727 frame[12] 0x18db6c1f8 __dispatch_mach_invoke$VARIANT$armv81 0x1b8 /usr/lib/system/libdispatch.dylib
+MIG 3 133 1727 frame[13] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 3 133 1727 frame[14] 0x18db741b0 __dispatch_lane_invoke$VARIANT$armv81 0x178 /usr/lib/system/libdispatch.dylib
+MIG 3 133 1727 frame[15] 0x18db7df14 __dispatch_workloop_worker_thread 0x25c /usr/lib/system/libdispatch.dylib
+MIG 3 133 1739 saved pc 0x1c2611538 _kevent_id 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 3 133 1739 lr 0x18db852cc __dispatch_kq_poll 0xdc /usr/lib/system/libdispatch.dylib
+MIG 3 133 1739 frame[0] 0x18db85c78 __dispatch_event_loop_wait_for_ownership$VARIANT$armv81 0x1ac /usr/lib/system/libdispatch.dylib
+MIG 3 133 1739 frame[1] 0x18db7ace0 ___DISPATCH_WAIT_FOR_QUEUE__ 0x134 /usr/lib/system/libdispatch.dylib
+MIG 3 133 1739 frame[2] 0x18db7a8fc __dispatch_sync_f_slow 0x88 /usr/lib/system/libdispatch.dylib
+MIG 3 133 1739 frame[3] 0x104c6ddb8 -[DMMigrationState startMigrationAndOrBlockIfNecessaryWithClientInvocation:buildVersion:lastBuildVersion:migrationStarterBlock:] 0x2d4 original datamigrator
+MIG 3 133 1739 frame[4] 0x104c74364 -[DMMigrator migrateCheckingNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:connection:migrationResultHandler:] 0x190 original datamigrator
+MIG 3 133 1739 frame[5] 0x104c70fdc -[DMMigratorProxy handleMessage:] 0xd88 original datamigrator
+MIG 3 133 1739 frame[6] 0x1c79108b0 -[DMXPCConnection _handleMessage:] 0x90 /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+MIG 3 133 1739 frame[7] 0x1d1bef788 __xpc_connection_call_event_handler 0x40 /usr/lib/system/libxpc.dylib
+MIG 3 133 1739 frame[8] 0x1d1befb68 __xpc_connection_mach_event 0x3a4 /usr/lib/system/libxpc.dylib
+MIG 3 133 1739 frame[9] 0x18db98834 __dispatch_client_callout4 0xc /usr/lib/system/libdispatch.dylib
+MIG 3 133 1739 frame[10] 0x18db6b65c __dispatch_mach_msg_invoke$VARIANT$armv81 0x170 /usr/lib/system/libdispatch.dylib
+MIG 3 133 1739 frame[11] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 3 133 1739 frame[12] 0x18db6c1f8 __dispatch_mach_invoke$VARIANT$armv81 0x1b8 /usr/lib/system/libdispatch.dylib
+MIG 3 133 1739 frame[13] 0x18db735d4 __dispatch_lane_serial_drain$VARIANT$armv81 0x12c /usr/lib/system/libdispatch.dylib
+MIG 3 133 1739 frame[14] 0x18db741b0 __dispatch_lane_invoke$VARIANT$armv81 0x178 /usr/lib/system/libdispatch.dylib
+MIG 3 133 1739 frame[15] 0x18db7df14 __dispatch_workloop_worker_thread 0x25c /usr/lib/system/libdispatch.dylib
+MIG 3 133 3736 saved pc 0x1c26114f0 ___workq_kernreturn 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 3 133 3736 lr 0x1d1b9ac1c __pthread_wqthread 0x164 /usr/lib/system/libsystem_pthread.dylib
+MIG 3 133 3736 frame[0] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+MIG 3 133 3932 saved pc 0x1c26114f0 ___workq_kernreturn 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG 3 133 3932 lr 0x1d1b9ac1c __pthread_wqthread 0x164 /usr/lib/system/libsystem_pthread.dylib
+MIG 3 133 3932 frame[0] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+MIG-W 2 198 1731 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG-W 2 198 1731 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+MIG-W 2 198 1731 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+MIG-W 2 198 1731 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+MIG-W 2 198 1731 frame[2] 0x186e5c148 ___CFRunLoopServiceMachPort 0x98 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG-W 2 198 1731 frame[3] 0x186e5d2e0 ___CFRunLoopRun 0x4b4 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG-W 2 198 1731 frame[4] 0x186e61d20 _CFRunLoopRunSpecific 0x244 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG-W 2 198 1731 frame[5] 0x1811b0ef8 -[NSRunLoop(NSRunLoop) runMode:beforeDate:] 0xcc /System/Library/Frameworks/Foundation.framework/Foundation
+MIG-W 2 198 1731 frame[6] 0x1811b0da4 -[NSRunLoop(NSRunLoop) run] 0x38 /System/Library/Frameworks/Foundation.framework/Foundation
+MIG-W 2 198 1731 frame[7] 0x1d1bf7840 __xpc_objc_main 0x1e8 /usr/lib/system/libxpc.dylib
+MIG-W 2 198 1731 frame[8] 0x1d1bf9968 _xpc_main 0x94 /usr/lib/system/libxpc.dylib
+MIG-W 2 198 1731 frame[9] 0x1028cac04 _main 0x24 original migrationpluginwrapper
+MIG-W 2 198 1731 frame[10] 0x1a4624344 start 0x740 /usr/lib/dyld
+MIG-W 2 198 1737 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+MIG-W 2 198 1737 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+MIG-W 2 198 1737 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+MIG-W 2 198 1737 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+MIG-W 2 198 1737 frame[2] 0x18db6a308 __dispatch_mach_send_and_wait_for_reply 0x210 /usr/lib/system/libdispatch.dylib
+MIG-W 2 198 1737 frame[3] 0x18db6a694 _dispatch_mach_send_with_result_and_wait_for_reply$VARIANT$armv81 0x34 /usr/lib/system/libdispatch.dylib
+MIG-W 2 198 1737 frame[4] 0x1d1bee0ec _xpc_connection_send_message_with_reply_sync 0xe8 /usr/lib/system/libxpc.dylib
+MIG-W 2 198 1737 frame[5] 0x18120c224 ___NSXPCCONNECTION_IS_WAITING_FOR_A_SYNCHRONOUS_REPLY__ 0x8 /System/Library/Frameworks/Foundation.framework/Foundation
+MIG-W 2 198 1737 frame[6] 0x1811a5cb0 -[NSXPCConnection _sendInvocation:orArguments:count:methodSignature:selector:withProxy:] 0x7e4 /System/Library/Frameworks/Foundation.framework/Foundation
+MIG-W 2 198 1737 frame[7] 0x186e06640 ____forwarding___ 0x2c0 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG-W 2 198 1737 frame[8] 0x186e688fc ___forwarding_prep_0___ 0x58 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG-W 2 198 1737 frame[9] 0x1a38b5824 +[IXAppInstallCoordinator cancelCoordinatorForAppWithIdentity:withReason:client:error:] 0x12c /System/Library/PrivateFrameworks/InstallCoordination.framework/InstallCoordination
+MIG-W 2 198 1737 frame[10] 0x1a38b5634 +[IXAppInstallCoordinator cancelCoordinatorForAppWithBundleID:withReason:client:error:] 0x68 /System/Library/PrivateFrameworks/InstallCoordination.framework/InstallCoordination
+MIG-W 2 198 1737 frame[11] 0x10323b7f8 -[MISystemAppMigrator attemptToInstallSystemAppWithBundleID:desiredAppState:stagedAppOrPatchURL:isInstalled:] 0xd4 original SystemAppMigrator
+MIG-W 2 198 1737 frame[12] 0x10323cb5c sub_0x8ad4 0x84 original SystemAppMigrator
+MIG-W 2 198 1737 frame[13] 0x186dfad1c ___NSDICTIONARY_IS_CALLING_OUT_TO_A_BLOCK__ 0xc /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG-W 2 198 1737 frame[14] 0x186e8b6f8 -[__NSFrozenDictionaryM enumerateKeysAndObjectsWithOptions:usingBlock:] 0xb8 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+MIG-W 2 198 1737 frame[15] 0x10323c16c -[MISystemAppMigrator performMigration] 0x464 original SystemAppMigrator
+MIG-W 2 198 2244 saved pc 0x0 unresolved
+MIG-W 2 198 2244 lr 0x0 unresolved

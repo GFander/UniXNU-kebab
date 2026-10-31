@@ -1,0 +1,58 @@
+UI-SB 1 27 310 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+UI-SB 1 27 310 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+UI-SB 1 27 310 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+UI-SB 1 27 310 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+UI-SB 1 27 310 frame[2] 0x18db6a308 __dispatch_mach_send_and_wait_for_reply 0x210 /usr/lib/system/libdispatch.dylib
+UI-SB 1 27 310 frame[3] 0x18db6a694 _dispatch_mach_send_with_result_and_wait_for_reply$VARIANT$armv81 0x34 /usr/lib/system/libdispatch.dylib
+UI-SB 1 27 310 frame[4] 0x1d1bee0ec _xpc_connection_send_message_with_reply_sync 0xe8 /usr/lib/system/libxpc.dylib
+UI-SB 1 27 310 frame[5] 0x19b9af128 -[BSXPCServiceConnectionMessage _sendSynchronously:] 0x148 /System/Library/PrivateFrameworks/BoardServices.framework/BoardServices
+UI-SB 1 27 310 frame[6] 0x19b9b1e78 -[BSXPCServiceConnectionMessage sendSynchronouslyWithError:] 0xac /System/Library/PrivateFrameworks/BoardServices.framework/BoardServices
+UI-SB 1 27 310 frame[7] 0x19b9b1554 ___80+[BSXPCServiceConnectionProxy createImplementationOfProtocol:forClass:withName:]_block_invoke 0x7b4 /System/Library/PrivateFrameworks/BoardServices.framework/BoardServices
+UI-SB 1 27 310 frame[8] 0x18dcf8ce0 -[BKSSystemShellService _checkIn] 0x104 /System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices
+UI-SB 1 27 310 frame[9] 0x1a269c304 _FBSystemShellInitialize 0x2c4 /System/Library/PrivateFrameworks/FrontBoard.framework/FrontBoard
+UI-SB 1 27 310 frame[10] 0x1c58655c8 _SBSystemAppMain 0x136c /System/Library/PrivateFrameworks/SpringBoard.framework/SpringBoard
+UI-SB 1 27 310 frame[11] 0x1a4624344 start 0x740 /usr/lib/dyld
+UI-SB 1 27 1756 saved pc 0x1c2611ad0 ___ulock_wait 0x8 /usr/lib/system/libsystem_kernel.dylib
+UI-SB 1 27 1756 lr 0x18db68128 __dlock_wait 0x30 /usr/lib/system/libdispatch.dylib
+UI-SB 1 27 1756 frame[0] 0x18db67f10 __dispatch_thread_event_wait_slow$VARIANT$armv81 0x30 /usr/lib/system/libdispatch.dylib
+UI-SB 1 27 1756 frame[1] 0x18db7acfc ___DISPATCH_WAIT_FOR_QUEUE__ 0x150 /usr/lib/system/libdispatch.dylib
+UI-SB 1 27 1756 frame[2] 0x18db7a8fc __dispatch_sync_f_slow 0x88 /usr/lib/system/libdispatch.dylib
+UI-SB 1 27 1756 frame[3] 0x19c9c4980 ____os_state_request_for_self_block_invoke 0x158 /usr/lib/system/libsystem_trace.dylib
+UI-SB 1 27 1756 frame[4] 0x18db977a8 __dispatch_call_block_and_release 0x14 /usr/lib/system/libdispatch.dylib
+UI-SB 1 27 1756 frame[5] 0x18db98780 __dispatch_client_callout 0xc /usr/lib/system/libdispatch.dylib
+UI-SB 1 27 1756 frame[6] 0x18db736fc __dispatch_lane_serial_drain$VARIANT$armv81 0x254 /usr/lib/system/libdispatch.dylib
+UI-SB 1 27 1756 frame[7] 0x18db741e4 __dispatch_lane_invoke$VARIANT$armv81 0x1ac /usr/lib/system/libdispatch.dylib
+UI-SB 1 27 1756 frame[8] 0x18db7df14 __dispatch_workloop_worker_thread 0x25c /usr/lib/system/libdispatch.dylib
+UI-SB 1 27 1756 frame[9] 0x1d1b9abd0 __pthread_wqthread 0x118 /usr/lib/system/libsystem_pthread.dylib
+UI-SB 1 27 1756 frame[10] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+UI-SB 1 27 2246 saved pc 0x0 unresolved
+UI-SB 1 27 2246 lr 0x0 unresolved
+UI-SB 2 27 310 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+UI-SB 2 27 310 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+UI-SB 2 27 310 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+UI-SB 2 27 310 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+UI-SB 2 27 310 frame[2] 0x18db6a308 __dispatch_mach_send_and_wait_for_reply 0x210 /usr/lib/system/libdispatch.dylib
+UI-SB 2 27 310 frame[3] 0x18db6a694 _dispatch_mach_send_with_result_and_wait_for_reply$VARIANT$armv81 0x34 /usr/lib/system/libdispatch.dylib
+UI-SB 2 27 310 frame[4] 0x1d1bee0ec _xpc_connection_send_message_with_reply_sync 0xe8 /usr/lib/system/libxpc.dylib
+UI-SB 2 27 310 frame[5] 0x19b9af128 -[BSXPCServiceConnectionMessage _sendSynchronously:] 0x148 /System/Library/PrivateFrameworks/BoardServices.framework/BoardServices
+UI-SB 2 27 310 frame[6] 0x19b9b1e78 -[BSXPCServiceConnectionMessage sendSynchronouslyWithError:] 0xac /System/Library/PrivateFrameworks/BoardServices.framework/BoardServices
+UI-SB 2 27 310 frame[7] 0x19b9b1554 ___80+[BSXPCServiceConnectionProxy createImplementationOfProtocol:forClass:withName:]_block_invoke 0x7b4 /System/Library/PrivateFrameworks/BoardServices.framework/BoardServices
+UI-SB 2 27 310 frame[8] 0x18dcf8ce0 -[BKSSystemShellService _checkIn] 0x104 /System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices
+UI-SB 2 27 310 frame[9] 0x1a269c304 _FBSystemShellInitialize 0x2c4 /System/Library/PrivateFrameworks/FrontBoard.framework/FrontBoard
+UI-SB 2 27 310 frame[10] 0x1c58655c8 _SBSystemAppMain 0x136c /System/Library/PrivateFrameworks/SpringBoard.framework/SpringBoard
+UI-SB 2 27 310 frame[11] 0x1a4624344 start 0x740 /usr/lib/dyld
+UI-SB 2 27 1756 saved pc 0x1c2611ad0 ___ulock_wait 0x8 /usr/lib/system/libsystem_kernel.dylib
+UI-SB 2 27 1756 lr 0x18db68128 __dlock_wait 0x30 /usr/lib/system/libdispatch.dylib
+UI-SB 2 27 1756 frame[0] 0x18db67f10 __dispatch_thread_event_wait_slow$VARIANT$armv81 0x30 /usr/lib/system/libdispatch.dylib
+UI-SB 2 27 1756 frame[1] 0x18db7acfc ___DISPATCH_WAIT_FOR_QUEUE__ 0x150 /usr/lib/system/libdispatch.dylib
+UI-SB 2 27 1756 frame[2] 0x18db7a8fc __dispatch_sync_f_slow 0x88 /usr/lib/system/libdispatch.dylib
+UI-SB 2 27 1756 frame[3] 0x19c9c4980 ____os_state_request_for_self_block_invoke 0x158 /usr/lib/system/libsystem_trace.dylib
+UI-SB 2 27 1756 frame[4] 0x18db977a8 __dispatch_call_block_and_release 0x14 /usr/lib/system/libdispatch.dylib
+UI-SB 2 27 1756 frame[5] 0x18db98780 __dispatch_client_callout 0xc /usr/lib/system/libdispatch.dylib
+UI-SB 2 27 1756 frame[6] 0x18db736fc __dispatch_lane_serial_drain$VARIANT$armv81 0x254 /usr/lib/system/libdispatch.dylib
+UI-SB 2 27 1756 frame[7] 0x18db741e4 __dispatch_lane_invoke$VARIANT$armv81 0x1ac /usr/lib/system/libdispatch.dylib
+UI-SB 2 27 1756 frame[8] 0x18db7df14 __dispatch_workloop_worker_thread 0x25c /usr/lib/system/libdispatch.dylib
+UI-SB 2 27 1756 frame[9] 0x1d1b9abd0 __pthread_wqthread 0x118 /usr/lib/system/libsystem_pthread.dylib
+UI-SB 2 27 1756 frame[10] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+UI-SB 2 27 2246 saved pc 0x0 unresolved
+UI-SB 2 27 2246 lr 0x0 unresolved

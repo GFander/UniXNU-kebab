@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "actual_production_sources": {
+    "osfmk/kern/kebab_bootdiag.c": "2c79c0deba4e88a005638d92647438044545e450da9765bab45aeb7e4f8582e3",
+    "bsd/kern/kebab_bootdiag.c": "126a0e8e51417648701cfd120c6325deee1210ef1d8478df27c326b38d1decc4"
+  },
+  "fixture_sha256": "810c9a3eeb975e2be7ad3631c2ec417e0dcab48399440d8535845d9c395f52b9",
+  "normal_only": true,
+  "fixed_wrapper_uuid": true,
+  "bounded_images": [
+    512,
+    8
+  ],
+  "legacy_regression": true,
+  "task_scheduler_map_nofault_uuid_explicit_models": true
+}

@@ -1,0 +1,812 @@
+{
+  "sha256": "88cde211c8aa344e011e204b5a05dee6bc3908e8721fbc5989c22508980e9401",
+  "uuid": "462f5fa733b037f28aa7aadf09475ac5",
+  "read_only": true,
+  "method_count": 71,
+  "methods": [
+    [
+      16072,
+      "-[MIPreferencesMigrationMetadata initWithSourceBundleID:destinationBundleID:keyMappings:completion:]"
+    ],
+    [
+      16300,
+      "-[MIPreferencesMigrationMetadata capturedPreferences]"
+    ],
+    [
+      16308,
+      "-[MIPreferencesMigrationMetadata setCapturedPreferences:]"
+    ],
+    [
+      16316,
+      "-[MIPreferencesMigrationMetadata sourceBundleID]"
+    ],
+    [
+      16324,
+      "-[MIPreferencesMigrationMetadata destinationBundleID]"
+    ],
+    [
+      16332,
+      "-[MIPreferencesMigrationMetadata keyMappings]"
+    ],
+    [
+      16340,
+      "-[MIPreferencesMigrationMetadata completion]"
+    ],
+    [
+      16348,
+      "-[MIPreferencesMigrationMetadata .cxx_destruct]"
+    ],
+    [
+      16432,
+      "-[MISystemAppStateWrapper lookupSystemAppStateWithOptions:]"
+    ],
+    [
+      16476,
+      "-[MISystemAppStateWrapper setSystemAppState:forBundleID:]"
+    ],
+    [
+      16488,
+      "-[MISystemAppMigrator _commonInit]"
+    ],
+    [
+      16556,
+      "-[MISystemAppMigrator initForTesting]"
+    ],
+    [
+      16636,
+      "-[MISystemAppMigrator init]"
+    ],
+    [
+      18192,
+      "-[MISystemAppMigrator dataClassName]"
+    ],
+    [
+      18204,
+      "-[MISystemAppMigrator enterSystemAppInstallDispatchGroupForBundleID:]"
+    ],
+    [
+      18444,
+      "-[MISystemAppMigrator leaveSystemAppInstallDispatchGroupForBundleID:]"
+    ],
+    [
+      18684,
+      "-[MISystemAppMigrator waitForSystemAppInstallDispatchGroup]"
+    ],
+    [
+      19284,
+      "-[MISystemAppMigrator firstTimeEncounteringDeletableSystemAppWithBundleId:]"
+    ],
+    [
+      19460,
+      "-[MISystemAppMigrator markHiddenAppAsUninstalled:]"
+    ],
+    [
+      19608,
+      "-[MISystemAppMigrator isRegulatedForChina]"
+    ],
+    [
+      19712,
+      "-[MISystemAppMigrator handleSpecialAppNews]"
+    ],
+    [
+      19772,
+      "-[MISystemAppMigrator handleSpecialAppActivity]"
+    ],
+    [
+      20300,
+      "-[MISystemAppMigrator handleAppsMissingRequiredCapabilities]"
+    ],
+    [
+      20772,
+      "-[MISystemAppMigrator handleAppsNotCompatibleWithDeviceFamily]"
+    ],
+    [
+      21180,
+      "-[MISystemAppMigrator handleForceInstalledApps]"
+    ],
+    [
+      21664,
+      "-[MISystemAppMigrator handleSupersededSystemApps]"
+    ],
+    [
+      23256,
+      "-[MISystemAppMigrator capturePreferencesToMigrate]"
+    ],
+    [
+      24076,
+      "-[MISystemAppMigrator finalizePreferencesToMigrate]"
+    ],
+    [
+      24900,
+      "-[MISystemAppMigrator markAppSuccessfullyInstalledWithBundleID:]"
+    ],
+    [
+      25116,
+      "-[MISystemAppMigrator appInstalledSuccessfullyWithBundleID:]"
+    ],
+    [
+      25420,
+      "-[MISystemAppMigrator coordinatorDidCompleteSuccessfully:forApplicationRecord:]"
+    ],
+    [
+      25656,
+      "-[MISystemAppMigrator coordinator:canceledWithReason:client:]"
+    ],
+    [
+      25888,
+      "-[MISystemAppMigrator demoteAppWithBundleID:demotionReason:]"
+    ],
+    [
+      26096,
+      "-[MISystemAppMigrator setPlaceholderPromiseForCoordinator:bundleID:installType:error:]"
+    ],
+    [
+      26532,
+      "-[MISystemAppMigrator setInstallOptionsForCoordinator:bundleID:error:]"
+    ],
+    [
+      26780,
+      "-[MISystemAppMigrator installDemotedPlaceholderWithBundleID:installType:]"
+    ],
+    [
+      27580,
+      "-[MISystemAppMigrator demoteAppWithBundleID:desiredAppState:isInstalled:]"
+    ],
+    [
+      27736,
+      "-[MISystemAppMigrator installOrUpdateAppWithBundleID:appURL:isInstalled:]"
+    ],
+    [
+      28888,
+      "-[MISystemAppMigrator usingAppStoreInstallSystemAppAppWithBundleID:]"
+    ],
+    [
+      29128,
+      "-[MISystemAppMigrator synchronouslyCancelAllAppStoreRequests]"
+    ],
+    [
+      29460,
+      "-[MISystemAppMigrator ignoreAppsNotInTrustCacheSentinelFileURL]"
+    ],
+    [
+      29560,
+      "-[MISystemAppMigrator shouldIgnoreAppsNotInTrustCache]"
+    ],
+    [
+      29704,
+      "-[MISystemAppMigrator isCurrentlyInstalledAppInTrustCacheForBundleID:]"
+    ],
+    [
+      30212,
+      "-[MISystemAppMigrator existsUnusedDataContainerWithBundleID:]"
+    ],
+    [
+      30496,
+      "-[MISystemAppMigrator attemptToInstallSystemAppWithBundleID:desiredAppState:stagedAppOrPatchURL:isInstalled:]"
+    ],
+    [
+      31576,
+      "-[MISystemAppMigrator currentlyInstalledSystemAppBundleIdentifiers]"
+    ],
+    [
+      32004,
+      "-[MISystemAppMigrator performMigration]"
+    ],
+    [
+      36412,
+      "-[MISystemAppMigrator itemsToInstall]"
+    ],
+    [
+      36428,
+      "-[MISystemAppMigrator startingSystemAppState]"
+    ],
+    [
+      36444,
+      "-[MISystemAppMigrator setStartingSystemAppState:]"
+    ],
+    [
+      36464,
+      "-[MISystemAppMigrator preferencesToMigrate]"
+    ],
+    [
+      36480,
+      "-[MISystemAppMigrator setPreferencesToMigrate:]"
+    ],
+    [
+      36500,
+      "-[MISystemAppMigrator appBundleIDsToUninstall]"
+    ],
+    [
+      36516,
+      "-[MISystemAppMigrator setAppBundleIDsToUninstall:]"
+    ],
+    [
+      36536,
+      "-[MISystemAppMigrator appBundleIDsRequestingStoreDownload]"
+    ],
+    [
+      36552,
+      "-[MISystemAppMigrator setAppBundleIDsRequestingStoreDownload:]"
+    ],
+    [
+      36572,
+      "-[MISystemAppMigrator appBundleIDsInstalledSuccessfully]"
+    ],
+    [
+      36588,
+      "-[MISystemAppMigrator setAppBundleIDsInstalledSuccessfully:]"
+    ],
+    [
+      36608,
+      "-[MISystemAppMigrator currentlyInstallingCoordinators]"
+    ],
+    [
+      36624,
+      "-[MISystemAppMigrator setCurrentlyInstallingCoordinators:]"
+    ],
+    [
+      36644,
+      "-[MISystemAppMigrator systemAppInstallGroup]"
+    ],
+    [
+      36660,
+      "-[MISystemAppMigrator setSystemAppInstallGroup:]"
+    ],
+    [
+      36680,
+      "-[MISystemAppMigrator pendingAppInstallListQueue]"
+    ],
+    [
+      36696,
+      "-[MISystemAppMigrator setPendingAppInstallListQueue:]"
+    ],
+    [
+      36716,
+      "-[MISystemAppMigrator pendingAppInstalls]"
+    ],
+    [
+      36732,
+      "-[MISystemAppMigrator setPendingAppInstalls:]"
+    ],
+    [
+      36752,
+      "-[MISystemAppMigrator installedAppListQueue]"
+    ],
+    [
+      36768,
+      "-[MISystemAppMigrator forceInstallBundleIDs]"
+    ],
+    [
+      36784,
+      "-[MISystemAppMigrator systemAppStateWrapper]"
+    ],
+    [
+      36800,
+      "-[MISystemAppMigrator setSystemAppStateWrapper:]"
+    ],
+    [
+      36820,
+      "-[MISystemAppMigrator .cxx_destruct]"
+    ]
+  ],
+  "symbols": [
+    [
+      13892,
+      "_MIIsCompatibleWithDeviceFamily"
+    ],
+    [
+      14024,
+      "_MIIsCompatibleWithAtLeastOneDeviceFamily"
+    ],
+    [
+      14396,
+      "_MIIsApplicableToCurrentDeviceFamilyWithError"
+    ],
+    [
+      14888,
+      "__CreateErrorV"
+    ],
+    [
+      15280,
+      "__CreateError"
+    ],
+    [
+      15324,
+      "__CreateAndLogError"
+    ],
+    [
+      15368,
+      "__CreateAndLogErrorV"
+    ],
+    [
+      15756,
+      "__IsMalformedBundleError"
+    ],
+    [
+      15988,
+      "_MICopyUnlocalizedDescriptionForContainerExtendedError"
+    ],
+    [
+      16072,
+      "-[MIPreferencesMigrationMetadata initWithSourceBundleID:destinationBundleID:keyMappings:completion:]"
+    ],
+    [
+      16300,
+      "-[MIPreferencesMigrationMetadata capturedPreferences]"
+    ],
+    [
+      16308,
+      "-[MIPreferencesMigrationMetadata setCapturedPreferences:]"
+    ],
+    [
+      16316,
+      "-[MIPreferencesMigrationMetadata sourceBundleID]"
+    ],
+    [
+      16324,
+      "-[MIPreferencesMigrationMetadata destinationBundleID]"
+    ],
+    [
+      16332,
+      "-[MIPreferencesMigrationMetadata keyMappings]"
+    ],
+    [
+      16340,
+      "-[MIPreferencesMigrationMetadata completion]"
+    ],
+    [
+      16348,
+      "-[MIPreferencesMigrationMetadata .cxx_destruct]"
+    ],
+    [
+      16432,
+      "-[MISystemAppStateWrapper lookupSystemAppStateWithOptions:]"
+    ],
+    [
+      16476,
+      "-[MISystemAppStateWrapper setSystemAppState:forBundleID:]"
+    ],
+    [
+      16488,
+      "-[MISystemAppMigrator _commonInit]"
+    ],
+    [
+      16556,
+      "-[MISystemAppMigrator initForTesting]"
+    ],
+    [
+      16636,
+      "-[MISystemAppMigrator init]"
+    ],
+    [
+      18192,
+      "-[MISystemAppMigrator dataClassName]"
+    ],
+    [
+      18204,
+      "-[MISystemAppMigrator enterSystemAppInstallDispatchGroupForBundleID:]"
+    ],
+    [
+      18444,
+      "-[MISystemAppMigrator leaveSystemAppInstallDispatchGroupForBundleID:]"
+    ],
+    [
+      18684,
+      "-[MISystemAppMigrator waitForSystemAppInstallDispatchGroup]"
+    ],
+    [
+      19284,
+      "-[MISystemAppMigrator firstTimeEncounteringDeletableSystemAppWithBundleId:]"
+    ],
+    [
+      19460,
+      "-[MISystemAppMigrator markHiddenAppAsUninstalled:]"
+    ],
+    [
+      19608,
+      "-[MISystemAppMigrator isRegulatedForChina]"
+    ],
+    [
+      19712,
+      "-[MISystemAppMigrator handleSpecialAppNews]"
+    ],
+    [
+      19772,
+      "-[MISystemAppMigrator handleSpecialAppActivity]"
+    ],
+    [
+      20300,
+      "-[MISystemAppMigrator handleAppsMissingRequiredCapabilities]"
+    ],
+    [
+      20772,
+      "-[MISystemAppMigrator handleAppsNotCompatibleWithDeviceFamily]"
+    ],
+    [
+      21180,
+      "-[MISystemAppMigrator handleForceInstalledApps]"
+    ],
+    [
+      21664,
+      "-[MISystemAppMigrator handleSupersededSystemApps]"
+    ],
+    [
+      23256,
+      "-[MISystemAppMigrator capturePreferencesToMigrate]"
+    ],
+    [
+      24076,
+      "-[MISystemAppMigrator finalizePreferencesToMigrate]"
+    ],
+    [
+      24900,
+      "-[MISystemAppMigrator markAppSuccessfullyInstalledWithBundleID:]"
+    ],
+    [
+      25116,
+      "-[MISystemAppMigrator appInstalledSuccessfullyWithBundleID:]"
+    ],
+    [
+      25420,
+      "-[MISystemAppMigrator coordinatorDidCompleteSuccessfully:forApplicationRecord:]"
+    ],
+    [
+      25656,
+      "-[MISystemAppMigrator coordinator:canceledWithReason:client:]"
+    ],
+    [
+      25888,
+      "-[MISystemAppMigrator demoteAppWithBundleID:demotionReason:]"
+    ],
+    [
+      26096,
+      "-[MISystemAppMigrator setPlaceholderPromiseForCoordinator:bundleID:installType:error:]"
+    ],
+    [
+      26532,
+      "-[MISystemAppMigrator setInstallOptionsForCoordinator:bundleID:error:]"
+    ],
+    [
+      26780,
+      "-[MISystemAppMigrator installDemotedPlaceholderWithBundleID:installType:]"
+    ],
+    [
+      27580,
+      "-[MISystemAppMigrator demoteAppWithBundleID:desiredAppState:isInstalled:]"
+    ],
+    [
+      27736,
+      "-[MISystemAppMigrator installOrUpdateAppWithBundleID:appURL:isInstalled:]"
+    ],
+    [
+      28888,
+      "-[MISystemAppMigrator usingAppStoreInstallSystemAppAppWithBundleID:]"
+    ],
+    [
+      29128,
+      "-[MISystemAppMigrator synchronouslyCancelAllAppStoreRequests]"
+    ],
+    [
+      29460,
+      "-[MISystemAppMigrator ignoreAppsNotInTrustCacheSentinelFileURL]"
+    ],
+    [
+      29560,
+      "-[MISystemAppMigrator shouldIgnoreAppsNotInTrustCache]"
+    ],
+    [
+      29704,
+      "-[MISystemAppMigrator isCurrentlyInstalledAppInTrustCacheForBundleID:]"
+    ],
+    [
+      30212,
+      "-[MISystemAppMigrator existsUnusedDataContainerWithBundleID:]"
+    ],
+    [
+      30496,
+      "-[MISystemAppMigrator attemptToInstallSystemAppWithBundleID:desiredAppState:stagedAppOrPatchURL:isInstalled:]"
+    ],
+    [
+      31576,
+      "-[MISystemAppMigrator currentlyInstalledSystemAppBundleIdentifiers]"
+    ],
+    [
+      32004,
+      "-[MISystemAppMigrator performMigration]"
+    ],
+    [
+      36412,
+      "-[MISystemAppMigrator itemsToInstall]"
+    ],
+    [
+      36428,
+      "-[MISystemAppMigrator startingSystemAppState]"
+    ],
+    [
+      36444,
+      "-[MISystemAppMigrator setStartingSystemAppState:]"
+    ],
+    [
+      36464,
+      "-[MISystemAppMigrator preferencesToMigrate]"
+    ],
+    [
+      36480,
+      "-[MISystemAppMigrator setPreferencesToMigrate:]"
+    ],
+    [
+      36500,
+      "-[MISystemAppMigrator appBundleIDsToUninstall]"
+    ],
+    [
+      36516,
+      "-[MISystemAppMigrator setAppBundleIDsToUninstall:]"
+    ],
+    [
+      36536,
+      "-[MISystemAppMigrator appBundleIDsRequestingStoreDownload]"
+    ],
+    [
+      36552,
+      "-[MISystemAppMigrator setAppBundleIDsRequestingStoreDownload:]"
+    ],
+    [
+      36572,
+      "-[MISystemAppMigrator appBundleIDsInstalledSuccessfully]"
+    ],
+    [
+      36588,
+      "-[MISystemAppMigrator setAppBundleIDsInstalledSuccessfully:]"
+    ],
+    [
+      36608,
+      "-[MISystemAppMigrator currentlyInstallingCoordinators]"
+    ],
+    [
+      36624,
+      "-[MISystemAppMigrator setCurrentlyInstallingCoordinators:]"
+    ],
+    [
+      36644,
+      "-[MISystemAppMigrator systemAppInstallGroup]"
+    ],
+    [
+      36660,
+      "-[MISystemAppMigrator setSystemAppInstallGroup:]"
+    ],
+    [
+      36680,
+      "-[MISystemAppMigrator pendingAppInstallListQueue]"
+    ],
+    [
+      36696,
+      "-[MISystemAppMigrator setPendingAppInstallListQueue:]"
+    ],
+    [
+      36716,
+      "-[MISystemAppMigrator pendingAppInstalls]"
+    ],
+    [
+      36732,
+      "-[MISystemAppMigrator setPendingAppInstalls:]"
+    ],
+    [
+      36752,
+      "-[MISystemAppMigrator installedAppListQueue]"
+    ],
+    [
+      36768,
+      "-[MISystemAppMigrator forceInstallBundleIDs]"
+    ],
+    [
+      36784,
+      "-[MISystemAppMigrator systemAppStateWrapper]"
+    ],
+    [
+      36800,
+      "-[MISystemAppMigrator setSystemAppStateWrapper:]"
+    ],
+    [
+      36820,
+      "-[MISystemAppMigrator .cxx_destruct]"
+    ],
+    [
+      37152,
+      "_MIBooleanValue"
+    ],
+    [
+      37236,
+      "_MIArrayContainsOnlyClass"
+    ],
+    [
+      37500,
+      "_MIDictionaryContainsOnlyClasses"
+    ],
+    [
+      37832,
+      "_MIStringifyObject"
+    ],
+    [
+      37956,
+      "_MIArrayifyThing"
+    ],
+    [
+      38248,
+      "_MICompareObjects"
+    ],
+    [
+      66368,
+      "_MI_DidResetSystemAppState"
+    ],
+    [
+      66376,
+      "_MI_VideosBundleID"
+    ],
+    [
+      66384,
+      "_MI_TVBundleID"
+    ],
+    [
+      66392,
+      "_MI_ActivityBundleID"
+    ],
+    [
+      66400,
+      "_MI_ActivityWidgetBundleID"
+    ],
+    [
+      66408,
+      "_MI_NewsBundleID"
+    ],
+    [
+      66416,
+      "_MI_Staged_App_URL_Key"
+    ],
+    [
+      66424,
+      "_MI_FindMyFriendsBundleID"
+    ],
+    [
+      86528,
+      "_OBJC_CLASS_$_MIPreferencesMigrationMetadata"
+    ],
+    [
+      86568,
+      "_OBJC_METACLASS_$_MIPreferencesMigrationMetadata"
+    ],
+    [
+      86608,
+      "_OBJC_METACLASS_$_MISystemAppStateWrapper"
+    ],
+    [
+      86648,
+      "_OBJC_CLASS_$_MISystemAppStateWrapper"
+    ],
+    [
+      86688,
+      "_OBJC_CLASS_$_MISystemAppMigrator"
+    ],
+    [
+      86728,
+      "_OBJC_METACLASS_$_MISystemAppMigrator"
+    ],
+    [
+      86960,
+      "_gLogHandle"
+    ]
+  ],
+  "function_starts": [
+    13892,
+    14024,
+    14396,
+    14888,
+    15280,
+    15324,
+    15368,
+    15756,
+    15988,
+    16072,
+    16300,
+    16308,
+    16316,
+    16324,
+    16332,
+    16340,
+    16348,
+    16432,
+    16476,
+    16488,
+    16556,
+    16636,
+    18192,
+    18204,
+    18356,
+    18444,
+    18596,
+    18684,
+    19012,
+    19092,
+    19284,
+    19460,
+    19608,
+    19712,
+    19772,
+    20300,
+    20440,
+    20772,
+    20912,
+    21180,
+    21664,
+    22092,
+    22864,
+    23060,
+    23256,
+    23916,
+    24076,
+    24764,
+    24900,
+    25052,
+    25116,
+    25344,
+    25420,
+    25656,
+    25888,
+    26096,
+    26532,
+    26780,
+    27580,
+    27736,
+    28888,
+    29072,
+    29128,
+    29376,
+    29460,
+    29560,
+    29704,
+    30212,
+    30496,
+    31576,
+    32004,
+    35516,
+    35532,
+    35540,
+    35724,
+    36412,
+    36428,
+    36444,
+    36464,
+    36480,
+    36500,
+    36516,
+    36536,
+    36552,
+    36572,
+    36588,
+    36608,
+    36624,
+    36644,
+    36660,
+    36680,
+    36696,
+    36716,
+    36732,
+    36752,
+    36768,
+    36784,
+    36800,
+    36820,
+    37104,
+    37152,
+    37236,
+    37500,
+    37696,
+    37832,
+    37956,
+    38248,
+    38372,
+    38460,
+    38516,
+    38788,
+    38856
+  ]
+}

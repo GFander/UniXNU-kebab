@@ -1,0 +1,199 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -150,26 +150,38 @@
+     printf("KEBAB UI: observer end; no suspension or modification; user frames are best-effort reads\n");
+ }
+ 
+-/* proc_name() reads the truncated p_comm. Select this one fixed launchd
+- * child using its full best name, copied while holding the proc lock.
+- * Mutable names are diagnostic identifiers, never authorization evidence. */
++/* Fixed launchd children only. Names are mutable diagnostic identifiers,
++ * never authorization. The wrapper name fills proc_name_t: also match the
++ * original executable UUID so a longer, truncated prefix is not selected.
++ * No task suspension or filesystem lookup is used to identify the process. */
+ extern void kebab_migrator_task_report(task_t);
++extern void kebab_plugin_task_report(task_t);
+ void kebab_migrator_report(void);
++struct kebab_migrator_snapshot {
++    const char *name; const uint8_t *expected_uuid; task_t task;
++    unsigned scanned; int pid; unsigned uid; bool found; unsigned uuid_refused;
++};
+ static int
+ kebab_migrator_select(proc_t process, void *argument)
+ {
+-    struct kebab_backboard_snapshot *snapshot = argument;
++    struct kebab_migrator_snapshot *snapshot = argument;
+     char name[sizeof(proc_name_t)] = {};
++    uint8_t uuid[16] = {};
+     ++snapshot->scanned;
+     proc_lock(process);
+     strlcpy(name, proc_best_name(process), sizeof(name));
++    if (snapshot->expected_uuid) proc_getexecutableuuid(process, uuid, sizeof(uuid));
+     proc_unlock(process);
+-    if (!strcmp(name, "com.apple.datamigrator") && proc_ppid(process) == 1) {
++    if (!strcmp(name, snapshot->name) && proc_ppid(process) == 1) {
+         snapshot->found = true;
+-        snapshot->pid = proc_pid(process);snapshot->uid = proc_getuid(process);
+-        task_t task = proc_task(process);
+-        if (task != TASK_NULL) {task_reference(task);snapshot->task = task;}
+-        return PROC_RETURNED_DONE;
++        if (snapshot->expected_uuid && memcmp(uuid, snapshot->expected_uuid, sizeof(uuid))) {
++            ++snapshot->uuid_refused;
++        } else {
++            snapshot->pid = proc_pid(process);snapshot->uid = proc_getuid(process);
++            task_t task = proc_task(process);
++            if (task != TASK_NULL) {task_reference(task);snapshot->task = task;}
++            return PROC_RETURNED_DONE;
++        }
+     }
+     return snapshot->scanned >= 512 ? PROC_RETURNED_DONE : PROC_RETURNED;
+ }
+@@ -178,16 +190,23 @@
+ {
+     if (ml_at_interrupt_context() || get_preemption_level() != 0 ||
+         !ml_get_interrupts_enabled()) return;
+-    struct kebab_backboard_snapshot snapshot = {};
+-    proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS, kebab_migrator_select, &snapshot, NULL, NULL);
+-    if (snapshot.task == TASK_NULL) {
+-        printf("KEBAB MIG: no referenced task found=%u scanned=%u (parent1/full-name; cap512)\n",
+-            snapshot.found, snapshot.scanned);
+-    } else {
+-        printf("KEBAB MIG: fixed process pid=%d uid=%u scanned=%u; best-effort wait snapshot\n",
+-            snapshot.pid, snapshot.uid, snapshot.scanned);
+-        kebab_migrator_task_report(snapshot.task);
+-        task_deallocate(snapshot.task);
++    static const char *const names[] = {"com.apple.datamigrator", "com.apple.migrationpluginwrapper"};
++    static const char *const labels[] = {"MIG", "MIG-W"};
++    static const uint8_t wrapper_uuid[16] = {0xa3,0x6b,0x14,0xaa,0x98,0x19,0x3d,0x1f,0x90,0x0c,0xe8,0x0b,0x45,0xc8,0xea,0xc7};
++    for (unsigned i = 0; i < 2; i++) {
++        struct kebab_migrator_snapshot snapshot = {};
++        snapshot.name = names[i];snapshot.expected_uuid = i ? wrapper_uuid : NULL;
++        proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS, kebab_migrator_select, &snapshot, NULL, NULL);
++        if (snapshot.task == TASK_NULL) {
++            printf("KEBAB %s: no referenced task found=%u scanned=%u uuid-refused=%u (parent1/full-name; cap512)\n",
++                labels[i], snapshot.found, snapshot.scanned, snapshot.uuid_refused);
++        } else {
++            printf("KEBAB %s: fixed process pid=%d uid=%u scanned=%u; best-effort wait snapshot\n",
++                labels[i], snapshot.pid, snapshot.uid, snapshot.scanned);
++            if (i == 0) kebab_migrator_task_report(snapshot.task);
++            else kebab_plugin_task_report(snapshot.task);
++            task_deallocate(snapshot.task);
++        }
+     }
+     printf("KEBAB MIG: observer end; no suspension or modification; user frames are best-effort reads\n");
+ }
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -8,6 +8,7 @@
+ #include <kern/sched_prim.h>
+ #include <kern/spl.h>
+ #include <mach/thread_info.h>
++#include <mach/task_info.h>
+ #include <kern/misc_protos.h>
+ #include <machine/machine_routines.h>
+ #include <arm/misc_protos.h>
+@@ -149,4 +150,104 @@
+ void kebab_preboard_task_report(task_t task) { kebab_task_threads_report(task, "UI-PB", true, 16); }
+ void kebab_migrator_task_report(task_t task);
+ void kebab_migrator_task_report(task_t task) { kebab_task_threads_report(task, "MIG", true, 16); }
++
++/* Public64-bit dyld_all_image_infos prefix is version/count/pointer (16B);
++ * dyld_image_info is loadAddress/path/modDate (24B). Only original system
++ * DataClassMigrators paths are reported, not a general user-memory API.
++ * These are bounded best-effort reads: identical prefix rereads do not prove
++ * the target was suspended or that no load/unload occurred in between. */
++static bool
++kebab_plugin_user_copy(vm_map_t map, uint64_t address, void *out, size_t bytes)
++{
++    if (map == VM_MAP_NULL || vm_map_pmap(map) == pmap_kernel() || !bytes ||
++        address < vm_map_min(map) || address >= vm_map_max(map) ||
++        vm_map_max(map) - address < bytes) return false;
++    return copyinmap(map, address, out, bytes) == KERN_SUCCESS;
++}
++static bool
++kebab_plugin_image_uuid(vm_map_t map, uint64_t base, uint8_t uuid[16])
++{
++    uint32_t header[8];
++    if (!kebab_plugin_user_copy(map, base, header, sizeof(header)) ||
++        header[0] != 0xfeedfacfu || header[4] > 128 || header[5] > 16384 ||
++        vm_map_max(map) - base < sizeof(header) + (uint64_t)header[5]) return false;
++    uint64_t offset = 0;
++    for (unsigned i = 0; i < header[4]; i++) {
++        uint32_t command[2];
++        if (offset > header[5] || header[5] - offset < sizeof(command) ||
++            !kebab_plugin_user_copy(map, base + sizeof(header) + offset, command, sizeof(command)) ||
++            command[1] < sizeof(command) || command[1] > header[5] - offset) return false;
++        if (command[0] == 0x1bu) {
++            return command[1] == 24 &&
++                kebab_plugin_user_copy(map, base + sizeof(header) + offset + sizeof(command), uuid, 16);
++        }
++        offset += command[1];
++    }
++    return false;
++}
++static void
++kebab_plugin_images_report(task_t task)
++{
++    task_dyld_info_data_t info = {};
++    mach_msg_type_number_t size = TASK_DYLD_INFO_COUNT;
++    kern_return_t result = task_info(task, TASK_DYLD_INFO, (task_info_t)&info, &size);
++    if (result != KERN_SUCCESS || size != TASK_DYLD_INFO_COUNT ||
++        info.all_image_info_format != TASK_DYLD_ALL_IMAGE_INFO_64 ||
++        info.all_image_info_size < 16) {
++        printf("KEBAB MIG-W IMAGES: dyld info unavailable result=0x%x count=%u\n", result, size);
++        return;
++    }
++    vm_map_t map = get_task_map_reference(task);
++    if (map == VM_MAP_NULL) return;
++    uint64_t head[2], again[2];
++    struct { uint64_t base; char path[256]; uint8_t uuid[16]; bool have_uuid; } selected[8] = {};
++    unsigned found = 0, scanned = 0;
++    bool stable = false, readable = kebab_plugin_user_copy(map, info.all_image_info_addr, head, sizeof(head));
++    if (readable && (uint32_t)head[0] >= 1 && (uint32_t)head[0] <= 20 && head[1] != 0) {
++        unsigned count = (unsigned)(head[0] >> 32), limit = count < 512 ? count : 512;
++        static const char prefix[] = "/System/Library/DataClassMigrators/";
++        for (; scanned < limit && found < 8; scanned++) {
++            uint64_t record[3];
++            if (head[1] > UINT64_MAX - (uint64_t)scanned * sizeof(record) ||
++                !kebab_plugin_user_copy(map, head[1] + (uint64_t)scanned * sizeof(record), record, sizeof(record))) break;
++            char first[sizeof(prefix) - 1];
++            if (!kebab_plugin_user_copy(map, record[1], first, sizeof(first)) ||
++                memcmp(first, prefix, sizeof(first))) continue;
++            char path[256] = {};bool complete = false;
++            memcpy(path, first, sizeof(first));
++            for (unsigned j = sizeof(first); j < sizeof(path); j++) {
++                if (record[1] > UINT64_MAX - j ||
++                    !kebab_plugin_user_copy(map, record[1] + j, &path[j], 1)) break;
++                if (path[j] == '\0') { complete = true;break; }
++                if ((unsigned char)path[j] < 32 || (unsigned char)path[j] > 126) break;
++            }
++            if (!complete) continue;
++            selected[found].base = record[0];
++            memcpy(selected[found].path, path, sizeof(path));
++            selected[found].have_uuid = kebab_plugin_image_uuid(map, record[0], selected[found].uuid);
++            found++;
++        }
++        stable = kebab_plugin_user_copy(map, info.all_image_info_addr, again, sizeof(again)) &&
++            head[0] == again[0] && head[1] == again[1];
++    }
++    vm_map_deallocate(map);
++    if (!stable) {
++        printf("KEBAB MIG-W IMAGES: unavailable/changing prefix; no module inventory accepted\n");
++        return;
++    }
++    printf("KEBAB MIG-W IMAGES: dyld-version=%u count=%u scanned=%u found=%u (cap512/8, best-effort)\n",
++        (unsigned)head[0], (unsigned)(head[0] >> 32), scanned, found);
++    for (unsigned i = 0; i < found; i++) {
++        printf("KEBAB MIG-W IMAGE: base=0x%llx uuid-valid=%u uuid=", selected[i].base, selected[i].have_uuid);
++        for (unsigned j = 0; j < 16; j++) printf("%02x", selected[i].uuid[j]);
++        printf(" path=%s\n", selected[i].path);
++    }
++}
++void kebab_plugin_task_report(task_t task);
++void
++kebab_plugin_task_report(task_t task)
++{
++    kebab_task_threads_report(task, "MIG-W", true, 16);
++    kebab_plugin_images_report(task);
++}
+ #endif /* KEBAB */
