@@ -1,0 +1,129 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -64,6 +64,7 @@
+  * before returning and print only after iteration has released its locks. */
+ extern void kebab_backboardd_task_report(task_t);
+ extern boolean_t ml_at_interrupt_context(void);
++extern boolean_t ml_get_interrupts_enabled(void);
+ extern int get_preemption_level(void);
+ void kebab_backboardd_report(void);
+ struct kebab_backboard_snapshot { task_t task; unsigned scanned; int pid; unsigned uid; bool found; };
+@@ -86,7 +87,7 @@
+ kebab_backboardd_report(void)
+ {
+     /* No allocation, proc access, or console write in unsafe context. */
+-    if (ml_at_interrupt_context() || get_preemption_level() != 0) return;
++    if (ml_at_interrupt_context() || get_preemption_level() != 0 || !ml_get_interrupts_enabled()) return;
+     struct kebab_backboard_snapshot snapshot = {};
+     proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS, kebab_backboard_select, &snapshot, NULL, NULL);
+     if (snapshot.task == TASK_NULL) {
+@@ -97,6 +98,6 @@
+         kebab_backboardd_task_report(snapshot.task);
+         task_deallocate(snapshot.task);
+     }
+-    printf("KEBAB BBOARD: observer end; no suspension/user-memory/register modification\n");
++    printf("KEBAB BBOARD: observer end; no suspension or modification; user frames are best-effort reads\n");
+ }
+ #endif /* KEBAB */
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -10,6 +10,10 @@
+ #include <mach/thread_info.h>
+ #include <kern/misc_protos.h>
+ #include <machine/machine_routines.h>
++#include <arm/misc_protos.h>
++#include <vm/vm_kern.h>
++#include <vm/vm_map.h>
++#include <vm/pmap.h>
+ 
+ /* Caller holds sched_lock at splsched. Only a waiting, non-runnable thread
+  * with a retained full kernel stack is inspected. A continuation-backed or
+@@ -37,11 +41,60 @@
+ 	}
+ 	return count;
+ }
++
++/* Read only a referenced, waiting/non-runnable thread's kernel-owned save area
++ * under sched_lock. Never run backtrace_user on an unsuspended foreign thread.
++ * No user address is dereferenced while holding task/thread/scheduler locks. */
++struct kebab_saved_user_site { uint64_t pc, lr, fp; };
++static bool
++kebab_waiting_user_site(thread_t thread, struct kebab_saved_user_site *site)
++{
++    if ((thread->state & (TH_WAIT | TH_RUN)) != TH_WAIT) return false;
++    const arm_saved_state_t *source = get_user_regs(thread);
++    arm_saved_state_t saved;
++    if (source == NULL || ml_nofault_copy((vm_offset_t)source, (vm_offset_t)&saved,
++        sizeof(saved)) != sizeof(saved) || !is_saved_state64(&saved) ||
++        saved.ash.count != ARM_SAVED_STATE64_COUNT) return false;
++    site->pc = get_saved_state_pc(&saved);
++    site->lr = get_saved_state_lr(&saved);
++    site->fp = get_saved_state_fp(&saved);
++    return true;
++}
++
++/* The target can resume after the above snapshot. These are explicitly
++ * best-effort call sites, not a consistent suspended-thread backtrace. The
++ * retained user map survives exit; copyinmap reports invalid/unmapped pages.
++ * Bound every read to that map, aligned increasing frames in a64KiB window,
++ * at most8pairs. Never use copyinmap's kernel-pmap memcpy fast path. */
+ static void
+-kebab_task_threads_report(task_t task, const char *label)
++kebab_user_wait_report(vm_map_t map, uint64_t tid, const struct kebab_saved_user_site *site)
++{
++    if (map == VM_MAP_NULL || vm_map_pmap(map) == pmap_kernel()) return;
++    printf("KEBAB BBOARD USER: tid=%llu saved pc=0x%llx lr=0x%llx fp=0x%llx; best-effort, target may resume\n",
++        tid, site->pc, site->lr, site->fp);
++    uint64_t fp = site->fp, origin = fp;
++    for (unsigned i = 0; i < 8; i++) {
++        uint64_t pair[2];
++        if ((fp & 15) != 0 || fp < vm_map_min(map) || fp >= vm_map_max(map) ||
++            vm_map_max(map) - fp < sizeof(pair) || fp < origin || fp - origin > 65536) break;
++        kern_return_t result = copyinmap(map, fp, pair, sizeof(pair));
++        if (result != KERN_SUCCESS) {
++            printf("KEBAB BBOARD USER: tid=%llu read stopped error=0x%x depth=%u\n", tid, result, i);
++            break;
++        }
++        if (pair[1] == 0) break;
++        printf("KEBAB BBOARD USER: tid=%llu frame[%u]=0x%llx\n", tid, i, pair[1]);
++        if (pair[0] <= fp) break;
++        fp = pair[0];
++    }
++}
++
++static void
++kebab_task_threads_report(task_t task, const char *label, bool user_sites)
+ {
+ 	thread_t observed[32], thread;
+ 	unsigned count = 0, thread_total = 0;
++	vm_map_t map = user_sites ? get_task_map_reference(task) : VM_MAP_NULL;
+ 	task_lock(task);
+ 	if (task->active) {
+ 		thread_total = task->thread_count;
+@@ -67,6 +120,8 @@
+ 		unsigned state = thread->state;
+ 		uint64_t frames[16];
+ 		unsigned frame_count = kebab_blocked_kernel_trace(thread, frames);
++		struct kebab_saved_user_site site = {};
++		bool have_site = user_sites && kebab_waiting_user_site(thread, &site);
+ 		thread_unlock(thread);
+ 		splx(priority);
+ 		printf("KEBAB %s: tid=%llu info=0x%x state=0x%x run=%d flags=0x%x suspend=%d sleep=%d wait=0x%llx continuation=0x%llx user=%d.%06d sys=%d.%06d\n", label,
+@@ -76,13 +131,15 @@
+ 		for (unsigned frame = 0; frame < frame_count; frame++) {
+ 			printf("KEBAB %s: tid=%llu kframe[%u]=0x%llx\n", label, tid, frame, frames[frame]);
+ 		}
++		if (have_site) kebab_user_wait_report(map, tid, &site);
+ 		thread_deallocate(thread);
+ 	}
++	if (map != VM_MAP_NULL) vm_map_deallocate(map);
+ 	printf("KEBAB %s: snapshot end; addresses name kernel waits, not user PCs\n", label);
+ }
+ 
+ void kebab_pid1_task_report(task_t task);
+ void kebab_backboardd_task_report(task_t task);
+-void kebab_pid1_task_report(task_t task) { kebab_task_threads_report(task, "PID1"); }
+-void kebab_backboardd_task_report(task_t task) { kebab_task_threads_report(task, "BBOARD"); }
++void kebab_pid1_task_report(task_t task) { kebab_task_threads_report(task, "PID1", false); }
++void kebab_backboardd_task_report(task_t task) { kebab_task_threads_report(task, "BBOARD", true); }
+ #endif /* KEBAB */

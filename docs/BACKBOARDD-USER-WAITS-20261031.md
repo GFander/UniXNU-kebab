@@ -1,0 +1,15 @@
+# backboardd 原版用户态等待位置：0436
+
+0435只有内核续接点，无法区分正常事件循环和真正的资源等待。本轮增加固定backboardd的有界只读调用位置采样；没有屏蔽崩溃、跳过断言、修改原版服务或建立假的CADisplay。
+
+0324在持有线程引用和调度锁时，仅对等待且不在运行的线程复制内核保存的64位用户状态，核对状态类型与长度。随后释放所有调度/任务/线程锁，再通过持有引用的用户地址空间读取栈帧。每线程最多8对、64KiB范围，地址必须在该用户map内、对齐且递增；拒绝kernel-pmap路径，读页失败停止。目标可以恢复运行，所以这是明确标记的best-effort采样，不是一致的暂停线程回溯。没有写寄存器、权限或用户内存。PID1观测仍只有内核等待；USB原panic分发源码未改变。
+
+0436在61.616与163.063秒两次采到原版backboardd PID57/UID501，均包含全部12个线程。匹配UUID的原版共享缓存表明：主线程在CFRunLoop中等待；另一条线程已进入QuartzCore CA::Render::Server::server_thread的Mach消息循环；另有DataMigration同步XPC等待及dispatch_group_wait。由此可排除“backboardd或RenderServer根本没有运行”的推断，但还不能证明主CADisplay缺失由哪条依赖导致。
+
+只读20H392系统镜像的backboardd启动配置指定mobile账户，与实机一致。程序SHA256为7aa6f8bf5ea2c3634fb8c8916a4e9c3c84508de78eccf57ca65c1ae4f676267c、UUID70b72340737a39738b474e9970f4ecb9。程序内地址根据同PID最后一次exec头部计算，不能误用xpcproxy第一次exec的地址；跨CPU日志中的服务名称可能交错。原版程序的运行时UUID尚未单独读取，相关程序内函数范围标记保留这一限制。缓存符号以实际固定缓存UUID及零slide解析，nearest符号不当作精确函数证明。
+
+303 common+4 host补丁两套独立回放、5260源码文件逐项一致，目标KDK和全量内核构建通过。207个原版HID槽位复核通过。公开测试入口检查完整当前源码与夹具字节，ASAN/UBSAN覆盖存活身份、引用、锁、saved-state类型/长度、运行线程拒绝、map上下界、8帧上限、页面失败和kernel-pmap拒绝；十个行为变异必须被实际断言拒绝。调度、VM和硬件在host测试中是显式替身。
+
+原硬件Root/nonce、原版MKB/systembag、真实加密Data C/D、RTC/NVRAM、defaults与原版watchdog实机回归通过超过180秒。两次采样命令均真实完成，原PID1观测与后续DRV也完成；触摸HID仍ready/error0，未出现真实手势报告。没有格式化或生成新密钥/包，development-fast保留；最近独立只读Data fsck仍为0416，完整System/SystemOS检查为0341。
+
+下一步核对原版显示枚举与真实设备声明、RenderServer显示列表建立流程。0436实际ADT的arm-io只有gic/timer/ufshc，没有display-subsystem；现有framebuffer注释却描述原版框架依赖该声明。须先核实精确消费者及资源绑定，再补正确的真实显示描述，不能仅凭注释加假的Apple硬件节点。触摸手动采样按用户要求待其回来后进行；蓝牙仍延期；GPU/显示呈现/可用SpringBoard未完成。
