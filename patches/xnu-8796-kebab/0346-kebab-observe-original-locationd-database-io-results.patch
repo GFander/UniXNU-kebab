@@ -1,0 +1,210 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -11,6 +11,9 @@
+ #include <sys/namei.h>
+ #include <sys/vnode_internal.h>
+ #include <kern/task.h>
++#include <kern/debug.h>
++#include <sys/fcntl.h>
++#include <sys/uio.h>
+ 
+ extern void kebab_pid1_task_report(task_t task);
+ void kebab_process_report(void);
+@@ -269,4 +272,114 @@
+     }
+     printf("KEBAB MIG: observer end; no suspension or modification; user frames are best-effort reads\n");
+ }
++/* Normal, bounded original locationd database I/O evidence. These observers
++ * run only after original operations release their FD/vnode locks/references.
++ * They never modify an operation's arguments, retval, error or authorization.
++ * Paths/metadata only: no database contents, file keys or user buffers read. */
++static uint32_t kebab_location_open_reports, kebab_location_fd_reports;
++static bool
++kebab_location_io_selected(proc_t process)
++{
++    if (panic_active() || ml_at_interrupt_context() || get_preemption_level() != 0 ||
++        !ml_get_interrupts_enabled() || process == PROC_NULL || process != current_proc() ||
++        strncmp(process->p_comm, "locationd", sizeof("locationd"))) return false;
++    static const uint8_t expected[16] = {0x72,0x36,0xf5,0x20,0xb3,0x31,0x38,0x3c,0x8b,0x98,0x5c,0x4e,0x2c,0xc5,0x9c,0x06};
++    uint8_t uuid[16] = {};
++    char name[sizeof(proc_name_t)] = {};
++    proc_lock(process);
++    strlcpy(name, proc_best_name(process), sizeof(name));
++    proc_getexecutableuuid(process, uuid, sizeof(uuid));
++    proc_unlock(process);
++    return !strcmp(name, "locationd") && !memcmp(uuid, expected, sizeof(uuid));
++}
++static bool
++kebab_location_io_contains(const char *path, const char *needle, size_t needle_bytes)
++{
++    size_t bytes = 0;
++    while (bytes < 512 && path[bytes]) bytes++;
++    if (bytes == 512 || needle_bytes > bytes) return false;
++    for (size_t i = 0; i <= bytes - needle_bytes; i++)
++        if (!memcmp(path + i, needle, needle_bytes)) return true;
++    return false;
++}
++static bool
++kebab_location_io_path(const char *path)
++{
++    return kebab_location_io_contains(path, "/locationd/", sizeof("/locationd/") - 1) ||
++        kebab_location_io_contains(path, ".db", sizeof(".db") - 1) ||
++        kebab_location_io_contains(path, ".sqlite", sizeof(".sqlite") - 1) ||
++        kebab_location_io_contains(path, "-wal", sizeof("-wal") - 1) ||
++        kebab_location_io_contains(path, "-shm", sizeof("-shm") - 1);
++}
++static void
++kebab_location_io_sanitize(char *path)
++{
++    for (unsigned i = 0; path[i]; i++) if ((unsigned char)path[i] < 32 || path[i] == 127) path[i] = '?';
++}
++static bool
++kebab_location_io_claim(uint32_t *counter, unsigned cap)
++{
++    if (__atomic_load_n(counter, __ATOMIC_RELAXED) >= cap) return false;
++    return __atomic_fetch_add(counter, 1u, __ATOMIC_RELAXED) < cap;
++}
++void kebab_locationd_fd_result(proc_t, const char *, int, int, int, int);
++void
++kebab_locationd_fd_result(proc_t process, const char *operation, int fd, int command, int error, int result)
++{
++    if (!kebab_location_io_selected(process) || operation == NULL ||
++        (strcmp(operation, "open") && strcmp(operation, "fcntl") && strcmp(operation, "fsync")) ||
++        __atomic_load_n(&kebab_location_fd_reports, __ATOMIC_RELAXED) >= 128) return;
++    if (!strcmp(operation, "fcntl") && !error && command != F_GETPROTECTIONCLASS &&
++        command != F_SETPROTECTIONCLASS && command != F_FULLFSYNC &&
++        command != F_BARRIERFSYNC && command != F_GETPATH) return;
++    vnode_t vnode = NULLVP;
++    vfs_context_t context = vfs_context_current();
++    int lookup = vnode_getfromfd(context, fd, &vnode), path_error = lookup, attr_error = lookup;
++    char path[512] = {};
++    struct vnode_attr attr = {};
++    bool regular = false;
++    if (!lookup) {
++        regular = vnode_isreg(vnode);
++        if (regular) {
++            int bytes = sizeof(path);
++            path_error = vn_getpath(vnode, path, &bytes);
++            path[sizeof(path) - 1] = 0;
++            VATTR_INIT(&attr);
++            VATTR_WANTED(&attr, va_uid);VATTR_WANTED(&attr, va_gid);
++            VATTR_WANTED(&attr, va_mode);VATTR_WANTED(&attr, va_dataprotect_class);
++            attr_error = vnode_getattr(vnode, &attr, context);
++        }
++        vnode_put(vnode);
++    }
++    if ((!regular || path_error || !kebab_location_io_path(path)) && !(error && (lookup || path_error))) return;
++    if (!kebab_location_io_claim(&kebab_location_fd_reports, 128)) return;
++    kebab_location_io_sanitize(path);
++    unsigned supported = (VATTR_IS_SUPPORTED(&attr, va_uid) ? 1u : 0u) |
++        (VATTR_IS_SUPPORTED(&attr, va_gid) ? 2u : 0u) |
++        (VATTR_IS_SUPPORTED(&attr, va_mode) ? 4u : 0u) |
++        (VATTR_IS_SUPPORTED(&attr, va_dataprotect_class) ? 8u : 0u);
++    printf("KEBAB LOC-IO: op=%s pid=%d fd=%d command=%d error=%d result=%d lookup=%d path-error=%d attr-error=%d supported=0x%x uid=%u gid=%u mode=0%o class=%u path=%s\n",
++        operation, proc_pid(process), fd, command, error, result, lookup, path_error, attr_error, supported,
++        attr.va_uid, attr.va_gid, attr.va_mode, attr.va_dataprotect_class, path[0] ? path : "<unavailable>");
++}
++void kebab_locationd_open_result(vfs_context_t, user_addr_t, enum uio_seg, int, int, int, int, int);
++void
++kebab_locationd_open_result(vfs_context_t context, user_addr_t address, enum uio_seg segment,
++    int flags, int requested_class, int directory_fd, int error, int result_fd)
++{
++    proc_t process = vfs_context_proc(context);
++    if (segment != UIO_USERSPACE || !kebab_location_io_selected(process) ||
++        __atomic_load_n(&kebab_location_open_reports, __ATOMIC_RELAXED) >= 64) return;
++    char path[512] = {};
++    size_t copied = 0;
++    int copied_error = copyinstr(address, path, sizeof(path), &copied);
++    if (copied_error || !copied || copied > sizeof(path)) return;
++    path[sizeof(path) - 1] = 0;
++    if (!kebab_location_io_path(path) || !kebab_location_io_claim(&kebab_location_open_reports, 64)) return;
++    kebab_location_io_sanitize(path);
++    printf("KEBAB LOC-OPEN: pid=%d dirfd=%d flags=0x%x requested-class=%d error=%d fd=%d path=%s\n",
++        proc_pid(process), directory_fd, flags, requested_class, error, error ? -1 : result_fd, path);
++    if (!error) kebab_locationd_fd_result(process, "open", result_fd, 0, 0, 0);
++}
++
+ #endif /* KEBAB */
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -81,6 +81,11 @@
+ #include <sys/vnode_internal.h>
+ #include <sys/mount_internal.h>
+ #include <sys/proc_internal.h>
++#if defined(KEBAB)
++void kebab_locationd_open_result(vfs_context_t, user_addr_t, enum uio_seg, int, int, int, int, int);
++void kebab_locationd_fd_result(proc_t, const char *, int, int, int, int);
++#endif
++
+ #include <sys/kauth.h>
+ #include <sys/uio_internal.h>
+ #include <kern/kalloc.h>
+@@ -5005,6 +5010,10 @@
+ 	error = open1at(vfs_context_current(), &nd, flags, &va,
+ 	    NULL, NULL, retval, fd, authfd);
+ 
++#if defined(KEBAB)
++	kebab_locationd_open_result(ctx, path, segflg, flags, class, fd, error, error ? -1 : *retval);
++#endif
++
+ 	return error;
+ }
+ 
+@@ -5059,6 +5068,10 @@
+ 	error = open1at(ctx, ndp, flags, vap, NULL, NULL, retval, fd, AUTH_OPEN_NOAUTHFD);
+ 
+ 	kfree_type(typeof(*__open_data), __open_data);
++
++#if defined(KEBAB)
++	kebab_locationd_open_result(ctx, path, segflg, flags, -1, fd, error, error ? -1 : *retval);
++#endif
+ 
+ 	return error;
+ }
+@@ -8457,6 +8470,10 @@
+ 
+ 	(void)vnode_put(vp);
+ 	file_drop(uap->fd);
++#if defined(KEBAB)
++	kebab_locationd_fd_result(p, "fsync", uap->fd, flags, error, 0);
++#endif
++
+ 	return error;
+ }
+ 
+--- a/bsd/kern/kern_descrip.c
++++ b/bsd/kern/kern_descrip.c
+@@ -78,6 +78,10 @@
+ #include <sys/kernel.h>
+ #include <sys/vnode_internal.h>
+ #include <sys/proc_internal.h>
++#if defined(KEBAB)
++void kebab_locationd_fd_result(proc_t, const char *, int, int, int, int);
++#endif
++
+ #include <sys/kauth.h>
+ #include <sys/file_internal.h>
+ #include <sys/guarded.h>
+@@ -5223,10 +5227,22 @@
+ 	}
+ 
+ outdrop:
++#if defined(KEBAB)
++	error = sys_fcntl_outdrop(p, fd, fp, vp, error);
++	kebab_locationd_fd_result(p, "fcntl", fd, cmd, error, (!error && cmd == F_GETPROTECTIONCLASS) ? *retval : 0);
++	return error;
++#else
+ 	return sys_fcntl_outdrop(p, fd, fp, vp, error);
++#endif
+ 
+ out:
++#if defined(KEBAB)
++	error = sys_fcntl_out(p, fd, fp, error);
++	kebab_locationd_fd_result(p, "fcntl", fd, cmd, error, (!error && cmd == F_GETPROTECTIONCLASS) ? *retval : 0);
++	return error;
++#else
+ 	return sys_fcntl_out(p, fd, fp, error);
++#endif
+ }
+ 
+ 

@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "version": "0462",
+  "fixture_sha256": "c7b593f50e36b191c10a0dacad5b8f52678897c491f09a7c68a43efc0a420968",
+  "complete_fragment_sha256": "74d3480ed7c92e0187ddf41ecb75ebab8583c33e02d495c8eca57eb60221688a",
+  "before_source_byte_exact_after_removing_insertions": {
+    "bsd/kern/kebab_bootdiag.c": "74ef02e8fed7d937b8ef4bf5dd149ee4576f6a1f36a3790135ae5373a60957d1",
+    "bsd/kern/sys_generic.c": "d2420a20bd02e86b3e2b94dbb48b36a4cf83573fe42d29cd11cc97f958e3d98b"
+  },
+  "actual_after_sha256": {
+    "bsd/kern/kebab_bootdiag.c": "e805210860ad8549e8e34c41eb9dc65bd33453ae3ba8802156e038b145f004de",
+    "bsd/kern/sys_generic.c": "5f81d1d755e443666e06a4549fe18b7fd3d955111d061ca1d340cb41907e5327"
+  },
+  "read_write_error_only": true,
+  "normal_post_fp_drop_observation": true,
+  "user_buffers_not_read": true,
+  "syscall_returns_unchanged": true,
+  "kernel_apis_explicitly_modeled": true,
+  "physical_test": false
+}

@@ -1,0 +1,67 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -327,8 +327,10 @@
+ kebab_locationd_fd_result(proc_t process, const char *operation, int fd, int command, int error, int result)
+ {
+     if (!kebab_location_io_selected(process) || operation == NULL ||
+-        (strcmp(operation, "open") && strcmp(operation, "fcntl") && strcmp(operation, "fsync")) ||
++        (strcmp(operation, "open") && strcmp(operation, "fcntl") && strcmp(operation, "fsync") &&
++         strcmp(operation, "read") && strcmp(operation, "write")) ||
+         __atomic_load_n(&kebab_location_fd_reports, __ATOMIC_RELAXED) >= 128) return;
++    if ((!strcmp(operation, "read") || !strcmp(operation, "write")) && !error) return;
+     if (!strcmp(operation, "fcntl") && !error && command != F_GETPROTECTIONCLASS &&
+         command != F_SETPROTECTIONCLASS && command != F_FULLFSYNC &&
+         command != F_BARRIERFSYNC && command != F_GETPATH) return;
+--- a/bsd/kern/sys_generic.c
++++ b/bsd/kern/sys_generic.c
+@@ -78,6 +78,10 @@
+ #include <sys/ioctl.h>
+ #include <sys/file_internal.h>
+ #include <sys/proc_internal.h>
++#if defined(KEBAB)
++void kebab_locationd_fd_result(proc_t, const char *, int, int, int, int);
++#endif
++
+ #include <sys/socketvar.h>
+ #include <sys/uio_internal.h>
+ #include <sys/kernel.h>
+@@ -334,6 +338,9 @@
+ 
+ 	if ((error = preparefileread(p, &fp, fd, flags & FOF_OFFSET))) {
+ 		*retval = 0;
++#if defined(KEBAB)
++		kebab_locationd_fd_result(p, "read", fd, flags, error, 0);
++#endif
+ 		return error;
+ 	}
+ 
+@@ -343,6 +350,9 @@
+ 	error = fp_readv(&context, fp, uio, flags, retval);
+ 
+ 	fp_drop(p, fd, fp, 0);
++#if defined(KEBAB)
++	if (error) kebab_locationd_fd_result(p, "read", fd, flags, error, 0);
++#endif
+ 	return error;
+ }
+ 
+@@ -662,6 +672,9 @@
+ 
+ 	if ((error = preparefilewrite(p, &fp, fd, flags & FOF_OFFSET, puguard))) {
+ 		*retval = 0;
++#if defined(KEBAB)
++		kebab_locationd_fd_result(p, "write", fd, flags, error, 0);
++#endif
+ 		return error;
+ 	}
+ 
+@@ -671,6 +684,9 @@
+ 	error = fp_writev(&context, fp, uio, flags, retval);
+ 
+ 	fp_drop(p, fd, fp, 0);
++#if defined(KEBAB)
++	if (error) kebab_locationd_fd_result(p, "write", fd, flags, error, 0);
++#endif
+ 	return error;
+ }
+ 

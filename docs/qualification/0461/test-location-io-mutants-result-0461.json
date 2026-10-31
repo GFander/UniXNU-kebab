@@ -1,0 +1,55 @@
+{
+  "passed": true,
+  "fixture_sha256": "a3f318396d43624bfec2ae532c9d749269fedcb372e4d7535e6eb5b5c665aa00",
+  "behavioral_mutants": [
+    {
+      "name": "uuid",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    },
+    {
+      "name": "irq",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    },
+    {
+      "name": "reference",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    },
+    {
+      "name": "path-error",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    },
+    {
+      "name": "errno",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    },
+    {
+      "name": "cap",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    },
+    {
+      "name": "path-bound",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": 1
+    },
+    {
+      "name": "path-scope",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    }
+  ],
+  "compile_failures_counted_as_refusals": false
+}

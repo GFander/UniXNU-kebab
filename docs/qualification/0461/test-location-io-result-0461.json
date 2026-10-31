@@ -1,0 +1,19 @@
+{
+  "passed": true,
+  "version": "0461",
+  "complete_fragment_sha256": "4cc4fd771f2bf0a7b5fdd6eae5cd789c04e888ab1c4b4c9a9f822d49230f205e",
+  "fixture_sha256": "a3f318396d43624bfec2ae532c9d749269fedcb372e4d7535e6eb5b5c665aa00",
+  "before_source_byte_exact_after_removing_only_insertions": {
+    "bsd/kern/kebab_bootdiag.c": "af8685514736ca4ccd88ed32f4b3ea6956a152dcd8eeabf3561300a802863067",
+    "bsd/vfs/vfs_syscalls.c": "000b35e0b4068151e429f61f9e1b18c137566e17dc47c0e0ac5e2821486536f8",
+    "bsd/kern/kern_descrip.c": "b834ed258ed4279fee9233339ebc0f7fc9f7e8ed2c25396fe0f0491debfab898"
+  },
+  "actual_after_sha256": {
+    "bsd/kern/kebab_bootdiag.c": "74ef02e8fed7d937b8ef4bf5dd149ee4576f6a1f36a3790135ae5373a60957d1",
+    "bsd/vfs/vfs_syscalls.c": "41b8557a556d92cc538b6e2efb095e7907772d8858bf3ac1d0ed966a68d74268",
+    "bsd/kern/kern_descrip.c": "a9cf47097ff449c03dd44153da2a75ed189600cbfecf593faa0496807a86bb9d"
+  },
+  "original_authorization_switch_and_cleanup_preserved": true,
+  "host_apis_are_explicit_models": true,
+  "physical_device_proof": false
+}
