@@ -1,0 +1,49 @@
+[  83.354] KEBAB UI-SB: tid=310 info=0x0 state=0x1 run=3 flags=0x0 suspend=0 sleep=0 wait=0xfffffe4021a72f70 continuation=0x0 user=0.143046 sys=0.966806
+[  83.354] KEBAB UI-SB: tid=310 kframe[0]=0xfffffe00066590f4
+   _machine_switch_context + 0x84
+[  83.354] KEBAB UI-SB: tid=310 kframe[1]=0xfffffe000651b568
+   _thread_invoke + 0x36c
+[  83.354] KEBAB UI-SB: tid=310 kframe[2]=0xfffffe0006519c6c
+   _thread_block_reason + 0xe4
+[  83.354] KEBAB UI-SB: tid=310 kframe[3]=0xfffffe00069a4c70
+   __sleep + 0x114
+[  83.354] KEBAB UI-SB: tid=310 kframe[4]=0xfffffe00069a5060
+   _tsleep + 0x6c
+[  83.354] KEBAB UI-SB: tid=310 kframe[5]=0xfffffe000695bda0
+   _kauth_resolver_submit + 0x58
+[  83.354] KEBAB UI-SB: tid=310 kframe[6]=0xfffffe000695ad74
+   _kauth_cred_cache_lookup + 0x4b0
+[  83.354] KEBAB UI-SB: tid=310 kframe[7]=0xfffffe000695b734
+   _kauth_cred_getguid + 0x30
+[  83.354] KEBAB UI-SB: tid=310 kframe[8]=0xfffffe0006957ae4
+   _kauth_acl_evaluate + 0x50
+[  83.354] KEBAB UI-SB: tid=310 kframe[9]=0xfffffe00066fada0
+   _vnode_attr_authorize_internal + 0x62c
+[  83.354] KEBAB UI-SB: tid=310 kframe[10]=0xfffffe00066f91f4
+   _vnode_authorize_callback + 0x3a4
+[  83.354] KEBAB UI-SB: tid=310 kframe[11]=0xfffffe0006957680
+   _kauth_authorize_action + 0x5c
+[  83.354] KEBAB UI-SB: tid=310 kframe[12]=0xfffffe00066f9a44
+   _vnode_authorize + 0x6c
+[  83.354] KEBAB UI-SB: tid=310 kframe[13]=0xfffffe00066ecad8
+   _lookup + 0x204
+[  83.354] KEBAB UI-SB: tid=310 kframe[14]=0xfffffe00066ebb80
+   _namei + 0x450
+[  83.354] KEBAB UI-SB: tid=310 kframe[15]=0xfffffe00067177c4
+   _vn_open_auth + 0x114
+[  83.355] KEBAB UI-SB: tid=1175 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24cdf11fe8 continuation=0xfffffe000694b878 user=0.007183 sys=0.023943
+   _workq_unpark_continue + 0x0
+[  83.355] KEBAB UI-SB: tid=1768 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe20021c1d20 continuation=0xfffffe00069d06a0 user=0.025038 sys=0.022712
+   _ulock_wait_continue + 0x0
+[  83.355] KEBAB UI-SB: tid=1788 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24cdf65fe8 continuation=0xfffffe000694b878 user=0.018332 sys=0.014518
+   _workq_unpark_continue + 0x0
+[  83.355] KEBAB UI-SB: tid=1789 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24ce204bf8 continuation=0xfffffe000694b878 user=0.005766 sys=0.005586
+   _workq_unpark_continue + 0x0
+[  83.355] KEBAB UI-SB: tid=1790 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24ce40b3d8 continuation=0xfffffe000694b878 user=0.010374 sys=0.037616
+   _workq_unpark_continue + 0x0
+[ 376.336] KEBAB UI-SB: tid=310 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.175881 sys=0.981268
+   _ipc_mqueue_receive_continue + 0x0
+[ 376.337] KEBAB UI-SB: tid=1768 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe20021c1d20 continuation=0xfffffe00069d06a0 user=0.025038 sys=0.022712
+   _ulock_wait_continue + 0x0
+[ 376.337] KEBAB UI-SB: tid=1788 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24cdf65fe8 continuation=0xfffffe000694b878 user=0.025248 sys=0.019984
+   _workq_unpark_continue + 0x0

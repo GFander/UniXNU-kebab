@@ -1,0 +1,24 @@
+{
+  "passed": true,
+  "fixture_sha256": "889f98cadbd3d4654bfaea71d5cf7de897c6ff6f2694ffc8cd28a28f36744c51",
+  "source_files": {
+    "bsd/kern/kebab_file_keys.c": "96d204072e22f85d294ba3ec1d2fbd2ffd561ba5d9e5007dc572dff7aef34396",
+    "bsd/kern/kebab_device_classbag_impl.h": "40f89236e0448bf9c0feb12d73ddb8df354ab648b5b56ea1ef16a1c3aea33cb6",
+    "bsd/kern/kebab_metadata_keys_impl.h": "b27db78c230603a0682b98ec3d80d12a5df206be892bf7897e4dd247ac43eee5",
+    "bsd/kern/kebab_volume_keys_impl.h": "92f6b00b76b0c8db50aa3162a00946ebcd9e856ae9ca9b3ce8a71a51ebcb1af9",
+    "bsd/kern/kebab_volume_control_impl.h": "df27fcdfb91e5488ac64e7c0cc1b4cd23355ee3da33610f55074f7e4cc8c0c93",
+    "bsd/kern/kebab_cpx_handles_impl.h": "266b29556e011410571cc94adf45064b8b2cf968b6a66e89a74a854ce4eba91a",
+    "bsd/kern/kebab_volume_wrapped_impl.h": "3290f685416fffbb0c0c6e5e82df64f9ad3e993a5b7906add50149a7c4ae2266",
+    "bsd/kern/kebab_apfs_metadata_native_impl.h": "6f02a440f039397f94b128c0f39e4ef19a2b330d7c52d300add7ae3518950858",
+    "bsd/kern/kebab_apfs_file_native_impl.h": "51254d08bc1c0861166451a1be930c0db60f65d2fa44de79a90f57c017da747e"
+  },
+  "header_sha256": "912ddb21d8acad631df4cffc68436e13eda6ac1a65902a29ec68855e29ae0518",
+  "actual_complete_core": true,
+  "independent_rfc3394_vector": true,
+  "all4096_record_byte_tampers_revoke_status": true,
+  "authenticated_invalid_policy_and_context_and_class_checks": true,
+  "output_unchanged_on_failure": true,
+  "no_status_key_material_or_generation": true,
+  "behavioral_mutants_refused": 9,
+  "openssl_crypto_and_context_lock_models": true
+}

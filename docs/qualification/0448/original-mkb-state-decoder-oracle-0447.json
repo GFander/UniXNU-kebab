@@ -1,0 +1,150 @@
+{
+  "passed": true,
+  "cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+  "decoder": "0x1ae3dfbe0 _decode_extended_state",
+  "unchanged_original_arm64_instructions": true,
+  "original_parser_integer_decoder_and_corecrypto_executed": true,
+  "original_code_hashes": {
+    "0x1ae3dfbe0": "de56c5a1f7cac0ba3091a961aa1341da54a27dce77c97a18e815f48b78050c00",
+    "0x1ae3dffb4": "a171e668454a570ce3f3b39e9d769f39537a9b9f5fd0fd31f246bd8f856b26c9"
+  },
+  "packet_hex": "311330070c02737302010430080c03736c73020103",
+  "positive": {
+    "result": 0,
+    "output": "040000000300000000000000000000000000000000000000000000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+    "ss": 4,
+    "sls": 3,
+    "steps": 1717,
+    "libc_models": [
+      "memcmp",
+      "memset_s"
+    ],
+    "cache_pages": 17,
+    "validated_original_branch_pool_thunks": {
+      "0x1afb86858": {
+        "target": "0x18dc47ec4",
+        "sha256": "6ca908862c09ac30fc6f08d2a4e80960960d3839868477bdee82abc7454410ce"
+      },
+      "0x1afb86528": {
+        "target": "0x1d1b0dd4c",
+        "sha256": "713e3602af1f6f11d9469adf054cccf86c1b0daa2ec340a1faf3418a183c1421"
+      },
+      "0x1afb86558": {
+        "target": "0x1d1b0dda4",
+        "sha256": "93e2987be6c6bb31d308ad8022462f7c72a2bf31bbf509858b05915c5a63bd9d"
+      },
+      "0x1afb8654c": {
+        "target": "0x1d1b10810",
+        "sha256": "5ff58b18ce65852f6178644d9e3e8589bf50bfd87be9dc608c0cb3626b1723cd"
+      },
+      "0x1afb86534": {
+        "target": "0x1d1b11830",
+        "sha256": "31eff16f522c7ebd0f7bb0a32ce66ba5346688b97f4fee37ec70b6caf7db220f"
+      }
+    }
+  },
+  "zero_sls_control": {
+    "result": 0,
+    "output": "040000000000000000000000000000000000000000000000000000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+    "ss": 4,
+    "sls": 0,
+    "steps": 1717,
+    "libc_models": [
+      "memcmp",
+      "memset_s"
+    ],
+    "cache_pages": 17,
+    "validated_original_branch_pool_thunks": {
+      "0x1afb86858": {
+        "target": "0x18dc47ec4",
+        "sha256": "6ca908862c09ac30fc6f08d2a4e80960960d3839868477bdee82abc7454410ce"
+      },
+      "0x1afb86528": {
+        "target": "0x1d1b0dd4c",
+        "sha256": "713e3602af1f6f11d9469adf054cccf86c1b0daa2ec340a1faf3418a183c1421"
+      },
+      "0x1afb86558": {
+        "target": "0x1d1b0dda4",
+        "sha256": "93e2987be6c6bb31d308ad8022462f7c72a2bf31bbf509858b05915c5a63bd9d"
+      },
+      "0x1afb8654c": {
+        "target": "0x1d1b10810",
+        "sha256": "5ff58b18ce65852f6178644d9e3e8589bf50bfd87be9dc608c0cb3626b1723cd"
+      },
+      "0x1afb86534": {
+        "target": "0x1d1b11830",
+        "sha256": "31eff16f522c7ebd0f7bb0a32ce66ba5346688b97f4fee37ec70b6caf7db220f"
+      }
+    }
+  },
+  "explicit_data_bindings": [
+    {
+      "cell": 8015402256,
+      "raw": 2206241718336,
+      "target": 7218462784,
+      "key": "ss"
+    },
+    {
+      "cell": 8015402264,
+      "raw": 2206241718340,
+      "target": 7218462788,
+      "key": "sls"
+    },
+    {
+      "cell": 8015402272,
+      "raw": 2206241718345,
+      "target": 7218462793,
+      "key": "sb"
+    },
+    {
+      "cell": 8015402288,
+      "raw": 2206241718354,
+      "target": 7218462802,
+      "key": "sfa"
+    },
+    {
+      "cell": 8015402304,
+      "raw": 2206241718365,
+      "target": 7218462813,
+      "key": "sgs"
+    },
+    {
+      "cell": 8015402312,
+      "raw": 2206241718370,
+      "target": 7218462818,
+      "key": "sas"
+    },
+    {
+      "cell": 8015402320,
+      "raw": 2206241718375,
+      "target": 7218462823,
+      "key": "sgpe"
+    },
+    {
+      "cell": 8015402328,
+      "raw": 2206241718381,
+      "target": 7218462829,
+      "key": "srcd"
+    },
+    {
+      "cell": 8015402368,
+      "raw": 2206241718411,
+      "target": 7218462859,
+      "key": "sr"
+    },
+    {
+      "cell": 7965625912,
+      "raw": 2206836204400,
+      "target": 7812948848,
+      "import_symbol": "__platform_memcmp"
+    }
+  ],
+  "explicit_models": [
+    "libc memset_s",
+    "libc memcmp",
+    "stack-canary binding",
+    "nine audited constant key-pointer relocations"
+  ],
+  "hardware_execution": false,
+  "no_private_cache_bytes_published": true
+}

@@ -1,0 +1,230 @@
+{
+  "version": "0448",
+  "native_sha256": "3cc1cd1ae4e97f37e8cb67d91d222a05ed985ad8e559b36838224ea6562983ba",
+  "assumed_runtime_slide": 0,
+  "scope": "Kernel continuation/return addresses only; nearest symbols are not proof of user-space execution or resource identity",
+  "samples": [
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 info=0x0 state=0x1 run=3 flags=0x0 suspend=0 sleep=0 wait=0xfffffe4021a72f70 continuation=0x0 user=0.143046 sys=0.966806",
+      "address": "0x0",
+      "return_address_adjusted": false,
+      "kernel_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[0]=0xfffffe00066590f4",
+      "address": "0xfffffe00066590f4",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "_machine_switch_context",
+      "offset": "0x84",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[1]=0xfffffe000651b568",
+      "address": "0xfffffe000651b568",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "_thread_invoke",
+      "offset": "0x36c",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[2]=0xfffffe0006519c6c",
+      "address": "0xfffffe0006519c6c",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "_thread_block_reason",
+      "offset": "0xe4",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[3]=0xfffffe00069a4c70",
+      "address": "0xfffffe00069a4c70",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "__sleep",
+      "offset": "0x114",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[4]=0xfffffe00069a5060",
+      "address": "0xfffffe00069a5060",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "_tsleep",
+      "offset": "0x6c",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[5]=0xfffffe000695bda0",
+      "address": "0xfffffe000695bda0",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "_kauth_resolver_submit",
+      "offset": "0x58",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[6]=0xfffffe000695ad74",
+      "address": "0xfffffe000695ad74",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "_kauth_cred_cache_lookup",
+      "offset": "0x4b0",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[7]=0xfffffe000695b734",
+      "address": "0xfffffe000695b734",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "_kauth_cred_getguid",
+      "offset": "0x30",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[8]=0xfffffe0006957ae4",
+      "address": "0xfffffe0006957ae4",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "_kauth_acl_evaluate",
+      "offset": "0x50",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[9]=0xfffffe00066fada0",
+      "address": "0xfffffe00066fada0",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "_vnode_attr_authorize_internal",
+      "offset": "0x62c",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[10]=0xfffffe00066f91f4",
+      "address": "0xfffffe00066f91f4",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "_vnode_authorize_callback",
+      "offset": "0x3a4",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[11]=0xfffffe0006957680",
+      "address": "0xfffffe0006957680",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "_kauth_authorize_action",
+      "offset": "0x5c",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[12]=0xfffffe00066f9a44",
+      "address": "0xfffffe00066f9a44",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "_vnode_authorize",
+      "offset": "0x6c",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[13]=0xfffffe00066ecad8",
+      "address": "0xfffffe00066ecad8",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "_lookup",
+      "offset": "0x204",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[14]=0xfffffe00066ebb80",
+      "address": "0xfffffe00066ebb80",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "_namei",
+      "offset": "0x450",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.354] KEBAB UI-SB: tid=310 kframe[15]=0xfffffe00067177c4",
+      "address": "0xfffffe00067177c4",
+      "return_address_adjusted": true,
+      "kernel_only": true,
+      "symbol": "_vn_open_auth",
+      "offset": "0x114",
+      "nearest_symbol_only": true
+    },
+    {
+      "line": "[  83.355] KEBAB UI-SB: tid=1175 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24cdf11fe8 continuation=0xfffffe000694b878 user=0.007183 sys=0.023943",
+      "address": "0xfffffe000694b878",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  83.355] KEBAB UI-SB: tid=1768 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe20021c1d20 continuation=0xfffffe00069d06a0 user=0.025038 sys=0.022712",
+      "address": "0xfffffe00069d06a0",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ulock_wait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  83.355] KEBAB UI-SB: tid=1788 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24cdf65fe8 continuation=0xfffffe000694b878 user=0.018332 sys=0.014518",
+      "address": "0xfffffe000694b878",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  83.355] KEBAB UI-SB: tid=1789 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24ce204bf8 continuation=0xfffffe000694b878 user=0.005766 sys=0.005586",
+      "address": "0xfffffe000694b878",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  83.355] KEBAB UI-SB: tid=1790 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24ce40b3d8 continuation=0xfffffe000694b878 user=0.010374 sys=0.037616",
+      "address": "0xfffffe000694b878",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 376.336] KEBAB UI-SB: tid=310 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.175881 sys=0.981268",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 376.337] KEBAB UI-SB: tid=1768 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe20021c1d20 continuation=0xfffffe00069d06a0 user=0.025038 sys=0.022712",
+      "address": "0xfffffe00069d06a0",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ulock_wait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 376.337] KEBAB UI-SB: tid=1788 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24cdf65fe8 continuation=0xfffffe000694b878 user=0.025248 sys=0.019984",
+      "address": "0xfffffe000694b878",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    }
+  ]
+}

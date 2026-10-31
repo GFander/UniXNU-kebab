@@ -1,0 +1,116 @@
+397 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+397 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+397 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+397 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+397 frame[2] 0x186e5c148 ___CFRunLoopServiceMachPort 0x98 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+397 frame[3] 0x186e5d2e0 ___CFRunLoopRun 0x4b4 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+397 frame[4] 0x186e61d20 _CFRunLoopRunSpecific 0x244 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+397 frame[5] 0x1043ede40 sub_0x100009664 0x7d8 /usr/libexec/backboardd
+397 frame[6] 0x1a4624344 start 0x740 /usr/lib/dyld
+553 saved pc 0x1c26114f0 ___workq_kernreturn 0x8 /usr/lib/system/libsystem_kernel.dylib
+553 lr 0x1d1b9ac1c __pthread_wqthread 0x164 /usr/lib/system/libsystem_pthread.dylib
+553 frame[0] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+794 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+794 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+794 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+794 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+794 frame[2] 0x186e5c148 ___CFRunLoopServiceMachPort 0x98 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+794 frame[3] 0x186e5d2e0 ___CFRunLoopRun 0x4b4 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+794 frame[4] 0x186e61d20 _CFRunLoopRunSpecific 0x244 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+794 frame[5] 0x186ea0bec _CFRunLoopRun 0x38 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+794 frame[6] 0x18e5a2f70 ___IOHIDServiceRunLoopCompatibilityThread 0x110 /System/Library/Frameworks/IOKit.framework/Versions/A/IOKit
+794 frame[7] 0x1d1b9c0ec __pthread_start 0x70 /usr/lib/system/libsystem_pthread.dylib
+1000 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+1000 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+1000 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+1000 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+1000 frame[2] 0x1882cc884 __ZN2CA6Render6Server13server_threadEPv 0x224 /System/Library/Frameworks/QuartzCore.framework/QuartzCore
+1000 frame[3] 0x18850b418 __ZL10thread_funPv 0x18 /System/Library/Frameworks/QuartzCore.framework/QuartzCore
+1000 frame[4] 0x1d1b9c0ec __pthread_start 0x70 /usr/lib/system/libsystem_pthread.dylib
+1000 frame[5] 0x1d1b9a72c _thread_start 0x4 /usr/lib/system/libsystem_pthread.dylib
+1725 saved pc 0x1c26114f0 ___workq_kernreturn 0x8 /usr/lib/system/libsystem_kernel.dylib
+1725 lr 0x1d1b9ac1c __pthread_wqthread 0x164 /usr/lib/system/libsystem_pthread.dylib
+1725 frame[0] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+1740 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+1740 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+1740 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+1740 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+1740 frame[2] 0x186e5c148 ___CFRunLoopServiceMachPort 0x98 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1740 frame[3] 0x186e5d2e0 ___CFRunLoopRun 0x4b4 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1740 frame[4] 0x186e61d20 _CFRunLoopRunSpecific 0x244 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1740 frame[5] 0x186ea0bec _CFRunLoopRun 0x38 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1740 frame[6] 0x188501ccc __ZN2CA12WindowServer11IOMFBServer11thread_bodyEPv 0x1a8 /System/Library/Frameworks/QuartzCore.framework/QuartzCore
+1740 frame[7] 0x18850b418 __ZL10thread_funPv 0x18 /System/Library/Frameworks/QuartzCore.framework/QuartzCore
+1741 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+1741 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+1741 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+1741 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+1741 frame[2] 0x186e5c148 ___CFRunLoopServiceMachPort 0x98 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1741 frame[3] 0x186e5d2e0 ___CFRunLoopRun 0x4b4 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1741 frame[4] 0x186e61d20 _CFRunLoopRunSpecific 0x244 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1741 frame[5] 0x186ea0bec _CFRunLoopRun 0x38 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1741 frame[6] 0x188501ccc __ZN2CA12WindowServer11IOMFBServer11thread_bodyEPv 0x1a8 /System/Library/Frameworks/QuartzCore.framework/QuartzCore
+1741 frame[7] 0x18850b418 __ZL10thread_funPv 0x18 /System/Library/Frameworks/QuartzCore.framework/QuartzCore
+1742 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+1742 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+1742 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+1742 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+1742 frame[2] 0x186e5c148 ___CFRunLoopServiceMachPort 0x98 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1742 frame[3] 0x186e5d2e0 ___CFRunLoopRun 0x4b4 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1742 frame[4] 0x186e61d20 _CFRunLoopRunSpecific 0x244 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1742 frame[5] 0x186ea0bec _CFRunLoopRun 0x38 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1742 frame[6] 0x188501ccc __ZN2CA12WindowServer11IOMFBServer11thread_bodyEPv 0x1a8 /System/Library/Frameworks/QuartzCore.framework/QuartzCore
+1742 frame[7] 0x18850b418 __ZL10thread_funPv 0x18 /System/Library/Frameworks/QuartzCore.framework/QuartzCore
+1745 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+1745 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+1745 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+1745 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+1745 frame[2] 0x186e5c148 ___CFRunLoopServiceMachPort 0x98 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1745 frame[3] 0x186e5d2e0 ___CFRunLoopRun 0x4b4 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1745 frame[4] 0x186e61d20 _CFRunLoopRunSpecific 0x244 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1745 frame[5] 0x186ea0bec _CFRunLoopRun 0x38 /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
+1745 frame[6] 0x1919bdfac __ZN16CLMotionActivity15isTypeInVehicleENS_4TypeE 0x5af4 /System/Library/Frameworks/CoreMotion.framework/CoreMotion
+1745 frame[7] 0x1d1b9c0ec __pthread_start 0x70 /usr/lib/system/libsystem_pthread.dylib
+1749 saved pc 0x1c26114f0 ___workq_kernreturn 0x8 /usr/lib/system/libsystem_kernel.dylib
+1749 lr 0x1d1b9ac1c __pthread_wqthread 0x164 /usr/lib/system/libsystem_pthread.dylib
+1749 frame[0] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+1760 saved pc 0x1c26114f0 ___workq_kernreturn 0x8 /usr/lib/system/libsystem_kernel.dylib
+1760 lr 0x1d1b9ac1c __pthread_wqthread 0x164 /usr/lib/system/libsystem_pthread.dylib
+1760 frame[0] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+1761 saved pc 0x1c26114f0 ___workq_kernreturn 0x8 /usr/lib/system/libsystem_kernel.dylib
+1761 lr 0x1d1b9ac1c __pthread_wqthread 0x164 /usr/lib/system/libsystem_pthread.dylib
+1761 frame[0] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+1762 saved pc 0x1c26114f0 ___workq_kernreturn 0x8 /usr/lib/system/libsystem_kernel.dylib
+1762 lr 0x1d1b9ac1c __pthread_wqthread 0x164 /usr/lib/system/libsystem_pthread.dylib
+1762 frame[0] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+1763 saved pc 0x1c2611ad0 ___ulock_wait 0x8 /usr/lib/system/libsystem_kernel.dylib
+1763 lr 0x18db68128 __dlock_wait 0x30 /usr/lib/system/libdispatch.dylib
+1763 frame[0] 0x18db684a0 __dispatch_group_wait_slow 0x30 /usr/lib/system/libdispatch.dylib
+1763 frame[1] 0x1043fc1f8 sub_0x1000181d8 0x1c /usr/libexec/backboardd
+1763 frame[2] 0x18db977a8 __dispatch_call_block_and_release 0x14 /usr/lib/system/libdispatch.dylib
+1763 frame[3] 0x18db98780 __dispatch_client_callout 0xc /usr/lib/system/libdispatch.dylib
+1763 frame[4] 0x18db736fc __dispatch_lane_serial_drain$VARIANT$armv81 0x254 /usr/lib/system/libdispatch.dylib
+1763 frame[5] 0x18db741e4 __dispatch_lane_invoke$VARIANT$armv81 0x1ac /usr/lib/system/libdispatch.dylib
+1763 frame[6] 0x18db7df14 __dispatch_workloop_worker_thread 0x25c /usr/lib/system/libdispatch.dylib
+1763 frame[7] 0x1d1b9abd0 __pthread_wqthread 0x118 /usr/lib/system/libsystem_pthread.dylib
+1764 saved pc 0x1c26114f0 ___workq_kernreturn 0x8 /usr/lib/system/libsystem_kernel.dylib
+1764 lr 0x1d1b9ac1c __pthread_wqthread 0x164 /usr/lib/system/libsystem_pthread.dylib
+1764 frame[0] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+1765 saved pc 0x1c2611030 _mach_msg2_trap 0x8 /usr/lib/system/libsystem_kernel.dylib
+1765 lr 0x1c2622b18 _mach_msg2_internal 0x48 /usr/lib/system/libsystem_kernel.dylib
+1765 frame[0] 0x1c2622db8 _mach_msg_overwrite 0x1e0 /usr/lib/system/libsystem_kernel.dylib
+1765 frame[1] 0x1c2611524 _mach_msg 0x10 /usr/lib/system/libsystem_kernel.dylib
+1765 frame[2] 0x18db6a308 __dispatch_mach_send_and_wait_for_reply 0x210 /usr/lib/system/libdispatch.dylib
+1765 frame[3] 0x18db6a694 _dispatch_mach_send_with_result_and_wait_for_reply$VARIANT$armv81 0x34 /usr/lib/system/libdispatch.dylib
+1765 frame[4] 0x1d1bee0ec _xpc_connection_send_message_with_reply_sync 0xe8 /usr/lib/system/libxpc.dylib
+1765 frame[5] 0x1c790a334 -[DMXPCConnection sendMessageSync:] 0x30 /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+1765 frame[6] 0x1c790fde0 -[DMConnection migrateCheckingNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:] 0xac /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+1765 frame[7] 0x1c790e60c -[DMClientAPIController _migrateWithConnection:checkNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:] 0x9c /System/Library/PrivateFrameworks/DataMigration.framework/DataMigration
+1769 saved pc 0x1c26114f0 ___workq_kernreturn 0x8 /usr/lib/system/libsystem_kernel.dylib
+1769 lr 0x1d1b9ac1c __pthread_wqthread 0x164 /usr/lib/system/libsystem_pthread.dylib
+1769 frame[0] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+1774 saved pc 0x1c26114f0 ___workq_kernreturn 0x8 /usr/lib/system/libsystem_kernel.dylib
+1774 lr 0x1d1b9ac1c __pthread_wqthread 0x164 /usr/lib/system/libsystem_pthread.dylib
+1774 frame[0] 0x1d1b9a720 _start_wqthread 0x4 /usr/lib/system/libsystem_pthread.dylib
+1775 saved pc 0x0 unresolved
+1775 lr 0x0 unresolved
