@@ -11,18 +11,18 @@
 | 实机 | OnePlus 8T，12 GB / 256 GB 机型；实际交给 XNU 的连续内存约 7.998 GiB |
 | CPU / 内核 | 8 核上线；ARM64、16 KiB 页、XNU 8796.141.3 / Darwin 22.6.0 |
 | 用户态来源 | iPhone X / D22AP，iOS 16.7.16，build 20H392；不是对 A11 硬件的完整模拟 |
-| 最近正常启动验收 | **0469**（复用0468内核，B加密缓存与新旧文件重启恢复）；最新人工触摸验收 **0459** |
-| 源码核对 | 330 个共同补丁 + 4 个 Mac 主机补丁，5,275 个源码文件与实际构建输入一致 |
-| 当前阻塞 | B类真实写入/冷恢复已通过；B加密缓存与冷恢复通过；APFS class1、迁移、system-shell check-in 和图形呈现仍待完成 |
+| 最近正常启动验收 | **0471**（复用0470内核，A类锁定准入与原密钥重启恢复）；最新人工触摸验收 **0459** |
+| 源码核对 | 331 个共同补丁 + 4 个 Mac 主机补丁，5,278 个源码文件与实际构建输入一致 |
+| 当前阻塞 | A/B/C/D加密文件和旧keychain恢复已有有界实测；完整密钥接口、迁移、system-shell check-in 与图形呈现尚未完成 |
 | 桌面 / 刷新率 | SpringBoard 进程已执行，尚无可用桌面；面板目标 120 Hz，真实时序尚未验证 |
 
-最新验收见[B类加密缓存与重启恢复](docs/CLASS-B-CPX-20261101.md)。0468/0469原生内核SHA-256：
+最新验收见[A类锁定准入与原密钥重启恢复](docs/CLASS-A-STORAGE-20261101.md)。0470/0471原生内核SHA-256：
 
 ```text
-1a22ba8dcf5bd950b9a27c71d07d8165cc3990311845cd1e51840670d6a5c5f1
+c0a8b2f44a3eed4eb43f9658d8325d3377620266e4a7026c582855e7d63c8ee2
 ```
 
-详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0469实机重启记录](docs/qualification/0469/0469-B-CPX-qualified.json)。编译、源码回放、实机测试分别记录，互不替代。
+详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0471实机重启记录](docs/qualification/0471/0471-A-qualified.json)。编译、源码回放、实机测试分别记录，互不替代。
 
 ## 已达成的功能
 
@@ -51,10 +51,11 @@
 | 硬件 Root 与 nonce 2212 | 经 Qualcomm QSEE/Keymaster 硬件封装密钥恢复 Root，派生专用 Image4 nonce key，原版 ignition 路径继续启动；复位恢复、认证与失败拒绝已有实测 | 不是 Apple 熔丝 UID/SEP；不声称 UFS ICE 硬件数据加密或物理断电安全验收；[最新密钥回归证据](docs/qualification/0462/0462-systembag-qualified.json) |
 | 软件密码学基础 | 内核所需哈希/HMAC、PRNG/DRBG、AES-CBC 与 APFS 所用 XTS 路径接入；X25519/ConcatKDF、B类实际包封与冷恢复通过；B类加密CPX和原版锁定准入已实测，非全RAM擦除验收 | 密钥来源的硬件保护和数据运算实现是两件事，不把软件 AES 称为硬件加速；[密码学基础](docs/CLASS-B-CRYPTO-20261031.md)、[平台与密钥里程碑](docs/PLATFORM-BASELINE-20261029.md)、[加密 Data](docs/LOCAL-IDENTITY-AND-PROTECTED-DATA-LIFECYCLE-20261031.md) |
 | 原版 APFS 密钥接口 | FS/FV、卷控制、metadata/每文件密钥与 CPX I/O 接通；原版工具创建并挂载真实加密 Data | 硬件Root支撑factory无口令C/D及派生B后端，未实现全类别/口令/SEP；B缓存改为内部加密句柄；[Data 与密钥生命周期](docs/LOCAL-IDENTITY-AND-PROTECTED-DATA-LIFECYCLE-20261031.md) |
-| 原版 keychain C/D | 严格 AMFI entitlement，原版 securityd 的 7/8/10/11 类 AES256 密钥真实包封/解封，完整内核重启后从原持久记录恢复 | 不是完整 keychain、A/AKU/口令或 Apple SEP；[0464–0465 验收](docs/KEYCHAIN-CD-20261031.md) |
+| 原版 keychain C/D | 严格 AMFI entitlement，原版 securityd 的 7/8/10/11 类 AES256 密钥真实包封/解封，完整内核重启后从原持久记录恢复 | 此行仅为早期C/D证据；后续AK/AKU见下行，口令/完整keychain/Apple SEP未完成；[0464–0465 验收](docs/KEYCHAIN-CD-20261031.md) |
+| A类完整保护（factory无PIN） | 原版APFS真实加密写读、锁定已打开缓存/非缓存读写零传输、解锁恢复及完整重启旧密钥/原密文恢复 | 非口令/SEP或全AKS；[0470–0471](docs/CLASS-A-STORAGE-20261101.md) |
 | B类加密存储与数据库 | 原版APFS真实B文件写读/锁定准入与完整重启恢复，原版locationd B数据库/journal同步成功 | B内部加密CPX与重启恢复通过，迁移未完成；[0468–0469](docs/CLASS-B-CPX-20261101.md) |
 | keychain AK/AKU | 原版AK6包封/解封、AKU9包封及完整重启后类别6–11旧记录恢复 | factory无口令与有限AES密钥profile，非完整keychain或Apple SEP；[实机边界](docs/CLASS-B-STORAGE-20261101.md) |
-| C/D 类加密文件 | 真实文件写入、同步、复位后读取、受控 class rewrap；旧明文与原始密文样本保持；私有测试文件的类别生命周期已修复 | 不能推导 A/B 类、锁屏口令、完整 keychain 或 SEP 可用；[0459 验收](docs/qualification/0459/0459-qualified-runtime.json)、[0462 回归](docs/qualification/0462/0462-systembag-qualified.json) |
+| C/D 类加密文件 | 真实文件写入、同步、复位后读取、受控 class rewrap；旧明文与原始密文样本保持；私有测试文件的类别生命周期已修复 | 此行仅为C/D证据，A/B见独立验收；锁屏口令、完整keychain和SEP未完成；[0459 验收](docs/qualification/0459/0459-qualified-runtime.json)、[0462 回归](docs/qualification/0462/0462-systembag-qualified.json) |
 | 真实 Data 内容与 phase 2 | 恢复 9,624 项固定初始布局、约 511 MB 逻辑文件；FactoryData/Pearl 布局、原版挂载 phase 2 及正常卸载已有实测 | 不伪造校准数据、不预设 setup 完成；原版首次系统迁移仍未完成；[恢复与验收](docs/DATA-PHASE2-QUALIFIED-0351.md) |
 | keybagd / system bag | 原版 `MKB_INIT` 完成；真实持久化 systembag envelope、认证 cookie 与实际 Data 映射，重启复用原 bank | envelope 内是本后端真实封装记录，不是 Apple SEP blob；用户态 AKS 仅已覆盖接口可用；[原版 keybagd 验收](docs/KEYBAGD-BOOTSTRAP-0356.md) |
 | RTC / 系统日历 | PMIC RTC 读取、持久日历偏移与重启恢复，解决早期系统时间回退引发的时间警告 | 不是可信时间、抗回滚或完整低功耗时钟验收；[时钟报告](docs/WATCHDOG-CLOCK-20261030.md) |
@@ -79,10 +80,10 @@
 ## 尚未达成
 
 - **可见、可交互 SpringBoard**：进程执行和同 PID 存活不是桌面验收；系统迁移与 shell check-in 仍有等待。
-- **密钥与迁移后续依赖**：B缓存已改为内部加密句柄并通过新旧文件冷恢复；APFS class1仍Unsupported，迁移/桌面登记仍在等待。见[最新证据与边界](docs/CLASS-B-CPX-20261101.md)。
+- **密钥与迁移后续依赖**：A/B/C/D与六类keychain已有有界证据；仍需补实际原版接口并解除迁移/桌面登记等待。见[最新证据与边界](docs/CLASS-A-STORAGE-20261101.md)。
 - **真实图形加速与呈现**：A650/Metal、CoreAnimation 到屏幕的完整链路、DPU/DSI 时序和物理 120 Hz 尚未验收；软件定时器或 FrontBoard 上报值不算物理 vsync。
 - **完整原版keychain**：类别6–11的有限AES密钥profile和旧记录重启恢复通过；口令、其他接口和完整锁生命周期验收仍未完成。见[最新实机报告](docs/CLASS-B-STORAGE-20261101.md)。
-- **完整 AppleKeyStore/安全能力**：APFS A类、口令、完整keychain、多用户及SEP兼容尚未完成；B缓存表示已硬化但非全RAM擦除证明；未知接口真实返回错误。
+- **完整 AppleKeyStore/安全能力**：锁屏口令、完整keychain/AKS、多用户及SEP兼容尚未完成；A/B限定factory无PIN，非全RAM擦除证明；未知接口真实返回错误。
 - **完整手机外设体验**：蓝牙无线功能、Wi-Fi、蜂窝、音频、相机、传感器、完整充电/电池/热管理与休眠唤醒，没有本项目的完整可用验收。
 
 后续顺序为：硬化B类缓存与补齐实际密钥/I/O依赖 → 完成原版迁移与 shell 登记 → 修复阻塞主线的 daemon 功能 → 推进并验证真实图形呈现和 GUI 输入 → 可用 SpringBoard → 恢复蓝牙任务。不通过隐藏日志、停止 watchdog 或伪造成功缩小问题。
@@ -105,6 +106,7 @@
 | 0464–0465 原版 keychain C/D | 硬件 Root/bank 用途隔离 KEK、严格原版 entitlement、原版包封/解封和完整重启恢复通过；B 类、A/AKU、迁移及桌面仍未完成 |
 | 0466–0467 B存储与keychain | 原版B文件/数据库真实加密I/O与冷恢复、原版keychain6–11旧记录恢复；明文缓存清除和迁移仍待完成 |
 | 0468–0469 B加密缓存 | APFS接收opaque64；新旧B文件、锁定准入和六类keychain跨重启恢复；非全RAM/迁移/桌面验收 |
+| 0470–0471 A类保护 | 原版缓存/直接I/O锁定拒绝，原key与原密文完整重启恢复；完整密钥接口/迁移/桌面仍未完成 |
 
 阶段编号是构建/验收序列，表中包含诊断与回归；不表示每个编号都新增了完整功能。更详细的历史与精确边界见[文档索引](docs/README.md)。
 
@@ -128,7 +130,7 @@ docs/qualification/               分阶段固定哈希的验收资料
 docs/history/                     已替代的首页、交接和早期草稿
 ```
 
-本仓库仍保留历史格式的 `board.toml`，其中 standalone、单核等设置不描述目前的完整 prelink 实机流程。**不能把旧入口当作一键重建当前0469的配方。** 官方格式 2、结构化 `porting.toml`/CI 和统一构建入口的迁移仍未完成；详见[仓库整理与规范差距](docs/REPOSITORY-LAYOUT.md)。
+本仓库仍保留历史格式的 `board.toml`，其中 standalone、单核等设置不描述目前的完整 prelink 实机流程。**不能把旧入口当作一键重建当前0471的配方。** 官方格式 2、结构化 `porting.toml`/CI 和统一构建入口的迁移仍未完成；详见[仓库整理与规范差距](docs/REPOSITORY-LAYOUT.md)。
 
 ## 获取源码与验证
 
@@ -144,9 +146,9 @@ git clone https://github.com/apple-oss-distributions/xnu.git ../apple-xnu
 mkdir -p .cache/qualification
 python3 scripts/qualification/replay-xnu.py \
   --repo . --xnu-source ../apple-xnu \
-  --manifest docs/qualification/0468/all-mac-source-0468.json \
-  --receipt .cache/qualification/replay-0468.json \
-  --cache .cache --expected-common 330
+  --manifest docs/qualification/0470/all-mac-source-0470.json \
+  --receipt .cache/qualification/replay-0470.json \
+  --cache .cache --expected-common 331
 ```
 
 校验已公开的真实触摸记录：

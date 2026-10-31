@@ -1,0 +1,45 @@
+{
+  "accepted": true,
+  "version": "0470",
+  "native_version": "0470",
+  "native_sha256": "c0a8b2f44a3eed4eb43f9658d8325d3377620266e4a7026c582855e7d63c8ee2",
+  "actual_log_sha256": "a155e4de46669fdfed3df180581a14075a0025907cc24c72db79e0c8bde8eef0",
+  "scope": "Genuine factory-no-passcode APFS A KF04/HA01; original already-open cached/direct reads and writes deny lock with zero transferred, unlock restores existing material; unchanged B/C/D and original keychain6\u201311",
+  "private_A_crypto_id": 259236,
+  "private_A_payload_sha256": "33f878693a6f08d6c2d226412289b92d17b4cedf043b419eb971497d35f27c2b",
+  "private_A_ciphertext_stripes": {
+    "0": [
+      "67411fe44e76568f794e691eefb96a9c630c917b9c3da3dfc0459b48577a59dd",
+      "67411fe44e76568f794e691eefb96a9c630c917b9c3da3dfc0459b48577a59dd"
+    ],
+    "61440": [
+      "fd222a79a8e430b8c4c3a7f4d49430025135e5e5ad0a4bbdc7117e2ff05e63ac",
+      "fd222a79a8e430b8c4c3a7f4d49430025135e5e5ad0a4bbdc7117e2ff05e63ac"
+    ]
+  },
+  "first_A_operation": "NEW",
+  "A_complete_kernel_restart_proven": false,
+  "original_APFS_cached_nocache_write_denial_proven": true,
+  "locked_closed_reopen_and_new_create_refused": true,
+  "unlock_restores_original_A_payload": true,
+  "old_B_ciphertext_stripes_preserved": true,
+  "cold_keychain_classes_unwrap_before_new": [
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "qualified_watchdog_seconds": 321.307,
+  "old_Root_bank_systembag_CD_RTC_NVRAM_defaults_preserved": true,
+  "APFS_class1_implemented": true,
+  "factory_no_passcode_only": true,
+  "physical_all_RAM_erasure_proven": false,
+  "Apple_SEP_or_hardware_AES_implemented": false,
+  "full_AppleKeyStore_implemented": false,
+  "migration_complete": false,
+  "system_shell_checkin_complete": false,
+  "usable_springboard": false,
+  "full_goal_complete": false
+}

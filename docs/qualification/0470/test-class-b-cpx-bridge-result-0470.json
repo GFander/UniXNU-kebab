@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "physical_test": false,
+  "actual_B_bank_math_AES_and_driver": true,
+  "independent_full4096B_XTS_vector": true,
+  "actual_native_driver_destructor_executes_and_storage_zero_checked": true,
+  "behavioral_mutants_rejected": 3,
+  "models": [
+    "bufattrs/CPX metadata",
+    "VFS lock broadcast",
+    "hardware Root restoration",
+    "mutex/RNG"
+  ],
+  "original_APFS_locked_descriptor_admission_not_modeled_as_success": true,
+  "summary": "PASS 42 actual B CPX/core/block/XTS/destructor cases: APFS-facing ciphertext unchanged, scoped FEK and AES context cleanup, locked active I/O, Root and AES faults; bufattrs/VFS/Root/RNG are explicit host models",
+  "fixture_sha256": {
+    "bridge-actual-core.c": "f9114d644ef97e14c117526f53842774e9d874e4d8b61d8fee0cd2f743ac0e09",
+    "bridge-actual-driver.cpp": "848b8446a50f620f63645abf92282875ae3eee1f9ee90b234bc5a3bd5b1f22e6"
+  }
+}

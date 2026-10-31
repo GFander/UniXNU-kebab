@@ -95,7 +95,12 @@
 
 - [B类加密缓存、新旧文件与keychain重启恢复](CLASS-B-CPX-20261101.md)
 
+- [A类保护、锁定准入与原密钥重启恢复](CLASS-A-STORAGE-20261101.md)
+
 ## 原始证据与测试
+
+- [0471完整重启验收](qualification/0471/)
+- [0470 A类后端、源码与测试](qualification/0470/)
 
 - [0469重启验收](qualification/0469/)
 - [0468加密CPX、源码与测试](qualification/0468/)
