@@ -1,0 +1,32 @@
+{
+  "parent_version": "0466",
+  "candidate": "0468",
+  "assembly_only": true,
+  "physical_test": false,
+  "changes": {
+    "bsd/kern/kebab_cpx_handles_impl.h": {
+      "before": "266b29556e011410571cc94adf45064b8b2cf968b6a66e89a74a854ce4eba91a",
+      "after": "23f5c9426fca111774f12310e2ea35c608226e335ac5e3e1681315947ea4c7d1"
+    },
+    "bsd/kern/kebab_apfs_file_b_impl.h": {
+      "before": "2659933758aa8f1c614ea149592945b04a166accb12f6e45f347cc6f6e2d61ef",
+      "after": "15b1a89b0dfea7453b1a236f7582fc620e702bb7c11e2b2a7d81455564689b64"
+    },
+    "bsd/kern/kebab_keybag_state_impl.h": {
+      "before": "86f9ff991327ee183de24c76ddb02899def6411c45217b109838c6674e0ee893",
+      "after": "266c5d138cf91e9880909ab784f315755d8bfda0fdbadc96a648aac22ed1c694"
+    },
+    "bsd/kern/kebab_b_file_lifecycle.c": {
+      "before": "6126337ed51938ca8e859faf81598c8056a2729fe385155e46d3e20d15bd8623",
+      "after": "eac8803f8fa93ce8640bd886f4c146c17fb2ba04424aa7524b5e6b7d0959e427"
+    },
+    "bsd/kern/kebab_b_file_probe_impl.h": {
+      "before": "f5914b0397d3ad23e24f0bc451a9fbb78e8d52c13abc7cd98b8462a16ed0cc3d",
+      "after": "525cd35abdbac84aa5c44c3038e853ec9a053f98a21b8987f72fcacf181776e0"
+    },
+    "bsd/kern/kebab_b_cpx_impl.h": {
+      "before": null,
+      "after": "bbe9f35228fb8b049372edc0883627a174a377f803c11987ef5845edb98c6d1f"
+    }
+  }
+}

@@ -93,7 +93,12 @@
 
 - [B类真实存储、数据库与六类keychain重启恢复](CLASS-B-STORAGE-20261101.md)
 
+- [B类加密缓存、新旧文件与keychain重启恢复](CLASS-B-CPX-20261101.md)
+
 ## 原始证据与测试
+
+- [0469重启验收](qualification/0469/)
+- [0468加密CPX、源码与测试](qualification/0468/)
 
 - [0467 B存储/keychain冷恢复](qualification/0467/)
 - [0466 B后端、源码与测试](qualification/0466/)

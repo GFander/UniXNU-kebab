@@ -1,0 +1,174 @@
+--- a/bsd/kern/kebab_cpx_handles_impl.h
++++ b/bsd/kern/kebab_cpx_handles_impl.h
+@@ -48,6 +48,8 @@
+  return kch_create_scope_locked(uuid,cls,key,output);
+ }
+ 
++#include "kebab_b_cpx_impl.h"
++
+ int
+ kebab_vek_cpx_handle_create(const uint8_t uuid[16],const uint8_t key[32],uint8_t output[64])
+ {
+@@ -63,6 +65,7 @@
+ {
+  if(!kfk_context() || !kfk_range(input,64) || !kfk_range(key,32) ||
+     kfk_overlap(input,64,key,32))return (int)kIOReturnBadArgument;
++ if(!memcmp(input,"HB01",4))return khb_open(input,key);
+  uint8_t token[64],kek[32]={0},plain[32]={0};memcpy(token,input,64);
+  unsigned difference=0,nonzero=0;
+  for(unsigned i=0;i<4;++i)difference|=token[i]^((const uint8_t *)"HT01")[i];
+--- a/bsd/kern/kebab_apfs_file_b_impl.h
++++ b/bsd/kern/kebab_apfs_file_b_impl.h
+@@ -1,6 +1,6 @@
+ /* Protected Unless Open: ephemeral Curve25519 public32 || AES-KW96(KF03).
+  * The authenticated inner88 binds exact UUID/revision/crypto_id/class and
+- * key32/IV16. CPX receives honest raw32, not a stateless wrapped token.
++ * key32/IV16. CPX receives HB01/64B ciphertext, never the plaintext file key.
+  * Existing C/D KF02/HT01 encoding is left untouched. Caller holds kfk_lock
+  * in helpers ending _locked. No VFS/IOKit call occurs under that lock. */
+ static int
+@@ -59,20 +59,21 @@
+ {
+  if(!kfk_context()||!kmd_buffers(cred,raw,wrapped,true)||wrapped->key_len<128)return (int)kIOReturnBadArgument;
+  if(!kfn_credential(cred)||raw->flags)return (int)kIOReturnUnsupported;
+- uint8_t material[48]={0},sealed[128]={0};
++ uint8_t material[48]={0},sealed[128]={0},token[64]={0};
+  lck_mtx_lock(&kfk_lock);int error=kbn_ready_locked(cred->bytes+22,false);
+  if(!error){read_random(material,48);if(!kdb_nonzero(material,32)||!kdb_nonzero(material+32,16))error=(int)kIOReturnError;}
+  if(!error)error=kbn_seal_locked(cred,material,sealed);
++ if(!error)error=khb_create_locked(cred->bytes+22,material,token);
+  if(!error)error=kbs_bind_raw_locked(cred->bytes+22);
+  if(!error){
+-  memcpy(wrapped->key,sealed,128);memcpy(raw->key,material,32);memcpy(raw->iv_key,material+32,16);
+-  wrapped->key_len=128;wrapped->dp_class=2;raw->key_len=32;raw->iv_key_len=16;raw->flags=0;
++  memcpy(wrapped->key,sealed,128);memcpy(raw->key,token,64);memcpy(raw->iv_key,material+32,16);
++  wrapped->key_len=128;wrapped->dp_class=2;raw->key_len=64;raw->iv_key_len=16;raw->flags=KEBAB_RAW_KEY_WRAPPED;
+  }
+  lck_mtx_unlock(&kfk_lock);
+  uint64_t crypto_id;memcpy(&crypto_id,cred->bytes,sizeof(crypto_id));
+- printf("KEBAB APFS B NEW: crypto-id=%llu raw-address=%p result=%x; raw32/IV16, no key bytes logged\n",
++ printf("KEBAB APFS B NEW: crypto-id=%llu raw-address=%p result=%x; opaque64/IV16, no key bytes logged\n",
+      (unsigned long long)crypto_id,raw->key,error);
+- kfk_wipe(material,sizeof(material));kfk_wipe(sealed,sizeof(sealed));return error;
++ kfk_wipe(material,sizeof(material));kfk_wipe(sealed,sizeof(sealed));kfk_wipe(token,sizeof(token));return error;
+ }
+ 
+ static int
+@@ -80,16 +81,17 @@
+ {
+  if(!kfk_context()||!kmd_buffers(cred,raw,wrapped,true)||wrapped->key_len!=128)return (int)kIOReturnBadArgument;
+  if(!kfn_credential(cred))return (int)kIOReturnUnsupported;
+- uint8_t sealed[128],plain[88]={0};memcpy(sealed,wrapped->key,128);
++ uint8_t sealed[128],plain[88]={0},token[64]={0};memcpy(sealed,wrapped->key,128);
+  lck_mtx_lock(&kfk_lock);int error=kbn_open_locked(cred,sealed,plain);
+  if(!error&&!kbn_identity(plain,cred))error=(int)kIOReturnNotPermitted;
++ if(!error)error=khb_create_locked(cred->bytes+22,plain+40,token);
+  if(!error)error=kbs_bind_raw_locked(cred->bytes+22);
+- if(!error){memcpy(raw->key,plain+40,32);memcpy(raw->iv_key,plain+72,16);raw->key_len=32;raw->iv_key_len=16;raw->flags=0;}
++ if(!error){memcpy(raw->key,token,64);memcpy(raw->iv_key,plain+72,16);raw->key_len=64;raw->iv_key_len=16;raw->flags=KEBAB_RAW_KEY_WRAPPED;}
+  lck_mtx_unlock(&kfk_lock);
+  uint64_t crypto_id;memcpy(&crypto_id,cred->bytes,sizeof(crypto_id));
+  printf("KEBAB APFS B UNWRAP: crypto-id=%llu raw-address=%p result=%x; no key bytes logged\n",
+      (unsigned long long)crypto_id,raw->key,error);
+- kfk_wipe(sealed,sizeof(sealed));kfk_wipe(plain,sizeof(plain));return error;
++ kfk_wipe(sealed,sizeof(sealed));kfk_wipe(plain,sizeof(plain));kfk_wipe(token,sizeof(token));return error;
+ }
+ 
+ static int
+--- a/bsd/kern/kebab_keybag_state_impl.h
++++ b/bsd/kern/kebab_keybag_state_impl.h
+@@ -103,7 +103,7 @@
+ void
+ kebab_apfs_b_note_cpx_destroy(const void *key,unsigned bytes,const char *operation)
+ {
+- if(bytes!=32||!kebab_apfs_b_volume_seen())return;
++ if(bytes>64||!kebab_apfs_b_volume_seen())return;
+  static uint32_t reports;uint32_t n=__atomic_fetch_add(&reports,1u,__ATOMIC_RELAXED);
+- if(n<64)printf("KEBAB CPX RAW32 DESTROY: operation=%s key-address=%p bytes=32; no key bytes logged\n",operation,key);
++ if(n<64)printf("KEBAB CPX STORAGE DESTROY: operation=%s storage-address=%p cached-bytes=%u; no key bytes logged\n",operation,key,bytes);
+ }
+--- a/bsd/kern/kebab_b_file_lifecycle.c
++++ b/bsd/kern/kebab_b_file_lifecycle.c
+@@ -1,7 +1,8 @@
+ /* Software CPX class-B lifecycle for the one authenticated HiOS Data volume.
+  * Called after VNOP_CLOSE and its use-reference drop, while the caller still
+  * owns an iocount. Recycle marks a live vnode; standard VFS reclaim waits for
+- * other descriptors/mappings/I/O, then original APFS frees its CPX objects.
++ * other descriptors/mappings/I/O, then original APFS frees its CPX objects. B FEKs are never stored
++ * in those objects: they contain internal HB01 ciphertext only.
+  * Native cpx_zone/AES-context zones clear their memory on free. */
+ #include <pexpert/arm64/board_config.h>
+ #if defined(KEBAB)
+@@ -53,7 +54,7 @@
+   * A marked but still-used vnode is reclaimed after its final reference. */
+  int busy=vnode_isinuse(vnode,0),sync_error=0;
+  if(!busy&&!(vfs_flags(mount)&MNT_RDONLY))sync_error=VNOP_FSYNC(vnode,MNT_WAIT,context);
+- if(sync_error){printf("KEBAB B CLOSE: sync-error=%d; raw key retained for pending I/O\n",sync_error);return sync_error;}
++ if(sync_error){printf("KEBAB B CLOSE: sync-error=%d; key state retained for pending I/O\n",sync_error);return sync_error;}
+  int immediate=vnode_recycle(vnode);
+  static uint32_t reports;uint32_t n=__atomic_fetch_add(&reports,1u,__ATOMIC_RELAXED);
+  if(n<64)printf("KEBAB B CLOSE: class-known=%u class=%u busy=%d volume-error=%d attr-error=%d recycle-immediate=%d; final VFS release owns reclaim\n",
+--- a/bsd/kern/kebab_b_file_probe_impl.h
++++ b/bsd/kern/kebab_b_file_probe_impl.h
+@@ -22,7 +22,7 @@
+ static int
+ kbp_files(mount_t expected)
+ {
+- const char *path="/private/var/.hios-cp-b-v1",*locked_path="/private/var/.hios-cp-b-locked-v1";
++ const char *path="/private/var/.hios-cp-b-v1",*locked_path="/private/var/.hios-cp-b-opaque-locked-v1";
+  vfs_context_t context=vfs_context_current();vnode_t file=NULLVP;
+  int error=vnode_open(path,O_NOFOLLOW|FREAD,0,0,&file,context);bool create=error==ENOENT;
+  if(file){int closed=vnode_close(file,FREAD,context);file=NULLVP;if(!error)error=closed;}
+--- /dev/null
++++ b/bsd/kern/kebab_b_cpx_impl.h
+@@ -0,0 +1,50 @@
++/* Internal HB01/64B CPX ciphertext, not an Apple SEP blob or on-disk KF03.
++ * APFS receives no plaintext file key. The storage bridge opens this handle
++ * only into its scoped I/O key buffer, whose destructor wipes it. The
++ * original APFS FIODEVICELOCKED/open policy owns B descriptor admission;
++ * already-open and publicly-created locked files must retain I/O access.
++ * Persistent KF03 unwrap still requires the actual unlocked B private key.
++ * Caller holds kfk_lock in *_locked helpers; no VFS operation under it. */
++static int
++khb_kek_locked(const uint8_t header[24],uint8_t output[32])
++{
++ uint32_t cls=0;memcpy(&cls,header+4,4);
++ if(memcmp(header,"HB01",4)||cls!=2)return (int)kIOReturnUnsupported;
++ if(!g_crypto_funcs||!g_crypto_funcs->ccsha256_di||!g_crypto_funcs->cchmac_fn)return (int)kIOReturnNotReady;
++ if(!kbs_factory_locked()||!kbs_ready||!kbs_bootstrap_done||!kdc_registered||!kdc_loaded)return (int)kIOReturnNotReady;
++ if(memcmp(header+8,kdc_uuid,16))return (int)kIOReturnNotPermitted;
++ static const uint8_t domain[]="UniXNU.kebab.protected-unless-open.cpx.v1";
++ uint8_t context[sizeof(domain)+80];
++ memcpy(context,domain,sizeof(domain));memcpy(context+sizeof(domain),kdb_identifier,16);
++ memcpy(context+sizeof(domain)+16,kdb_record+24,32);
++ memcpy(context+sizeof(domain)+48,kdb_record+16,4);memcpy(context+sizeof(domain)+52,kdb_record+60,4);
++ memcpy(context+sizeof(domain)+56,header,24);
++ g_crypto_funcs->cchmac_fn(g_crypto_funcs->ccsha256_di,32,kfk_root_kek,sizeof(context),context,output);
++ kfk_wipe(context,sizeof(context));return 0;
++}
++
++static int
++khb_create_locked(const uint8_t uuid[16],const uint8_t key[32],uint8_t output[64])
++{
++ uint8_t token[64]={0},kek[32]={0};uint32_t cls=2;
++ memcpy(token,"HB01",4);memcpy(token+4,&cls,4);memcpy(token+8,uuid,16);
++ int error=khb_kek_locked(token,kek);
++ if(!error)error=kfk_wrap(kek,key,32,token+24,true);
++ if(!error)memcpy(output,token,64);
++ kfk_wipe(token,sizeof(token));kfk_wipe(kek,sizeof(kek));return error;
++}
++
++/* Only called after public handle-open range/context/alias validation. */
++static int
++khb_open(const uint8_t input[64],uint8_t key[32])
++{
++ uint8_t token[64],kek[32]={0},plain[32]={0};memcpy(token,input,64);
++ lck_mtx_lock(&kfk_lock);int error=khb_kek_locked(token,kek);
++ if(!error)error=kfk_wrap(kek,token+24,40,plain,false);
++ if(!error)memcpy(key,plain,32);
++ lck_mtx_unlock(&kfk_lock);
++ kfk_wipe(token,sizeof(token));kfk_wipe(kek,sizeof(kek));kfk_wipe(plain,sizeof(plain));
++ static uint32_t reports;uint32_t n=__atomic_fetch_add(&reports,1u,__ATOMIC_RELAXED);
++ if(error||n<16)printf("KEBAB B CPX: opaque64 -> io-local32 result=%x; APFS cache contains ciphertext, no key bytes logged\n",error);
++ return error;
++}
