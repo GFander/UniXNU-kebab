@@ -1,0 +1,70 @@
+--- a/bsd/dev/kebab_bt_uart.c
++++ b/bsd/dev/kebab_bt_uart.c
+@@ -14,6 +14,37 @@
+ extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
+ extern int get_preemption_level(void);
+ static struct { vm_offset_t se,pll,root,vote;bool dead; } kbu_native;
++/* Fixed, cache-line-contained last-transaction record. A NoC failure can
++ * remove USB before its TX ring drains. Crashdump recovery reads only this
++ * named record and the console ring after verifying the loaded image header;
++ * it never needs a full RAM dump or key-bearing memory. */
++static volatile struct {
++ uint64_t sequence,completed,mapped_address;
++ uint32_t space,offset,value,write,phase,frames,tx,rx;
++ int32_t error;
++} kbu_trace __attribute__((aligned(64)));
++_Static_assert(sizeof(kbu_trace)==64,"last-MMIO trace must fit one cache line");
++static void
++kbu_trace_publish(void)
++{
++ /* SM8250's qualified data cache line is64 bytes, this record is64 aligned. */
++ __asm__ volatile("dc cvac, %0" :: "r"(&kbu_trace) : "memory");
++ __asm__ volatile("dsb sy" ::: "memory");
++}
++static void
++kbu_trace_begin(void *ctx,enum kbu_space space,uint32_t off,uint32_t value,bool write)
++{
++ const struct kbu_result *out=(const struct kbu_result *)ctx;
++ ++kbu_trace.sequence;kbu_trace.mapped_address=0;kbu_trace.space=space;kbu_trace.offset=off;kbu_trace.value=value;kbu_trace.write=write;kbu_trace.error=0;
++ kbu_trace.phase=out?out->phase:0;kbu_trace.frames=out?out->frames:0;kbu_trace.tx=out?out->tx:0;kbu_trace.rx=out?out->rx:0;
++ kbu_trace_publish();
++}
++static void
++kbu_trace_end(int error,uint32_t value)
++{
++ kbu_trace.error=error;kbu_trace.value=value;kbu_trace.completed=kbu_trace.sequence;kbu_trace_publish();
++}
++
+ /* All mappings and I/O require the shared GENI transaction mutex. The
+  * bounded explicit bootstrap test holds it through restore. No automatic
+  * background poller/long-lived receive path or userspace API is published. */
+@@ -33,16 +64,16 @@
+ static int
+ kbu_native_read(void *ctx,enum kbu_space space,uint32_t off,uint32_t *v)
+ {
+- (void)ctx;if(!v)return EINVAL;vm_offset_t addr;int e=kbu_native_address(space,off,false,&addr);if(e)return e;
++ if(!v)return EINVAL;kbu_trace_begin(ctx,space,off,0,false);vm_offset_t addr;int e=kbu_native_address(space,off,false,&addr);if(e){kbu_trace_end(e,0);return e;}kbu_trace.mapped_address=addr;kbu_trace_publish();
+  __asm__ volatile("dsb sy" ::: "memory");*v=*(volatile uint32_t *)addr;
+- __asm__ volatile("dsb sy" ::: "memory");return 0;
++ __asm__ volatile("dsb sy" ::: "memory");kbu_trace_end(0,*v);return 0;
+ }
+ static int
+ kbu_native_write(void *ctx,enum kbu_space space,uint32_t off,uint32_t v)
+ {
+- (void)ctx;vm_offset_t addr;int e=kbu_native_address(space,off,true,&addr);if(e)return e;
++ kbu_trace_begin(ctx,space,off,v,true);vm_offset_t addr;int e=kbu_native_address(space,off,true,&addr);if(e){kbu_trace_end(e,v);return e;}kbu_trace.mapped_address=addr;kbu_trace_publish();
+  __asm__ volatile("dsb sy" ::: "memory");*(volatile uint32_t *)addr=v;
+- __asm__ volatile("dsb sy" ::: "memory");return 0;
++ __asm__ volatile("dsb sy" ::: "memory");kbu_trace_end(0,v);return 0;
+ }
+ static void kbu_native_wait(void *ctx,uint32_t us){(void)ctx;delay(us);}
+ static uint64_t
+@@ -68,7 +99,7 @@
+   * Recheck branch accessibility inside our transaction before touching SE6. */
+  kebab_bluetooth_clock_prepare();
+  struct kbu_result out;memset(&out,0,sizeof(out));int e=EBUSY;
+- const struct kbu_io io={kbu_native_read,kbu_native_write,kbu_native_wait,kbu_native_now,NULL};
++ const struct kbu_io io={kbu_native_read,kbu_native_write,kbu_native_wait,kbu_native_now,&out};
+  kebab_geni_transaction_lock();
+  if(!kbu_native.dead)e=kbu_loopback(&io,&out);
+  if(out.changed&&!out.restored)kbu_native.dead=true;

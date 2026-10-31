@@ -1,0 +1,25 @@
+--- a/bsd/dev/kebab_bt_uart.c
++++ b/bsd/dev/kebab_bt_uart.c
+@@ -3,6 +3,7 @@
+ #include <sys/types.h>
+ #include <sys/errno.h>
+ #include <sys/systm.h>
++#include <sys/proc_internal.h>
+ #include <kern/debug.h>
+ #include <kern/clock.h>
+ #include <libkern/libkern.h>
+@@ -55,6 +56,14 @@
+  if(panic_active()||ml_at_interrupt_context()||get_preemption_level()||!ml_get_interrupts_enabled()){
+   printf("KEBAB BTUART: end error=%d unsafe-context; no register access\n",EBUSY);return;
+  }
++ /* This destructive diagnostic is a post-BSD console operation. USB can
++  * enumerate while platform/autoconfiguration is still in progress. The
++  * real PID1 pointer is published by bsd_utaskbootstrap after that setup;
++  * reject before any clock, mapping or mutex work until it exists. The
++  * transport primitives themselves remain usable by a future owned driver. */
++ if(__atomic_load_n(&initproc,__ATOMIC_ACQUIRE)==PROC_NULL){
++  printf("KEBAB BTUART: end error=%d BSD startup incomplete; no register access\n",EAGAIN);return;
++ }
+  /* Existing acquisition owns only SE6/AHB votes and reports its real result.
+   * Recheck branch accessibility inside our transaction before touching SE6. */
+  kebab_bluetooth_clock_prepare();

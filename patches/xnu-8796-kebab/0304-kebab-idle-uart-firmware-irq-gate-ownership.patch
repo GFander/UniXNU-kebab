@@ -1,0 +1,23 @@
+--- a/bsd/dev/kebab_bt_uart_impl.h
++++ b/bsd/dev/kebab_bt_uart_impl.h
+@@ -178,12 +178,18 @@
+  e=kbu_read(io,KBU_GCC,0x17730,&v);if(e)goto done;if(v&1){e=EBUSY;goto done;}
+  for(unsigned i=0;i<4;++i){e=kbu_read(io,KBU_GCC,0x17734+4*i,&root[i]);if(e)goto done;}
+  for(unsigned i=0;i<KBU_CONFIG_COUNT;++i){e=kbu_read(io,KBU_SE,kbu_config[i],&saved[i]);if(e)goto done;++saved_count;}
+- /* No live DMA or interrupt consumer may be displaced. */
++ /* SE6 has no other native driver/IRQ607 registration. Boot firmware
++  * leaves the four documented aggregate IRQ gates enabled (0xf), while
++  * both engines, FIFOs, pending IRQs and GSI/DMA are idle. Those gates
++  * are configuration, not evidence of a live consumer. Mask them for
++  * our exclusive polled transaction, then restore the exact saved word.
++  * Unknown routing bits or active GSI/DMA still refuse before writes. */
+  out->route=saved[0];out->gsi=saved[1];out->dma=saved[12];
+- if(saved[0]||saved[1]||saved[12]&1){out->blocked_offset=saved[0]?0xe1c:saved[1]?0xe18:0x258;out->blocked_value=saved[0]?saved[0]:saved[1]?saved[1]:saved[12];e=EBUSY;goto done;}
++ if((saved[0]&~0xfu)||saved[1]||(saved[12]&1)){out->blocked_offset=(saved[0]&~0xfu)?0xe1c:saved[1]?0xe18:0x258;out->blocked_value=(saved[0]&~0xfu)?saved[0]:saved[1]?saved[1]:saved[12];e=EBUSY;goto done;}
+  out->changed=true;out->phase=3;
+  /* Polled bootstrap: local status latches enabled, CPU IRQ routing stays0. */
+  #define KBU_SET(space,off,val) do{e=kbu_set(io,space,off,val);if(e)goto cleanup;}while(0)
++ KBU_SET(KBU_SE,0xe1c,0);
+  KBU_SET(KBU_SE,0x48,0);KBU_SET(KBU_SE,0x4c,0);
+  KBU_SET(KBU_GCC,0x17738,(root[1]&0xffff0000u)|384u);
+  KBU_SET(KBU_GCC,0x1773c,(root[2]&0xffff0000u)|0xc476u);

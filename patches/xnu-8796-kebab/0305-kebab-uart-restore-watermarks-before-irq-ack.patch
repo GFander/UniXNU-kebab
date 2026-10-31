@@ -1,0 +1,30 @@
+--- a/bsd/dev/kebab_bt_uart_impl.h
++++ b/bsd/dev/kebab_bt_uart_impl.h
+@@ -223,7 +223,6 @@
+   if(!c)c=s;
+   /* Never change clocks/config under an engine which failed to stop. */
+   if(!c){
+-   for(unsigned i=0;i<2;++i){uint32_t status;int x=kbu_read(io,KBU_SE,i?0x640:0x610,&status);if(!x)x=kbu_write(io,KBU_SE,i?0x648:0x618,status);if(!c)c=x;}
+    uint32_t status;int x=kbu_read(io,KBU_SE,0x804,&status);if(!x&&(status&0x1ffffffu))x=EIO;if(!c)c=x;
+    x=kbu_read(io,KBU_SE,0x800,&status);if(!x&&(status&0xfffffffu))x=EIO;if(!c)c=x;
+    x=kbu_read(io,KBU_SE,0x40,&status);if(!x&&(status&0x1001u))x=EIO;if(!c)c=x;
+@@ -233,8 +232,18 @@
+    for(unsigned i=0;i<4&&!c;++i)c=kbu_set(io,KBU_GCC,0x17734+i*4,root[i]);
+    if(!c)c=kbu_update_root(io);
+    /* Clocks restored last, after every other ordinary config word. */
+-   for(unsigned i=saved_count;i>0&&!c;){--i;if(i==4||i==5)continue;c=kbu_set(io,KBU_SE,kbu_config[i],saved[i]);}
++   for(unsigned i=saved_count;i>0&&!c;){--i;if(i==0||i==4||i==5)continue;c=kbu_set(io,KBU_SE,kbu_config[i],saved[i]);}
+    if(!c)c=kbu_set(io,KBU_SE,0x4c,saved[5]);if(!c)c=kbu_set(io,KBU_SE,0x48,saved[4]);
++   /* TX watermark is level-sensitive while its temporary threshold is2.
++    * Restore ordinary config/clocks BEFORE the final acknowledgement.
++    * Clear secondary before its primary summary, verify both pending
++    * words, then restore aggregate CPU routing last. Do not report a
++    * clean restore with an interrupt that immediately reasserts. */
++   for(unsigned i=0;i<2&&!c;++i){uint32_t status;uint32_t off=i?0x610:0x640;
++    c=kbu_read(io,KBU_SE,off,&status);if(!c)c=kbu_write(io,KBU_SE,i?0x618:0x648,status);
++   }
++   for(unsigned i=0;i<2&&!c;++i){uint32_t status;c=kbu_read(io,KBU_SE,i?0x610:0x640,&status);if(!c&&status)c=EIO;}
++   if(!c)c=kbu_set(io,KBU_SE,0xe1c,saved[0]);
+   }
+   out->cleanup_error=c;out->restored=!c;if(!e)e=c;
+  }

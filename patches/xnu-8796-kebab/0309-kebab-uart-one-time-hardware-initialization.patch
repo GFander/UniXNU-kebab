@@ -1,0 +1,97 @@
+--- a/bsd/dev/kebab_bt_uart.c
++++ b/bsd/dev/kebab_bt_uart.c
+@@ -13,7 +13,7 @@
+ #include "kebab_bt_uart_impl.h"
+ extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
+ extern int get_preemption_level(void);
+-static struct { vm_offset_t se,pll,root,vote;bool dead; } kbu_native;
++static struct { vm_offset_t se,pll,root,vote;bool dead;struct kbu_owner owner;unsigned default_writes; } kbu_native;
+ /* Fixed, cache-line-contained last-transaction record. A NoC failure can
+  * remove USB before its TX ring drains. Crashdump recovery reads only this
+  * named record and the console ring after verifying the loaded image header;
+@@ -71,9 +71,12 @@
+ static int
+ kbu_native_write(void *ctx,enum kbu_space space,uint32_t off,uint32_t v)
+ {
+- kbu_trace_begin(ctx,space,off,v,true);vm_offset_t addr;int e=kbu_native_address(space,off,true,&addr);if(e){kbu_trace_end(e,v);return e;}kbu_trace.mapped_address=addr;kbu_trace_publish();
++ kbu_trace_begin(ctx,space,off,v,true);
++ /* Refuse an accidental repeat as a real error, never synthesize a write. */
++ if(space==KBU_SE&&off==0x20&&kbu_native.default_writes){kbu_trace_end(EALREADY,v);return EALREADY;}
++ vm_offset_t addr;int e=kbu_native_address(space,off,true,&addr);if(e){kbu_trace_end(e,v);return e;}kbu_trace.mapped_address=addr;kbu_trace_publish();
+  __asm__ volatile("dsb sy" ::: "memory");*(volatile uint32_t *)addr=v;
+- __asm__ volatile("dsb sy" ::: "memory");kbu_trace_end(0,v);return 0;
++ __asm__ volatile("dsb sy" ::: "memory");if(space==KBU_SE&&off==0x20)++kbu_native.default_writes;kbu_trace_end(0,v);return 0;
+ }
+ static void kbu_native_wait(void *ctx,uint32_t us){(void)ctx;delay(us);}
+ static uint64_t
+@@ -99,12 +102,13 @@
+   * Recheck branch accessibility inside our transaction before touching SE6. */
+  kebab_bluetooth_clock_prepare();
+  struct kbu_result out;memset(&out,0,sizeof(out));int e=EBUSY;
+- const struct kbu_io io={kbu_native_read,kbu_native_write,kbu_native_wait,kbu_native_now,&out};
++ const struct kbu_io io={kbu_native_read,kbu_native_write,kbu_native_wait,kbu_native_now,&out,&kbu_native.owner};
+  kebab_geni_transaction_lock();
+  if(!kbu_native.dead)e=kbu_loopback(&io,&out);
+  if(out.changed&&!out.restored)kbu_native.dead=true;
+  bool dead=kbu_native.dead;kebab_geni_transaction_unlock();
+  printf("KEBAB BTUART: phase=%u frames=%u tx=%u rx=%u irq=%08x/%08x changed=%u restored=%u cleanup=%d quarantined=%u\n",out.phase,out.frames,out.tx,out.rx,out.mp,out.sp,out.changed,out.restored,out.cleanup_error,dead);
++ printf("KEBAB BTUART: port default-state=%u actual-default-writes=%u\n",kbu_native.owner.default_state,kbu_native.default_writes);
+  printf("KEBAB BTUART: preflight route=%08x gsi=%08x dma=%08x blocked=%03x value=%08x\n",out.route,out.gsi,out.dma,out.blocked_offset,out.blocked_value);
+  printf("KEBAB BTUART: LUCID mode=%08x L=%08x user=%08x opmode=%08x alpha=%08x vote=%08x\n",out.pll[0],out.pll[1],out.pll[2],out.pll[3],out.pll[4],out.pll[5]);
+  printf("KEBAB BTUART: end error=%d internal-SE6-only; no controller/HCI/RF qualification\n",e);
+--- a/bsd/dev/kebab_bt_uart_impl.h
++++ b/bsd/dev/kebab_bt_uart_impl.h
+@@ -2,12 +2,16 @@
+  * register facts in LineageOS sm8250 98a7970 (GENI/UART/GCC/LUCID). No Linux
+  * implementation is linked. Internal loopback is not controller/RF proof. */
+ enum kbu_space { KBU_SE, KBU_GCC };
++/* Per exclusive SE6 owner, across transactions, invalidated only by a real
++ * hardware reset. 0=not applied,1=applied,2=delivery uncertain (quarantined). */
++struct kbu_owner { unsigned default_state; };
+ struct kbu_io {
+  int (*read)(void *,enum kbu_space,uint32_t,uint32_t *);
+  int (*write)(void *,enum kbu_space,uint32_t,uint32_t);
+  void (*wait)(void *,uint32_t);
+  uint64_t (*now)(void *);
+  void *ctx;
++ struct kbu_owner *owner;
+ };
+ struct kbu_result {
+  uint32_t phase,frames,tx,rx,mp,sp,pll[6],route,gsi,dma,blocked_offset,blocked_value;
+@@ -159,8 +163,9 @@
+ static int
+ kbu_loopback(const struct kbu_io *io,struct kbu_result *out)
+ {
+- if(!io||!out||!io->read||!io->write||!io->wait||!io->now)return EINVAL;
++ if(!io||!out||!io->read||!io->write||!io->wait||!io->now||!io->owner)return EINVAL;
+  memset(out,0,sizeof(*out));
++ if(io->owner->default_state>1){out->error=EBUSY;return EBUSY;}
+  uint32_t saved[KBU_CONFIG_COUNT],root[4],v;int e=0;unsigned saved_count=0;
+  /* PLL is shared with USB/UFS: inspect LUCID layout, never tune/vote it. */
+  static const uint32_t pll_offsets[]={0,4,0xc,0x38,0x40,0x52018};
+@@ -211,7 +216,16 @@
+  KBU_SET(KBU_GCC,0x17734,(root[0]&~0x10371fu)|0x102601u);
+  e=kbu_update_root(io);if(e)goto cleanup;
+  KBU_SET(KBU_SE,0x28,saved[7]|0x7fu);KBU_SET(KBU_SE,0xe30,saved[8]|0xfu);
+- KBU_SET(KBU_SE,0x24,0x7f);e=kbu_write(io,KBU_SE,0x20,1);if(e)goto cleanup;
++ KBU_SET(KBU_SE,0x24,0x7f);
++ /* FORCE_DEFAULT is the one-time port initialization operation, not
++  * ordinary transfer configuration. Repeating it on the live SE6 wedges
++  * this device's bus (actual last-MMIO crash proof). The vendor driver
++  * likewise runs port_setup once, then reuses the initialized engine. */
++ if(io->owner->default_state==0){
++  io->owner->default_state=2;
++  e=kbu_write(io,KBU_SE,0x20,1);if(e)goto cleanup;
++  io->owner->default_state=1;
++ }
+  KBU_SET(KBU_SE,0x7c,0);KBU_SET(KBU_SE,0x22c,1);
+  KBU_SET(KBU_SE,0x254,0);KBU_SET(KBU_SE,0x258,0);
+  KBU_SET(KBU_SE,0x25c,2);KBU_SET(KBU_SE,0x268,8);KBU_SET(KBU_SE,0x26c,0);
+@@ -262,6 +276,7 @@
+    for(unsigned i=0;i<2&&!c;++i){uint32_t status;c=kbu_read(io,KBU_SE,i?0x610:0x640,&status);if(!c&&status)c=EIO;}
+    if(!c)c=kbu_set(io,KBU_SE,0xe1c,saved[0]);
+   }
++  if(io->owner->default_state==2&&!c)c=EIO;
+   out->cleanup_error=c;out->restored=!c;if(!e)e=c;
+  }
+  #undef KBU_SET

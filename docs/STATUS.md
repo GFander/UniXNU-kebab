@@ -1,4 +1,8 @@
-# 当前验收状态（2026-10-31 / 0404；正常默认0405）
+当前阶段验收：0415；正常默认0415。288 common + 4 host / 5248 源码一致。
+
+真实SE6内部UART收发与恢复已实机验收（0414/0415）：每次9组/1225字节、重复调用及完整重启通过；蓝牙控制器、HCI、扫描/连接/传输仍未完成。见[范围报告](BLUETOOTH-UART-20261031.md)。
+
+# 0404/0405历史验收状态（2026-10-31）
 
 新增真实SE6时钟准备和FIFO字段修复：0402/0403各验证首次获取与重复调用，UART协议2、微码修订3、TX16/RX32字且每字32位；0404原版只读Data检查通过，0405正常回归。279 common +4 host /5246源码一致。控制器未上电，无UART字节交换/HCI，蓝牙仍不可用。见[范围报告](BLUETOOTH-SE6-CLOCK-20261031.md)、[实机与源码证据](qualification/0404/README.md)。AKS17/35、真实A/B密钥、剩余daemon和SpringBoard仍待开发；下列为历史基线。
 
@@ -17,4 +21,4 @@
 
 下一顺序：补齐真实密钥和daemon功能 → 结合最新构建重新审核GPU/显示/输入指南 → 实现对应驱动并实机验证 → 可见可用SpringBoard。全部目标仍在进行，每个后续验收小目标整理并上传一次。
 
-已发布源码检查点：[a8fa16a256f2](https://github.com/GFander/UniXNU-kebab/commit/a8fa16a256f29f8dbe5a5de104738b76da7000bf)（ios16分支，SE6时钟与FIFO前置条件）；[发布核对](qualification/0404/publication.json)。完整SpringBoard目标仍在进行。
+已发布源码检查点：[9f48d5969d63](https://github.com/GFander/UniXNU-kebab/commit/9f48d5969d63128914b37c94145555e7a5d93610)（ios16分支，蓝牙固件只读读取）；[发布核对](qualification/0398/publication.json)。完整SpringBoard目标仍在进行。

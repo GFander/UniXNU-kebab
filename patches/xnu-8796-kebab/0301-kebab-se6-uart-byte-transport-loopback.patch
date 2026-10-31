@@ -1,0 +1,357 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -664,6 +664,7 @@
+ 
+ bsd/dev/kebab_geni.c			standard
+ bsd/dev/kebab_bluetooth.c			standard
++bsd/dev/kebab_bt_uart.c			standard
+ 
+ bsd/kern/kebab_bootdiag.c			standard
+ bsd/kern/kebab_apfs_probe.c			standard
+--- a/bsd/dev/kebab_bluetooth.h
++++ b/bsd/dev/kebab_bluetooth.h
+@@ -6,6 +6,7 @@
+ #endif
+ void kebab_bluetooth_hardware_report(void);
+ void kebab_bluetooth_clock_prepare(void);
++void kebab_bluetooth_uart_loopback(void);
+ #ifdef __cplusplus
+ }
+ #endif
+--- /dev/null
++++ b/bsd/dev/kebab_bt_uart.c
+@@ -0,0 +1,71 @@
++/* Explicit SE6 internal loopback; controller reset/power/pins untouched. */
++#if defined(KEBAB)
++#include <sys/types.h>
++#include <sys/errno.h>
++#include <sys/systm.h>
++#include <kern/debug.h>
++#include <kern/clock.h>
++#include <libkern/libkern.h>
++#include <machine/machine_routines.h>
++#include "kebab_geni.h"
++#include "kebab_bluetooth.h"
++#include "kebab_bt_uart_impl.h"
++extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
++extern int get_preemption_level(void);
++static struct { vm_offset_t se,pll,root,vote;bool dead; } kbu_native;
++/* All mappings and I/O require the shared GENI transaction mutex. The
++ * bounded explicit bootstrap test holds it through restore. No automatic
++ * background poller/long-lived receive path or userspace API is published. */
++static int
++kbu_native_address(enum kbu_space space,uint32_t off,bool write,vm_offset_t *address)
++{
++ if(!kbu_allowed(space,off,write))return EINVAL;
++ vm_offset_t *map;uint32_t pa,base,size;
++ if(space==KBU_SE){map=&kbu_native.se;pa=0x00998000;base=0;size=0x4000;}
++ else if(off<0x1000){map=&kbu_native.pll;pa=0x00100000;base=0;size=0x1000;}
++ else if(off==0x52018||off==0x52008){map=&kbu_native.vote;pa=0x00152000;base=0x52000;size=0x1000;}
++ else {map=&kbu_native.root;pa=0x00117000;base=0x17000;size=0x1000;}
++ if(off<base||off-base>size-4)return EINVAL;
++ if(!*map)*map=ml_io_map(pa,size);if(!*map)return ENOMEM;
++ *address=*map+off-base;return 0;
++}
++static int
++kbu_native_read(void *ctx,enum kbu_space space,uint32_t off,uint32_t *v)
++{
++ (void)ctx;if(!v)return EINVAL;vm_offset_t addr;int e=kbu_native_address(space,off,false,&addr);if(e)return e;
++ __asm__ volatile("dsb sy" ::: "memory");*v=*(volatile uint32_t *)addr;
++ __asm__ volatile("dsb sy" ::: "memory");return 0;
++}
++static int
++kbu_native_write(void *ctx,enum kbu_space space,uint32_t off,uint32_t v)
++{
++ (void)ctx;vm_offset_t addr;int e=kbu_native_address(space,off,true,&addr);if(e)return e;
++ __asm__ volatile("dsb sy" ::: "memory");*(volatile uint32_t *)addr=v;
++ __asm__ volatile("dsb sy" ::: "memory");return 0;
++}
++static void kbu_native_wait(void *ctx,uint32_t us){(void)ctx;delay(us);}
++static uint64_t
++kbu_native_now(void *ctx)
++{
++ (void)ctx;uint64_t ticks,ns;clock_get_uptime(&ticks);absolutetime_to_nanoseconds(ticks,&ns);return ns/1000;
++}
++void
++kebab_bluetooth_uart_loopback(void)
++{
++ if(panic_active()||ml_at_interrupt_context()||get_preemption_level()||!ml_get_interrupts_enabled()){
++  printf("KEBAB BTUART: end error=%d unsafe-context; no register access\n",EBUSY);return;
++ }
++ /* Existing acquisition owns only SE6/AHB votes and reports its real result.
++  * Recheck branch accessibility inside our transaction before touching SE6. */
++ kebab_bluetooth_clock_prepare();
++ struct kbu_result out;memset(&out,0,sizeof(out));int e=EBUSY;
++ const struct kbu_io io={kbu_native_read,kbu_native_write,kbu_native_wait,kbu_native_now,NULL};
++ kebab_geni_transaction_lock();
++ if(!kbu_native.dead)e=kbu_loopback(&io,&out);
++ if(out.changed&&!out.restored)kbu_native.dead=true;
++ bool dead=kbu_native.dead;kebab_geni_transaction_unlock();
++ printf("KEBAB BTUART: phase=%u frames=%u tx=%u rx=%u irq=%08x/%08x changed=%u restored=%u cleanup=%d quarantined=%u\n",out.phase,out.frames,out.tx,out.rx,out.mp,out.sp,out.changed,out.restored,out.cleanup_error,dead);
++ printf("KEBAB BTUART: LUCID mode=%08x L=%08x user=%08x opmode=%08x alpha=%08x vote=%08x\n",out.pll[0],out.pll[1],out.pll[2],out.pll[3],out.pll[4],out.pll[5]);
++ printf("KEBAB BTUART: end error=%d internal-SE6-only; no controller/HCI/RF qualification\n",e);
++}
++#endif
+--- /dev/null
++++ b/bsd/dev/kebab_bt_uart_impl.h
+@@ -0,0 +1,230 @@
++/* Fixed SM8250 SE6 bootstrap byte transport; independently implemented from
++ * register facts in LineageOS sm8250 98a7970 (GENI/UART/GCC/LUCID). No Linux
++ * implementation is linked. Internal loopback is not controller/RF proof. */
++enum kbu_space { KBU_SE, KBU_GCC };
++struct kbu_io {
++ int (*read)(void *,enum kbu_space,uint32_t,uint32_t *);
++ int (*write)(void *,enum kbu_space,uint32_t,uint32_t);
++ void (*wait)(void *,uint32_t);
++ uint64_t (*now)(void *);
++ void *ctx;
++};
++struct kbu_result {
++ uint32_t phase,frames,tx,rx,mp,sp,pll[6];
++ int error,cleanup_error;
++ bool changed,restored;
++};
++/* Only ordinary RW configuration is saved. Never restore FIFO, command,
++ * W1C IRQ or status values as if they were configuration. */
++static const uint32_t kbu_config[]={
++ 0xe1c,0xe18,0x614,0x644,0x48,0x4c,0x24,0x28,0xe30,0x7c,
++ 0x22c,0x254,0x258,0x25c,0x260,0x264,0x268,0x26c,0x270,
++ 0x280,0x284,0x288,0x28c,0x294,0x2a4,0x2a8,0x2ac,0x80c,0x810,0x814
++};
++#define KBU_CONFIG_COUNT (sizeof(kbu_config)/sizeof(kbu_config[0]))
++static bool
++kbu_allowed(enum kbu_space space,uint32_t off,bool write)
++{
++ if(space==KBU_GCC){
++  if(off>=0x17730&&off<=0x17740&&!(off&3))return true;
++  if(!write&&(off==0||off==4||off==0xc||off==0x38||off==0x40||off==0x52018||off==0x52008||off==0x17004||off==0x17008||off==0x1772c))return true;
++  return false;
++ }
++ if(space!=KBU_SE)return false;
++ for(unsigned i=0;i<KBU_CONFIG_COUNT;++i)if(off==kbu_config[i])return true;
++ if(write)return off==0x20||off==0x600||off==0x604||off==0x618||off==0x630||off==0x634||off==0x648||off==0x700;
++ return off==0x40||off==0x68||off==0x6c||off==0x610||off==0x640||off==0x780||off==0x800||off==0x804||off==0xe24||off==0xe28;
++}
++static int
++kbu_read(const struct kbu_io *io,enum kbu_space space,uint32_t off,uint32_t *v)
++{return io->read(io->ctx,space,off,v);}
++static int
++kbu_write(const struct kbu_io *io,enum kbu_space space,uint32_t off,uint32_t v)
++{return io->write(io->ctx,space,off,v);}
++static int
++kbu_set(const struct kbu_io *io,enum kbu_space space,uint32_t off,uint32_t v)
++{
++ uint32_t got;int e=kbu_write(io,space,off,v);if(e)return e;
++ e=kbu_read(io,space,off,&got);return e?e:got==v?0:EIO;
++}
++static int
++kbu_poll_clear(const struct kbu_io *io,enum kbu_space space,uint32_t off,uint32_t bits,unsigned count)
++{
++ for(unsigned i=0;i<count;++i){uint32_t v;int e=kbu_read(io,space,off,&v);if(e)return e;if(!(v&bits))return 0;io->wait(io->ctx,1);}
++ return ETIMEDOUT;
++}
++static int
++kbu_update_root(const struct kbu_io *io)
++{
++ uint32_t cmd;int e=kbu_read(io,KBU_GCC,0x17730,&cmd);if(e)return e;
++ e=kbu_write(io,KBU_GCC,0x17730,cmd|1u);if(e)return e;
++ return kbu_poll_clear(io,KBU_GCC,0x17730,1u,500);
++}
++static int
++kbu_stop(const struct kbu_io *io,uint32_t ctrl,uint32_t active)
++{
++ uint32_t v;int e=kbu_read(io,KBU_SE,0x40,&v);if(e||!(v&active))return e;
++ e=kbu_write(io,KBU_SE,ctrl,4);if(e)return e;
++ e=kbu_poll_clear(io,KBU_SE,0x40,active,1000);
++ if(!e)return 0;
++ e=kbu_write(io,KBU_SE,ctrl,2);if(e)return e;
++ return kbu_poll_clear(io,KBU_SE,0x40,active,1000);
++}
++/* Caller retains bytes from a consumed FIFO word when a consumer asks for
++ * fewer than four. This is the same byte reader used by the loopback probe;
++ * a future HCI parser must not depend on FIFO word boundaries. */
++struct kbu_rx { uint32_t word;unsigned remaining; };
++static int
++kbu_receive(const struct kbu_io *io,struct kbu_rx *rx,uint8_t *dst,unsigned capacity,unsigned *received)
++{
++ *received=0;
++ while(*received<capacity){
++  if(!rx->remaining){
++   uint32_t status;int e=kbu_read(io,KBU_SE,0x804,&status);if(e)return e;
++   unsigned words=status&0x1ffffffu;if(words>32)return EIO;if(!words)break;
++   unsigned valid=(status>>28)&7u;
++   if(valid>4)return EIO;
++   rx->remaining=(words==1&&(status&0x80000000u)&&valid)?valid:4;
++   e=kbu_read(io,KBU_SE,0x780,&rx->word);if(e){rx->remaining=0;return e;}
++  }
++  dst[(*received)++]=(uint8_t)rx->word;rx->word>>=8;--rx->remaining;
++ }
++ return 0;
++}
++static int
++kbu_transmit(const struct kbu_io *io,const uint8_t *src,unsigned length,unsigned *sent)
++{
++ *sent=0;uint32_t status;int e=kbu_read(io,KBU_SE,0x800,&status);if(e)return e;
++ unsigned words=status&0xfffffffu;if(words>16)return EIO;
++ unsigned room=(16-words)*4;
++ while(*sent<length&&room){
++  uint32_t word=0;unsigned n=length-*sent;if(n>4)n=4;
++  for(unsigned j=0;j<n;++j)word|=(uint32_t)src[*sent+j]<<(8*j);
++  e=kbu_write(io,KBU_SE,0x700,word);if(e)return e;
++  *sent+=n;room-=4;
++ }
++ return 0;
++}
++static int
++kbu_frame(const struct kbu_io *io,unsigned length,struct kbu_result *out)
++{
++ uint8_t tx[513],rx[513];unsigned sent=0,received=0;struct kbu_rx stash={0,0};
++ if(!length||length>sizeof(tx))return EINVAL;
++ for(unsigned i=0;i<length;++i)tx[i]=(uint8_t)((i*73u+length*19u)^(i>>1));
++ int e=kbu_set(io,KBU_SE,0x270,length);if(e)return e;
++ e=kbu_write(io,KBU_SE,0x600,1u<<27);if(e)return e;
++ uint64_t start=io->now(io->ctx);
++ /* Monotonic deadline AND iteration bound: a broken timer cannot hang USB. */
++ for(unsigned poll=0;poll<100000;++poll){
++  uint32_t m,s,state;unsigned n;
++  e=kbu_read(io,KBU_SE,0x610,&m);if(e)return e;out->mp=m;
++  e=kbu_read(io,KBU_SE,0x640,&s);if(e)return e;out->sp=s;
++  if((m&0x3300000eu)||(s&0x03007e0eu))return EIO;
++  /* Deliberately exercise tiny consumer buffers, including partial words. */
++  unsigned cap=length-received;if(cap>3)cap=3;
++  e=kbu_receive(io,&stash,rx+received,cap,&n);received+=n;out->rx+=n;if(e)return e;
++  if(s&0x0c000000u){e=kbu_write(io,KBU_SE,0x648,s&0x0c000000u);if(e)return e;}
++  /* Loopback is its own peer: bound outstanding bytes to half the RX FIFO.
++   * This pacing belongs to this test, not the generic transmit primitive. */
++  if(received>sent||sent-received>64)return EIO;
++  unsigned budget=64-(sent-received),want=length-sent;
++  if(want>budget)want=budget;
++  if(want>0&&want<length-sent)want&=~3u;
++  e=kbu_transmit(io,tx+sent,want,&n);sent+=n;out->tx+=n;if(e)return e;
++  e=kbu_read(io,KBU_SE,0x40,&state);if(e)return e;
++  if((m&1u)&&!(state&1u)&&sent==length&&received==length){
++   if(stash.remaining||memcmp(tx,rx,length))return EILSEQ;
++   e=kbu_write(io,KBU_SE,0x618,1);if(e)return e;
++   return 0;
++  }
++  if(io->now(io->ctx)-start>=100000)return ETIMEDOUT;
++  io->wait(io->ctx,1);
++ }
++ return ETIMEDOUT;
++}
++static int
++kbu_loopback(const struct kbu_io *io,struct kbu_result *out)
++{
++ if(!io||!out||!io->read||!io->write||!io->wait||!io->now)return EINVAL;
++ memset(out,0,sizeof(*out));
++ uint32_t saved[KBU_CONFIG_COUNT],root[4],v;int e=0;unsigned saved_count=0;
++ /* PLL is shared with USB/UFS: inspect LUCID layout, never tune/vote it. */
++ static const uint32_t pll_offsets[]={0,4,0xc,0x38,0x40,0x52018};
++ out->phase=1;
++ {
++  uint32_t c[4];const uint32_t off[]={0x52008,0x17004,0x17008,0x1772c};
++  for(unsigned i=0;i<4;++i){e=kbu_read(io,KBU_GCC,off[i],&c[i]);if(e)goto done;}
++  if((c[0]&0x100c0u)!=0x100c0u||((c[1]|c[3])&0x80000000u)||((c[2]&0x80000000u)&&!(c[2]&2u))){e=EAGAIN;goto done;}
++ }
++ for(unsigned i=0;i<6;++i){e=kbu_read(io,KBU_GCC,pll_offsets[i],&out->pll[i]);if(e)goto done;}
++ if(!(out->pll[0]&0x80000000u)||!(out->pll[0]&1)||out->pll[1]!=31||
++    ((out->pll[2]>>8)&15)!=1||out->pll[3]!=1||out->pll[4]!=0x4000||!(out->pll[5]&1)){
++  e=EPROTONOSUPPORT;goto done;
++ }
++ out->phase=2;
++ e=kbu_read(io,KBU_SE,0x68,&v);if(e)goto done;if(((v>>8)&255)!=2){e=EPROTONOSUPPORT;goto done;}
++ e=kbu_read(io,KBU_SE,0x6c,&v);if(e)goto done;if(((v>>8)&255)!=2){e=EPROTONOSUPPORT;goto done;}
++ e=kbu_read(io,KBU_SE,0xe24,&v);if(e)goto done;if(((v>>16)&63)!=16||((v>>24)&63)!=32){e=EPROTONOSUPPORT;goto done;}
++ e=kbu_read(io,KBU_SE,0xe28,&v);if(e)goto done;if(((v>>16)&63)!=32||((v>>24)&63)!=32){e=EPROTONOSUPPORT;goto done;}
++ for(unsigned i=0;i<5;++i){
++  const uint32_t offsets[]={0x40,0x800,0x804,0x610,0x640};
++  e=kbu_read(io,KBU_SE,offsets[i],&v);if(e)goto done;if(v){e=EBUSY;goto done;}
++ }
++ e=kbu_read(io,KBU_GCC,0x17730,&v);if(e)goto done;if(v&1){e=EBUSY;goto done;}
++ for(unsigned i=0;i<4;++i){e=kbu_read(io,KBU_GCC,0x17734+4*i,&root[i]);if(e)goto done;}
++ for(unsigned i=0;i<KBU_CONFIG_COUNT;++i){e=kbu_read(io,KBU_SE,kbu_config[i],&saved[i]);if(e)goto done;++saved_count;}
++ /* No live DMA or interrupt consumer may be displaced. */
++ if(saved[0]||saved[1]||saved[12]&1){e=EBUSY;goto done;}
++ out->changed=true;out->phase=3;
++ /* Polled bootstrap: local status latches enabled, CPU IRQ routing stays0. */
++ #define KBU_SET(space,off,val) do{e=kbu_set(io,space,off,val);if(e)goto cleanup;}while(0)
++ KBU_SET(KBU_SE,0x48,0);KBU_SET(KBU_SE,0x4c,0);
++ KBU_SET(KBU_GCC,0x17738,(root[1]&0xffff0000u)|384u);
++ KBU_SET(KBU_GCC,0x1773c,(root[2]&0xffff0000u)|0xc476u);
++ KBU_SET(KBU_GCC,0x17740,(root[3]&0xffff0000u)|0xc2f6u);
++ KBU_SET(KBU_GCC,0x17734,(root[0]&~0x10371fu)|0x102601u);
++ e=kbu_update_root(io);if(e)goto cleanup;
++ KBU_SET(KBU_SE,0x28,saved[7]|0x7fu);KBU_SET(KBU_SE,0xe30,saved[8]|0xfu);
++ KBU_SET(KBU_SE,0x24,0x7f);e=kbu_write(io,KBU_SE,0x20,1);if(e)goto cleanup;
++ KBU_SET(KBU_SE,0x7c,0);KBU_SET(KBU_SE,0x22c,1);
++ KBU_SET(KBU_SE,0x254,0);KBU_SET(KBU_SE,0x258,0);
++ KBU_SET(KBU_SE,0x25c,2);KBU_SET(KBU_SE,0x268,8);KBU_SET(KBU_SE,0x26c,0);
++ KBU_SET(KBU_SE,0x280,0);KBU_SET(KBU_SE,0x28c,8);KBU_SET(KBU_SE,0x294,160);
++ KBU_SET(KBU_SE,0x2a4,0);KBU_SET(KBU_SE,0x2a8,0);KBU_SET(KBU_SE,0x2ac,0);
++ /* Four 8-bit symbols in each 32-bit FIFO word, low byte first. */
++ KBU_SET(KBU_SE,0x260,0x4380e);KBU_SET(KBU_SE,0x264,0xc3e0e);
++ KBU_SET(KBU_SE,0x284,0x4380e);KBU_SET(KBU_SE,0x288,0xc3e0e);
++ KBU_SET(KBU_SE,0x80c,2);KBU_SET(KBU_SE,0x810,16);KBU_SET(KBU_SE,0x814,28);
++ KBU_SET(KBU_SE,0x614,0x3300003fu);KBU_SET(KBU_SE,0x644,0x0f007e3fu);
++ KBU_SET(KBU_SE,0x48,0x41);KBU_SET(KBU_SE,0x4c,0x41);
++ out->phase=4;e=kbu_write(io,KBU_SE,0x630,(1u<<27)|0x80u);if(e)goto cleanup;
++ {
++  static const unsigned lengths[]={1,3,4,63,64,65,255,257,513};
++  for(unsigned i=0;i<sizeof(lengths)/sizeof(lengths[0]);++i){
++   e=kbu_frame(io,lengths[i],out);if(e)goto cleanup;++out->frames;
++  }
++ }
++ out->phase=5;
++cleanup:
++ {
++  int c=kbu_stop(io,0x604,1);int s=kbu_stop(io,0x634,1u<<12);
++  if(!c)c=s;
++  /* Never change clocks/config under an engine which failed to stop. */
++  if(!c){
++   for(unsigned i=0;i<2;++i){uint32_t status;int x=kbu_read(io,KBU_SE,i?0x640:0x610,&status);if(!x)x=kbu_write(io,KBU_SE,i?0x648:0x618,status);if(!c)c=x;}
++   uint32_t status;int x=kbu_read(io,KBU_SE,0x804,&status);if(!x&&(status&0x1ffffffu))x=EIO;if(!c)c=x;
++  }
++  if(!c){
++   c=kbu_set(io,KBU_SE,0x48,0);if(!c)c=kbu_set(io,KBU_SE,0x4c,0);
++   for(unsigned i=0;i<4&&!c;++i)c=kbu_set(io,KBU_GCC,0x17734+i*4,root[i]);
++   if(!c)c=kbu_update_root(io);
++   /* Clocks restored last, after every other ordinary config word. */
++   for(unsigned i=saved_count;i>0&&!c;){--i;if(i==4||i==5)continue;c=kbu_set(io,KBU_SE,kbu_config[i],saved[i]);}
++   if(!c)c=kbu_set(io,KBU_SE,0x4c,saved[5]);if(!c)c=kbu_set(io,KBU_SE,0x48,saved[4]);
++  }
++  out->cleanup_error=c;out->restored=!c;if(!e)e=c;
++ }
++ #undef KBU_SET
++done:
++ out->error=e;return e;
++}
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -274,6 +274,8 @@
+ #define UD_REBOOT_BTFW_REPORT 34u
+ #define UD_REBOOT_BTHW_REPORT 35u
+ #define UD_REBOOT_BTCLK_PREPARE 36u
++#define UD_REBOOT_BTUART_LOOPBACK 37u
++extern void kebab_bluetooth_uart_loopback(void);
+ extern void kebab_bluetooth_clock_prepare(void);
+ extern void kebab_bluetooth_hardware_report(void);
+ extern void kebab_bluetooth_firmware_report(void);
+@@ -1463,6 +1465,9 @@
+ 		    sizeof("DRV?\n") - 1)) {
+ 			return UD_REBOOT_DRV_REPORT;
+ 		}
++		if (ud_command_seen(buf, received, "BTUART\n", sizeof("BTUART\n") - 1)) {
++			return UD_REBOOT_BTUART_LOOPBACK;
++		}
+ 		if (ud_command_seen(buf, received, "BTCLK\n", sizeof("BTCLK\n") - 1)) {
+ 			return UD_REBOOT_BTCLK_PREPARE;
+ 		}
+@@ -1725,6 +1730,8 @@
+ 		kebab_pid1_report();
+ 	} else if (command == UD_REBOOT_QSEELOG_REPORT) {
+ 		kebab_qsee_log_report();
++	} else if (command == UD_REBOOT_BTUART_LOOPBACK) {
++		kebab_bluetooth_uart_loopback();
+ 	} else if (command == UD_REBOOT_BTCLK_PREPARE) {
+ 		kebab_bluetooth_clock_prepare();
+ 	} else if (command == UD_REBOOT_BTHW_REPORT) {

@@ -1,0 +1,17 @@
+--- a/bsd/dev/kebab_bt_uart_impl.h
++++ b/bsd/dev/kebab_bt_uart_impl.h
+@@ -157,8 +157,12 @@
+   if((c[0]&0x100c0u)!=0x100c0u||((c[1]|c[3])&0x80000000u)||((c[2]&0x80000000u)&&!(c[2]&2u))){e=EAGAIN;goto done;}
+  }
+  for(unsigned i=0;i<6;++i){e=kbu_read(io,KBU_GCC,pll_offsets[i],&out->pll[i]);if(e)goto done;}
+- if(!(out->pll[0]&0x80000000u)||!(out->pll[0]&1)||out->pll[1]!=31||
+-    ((out->pll[2]>>8)&15)!=1||out->pll[3]!=1||out->pll[4]!=0x4000||!(out->pll[5]&1)){
++ /* In hardware FSM mode ACTIVE_FLAG is authoritative (vendor enable
++  * waits for it); software OPMODE can remain STANDBY. Manual control
++  * instead requires RUN and global OUTCTRL. Never change shared PLL. */
++ if(!(out->pll[0]&0x80000000u)||
++    ((out->pll[0]&(1u<<20))?!(out->pll[0]&(1u<<30)):(!(out->pll[0]&1)||out->pll[3]!=1))||
++    out->pll[1]!=31||((out->pll[2]>>8)&15)!=1||out->pll[4]!=0x4000||!(out->pll[5]&1)){
+   e=EPROTONOSUPPORT;goto done;
+  }
+  out->phase=2;
