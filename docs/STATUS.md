@@ -1,3 +1,7 @@
+最新触摸协议前置检查点0433：300 common+4 host /5260源码一致。
+
+已修复S3908续读前缀错位及超过GENI64B上限的完整配置发送；真实控制器接受128B配置，原版触摸HID/EventDriver启动。**尚无实机手势验收，不能声称触摸可用**。0431–0433原密钥/加密Data/MKB/defaults/watchdog回归通过。音量键实机验收仍见0430；GPU、显示呈现与可用SpringBoard未完成，蓝牙延期。见[本轮范围](TOUCH-PROTOCOL-20261031.md)及[限定验收资料](qualification/0433/README.md)。以下是历史阶段。
+
 最新输入阶段：0429/0430，正常默认0430。297 common +4 host /5259源码一致。
 
 实机音量上/下的按下、松开已被原版HID解析器接受，并匹配原版IOHIDInterface/EventDriver；已修复RTC/NVRAM误把Data设备号写死为1/3的问题，真实1/4挂载保留全部原认证检查。两次正常启动的原密钥、加密Data、MKB、defaults与watchdog回归通过。触摸、界面事件消费、GPU、显示呈现及可用SpringBoard仍未完成；蓝牙继续延期。见[本轮范围](HID-INPUT-AND-DATA-IDENTITY-20261031.md)及[验收资料](qualification/0430/README.md)。以下为历史阶段。

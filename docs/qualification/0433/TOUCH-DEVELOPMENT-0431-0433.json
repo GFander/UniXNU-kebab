@@ -1,0 +1,247 @@
+{
+  "stages": {
+    "0431": {
+      "normal_regression": {
+        "version": "0431",
+        "defaults_matching_complete": true,
+        "actual_log_sha256": "32ad193c46cf49f7165c2d36ee5050822e6fdad054634f633ad08370b4db7e02",
+        "native_sha256": "5fe9615f1da3d10fc4a9d2ef3e88204031da5a67d6ded6a4dbf89c906c6046cb",
+        "real_apple_image4_start_succeeded": true,
+        "actual_busy_reference_released": true,
+        "busy_lifecycle": [
+          [
+            0,
+            0,
+            1,
+            "defaults"
+          ],
+          [
+            11,
+            1,
+            1,
+            "AppleImage4"
+          ],
+          [
+            14,
+            2,
+            -1,
+            "defaults"
+          ],
+          [
+            15,
+            1,
+            -1,
+            "AppleImage4"
+          ]
+        ],
+        "final_busy_state": 0,
+        "actual_waits": [
+          "IOAESAccelerator",
+          "IOResources/IONVRAM",
+          "IODTNVRAM"
+        ],
+        "hardware_nonce_and_data_restored_without_generation": true,
+        "native_nvram_existing_proxy_adopted": true,
+        "nvram_encrypted_data_banks_cold_restored": true,
+        "nvram_restored_bank": 1,
+        "nvram_restored_generation": 268,
+        "nvram_hardware_or_rollback_claim": false,
+        "nvram_durable_write_calls": 2,
+        "watchdog_enabled": true,
+        "original_iokit_monitoring_preserved": true,
+        "watchdog_heartbeat_times": [
+          41.9,
+          41.9,
+          51.882,
+          61.876,
+          71.888,
+          81.883,
+          91.917,
+          101.892,
+          111.938,
+          121.914,
+          131.889,
+          141.924,
+          151.939,
+          161.914,
+          171.887,
+          181.937
+        ],
+        "original_locked_observations": [
+          [
+            63.811,
+            30,
+            4
+          ],
+          [
+            93.848,
+            60,
+            7
+          ],
+          [
+            123.846,
+            90,
+            10
+          ],
+          [
+            153.872,
+            120,
+            13
+          ],
+          [
+            183.93,
+            150,
+            16
+          ]
+        ],
+        "systembag_and_hardware_c_d_preserved": true,
+        "rtc_record_reused": true,
+        "panic": [],
+        "full_ios_or_springboard": false,
+        "gpu_display_input_started": true
+      },
+      "touch_qualified": false,
+      "reason": "Continued-read prefix a5/03 incorrectly included as payload; shifted app metadata"
+    },
+    "0432": {
+      "normal_regression": {
+        "version": "0432",
+        "defaults_matching_complete": true,
+        "actual_log_sha256": "1081e4608e0137806c2200838badb9a34ae3fa833873e07db788b34360c577b5",
+        "native_sha256": "64a3890eff029c492be43768236728dc9f6559bd01cc854ee259c45aac907404",
+        "real_apple_image4_start_succeeded": true,
+        "actual_busy_reference_released": true,
+        "busy_lifecycle": [
+          [
+            0,
+            0,
+            1,
+            "defaults"
+          ],
+          [
+            11,
+            1,
+            1,
+            "AppleImage4"
+          ],
+          [
+            14,
+            2,
+            -1,
+            "defaults"
+          ],
+          [
+            15,
+            1,
+            -1,
+            "AppleImage4"
+          ]
+        ],
+        "final_busy_state": 0,
+        "actual_waits": [
+          "IOAESAccelerator",
+          "IOResources/IONVRAM",
+          "IODTNVRAM"
+        ],
+        "hardware_nonce_and_data_restored_without_generation": true,
+        "native_nvram_existing_proxy_adopted": true,
+        "nvram_encrypted_data_banks_cold_restored": true,
+        "nvram_restored_bank": 0,
+        "nvram_restored_generation": 273,
+        "nvram_hardware_or_rollback_claim": false,
+        "nvram_durable_write_calls": 2,
+        "watchdog_enabled": true,
+        "original_iokit_monitoring_preserved": true,
+        "watchdog_heartbeat_times": [
+          41.988,
+          42.051,
+          52.037,
+          62.012,
+          72.005,
+          82.007,
+          92.006,
+          102.054,
+          112.048,
+          122.057,
+          131.999,
+          142.0,
+          152.056,
+          162.037,
+          172.059,
+          182.052,
+          192.046,
+          202.043,
+          212.029,
+          222.043,
+          232.045,
+          242.06,
+          252.059,
+          262.042,
+          272.039,
+          282.016,
+          292.064
+        ],
+        "original_locked_observations": [
+          [
+            63.889,
+            30,
+            4
+          ],
+          [
+            93.876,
+            60,
+            7
+          ],
+          [
+            123.931,
+            90,
+            10
+          ],
+          [
+            153.926,
+            120,
+            13
+          ],
+          [
+            183.989,
+            150,
+            16
+          ],
+          [
+            214.024,
+            180,
+            19
+          ],
+          [
+            244.06,
+            210,
+            22
+          ],
+          [
+            274.098,
+            240,
+            25
+          ]
+        ],
+        "systembag_and_hardware_c_d_preserved": true,
+        "rtc_record_reused": true,
+        "panic": [],
+        "full_ios_or_springboard": false,
+        "gpu_display_input_started": true
+      },
+      "touch_qualified": false,
+      "reason": "Correct app metadata proved; full128B report config refused by existing64B GENI write limit before transmission"
+    }
+  },
+  "bluetooth_deferred": true,
+  "no_firmware_download": true,
+  "current": "0433",
+  "pending": "Real touch/HID physical tests, normal restart qualification and publication",
+  "last_published_normal": "0430",
+  "source": {
+    "common": 300,
+    "host": 4,
+    "files": 5260,
+    "private_and_public_replay": true
+  }
+}

@@ -1,0 +1,54 @@
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -760,6 +760,13 @@
+ }
+ 
+ static int
++kt_tcm_wire_write(void *context, const uint8_t *bytes, uint32_t length)
++{
++    (void)context;
++    return kebab_geni_i2c_write(bytes, length);
++}
++
++static int
+ kt_tcm_read_header(uint8_t cmd, kebab_tcm_header *header)
+ {
+     uint8_t bytes[KEBAB_TCM_HEADER_SIZE];
+@@ -810,7 +817,7 @@
+ 	}
+ 	kebab_geni_trace("KEBAB TOUCH: TCM command 0x%02x, %u payload byte(s)\n", cmd,
+ 	    len);
+-	err = kebab_geni_i2c_write(out, written);
++	err = kebab_tcm_wire_command(out, written, kt_tcm_wire_write, NULL);
+ 	if (err != 0) {
+ 		printf("KEBAB TOUCH: command 0x%02x was not written\n", cmd);
+ 		return -1;
+--- a/bsd/dev/kebab_tcm_wire.h
++++ b/bsd/dev/kebab_tcm_wire.h
+@@ -28,4 +28,26 @@
+     }
+     return out[length]==KEBAB_TCM_PADDING?0:-1;
+ }
++/* The bounded GENI backend carries at most64 bytes per I2C transaction.
++ * Preserve the complete command/LE payload length and use the controller's
++ * CONTINUE_WRITE opcode on subsequent chunks, as in the matched vendor API.
++ * A partial command is never retried or acknowledged as complete here. */
++typedef int (*kebab_tcm_wire_write)(void *,const uint8_t *,uint32_t);
++static inline int
++kebab_tcm_wire_command(const uint8_t *command,uint32_t length,
++    kebab_tcm_wire_write write,void *context)
++{
++    if (!command || !write || length<3 || length>KEBAB_TCM_REPORT_CONFIG_MAX+3 ||
++        ((uint32_t)command[1]|((uint32_t)command[2]<<8))+3!=length) return -1;
++    uint8_t chunk[KEBAB_TCM_WIRE_CHUNK];
++    uint32_t offset=1,remaining=length-1;
++    while (remaining) {
++        uint32_t bytes=remaining>KEBAB_TCM_WIRE_CHUNK-1?KEBAB_TCM_WIRE_CHUNK-1:remaining;
++        chunk[0]=offset==1?command[0]:0x01;
++        for (uint32_t i=0;i<bytes;i++) chunk[i+1]=command[offset+i];
++        if (write(context,chunk,bytes+1)) return -1;
++        offset+=bytes;remaining-=bytes;
++    }
++    return 0;
++}
+ #endif
