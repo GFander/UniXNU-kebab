@@ -1,0 +1,68 @@
+{
+  "passed": true,
+  "source_sha256": {
+    "ec_c25519_m31.c": "4ef0fbaaddafb6262c0510dcae657377aa05fd7b3c80431056d1ec0efd654aa8",
+    "inner.h": "4a7e65d4ad64a5820ae4278a26015ff82011a7960bd9ceea6b40c4d903704fd8",
+    "ccopy.c": "5163871149faa35a4ba026a915743065238fc94cc4312f02867a4f50ff2631f8",
+    "kebab_x25519.c": "bbad950f49ff284468e7f863d2a33a8e5cbd189ad66e2842515022a5c837634a"
+  },
+  "test_sha256": "90e6221a71609752cc2b87a8e459e8f824793f1bcf0289d7f0440d41e2821368",
+  "vectors_sha256": "faba5f882d61e4d84ca408fe130f45804f4ee5cb604ff7cf13b9f2ffb2b4ec23",
+  "mutants": [
+    {
+      "name": "low-order",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    },
+    {
+      "name": "point-high-bit",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    },
+    {
+      "name": "scalar-clamp",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    },
+    {
+      "name": "failed-output",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    },
+    {
+      "name": "wipe-scalar",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    },
+    {
+      "name": "kdf-counter",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    },
+    {
+      "name": "kdf-parties",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    },
+    {
+      "name": "kdf-provider-error",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    },
+    {
+      "name": "kdf-zero-secret",
+      "compiled": true,
+      "behavior_rejected": true,
+      "exit": -6
+    }
+  ],
+  "compile_failures_counted_as_refusals": false
+}

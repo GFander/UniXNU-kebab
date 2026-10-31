@@ -1,0 +1,25 @@
+{
+  "passed": true,
+  "component_only": true,
+  "classB_backend_implemented": false,
+  "physical_test": false,
+  "independent_vectors": 514,
+  "kdf_independent_vectors": 514,
+  "kdf_transcript": "BE32(1)||Z32||ephemeral-public32||class-public32;SHA256",
+  "kdf_provider_error_zero_shared_and_alias_tests": true,
+  "rfc1000_iterations": true,
+  "all_zero_rejected_without_output_mutation": true,
+  "high_bit_and_partial_alias_tests": true,
+  "temporary_wipe_regions_per_exchange": 17,
+  "temporary_wipe_bytes_per_exchange": 600,
+  "comparison": "cryptography46/OpenSSL X25519 + exact RFC7748 strings; Python ConcatKDFHash vs production KDF with OpenSSL SHA256",
+  "source_sha256": {
+    "ec_c25519_m31.c": "4ef0fbaaddafb6262c0510dcae657377aa05fd7b3c80431056d1ec0efd654aa8",
+    "inner.h": "4a7e65d4ad64a5820ae4278a26015ff82011a7960bd9ceea6b40c4d903704fd8",
+    "ccopy.c": "5163871149faa35a4ba026a915743065238fc94cc4312f02867a4f50ff2631f8",
+    "kebab_x25519.c": "bbad950f49ff284468e7f863d2a33a8e5cbd189ad66e2842515022a5c837634a"
+  },
+  "vectors_sha256": "faba5f882d61e4d84ca408fe130f45804f4ee5cb604ff7cf13b9f2ffb2b4ec23",
+  "test_sha256": "90e6221a71609752cc2b87a8e459e8f824793f1bcf0289d7f0440d41e2821368",
+  "rfc7748_sha256": "279ca0ecc5e92e2962e27b846986aeb74729d9dd34bd4a04a362f80dcb596ad3"
+}
