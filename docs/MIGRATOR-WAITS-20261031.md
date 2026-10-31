@@ -1,0 +1,15 @@
+# 数据迁移的真实 PreBoard 解锁等待：0446
+
+0445已定位SpringBoard同步check-in和backboardd的DataMigration同步调用。0446读取原版迁移服务接收端，确认阻塞发生在解锁阶段，尚未进入迁移插件执行。原版数据迁移、PreBoard以及所有信号/状态条件保留。
+
+旧PROC?显示com.apple.datami，因为XNU proc_name复制截断的p_comm。0332新增正常控制台固定MIG?：在proc锁内复制完整proc_best_name到proc_name_t大小缓冲，只接受精确com.apple.datamigrator及parent1，报告真实UID。名称可被进程修改，故它只是诊断标识，不用于授权；没有任意名称/PID/map输入或权限授予。沿用已验证的task/thread/map引用及等待现场读取，每次最多512进程、32线程、16对用户帧、64KiB窗口，拒绝运行中线程和kernel pmap；目标可恢复，因此是best-effort观察。旧UI/BBOARD/PID1行为及完整panic dispatcher保持。
+
+实机在132.066与347.841秒均选中迁移服务130/UID501，其线程754均经dispatch semaphore等待，原调用位置为MigratorAlternateAppDelegate::waitUntilPreboardDidFinishUnlock（原址0x10000a0b4），调用者DMMigrator::_unlockKeyBagUseOfForceIsAuthorized（原调用0x10000b8f0）。另有多个XPC处理线程等待DMMigrationState启动迁移的同步队列。原版PreBoard仍在UIKit事件循环，SpringBoard继续等待check-in；没有把进程存在计为可用界面。
+
+匹配20H392原程序在0x10000b864调用MKBGetDeviceLockState(NULL)，只在返回0或3时不进入上述PreBoard等待。匹配MobileKeyBag在0x1ae3df468调用原__get_device_lock_state；无选项路径经0x1ae3e082c选择17。原AppleKeyStore aks_get_device_state以1个scalar及最多4096字节struct输出调用内核，再交原_decode_extended_state解析。当前已编译原生user client没有selector17实现，实机反复返回e00002c7；原MKB错误映射将此错误归入-1路径。因此状态查询是明确缺失的功能接口。运行时没有额外直接读取MKB返回寄存器，完整接口数据与状态字段仍需实现和实机核对。
+
+下一步应从现有已认证硬件密钥包的真实策略和可访问密钥派生状态，接通原消费者，不修改迁移判断、伪造完成通知或解除未支持的密钥限制。当前工厂包仅C/D，A/B、passcode和SEP仍未实现。参考[Apple对keybag状态的说明](https://support.apple.com/en-au/guide/security/sec6483d5760/web)：解锁状态取决于包内密钥可访问且成功解包。另复查[上游固定版本AppleKeyStoreState](https://github.com/UniXNU/AppleKeyStoreState/blob/42ff83e08b2265fe741d4adaf084bebe003452ba/NativeKeyStoreEvents.cpp)，它明确是offline状态fixture；其固定无锁响应没有照搬。
+
+原生SHA7e6d8a453171ee30d4a596c37996d03b4a388ef05d426072f127465b54b5f5f7/18914376字节。BSD/Mach/USB目标编译、完整构建通过；311common+4host两套完整回放与5261个实际编译源码一致；207原HID槽位核对通过。公开runner编译3份完整生产观察器/parser/dispatcher，ASAN/UBSAN正常路径通过并拒绝24个行为变异，覆盖长名称截断/前缀、parent、锁上下文、扫描/帧边界、引用和panic路径。host task/scheduler/map/nofault/外围动作是明确模型；实机MIG?两次均实际完成。初版host自定义strlcpy与Linux已有声明冲突，改用真实libc后测试通过，生产代码未因此改动。
+
+封存窗口原watchdog到574.290秒，Root/nonce、原MKB/systembag、加密Data C/D、RTC/NVRAM/defaults、selector29和HIDready保持。旧FBS零缩放断言未复现；初次blockSystemApp SIGKILL仍原样发生。用户120Hz为硬件目标，真实120Hz/呈现/GPU/可用SpringBoard均未验收，触摸采样等其回来，蓝牙延期。保持development-fast；最近独立RO Data fsck0416、完整System/SystemOS0341，没有新增全量校验、格式化或密钥生成。

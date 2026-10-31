@@ -1,0 +1,40 @@
+{
+  "cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+  "build": "20H392",
+  "original_binary": {
+    "build": "20H392",
+    "read_only_original": true,
+    "files": {
+      "datamigrator": {
+        "sha256": "979848942d141c57289b8092ea68e396133cc99162ba308f7192316d669caa52",
+        "bytes": 200752,
+        "uuid": "708912fb4c533e4db6cac38af2f3521d",
+        "path": "/System/Library/PrivateFrameworks/DataMigration.framework/XPCServices/com.apple.datamigrator.xpc/com.apple.datamigrator",
+        "bundle_identifier": "com.apple.datamigrator",
+        "xpc_role_account": "mobile"
+      }
+    },
+    "runtime_uuid_independently_read": false
+  },
+  "read_only_originals": true,
+  "migrator_wait_call": "0x10000b8f0",
+  "migrator_lock_query": "0x10000b864 MKBGetDeviceLockState(NULL)",
+  "migrator_fast_paths": "0x10000b868/0x10000b86c allow return0 or3; other returns lead to PreBoard wait",
+  "mkb_export": "0x1ae3df468",
+  "mkb_common_helper": "0x1ae3e0130 __get_device_lock_state",
+  "mkb_normal_state_stub": "0x1ae3e082c sets selector0x11",
+  "aks_export": "0x1f2ec5d20 aks_get_device_state",
+  "aks_original_io_connect_call": "0x1f2ec5dc8 scalar1, output<=4096",
+  "aks_original_state_decoder": "0x1f2eb50f8 _decode_extended_state",
+  "mkb_error_map": "0x1ae3e0654; e00002c7 follows default0x1ae3e0784, optional logging, then w8=-1 at0x1ae3e07cc",
+  "native_aks_source_sha256": "404c071523d755936c2eceaab02617f38eb967c186940f67f3447915eec85feb",
+  "native_selector17_supported": false,
+  "native_state17_errors": 759,
+  "native_state17_error": "e00002c7",
+  "raw_mkb_return_independently_sampled": false,
+  "current_factory_bank": "authenticated hardware-root-backed C/D only; A/B/passcode/SEP unsupported",
+  "upstream_state_only_reference": "https://github.com/UniXNU/AppleKeyStoreState/blob/42ff83e08b2265fe741d4adaf084bebe003452ba/NativeKeyStoreEvents.cpp",
+  "upstream_fixture_not_adopted": true,
+  "apple_state_semantics_reference": "https://support.apple.com/en-au/guide/security/sec6483d5760/web",
+  "next": "Implement only truthful authenticated backend status semantics, validate actual original decoder and consumer; retain failures for missing class/key operations"
+}
