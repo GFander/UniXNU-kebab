@@ -1,0 +1,142 @@
+{
+  "passed": true,
+  "version": "0466",
+  "physical_test": false,
+  "whole_native_build": false,
+  "records": [
+    {
+      "translation_unit": "kebab_file_keys",
+      "compiler_record_sha256": "e5792f35248148ddc951ed9d7d00dffd07e1f19cdff0593dec1cf46c081318b7",
+      "record_from": "kebab_file_keys",
+      "passed": true,
+      "warnings": 84,
+      "errors": 0
+    },
+    {
+      "translation_unit": "KebabKeyStore",
+      "compiler_record_sha256": "3044dea0f41de5754f37bd1286ff950f92c4baf71ad568fb6825298d9d83c4b7",
+      "record_from": "KebabKeyStore",
+      "passed": true,
+      "warnings": 14,
+      "errors": 0
+    },
+    {
+      "translation_unit": "KebabBlockStorageDevice",
+      "compiler_record_sha256": "776ce0221ff377ef3408825d746287107fc3439195f0e63325fe8c06848aac5f",
+      "record_from": "KebabBlockStorageDevice",
+      "passed": true,
+      "warnings": 4,
+      "errors": 0
+    },
+    {
+      "translation_unit": "vfs_vnops",
+      "compiler_record_sha256": "c2408a49a50c1683da2fbd8fc80c1394c2c30ed2368a5aab2e2e9219bd828e6d",
+      "record_from": "vfs_vnops",
+      "passed": true,
+      "warnings": 7,
+      "errors": 0
+    },
+    {
+      "translation_unit": "vfs_cprotect",
+      "compiler_record_sha256": "ae855a635107771b90880436a42303f68c074237b473a9081413dc52616aa3d1",
+      "record_from": "vfs_cprotect",
+      "passed": true,
+      "warnings": 8,
+      "errors": 0
+    },
+    {
+      "translation_unit": "kebab_apfs_probe",
+      "compiler_record_sha256": "c470a5ec4f804c4fcd4dab6191bd8535db948f57e0952fc2248224a402873edf",
+      "record_from": "kebab_apfs_probe",
+      "passed": true,
+      "warnings": 46,
+      "errors": 0
+    },
+    {
+      "translation_unit": "kebab_b_file_lifecycle",
+      "compiler_record_sha256": "e5792f35248148ddc951ed9d7d00dffd07e1f19cdff0593dec1cf46c081318b7",
+      "record_from": "kebab_file_keys",
+      "passed": true,
+      "warnings": 8,
+      "errors": 0
+    }
+  ],
+  "source_changes": {
+    "bsd/kern/kebab_file_keys.c": {
+      "before": "266dfeba94943833fce2ea381009c69188aef7f654b78ca1aca86023106c0791",
+      "after": "9d2cfd857fa303442ff696547a679f69f83c9c4e16448da02cd564cd9db465ba"
+    },
+    "bsd/kern/kebab_device_classbag_impl.h": {
+      "before": "40f89236e0448bf9c0feb12d73ddb8df354ab648b5b56ea1ef16a1c3aea33cb6",
+      "after": "e0a5a583f30f92ed14c497afdc53951e38fe07379633e3e4ec22e128ffe83ab2"
+    },
+    "bsd/kern/kebab_file_keys.h": {
+      "before": "0bc57bffa4fad2a192e0417a55b5e82709d1fbfb79f467a47dedcc1fe486bafb",
+      "after": "454be754859d382c9302ec0a035503fe1ebeb9c44dae0fe4debaa0ca95181a87"
+    },
+    "bsd/kern/kebab_device_classbag_file_impl.h": {
+      "before": "3bf6f5adde8eaea797c1af9a4397b98f3467f04ea7d45f9c4e619f176f4a85a2",
+      "after": "f2df3e5ac54baea72c0e733a7f74fcb960a245bb16316bb3ef069a4a1fdb3423"
+    },
+    "bsd/kern/kebab_apfs_file_native_impl.h": {
+      "before": "51254d08bc1c0861166451a1be930c0db60f65d2fa44de79a90f57c017da747e",
+      "after": "ecb43ce24a917435c27ddeaa68dd589c635abe5f700c0d2e06e5ce3fde98d3fb"
+    },
+    "bsd/kern/kebab_keychain_keys_impl.h": {
+      "before": "3524081cc9c5782b90e224afb977fb16f5171b6086b6372e9a03a2d8198c8bf2",
+      "after": "7665dca9cb94a970a5a20731a8d35fa948f7d655e04adde00058ab2c2417268b"
+    },
+    "bsd/kern/kebab_class_b_math_impl.h": {
+      "before": "6c77b03a2915ea18920342bc4a31a37cefac863d16622b7d942274bf810caa8a",
+      "after": "ee898fa02354c23485af4fe19e4a6a9992eef045b92bb57ba6dcea24ffe254af"
+    },
+    "bsd/kern/kebab_data_files_impl.h": {
+      "before": "2ece9903c1a8b896b8e2475d25dff6e0e616a049f85ac457d560fa35d283d5ee",
+      "after": "2e72ceda701e6539d135469851712e610b96fbe88a40040627951bb170bdfcb0"
+    },
+    "iokit/Kernel/arm/kebab_aks_userclient_impl.h": {
+      "before": "1dad411f77af815ded6f9e9929862e06530ce871cee3d6a86065b1b7c1f763ea",
+      "after": "10434144a1fe19f3c7b0cd5799b5c2d7030a2e04a0fe8885fa4df85d48a7ae28"
+    },
+    "iokit/Kernel/arm/kebab_block_crypto_impl.h": {
+      "before": "4585f4a6427945e9493f498505bc9f2062412f5725cd67f0219b6ef104728831",
+      "after": "cccc0c4b4f591a0a5e4c5ac79feee369dc2cb7c0e798cc9cb7ddd6e5e80a1197"
+    },
+    "bsd/vfs/vfs_vnops.c": {
+      "before": "83cf1c62cf33772edc11dde1bf8822d52a1fc99329ecfcbfd4814497d034e47e",
+      "after": "54f0c472f990570924e29bbb636a5c05db6d6c1dd697d1de57f81e0ebbc2befa"
+    },
+    "bsd/vfs/vfs_cprotect.c": {
+      "before": "b3ecd75412e9b50384b4dac78ef606b21effc15d434985289cf41d03560bf253",
+      "after": "0b9fa33dea2743c77d28c6d07ff6a0011360118128d851c862c6b2cc1473452b"
+    },
+    "bsd/conf/files": {
+      "before": "f5b59ec0ace1b9b08f48fa5bbcefa709e02c1abe231bd465b8fbdf0de40a52a7",
+      "after": "79dd6a599057f60b14d9c0e7e2a15cd34ece0b1a49dde38ebb642b725f2ab245"
+    },
+    "bsd/kern/kebab_keybag_state_impl.h": {
+      "before": null,
+      "after": "86f9ff991327ee183de24c76ddb02899def6411c45217b109838c6674e0ee893"
+    },
+    "bsd/kern/kebab_keybag_events_impl.h": {
+      "before": null,
+      "after": "6e2fd71b505dc678a940904ef18dc048627e85358eab482c8ae5e35acad9a792"
+    },
+    "bsd/kern/kebab_apfs_file_b_impl.h": {
+      "before": null,
+      "after": "2659933758aa8f1c614ea149592945b04a166accb12f6e45f347cc6f6e2d61ef"
+    },
+    "bsd/kern/kebab_b_file_lifecycle.c": {
+      "before": null,
+      "after": "6126337ed51938ca8e859faf81598c8056a2729fe385155e46d3e20d15bd8623"
+    },
+    "iokit/Kernel/arm/kebab_aks_device_lock_impl.h": {
+      "before": null,
+      "after": "1132ede7b4a1ff65c37b88d6d42090bf8de1d40dcaab0e587c6bd62202026277"
+    },
+    "bsd/kern/kebab_b_file_probe_impl.h": {
+      "before": null,
+      "after": "f5914b0397d3ad23e24f0bc451a9fbb78e8d52c13abc7cd98b8462a16ed0cc3d"
+    }
+  }
+}

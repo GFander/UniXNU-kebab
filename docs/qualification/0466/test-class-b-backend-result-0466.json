@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "physical_test": false,
+  "production_code_tested": true,
+  "independent_B_vector": true,
+  "behavioral_mutants_rejected": 9,
+  "explicit_models": [
+    "hardware Root restoration",
+    "VFS lock broadcast",
+    "mutex ownership",
+    "RNG",
+    "native CPX teardown not executed"
+  ],
+  "summary": "PASS 1286 actual B/keychain/bank assertions: independent EC/KDF/KW envelope, tamper/identity/AES/RNG faults, locked create, locked unwrap refusal, unlock recovery, revoke/race, C/D preservation; VFS/Root/locks/RNG explicit host models",
+  "fixture_sha256": "860d4b583b0222a7ae013680fd2d7f1770e89cfc1086a6c73ec32ffe4dcc76e6"
+}

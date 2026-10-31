@@ -1,0 +1,36 @@
+{
+  "version": "0467",
+  "actual_log_sha256": "4179e256cefda6923dd2e7adb4b3cb10f68dc20d9f16d9ce0d600a15f84ed4b4",
+  "native_version": "0466",
+  "native_sha256": "8742415ff15a01bd14a15cbc3c239799a032086023dc030013fa7c7383d08593",
+  "qualified_partial_milestone": true,
+  "scope": "Complete kernel restart using exact0466 native; original APFS restores both old B private files via actual unwrap before new key creation, original six keychain classes restore persisted records",
+  "private_B_full_restart_restoration_proven": true,
+  "cold_B_crypto_ids_unwrap_before_new": [
+    245422,
+    245423
+  ],
+  "B_private_files_recreated": false,
+  "cold_B_ciphertext_stripes_unchanged": true,
+  "cold_keychain_classes_unwrap_before_new": [
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "original_locationd_B_database_WAL_SHM_class_queries_success": true,
+  "new_original_DB_write_claimed_this_boot": false,
+  "CPX_destroy_log_count": 0,
+  "B_unwrap_callback_count": 26,
+  "last_close_memory_key_erasure_proven": false,
+  "remaining_lifecycle_question": "Original APFS close-time descriptor denial works but no matching CPX destroy observed. Do not infer plaintext cache erasure; follow-up internal encrypted CPX representation requires native/physical tests.",
+  "qualified_watchdog_seconds": 321.64,
+  "hardware_root_bank_systembag_CD_defaults_rtc_nvram_preserved": true,
+  "full_kernel_restart_reusing_exact_native": true,
+  "migration_complete": false,
+  "system_shell_checkin_complete": false,
+  "usable_springboard": false,
+  "full_goal_complete": false
+}

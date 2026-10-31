@@ -91,7 +91,12 @@
 - [STANDARDIZATION-RESULT-20261029.md](STANDARDIZATION-RESULT-20261029.md)
 - [STORAGE-PLAN.md](STORAGE-PLAN.md)
 
+- [B类真实存储、数据库与六类keychain重启恢复](CLASS-B-STORAGE-20261101.md)
+
 ## 原始证据与测试
+
+- [0467 B存储/keychain冷恢复](qualification/0467/)
+- [0466 B后端、源码与测试](qualification/0466/)
 
 - [0465 原版 keychain 完整重启恢复](qualification/0465/)
 - [0464 原版 keychain 后端、授权、源码与测试](qualification/0464/)

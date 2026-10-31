@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "physical_test": false,
+  "complete_client": true,
+  "models": [
+    "IOKit",
+    "AMFI entitlement lookup",
+    "keychain crypto",
+    "device lock backend"
+  ],
+  "legacy_keychain_cases_retained": true,
+  "strict_separate_device_capability": true,
+  "behavioral_mutants_rejected": 7,
+  "summary": "PASS 17130 actual selector/access/marshal/refusal cases; mocked IOKit and sealed-bank export, hardware not claimed",
+  "fixture_sha256": "b75a73f9fc3959d7fd001e4491dc4803ff9d2389b5022f0d3a6cd74056a65fa3"
+}
