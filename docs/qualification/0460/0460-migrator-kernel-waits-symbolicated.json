@@ -1,0 +1,683 @@
+{
+  "version": "0460",
+  "native_sha256": "25ab228e22dc4ac29cea74b887f1097ef3409fa8440549e25f4aac60dc642156",
+  "assumed_runtime_slide": 0,
+  "scope": "Kernel continuation/return addresses only; nearest symbols are not proof of user-space execution or resource identity",
+  "samples": [
+    {
+      "line": "[  93.936] KEBAB MIG: tid=1229 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.111190 sys=0.111277",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.936] KEBAB MIG: tid=1522 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002d0f280 continuation=0xfffffe0006974740 user=0.000770 sys=0.001531",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.936] KEBAB MIG: tid=1523 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.052398 sys=0.094838",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.937] KEBAB MIG: tid=1524 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002d0c080 continuation=0xfffffe0006974740 user=0.001074 sys=0.001222",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.938] KEBAB MIG: tid=2176 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2003012880 continuation=0xfffffe0006974740 user=0.001408 sys=0.002377",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.938] KEBAB MIG: tid=2342 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b351d5fe8 continuation=0xfffffe000694bc48 user=0.003710 sys=0.009411",
+      "address": "0xfffffe000694bc48",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.939] KEBAB MIG: tid=2363 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002ff4200 continuation=0xfffffe0006974740 user=0.000505 sys=0.000723",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.939] KEBAB MIG: tid=2371 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002ffb480 continuation=0xfffffe0006974740 user=0.000905 sys=0.002047",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.940] KEBAB MIG: tid=2559 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b352cdfe8 continuation=0xfffffe000694bc48 user=0.001062 sys=0.004252",
+      "address": "0xfffffe000694bc48",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.940] KEBAB MIG-W: tid=2346 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.010186 sys=0.021111",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.941] KEBAB MIG-W: tid=2355 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b35350bf8 continuation=0xfffffe000694bc48 user=0.056356 sys=0.060767",
+      "address": "0xfffffe000694bc48",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.941] KEBAB MIG-W: tid=2356 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe00060098f8 continuation=0xfffffe0006529b4c user=0.181859 sys=0.223299",
+      "address": "0xfffffe0006529b4c",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_semaphore_wait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.942] KEBAB MIG-W: tid=2370 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b355773d8 continuation=0xfffffe000694bc48 user=0.000241 sys=0.000766",
+      "address": "0xfffffe000694bc48",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.942] KEBAB MIG-I: tid=633 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.052355 sys=0.086343",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.942] KEBAB MIG-I: tid=2472 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b35339fe8 continuation=0xfffffe000694bc48 user=0.000000 sys=0.000000",
+      "address": "0xfffffe000694bc48",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.943] KEBAB MIG-L: tid=390 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002d06180 continuation=0xfffffe0006974740 user=0.399184 sys=2.011974",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.943] KEBAB MIG-L: tid=1252 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.007677 sys=0.081891",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.944] KEBAB MIG-L: tid=1259 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b35349fe8 continuation=0xfffffe000694bc48 user=0.001296 sys=0.002072",
+      "address": "0xfffffe000694bc48",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.944] KEBAB MIG-L: tid=1467 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002cff080 continuation=0xfffffe0006974740 user=0.019662 sys=0.071809",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.998] KEBAB MIG-L: tid=1485 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002aa1a00 continuation=0xfffffe0006943400 user=0.052156 sys=0.131428",
+      "address": "0xfffffe0006943400",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_psynch_mtxcontinue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.999] KEBAB MIG-L: tid=1491 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002aa1a00 continuation=0xfffffe0006943400 user=0.028874 sys=0.042533",
+      "address": "0xfffffe0006943400",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_psynch_mtxcontinue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  93.999] KEBAB MIG-L: tid=1495 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe00060098f8 continuation=0xfffffe0006529b4c user=0.039109 sys=0.104992",
+      "address": "0xfffffe0006529b4c",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_semaphore_wait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  94.000] KEBAB MIG-L: tid=1497 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.003612 sys=0.004077",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  94.000] KEBAB MIG-L: tid=1498 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe20022a4c40 continuation=0xfffffe00069cde64 user=0.015057 sys=0.013300",
+      "address": "0xfffffe00069cde64",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ulock_wait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  94.000] KEBAB MIG-L: tid=1533 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe20022a7dc0 continuation=0xfffffe00069cde64 user=0.010416 sys=0.038474",
+      "address": "0xfffffe00069cde64",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ulock_wait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[  94.001] KEBAB MIG-L: tid=1535 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002be4b00 continuation=0xfffffe0006974740 user=0.038498 sys=0.046418",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.255] KEBAB MIG: tid=1229 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=1.933890 sys=0.997801",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.256] KEBAB MIG: tid=1522 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002d0f280 continuation=0xfffffe0006974740 user=0.000770 sys=0.001531",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.256] KEBAB MIG: tid=1523 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.068463 sys=0.102444",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.257] KEBAB MIG: tid=1524 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002d0c080 continuation=0xfffffe0006974740 user=0.001074 sys=0.001222",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.258] KEBAB MIG: tid=2176 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2003012880 continuation=0xfffffe0006974740 user=0.001408 sys=0.002377",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.258] KEBAB MIG: tid=2363 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002ff4200 continuation=0xfffffe0006974740 user=0.000505 sys=0.000723",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.259] KEBAB MIG: tid=2371 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002ffb480 continuation=0xfffffe0006974740 user=0.000905 sys=0.002047",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.260] KEBAB MIG: tid=2975 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b35115fe8 continuation=0xfffffe000694bc48 user=0.054950 sys=0.206231",
+      "address": "0xfffffe000694bc48",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.260] KEBAB MIG-W: tid=2978 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.011166 sys=0.020274",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.261] KEBAB MIG-W: tid=2980 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.302227 sys=0.366720",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.261] KEBAB MIG-W: tid=3000 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b34f99fe8 continuation=0xfffffe000694bc48 user=0.000188 sys=0.000422",
+      "address": "0xfffffe000694bc48",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.262] KEBAB MIG-I: tid=633 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.052355 sys=0.086343",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.263] KEBAB MIG-I: tid=2962 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b34f733d8 continuation=0xfffffe000694bc48 user=0.000030 sys=0.000098",
+      "address": "0xfffffe000694bc48",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.263] KEBAB MIG-L: tid=390 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002d06180 continuation=0xfffffe0006974740 user=0.399184 sys=2.011974",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.264] KEBAB MIG-L: tid=1252 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.010220 sys=0.083388",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.317] KEBAB MIG-L: tid=1467 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002cff080 continuation=0xfffffe0006974740 user=0.019662 sys=0.071809",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.318] KEBAB MIG-L: tid=1485 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002aa1a00 continuation=0xfffffe0006943400 user=0.052156 sys=0.131428",
+      "address": "0xfffffe0006943400",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_psynch_mtxcontinue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.318] KEBAB MIG-L: tid=1491 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002aa1a00 continuation=0xfffffe0006943400 user=0.028874 sys=0.042533",
+      "address": "0xfffffe0006943400",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_psynch_mtxcontinue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.319] KEBAB MIG-L: tid=1495 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe00060098f8 continuation=0xfffffe0006529b4c user=0.081299 sys=0.401196",
+      "address": "0xfffffe0006529b4c",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_semaphore_wait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.319] KEBAB MIG-L: tid=1497 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.003612 sys=0.004077",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.320] KEBAB MIG-L: tid=1498 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe20022a4c40 continuation=0xfffffe00069cde64 user=0.015057 sys=0.013300",
+      "address": "0xfffffe00069cde64",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ulock_wait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.320] KEBAB MIG-L: tid=1533 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe20022a7dc0 continuation=0xfffffe00069cde64 user=0.010416 sys=0.038474",
+      "address": "0xfffffe00069cde64",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ulock_wait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.320] KEBAB MIG-L: tid=1535 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002be4b00 continuation=0xfffffe0006974740 user=0.038498 sys=0.046418",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 285.321] KEBAB MIG-L: tid=3279 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b3578f3d8 continuation=0xfffffe000694bc48 user=0.000221 sys=0.000379",
+      "address": "0xfffffe000694bc48",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.282] KEBAB MIG: tid=1229 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=4.636741 sys=2.392420",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.282] KEBAB MIG: tid=1522 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002d0f280 continuation=0xfffffe0006974740 user=0.000770 sys=0.001531",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.283] KEBAB MIG: tid=1523 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.068463 sys=0.102444",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.283] KEBAB MIG: tid=1524 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002d0c080 continuation=0xfffffe0006974740 user=0.001074 sys=0.001222",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.284] KEBAB MIG: tid=2176 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2003012880 continuation=0xfffffe0006974740 user=0.001408 sys=0.002377",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.285] KEBAB MIG: tid=2363 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002ff4200 continuation=0xfffffe0006974740 user=0.000505 sys=0.000723",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.285] KEBAB MIG: tid=2371 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002ffb480 continuation=0xfffffe0006974740 user=0.000905 sys=0.002047",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.286] KEBAB MIG: tid=2975 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe20032b1b80 continuation=0xfffffe0006974740 user=0.087942 sys=0.328611",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.286] KEBAB MIG: tid=4591 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b359373d8 continuation=0xfffffe000694bc48 user=0.042805 sys=0.160547",
+      "address": "0xfffffe000694bc48",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.286] KEBAB MIG-W: tid=2978 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.011496 sys=0.020523",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.286] KEBAB MIG-W: tid=2980 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.302227 sys=0.366720",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.287] KEBAB MIG-W: tid=3000 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b34f99fe8 continuation=0xfffffe000694bc48 user=0.000632 sys=0.000767",
+      "address": "0xfffffe000694bc48",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.287] KEBAB MIG-I: tid=633 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.052355 sys=0.086343",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.287] KEBAB MIG-I: tid=2962 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b34f733d8 continuation=0xfffffe000694bc48 user=0.000030 sys=0.000098",
+      "address": "0xfffffe000694bc48",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.287] KEBAB MIG-L: tid=390 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002d06180 continuation=0xfffffe0006974740 user=0.399184 sys=2.011974",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.344] KEBAB MIG-L: tid=1252 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.014286 sys=0.085850",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.345] KEBAB MIG-L: tid=1467 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002cff080 continuation=0xfffffe0006974740 user=0.019662 sys=0.071809",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.345] KEBAB MIG-L: tid=1485 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002aa1a00 continuation=0xfffffe0006943400 user=0.052156 sys=0.131428",
+      "address": "0xfffffe0006943400",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_psynch_mtxcontinue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.345] KEBAB MIG-L: tid=1491 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002aa1a00 continuation=0xfffffe0006943400 user=0.028874 sys=0.042533",
+      "address": "0xfffffe0006943400",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_psynch_mtxcontinue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.346] KEBAB MIG-L: tid=1495 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe00060098f8 continuation=0xfffffe0006529b4c user=0.146964 sys=0.881805",
+      "address": "0xfffffe0006529b4c",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_semaphore_wait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.346] KEBAB MIG-L: tid=1497 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.003612 sys=0.004077",
+      "address": "0xfffffe00064c98d8",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ipc_mqueue_receive_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.346] KEBAB MIG-L: tid=1498 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe20022a4c40 continuation=0xfffffe00069cde64 user=0.015057 sys=0.013300",
+      "address": "0xfffffe00069cde64",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ulock_wait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.347] KEBAB MIG-L: tid=1533 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe20022a7dc0 continuation=0xfffffe00069cde64 user=0.010416 sys=0.038474",
+      "address": "0xfffffe00069cde64",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_ulock_wait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.347] KEBAB MIG-L: tid=1535 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2002be4b00 continuation=0xfffffe0006974740 user=0.038498 sys=0.046418",
+      "address": "0xfffffe0006974740",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_filt_wlwait_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    },
+    {
+      "line": "[ 590.347] KEBAB MIG-L: tid=3279 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b3578f3d8 continuation=0xfffffe000694bc48 user=0.000221 sys=0.000379",
+      "address": "0xfffffe000694bc48",
+      "return_address_adjusted": false,
+      "kernel_only": true,
+      "symbol": "_workq_unpark_continue",
+      "offset": "0x0",
+      "nearest_symbol_only": false
+    }
+  ]
+}

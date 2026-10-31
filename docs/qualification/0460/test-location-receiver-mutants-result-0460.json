@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "fixture_sha256": "bad13360cf2a2dad19bb220b56b188012c47b77446d0c3a65494de683d6efb73",
+  "behavioral_mutations_refused": [
+    "wrong-fixed-name",
+    "wrong-location-label",
+    "wrong-original-uuid",
+    "omit-location-uuid",
+    "dispatch-location-as-installer",
+    "short-location-frames",
+    "accept-other-parent",
+    "force-root-uid",
+    "remove512bound"
+  ],
+  "compile_failures_not_counted": true
+}

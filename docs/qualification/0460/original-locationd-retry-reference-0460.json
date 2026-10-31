@@ -1,0 +1,20 @@
+{
+  "original_locationd": {
+    "build": "20H392",
+    "path": "/usr/libexec/locationd",
+    "bytes": 30931872,
+    "sha256": "75066240cfcc9792b2314bc90847811d164cf702756890078bbd42131f9ef4b9",
+    "uuid": "7236f520b331383c8b985c4e2cc59c06",
+    "read_only": true
+  },
+  "runtime_uuid_checked_by_fixed_selector": true,
+  "error_compare_pc": "0x100a38924",
+  "sqlite_primary_error_code": 10,
+  "sqlite_error_name": "SQLITE_IOERR",
+  "retry_call_pc": "0x100a3893c",
+  "delay_helper_pc": "0x100a38cbc",
+  "sleep_seconds": 5,
+  "statement": "Actual selected return site is the IOERR retry arm of original database initialization/configuration; exact failed VFS operation and database path remain unproven",
+  "sqlite_migration_server_method": "-[CLInternalService performMigrationWithReplyBlock:]",
+  "ipc_transaction_pairing_proven": false
+}
