@@ -1,0 +1,92 @@
+--- a/bsd/dev/kebab_bt_power_impl.h
++++ b/bsd/dev/kebab_bt_power_impl.h
+@@ -16,6 +16,8 @@
+ struct kbp_resource {
+  uint32_t address;
+  uint16_t slave_version, auxiliary_length;
++ uint8_t auxiliary[16];
++ uint32_t matches;
+ };
+ struct kbp_result {
+  uint32_t version, standalone;
+@@ -75,7 +77,10 @@
+       headers > length || entries > (length - headers) / 24u ||
+       auxiliary > length) return EINVAL;
+   /* Firmware can have multiple tables of the same slave class. Search all
+-   * of them; reject duplicate selected identifiers, never pick the first. */
++  * of them. Firmware may repeat an identical accelerator mapping (actual
++  * smpa5 on this board does). The upstream query returns the first; here
++  * merge only exact address/version/aux equivalence and report the count.
++  * Conflicting selected identifiers remain a hard error. */
+   for (unsigned entry = 0; entry < entries; ++entry) {
+    uint32_t offset = headers + entry * 24u, name[2];
+    error = kbp_word(io, length, offset, &name[0]);
+@@ -87,25 +92,44 @@
+     uint32_t address, tail;
+     error = kbp_word(io, length, offset + 16u, &address);
+     if (error) return error;
+-    if (mask & (1u << index)) {
+-     if (conflict) *conflict = (struct kbp_conflict) {
+-      index, slave, entry, offset, found.resources[index].address, address
+-     };
+-     return EEXIST;
+-    }
+     error = kbp_word(io, length, offset + 20u, &tail);
+     if (error) return error;
+     uint32_t bytes = tail & 0xffffu, relative = tail >> 16;
+     if (id != 4u || (address & 0xffff0000u) != 0x00040000u ||
+         (address & 0xffu) || relative > length - auxiliary ||
+         bytes > length - auxiliary - relative) return EINVAL;
++    struct kbp_resource resource;
++    memset(&resource, 0, sizeof(resource));
++    if (bytes > sizeof(resource.auxiliary)) return E2BIG;
++    resource.address = address;
++    resource.slave_version = (uint16_t)w2;
++    resource.auxiliary_length = (uint16_t)bytes;
++    resource.matches = 1;
++    for (unsigned byte = 0; byte < bytes; ++byte) {
++     uint32_t at = auxiliary + relative + byte, value;
++     error = kbp_word(io, length, at & ~3u, &value);
++     if (error) return error;
++     resource.auxiliary[byte] = (uint8_t)(value >> ((at & 3u) * 8u));
++    }
++    if (mask & (1u << index)) {
++     const struct kbp_resource *previous = &found.resources[index];
++     if (previous->address != address ||
++         previous->slave_version != resource.slave_version ||
++         previous->auxiliary_length != bytes ||
++         memcmp(previous->auxiliary, resource.auxiliary, sizeof(resource.auxiliary))) {
++      if (conflict) *conflict = (struct kbp_conflict) {
++       index, slave, entry, offset, previous->address, address
++      };
++      return EEXIST;
++     }
++     ++found.resources[index].matches;
++     continue;
++    }
+     /* No alias may map two rail names to the same accelerator register. */
+     for (unsigned previous = 0; previous < KBP_RESOURCE_COUNT; ++previous)
+      if ((mask & (1u << previous)) &&
+          found.resources[previous].address == address) return EINVAL;
+-    found.resources[index].address = address;
+-    found.resources[index].slave_version = (uint16_t)w2;
+-    found.resources[index].auxiliary_length = (uint16_t)bytes;
++    found.resources[index] = resource;
+     mask |= 1u << index;
+    }
+   }
+--- a/bsd/dev/kebab_rpmh.c
++++ b/bsd/dev/kebab_rpmh.c
+@@ -705,9 +705,10 @@
+       conflict.resource, conflict.slave_table, conflict.entry, conflict.offset,
+       conflict.first_address, conflict.second_address);
+  if (!error) for (unsigned i = 0; i < KBP_RESOURCE_COUNT; ++i)
+-  printf("KEBAB BTPWR: resource=%s address=%08x slave-version=%04x aux-bytes=%u\n",
++  printf("KEBAB BTPWR: resource=%s address=%08x slave-version=%04x aux-bytes=%u matches=%u\n",
+       kbp_names[i], result.resources[i].address,
+-      result.resources[i].slave_version, result.resources[i].auxiliary_length);
++      result.resources[i].slave_version, result.resources[i].auxiliary_length,
++      result.resources[i].matches);
+  printf("KEBAB BTPWR: end error=%d read-only; board binding and rail ownership not established\n", error);
+ }
+ 

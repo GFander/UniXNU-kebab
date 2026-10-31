@@ -1,7 +1,7 @@
 from pathlib import Path
 import json,hashlib,re,sys,subprocess
 r=Path(__file__).resolve().parent;b=r.parent/'p1-run/prelink-fix';v=sys.argv[1]
-assert v in ('0372','0373','0376','0378','0380','0382','0383','0384','0386','0387','0388','0389','0390','0391','0393','0394','0395','0396','0397','0399','0400','0401','0402','0403','0405','0406','0407','0408','0409','0410','0411','0412','0413','0414','0415','0417')
+assert v in ('0372','0373','0376','0378','0380','0382','0383','0384','0386','0387','0388','0389','0390','0391','0393','0394','0395','0396','0397','0399','0400','0401','0402','0403','0405','0406','0407','0408','0409','0410','0411','0412','0413','0414','0415','0417','0418','0419','0420','0421','0422')
 raw=(r/(v+'-media-boot.log')).read_bytes();s=raw.decode();digest=hashlib.sha256(raw).hexdigest()
 assert json.loads((r/(v+'-capture-provenance.json')).read_text())['sha256']==digest
 for needle in ['KEBAB NONCE ROOT: restoring opaque keyblob; generation skipped',

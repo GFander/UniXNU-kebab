@@ -1,6 +1,6 @@
-当前阶段验收：0415；正常默认0417。288 common + 4 host / 5248 源码一致。
+当前阶段验收：0422；正常默认0422。292 common +4 host /5249 源码一致。
 
-真实SE6内部UART收发与恢复已实机验收（0414/0415）：每次9组/1225字节、重复调用及完整重启通过；蓝牙控制器、HCI、扫描/连接/传输仍未完成。见[范围报告](docs/BLUETOOTH-UART-20261031.md)。
+真实蓝牙供电资源只读发现与等价别名检查已通过0421/0422完整重启实测。控制器供电、HCI、扫描/连接/数据仍未完成，蓝牙整体不可用。见[本阶段范围](docs/BLUETOOTH-POWER-DISCOVERY-20261031.md)、[LineageOS对照](docs/BLUETOOTH-LINEAGE-COMPARISON-20261031.md)和[源码/实机证据](docs/qualification/0422/README.md)。
 
 # UniXNU-kebab
 

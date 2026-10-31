@@ -1,0 +1,41 @@
+{
+  "version": "0422",
+  "source_version": "0421",
+  "resource_discovery_qualified": true,
+  "scope": "actual fixed read-only Bluetooth supply-name/accelerator discovery only",
+  "actual_log_sha256": "0e466848272cfb81da0aeb6d6adc4c429d83678491510c8ac37e9a1455e8c534",
+  "native_sha256": "80803c9683346a6fe99cb1a9fb94a3dadcc1b6c96e3c43d2a1ccdb697b694c6a",
+  "successful_reports": 2,
+  "actual_resources": {
+    "standalone": 0,
+    "resources": [
+      {
+        "name": "smpa5",
+        "address": "00040100",
+        "slave_version": "0100",
+        "auxiliary_bytes": 4,
+        "equivalent_matches": 2
+      },
+      {
+        "name": "smpa6",
+        "address": "00040200",
+        "slave_version": "0100",
+        "auxiliary_bytes": 4,
+        "equivalent_matches": 2
+      },
+      {
+        "name": "smpc8",
+        "address": "00040400",
+        "slave_version": "0100",
+        "auxiliary_bytes": 4,
+        "equivalent_matches": 2
+      }
+    ]
+  },
+  "gpio_and_gcc_exactly_preserved": true,
+  "original_hardware_root_c_d_mkb_defaults_watchdog_preserved": true,
+  "controller_power_or_owned_rail_votes_qualified": false,
+  "controller_hci_qualified": false,
+  "bluetooth_functional": false,
+  "full_springboard": false
+}

@@ -1,0 +1,13 @@
+{
+  "version": "0418",
+  "candidate_accepted": false,
+  "power_discovery_executed": false,
+  "reason": "BTPWR input intercepted by existing PWR suffix scan; actual touch RO report, no radio/rail writes",
+  "fixed_by_formal_patch": "0311-kebab-bluetooth-power-command-priority.patch",
+  "actual_log_sha256": "d686e95880709365ab1fee10eb1a626fc7337ae55f014a63e658e2a3a55565a8",
+  "panic": [],
+  "original_mkb_init_observed": true,
+  "full_normal_regression_accepted": false,
+  "last_independent_data_fsck": "0416",
+  "bluetooth_functional": false
+}
