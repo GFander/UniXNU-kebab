@@ -1,3 +1,7 @@
+最新输入阶段：0429/0430，正常默认0430。297 common +4 host /5259源码一致。
+
+实机音量上/下的按下、松开已被原版HID解析器接受，并匹配原版IOHIDInterface/EventDriver；已修复RTC/NVRAM误把Data设备号写死为1/3的问题，真实1/4挂载保留全部原认证检查。两次正常启动的原密钥、加密Data、MKB、defaults与watchdog回归通过。触摸、界面事件消费、GPU、显示呈现及可用SpringBoard仍未完成；蓝牙继续延期。见[本轮范围](docs/HID-INPUT-AND-DATA-IDENTITY-20261031.md)及[验收资料](docs/qualification/0430/README.md)。以下为历史阶段。
+
 最新图形/输入前置阶段：0425–0427；正常默认0427。295 common +4 host /5252源码一致。
 
 已修正iOS16 selector74可选追踪契约，并在两次正常启动中加入原版IOHIDFamily/EventDriver闭包；实机确认一个原版IOHIDResource。真实触摸/按键HID事件、GPU、图像呈现与可用SpringBoard尚未完成，主CADisplay断言仍在。见[本轮范围](docs/GRAPHICS-PREREQUISITE-20261031.md)、[最新版指南复核](docs/GPU-DISPLAY-INPUT-REVIEW-0424.md)及[实机/源码证据](docs/qualification/0427/README.md)。蓝牙继续延期至可用SpringBoard之后。以下是历史阶段。

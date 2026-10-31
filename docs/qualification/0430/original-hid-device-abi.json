@@ -1,0 +1,1313 @@
+{
+  "original_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "header_sha256": "332abebb53adb20137d05d07f8b99d1471ceb9f349517585fa5fa53c46260b09",
+  "probe_object_sha256": "8debff4c61aed3730e53cfff22985a99dece8e8d31fa6c248684a4f4a214ea94",
+  "bindings_sha256": "04ccbcfabadd53ad5a5f1b1174aad06e2747a73dd224707c94c1fe36c242d020",
+  "object_bytes": 208,
+  "all_compiled_virtual_slots_checked": 207,
+  "rows": [
+    {
+      "slot": 206,
+      "symbol": "__ZN11IOHIDDevice17postElementValuesEPjjjjP15IOHIDCompletion",
+      "original_target": "0xfffffff00572cad4",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 205,
+      "symbol": "__ZN11IOHIDDevice19updateElementValuesEPjjjjP15IOHIDCompletionP24IOBufferMemoryDescriptor",
+      "original_target": "0xfffffff00572cacc",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 204,
+      "symbol": "__ZN11IOHIDDevice14completeReportEP8OSActionij",
+      "original_target": "0xfffffff00572c320",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 203,
+      "symbol": "__ZN11IOHIDDevice10conformsToEjj",
+      "original_target": "0xfffffff00572c1b0",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 202,
+      "symbol": "__ZN11IOHIDDevice16destroyInterfaceEj",
+      "original_target": "0xfffffff00572c0a4",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 201,
+      "symbol": "__ZN11IOHIDDevice15createInterfaceEj",
+      "original_target": "0xfffffff00572bf08",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 200,
+      "symbol": "__ZN11IOHIDDevice19newDeviceUsagePairsEv",
+      "original_target": "0xfffffff00572a9e4",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 199,
+      "symbol": "__ZN11IOHIDDevice25handleReportWithTimeAsyncEyP18IOMemoryDescriptor15IOHIDReportTypejjP15IOHIDCompletion",
+      "original_target": "0xfffffff00572bdd4",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 198,
+      "symbol": "__ZNK11IOHIDDevice23newReportIntervalNumberEv",
+      "original_target": "0xfffffff00572bd48",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 197,
+      "symbol": "__ZN11IOHIDDevice20handleReportWithTimeEyP18IOMemoryDescriptor15IOHIDReportTypej",
+      "original_target": "0xfffffff00572b83c",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 196,
+      "symbol": "__ZNK11IOHIDDevice20newCountryCodeNumberEv",
+      "original_target": "0xfffffff00572b834",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 195,
+      "symbol": "__ZNK11IOHIDDevice23newVendorIDSourceNumberEv",
+      "original_target": "0xfffffff00572b82c",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 194,
+      "symbol": "__ZN11IOHIDDevice9setReportEP18IOMemoryDescriptor15IOHIDReportTypejjP15IOHIDCompletion",
+      "original_target": "0xfffffff00572b80c",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 193,
+      "symbol": "__ZN11IOHIDDevice9getReportEP18IOMemoryDescriptor15IOHIDReportTypejjP15IOHIDCompletion",
+      "original_target": "0xfffffff00572b7ec",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 192,
+      "symbol": "__ZNK11IOHIDDevice19newLocationIDNumberEv",
+      "original_target": "0xfffffff00572b694",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 191,
+      "symbol": "__ZNK11IOHIDDevice21newSerialNumberStringEv",
+      "original_target": "0xfffffff00572b5d0",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 190,
+      "symbol": "__ZN11IOHIDDevice17postElementValuesEPjj",
+      "original_target": "0xfffffff00572b5b8",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 189,
+      "symbol": "__ZN11IOHIDDevice19updateElementValuesEPjj",
+      "original_target": "0xfffffff00572b59c",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 188,
+      "symbol": "__ZN11IOHIDDevice18checkEventDeliveryEP15IOHIDEventQueuejPb",
+      "original_target": "0xfffffff00572b510",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 187,
+      "symbol": "__ZN11IOHIDDevice17stopEventDeliveryEP15IOHIDEventQueuej",
+      "original_target": "0xfffffff00572b3dc",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 186,
+      "symbol": "__ZN11IOHIDDevice18startEventDeliveryEP15IOHIDEventQueuejj",
+      "original_target": "0xfffffff00572b2d0",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 185,
+      "symbol": "__ZN11IOHIDDevice15registerElementEP19IOHIDElementPrivatePj",
+      "original_target": "0xfffffff00572b2ac",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 184,
+      "symbol": "__ZNK11IOHIDDevice33getMemoryWithCurrentElementValuesEv",
+      "original_target": "0xfffffff00572b2bc",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 183,
+      "symbol": "__ZN11IOHIDDevice9setReportEP18IOMemoryDescriptor15IOHIDReportTypej",
+      "original_target": "0xfffffff00572a900",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 182,
+      "symbol": "__ZN11IOHIDDevice9getReportEP18IOMemoryDescriptor15IOHIDReportTypej",
+      "original_target": "0xfffffff00572a7cc",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 181,
+      "symbol": "__ZN11IOHIDDevice12handleReportEP18IOMemoryDescriptor15IOHIDReportTypej",
+      "original_target": "0xfffffff00572a730",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 180,
+      "symbol": "__ZNK16KebabHidAbiProbe19newReportDescriptorEPP18IOMemoryDescriptor",
+      "original_target": "0xfffffff00770ace4",
+      "kind": "probe override"
+    },
+    {
+      "slot": 179,
+      "symbol": "__ZNK11IOHIDDevice25newPrimaryUsagePageNumberEv",
+      "original_target": "0xfffffff00572a6d8",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 178,
+      "symbol": "__ZNK11IOHIDDevice21newPrimaryUsageNumberEv",
+      "original_target": "0xfffffff00572a680",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 177,
+      "symbol": "__ZNK11IOHIDDevice15newSerialNumberEv",
+      "original_target": "0xfffffff00572a678",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 176,
+      "symbol": "__ZNK11IOHIDDevice16newVersionNumberEv",
+      "original_target": "0xfffffff00572a670",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 175,
+      "symbol": "__ZNK11IOHIDDevice18newProductIDNumberEv",
+      "original_target": "0xfffffff00572a668",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 174,
+      "symbol": "__ZNK11IOHIDDevice17newVendorIDNumberEv",
+      "original_target": "0xfffffff00572a660",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 173,
+      "symbol": "__ZNK11IOHIDDevice16newProductStringEv",
+      "original_target": "0xfffffff00572a658",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 172,
+      "symbol": "__ZNK11IOHIDDevice21newManufacturerStringEv",
+      "original_target": "0xfffffff00572a650",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 171,
+      "symbol": "__ZNK11IOHIDDevice18newTransportStringEv",
+      "original_target": "0xfffffff00572a648",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 170,
+      "symbol": "__ZN11IOHIDDevice17publishPropertiesEP9IOService",
+      "original_target": "0xfffffff005728d28",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 169,
+      "symbol": "__ZN11IOHIDDevice10handleStopEP9IOService",
+      "original_target": "0xfffffff005729a5c",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 168,
+      "symbol": "__ZN11IOHIDDevice11handleStartEP9IOService",
+      "original_target": "0xfffffff005729a54",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 167,
+      "symbol": "__ZN9IOService15powerChangeDoneEm",
+      "original_target": "0xfffffff00776e9ac",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 166,
+      "symbol": "__ZN9IOService17cancelPowerChangeEm",
+      "original_target": "0xfffffff00776de74",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 165,
+      "symbol": "__ZN9IOService16allowPowerChangeEm",
+      "original_target": "0xfffffff00776ddf0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 164,
+      "symbol": "__ZN9IOService12tellChangeUpEm",
+      "original_target": "0xfffffff00776dde4",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 163,
+      "symbol": "__ZN9IOService16tellNoChangeDownEm",
+      "original_target": "0xfffffff00776d930",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 162,
+      "symbol": "__ZN9IOService14tellChangeDownEm",
+      "original_target": "0xfffffff00776d924",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 161,
+      "symbol": "__ZN9IOService13askChangeDownEm",
+      "original_target": "0xfffffff00776d918",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 160,
+      "symbol": "__ZN9IOService21powerStateDidChangeToEmmPS_",
+      "original_target": "0xfffffff00776e9a4",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 159,
+      "symbol": "__ZN9IOService22powerStateWillChangeToEmmPS_",
+      "original_target": "0xfffffff00776e99c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 158,
+      "symbol": "__ZN9IOService24powerStateForDomainStateEm",
+      "original_target": "0xfffffff00776e954",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 157,
+      "symbol": "__ZN9IOService31initialPowerStateForDomainStateEm",
+      "original_target": "0xfffffff00776e900",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 156,
+      "symbol": "__ZN9IOService27maxCapabilityForDomainStateEm",
+      "original_target": "0xfffffff00776e8b8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 155,
+      "symbol": "__ZN9IOService13setPowerStateEmPS_",
+      "original_target": "0xfffffff00776e8b0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 154,
+      "symbol": "__ZN9IOService18setIdleTimerPeriodEm",
+      "original_target": "0xfffffff00776d5f4",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 153,
+      "symbol": "__ZN9IOService16removePowerChildEP17IOPowerConnection",
+      "original_target": "0xfffffff00776be54",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 152,
+      "symbol": "__ZN9IOService13addPowerChildEPS_",
+      "original_target": "0xfffffff00776b7f8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 151,
+      "symbol": "__ZN9IOService17getAggressivenessEmPm",
+      "original_target": "0xfffffff00776d800",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 150,
+      "symbol": "__ZN9IOService17setAggressivenessEmm",
+      "original_target": "0xfffffff00776d7f8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 149,
+      "symbol": "__ZN9IOService14activityTickleEmm",
+      "original_target": "0xfffffff00776d588",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 148,
+      "symbol": "__ZN9IOService23requestPowerDomainStateEmP17IOPowerConnectionm",
+      "original_target": "0xfffffff00776c9a0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 147,
+      "symbol": "__ZN9IOService19registerPowerDriverEPS_P14IOPMPowerStatem",
+      "original_target": "0xfffffff00776c00c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 146,
+      "symbol": "__ZN9IOService10joinPMtreeEPS_",
+      "original_target": "0xfffffff00776b524",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 145,
+      "symbol": "__ZN9IOService6PMstopEv",
+      "original_target": "0xfffffff00776b540",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 144,
+      "symbol": "__ZN9IOService6PMinitEv",
+      "original_target": "0xfffffff00775e108",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 143,
+      "symbol": "__ZN9IOService15errnoFromReturnEi",
+      "original_target": "0xfffffff007747b38",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 142,
+      "symbol": "__ZN9IOService16stringFromReturnEi",
+      "original_target": "0xfffffff007747ac0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 141,
+      "symbol": "__ZN9IOService13newUserClientEP4taskPvjPP12IOUserClient",
+      "original_target": "0xfffffff007747ab4",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 140,
+      "symbol": "__ZN11IOHIDDevice13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient",
+      "original_target": "0xfffffff005729fe0",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 139,
+      "symbol": "__ZN9IOService23acknowledgeNotificationEPvj",
+      "original_target": "0xfffffff007747828",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 138,
+      "symbol": "__ZN9IOService17applyToInterestedEPK8OSSymbolPFvP8OSObjectPvES5_",
+      "original_target": "0xfffffff0077477c0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 137,
+      "symbol": "__ZN9IOService14applyToClientsEPFvPS_PvES1_",
+      "original_target": "0xfffffff0077477ac",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 136,
+      "symbol": "__ZN9IOService16applyToProvidersEPFvPS_PvES1_",
+      "original_target": "0xfffffff007747798",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 135,
+      "symbol": "__ZN9IOService16registerInterestEPK8OSSymbolPFiPvS3_jPS_S3_mES3_S3_",
+      "original_target": "0xfffffff007747688",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 134,
+      "symbol": "__ZN9IOService14messageClientsEjPvm",
+      "original_target": "0xfffffff007747638",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 133,
+      "symbol": "__ZN9IOService13messageClientEjP8OSObjectPvm",
+      "original_target": "0xfffffff00774733c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 132,
+      "symbol": "__ZN11IOHIDDevice7messageEjP9IOServicePv",
+      "original_target": "0xfffffff00572a31c",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 131,
+      "symbol": "__ZN9IOService12requestProbeEj",
+      "original_target": "0xfffffff007747324",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 130,
+      "symbol": "__ZN9IOService14causeInterruptEi",
+      "original_target": "0xfffffff0077472a0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 129,
+      "symbol": "__ZN9IOService16disableInterruptEi",
+      "original_target": "0xfffffff00774721c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 128,
+      "symbol": "__ZN9IOService15enableInterruptEi",
+      "original_target": "0xfffffff007747198",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 127,
+      "symbol": "__ZN9IOService16getInterruptTypeEiPi",
+      "original_target": "0xfffffff0077470e8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 126,
+      "symbol": "__ZN9IOService19unregisterInterruptEi",
+      "original_target": "0xfffffff007747040",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 125,
+      "symbol": "__ZN9IOService17registerInterruptEiP8OSObjectPFvS1_PvPS_iES2_",
+      "original_target": "0xfffffff007746f74",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 124,
+      "symbol": "__ZN9IOService15setDeviceMemoryEP7OSArray",
+      "original_target": "0xfffffff007746f5c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 123,
+      "symbol": "__ZN9IOService15getDeviceMemoryEv",
+      "original_target": "0xfffffff007746ef8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 122,
+      "symbol": "__ZN9IOService24mapDeviceMemoryWithIndexEjj",
+      "original_target": "0xfffffff007746eb4",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 121,
+      "symbol": "__ZN9IOService24getDeviceMemoryWithIndexEj",
+      "original_target": "0xfffffff007746e38",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 120,
+      "symbol": "__ZN9IOService20getDeviceMemoryCountEv",
+      "original_target": "0xfffffff007746dc4",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 119,
+      "symbol": "__ZN9IOService12getResourcesEv",
+      "original_target": "0xfffffff007746dbc",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 118,
+      "symbol": "__ZN9IOService20callPlatformFunctionEPKcbPvS2_S2_S2_",
+      "original_target": "0xfffffff007746d18",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 117,
+      "symbol": "__ZN9IOService20callPlatformFunctionEPK8OSSymbolbPvS3_S3_S3_",
+      "original_target": "0xfffffff0077469c8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 116,
+      "symbol": "__ZNK9IOService21getOpenClientIteratorEv",
+      "original_target": "0xfffffff0077468c0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 115,
+      "symbol": "__ZNK9IOService17getClientIteratorEv",
+      "original_target": "0xfffffff0077468ac",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 114,
+      "symbol": "__ZNK9IOService9getClientEv",
+      "original_target": "0xfffffff007746898",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 113,
+      "symbol": "__ZNK9IOService23getOpenProviderIteratorEv",
+      "original_target": "0xfffffff007746790",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 112,
+      "symbol": "__ZNK9IOService19getProviderIteratorEv",
+      "original_target": "0xfffffff00774677c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 111,
+      "symbol": "__ZNK9IOService11getWorkLoopEv",
+      "original_target": "0xfffffff00774674c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 110,
+      "symbol": "__ZNK9IOService11getProviderEv",
+      "original_target": "0xfffffff0077466e0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 109,
+      "symbol": "__ZN9IOService6detachEPS_",
+      "original_target": "0xfffffff007746364",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 108,
+      "symbol": "__ZN9IOService6attachEPS_",
+      "original_target": "0xfffffff0077460ec",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 107,
+      "symbol": "__ZN9IOService17comparePropertiesEP12OSDictionaryP12OSCollection",
+      "original_target": "0xfffffff007745fd8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 106,
+      "symbol": "__ZN9IOService15comparePropertyEP12OSDictionaryPK8OSString",
+      "original_target": "0xfffffff007745f44",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 105,
+      "symbol": "__ZN9IOService15comparePropertyEP12OSDictionaryPKc",
+      "original_target": "0xfffffff007745eb0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 104,
+      "symbol": "__ZN9IOService17addNeededResourceEPKc",
+      "original_target": "0xfffffff007745d10",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 103,
+      "symbol": "__ZN9IOService13matchLocationEPS_",
+      "original_target": "0xfffffff007745ccc",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 102,
+      "symbol": "__ZN9IOService18matchPropertyTableEP12OSDictionary",
+      "original_target": "0xfffffff007745cc4",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 101,
+      "symbol": "__ZN11IOHIDDevice18matchPropertyTableEP12OSDictionaryPi",
+      "original_target": "0xfffffff005728b74",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 100,
+      "symbol": "__ZN9IOService10adjustBusyEi",
+      "original_target": "0xfffffff007745c70",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 99,
+      "symbol": "__ZN9IOService12getBusyStateEv",
+      "original_target": "0xfffffff007745c64",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 98,
+      "symbol": "__ZN9IOService15terminateClientEPS_j",
+      "original_target": "0xfffffff007745c00",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 97,
+      "symbol": "__ZN9IOService20unlockForArbitrationEv",
+      "original_target": "0xfffffff007745a98",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 96,
+      "symbol": "__ZN9IOService18lockForArbitrationEb",
+      "original_target": "0xfffffff007745704",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 95,
+      "symbol": "__ZN9IOService8finalizeEj",
+      "original_target": "0xfffffff007745520",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 94,
+      "symbol": "__ZN9IOService9terminateEj",
+      "original_target": "0xfffffff007745518",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 93,
+      "symbol": "__ZNK11IOHIDDevice12handleIsOpenEPK9IOService",
+      "original_target": "0xfffffff005729fa0",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 92,
+      "symbol": "__ZN11IOHIDDevice11handleCloseEP9IOServicej",
+      "original_target": "0xfffffff005729eb4",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 91,
+      "symbol": "__ZN11IOHIDDevice10handleOpenEP9IOServicejPv",
+      "original_target": "0xfffffff005729a60",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 90,
+      "symbol": "__ZNK9IOService6isOpenEPKS_",
+      "original_target": "0xfffffff007745418",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 89,
+      "symbol": "__ZN9IOService5closeEPS_j",
+      "original_target": "0xfffffff0077452f0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 88,
+      "symbol": "__ZN9IOService4openEPS_jPv",
+      "original_target": "0xfffffff0077451c4",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 87,
+      "symbol": "__ZN11IOHIDDevice4stopEP9IOService",
+      "original_target": "0xfffffff005728564",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 86,
+      "symbol": "__ZN11IOHIDDevice5startEP9IOService",
+      "original_target": "0xfffffff005726f90",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 85,
+      "symbol": "__ZN9IOService5probeEPS_Pi",
+      "original_target": "0xfffffff007745190",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 84,
+      "symbol": "__ZN9IOService15registerServiceEj",
+      "original_target": "0xfffffff007744f6c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 83,
+      "symbol": "__ZNK9IOService8getStateEv",
+      "original_target": "0xfffffff007744f64",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 82,
+      "symbol": "__ZN11IOHIDDevice12updateReportEP19IOReportChannelListjPvS2_",
+      "original_target": "0xfffffff005728558",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 81,
+      "symbol": "__ZN11IOHIDDevice15configureReportEP19IOReportChannelListjPvS2_",
+      "original_target": "0xfffffff00572854c",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 80,
+      "symbol": "__ZN9IOService22copyClientWithCategoryEPK8OSSymbol",
+      "original_target": "0xfffffff00774491c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 79,
+      "symbol": "__ZN9IOService18systemWillShutdownEj",
+      "original_target": "0xfffffff00776e9b0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 78,
+      "symbol": "__ZN9IOService15nextIdleTimeoutEyyj",
+      "original_target": "0xfffffff00776d798",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 77,
+      "symbol": "__ZN9IOService12didTerminateEPS_jPb",
+      "original_target": "0xfffffff007744844",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 76,
+      "symbol": "__ZN11IOHIDDevice13willTerminateEP9IOServicej",
+      "original_target": "0xfffffff00572878c",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 75,
+      "symbol": "__ZN9IOService16requestTerminateEPS_j",
+      "original_target": "0xfffffff0077447b8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 74,
+      "symbol": "__ZN9IOService4initEP15IORegistryEntryPK15IORegistryPlane",
+      "original_target": "0xfffffff007744718",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 73,
+      "symbol": "__ZN15IORegistryEntry13childFromPathEPKcPK15IORegistryPlanePcPi",
+      "original_target": "0xfffffff007740cc4",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 72,
+      "symbol": "__ZNK15IORegistryEntry16getPathComponentEPcPiPK15IORegistryPlane",
+      "original_target": "0xfffffff007740bc4",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 71,
+      "symbol": "__ZNK15IORegistryEntry7getPathEPcPiPK15IORegistryPlane",
+      "original_target": "0xfffffff00774067c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 70,
+      "symbol": "__ZN15IORegistryEntry11setLocationEPKcPK15IORegistryPlane",
+      "original_target": "0xfffffff007740610",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 69,
+      "symbol": "__ZN15IORegistryEntry11setLocationEPK8OSSymbolPK15IORegistryPlane",
+      "original_target": "0xfffffff00774058c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 68,
+      "symbol": "__ZNK15IORegistryEntry12copyLocationEPK15IORegistryPlane",
+      "original_target": "0xfffffff007740500",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 67,
+      "symbol": "__ZNK15IORegistryEntry11getLocationEPK15IORegistryPlane",
+      "original_target": "0xfffffff0077404b0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 66,
+      "symbol": "__ZN15IORegistryEntry7setNameEPKcPK15IORegistryPlane",
+      "original_target": "0xfffffff007740444",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 65,
+      "symbol": "__ZN15IORegistryEntry7setNameEPK8OSSymbolPK15IORegistryPlane",
+      "original_target": "0xfffffff007740374",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 64,
+      "symbol": "__ZNK15IORegistryEntry11compareNameEP8OSStringPS1_",
+      "original_target": "0xfffffff0077402e8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 63,
+      "symbol": "__ZNK15IORegistryEntry12compareNamesEP8OSObjectPP8OSString",
+      "original_target": "0xfffffff007740190",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 62,
+      "symbol": "__ZNK15IORegistryEntry8copyNameEPK15IORegistryPlane",
+      "original_target": "0xfffffff0077400c8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 61,
+      "symbol": "__ZNK15IORegistryEntry7getNameEPK15IORegistryPlane",
+      "original_target": "0xfffffff00774000c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 60,
+      "symbol": "__ZN15IORegistryEntry9detachAllEPK15IORegistryPlane",
+      "original_target": "0xfffffff00773fe40",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 59,
+      "symbol": "__ZN15IORegistryEntry11detachAboveEPK15IORegistryPlane",
+      "original_target": "0xfffffff00773fda0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 58,
+      "symbol": "__ZN15IORegistryEntry15detachFromChildEPS_PK15IORegistryPlane",
+      "original_target": "0xfffffff00773fb40",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 57,
+      "symbol": "__ZN15IORegistryEntry13attachToChildEPS_PK15IORegistryPlane",
+      "original_target": "0xfffffff00773fa18",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 56,
+      "symbol": "__ZN15IORegistryEntry16detachFromParentEPS_PK15IORegistryPlane",
+      "original_target": "0xfffffff00773f7b8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 55,
+      "symbol": "__ZN15IORegistryEntry14attachToParentEPS_PK15IORegistryPlane",
+      "original_target": "0xfffffff00773f49c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 54,
+      "symbol": "__ZNK15IORegistryEntry8getDepthEPK15IORegistryPlane",
+      "original_target": "0xfffffff00773f378",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 53,
+      "symbol": "__ZNK15IORegistryEntry7inPlaneEPK15IORegistryPlane",
+      "original_target": "0xfffffff00773f220",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 52,
+      "symbol": "__ZNK15IORegistryEntry8isParentEPS_PK15IORegistryPlaneb",
+      "original_target": "0xfffffff00773f0e0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 51,
+      "symbol": "__ZNK15IORegistryEntry7isChildEPS_PK15IORegistryPlaneb",
+      "original_target": "0xfffffff00773efa0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 50,
+      "symbol": "__ZNK15IORegistryEntry13getChildEntryEPK15IORegistryPlane",
+      "original_target": "0xfffffff00773ef60",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 49,
+      "symbol": "__ZNK15IORegistryEntry15applyToChildrenEPFvPS_PvES1_PK15IORegistryPlane",
+      "original_target": "0xfffffff00773ee44",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 48,
+      "symbol": "__ZNK15IORegistryEntry16getChildIteratorEPK15IORegistryPlane",
+      "original_target": "0xfffffff00773ece8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 47,
+      "symbol": "__ZNK15IORegistryEntry14getParentEntryEPK15IORegistryPlane",
+      "original_target": "0xfffffff00773eca8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 46,
+      "symbol": "__ZNK15IORegistryEntry14applyToParentsEPFvPS_PvES1_PK15IORegistryPlane",
+      "original_target": "0xfffffff00773eb8c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 45,
+      "symbol": "__ZNK15IORegistryEntry17getParentIteratorEPK15IORegistryPlane",
+      "original_target": "0xfffffff00773ea30",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 44,
+      "symbol": "__ZN15IORegistryEntry13setPropertiesEP8OSObject",
+      "original_target": "0xfffffff00773ea24",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 43,
+      "symbol": "__ZNK9IOService19serializePropertiesEP11OSSerialize",
+      "original_target": "0xfffffff007744714",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 42,
+      "symbol": "__ZNK15IORegistryEntry24dictionaryWithPropertiesEv",
+      "original_target": "0xfffffff00773e7e0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 41,
+      "symbol": "__ZNK15IORegistryEntry12copyPropertyEPKc",
+      "original_target": "0xfffffff00773e6ec",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 40,
+      "symbol": "__ZNK15IORegistryEntry12copyPropertyEPK8OSString",
+      "original_target": "0xfffffff00773e5f8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 39,
+      "symbol": "__ZNK15IORegistryEntry12copyPropertyEPK8OSSymbol",
+      "original_target": "0xfffffff00773e504",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 38,
+      "symbol": "__ZNK15IORegistryEntry11getPropertyEPKcPK15IORegistryPlanej",
+      "original_target": "0xfffffff00773e39c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 37,
+      "symbol": "__ZNK15IORegistryEntry11getPropertyEPK8OSStringPK15IORegistryPlanej",
+      "original_target": "0xfffffff00773e234",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 36,
+      "symbol": "__ZNK15IORegistryEntry11getPropertyEPK8OSSymbolPK15IORegistryPlanej",
+      "original_target": "0xfffffff00773e0cc",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 35,
+      "symbol": "__ZNK15IORegistryEntry11getPropertyEPKc",
+      "original_target": "0xfffffff00773e078",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 34,
+      "symbol": "__ZNK15IORegistryEntry11getPropertyEPK8OSString",
+      "original_target": "0xfffffff00773e024",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 33,
+      "symbol": "__ZNK15IORegistryEntry11getPropertyEPK8OSSymbol",
+      "original_target": "0xfffffff00773df44",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 32,
+      "symbol": "__ZN15IORegistryEntry14removePropertyEPKc",
+      "original_target": "0xfffffff00773defc",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 31,
+      "symbol": "__ZN15IORegistryEntry14removePropertyEPK8OSString",
+      "original_target": "0xfffffff00773deb4",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 30,
+      "symbol": "__ZN15IORegistryEntry14removePropertyEPK8OSSymbol",
+      "original_target": "0xfffffff00773ddd4",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 29,
+      "symbol": "__ZN15IORegistryEntry11setPropertyEPKcPvj",
+      "original_target": "0xfffffff00773dd04",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 28,
+      "symbol": "__ZN15IORegistryEntry11setPropertyEPKcyj",
+      "original_target": "0xfffffff00773dc34",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 27,
+      "symbol": "__ZN15IORegistryEntry11setPropertyEPKcb",
+      "original_target": "0xfffffff00773dba8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 26,
+      "symbol": "__ZN15IORegistryEntry11setPropertyEPKcS1_",
+      "original_target": "0xfffffff00773db24",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 25,
+      "symbol": "__ZN15IORegistryEntry11setPropertyEPKcP8OSObject",
+      "original_target": "0xfffffff00773dac0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 24,
+      "symbol": "__ZN15IORegistryEntry11setPropertyEPK8OSStringP8OSObject",
+      "original_target": "0xfffffff00773da5c",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 23,
+      "symbol": "__ZN11IOHIDDevice11setPropertyEPK8OSSymbolP8OSObject",
+      "original_target": "0xfffffff00572a53c",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 22,
+      "symbol": "__ZN15IORegistryEntry16setPropertyTableEP12OSDictionary",
+      "original_target": "0xfffffff00773d790",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 21,
+      "symbol": "__ZN11IOHIDDevice4initEP12OSDictionary",
+      "original_target": "0xfffffff005726c34",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 20,
+      "symbol": "__ZN15IORegistryEntry17runPropertyActionEPFiP8OSObjectPvS2_S2_S2_ES1_S2_S2_S2_S2_",
+      "original_target": "0xfffffff00773d450",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 19,
+      "symbol": "__ZNK15IORegistryEntry14copyChildEntryEPK15IORegistryPlane",
+      "original_target": "0xfffffff00773d3d0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 18,
+      "symbol": "__ZNK15IORegistryEntry15copyParentEntryEPK15IORegistryPlane",
+      "original_target": "0xfffffff00773d350",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 17,
+      "symbol": "__ZNK15IORegistryEntry12copyPropertyEPK8OSSymbolPK15IORegistryPlanej",
+      "original_target": "0xfffffff00773d1e8",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 16,
+      "symbol": "__ZNK15IORegistryEntry12copyPropertyEPK8OSStringPK15IORegistryPlanej",
+      "original_target": "0xfffffff00773d080",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 15,
+      "symbol": "__ZNK15IORegistryEntry12copyPropertyEPKcPK15IORegistryPlanej",
+      "original_target": "0xfffffff00773cf18",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 14,
+      "symbol": "__ZN11IOHIDDevice4freeEv",
+      "original_target": "0xfffffff005726ca0",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 13,
+      "symbol": "__ZN8OSObject4initEv",
+      "original_target": "0xfffffff0076e2360",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 12,
+      "symbol": "__ZN11IOHIDDevice8DispatchE5IORPC",
+      "original_target": "0xfffffff005757ed8",
+      "kind": "unchanged original HID implementation"
+    },
+    {
+      "slot": 11,
+      "symbol": "__ZNK8OSObject13taggedReleaseEPKvi",
+      "original_target": "0xfffffff0076e22b0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 10,
+      "symbol": "__ZNK8OSObject13taggedReleaseEPKv",
+      "original_target": "0xfffffff0076e22a0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 9,
+      "symbol": "__ZNK8OSObject12taggedRetainEPKv",
+      "original_target": "0xfffffff0076e2228",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 8,
+      "symbol": "__ZNK15OSMetaClassBase9isEqualToEPKS_",
+      "original_target": "0xfffffff0076df9e0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 7,
+      "symbol": "__ZNK16KebabHidAbiProbe12getMetaClassEv",
+      "original_target": "0xfffffff005726bc8",
+      "kind": "probe override"
+    },
+    {
+      "slot": 6,
+      "symbol": "__ZNK8OSObject9serializeEP11OSSerialize",
+      "original_target": "0xfffffff0076e20fc",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 5,
+      "symbol": "__ZNK8OSObject7releaseEv",
+      "original_target": "0xfffffff0076e20ec",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 4,
+      "symbol": "__ZNK8OSObject6retainEv",
+      "original_target": "0xfffffff0076e20dc",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 3,
+      "symbol": "__ZNK8OSObject14getRetainCountEv",
+      "original_target": "0xfffffff0076e20d4",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 2,
+      "symbol": "__ZNK8OSObject7releaseEi",
+      "original_target": "0xfffffff0076e20c0",
+      "kind": "common original kernel implementation"
+    },
+    {
+      "slot": 1,
+      "symbol": "__ZN16KebabHidAbiProbeD0Ev",
+      "original_target": "0xfffffff005726bc4",
+      "kind": "probe override"
+    },
+    {
+      "slot": 0,
+      "symbol": "__ZN16KebabHidAbiProbeD1Ev",
+      "original_target": "0xfffffff005726bc0",
+      "kind": "probe override"
+    }
+  ],
+  "bindings": {
+    "__ZN11IOHIDDevice17postElementValuesEPjjjjP15IOHIDCompletion": "0xfffffff00572cad4",
+    "__ZN11IOHIDDevice19updateElementValuesEPjjjjP15IOHIDCompletionP24IOBufferMemoryDescriptor": "0xfffffff00572cacc",
+    "__ZN11IOHIDDevice14completeReportEP8OSActionij": "0xfffffff00572c320",
+    "__ZN11IOHIDDevice10conformsToEjj": "0xfffffff00572c1b0",
+    "__ZN11IOHIDDevice16destroyInterfaceEj": "0xfffffff00572c0a4",
+    "__ZN11IOHIDDevice15createInterfaceEj": "0xfffffff00572bf08",
+    "__ZN11IOHIDDevice19newDeviceUsagePairsEv": "0xfffffff00572a9e4",
+    "__ZN11IOHIDDevice25handleReportWithTimeAsyncEyP18IOMemoryDescriptor15IOHIDReportTypejjP15IOHIDCompletion": "0xfffffff00572bdd4",
+    "__ZNK11IOHIDDevice23newReportIntervalNumberEv": "0xfffffff00572bd48",
+    "__ZN11IOHIDDevice20handleReportWithTimeEyP18IOMemoryDescriptor15IOHIDReportTypej": "0xfffffff00572b83c",
+    "__ZNK11IOHIDDevice20newCountryCodeNumberEv": "0xfffffff00572b834",
+    "__ZNK11IOHIDDevice23newVendorIDSourceNumberEv": "0xfffffff00572b82c",
+    "__ZN11IOHIDDevice9setReportEP18IOMemoryDescriptor15IOHIDReportTypejjP15IOHIDCompletion": "0xfffffff00572b80c",
+    "__ZN11IOHIDDevice9getReportEP18IOMemoryDescriptor15IOHIDReportTypejjP15IOHIDCompletion": "0xfffffff00572b7ec",
+    "__ZNK11IOHIDDevice19newLocationIDNumberEv": "0xfffffff00572b694",
+    "__ZNK11IOHIDDevice21newSerialNumberStringEv": "0xfffffff00572b5d0",
+    "__ZN11IOHIDDevice17postElementValuesEPjj": "0xfffffff00572b5b8",
+    "__ZN11IOHIDDevice19updateElementValuesEPjj": "0xfffffff00572b59c",
+    "__ZN11IOHIDDevice18checkEventDeliveryEP15IOHIDEventQueuejPb": "0xfffffff00572b510",
+    "__ZN11IOHIDDevice17stopEventDeliveryEP15IOHIDEventQueuej": "0xfffffff00572b3dc",
+    "__ZN11IOHIDDevice18startEventDeliveryEP15IOHIDEventQueuejj": "0xfffffff00572b2d0",
+    "__ZN11IOHIDDevice15registerElementEP19IOHIDElementPrivatePj": "0xfffffff00572b2ac",
+    "__ZNK11IOHIDDevice33getMemoryWithCurrentElementValuesEv": "0xfffffff00572b2bc",
+    "__ZN11IOHIDDevice9setReportEP18IOMemoryDescriptor15IOHIDReportTypej": "0xfffffff00572a900",
+    "__ZN11IOHIDDevice9getReportEP18IOMemoryDescriptor15IOHIDReportTypej": "0xfffffff00572a7cc",
+    "__ZN11IOHIDDevice12handleReportEP18IOMemoryDescriptor15IOHIDReportTypej": "0xfffffff00572a730",
+    "__ZNK11IOHIDDevice25newPrimaryUsagePageNumberEv": "0xfffffff00572a6d8",
+    "__ZNK11IOHIDDevice21newPrimaryUsageNumberEv": "0xfffffff00572a680",
+    "__ZNK11IOHIDDevice15newSerialNumberEv": "0xfffffff00572a678",
+    "__ZNK11IOHIDDevice16newVersionNumberEv": "0xfffffff00572a670",
+    "__ZNK11IOHIDDevice18newProductIDNumberEv": "0xfffffff00572a668",
+    "__ZNK11IOHIDDevice17newVendorIDNumberEv": "0xfffffff00572a660",
+    "__ZNK11IOHIDDevice16newProductStringEv": "0xfffffff00572a658",
+    "__ZNK11IOHIDDevice21newManufacturerStringEv": "0xfffffff00572a650",
+    "__ZNK11IOHIDDevice18newTransportStringEv": "0xfffffff00572a648",
+    "__ZN11IOHIDDevice17publishPropertiesEP9IOService": "0xfffffff005728d28",
+    "__ZN11IOHIDDevice10handleStopEP9IOService": "0xfffffff005729a5c",
+    "__ZN11IOHIDDevice11handleStartEP9IOService": "0xfffffff005729a54",
+    "__ZN11IOHIDDevice13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient": "0xfffffff005729fe0",
+    "__ZN11IOHIDDevice7messageEjP9IOServicePv": "0xfffffff00572a31c",
+    "__ZN11IOHIDDevice18matchPropertyTableEP12OSDictionaryPi": "0xfffffff005728b74",
+    "__ZNK11IOHIDDevice12handleIsOpenEPK9IOService": "0xfffffff005729fa0",
+    "__ZN11IOHIDDevice11handleCloseEP9IOServicej": "0xfffffff005729eb4",
+    "__ZN11IOHIDDevice10handleOpenEP9IOServicejPv": "0xfffffff005729a60",
+    "__ZN11IOHIDDevice4stopEP9IOService": "0xfffffff005728564",
+    "__ZN11IOHIDDevice5startEP9IOService": "0xfffffff005726f90",
+    "__ZN11IOHIDDevice12updateReportEP19IOReportChannelListjPvS2_": "0xfffffff005728558",
+    "__ZN11IOHIDDevice15configureReportEP19IOReportChannelListjPvS2_": "0xfffffff00572854c",
+    "__ZN11IOHIDDevice13willTerminateEP9IOServicej": "0xfffffff00572878c",
+    "__ZN11IOHIDDevice11setPropertyEPK8OSSymbolP8OSObject": "0xfffffff00572a53c",
+    "__ZN11IOHIDDevice4initEP12OSDictionary": "0xfffffff005726c34",
+    "__ZN11IOHIDDevice4freeEv": "0xfffffff005726ca0",
+    "__ZN11IOHIDDevice8DispatchE5IORPC": "0xfffffff005757ed8",
+    "__ZN11IOHIDDeviceC2EPK11OSMetaClass": "0xfffffff005726b9c",
+    "__ZN11IOHIDDeviceD2Ev": "0xfffffff005726bbc",
+    "__ZN11IOHIDDevice10gMetaClassE": "0xfffffff007a128e0",
+    "__ZTV11IOHIDDevice": "0xfffffff006cbe2c0"
+  },
+  "constructor_and_destructor_parent_stubs_checked": true,
+  "runtime_input_qualified": false
+}

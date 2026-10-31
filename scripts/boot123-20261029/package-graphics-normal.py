@@ -2,7 +2,7 @@
 from pathlib import Path
 import argparse,hashlib,json,re,subprocess,sys,time,tomllib
 r=Path(__file__).resolve().parent;b=r.parent/'p1-run/prelink-fix'
-p=argparse.ArgumentParser();p.add_argument('version');p.add_argument('previous');p.add_argument('--hid-roots',action='store_true');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('version');p.add_argument('previous');p.add_argument('--hid-roots',action='store_true');p.add_argument('--input-mask',type=int,choices=range(4));a=p.parse_args()
 v,previous=a.version,a.previous;assert len(v)==4 and v.isdigit() and int(v)>int(previous)
 native=b/('kernel-'+v+'.kebab');assert native.is_file()
 assert not (b/('prelink-'+v+'.bin')).exists(),'Do not overwrite an existing prelink candidate'
@@ -27,7 +27,11 @@ config=(b/('unixnu-'+previous+'-ro.toml')).read_text()
 config,n=re.subn(r'^args = .*$',lambda m:'args = '+json.dumps(text),config,count=1,flags=re.M);assert n==1
 (b/('unixnu-'+v+'-ro.toml')).write_text(config,newline='\n')
 run(r.parent/'pack-payload.py',b/('payload-'+previous+'-ro.img'),b/('prelink-'+v+'.bin'),b/('payload-'+v+'-ro.tmp.img'),b/('unixnu-'+v+'-ro.toml'))
-run(b/'refresh_owner_manifest.py',b/('payload-'+v+'-ro.tmp.img'),b/('payload-'+v+'-ro.img'),'DADD93F8-DBBF-4B17-A1DF-0F11E64172F7','--firmware-base',r/'signed-darwin22.img','--stable-os-namespace')
+temporary=b/('payload-'+v+'-ro.tmp.img')
+if a.input_mask is not None:
+ target=b/('payload-'+v+'-ro.hid.tmp.img')
+ run(r/'adt-hid-input.py',temporary,target,'--mask',a.input_mask);temporary=target
+run(b/'refresh_owner_manifest.py',temporary,b/('payload-'+v+'-ro.img'),'DADD93F8-DBBF-4B17-A1DF-0F11E64172F7','--firmware-base',r/'signed-darwin22.img','--stable-os-namespace')
 run(r.parent/'pack-boot.py',r/'signed-darwin22.img',b/('payload-'+v+'-ro.img'),b/('boot-'+v+'-ro.img'))
 run(b/'verify-0187-install.py','--version',v,'--boot-only','--firmware-base',r/'signed-darwin22.img','--data-files-proof','template-userland')
 run(r/'audit-aks-provider-abi.py',v)

@@ -7,7 +7,9 @@ assert options in ([],['fsck']);fsck=bool(options)
 assert all(len(x)==4 and x.isdigit() for x in (v,previous,replay_version)) and int(v)>int(previous)
 assert len(native)==64 and hashlib.sha256((b/('kernel-'+v+'.kebab')).read_bytes()).hexdigest()==native
 q=json.loads((r/('all-source-replay-'+replay_version+'.json')).read_text());assert q['all_source_equal']
-p=r/'flash-stage.py';s=p.read_text();assert repr(v) not in s
+p=r/'flash-stage.py';s=p.read_text()
+allowline=next(line for line in s.splitlines() if line.startswith('assert sys.argv[2:]'))
+assert v not in ast.literal_eval(allowline.split('VERSION in ',1)[1]),'Version already registered'
 lines=s.splitlines(True)
 for i,l in enumerate(lines):
  if l.startswith('assert sys.argv[2:]'):
