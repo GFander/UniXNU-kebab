@@ -1,4 +1,4 @@
-# UniXNU-kebab / HiOS
+# UniXNU-kebab
 
 在 **一加 8T（kebab / Qualcomm SM8250）** 上移植 XNU，运行原版 **iOS 16.7.16（20H392）用户态**。项目采用 Mu-Silicium UEFI、DarwinBoot、自编译的 XNU 8796.141.3 和供体原版组件的 prelink 路线，参考 [UniXNU 移植指南](https://unixnu.com/zh/porting/) 与 [UniXNU-sheng](https://github.com/UniXNU/UniXNU-sheng)。
 
