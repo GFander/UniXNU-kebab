@@ -1,0 +1,64 @@
+{
+  "qualified_build": "0424",
+  "native_sha256": "bea59aaf413c87356caadad4c3cd8c2fab52c7b91a62b69fb9e4a228eff11366",
+  "shipped_prelink_sha256": "847e5de8cf9c673583d768035b07826b767d933ca56b986437c3d432284e8215",
+  "guide_sha256": "facfb1b7bc93ec7268a2c0f85907480243793655384b3a5ac8f875e3d9c04734",
+  "source_hashes_equal_actual_native_source": {
+    "config/MASTER": "dd11d67ee021221fcd5ef5c2a86c300800a3105de39ed18660817275f5161038",
+    "iokit/KernelConfigTables.cpp": "e421b9e8205a82bfe858e15a2029361de55f2a5084d4f1eef15fe95c5cdf08c9",
+    "pexpert/arm/pe_init.c": "828368f9415c9749f661563a714152d88f70ce639faae867c900dcfdbdf53b79",
+    "iokit/Kernel/arm/KebabFramebuffer.cpp": "bc6c2c8b70d023eda3f49a515128761728bb238391a059b007472bad151109a0",
+    "iokit/Kernel/arm/KebabPlatformExpert.cpp": "53fc2da4ca5c36dca50d4bdf3dbb4c02f76c884c12ce139e25a2247adff81cae",
+    "iokit/Kernel/arm/KebabSurface.cpp": "6805297d7d2649b50bde0c0de7cd10918fb5bc5528cde5a15be1393adc793f14",
+    "iokit/Kernel/arm/KebabSurface.h": "7e74bc8865f152bc5a4ce646ff8b20870605746f18705905ad79671ab2a4f9f7",
+    "bsd/dev/kebab_dma_limits.h": "0f91cebff34ea521d7316f68dc2110bba2d079c585cf547e2b9664432b81ea20"
+  },
+  "current_components": [
+    "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
+    "com.apple.driver.AppleARMPlatform",
+    "com.apple.driver.AppleARMWatchdogTimer",
+    "com.apple.driver.AppleEffaceableStorage",
+    "com.apple.driver.AppleMobileFileIntegrity",
+    "com.apple.driver.ApplePMGR",
+    "com.apple.filesystems.apfs",
+    "com.apple.iokit.CoreAnalyticsFamily",
+    "com.apple.iokit.IOCryptoAcceleratorFamily",
+    "com.apple.iokit.IOReportFamily",
+    "com.apple.iokit.IOSlowAdaptiveClockingFamily",
+    "com.apple.iokit.IOStorageFamily",
+    "com.apple.kec.corecrypto",
+    "com.apple.kext.AppleMatch",
+    "com.apple.kext.CoreTrust",
+    "com.apple.security.AppleImage4",
+    "com.apple.security.sandbox"
+  ],
+  "current_codeless": [],
+  "original_hid_metadata_reference": "guide-current-inputs-audit.json",
+  "original_donor_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "hid_original_metadata_unchanged": true,
+  "hid_added_code": [
+    "com.apple.iokit.IOHIDFamily"
+  ],
+  "hid_added_codeless": [
+    "com.apple.iokit.IOHIDEventDriver"
+  ],
+  "adt_nodes": [
+    {
+      "path": "/device-tree/kebab-geni13",
+      "properties": [
+        "name",
+        "compatible",
+        "reg",
+        "kebab,touch-address"
+      ]
+    }
+  ],
+  "adt_sha256": "368c7c6a22da5851d0ddfb44c481f4838e905e554865d4dc94803a8574e89c8a",
+  "runtime_assertion": "FBSDisplayMonitor: failed to find the main CADisplay",
+  "framebuffer_really_opened_by": "MobileGestaltHelper selectors8,28",
+  "backboardd_actual_process_observed": true,
+  "runtime_log_sha256": "a053e5293cedcc6b86a3069f654cd321e8f72b8ed42a11d66015ce7e37930213",
+  "process_log_sha256": "518aadf80a6a0c61393214053068304ed38c8127a4aad6477fd8d25236768089",
+  "bluetooth_deferred": true,
+  "graphics_implemented_or_qualified": false
+}

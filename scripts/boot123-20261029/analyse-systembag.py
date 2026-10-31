@@ -2,7 +2,7 @@
 from pathlib import Path
 import json,hashlib,re,sys,tomllib,subprocess
 r=Path(__file__).resolve().parent;b=r.parent/'p1-run/prelink-fix'
-v=sys.argv[1];assert v in ('0354','0355','0363','0364','0367','0368','0369','0370','0371','0372','0373','0375','0376','0377','0378','0379','0380','0382','0383','0384','0386','0387','0388','0389','0390','0391','0393','0394','0395','0396','0397','0399','0400','0401','0402','0403','0405','0406','0407','0408','0409','0410','0411','0412','0413','0414','0415','0417','0418','0419','0420','0421','0422')
+v=sys.argv[1];assert v in ('0354', '0355', '0363', '0364', '0367', '0368', '0369', '0370', '0371', '0372', '0373', '0375', '0376', '0377', '0378', '0379', '0380', '0382', '0383', '0384', '0386', '0387', '0388', '0389', '0390', '0391', '0393', '0394', '0395', '0396', '0397', '0399', '0400', '0401', '0402', '0403', '0405', '0406', '0407', '0408', '0409', '0410', '0411', '0412', '0413', '0414', '0415', '0417', '0418', '0419', '0420', '0421', '0422', '0423', '0424', '0425', '0426', '0427')
 raw=(r/(v+'-media-boot.log')).read_bytes();s=raw.decode();digest=hashlib.sha256(raw).hexdigest()
 assert json.loads((r/(v+'-capture-provenance.json')).read_text())['sha256']==digest
 mode='exclusive initialize' if v=='0354' else 'cold authenticate'
@@ -35,7 +35,7 @@ out={'version':v,'actual_log_sha256':digest,'stage_accepted':True,'original_keyb
  'full_applekeystore_compatibility':False,'apple_sep_or_passcode_ab_claim':False,'qualified_policy':'factory no-passcode C/D',
  'unimplemented_selectors_observed':sorted(set(int(x) for x in re.findall(r'selector=(\d+) scalar=[^\n]*result=e00002c7',s))),
  'later_panic':re.findall(r'panic\(cpu[^\n]+',s)[:1],
- 'gpu_display_input_started':False,'springboard_qualified':False,'final_fsck_pending':True}
+ 'gpu_display_input_started':int(v)>=425,'springboard_qualified':False,'final_fsck_pending':True}
 if v=='0355':
  previous=json.loads((r/'0354-systembag-qualified.json').read_text());assert previous['stage_accepted']
  assert previous['actual_log_sha256']==hashlib.sha256((r/'0354-media-boot.log').read_bytes()).hexdigest()

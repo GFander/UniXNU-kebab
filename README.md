@@ -1,3 +1,7 @@
+最新图形/输入前置阶段：0425–0427；正常默认0427。295 common +4 host /5252源码一致。
+
+已修正iOS16 selector74可选追踪契约，并在两次正常启动中加入原版IOHIDFamily/EventDriver闭包；实机确认一个原版IOHIDResource。真实触摸/按键HID事件、GPU、图像呈现与可用SpringBoard尚未完成，主CADisplay断言仍在。见[本轮范围](docs/GRAPHICS-PREREQUISITE-20261031.md)、[最新版指南复核](docs/GPU-DISPLAY-INPUT-REVIEW-0424.md)及[实机/源码证据](docs/qualification/0427/README.md)。蓝牙继续延期至可用SpringBoard之后。以下是历史阶段。
+
 最新阶段：0423/0424 实机板型与共享锁收尾验收通过；正常默认0424。293 common +4 host /5252源文件一致。
 
 按用户最新安排，蓝牙从现在起延期到GPU、显示、输入和可用SpringBoard之后。实际板型19805、供电拓扑、内部UART、固件/资源只读采集及测试证据已保存；控制器/HCI/RF仍未完成，蓝牙不可用。见[归档与恢复入口](docs/BLUETOOTH-DEFERRED-20261031.md)及[本轮实机/源码证据](docs/qualification/0424/README.md)。下列旧阶段顺序与“待读取板型”描述属于历史，以上述归档为准。

@@ -1,0 +1,197 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -44,8 +44,8 @@
+  *   79 GetBlock, 84 SetContrast: unsupported (would have to fake a result)
+  *   57 GetColorRemapMode -> [0] (no remap)
+  *   72 Enable/DisableNotifications [func, refcon, type, 0]
+- *   74 SupportedFrameInfo -> mode struct {version, size, 1125, 2436, 3,
+- *      60, sRGB, SDR, rotation 0, BGRA, ...}; layout is ours (see below)
++ *   74 SupportedFrameInfo [index] -> [count] + trace-key string (64 bytes);
++ *      optional trace-key subscription is unsupported, not display geometry
+  *   83 CopyLayerDisplayedSurface [layer] -> [port name of the displayed
+  *      surface, or not found]
+  *
+@@ -126,30 +126,8 @@
+ #define KEBAB_FB_LOGICAL_H              2436
+ #define KEBAB_FB_DOT_PITCH              458     /* ppi, iPhone X logical panel */
+ #define KEBAB_FB_FORMAT_BGRA            0x42475241
+-#define KEBAB_FB_GAMUT_SRGB             1
+ #define KEBAB_FB_SWAP_WAIT_MAX_MS       1000    /* bounds a kernel wait */
+ 
+-/*
+- * Selector 74's shape. IOMobileFramebuffer.framework calls it
+- * "SupportedFrameInfo"; the exact wire layout has not been recovered, so
+- * this is our definition: the fields are the mode facts userland needs
+- * (logical size, scale, refresh, gamut). The requested output size is
+- * logged once, so a real backboardd session can correct the layout without
+- * another guess. Values are always the iPhone X identity, never the panel.
+- */
+-struct kebab_frame_info {
+-	uint32_t version;               /* 0x00: 1 */
+-	uint32_t size;                  /* 0x04: sizeof(struct) */
+-	uint32_t width;                 /* 0x08: 1125 logical pixels */
+-	uint32_t height;                /* 0x0c: 2436 */
+-	uint32_t scale;                 /* 0x10: 3 (1x = 1) */
+-	uint32_t refresh;               /* 0x14: 60 Hz */
+-	uint32_t gamut;                 /* 0x18: 1 = sRGB */
+-	uint32_t hdr;                   /* 0x1c: 0 = SDR */
+-	uint32_t rotation;              /* 0x20: 0 = portrait */
+-	uint32_t pixelFormat;           /* 0x24: 'BGRA' */
+-	uint32_t reserved[2];           /* 0x28 */
+-};
+ 
+ class IOMobileFramebuffer : public IOService {
+ 	OSDeclareDefaultStructors(IOMobileFramebuffer);
+@@ -227,6 +205,8 @@
+ 	io_user_reference_t fRefcon[KEBAB_FB_NOTIFY_TYPES];
+ 	IOLock             *fCallLock;
+ 	bool                fClosed;
++	uint64_t            fLogged[2]; /* per connection, protected by fCallLock */
++	void logCall(uint32_t selector, IOExternalMethodArguments *args, IOReturn result);
+ 	void closeConnection();
+ 
+ 	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
+@@ -656,6 +636,7 @@
+ 	fFB = NULL;
+ 	fPort = MACH_PORT_NULL;
+ 	fClosed = false;
++	bzero(fLogged, sizeof(fLogged));
+ 	bzero(fFunc, sizeof(fFunc));
+ 	bzero(fRefcon, sizeof(fRefcon));
+ 	fCallLock = IOLockAlloc();
+@@ -785,47 +766,26 @@
+ 	return kIOReturnSuccess;
+ }
+ 
+-/* Like kebab_fb_struct_out, but a client buffer smaller than the definition
+- * still gets the prefix it asked for instead of a hard failure. */
+-static IOReturn
+-kebab_fb_struct_out_partial(IOExternalMethodArguments *args, const void *buf, uint32_t len)
+-{
+-	uint8_t *dst;
+-	uint32_t avail;
+-
+-	if (args->structureOutputDescriptor != NULL) {
+-		avail = (uint32_t)args->structureOutputDescriptor->getLength();
+-		if (avail < 1) {
+-			return kIOReturnNoSpace;
+-		}
+-		dst = (uint8_t *)IOMallocData(avail);
+-		if (dst == NULL) {
+-			return kIOReturnNoMemory;
+-		}
+-		bzero(dst, avail);
+-		memcpy(dst, buf, avail < len ? avail : len);
+-		IOReturn ret = args->structureOutputDescriptor->writeBytes(0, dst, avail) == avail ?
+-		    kIOReturnSuccess : kIOReturnVMError;
+-		IOFreeData(dst, avail);
+-		if (ret == kIOReturnSuccess) {
+-			args->structureOutputDescriptorSize = avail;
+-		}
+-		return ret;
+-	}
+-	if (args->structureOutput == NULL) {
+-		return kIOReturnBadArgument;
+-	}
+-	avail = args->structureOutputSize;
+-	if (avail == 0) {
+-		return kIOReturnNoSpace;
+-	}
+-	bzero(args->structureOutput, avail);
+-	memcpy(args->structureOutput, buf, avail < len ? avail : len);
+-	return kIOReturnSuccess;
+-}
+-
+-static uint64_t kebab_fb_logged;        /* selectors 0..63 already logged */
+-static uint64_t kebab_fb_logged_hi;     /* selectors 64..127 already logged */
++/* Call shapes belong to each connection: MobileGestalt's successful call must
++ * not hide a different caller's first request or ABI validation failure. */
++void
++IOMobileFramebufferUserClient::logCall(uint32_t selector,
++    IOExternalMethodArguments *args, IOReturn result)
++{
++	if (selector >= 128) {
++		return;
++	}
++	uint64_t bit = 1ULL << (selector & 63);
++	uint64_t *logged = &fLogged[selector >> 6];
++	if (!(*logged & bit)) {
++		*logged |= bit;
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		IOLog("KEBAB FB: %s sel %u in %u/%u out %u/%u -> 0x%x\n", name, selector,
++		    args ? args->scalarInputCount : 0, args ? args->structureInputSize : 0,
++		    args ? args->scalarOutputCount : 0, args ? args->structureOutputSize : 0, result);
++	}
++}
+ 
+ IOReturn
+ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
+@@ -843,7 +803,7 @@
+ 		{ kKebabFBVideoPowerSavings, 1, 0 }, { kKebabFBSetBrightnessCorrection, 0, 0 },
+ 		{ kKebabFBSetMatrix, 0, 0 }, { kKebabFBGetColorRemapMode, 0, 1 },
+ 		{ kKebabFBSetParameter, 0, 0 }, { kKebabFBNotifications, 3, 0 },
+-		{ kKebabFBSupportedFrameInfo, 0, 0 }, { kKebabFBGetBlock, 0, 0 },
++		{ kKebabFBSupportedFrameInfo, 1, 1 }, { kKebabFBGetBlock, 0, 0 },
+ 		{ kKebabFBCopyDisplayedSurface, 0, 1 }, { kKebabFBSetContrast, 0, 0 },
+ 	};
+ 	KebabUserClientCall call(fCallLock);
+@@ -853,6 +813,7 @@
+ 	IOReturn validation = kebab_user_client_validate(selector, args, methods,
+ 	    sizeof(methods) / sizeof(methods[0]));
+ 	if (validation != kIOReturnSuccess) {
++		logCall(selector, args, validation);
+ 		return validation;
+ 	}
+ 	IOReturn ret = kIOReturnSuccess;
+@@ -1006,22 +967,12 @@
+ 		out[0] = fFB->fColorRemapMode;
+ 		outCount = 1;
+ 		break;
+-	case kKebabFBSupportedFrameInfo: {
+-		struct kebab_frame_info info;
+-		bzero(&info, sizeof(info));
+-		info.version = 1;
+-		info.size = (uint32_t)sizeof(info);
+-		info.width = fFB->fLogicalW;
+-		info.height = fFB->fLogicalH;
+-		info.scale = fFB->fLogicalW == KEBAB_FB_LOGICAL_W ? 3 : 1;
+-		info.refresh = 60;
+-		info.gamut = KEBAB_FB_GAMUT_SRGB;
+-		info.hdr = 0;
+-		info.rotation = 0;
+-		info.pixelFormat = KEBAB_FB_FORMAT_BGRA;
+-		ret = kebab_fb_struct_out_partial(args, &info, (uint32_t)sizeof(info));
+-		break;
+-	}
++	case kKebabFBSupportedFrameInfo:
++		/* Exact 20H392 _kern_SupportedFrameInfo uses scalar index/count
++		 * and a 64-byte trace-key string. No trace-key subscription backend
++		 * exists here. Never return an invented display-mode structure. */
++		ret = kIOReturnUnsupported;
++		break;
+ 	case kKebabFBCopyDisplayedSurface: {
+ 		uint32_t layer = args->scalarInputCount > 0 ? (uint32_t)args->scalarInput[0] : 0;
+ 		uint32_t id;
+@@ -1073,19 +1024,10 @@
+ 		args->scalarOutput[i] = i < outCount ? out[i] : 0;
+ 	}
+ 	if (args->structureOutputDescriptor == NULL && args->structureOutput != NULL &&
+-	    selector != kKebabFBGetDisplayArea && selector != kKebabFBSupportedFrameInfo) {
++	    selector != kKebabFBGetDisplayArea) {
+ 		bzero(args->structureOutput, args->structureOutputSize);
+ 	}
+-	uint64_t *logged = selector < 64 ? &kebab_fb_logged : &kebab_fb_logged_hi;
+-	uint64_t bit = 1ULL << (selector & 63);
+-	if (!(*logged & bit)) {
+-		*logged |= bit;
+-		char name[32];
+-		proc_selfname(name, sizeof(name));
+-		IOLog("KEBAB FB: %s sel %u in %u/%u out %u/%u -> 0x%x\n", name, selector,
+-		    args->scalarInputCount, args->structureInputSize,
+-		    args->scalarOutputCount, args->structureOutputSize, ret);
+-	}
++	logCall(selector, args, ret);
+ 	return ret;
+ }
+ #endif /* KEBAB */
