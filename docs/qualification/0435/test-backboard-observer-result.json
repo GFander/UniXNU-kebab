@@ -1,0 +1,10 @@
+{
+  "passed": true,
+  "behavioral_mutations_refused": 4,
+  "actual_production_sources": {
+    "bsd/kern/kebab_bootdiag.c": "3fbf9e674f696eb697c110731cc60886c5e3936082a12023cd57b677f67e643d",
+    "osfmk/kern/kebab_bootdiag.c": "cdf2c3a14d034811aa854f4b53f44eed5a55959943043f98336cbdb232c0cc8b"
+  },
+  "fixture_sha256": "87321acf74423d56dd7847872afc0746a110b2c7bcd7c1ad24f714cb28a29a3d",
+  "kernel_hardware_and_wait_layout_are_explicit_standins": true
+}

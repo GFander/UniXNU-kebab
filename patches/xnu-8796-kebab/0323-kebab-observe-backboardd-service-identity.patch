@@ -1,0 +1,45 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -57,14 +57,16 @@
+ 	task_deallocate(task);
+ }
+ 
+-/* Exact daemon selector, not an arbitrary task/user-memory debugger. The
++/* Fixed launchd child selector, not an arbitrary task/user-memory debugger.
++ * A system daemon need not run as root. Observe and report its actual UID;
++ * this diagnostic never grants credentials or changes the selected task. The
+  * iterator retains the proc during the callback; take the task reference
+  * before returning and print only after iteration has released its locks. */
+ extern void kebab_backboardd_task_report(task_t);
+ extern boolean_t ml_at_interrupt_context(void);
+ extern int get_preemption_level(void);
+ void kebab_backboardd_report(void);
+-struct kebab_backboard_snapshot { task_t task; unsigned scanned; int pid; bool found; };
++struct kebab_backboard_snapshot { task_t task; unsigned scanned; int pid; unsigned uid; bool found; };
+ static int
+ kebab_backboard_select(proc_t process, void *argument)
+ {
+@@ -72,8 +74,8 @@
+     char name[MAXCOMLEN + 1] = {};
+     ++snapshot->scanned;
+     proc_name(proc_pid(process), name, sizeof(name));
+-    if (!strcmp(name, "backboardd") && proc_ppid(process) == 1 && proc_getuid(process) == 0) {
+-        snapshot->found = true;snapshot->pid = proc_pid(process);
++    if (!strcmp(name, "backboardd") && proc_ppid(process) == 1) {
++        snapshot->found = true;snapshot->pid = proc_pid(process);snapshot->uid = proc_getuid(process);
+         task_t task = proc_task(process);
+         if (task != TASK_NULL) {task_reference(task);snapshot->task = task;}
+         return PROC_RETURNED_DONE;
+@@ -88,10 +90,10 @@
+     struct kebab_backboard_snapshot snapshot = {};
+     proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS, kebab_backboard_select, &snapshot, NULL, NULL);
+     if (snapshot.task == TASK_NULL) {
+-        printf("KEBAB BBOARD: no referenced task found=%u scanned=%u (root/parent1/name filter; cap512)\n",
++        printf("KEBAB BBOARD: no referenced task found=%u scanned=%u (parent1/exact-name filter; cap512)\n",
+             snapshot.found, snapshot.scanned);
+     } else {
+-        printf("KEBAB BBOARD: fixed daemon pid=%d scanned=%u; read-only kernel waits\n",snapshot.pid,snapshot.scanned);
++        printf("KEBAB BBOARD: fixed daemon pid=%d uid=%u scanned=%u; read-only kernel waits\n",snapshot.pid,snapshot.uid,snapshot.scanned);
+         kebab_backboardd_task_report(snapshot.task);
+         task_deallocate(snapshot.task);
+     }

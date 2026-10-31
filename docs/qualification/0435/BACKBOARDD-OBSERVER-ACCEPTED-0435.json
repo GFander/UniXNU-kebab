@@ -1,0 +1,147 @@
+{
+  "accepted": true,
+  "scope": "Fixed backboardd read-only kernel-wait observer and preserved PID1/USB panic rejection; NOT display, GPU, physical touch, daemon functionality or SpringBoard acceptance",
+  "version": "0435",
+  "native_sha256": "ba2fe0e4bee1b43179ede5d2ba6f4069f8ccf7946a5c159621378f2cf0fde552",
+  "native_bytes": 18930280,
+  "source_replay": {
+    "common": 302,
+    "host": 4,
+    "files": 5260,
+    "all_equal": true
+  },
+  "actual_log_sha256": "8802e025dc365db332b16720a60c7853e79c3aecf9cda261c7b0b60e42c543a9",
+  "backboardd_pid": 57,
+  "actual_service_uid": 501,
+  "observations": [
+    {
+      "seconds": 63.061,
+      "scanned": 122,
+      "threads": 12,
+      "total_threads": 12
+    },
+    {
+      "seconds": 147.36,
+      "scanned": 144,
+      "threads": 12,
+      "total_threads": 12
+    }
+  ],
+  "kernel_continuations": {
+    "_ipc_mqueue_receive_continue": 10,
+    "_workq_unpark_continue": 12,
+    "_ulock_wait_continue": 2
+  },
+  "user_pc_or_resource_identity_proven": false,
+  "thread_suspension": false,
+  "user_memory_read": false,
+  "register_or_permission_changes": false,
+  "hardware_and_original_security_regression": {
+    "version": "0435",
+    "defaults_matching_complete": true,
+    "actual_log_sha256": "8802e025dc365db332b16720a60c7853e79c3aecf9cda261c7b0b60e42c543a9",
+    "native_sha256": "ba2fe0e4bee1b43179ede5d2ba6f4069f8ccf7946a5c159621378f2cf0fde552",
+    "real_apple_image4_start_succeeded": true,
+    "actual_busy_reference_released": true,
+    "busy_lifecycle": [
+      [
+        0,
+        0,
+        1,
+        "defaults"
+      ],
+      [
+        11,
+        1,
+        1,
+        "AppleImage4"
+      ],
+      [
+        14,
+        2,
+        -1,
+        "defaults"
+      ],
+      [
+        15,
+        1,
+        -1,
+        "AppleImage4"
+      ]
+    ],
+    "final_busy_state": 0,
+    "actual_waits": [
+      "IOAESAccelerator",
+      "IOResources/IONVRAM",
+      "IODTNVRAM"
+    ],
+    "hardware_nonce_and_data_restored_without_generation": true,
+    "native_nvram_existing_proxy_adopted": true,
+    "nvram_encrypted_data_banks_cold_restored": true,
+    "nvram_restored_bank": 1,
+    "nvram_restored_generation": 288,
+    "nvram_hardware_or_rollback_claim": false,
+    "nvram_durable_write_calls": 2,
+    "watchdog_enabled": true,
+    "original_iokit_monitoring_preserved": true,
+    "watchdog_heartbeat_times": [
+      45.628,
+      45.628,
+      55.663,
+      65.619,
+      75.662,
+      85.673,
+      95.614,
+      105.675,
+      115.643,
+      125.666,
+      135.652,
+      145.643,
+      155.676,
+      165.647,
+      175.649
+    ],
+    "original_locked_observations": [
+      [
+        63.929,
+        30,
+        3
+      ],
+      [
+        93.923,
+        60,
+        6
+      ],
+      [
+        123.969,
+        90,
+        9
+      ],
+      [
+        153.992,
+        120,
+        12
+      ],
+      [
+        184.003,
+        150,
+        15
+      ]
+    ],
+    "systembag_and_hardware_c_d_preserved": true,
+    "rtc_record_reused": true,
+    "panic": [],
+    "full_ios_or_springboard": false,
+    "gpu_display_input_started": true
+  },
+  "physical_touch_qualified": false,
+  "manual_touch_deferred_by_user": true,
+  "gpu_or_presentation_qualified": false,
+  "usable_springboard": false,
+  "bluetooth_deferred": true,
+  "host_behavioral_mutants_refused": 6,
+  "rejected_first_candidate": "0434 root-only identity condition excluded real UID501; normal substrate regression passed",
+  "last_independent_readonly_data_fsck": "0416",
+  "last_full_system_systemos_check": "0341",
+  "daily_development_fast": true
+}
