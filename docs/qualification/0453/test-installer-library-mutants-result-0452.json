@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "fixture_sha256": "2595cdf700cc9d7dbcd9e8547d6ea8bfa4fb53811eb0ebf8d1dd99350acc9058",
+  "behavioral_mutations_refused": [
+    "wrong-owner-gate",
+    "wrong-group-gate",
+    "ignore-flags",
+    "ignore-protection-gate",
+    "wrong-desired-mode",
+    "wrong-desired-protection",
+    "ignore-set-failure",
+    "omit-vnode-release",
+    "ignore-flush-failure"
+  ],
+  "compile_failures_not_counted": true
+}

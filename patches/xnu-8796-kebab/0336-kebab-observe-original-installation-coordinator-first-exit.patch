@@ -1,0 +1,11 @@
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1906,7 +1906,7 @@
+ static void
+ kebab_runtime_exit_evidence(proc_t p,int rv,struct uthread *ut)
+ {
+- static const char *const names[]={"tccd","mediaserverd","locationd","SpringBoard","notifyd","securityd","configd","lockdownd","powerd","ReportCrash","navd","backboardd","fairplayd.H2","bluetoothd","coreduetd","CommCenter","identityservices"};
++ static const char *const names[]={"tccd","mediaserverd","locationd","SpringBoard","notifyd","securityd","configd","lockdownd","powerd","ReportCrash","navd","backboardd","fairplayd.H2","bluetoothd","coreduetd","CommCenter","identityservices","installcoordinat"};
+  static uint32_t reported;
+  // A selected daemon can voluntarily exit0/1 without a signal or exit reason.
+  // Record its first real exit too; absence of a corpse message is not liveness.

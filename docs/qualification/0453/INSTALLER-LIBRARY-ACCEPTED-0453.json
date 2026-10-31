@@ -1,0 +1,67 @@
+{
+  "version": "0453",
+  "accepted": true,
+  "scope": "Original installation coordinator initialization EACCES and fixed legacy directory metadata recovery; original API replies now allow placeholder copy; not complete application installation/migration or GUI",
+  "boots": {
+    "0450": {
+      "actual_log_sha256": "ec937b660c59aeb04b417fc40d8c60010daa853fded19821fdacd0afa472a1df",
+      "native_sha256": "85a360db5bd7024f7884c74eeb0390a9142d4a7d7e22a1a8fff5dde4b72c3874",
+      "source_version": "0450",
+      "common_patches": 315,
+      "watchdog_last_seconds": 394.227
+    },
+    "0451": {
+      "actual_log_sha256": "99d5b74e03fc4a8decbed04318e9bc49d597b5c9b97cd447b6cab4fc60b74910",
+      "native_sha256": "cf5deecd8af9fd6b4f6e55f80826ffce58e6e806ee37be7826aadba34c0289b6",
+      "source_version": "0451",
+      "common_patches": 316,
+      "watchdog_last_seconds": 574.447
+    },
+    "0452": {
+      "actual_log_sha256": "f9f0cfa73795ed0a6d0496e82a92e5a9ae6c31972fe629cb0b23378c9039e50b",
+      "native_sha256": "dc4b1e33d02175b39d9c9742f54f66afda9074ce53adc7c1662a631485086811",
+      "source_version": "0452",
+      "common_patches": 317,
+      "watchdog_last_seconds": 394.169
+    },
+    "0453": {
+      "actual_log_sha256": "d38265cdd06deeeca67cc06a4fd4404346216cba4f605ac1340cae59fab8073e",
+      "native_sha256": "dc4b1e33d02175b39d9c9742f54f66afda9074ce53adc7c1662a631485086811",
+      "source_version": "0452",
+      "common_patches": 317,
+      "watchdog_last_seconds": 364.114
+    }
+  },
+  "native_source_version": "0452",
+  "native_bytes": 18914960,
+  "exact_legacy_state": {
+    "uid": 4294967294,
+    "gid": 4294967294,
+    "mode": 0,
+    "flags": 0,
+    "protection_class": 0
+  },
+  "repaired_library": {
+    "uid": 501,
+    "gid": 501,
+    "mode": 489,
+    "protection_class": 4
+  },
+  "same_directory_not_replaced": true,
+  "original_initializer_created_installcoordination_child": true,
+  "full_reboot_reused_metadata_without_rewrite": true,
+  "actual_original_placeholder_copy_path_reached": true,
+  "old_cancel_coordinator_wait_passed": true,
+  "cold_original_placeholder_configuration_reply_pending": true,
+  "installation_complete": false,
+  "migration_complete": false,
+  "usable_springboard": false,
+  "hardware_roots_nonce_original_mkb_c_d_defaults_watchdog_preserved": true,
+  "ordinary_daemon_crashes_not_suppressed": true,
+  "next_observed_wait": "0452 copyfile -> ACL -> resolver_submit; 0453 now original IXPlaceholder setConfigurationCompleteWithError synchronous reply: trace actual receiver and original iOS identity contract without deleting ACL",
+  "manual_touch_pending": true,
+  "user_panel_target_hz": 120,
+  "physical_120hz_qualified": false,
+  "bluetooth_deferred": true,
+  "full_goal_complete": false
+}

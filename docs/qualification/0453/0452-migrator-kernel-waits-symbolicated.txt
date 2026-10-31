@@ -1,0 +1,120 @@
+[  75.454] KEBAB MIG: tid=784 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.017602 sys=0.043341
+   _ipc_mqueue_receive_continue + 0x0
+[  75.454] KEBAB MIG: tid=791 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe29a081cd00 continuation=0xfffffe0006977330 user=0.003386 sys=0.005977
+   _filt_wlwait_continue + 0x0
+[  75.455] KEBAB MIG: tid=792 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24d46a9c60 continuation=0xfffffe00069d0a58 user=0.041353 sys=0.085938
+   _ulock_wait_continue + 0x0
+[  75.455] KEBAB MIG: tid=852 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe29a078ef00 continuation=0xfffffe0006977330 user=0.001293 sys=0.001293
+   _filt_wlwait_continue + 0x0
+[  75.455] KEBAB MIG: tid=1002 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b3b9f1fe8 continuation=0xfffffe000694bc14 user=0.000674 sys=0.001221
+   _workq_unpark_continue + 0x0
+[ 188.870] KEBAB MIG: tid=784 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=1.074195 sys=0.578158
+   _ipc_mqueue_receive_continue + 0x0
+[ 188.870] KEBAB MIG: tid=791 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe29a081cd00 continuation=0xfffffe0006977330 user=0.003386 sys=0.005977
+   _filt_wlwait_continue + 0x0
+[ 188.932] KEBAB MIG: tid=792 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.051855 sys=0.094660
+   _ipc_mqueue_receive_continue + 0x0
+[ 188.933] KEBAB MIG: tid=852 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe29a078ef00 continuation=0xfffffe0006977330 user=0.001293 sys=0.001293
+   _filt_wlwait_continue + 0x0
+[ 188.933] KEBAB MIG: tid=1002 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe29a055c700 continuation=0xfffffe0006977330 user=0.003151 sys=0.003997
+   _filt_wlwait_continue + 0x0
+[ 188.934] KEBAB MIG: tid=1700 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe29a04a4700 continuation=0xfffffe0006977330 user=0.016150 sys=0.058658
+   _filt_wlwait_continue + 0x0
+[ 188.934] KEBAB MIG: tid=1711 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe29a055c500 continuation=0xfffffe0006977330 user=0.000394 sys=0.000284
+   _filt_wlwait_continue + 0x0
+[ 188.934] KEBAB MIG: tid=2422 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b3b9b33d8 continuation=0xfffffe000694bc14 user=0.011229 sys=0.040536
+   _workq_unpark_continue + 0x0
+[ 188.934] KEBAB MIG: tid=2792 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b3be0cbf8 continuation=0xfffffe000694bc14 user=0.001324 sys=0.005389
+   _workq_unpark_continue + 0x0
+[ 188.935] KEBAB MIG-W: tid=1704 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.009409 sys=0.017721
+   _ipc_mqueue_receive_continue + 0x0
+[ 188.935] KEBAB MIG-W: tid=1709 info=0x0 state=0x41 run=3 flags=0x0 suspend=0 sleep=0 wait=0xfffffe541e2872b0 continuation=0x0 user=0.383899 sys=0.657254
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[0]=0xfffffe00066590f4
+   _machine_switch_context + 0x84
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[1]=0xfffffe000651b568
+   _thread_invoke + 0x36c
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[2]=0xfffffe0006519c6c
+   _thread_block_reason + 0xe4
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[3]=0xfffffe00069a5028
+   __sleep + 0x114
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[4]=0xfffffe00069a5418
+   _tsleep + 0x6c
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[5]=0xfffffe000695c13c
+   _kauth_resolver_submit + 0x58
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[6]=0xfffffe000695b110
+   _kauth_cred_cache_lookup + 0x4b0
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[7]=0xfffffe000695bad0
+   _kauth_cred_getguid + 0x30
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[8]=0xfffffe0006957e80
+   _kauth_acl_evaluate + 0x50
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[9]=0xfffffe00066fb13c
+   _vnode_attr_authorize_internal + 0x62c
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[10]=0xfffffe00066f9590
+   _vnode_authorize_callback + 0x3a4
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[11]=0xfffffe0006957a1c
+   _kauth_authorize_action + 0x5c
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[12]=0xfffffe00066f9de0
+   _vnode_authorize + 0x6c
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[13]=0xfffffe0006718c1c
+   _vn_stat + 0x50
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[14]=0xfffffe000696c73c
+   _fstat + 0x140
+[ 188.935] KEBAB MIG-W: tid=1709 kframe[15]=0xfffffe0006afd27c
+   _unix_syscall + 0x314
+[ 188.935] KEBAB MIG-W: tid=2839 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b3b61f3d8 continuation=0xfffffe000694bc14 user=0.000031 sys=0.000116
+   _workq_unpark_continue + 0x0
+[ 284.985] KEBAB MIG: tid=784 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=1.986147 sys=1.013869
+   _ipc_mqueue_receive_continue + 0x0
+[ 284.985] KEBAB MIG: tid=791 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe29a081cd00 continuation=0xfffffe0006977330 user=0.003386 sys=0.005977
+   _filt_wlwait_continue + 0x0
+[ 284.986] KEBAB MIG: tid=792 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.051855 sys=0.094660
+   _ipc_mqueue_receive_continue + 0x0
+[ 284.986] KEBAB MIG: tid=852 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe29a078ef00 continuation=0xfffffe0006977330 user=0.001293 sys=0.001293
+   _filt_wlwait_continue + 0x0
+[ 284.987] KEBAB MIG: tid=1002 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe29a055c700 continuation=0xfffffe0006977330 user=0.003151 sys=0.003997
+   _filt_wlwait_continue + 0x0
+[ 284.987] KEBAB MIG: tid=1700 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe29a04a4700 continuation=0xfffffe0006977330 user=0.016150 sys=0.058658
+   _filt_wlwait_continue + 0x0
+[ 284.988] KEBAB MIG: tid=1711 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe29a055c500 continuation=0xfffffe0006977330 user=0.000394 sys=0.000284
+   _filt_wlwait_continue + 0x0
+[ 284.988] KEBAB MIG: tid=3690 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b3baa1fe8 continuation=0xfffffe000694bc14 user=0.004469 sys=0.017431
+   _workq_unpark_continue + 0x0
+[ 284.988] KEBAB MIG-W: tid=1704 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.009409 sys=0.017721
+   _ipc_mqueue_receive_continue + 0x0
+[ 284.988] KEBAB MIG-W: tid=1709 info=0x0 state=0x41 run=3 flags=0x0 suspend=0 sleep=0 wait=0xfffffe541ded3320 continuation=0x0 user=0.485081 sys=0.735482
+[ 284.988] KEBAB MIG-W: tid=1709 kframe[0]=0xfffffe00066590f4
+   _machine_switch_context + 0x84
+[ 284.988] KEBAB MIG-W: tid=1709 kframe[1]=0xfffffe000651b568
+   _thread_invoke + 0x36c
+[ 285.047] KEBAB MIG-W: tid=1709 kframe[2]=0xfffffe0006519c6c
+   _thread_block_reason + 0xe4
+[ 285.047] KEBAB MIG-W: tid=1709 kframe[3]=0xfffffe00069a5028
+   __sleep + 0x114
+[ 285.047] KEBAB MIG-W: tid=1709 kframe[4]=0xfffffe00069a5418
+   _tsleep + 0x6c
+[ 285.047] KEBAB MIG-W: tid=1709 kframe[5]=0xfffffe000695c13c
+   _kauth_resolver_submit + 0x58
+[ 285.047] KEBAB MIG-W: tid=1709 kframe[6]=0xfffffe000695b110
+   _kauth_cred_cache_lookup + 0x4b0
+[ 285.047] KEBAB MIG-W: tid=1709 kframe[7]=0xfffffe000695bad0
+   _kauth_cred_getguid + 0x30
+[ 285.047] KEBAB MIG-W: tid=1709 kframe[8]=0xfffffe0006957e80
+   _kauth_acl_evaluate + 0x50
+[ 285.047] KEBAB MIG-W: tid=1709 kframe[9]=0xfffffe00066fb13c
+   _vnode_attr_authorize_internal + 0x62c
+[ 285.047] KEBAB MIG-W: tid=1709 kframe[10]=0xfffffe00066f9590
+   _vnode_authorize_callback + 0x3a4
+[ 285.047] KEBAB MIG-W: tid=1709 kframe[11]=0xfffffe0006957a1c
+   _kauth_authorize_action + 0x5c
+[ 285.047] KEBAB MIG-W: tid=1709 kframe[12]=0xfffffe00066f9de0
+   _vnode_authorize + 0x6c
+[ 285.047] KEBAB MIG-W: tid=1709 kframe[13]=0xfffffe000671ab94
+   _vn_listxattr + 0x84
+[ 285.047] KEBAB MIG-W: tid=1709 kframe[14]=0xfffffe0006710cb0
+   _flistxattr + 0x104
+[ 285.047] KEBAB MIG-W: tid=1709 kframe[15]=0xfffffe0006afd27c
+   _unix_syscall + 0x314
+[ 285.048] KEBAB MIG-W: tid=3630 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b3b6d0bf8 continuation=0xfffffe000694bc14 user=0.003091 sys=0.002905
+   _workq_unpark_continue + 0x0
+[ 285.048] KEBAB MIG-W: tid=3843 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe1b3b67dfe8 continuation=0xfffffe000694bc14 user=0.000310 sys=0.000440
+   _workq_unpark_continue + 0x0

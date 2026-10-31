@@ -1,0 +1,81 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -1,12 +1,15 @@
+ /* Normal USB boot observability. Snapshot a bounded set of referenced objects;
+  * never print while holding a proc/task/thread lock. No thread suspension,
+- * saved-state modification, filesystem operation, or user memory access.
++ * saved-state modification or filesystem mutation. Fixed migration metadata
++ * and user frames are read only, outside proc/task/thread locks.
+  * The USB panic dispatcher rejects these commands before calling this file. */
+ #if defined(KEBAB)
+ #include <sys/param.h>
+ #include <sys/proc.h>
+ #include <sys/proc_internal.h>
+ #include <sys/systm.h>
++#include <sys/namei.h>
++#include <sys/vnode_internal.h>
+ #include <kern/task.h>
+ 
+ extern void kebab_pid1_task_report(task_t task);
+@@ -185,11 +188,61 @@
+     }
+     return snapshot->scanned >= 512 ? PROC_RETURNED_DONE : PROC_RETURNED;
+ }
++/* Fixed canonical Data paths implicated by original installer EACCES.
++ * No directory enumeration, arbitrary path input, authorization override or
++ * metadata write. Refuse symlinks in any component; report only supported
++ * attributes and release vnode/namei state before printing. This is normal
++ * sleepable context only, not a panic/interrupt filesystem operation. */
++static void
++kebab_installer_directories_report(void)
++{
++    static const char *const paths[] = {
++        "/private/var",
++        "/private/var/containers",
++        "/private/var/containers/Shared",
++        "/private/var/containers/Shared/SystemGroup",
++        "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.installcoordinationd",
++        "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.installcoordinationd/Library",
++        "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.installcoordinationd/Library/InstallCoordination"
++    };
++    for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
++        struct nameidata nd;
++        vfs_context_t context = vfs_context_current();
++        NDINIT(&nd, LOOKUP, OP_LOOKUP, NOFOLLOW, UIO_SYSSPACE,
++            CAST_USER_ADDR_T(paths[i]), context);
++        nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
++        int error = namei(&nd);
++        if (error) {
++            printf("KEBAB MIG-DIR: index=%u lookup=%d path=%s (fixed nofollow)\n", i, error, paths[i]);
++            continue;
++        }
++        vnode_t vnode = nd.ni_vp;
++        nameidone(&nd);
++        struct vnode_attr attr = {};
++        VATTR_INIT(&attr);
++        VATTR_WANTED(&attr, va_uid);VATTR_WANTED(&attr, va_gid);
++        VATTR_WANTED(&attr, va_mode);VATTR_WANTED(&attr, va_flags);
++        VATTR_WANTED(&attr, va_dataprotect_class);
++        error = vnode_getattr(vnode, &attr, context);
++        bool directory = vnode_isdir(vnode);
++        vnode_put(vnode);
++        unsigned supported = (VATTR_IS_SUPPORTED(&attr, va_uid) ? 1u : 0u) |
++            (VATTR_IS_SUPPORTED(&attr, va_gid) ? 2u : 0u) |
++            (VATTR_IS_SUPPORTED(&attr, va_mode) ? 4u : 0u) |
++            (VATTR_IS_SUPPORTED(&attr, va_flags) ? 8u : 0u) |
++            (VATTR_IS_SUPPORTED(&attr, va_dataprotect_class) ? 16u : 0u);
++        printf("KEBAB MIG-DIR: index=%u getattr=%d dir=%u supported=0x%x uid=%u gid=%u mode=0%o flags=0x%x class=%u path=%s\n",
++            i, error, directory, supported, attr.va_uid, attr.va_gid,
++            attr.va_mode & 07777, attr.va_flags, attr.va_dataprotect_class, paths[i]);
++    }
++}
++
+ void
+ kebab_migrator_report(void)
+ {
+     if (ml_at_interrupt_context() || get_preemption_level() != 0 ||
+         !ml_get_interrupts_enabled()) return;
++    kebab_installer_directories_report();
+     static const char *const names[] = {"com.apple.datamigrator", "com.apple.migrationpluginwrapper"};
+     static const char *const labels[] = {"MIG", "MIG-W"};
+     static const uint8_t wrapper_uuid[16] = {0xa3,0x6b,0x14,0xaa,0x98,0x19,0x3d,0x1f,0x90,0x0c,0xe8,0x0b,0x45,0xc8,0xea,0xc7};
