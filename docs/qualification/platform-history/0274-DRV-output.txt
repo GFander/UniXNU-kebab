@@ -1,0 +1,45 @@
+KEBAB SMP: selected=8 limit=8; SMP observation, no AMP/frequency-policy claim
+KEBAB SMP: cpu=0 mpidr=0x0 cluster=0 type=0 signal=1 timer=193282 sgi=7391 valid=1
+KEBAB SMP: cpu=1 mpidr=0x100 cluster=0 type=0 signal=1 timer=156520 sgi=5871 valid=1
+KEBAB SMP: cpu=2 mpidr=0x200 cluster=0 type=0 signal=1 timer=107710 sgi=2539 valid=1
+KEBAB SMP: cpu=3 mpidr=0x300 cluster=0 type=0 signal=1 timer=10627 sgi=347 valid=1
+KEBAB SMP: cpu=4 mpidr=0x400 cluster=0 type=0 signal=1 timer=2761 sgi=16 valid=1
+KEBAB SMP: cpu=5 mpidr=0x500 cluster=0 type=0 signal=1 timer=2 sgi=7 valid=1
+KEBAB SMP: cpu=6 mpidr=0x600 cluster=0 type=0 signal=1 timer=5 sgi=4 valid=1
+KEBAB SMP: cpu=7 mpidr=0x700 cluster=0 type=0 signal=1 timer=2 sgi=3 valid=1
+KEBAB MEMORY: physBase=0x200004000 boot_mem=8587837440 actual=0 max_mem=8587837440
+KEBAB DRV: manifest v1; registry state is observed now; C entries have no service
+KEBAB DRV: platform class=KebabPlatformExpert id=100000120 state=0x1e inactive=0 provider=oneplus,kebab
+KEBAB DRV: platform class=KebabPlatformExpert matched=1 valid=1 scope=ADT platform/resources
+KEBAB DRV: image4 class=AppleImage4 query=unavailable scope=original defaults-nub service; startup qualification separate
+KEBAB DRV: aes class=IOAESAccelerator query=unavailable scope=original crypto-family identity; backend qualification separate
+KEBAB DRV: cpu class=KebabCPU id=10000012d state=0x1e inactive=0 provider=cpu0
+KEBAB DRV: cpu class=KebabCPU id=10000012f state=0x1e inactive=0 provider=cpu1
+KEBAB DRV: cpu class=KebabCPU id=100000131 state=0x1e inactive=0 provider=cpu2
+KEBAB DRV: cpu class=KebabCPU id=100000133 state=0x1e inactive=0 provider=cpu3
+KEBAB DRV: cpu class=KebabCPU id=100000135 state=0x1e inactive=0 provider=cpu4
+KEBAB DRV: cpu class=KebabCPU id=100000137 state=0x1e inactive=0 provider=cpu5
+KEBAB DRV: cpu class=KebabCPU id=100000139 state=0x1e inactive=0 provider=cpu6
+KEBAB DRV: cpu class=KebabCPU id=10000013b state=0x1e inactive=0 provider=cpu7
+KEBAB DRV: cpu class=KebabCPU matched=8+ valid=1 scope=single boot CPU; no SMP qualification
+KEBAB DRV: ufs class=KebabBlockStorageDevice id=10000014f state=0x1e inactive=0 provider=oneplus,kebab
+KEBAB DRV: ufs class=KebabBlockStorageDevice id=10000016b state=0x1e inactive=0 provider=oneplus,kebab
+KEBAB DRV: ufs class=KebabBlockStorageDevice matched=2 valid=1 scope=boot C UFS + native storage bridge
+KEBAB DRV: usb backend=C service=none scope=resident DWC3 C core; no normal IOService
+KEBAB DRV: spmi class=KebabSPMIBus id=10000013e state=0x1e inactive=0 provider=kebab-spmi
+KEBAB DRV: spmi class=KebabSPMIBus matched=1 valid=1 scope=ADT arbiter + boot C backend
+KEBAB DRV: pon class=KebabPon id=10000014c state=0x1e inactive=0 provider=pmic-pon
+KEBAB DRV: pon class=KebabPon matched=1 valid=1 scope=scoped PON; panic uses C core directly
+KEBAB DRV: keys class=KebabPmicKeys id=10000014d state=0x1e inactive=0 provider=pmic-keys
+KEBAB DRV: keys class=KebabPmicKeys matched=1 valid=1 scope=raw PMIC sampling; no HID
+KEBAB DRV: rpmh class=KebabVrm id=10000014e state=0x1e inactive=0 provider=rpmh-vrm-policy
+KEBAB DRV: rpmh class=KebabVrm matched=1 valid=1 scope=RSC policy/readback; no IOPM
+KEBAB DRV: geni class=KebabGeniBus id=10000013f state=0x1e inactive=0 provider=kebab-geni13
+KEBAB DRV: geni class=KebabGeniBus matched=1 valid=1 scope=SE13/bitbang transport; boot C mappings
+KEBAB DRV: touch class=KebabTouch id=10000014b state=0x1e inactive=0 provider=synaptics,s3908
+KEBAB DRV: touch class=KebabTouch matched=1 valid=1 scope=typed TCM state; C polling lifetime; no HID
+KEBAB DRV: display class=AppleCLCD id=100000129 state=0x1e inactive=0 provider=KebabPlatformExpert
+KEBAB DRV: display class=AppleCLCD matched=1 valid=1 scope=CPU framebuffer; no GPU/vsync qualification
+KEBAB DRV: surface class=IOCoreSurfaceRoot id=100000142 state=0x1e inactive=0 provider=IOResources
+KEBAB DRV: surface class=IOCoreSurfaceRoot matched=1 valid=1 scope=compatibility selectors; private ABI incomplete
+KEBAB DRV: end; matched service does not certify user ABI or hardware capability

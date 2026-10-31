@@ -1,44 +1,41 @@
-最新触摸协议前置检查点0433：300 common+4 host /5260源码一致。
+# 当前状态：0460 实机基线
 
-已修复S3908续读前缀错位及超过GENI64B上限的完整配置发送；真实控制器接受128B配置，原版触摸HID/EventDriver启动。**尚无实机手势验收，不能声称触摸可用**。0431–0433原密钥/加密Data/MKB/defaults/watchdog回归通过。音量键实机验收仍见0430；GPU、显示呈现与可用SpringBoard未完成，蓝牙延期。见[本轮范围](TOUCH-PROTOCOL-20261031.md)及[限定验收资料](qualification/0433/README.md)。以下是历史阶段。
+更新时间：2026-10-31。完整功能总览见[仓库首页](../README.md)，资料入口见[文档索引](README.md)。本页取代此前逐轮追加的“最新状态”；旧页原文保存在[历史归档](history/STATUS-before-0460.txt)。
 
-最新输入阶段：0429/0430，正常默认0430。297 common +4 host /5259源码一致。
+## 已验收与未验收
 
-实机音量上/下的按下、松开已被原版HID解析器接受，并匹配原版IOHIDInterface/EventDriver；已修复RTC/NVRAM误把Data设备号写死为1/3的问题，真实1/4挂载保留全部原认证检查。两次正常启动的原密钥、加密Data、MKB、defaults与watchdog回归通过。触摸、界面事件消费、GPU、显示呈现及可用SpringBoard仍未完成；蓝牙继续延期。见[本轮范围](HID-INPUT-AND-DATA-IDENTITY-20261031.md)及[验收资料](qualification/0430/README.md)。以下为历史阶段。
-
-最新图形/输入前置阶段：0425–0427；正常默认0427。295 common +4 host /5252源码一致。
-
-已修正iOS16 selector74可选追踪契约，并在两次正常启动中加入原版IOHIDFamily/EventDriver闭包；实机确认一个原版IOHIDResource。真实触摸/按键HID事件、GPU、图像呈现与可用SpringBoard尚未完成，主CADisplay断言仍在。见[本轮范围](GRAPHICS-PREREQUISITE-20261031.md)、[最新版指南复核](GPU-DISPLAY-INPUT-REVIEW-0424.md)及[实机/源码证据](qualification/0427/README.md)。蓝牙继续延期至可用SpringBoard之后。以下是历史阶段。
-
-最新阶段：0423/0424 实机板型与共享锁收尾验收通过；正常默认0424。293 common +4 host /5252源文件一致。
-
-按用户最新安排，蓝牙从现在起延期到GPU、显示、输入和可用SpringBoard之后。实际板型19805、供电拓扑、内部UART、固件/资源只读采集及测试证据已保存；控制器/HCI/RF仍未完成，蓝牙不可用。见[归档与恢复入口](BLUETOOTH-DEFERRED-20261031.md)及[本轮实机/源码证据](qualification/0424/README.md)。下列旧阶段顺序与“待读取板型”描述属于历史，以上述归档为准。
-
-当前阶段验收：0422；正常默认0422。292 common +4 host /5249 源码一致。
-
-真实蓝牙供电资源只读发现与等价别名检查已通过0421/0422完整重启实测。控制器供电、HCI、扫描/连接/数据仍未完成，蓝牙整体不可用。见[本阶段范围](BLUETOOTH-POWER-DISCOVERY-20261031.md)、[LineageOS对照](BLUETOOTH-LINEAGE-COMPARISON-20261031.md)和[源码/实机证据](qualification/0422/README.md)。
-
-历史阶段验收：0415；正常默认0417。288 common + 4 host / 5248 源码一致。
-
-真实SE6内部UART收发与恢复已实机验收（0414/0415）：每次9组/1225字节、重复调用及完整重启通过；蓝牙控制器、HCI、扫描/连接/传输仍未完成。见[范围报告](BLUETOOTH-UART-20261031.md)。
-
-# 0404/0405历史验收状态（2026-10-31）
-
-新增真实SE6时钟准备和FIFO字段修复：0402/0403各验证首次获取与重复调用，UART协议2、微码修订3、TX16/RX32字且每字32位；0404原版只读Data检查通过，0405正常回归。279 common +4 host /5246源码一致。控制器未上电，无UART字节交换/HCI，蓝牙仍不可用。见[范围报告](BLUETOOTH-SE6-CLOCK-20261031.md)、[实机与源码证据](qualification/0404/README.md)。AKS17/35、真实A/B密钥、剩余daemon和SpringBoard仍待开发；下列为历史基线。
-
-当前分支为iOS16设备移植。目标用户态为iPhone X的16.7.16/20H392，原生XNU固定8796.141.3、16KiB页；源码回放为268 common +4 host /5239文件一致。
-
-| 范围 | 已验证行为 | 边界 |
+| 范围 | 当前结论 | 证据 |
 | --- | --- | --- |
-| 原版APFS/Cryptex | 原版System/Preboot只读、真实加密Data，独立SystemOS库路径已接通 | 不是Apple SSV认证；完整系统镜像原始参考0341保留 |
-| 硬件密钥 | 既有QSEE硬件Root/nonce恢复，原版MKB_INIT及factory无口令C/D文件明文/密文保持 | 完整A/B、口令、SEP/AKS接口尚未完成 |
-| 资源生命周期 | 原版AppleImage4/defaults正常返回且busy归零 | 未关闭watchdog监控 |
-| watchdog/Sandbox | owner平台类映射；真实watchdogd允许、本任务无关服务拒绝；原版心跳保持 | 后端是原版截止时间的软件观察器，不是独立硬件WDT |
-| 维护验收 | 原版只读fsck退出0、DataOK、crypto-io；已恢复正常0386 | 没有修复或放宽警告白名单 |
-| 用户态/UI | 前述被监测的daemon信号崩溃在两次窗口未复现 | classB密钥失败、部分重复启动仍需追踪；SpringBoard显示监控断言未解决 |
+| 正常启动 | 最近正常验收 0460，原版 iOS 用户态运行；原硬件密钥、MKB/systembag、C/D 加密 Data、RTC/NVRAM/defaults 与 watchdog 回归通过 | [0460 收据](qualification/0460/0460-qualified-runtime.json)、[原始日志](qualification/0460/0460-media-boot.log) |
+| 共同源码 | 324 个共同补丁 + 4 个 Mac 主机补丁，全部 5,261 个源码文件与实际编译输入一致；固定 Apple OSS 基提交 `1b191cb58250d0705d8a51287127505aa4bc0789` | [公共回放](qualification/0460/public-all-source-replay-0460.json)、[源码清单](qualification/0460/all-mac-source-0460.json) |
+| CPU / 内存 | 8 核与 8 GiB−2 MiB（8,587,837,440 字节，约 7.998 GiB）连续窗口已实测；非完整 12 GiB、AMP 或功耗验收 | [平台历史验收](PLATFORM-BASELINE-20261029.md) |
+| 触摸 | 0459 人工五点、横竖滑动、双指分离/保持与依次抬起通过原版 HID；新增 2,030 份报告，零队列丢失 | [实际记录](TOUCH-PHYSICAL-20261031.md)、[收据](qualification/0459-touch/0459-touch-live-qualified.json) |
+| 音量键 | 真实音量上/下的按下与释放已进入原版 HID；不等于 GUI 消费 | [0429/0430](HID-INPUT-AND-DATA-IDENTITY-20261031.md) |
+| 显示 | GOP 控制台可见；原版显示枚举、显示区域及缩放修复已有实测 | [枚举](GOP-DISPLAY-ENUMERATION-20261031.md)、[区域](DISPLAY-AREA-20261031.md)、[缩放](DISPLAY-SCALE-20261031.md) |
+| 桌面 | **尚未显示可用 SpringBoard**；实际进程进入 system-shell check-in 等待，不把进程存活算作桌面完成 | [UI 等待](FIXED-UI-WAITS-20261031.md)、[迁移现场](CORELOCATION-WAIT-20261031.md) |
+| 图形 / 120 Hz | A650/Metal、完整合成呈现、DPU/DSI 生命周期与真实面板 120 Hz 尚未验收 | 120 Hz 为用户提供的硬件规格/目标，不能用软件定时器证明 |
+| 蓝牙 | 控制器无线功能不可用；资源、固件与内部 UART 前置证据已归档，按用户安排延期 | [后续入口](BLUETOOTH-DEFERRED-20261031.md) |
 
-详见[Sandbox/watchdog报告](SANDBOX-WATCHDOG-20261031.md)、[实机收据与公共源码回放](qualification/0386/README.md)、[上一轮崩溃分类](USERLAND-CRASHES-20261031.md)。源代码、构建通过和实机行为是独立验收项，不能相互替代。
+0460 原生内核：18,944,304 字节，SHA-256 `25ab228e22dc4ac29cea74b887f1097ef3409fa8440549e25f4aac60dc642156`。最近实机源码提交为 [4662532](https://github.com/GFander/UniXNU-kebab/commit/466253282294f3f88478bac78bbbec8e6001b90f)。本次文档提交不改变内核、载荷或实机状态。
 
-下一顺序：补齐真实密钥和daemon功能 → 结合最新构建重新审核GPU/显示/输入指南 → 实现对应驱动并实机验证 → 可见可用SpringBoard。全部目标仍在进行，每个后续验收小目标整理并上传一次。
+## 当前直接阻塞
 
-已发布源码检查点：[9f48d5969d63](https://github.com/GFander/UniXNU-kebab/commit/9f48d5969d63128914b37c94145555e7a5d93610)（ios16分支，蓝牙固件只读读取）；[发布核对](qualification/0398/publication.json)。完整SpringBoard目标仍在进行。
+原版迁移调用者等待 `CLInternalPerformMigration`；0460 固定选择原版 locationd 的三次实机采样覆盖全部 11 个线程，数据库工作线程都经过 SQLite 主错误码 10 对应的重试分支，然后 `sleep(5)`。这证明存在数据库 I/O 错误重试，但尚未证明具体数据库路径、失败的 VFS 操作、权限错误、缺失密钥或损坏原因。调用者和接收端尚无匹配的 IPC transaction ID，不能把所有等待都认定为同一请求。
+
+0461 正在补充原版 locationd 的有界 open/fcntl/fsync 结果观测，目标是拿到真实路径与 errno。候选尚未完成主机/ABI/源码回放和实机验收，**没有作为已修复功能发布或刷入**。不能因构建产物存在就把其列入已验收基线。
+
+下一顺序：
+
+1. 确认实际失败操作，修复底层功能并实机复验；不删除数据库、重建密钥、降级保护类别或改写失败返回。
+2. 跑完原版 DataMigration、安装服务和 system-shell check-in，继续逐项处理实际 daemon 功能失败。
+3. 依据最新状态继续图形呈现与 GUI 输入，验证真正可见、可交互的 SpringBoard；单独测量物理刷新率。
+4. 可用桌面之后恢复蓝牙控制器/HCI/无线业务开发。
+
+## 必须保留的边界
+
+- 已验收密钥策略为 factory 无口令 C/D；A/B 类、口令、多用户、完整 keychain/Apple SEP 尚未完成。systembag envelope 承载本后端认证 bank，不冒充 Apple SEP 格式。
+- 原版 watchdog 客户端、心跳与截止时间保持；其后端为软件观察器，未声称独立硬件 WDT。0460 聚合心跳收据覆盖到 321.203 秒，原始日志另有更晚观察；这是有限窗口。
+- Sandbox 执行代码保留；owner 策略中的硬件类条件做了精确板级映射，不能称策略数据未修改或具有 Apple 签名认证。
+- development-fast 是正常开发策略；完整 System/SystemOS 内容检查保留 0341 证据，最近独立原版只读 Data fsck 为 0416。本次没有重新执行全盘扫描或 fsck。
+- 0459 真实触摸只验到原版 HID 接收；GUI 消费、屏幕像素对齐、超过两指及物理采样率未验收。
+- 部分旧阶段文档仍描述当时的 HFS+、单核或触摸未采样状态，作为历史证据保留，当前结论以本页和对应更新的验收收据为准。

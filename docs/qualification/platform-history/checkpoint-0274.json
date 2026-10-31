@@ -1,0 +1,181 @@
+{
+  "date": "2026-10-29",
+  "device": "c073a488",
+  "slot": "b",
+  "native_sha256": "8cdc0f2d856140dd96dd024e9fb6a80d36763dfcd36b3a34ff8e811647c46129",
+  "source_replay": {
+    "common": 200,
+    "mac_host": 4,
+    "source_files_equal": 5198,
+    "proof_sha256": "4ba14d30533c0d48af516cabeb10378a8093effbfc879d256f093e405e9d7e06"
+  },
+  "smp": {
+    "qualified_online_cores": 8,
+    "samples": [
+      {
+        "cpu": 0,
+        "mpidr": 0,
+        "cluster": 0,
+        "type": 0,
+        "signal": 1,
+        "timer": 193282,
+        "sgi": 7391,
+        "valid": 1
+      },
+      {
+        "cpu": 1,
+        "mpidr": 256,
+        "cluster": 0,
+        "type": 0,
+        "signal": 1,
+        "timer": 156520,
+        "sgi": 5871,
+        "valid": 1
+      },
+      {
+        "cpu": 2,
+        "mpidr": 512,
+        "cluster": 0,
+        "type": 0,
+        "signal": 1,
+        "timer": 107710,
+        "sgi": 2539,
+        "valid": 1
+      },
+      {
+        "cpu": 3,
+        "mpidr": 768,
+        "cluster": 0,
+        "type": 0,
+        "signal": 1,
+        "timer": 10627,
+        "sgi": 347,
+        "valid": 1
+      },
+      {
+        "cpu": 4,
+        "mpidr": 1024,
+        "cluster": 0,
+        "type": 0,
+        "signal": 1,
+        "timer": 2761,
+        "sgi": 16,
+        "valid": 1
+      },
+      {
+        "cpu": 5,
+        "mpidr": 1280,
+        "cluster": 0,
+        "type": 0,
+        "signal": 1,
+        "timer": 2,
+        "sgi": 7,
+        "valid": 1
+      },
+      {
+        "cpu": 6,
+        "mpidr": 1536,
+        "cluster": 0,
+        "type": 0,
+        "signal": 1,
+        "timer": 5,
+        "sgi": 4,
+        "valid": 1
+      },
+      {
+        "cpu": 7,
+        "mpidr": 1792,
+        "cluster": 0,
+        "type": 0,
+        "signal": 1,
+        "timer": 2,
+        "sgi": 3,
+        "valid": 1
+      }
+    ],
+    "amp_policy_qualified": false,
+    "performance_benchmark": false,
+    "non_boot_core_panic_fastboot": true
+  },
+  "cryptex": {
+    "original_raw_image_sha256": "9cd738f3b0169055549df84ad6d8d13e50a2da39af618ce0522ca4e06df86849",
+    "fixed_path": "/private/preboot/.hios-systemos-v1.apfs",
+    "original_apfs_ro_mount": true,
+    "inner_volume_uuid": "96096B28-B6DC-4BC7-9D3A-2632A0FE53F1",
+    "shared_cache_mapped": false,
+    "apple_im4m_authenticated": false,
+    "original_trustcache_modules_loaded": 3,
+    "original_module_entries": [
+      2760,
+      61,
+      30
+    ],
+    "bundle_sha256": "2d97b2a4e114c7303f5521814b8ae67bb85c66e4628fefbb13fe38a3fdba555d"
+  },
+  "memory": {
+    "qualified_boot_mem": 8587837440,
+    "qualified_max_mem": 8587837440,
+    "physical_dram_claim": 12884901888,
+    "memSizeActual_observed": 0,
+    "boot_args_abi_mismatch": {
+      "xnu_commandline": 608,
+      "loader_commandline": 1024,
+      "xnu_memSizeActual_offset": "0x2d8",
+      "loader_memSizeActual_offset": "0x478"
+    },
+    "transient_0269_qualified": false,
+    "actual_8g_0270": "failed before XNU; not a kernel panic",
+    "qualified_gib": 7.998046875,
+    "qualified_phys_base": "0x200004000",
+    "exact_8g_0270": "NO WINDOW: required0x4000 load offset exceeds the exact8GiB free run",
+    "aligned_8g_0271": true,
+    "high_dma_observed": {
+      "usb": "0x206e98000",
+      "ufs": "0x208918000"
+    },
+    "concurrent_hardware_nonce_verified_in": [
+      "0272",
+      "0273"
+    ]
+  },
+  "hardware_nonce_restore_and_image4_pass": [
+    "0264",
+    "0266",
+    "0267",
+    "0272",
+    "0273"
+  ],
+  "boots": {
+    "0264": "4d0ebac7842428e8682d4f89623d49a137b00a7d1438533cba0d33b6ec537a77",
+    "0266": "a926cfa3bf748abbaaeda8eff626da6126720d7542624ab679f637ece57e8f63",
+    "0267": "420272411014c5f30b550a447211aa1c50c189207f0d06ac0751a81b0adac6d5",
+    "0268": "df769c4ee190d385d89aaef605971fc9e21dae7a062c579f96916854392ef380",
+    "0269": "88bf60ef79e132b0be30ca9b106f8b072a12ef3f8e58afd739946c2346e89913",
+    "0270": "88bf60ef79e132b0be30ca9b106f8b072a12ef3f8e58afd739946c2346e89913",
+    "0271": "43ba1e44c0abac56b836ab799099673771de791c49575b7222a887c66618a1a7",
+    "0272": "cf022a30836fcc3e326ca4a47902fc0fb940dd987a0d3767532bf0c0f7fed20d",
+    "0273": "ecdcb36726cf680a20cdec44d1299c083cd353dc1ea881db2337707b17700454",
+    "0274": "6eb706177f43ab3ab912af6f4feca5244411c7d36565019703e2b3f60eaad2a7"
+  },
+  "springboard_running": false,
+  "git_committed_or_pushed": false,
+  "updated_at": "2026-10-29T23:15:43+08:00",
+  "latest_installed_version": "0274",
+  "device_state": "fastboot, exact c073a488 observed after normal sync reset",
+  "final_regression_sha256": "a11a4b53b586a29ba0b43679c702abeaa1ea6754813dc2cf36071670ba576151",
+  "evidence_sha256": {
+    "0274-DRV-output.txt": "0c2ecc9a7cf42a7414bf1ee0a2485fec0d2d93f4a9760cdbf0194ba860f072cf",
+    "0274-FWLOG-all-output.txt": "91b4cff37f6b473ccbd9e449f1f2dee377b1926fa44703149a2f02dc116049cf",
+    "0273-FWLOG-output.txt": "b333a30a9f2fb1059bba67b76df3632c73ac1a94070a9c25b2469ccf25c05689",
+    "0273-FASTBOOT-output.txt": "eb9c4ef75a6d9767406d319faddc016823f73cecce561f88314e590574ba0b42",
+    "original-three-trust.json": "a6a0442cea4067f7e689cc253b5a111351072a6475f1f9dcf2eab30fb7586736",
+    "host-original-trust-result.txt": "fd7ae9aa888951d693f85e785c4e3800dabc9c30d9f48f0fe4209456abdf8464"
+  },
+  "remaining": [
+    "DarwinBoot608-byte boot_args producer ABI",
+    "owner verified mount before deferred DSC plan/map and dyld startup",
+    "APFS Data/content protection",
+    "full launchd/UI and platform drivers",
+    "AMP/frequency/power and load/TLB stress qualification"
+  ]
+}
