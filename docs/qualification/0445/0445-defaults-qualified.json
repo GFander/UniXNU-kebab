@@ -1,0 +1,158 @@
+{
+  "version": "0445",
+  "defaults_matching_complete": true,
+  "actual_log_sha256": "b7550ec6663d24d044adad0f814de05bbc71e8f4499c1ea4772e0795402c01ab",
+  "native_sha256": "115d2e00c5d84272fce844c9bdaf4849789ea64b830deaa584171a74f127ee59",
+  "real_apple_image4_start_succeeded": true,
+  "actual_busy_reference_released": true,
+  "busy_lifecycle": [
+    [
+      0,
+      0,
+      1,
+      "defaults"
+    ],
+    [
+      11,
+      1,
+      1,
+      "AppleImage4"
+    ],
+    [
+      14,
+      2,
+      -1,
+      "defaults"
+    ],
+    [
+      15,
+      1,
+      -1,
+      "AppleImage4"
+    ]
+  ],
+  "final_busy_state": 0,
+  "actual_waits": [
+    "IOAESAccelerator",
+    "IOResources/IONVRAM",
+    "IODTNVRAM"
+  ],
+  "hardware_nonce_and_data_restored_without_generation": true,
+  "native_nvram_existing_proxy_adopted": true,
+  "nvram_encrypted_data_banks_cold_restored": true,
+  "nvram_restored_bank": 1,
+  "nvram_restored_generation": 338,
+  "nvram_hardware_or_rollback_claim": false,
+  "nvram_durable_write_calls": 2,
+  "watchdog_enabled": true,
+  "original_iokit_monitoring_preserved": true,
+  "watchdog_heartbeat_times": [
+    42.072,
+    42.072,
+    52.06,
+    62.047,
+    72.05,
+    82.093,
+    92.084,
+    102.071,
+    112.072,
+    122.061,
+    132.062,
+    142.1,
+    152.097,
+    162.081,
+    172.068,
+    182.104,
+    192.085,
+    202.065,
+    212.113,
+    222.104,
+    232.097,
+    242.092,
+    252.082,
+    262.09,
+    272.073,
+    282.134,
+    292.137,
+    302.126,
+    312.122,
+    322.099
+  ],
+  "original_locked_observations": [
+    [
+      63.857,
+      30,
+      4
+    ],
+    [
+      93.893,
+      60,
+      7
+    ],
+    [
+      123.936,
+      90,
+      10
+    ],
+    [
+      153.968,
+      120,
+      13
+    ],
+    [
+      183.976,
+      150,
+      16
+    ],
+    [
+      213.99,
+      180,
+      19
+    ],
+    [
+      244.028,
+      210,
+      22
+    ],
+    [
+      274.079,
+      240,
+      25
+    ],
+    [
+      304.061,
+      270,
+      28
+    ],
+    [
+      334.093,
+      300,
+      31
+    ],
+    [
+      364.144,
+      330,
+      34
+    ],
+    [
+      394.189,
+      360,
+      37
+    ],
+    [
+      424.223,
+      390,
+      40
+    ],
+    [
+      453.815,
+      420,
+      43
+    ]
+  ],
+  "systembag_and_hardware_c_d_preserved": true,
+  "rtc_record_reused": true,
+  "panic": [],
+  "full_ios_or_springboard": false,
+  "gpu_display_input_started": true
+}

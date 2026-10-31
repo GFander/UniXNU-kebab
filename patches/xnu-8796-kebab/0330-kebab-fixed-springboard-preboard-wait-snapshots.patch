@@ -1,0 +1,151 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -100,4 +100,53 @@
+     }
+     printf("KEBAB BBOARD: observer end; no suspension or modification; user frames are best-effort reads\n");
+ }
++
++/* Only these two fixed launchd children are selected. Report actual UID;
++ * names, PIDs and maps are not accepted from the USB command. The iterator
++ * holds the process; retain its task there and print outside its locks. */
++extern void kebab_springboard_task_report(task_t);
++extern void kebab_preboard_task_report(task_t);
++void kebab_ui_report(void);
++struct kebab_ui_snapshot {
++    const char *name; task_t task; unsigned scanned; int pid; unsigned uid; bool found;
++};
++static int
++kebab_ui_select(proc_t process, void *argument)
++{
++    struct kebab_ui_snapshot *snapshot = argument;
++    char name[MAXCOMLEN + 1] = {};
++    ++snapshot->scanned;
++    proc_name(proc_pid(process), name, sizeof(name));
++    if (!strcmp(name, snapshot->name) && proc_ppid(process) == 1) {
++        snapshot->found = true;
++        snapshot->pid = proc_pid(process);snapshot->uid = proc_getuid(process);
++        task_t task = proc_task(process);
++        if (task != TASK_NULL) {task_reference(task);snapshot->task = task;}
++        return PROC_RETURNED_DONE;
++    }
++    return snapshot->scanned >= 512 ? PROC_RETURNED_DONE : PROC_RETURNED;
++}
++void
++kebab_ui_report(void)
++{
++    if (ml_at_interrupt_context() || get_preemption_level() != 0 ||
++        !ml_get_interrupts_enabled()) return;
++    static const char *const names[] = {"SpringBoard", "PreBoard"};
++    static const char *const labels[] = {"UI-SB", "UI-PB"};
++    for (unsigned i = 0; i < 2; i++) {
++        struct kebab_ui_snapshot snapshot = {};snapshot.name = names[i];
++        proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS, kebab_ui_select, &snapshot, NULL, NULL);
++        if (snapshot.task == TASK_NULL) {
++            printf("KEBAB %s: no referenced task found=%u scanned=%u (parent1/exact-name; cap512)\n",
++                labels[i], snapshot.found, snapshot.scanned);
++        } else {
++            printf("KEBAB %s: fixed process pid=%d uid=%u scanned=%u; best-effort wait snapshot\n",
++                labels[i], snapshot.pid, snapshot.uid, snapshot.scanned);
++            if (i == 0) kebab_springboard_task_report(snapshot.task);
++            else kebab_preboard_task_report(snapshot.task);
++            task_deallocate(snapshot.task);
++        }
++    }
++    printf("KEBAB UI: observer end; no suspension or modification; user frames are best-effort reads\n");
++}
+ #endif /* KEBAB */
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -1,4 +1,4 @@
+-/* Mach-private half of normal PID1 observability. The caller holds a task
++/* Mach-private half of normal PID1 and fixed daemon/UI observability. The caller holds a task
+  * reference. Copy at most 32 thread references under task_lock, then observe
+  * each under sched_lock; release everything before printing or returning. */
+ #if defined(KEBAB)
+@@ -67,11 +67,11 @@
+  * Bound every read to that map, aligned increasing frames in a64KiB window,
+  * at most8pairs. Never use copyinmap's kernel-pmap memcpy fast path. */
+ static void
+-kebab_user_wait_report(vm_map_t map, uint64_t tid, const struct kebab_saved_user_site *site)
++kebab_user_wait_report(vm_map_t map, const char *label, uint64_t tid, const struct kebab_saved_user_site *site)
+ {
+     if (map == VM_MAP_NULL || vm_map_pmap(map) == pmap_kernel()) return;
+-    printf("KEBAB BBOARD USER: tid=%llu saved pc=0x%llx lr=0x%llx fp=0x%llx; best-effort, target may resume\n",
+-        tid, site->pc, site->lr, site->fp);
++    printf("KEBAB %s USER: tid=%llu saved pc=0x%llx lr=0x%llx fp=0x%llx; best-effort, target may resume\n",
++        label, tid, site->pc, site->lr, site->fp);
+     uint64_t fp = site->fp, origin = fp;
+     for (unsigned i = 0; i < 8; i++) {
+         uint64_t pair[2];
+@@ -79,11 +79,11 @@
+             vm_map_max(map) - fp < sizeof(pair) || fp < origin || fp - origin > 65536) break;
+         kern_return_t result = copyinmap(map, fp, pair, sizeof(pair));
+         if (result != KERN_SUCCESS) {
+-            printf("KEBAB BBOARD USER: tid=%llu read stopped error=0x%x depth=%u\n", tid, result, i);
++            printf("KEBAB %s USER: tid=%llu read stopped error=0x%x depth=%u\n", label, tid, result, i);
+             break;
+         }
+         if (pair[1] == 0) break;
+-        printf("KEBAB BBOARD USER: tid=%llu frame[%u]=0x%llx\n", tid, i, pair[1]);
++        printf("KEBAB %s USER: tid=%llu frame[%u]=0x%llx\n", label, tid, i, pair[1]);
+         if (pair[0] <= fp) break;
+         fp = pair[0];
+     }
+@@ -131,7 +131,7 @@
+ 		for (unsigned frame = 0; frame < frame_count; frame++) {
+ 			printf("KEBAB %s: tid=%llu kframe[%u]=0x%llx\n", label, tid, frame, frames[frame]);
+ 		}
+-		if (have_site) kebab_user_wait_report(map, tid, &site);
++		if (have_site) kebab_user_wait_report(map, label, tid, &site);
+ 		thread_deallocate(thread);
+ 	}
+ 	if (map != VM_MAP_NULL) vm_map_deallocate(map);
+@@ -142,4 +142,8 @@
+ void kebab_backboardd_task_report(task_t task);
+ void kebab_pid1_task_report(task_t task) { kebab_task_threads_report(task, "PID1", false); }
+ void kebab_backboardd_task_report(task_t task) { kebab_task_threads_report(task, "BBOARD", true); }
++void kebab_springboard_task_report(task_t task);
++void kebab_preboard_task_report(task_t task);
++void kebab_springboard_task_report(task_t task) { kebab_task_threads_report(task, "UI-SB", true); }
++void kebab_preboard_task_report(task_t task) { kebab_task_threads_report(task, "UI-PB", true); }
+ #endif /* KEBAB */
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -278,6 +278,8 @@
+ #define UD_REBOOT_BTPWR_REPORT 38u
+ #define UD_REBOOT_BTBOARD_REPORT 39u
+ #define UD_REBOOT_BBOARD_REPORT 40u
++#define UD_REBOOT_UI_REPORT 41u
++extern void kebab_ui_report(void);
+ extern void kebab_backboardd_report(void);
+ extern void kebab_board_report(void);
+ extern void kebab_bluetooth_power_report(void);
+@@ -1472,6 +1474,9 @@
+ 		if (ud_command_seen(buf, received, "PROC?\n", sizeof("PROC?\n") - 1)) {
+ 			return UD_REBOOT_PROC_REPORT;
+ 		}
++		if (ud_command_seen(buf, received, "UI?\n", sizeof("UI?\n") - 1)) {
++			return UD_REBOOT_UI_REPORT;
++		}
+ 		if (ud_command_seen(buf, received, "BBOARD?\n", sizeof("BBOARD?\n") - 1)) {
+ 			return UD_REBOOT_BBOARD_REPORT;
+ 		}
+@@ -1598,6 +1603,9 @@
+ 	}
+ 	if (received >= sizeof("PROC?\n") - 1 && !memcmp(buf, "PROC?\n", sizeof("PROC?\n") - 1)) {
+ 		return UD_REBOOT_PROC_REPORT;
++	}
++	if (received >= sizeof("UI?\n") - 1 && !memcmp(buf, "UI?\n", sizeof("UI?\n") - 1)) {
++		return UD_REBOOT_UI_REPORT;
+ 	}
+ 	if (received >= sizeof("BBOARD?\n") - 1 && !memcmp(buf, "BBOARD?\n", sizeof("BBOARD?\n") - 1)) {
+ 		return UD_REBOOT_BBOARD_REPORT;
+@@ -1748,6 +1756,8 @@
+ 		kebab_process_report();
+ 	} else if (command == UD_REBOOT_PID1_REPORT) {
+ 		kebab_pid1_report();
++	} else if (command == UD_REBOOT_UI_REPORT) {
++		kebab_ui_report();
+ 	} else if (command == UD_REBOOT_BBOARD_REPORT) {
+ 		kebab_backboardd_report();
+ 	} else if (command == UD_REBOOT_QSEELOG_REPORT) {

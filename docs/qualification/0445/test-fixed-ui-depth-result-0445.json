@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "actual_production_sources": {
+    "osfmk/kern/kebab_bootdiag.c": "7528e666277ae1fcdf3f3f460944cc4a11f845a87de18b4cd22225bccf44f4ac",
+    "bsd/kern/kebab_bootdiag.c": "e15adaa1f58ce17f2b578055b7dab26f445f88b92722790852955aa2538605cf"
+  },
+  "fixture_sha256": "fdde3b20465fcb86a1a5fc1e6b26b8765c32616494f220bfe07eccff4780b428",
+  "behavioral_mutations_refused": 6,
+  "ui_pairs": 16,
+  "backboard_pairs": 8,
+  "absolute_helper_pairs": 16,
+  "frame_window_bytes": 65536,
+  "legacy_selection_references_map_context_regression": true,
+  "best_effort_not_suspended_snapshot": true,
+  "kernel_task_scheduler_map_nofault_are_explicit_models": true
+}
