@@ -3,7 +3,7 @@
   "scope": "real SoC SE6 internal UART byte transport, repeated/cold restart and exact configuration/IRQ restore; Bluetooth controller/RF unqualified",
   "native_sha256": "851642251a6b9c0517468124f50efec34e27c96673e50d310c35ed4c17378715",
   "native_source_version": "0414",
-  "normal_default": "0415",
+  "normal_default": "0417",
   "common_patches": 288,
   "host_patches": 4,
   "source_files": 5248,
@@ -349,13 +349,13 @@
   "hardware_roots_nonce_and_original_bags_preserved": true,
   "encrypted_data_factory_c_d_preserved": true,
   "original_watchdog_and_macf_retained": true,
-  "new_independent_fsck_performed": false,
-  "last_independent_readonly_fsck": "0404",
+  "new_independent_fsck_performed": true,
+  "last_independent_readonly_fsck": "0416",
   "daily_fast_boot_retained": true,
   "full_aks_a_b_or_passcode_claim": false,
   "gpu_display_input_started": false,
   "usable_springboard": false,
-  "github_pushed": false,
+  "github_pushed": true,
   "prior_fault_proof": {
     "native_version": "0413",
     "native_sha256": "635923d3f115a49d73cce65b536265909f21ee6e9c2bbf8faf64181eefd720f1",
@@ -373,5 +373,155 @@
     "console_ring_sha256": "21cae1cf283cac7077a149c4651e386385cff76fa3f9a849ca066f21a6ff1501",
     "sahara_non_storage_reset_accepted": true,
     "full_ram_dump": false
+  },
+  "github_source_commit": "c946dec095581fd98539b7882eea3fd2c20d37e7",
+  "github_source_url": "https://github.com/GFander/UniXNU-kebab/commit/c946dec095581fd98539b7882eea3fd2c20d37e7",
+  "normal_default_restored_after_maintenance": "0417",
+  "independent_readonly_fsck": {
+    "version": "0416",
+    "baseline_version": "0343",
+    "full_content_reference_version": "0341",
+    "full_content_reference_log_sha256": "53ac7d3d421f291827fd4b5840ec529842a71d7130c3dd3117c9d38888925639",
+    "original_signed_fsck_exit": 0,
+    "read_only_no_repairs": true,
+    "original_crypto_io_enabled": true,
+    "original_data_volume_ok": true,
+    "warnings": [
+      "container has been mounted by APFS version 2236.141.1, which is newer than 2142.140.9.704.1",
+      "disabling overallocation repairs by default; use -o to override"
+    ],
+    "unexpected_warnings": [],
+    "original_os_build_initialized": true,
+    "complete_original_os": true,
+    "complete_original_systemos": true,
+    "current_boot_development_fast": true,
+    "original_dsc_map_signatures": true,
+    "original_firmware": true,
+    "real_cold_c_d_file_checks": true,
+    "actual_log_sha256": "0631ed0f80a1ca8fa73f7517ffdb157be724d9a3e9761ee9706da200b330c0da",
+    "accepted": true
+  },
+  "final_normal_regression": {
+    "version": "0417",
+    "defaults_matching_complete": true,
+    "actual_log_sha256": "fd2428be5dfc16330b819ec8c809a07fc4fcc0674da11b3c0bfb0d0c70977aef",
+    "native_sha256": "851642251a6b9c0517468124f50efec34e27c96673e50d310c35ed4c17378715",
+    "real_apple_image4_start_succeeded": true,
+    "actual_busy_reference_released": true,
+    "busy_lifecycle": [
+      [
+        0,
+        0,
+        1,
+        "defaults"
+      ],
+      [
+        11,
+        1,
+        1,
+        "AppleImage4"
+      ],
+      [
+        14,
+        2,
+        -1,
+        "defaults"
+      ],
+      [
+        15,
+        1,
+        -1,
+        "AppleImage4"
+      ]
+    ],
+    "final_busy_state": 0,
+    "actual_waits": [
+      "IOAESAccelerator",
+      "IOResources/IONVRAM",
+      "IODTNVRAM"
+    ],
+    "hardware_nonce_and_data_restored_without_generation": true,
+    "native_nvram_existing_proxy_adopted": true,
+    "nvram_encrypted_data_banks_cold_restored": true,
+    "nvram_restored_bank": 0,
+    "nvram_restored_generation": 203,
+    "nvram_hardware_or_rollback_claim": false,
+    "nvram_durable_write_calls": 2,
+    "watchdog_enabled": true,
+    "original_iokit_monitoring_preserved": true,
+    "watchdog_heartbeat_times": [
+      38.33,
+      38.33,
+      48.311,
+      58.341,
+      68.338,
+      78.342,
+      88.361,
+      98.303,
+      108.36,
+      118.354,
+      128.353,
+      138.32,
+      148.335,
+      158.316,
+      168.325,
+      178.329,
+      188.342,
+      198.34,
+      208.372,
+      218.351,
+      228.358,
+      238.327,
+      248.378,
+      258.373,
+      268.347
+    ],
+    "original_locked_observations": [
+      [
+        60.339,
+        30,
+        4
+      ],
+      [
+        90.361,
+        60,
+        7
+      ],
+      [
+        120.411,
+        90,
+        10
+      ],
+      [
+        150.47,
+        120,
+        13
+      ],
+      [
+        180.46,
+        150,
+        16
+      ],
+      [
+        210.495,
+        180,
+        19
+      ],
+      [
+        240.51,
+        210,
+        22
+      ],
+      [
+        270.59,
+        240,
+        25
+      ]
+    ],
+    "systembag_and_hardware_c_d_preserved": true,
+    "rtc_record_reused": true,
+    "panic": [],
+    "full_ios_or_springboard": false,
+    "gpu_display_input_started": false
   }
 }
