@@ -1,0 +1,370 @@
+fix(dsc): map the dynamic-config page dyld reads at the top of the cache
+
+mapSplitCacheSystemWide() does not map only the 43 cache files.  It appends one
+more entry with fd == -1: a single page at sharedRegionStart +
+header.dynamicDataOffset holding struct dyld_cache_dynamic_data_header, and the
+kernel slides it with everything else.  Once shared_region_check_np() succeeds,
+dyld dereferences that page unconditionally, before it looks at any image:
+
+    SyscallDelegate::hasExistingDyldCache()   dyldMain, first thing it does
+    reuseExistingCache()                      SharedCacheRuntime
+
+both do strncmp((char*)(base + header.dynamicDataOffset), magic, 16).
+
+kebab_dsc_build_plan() only produced the mappings the cache files declare, so
+its extent stopped 0x4000 short of sharedRegionSize: exactly that page.  In the
+real cache dynamicDataOffset is 0xaade4000, dynamicDataMaxSize 0x4000 and
+sharedRegionSize 0xaade8000, so the missing page sits at
+0x180000000 + 0xaade4000 = 0x22ade4000, immediately after the last mapping of
+.42.dyldlinkedit.  A read there takes a translation fault, vm_fault() returns
+KERN_FAILURE for the sub-map entry, and dyld dies on its first cache access
+instead of ever seeing the cache.
+
+Add the page to the main cache's mapping list: read-only, VM_PROT_ZF so that
+vm_shared_region_map_file() creates an anonymous zero-filled object instead of a
+file mapping, and slid with every other mapping.  The contents stay zero, so
+dyld reports "mapped cache does not contain dynamic config data" and continues;
+the kernel cannot write dyld's fsId/fsObjId, and pretending to would be worse
+than saying so.  On the real cache the page's extent now ends exactly at
+sharedRegionStart + sharedRegionSize, 0xaade8000.
+
+Also grow struct kebab_dsc_header to the 512 bytes the mapping table starts at
+so dynamicDataOffset/dynamicDataMaxSize (496/504) can be read and asserted, and
+add the lines that made the remaining failures invisible: the ENOMEM paths in
+the plan builder and for the mapping table, and a post-failure probe of
+shared_region_check_np() so a failed vm_shared_region_map_file() says whether
+the kernel's own rollback left the region empty or half mapped.
+
+The is_main check in kebab_dsc_validate_header() compared sharedRegionStart
+with plan->region_start, which had just been copied out of that same field, so
+it could never fire; with the default slide of 0 nothing else looked at the base
+either.  Compare against SHARED_REGION_BASE_ARM64 instead: every mapping is
+entered at sms_address - sr_base_address, and a cache that declares any other
+base can only be placed by accident.
+
+Verified on the host only: the added page's end equals sharedRegionSize, it
+overlaps none of the 51 cache mappings, and it survives every accepted slide
+(0x55210000 leaves 0x8000 of slack).  No hardware.
+diff --git a/bsd/kern/kebab_dyldcache.c b/bsd/kern/kebab_dyldcache.c
+index f0f1a82..baebd16 100644
+--- a/bsd/kern/kebab_dyldcache.c
++++ b/bsd/kern/kebab_dyldcache.c
+@@ -18,6 +18,12 @@
+  * and protections.  Mapping is done with vm_shared_region_map_file(), the same
+  * primitive dyld reaches through shared_region_map_and_slide_2_np().
+  *
++ * The plan is 51 file mappings plus one page that is not part of any file: the
++ * dyld_cache_dynamic_data_header page at sharedRegionStart +
++ * dynamicDataOffset, which dyld always adds as an fd == -1 mapping and then
++ * reads unconditionally once shared_region_check_np() succeeds.  Omitting it
++ * leaves a one-page hole at the top of the cache that faults inside dyld.
++ *
+  * Slide support consumes dyld_cache_mapping_and_slide_info.  Four mappings in
+  * this cache carry slide info (the __DATA_CONST and __DATA mappings of the two
+  * .dylddata subcaches); they are marked VM_PROT_SLIDE and their slide info is
+@@ -77,7 +83,7 @@
+ #define KEBAB_DSC_MAX_SUBCACHES         64
+ #define KEBAB_DSC_MAX_FILES             (1 + KEBAB_DSC_MAX_SUBCACHES)
+ #define KEBAB_DSC_MAX_MAPPINGS          8
+-#define KEBAB_DSC_HEADER_SIZE           456
++#define KEBAB_DSC_HEADER_SIZE           512
+ #define KEBAB_DSC_PAGE_SIZE             0x4000
+ #define KEBAB_DSC_SUB_ENTRY_SIZE        56
+ #define KEBAB_DSC_MAPPING_SIZE          32
+@@ -96,10 +102,12 @@
+ 
+ /*
+  * dyld_cache_header, from dyld's dyld_cache_format.h.  Only the fields this
+- * module reads are listed; the layout up to symbolFileUUID is fixed and is
++ * module reads are listed; the layout up to dynamicDataMaxSize is fixed and is
+  * checked with offsetof() below.  imagesOffset/imagesCount were moved to the
+  * end of the header (448/452) when the split cache was introduced; the old
+- * copies at 24/28 are explicitly unused.
++ * copies at 24/28 are explicitly unused.  dynamicDataOffset/dynamicDataMaxSize
++ * (496/504) are what dyld uses to find the one page it maps in addition to the
++ * cache files (see kebab_dsc_add_dynamic_config()).
+  */
+ struct kebab_dsc_header {
+ 	char            magic[16];                    /*   0 */
+@@ -165,7 +173,15 @@ struct kebab_dsc_header {
+ 	uint64_t        rosetta_read_write_size;      /* 440 */
+ 	uint32_t        images_offset;                /* 448 */
+ 	uint32_t        images_count;                 /* 452 */
+-	/* 456 */
++	uint32_t        cache_sub_type;               /* 456 unused */
++	uint32_t        unused_pad;                   /* 460 */
++	uint64_t        objc_opts_offset;             /* 464 unused */
++	uint64_t        objc_opts_size;               /* 472 unused */
++	uint64_t        cache_atlas_offset;           /* 480 unused */
++	uint64_t        cache_atlas_size;             /* 488 unused */
++	uint64_t        dynamic_data_offset;          /* 496 */
++	uint64_t        dynamic_data_max_size;        /* 504 */
++	/* 512 */
+ };
+ 
+ struct kebab_dsc_mapping_info {
+@@ -229,6 +245,9 @@ static_assert(offsetof(struct kebab_dsc_header, sub_cache_array_offset) == 392,
+ static_assert(offsetof(struct kebab_dsc_header, symbol_file_uuid) == 400, "symbolFileUUID");
+ static_assert(offsetof(struct kebab_dsc_header, images_offset) == 448, "imagesOffset");
+ static_assert(offsetof(struct kebab_dsc_header, images_count) == 452, "imagesCount");
++static_assert(offsetof(struct kebab_dsc_header, cache_sub_type) == 456, "cacheSubType");
++static_assert(offsetof(struct kebab_dsc_header, dynamic_data_offset) == 496, "dynamicDataOffset");
++static_assert(offsetof(struct kebab_dsc_header, dynamic_data_max_size) == 504, "dynamicDataMaxSize");
+ static_assert(sizeof(struct kebab_dsc_mapping_info) == KEBAB_DSC_MAPPING_SIZE, "mapping info size");
+ static_assert(sizeof(struct kebab_dsc_mapping_slide_info) == KEBAB_DSC_SLIDE_INFO_SIZE,
+     "mapping and slide info size");
+@@ -267,6 +286,8 @@ struct kebab_dsc_plan {
+ 	uint64_t        total_mapped;
+ 	uint64_t        highest_end;
+ 	uint64_t        slide;
++	uint64_t        dynamic_config_addr;    /* unslid; 0 when the cache has none */
++	uint64_t        dynamic_config_size;
+ 	uint8_t         main_uuid[16];
+ 	uint8_t         symbol_uuid[16];
+ 	boolean_t       symbols_present;
+@@ -640,10 +661,21 @@ kebab_dsc_validate_header(const struct kebab_dsc_header *h, uint64_t file_size,
+ 	}
+ 
+ 	if (is_main) {
+-		if (h->shared_region_start != plan->region_start) {
+-			printf("KEBAB DSC: %s: sharedRegionStart 0x%llx != 0x%llx\n",
+-			    name, (unsigned long long)h->shared_region_start,
+-			    (unsigned long long)plan->region_start);
++		/*
++		 * plan->region_start was just copied out of this field, so
++		 * comparing the two proves nothing.  What has to hold is that
++		 * the cache's region is the kernel's fixed shared region: every
++		 * mapping is entered at sms_address - sr_base_address, and a
++		 * cache that declares any other base can only be mapped by
++		 * accident.  Reject it here instead of letting the mappings land
++		 * wherever the subtraction puts them.
++		 */
++		if (h->shared_region_start != KEBAB_DSC_REGION_BASE) {
++			printf("KEBAB DSC: %s: sharedRegionStart 0x%llx is not the "
++			    "kernel shared region base 0x%llx; the cache cannot be "
++			    "placed\n", name,
++			    (unsigned long long)h->shared_region_start,
++			    (unsigned long long)KEBAB_DSC_REGION_BASE);
+ 			return EINVAL;
+ 		}
+ 		if (h->shared_region_size != plan->region_size) {
+@@ -1091,6 +1123,118 @@ kebab_dsc_apply_slide(struct kebab_dsc_plan *plan, uint64_t slide)
+ 
+ #pragma mark - plan
+ 
++/*
++ * dyld does not map only the cache files.  mapSplitCacheSystemWide() appends
++ * one extra "file" with fd == -1: a single page at
++ *
++ *     sharedRegionStart + header.dynamicDataOffset
++ *
++ * holding struct dyld_cache_dynamic_data_header (magic, fsId, fsObjId), and it
++ * puts it at the *end* of the mapping list so it is slid with everything else.
++ * Both readers of that page are unconditional once shared_region_check_np()
++ * succeeds:
++ *
++ *     SyscallDelegate::hasExistingDyldCache()   dyldMain, before anything else
++ *     reuseExistingCache()                      SharedCacheRuntime
++ *
++ * do `strncmp((char*)(base + header.dynamicDataOffset), magic, 16)`.  A cache
++ * that the kernel pre-mapped without that page therefore faults inside dyld on
++ * its first cache access instead of falling back to the filesystem.
++ *
++ * The port cannot supply the contents (dyld writes them itself, for its own
++ * process), but it must supply the mapping: read-only, anonymous, so it reads
++ * as zeros and dyld takes its "does not contain dynamic config data" branch
++ * and carries on.  On the real cache dynamicDataOffset is 0xaade4000 and
++ * dynamicDataMaxSize 0x4000, i.e. exactly the one-page gap between the plan's
++ * extent (0xaade4000) and sharedRegionSize (0xaade8000).
++ */
++static int
++kebab_dsc_add_dynamic_config(struct kebab_dsc_plan *plan,
++    const struct kebab_dsc_header *h)
++{
++	struct kebab_dsc_file *main_file = &plan->files[0];
++	struct shared_file_mapping_slide_np *m;
++	uint64_t addr;
++	uint64_t size;
++	uint64_t region_end;
++	uint32_t i, j;
++
++	if (h->dynamic_data_offset == 0) {
++		printf("KEBAB DSC: dynamicDataOffset is 0; no dynamic config page "
++		    "to map\n");
++		return 0;
++	}
++	if ((h->dynamic_data_offset & (KEBAB_DSC_PAGE_SIZE - 1)) != 0) {
++		printf("KEBAB DSC: dynamicDataOffset 0x%llx is not 0x%x-byte "
++		    "aligned\n", (unsigned long long)h->dynamic_data_offset,
++		    KEBAB_DSC_PAGE_SIZE);
++		return EINVAL;
++	}
++	size = h->dynamic_data_max_size;
++	if (size == 0) {
++		/* dyld maps round_page(sizeof(dyld_cache_dynamic_data_header)) */
++		size = KEBAB_DSC_PAGE_SIZE;
++	}
++	if ((size & (KEBAB_DSC_PAGE_SIZE - 1)) != 0) {
++		size = (size + KEBAB_DSC_PAGE_SIZE - 1) &
++		    ~(uint64_t)(KEBAB_DSC_PAGE_SIZE - 1);
++	}
++	addr = plan->region_start + h->dynamic_data_offset;
++	region_end = plan->region_start + plan->region_size;
++	if (addr < plan->region_start || addr + size < addr ||
++	    addr + size > region_end) {
++		printf("KEBAB DSC: dynamic config page [0x%llx, 0x%llx) is outside "
++		    "the declared region [0x%llx, 0x%llx)\n",
++		    (unsigned long long)addr, (unsigned long long)(addr + size),
++		    (unsigned long long)plan->region_start,
++		    (unsigned long long)region_end);
++		return EINVAL;
++	}
++	if (main_file->mapping_count >= KEBAB_DSC_MAX_MAPPINGS) {
++		printf("KEBAB DSC: no room for the dynamic config page in the main "
++		    "cache's %u mappings\n", KEBAB_DSC_MAX_MAPPINGS);
++		return E2BIG;
++	}
++
++	/* It must not collide with anything the cache itself maps. */
++	for (i = 0; i < plan->file_count; i++) {
++		const struct kebab_dsc_file *f = &plan->files[i];
++
++		for (j = 0; j < f->mapping_count; j++) {
++			const struct shared_file_mapping_slide_np *o =
++			    &f->mappings[j];
++
++			if (addr < o->sms_address + o->sms_size &&
++			    o->sms_address < addr + size) {
++				printf("KEBAB DSC: dynamic config page [0x%llx, "
++				    "0x%llx) overlaps %s mapping %u\n",
++				    (unsigned long long)addr,
++				    (unsigned long long)(addr + size),
++				    f->name, j);
++				return EINVAL;
++			}
++		}
++	}
++
++	m = &main_file->mappings[main_file->mapping_count];
++	m->sms_address = addr;
++	m->sms_size = size;
++	m->sms_file_offset = 0;
++	m->sms_slide_size = 0;
++	m->sms_slide_start = 0;
++	m->sms_max_prot = VM_PROT_READ;
++	/*
++	 * VM_PROT_ZF is what makes vm_shared_region_map_file() create an
++	 * anonymous zero-filled object instead of a file mapping.  It is masked
++	 * off with VM_PROT_ALL before it reaches the VM map entry.
++	 */
++	m->sms_init_prot = VM_PROT_READ | VM_PROT_ZF;
++	main_file->mapping_count++;
++	plan->dynamic_config_addr = addr;
++	plan->dynamic_config_size = size;
++	return 0;
++}
++
+ static void
+ kebab_dsc_log_plan(const struct kebab_dsc_plan *plan)
+ {
+@@ -1102,6 +1246,14 @@ kebab_dsc_log_plan(const struct kebab_dsc_plan *plan)
+ 	    (unsigned long long)plan->region_size,
+ 	    (unsigned long long)(plan->region_start + plan->region_size),
+ 	    (unsigned long long)plan->max_slide);
++	if (plan->dynamic_config_size != 0) {
++		printf("KEBAB DSC: dynamic config page 0x%llx+0x%llx (offset "
++		    "0x%llx), zero-filled read-only\n",
++		    (unsigned long long)(plan->dynamic_config_addr + plan->slide),
++		    (unsigned long long)plan->dynamic_config_size,
++		    (unsigned long long)(plan->dynamic_config_addr -
++		    plan->region_start));
++	}
+ 	printf("KEBAB DSC: slide 0x%llx (%s); %u mapping(s) carry slide info; "
+ 	    "shared region [0x%llx, 0x%llx)\n",
+ 	    (unsigned long long)plan->slide,
+@@ -1246,6 +1398,8 @@ kebab_dsc_build_plan(const char *dir, struct kebab_dsc_plan *plan)
+ 	entries = kalloc_data(plan->subcache_count * sizeof(*entries),
+ 	    Z_WAITOK | Z_ZERO);
+ 	if (entries == NULL) {
++		printf("KEBAB DSC: cannot allocate %u subcache entries; shared "
++		    "cache NOT mapped\n", plan->subcache_count);
+ 		error = ENOMEM;
+ 		goto out;
+ 	}
+@@ -1264,6 +1418,8 @@ kebab_dsc_build_plan(const char *dir, struct kebab_dsc_plan *plan)
+ 	candidates = kalloc_data(KEBAB_DSC_MAX_CANDIDATES * sizeof(*candidates),
+ 	    Z_WAITOK | Z_ZERO);
+ 	if (candidates == NULL) {
++		printf("KEBAB DSC: cannot allocate %u directory candidates; "
++		    "shared cache NOT mapped\n", KEBAB_DSC_MAX_CANDIDATES);
+ 		error = ENOMEM;
+ 		goto out;
+ 	}
+@@ -1409,6 +1565,16 @@ kebab_dsc_build_plan(const char *dir, struct kebab_dsc_plan *plan)
+ 		goto out;
+ 	}
+ 
++	/*
++	 * Last mapping dyld would have created: the dynamic config data page
++	 * that lives past the last file mapping but inside sharedRegionSize.
++	 * Every mapping is in the plan by now, so the overlap check is complete.
++	 */
++	error = kebab_dsc_add_dynamic_config(plan, &main_header);
++	if (error != 0) {
++		goto out;
++	}
++
+ 	for (i = 0; i < candidate_count; i++) {
+ 		if (memcmp(candidates[i].uuid, main_header.symbol_file_uuid, 16) == 0) {
+ 			plan->symbols_present = TRUE;
+@@ -1494,6 +1660,8 @@ kebab_dsc_map_plan(struct kebab_dsc_plan *plan)
+ 
+ 	srm = kalloc_data(plan->file_count * sizeof(*srm), Z_WAITOK | Z_ZERO);
+ 	if (srm == NULL) {
++		printf("KEBAB DSC: map: cannot allocate %u file mappings; shared "
++		    "cache NOT mapped (ENOMEM)\n", plan->file_count);
+ 		vm_shared_region_deallocate(shared_region);
+ 		return ENOMEM;
+ 	}
+@@ -1550,8 +1718,25 @@ kebab_dsc_map_plan(struct kebab_dsc_plan *plan)
+ 	kr = vm_shared_region_map_file(shared_region, (int)plan->file_count, srm);
+ 	error = (int)kebab_dsc_mapping_errno(kr);
+ 	if (error != 0) {
+-		printf("KEBAB DSC: map: vm_shared_region_map_file failed 0x%x "
+-		    "(error %d); shared cache NOT mapped\n", kr, error);
++		/*
++		 * vm_shared_region_map_file() undoes its own partial work, so
++		 * the region should be empty again and dyld can map the cache
++		 * itself.  Say which of the two happened: a region that still
++		 * has a mapping at this point is a half-built cache that dyld
++		 * will accept and then fault on.
++		 */
++		start = 0;
++		if (vm_shared_region_start_address(shared_region, &start, NULL) !=
++		    KERN_SUCCESS) {
++			printf("KEBAB DSC: map: vm_shared_region_map_file failed "
++			    "0x%x (error %d); region is empty again, shared cache "
++			    "NOT mapped\n", kr, error);
++		} else {
++			printf("KEBAB DSC: map: vm_shared_region_map_file failed "
++			    "0x%x (error %d) but the region still maps 0x%llx; "
++			    "shared cache is HALF MAPPED\n", kr, error,
++			    (unsigned long long)start);
++		}
+ 		goto fail;
+ 	}
+ 
+@@ -1565,6 +1750,13 @@ kebab_dsc_map_plan(struct kebab_dsc_plan *plan)
+ 	printf("KEBAB DSC: map: mapped 0x%llx bytes at 0x%llx\n",
+ 	    (unsigned long long)plan->total_mapped,
+ 	    (unsigned long long)(plan->region_start + plan->slide));
++	if (plan->dynamic_config_size != 0) {
++		printf("KEBAB DSC: map: dynamic config page 0x%llx+0x%llx is "
++		    "zero-filled; dyld will report \"no dynamic config data\" and "
++		    "continue\n",
++		    (unsigned long long)(plan->dynamic_config_addr + plan->slide),
++		    (unsigned long long)plan->dynamic_config_size);
++	}
+ 
+ 	/*
+ 	 * shared_region_check_np() returns the address of the first mapping,

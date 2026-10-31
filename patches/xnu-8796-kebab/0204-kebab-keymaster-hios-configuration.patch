@@ -1,0 +1,51 @@
+--- a/bsd/kern/kebab_qsee_probe.c
++++ b/bsd/kern/kebab_qsee_probe.c
+@@ -173,6 +173,28 @@
+ 	qsee_erase(page);
+ 	uint32_t *request=(uint32_t *)(page+0x100);
+ 	uint32_t *response=(uint32_t *)(page+0x2000);
++	/* Normal Keymaster Configure for the HiOS namespace. OS version is
++	 * the actual 16.7.16 userland (160716); Android patch month is undeclared
++	 * (0). These are key-blob version bindings, not Android/Apple attestation.
++	 * No root-of-trust, boot-state, vendor/boot patch or rollback command.
++	 */
++	request[0]=0x2116;
++	uint8_t *encoded=(uint8_t *)(request+1);
++	unsigned used=qsee_cbor_header(encoded,5,3);
++	used+=qsee_cbor_header(encoded+used,0,22);
++	used+=qsee_cbor_header(encoded+used,0,2);
++	used+=qsee_cbor_header(encoded+used,0,0x300002c1);
++	used+=qsee_cbor_header(encoded+used,0,160716);
++	used+=qsee_cbor_header(encoded+used,0,0x300002c2);
++	used+=qsee_cbor_header(encoded+used,0,0);
++	memset(response,0xa5,0x1800);
++	struct qsee_result r=qsee_storage_send(page,pa,app,4+used);
++	printf("KEBAB QSEE: HiOS configure transport=%d result=0x%llx\n",r.status,r.value);
++	if (qsee_pending(r)) return false;
++	if (r.status || r.value) goto done;
++	printf("KEBAB QSEE: HiOS configure reply=%d OS_VERSION=160716 OS_PATCHLEVEL=0\n",(int32_t)response[0]);
++	if (response[0]) goto done;
++	bzero(request,0x1000-0x100);
+ 	/* Active 4.1/4.558 path: command followed by a definite CBOR map.
+ 	 * Label22 is parameter count; repeated PURPOSE labels preserve the set.
+ 	 */
+@@ -181,8 +203,8 @@
+ 		{0x20000001,0}, {0x20000001,1}, {0x700002d2,1},
+ 	};
+ 	request[0]=0x2108;
+-	uint8_t *encoded=(uint8_t *)(request+1);
+-	unsigned used=qsee_cbor_header(encoded,5,6);
++	encoded=(uint8_t *)(request+1);
++	used=qsee_cbor_header(encoded,5,6);
+ 	used+=qsee_cbor_header(encoded+used,0,22);
+ 	used+=qsee_cbor_header(encoded+used,0,5);
+ 	for (unsigned i=0; i<5; i++) {
+@@ -191,7 +213,7 @@
+ 		else used+=qsee_cbor_header(encoded+used,0,params[i][1]);
+ 	}
+ 	memset(response,0xa5,0x1800);
+-	struct qsee_result r=qsee_storage_send(page,pa,app,4+used);
++	r=qsee_storage_send(page,pa,app,4+used);
+ 	printf("KEBAB QSEE: storage generate CBOR transport=%d result=0x%llx\n",r.status,r.value);
+ 	if (qsee_pending(r)) return false;
+ 	if (r.status || r.value) goto done;

@@ -1,0 +1,144 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6993,6 +6993,10 @@
+  *		word width of the kernel. Once the self-exec completes, the
+  *		initproc might be different.
+  */
++#if defined(KEBAB)
++#include "kebab_apfs_tool_impl.h"
++#endif
++
+ static int
+ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
+ {
+@@ -7024,8 +7028,13 @@
+ 	 * Put out first (and only) argument, similarly.
+ 	 * Assumes everything fits in a page as allocated above.
+ 	 */
+-	if (boothowto & RB_SINGLE) {
+-		const char *init_args = "-s";
++ const char *init_args = NULL;
++#if defined(KEBAB)
++ unsigned tool_mode=0;PE_parse_boot_argn("kebab_apfs_tool",&tool_mode,sizeof(tool_mode));
++ if(tool_mode==1 && strcmp(path,KAT_PATH)==0)init_args="-h";
++#endif
++ if(!init_args && (boothowto & RB_SINGLE))init_args="-s";
++ if(init_args) {
+ 		size_t init_args_length = strlen(init_args) + 1;
+ 
+ 		argv1 = scratch_addr;
+@@ -7126,11 +7135,22 @@
+ 
+ 	(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
+ #if defined(KEBAB)
++ unsigned tool_mode=0;PE_parse_boot_argn("kebab_apfs_tool",&tool_mode,sizeof(tool_mode));
++ if(tool_mode){int tool_policy=kat_policy();if(tool_policy)panic("KEBAB APFS TOOL: early profile rejected %d",tool_policy);}
+  extern int kebab_apfs_probe_prepare(proc_t, user_addr_t);
+  int kebab_apfs_probe_error = kebab_apfs_probe_prepare(p, (user_addr_t)scratch_addr);
+  if (kebab_apfs_probe_error) panic("kebab APFS probe failed: %d", kebab_apfs_probe_error);
+  int owner_dsc_prepare_error = kebab_dsc_after_mount();
+  if (owner_dsc_prepare_error) panic("kebab owner DSC prepare failed: %d", owner_dsc_prepare_error);
++ if(tool_mode) {
++  if(tool_mode!=1)panic("KEBAB APFS TOOL: unsupported tool mode %u",tool_mode);
++  int tool_error=kat_prepare(p,(user_addr_t)scratch_addr);
++  if(tool_error)panic("KEBAB APFS TOOL: profile/hash/console rejected %d",tool_error);
++  printf("KEBAB APFS TOOL: exec original newfs_apfs -h; all storage RO, no device argument\n");
++  tool_error=load_init_program_at_path(p,(user_addr_t)scratch_addr,KAT_PATH);
++  if(!tool_error)return;
++  panic("KEBAB APFS TOOL: original formatter exec failed %d",tool_error);
++ }
+ #endif
+ #if CONFIG_MEMORYSTATUS
+ 	(void) memorystatus_init_at_boot_snapshot();
+--- a/bsd/dev/kebab_cryptex_media.c
++++ b/bsd/dev/kebab_cryptex_media.c
+@@ -316,7 +316,10 @@
+  if (error) return error;
+  uint8_t *buffer = NULL, digest[32];
+  if (!vnode_isreg(file) || vnode_mount(file) != kcm_system ||
+-     !kcm_mount_readonly(kcm_system) || ubc_getsize(file) != bytes) error = EAUTH;
++     !kcm_mount_readonly(kcm_system)) error = EAUTH;
++ struct vnode_attr attributes;VATTR_INIT(&attributes);VATTR_WANTED(&attributes,va_data_size);
++ if(!error)error=vnode_getattr(file,&attributes,context);
++ if(!error && (!VATTR_IS_SUPPORTED(&attributes,va_data_size) || attributes.va_data_size!=(uint64_t)bytes))error=EAUTH;
+  if (!error) buffer = kalloc_data(KCM_CHUNK, Z_WAITOK);
+  if (!error && !buffer) error = ENOMEM;
+  SHA256_CTX hash;
+@@ -339,6 +342,17 @@
+ }
+ 
+ #include "kebab_owner_os_impl.h"
++
++int
++kebab_cryptex_tool_verify(void)
++{
++ static const uint8_t expected[32]={0xe7,0xff,0xc5,0xd7,0x18,0x84,0x50,0xf8,0x30,0xee,0x35,0xa4,0x9c,0xf0,0x00,0xc6,
++  0x22,0xeb,0xee,0x49,0x01,0x8a,0xe6,0xc4,0xad,0x78,0x59,0x38,0xc5,0x71,0x91,0xd2};
++ int error=kebab_cryptex_mount_recheck();
++ if(!error)error=kcm_verify_boot_file("/System/Library/Filesystems/apfs.fs/newfs_apfs",457408,expected);
++ printf("KEBAB APFS TOOL: original formatter SHA/size/RO identity %s (%d)\n",error?"FAIL":"PASS",error);
++ return error;
++}
+ 
+ int
+ kebab_cryptex_boot_files_verify(void)
+--- a/bsd/dev/kebab_cryptex_media.h
++++ b/bsd/dev/kebab_cryptex_media.h
+@@ -10,6 +10,7 @@
+ int kebab_cryptex_blockstorage_volume(dev_t *device, char *name, size_t capacity);
+ int kebab_cryptex_mount_recheck(void);
+ int kebab_cryptex_boot_files_verify(void);
++int kebab_cryptex_tool_verify(void);
+ /* Requires complete original OS Merkle verification, not two boot files. */
+ int kebab_cryptex_os_recheck(void);
+ /* Explicit development-fast policy is separate from complete-content proof. */
+--- /dev/null
++++ b/bsd/kern/kebab_apfs_tool_impl.h
+@@ -0,0 +1,47 @@
++/* Fixed original formatter HELP only. No caller-supplied path/device/options. */
++#include <sys/fcntl.h>
++#define KAT_PATH "/System/Library/Filesystems/apfs.fs/newfs_apfs"
++extern int kebab_cryptex_tool_verify(void);
++
++static int
++kat_policy(void)
++{
++#if DEVELOPMENT || DEBUG
++ static const char *const names[]={"kebab_apfs_tool","ufsrw","rootrw","ufsmedia_root",
++  "kebab_apfs_probe","kebab_owner_fast","kebab_owner_startup","kebab_owner_dsc",
++  "kebab_owner_os","kebab_dsc","kebab_dsc_map","kebab_cryptex_media","kebab_boot_firmware",
++  "kebab_install","kebab_data_root","kebab_file_keys_test","kebab_aks_fs","kebab_cpx_xts",
++  "kebab_nonce_root","kebab_hardware_nonce","kebab_qsee_probe","kebab_wrapped_key_probe"};
++ static const unsigned expected[]={1,0,0,2,3,1,1,1,1,1,1,1,2,0,0,0,0,0,0,0,0,0};
++ for(unsigned i=0;i<sizeof(expected)/sizeof(*expected);++i){
++  unsigned value=0;PE_parse_boot_argn(names[i],&value,sizeof(value));if(value!=expected[i])return EPERM;
++ }
++ return 0;
++#else
++ return EPERM;
++#endif
++}
++
++static int
++kat_prepare(proc_t p, user_addr_t scratch)
++{
++ if(!p || proc_getpid(p)!=1 || !scratch)return EINVAL;
++ int error=kat_policy();if(error)return error;
++ error=kebab_cryptex_tool_verify();if(error)return error;
++ user_addr_t console=scratch+0x800;
++ if(console<scratch)return EINVAL;
++ error=copyout("/dev/console",console,13);if(error)return error;
++ int opened[3]={-1,-1,-1};
++ for(unsigned i=0;i<3;++i) {
++  struct open_args request={.path=console,.flags=O_RDWR|O_NOCTTY|O_NONBLOCK,.mode=0};
++  int result=-1;error=open(p,&request,&result);
++  if(error)break;
++  opened[i]=result;if(result!=(int)i){error=EBADF;break;}
++ }
++ if(error)for(unsigned i=0;i<3;++i)if(opened[i]>=0){
++  (void)close_nocancel(p,opened[i]);
++ }
++ return error;
++}
++
++

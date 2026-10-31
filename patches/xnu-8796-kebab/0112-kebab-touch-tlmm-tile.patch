@@ -1,0 +1,59 @@
+fix(touch): address the SOUTH TLMM tile instead of a flat pin offset
+
+The first bit-bang boot read 0x00000000 from TLMM_CTL/TLMM_IO for GPIO 36..39
+and the mux write did not stick.  Kona's TLMM is tiled:
+drivers/pinctrl/qcom/pinctrl-kona.c defines NORTH 0x900000, SOUTH 0x500000,
+WEST 0x100000 and EAST 0, and every pin is tile + 0x1000 * pin.  GPIO 36..39
+are in the SOUTH tile, so their registers are at
+0x0F000000 + 0x500000 + 0x1000 * pin, not at 0x0F000000 + 0x1000 * pin.  The
+flat address landed in a hole between tiles, which is why every read was zero
+and writes were ignored.
+
+Map the SOUTH tile (KT_TLMM_PA + 0x500000, 0x40000) and keep the per-pin
+offset relative to it.  0x40000 still covers SOUTH-tile pins 0..63, so 0109's
+size bound is unchanged; only the base was wrong.  This applies to the QUP
+path too: its pin mux and reset pulse were writing to the same wrong
+addresses, so the first hardware runs of both transports were configuring
+nothing.
+diff --git a/bsd/dev/kebab_touch.c b/bsd/dev/kebab_touch.c
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -150,9 +150,9 @@
+  * The TLMM block is 16 MiB in the device tree, but ml_io_map() allocates from
+  * the kernel's 8 MiB io_submap and passes KMA_NOFAIL, so an over-size request
+  * panics in kmem_alloc instead of returning 0.  This driver touches only the
+- * per-pin configuration registers, at TLMM_CTL(pin) = 0x1000 * pin; the
+- * highest pin used is GPIO 39 (IRQ), and 0x40000 covers up to GPIO 63.
+- * Do not widen this back to the full block.
++ * SOUTH-tile per-pin registers (GPIO 36..39, so offsets 0x24000..0x27000 from
++ * the tile base); 0x40000 covers SOUTH-tile pins 0..63.  Do not widen this
++ * back to the full block.
+  */
+ #define KT_TLMM_SIZE            0x00040000u
+ 
+@@ -272,6 +272,15 @@
+ 
+ /* ---------------------------------------------------------- TLMM registers */
+ 
++/*
++ * Kona's TLMM is tiled.  drivers/pinctrl/qcom/pinctrl-kona.c defines the tile
++ * bases NORTH 0x900000, SOUTH 0x500000, WEST 0x100000, EAST 0 and computes
++ * every pin as tile + 0x1000 * pin; GPIO 36..39 (SDA, SCL, reset, IRQ) are in
++ * the SOUTH tile.  A flat "block base + 0x1000 * pin" address lands in a hole
++ * between tiles and reads as zero, which is exactly what the first hardware
++ * run showed.  kt.tlmm is therefore the mapped SOUTH tile, not the block base.
++ */
++#define TLMM_TILE_SOUTH         0x00500000u
+ #define TLMM_REG_SIZE           0x1000u
+ #define TLMM_CTL(pin)           (TLMM_REG_SIZE * (pin))
+ #define TLMM_IO(pin)            (TLMM_REG_SIZE * (pin) + 0x4u)
+@@ -1841,7 +1850,8 @@
+ 		    KT_PIN_SDA, KT_PIN_SCL, KT_PIN_RESET, KT_PIN_IRQ);
+ 	}
+ 	if (kt.bb || pins != 0 || reset != 0 || kt.raw) {
+-		kt.tlmm = ml_io_map(KT_TLMM_PA, KT_TLMM_SIZE);
++		kt.tlmm = ml_io_map(KT_TLMM_PA + TLMM_TILE_SOUTH,
++		    KT_TLMM_SIZE);
+ 	}
+ 	if (kt.bb && kt.tlmm == 0) {
+ 		printf("KEBAB TOUCH: bit-bang transport needs TLMM and it is not mapped\n");

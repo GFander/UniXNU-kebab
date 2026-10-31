@@ -1,0 +1,33 @@
+--- a/iokit/Kernel/IONVRAMCHRPHandler.cpp
++++ b/iokit/Kernel/IONVRAMCHRPHandler.cpp
+@@ -608,6 +608,22 @@
+ 		DEBUG_INFO("%s=%u\n", kNVRAMCommonUsedKey, getCommonUsed());
+ 	}
+ 
++#if defined(KEBAB)
++ // Initial boot is exclusive; late disk-proxy adoption already holds the
++ // native variable/controller locks. Avoid recursive provider get/set locks
++ // when ensuring the same internal empty boot-args default. External callers
++ // still go through unchanged IODTNVRAM permission and GUID translation.
++ uuid_t bootGuid;
++ translateGUID(gAppleNVRAMGuid,kIONVRAMBootArgsKey,bootGuid,getSystemPartitionActive());
++ OSSharedPtr<const OSSymbol> bootKey=keyWithGuidAndCString(bootGuid,kIONVRAMBootArgsKey);
++ if(!bootKey)return kIOReturnNoMemory;
++ if(!_varDict->getObject(bootKey.get())) {
++  propObject=OSString::withCStringNoCopy("");
++  if(!propObject)return kIOReturnNoMemory;
++  IOReturn error=setVariable(bootGuid,kIONVRAMBootArgsKey,propObject.get());
++  if(error!=kIOReturnSuccess)return error;
++ }
++#else
+ 	// Create the boot-args property if it is not in the dictionary.
+ 	if (_provider->getProperty(kIONVRAMBootArgsKey) == nullptr) {
+ 		propSymbol = OSSymbol::withCString(kIONVRAMBootArgsKey);
+@@ -615,6 +631,7 @@
+ 
+ 		_provider->setProperty(propSymbol.get(), propObject.get());
+ 	}
++#endif
+ 
+ 	_newData = true;
+ 

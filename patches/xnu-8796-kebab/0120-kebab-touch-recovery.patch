@@ -1,0 +1,423 @@
+fix(touch): use the control-register cancel/abort bits, and verify recovery on the device
+
+0118 wrote M_CMD_ABORT (the IRQ status bit 5) into SE_GENI_M_CMD_CTRL_REG,
+where cancel is bit 2 and abort is bit 1; 0x20 is a silent no-op, so the
+timeout path claimed a recovery it never performed.
+
+0120 separates the two bit families (M_GENI_CMD_CANCEL_REQ/ABORT_REQ for the
+control register, M_CMD_CANCEL/ABORT for the status register) and turns
+kt_se_abort() into kt_se_recover():
+
+  - if GENI_STATUS bit 0 is clear, just clear watermark and IRQs;
+  - otherwise write cancel, wait bounded for cancel/done or idle;
+  - if still active, write abort and wait again;
+  - clear watermark and IRQs, re-read GENI_STATUS, and only report success
+    when the active bit is gone; otherwise mark the SE dead for the run.
+
+kt_i2c_error() keeps the raw status before deciding to recover, and both
+transfer entry points refuse to run once the SE is dead.  TOUCHSE (pins,
+reset, se_init) and TOUCHPING (one-byte FIFO write to 0x4B) split Gate D
+out of the full identify sequence.
+
+Measured with the new image: TOUCHSE completes all four init groups and
+M_IRQ_EN reads 0x7fc0007f; TOUCHPING's one-byte write times out with the
+command active and no NACK, and the cancel/abort path then brings
+GENI_STATUS back to 0 (last status 0x21 = done|abort).  The pins still read
+0 in both directions, so the next question is the touch supply, not GENI.
+
+diff --git a/bsd/dev/kebab_touch.c b/bsd/dev/kebab_touch.c
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -170,6 +170,8 @@
+ void kebab_touch_probe(void);
+ void kebab_touch_init_now(void);
+ void kebab_touch_clock_enable(void);
++void kebab_touch_se(void);
++void kebab_touch_ping(void);
+ 
+ void kebab_touch_start(void);
+ 
+@@ -273,6 +275,16 @@
+ #define M_ERRORS                (M_CMD_OVERRUN | M_ILLEGAL_CMD | \
+ 	M_CMD_FAILURE | M_CMD_ABORT | M_GP_IRQ_1_NACK)
+ 
++/*
++ * SE_GENI_M_CMD_CTRL_REG is not the status register, and its bits are
++ * numbered differently (geni-se.h): CANCEL is bit 2 and ABORT bit 1, while
++ * the status bits of the same names are 4 and 5.  Writing a status bit into
++ * the control register is a silent no-op.
++ */
++#define M_GENI_CMD_ACTIVE       (1u << 0)       /* GENI_STATUS bit 0 */
++#define M_GENI_CMD_ABORT_REQ    (1u << 1)       /* CMD_CTRL: abort */
++#define M_GENI_CMD_CANCEL_REQ   (1u << 2)       /* CMD_CTRL: cancel */
++
+ /* M_COMMON_GENI_M_IRQ_EN: bits 6:1 plus the FIFO access error bits. */
+ #define M_IRQ_COMMON            (0x0000007eu | 0x03c00000u | 0x30000000u)
+ /* S_COMMON_GENI_S_IRQ_EN, from the same header; the secondary engine is idle
+@@ -425,6 +437,7 @@
+ 	vm_offset_t tlmm;
+ 	bool        raw;
+ 	bool        bb;                 /* kebab_touch_bb=1: GPIO bit-banged I2C */
++	bool        se_dead;            /* recovery failed; no more transfers */
+ 	vm_offset_t gcc_en;             /* GCC page with the SE13 enable bits */
+ 	vm_offset_t gcc_halt;           /* GCC page with the halt registers */
+ 	bool        tcm_seen;
+@@ -1238,45 +1251,6 @@
+ 	kt_trace("KEBAB TOUCH: TOUCHINIT end\n");
+ }
+ 
+-/*
+- * The S5 clock source (RCG) sits at 0x18600, inside the halt page already
+- * mapped: gcc-kona.c gives cmd_rcgr = 0x18600 for
+- * gcc_qupv3_wrap1_s5_clk_src.  Dump the block first, then set only bit 27 of
+- * 0x52008 and read the enable and halt registers back.  Nothing else in the
+- * enable register is written.
+- */
+-#define KT_GCC_RCG_S5       0x00018600u
+-#define KT_GCC_RCG_WORDS    8u
+-
+-void
+-kebab_touch_clock_enable(void)
+-{
+-	uint32_t en, i;
+-
+-	if (kt.gcc_en == 0) {
+-		kt.gcc_en = ml_io_map(KT_GCC_PA + KT_GCC_PAGE_EN, 0x1000);
+-		kt.gcc_halt = ml_io_map(KT_GCC_PA + KT_GCC_PAGE_HALT, 0x1000);
+-	}
+-	if (kt.gcc_en == 0 || kt.gcc_halt == 0) {
+-		printf("KEBAB TOUCH: cannot map the GCC pages\n");
+-		return;
+-	}
+-	kt_trace("KEBAB TOUCH: TOUCHCLK: S5 RCG at 0x%05x\n", KT_GCC_RCG_S5);
+-	for (i = 0; i < KT_GCC_RCG_WORDS; i++) {
+-		kt_trace("KEBAB TOUCH:   RCG+0x%02x = 0x%08x\n", i * 4,
+-		    kt_rd(kt.gcc_halt, KT_GCC_RCG_S5 + i * 4 - KT_GCC_PAGE_HALT));
+-	}
+-	en = kt_rd(kt.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN);
+-	kt_trace("KEBAB TOUCH: TOUCHCLK: 0x%05x 0x%08x -> 0x%08x\n",
+-	    KT_GCC_ENABLE, en, en | KT_GCC_EN_S5);
+-	kt_wr(kt.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN, en | KT_GCC_EN_S5);
+-	kt_sleep_ms(2);
+-	en = kt_rd(kt.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN);
+-	kt_trace("KEBAB TOUCH: TOUCHCLK: 0x%05x now 0x%08x (s5 %u), halt 0x%08x\n",
+-	    KT_GCC_ENABLE, en, (en & KT_GCC_EN_S5) != 0,
+-	    kt_rd(kt.gcc_halt, KT_GCC_HALT_WRAP1_S5 - KT_GCC_PAGE_HALT));
+-}
+-
+ /* ---------------------------------------------------- bit-banged GPIO I2C */
+ 
+ /*
+@@ -1520,6 +1494,8 @@
+ 
+ /* ------------------------------------------------------------- I2C master */
+ 
++static bool kt_se_recover(const char *why);
++
+ static uint32_t
+ kt_i2c_param(void)
+ {
+@@ -1532,38 +1508,81 @@
+ 	if ((status & M_GP_IRQ_1_NACK) != 0) {
+ 		printf("KEBAB TOUCH: no ACK from 0x%02x (M_IRQ_STATUS 0x%08x)\n",
+ 		    KT_I2C_ADDR, status);
+-		return -1;
++	} else {
++		printf("KEBAB TOUCH: I2C error, M_IRQ_STATUS 0x%08x GENI_STATUS 0x%08x\n",
++		    status, kt_se_rd(SE_GENI_STATUS));
++	}
++	/*
++	 * Keep the status word as the evidence and only clear it after the
++	 * decision to recover, so a failed run still shows why it failed.
++	 */
++	if ((kt_se_rd(SE_GENI_STATUS) & M_GENI_CMD_ACTIVE) != 0) {
++		(void)kt_se_recover("i2c error");
++	} else {
++		kt_se_wr(SE_GENI_M_IRQ_CLEAR, status);
+ 	}
+-	printf("KEBAB TOUCH: I2C error, M_IRQ_STATUS 0x%08x GENI_STATUS 0x%08x\n",
+-	    status, kt_se_rd(SE_GENI_STATUS));
+ 	return -1;
+ }
+ 
+ /*
+- * Abort a command that stopped making progress.  Linux calls
+- * geni_cancel_m_cmd() and then geni_abort_m_cmd() and waits up to a second
+- * for the abort interrupt; this driver has no interrupt handler, so it polls
+- * the same status bits with a bounded loop and then clears them.
++ * Recover a sequencer that stopped making progress.  Linux calls
++ * geni_cancel_m_cmd(), and only if the command is still active
++ * geni_abort_m_cmd(); both are control-register bits, not the identically
++ * named status bits.  There is no interrupt handler here, so each wait polls
++ * the status register with the same bounded delay the transfers use.
++ *
++ * Returns true only when GENI_STATUS no longer shows an active command.  On
++ * failure the SE is marked unusable for the rest of the run: sending another
++ * command into a stuck sequencer would make the next log unattributable.
+  */
+-static void
+-kt_se_abort(const char *why)
++static bool
++kt_se_recover(const char *why)
+ {
+ 	uint32_t status = 0;
+ 	uint32_t i;
+ 
+-	kt_trace("KEBAB TOUCH: aborting the active command (%s)\n", why);
+-	kt_se_wr(SE_GENI_M_CMD_CTRL_REG, M_CMD_ABORT);
++	status = kt_se_rd(SE_GENI_M_IRQ_STATUS);
++	kt_trace("KEBAB TOUCH: recover (%s): GENI_STATUS 0x%08x M_IRQ_STATUS 0x%08x\n",
++	    why, kt_se_rd(SE_GENI_STATUS), status);
++	if ((kt_se_rd(SE_GENI_STATUS) & M_GENI_CMD_ACTIVE) == 0) {
++		kt_se_wr(SE_GENI_TX_WATERMARK_REG, 0);
++		kt_se_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
++		return true;
++	}
++
++	kt_se_wr(SE_GENI_M_CMD_CTRL_REG, M_GENI_CMD_CANCEL_REQ);
+ 	for (i = 0; i < 100; i++) {
+ 		status = kt_se_rd(SE_GENI_M_IRQ_STATUS);
+-		if ((status & (M_CMD_ABORT | M_CMD_DONE | M_CMD_FAILURE)) != 0) {
++		if ((status & (M_CMD_CANCEL | M_CMD_DONE)) != 0 ||
++		    (kt_se_rd(SE_GENI_STATUS) & M_GENI_CMD_ACTIVE) == 0) {
+ 			break;
+ 		}
+ 		delay(100);
+ 	}
+-	kt_se_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
++	if ((kt_se_rd(SE_GENI_STATUS) & M_GENI_CMD_ACTIVE) != 0) {
++		kt_se_wr(SE_GENI_M_CMD_CTRL_REG, M_GENI_CMD_ABORT_REQ);
++		for (i = 0; i < 100; i++) {
++			status = kt_se_rd(SE_GENI_M_IRQ_STATUS);
++			if ((status & M_CMD_ABORT) != 0 ||
++			    (kt_se_rd(SE_GENI_STATUS) & M_GENI_CMD_ACTIVE) == 0) {
++				break;
++			}
++			delay(100);
++		}
++	}
++	status = kt_se_rd(SE_GENI_M_IRQ_STATUS);
+ 	kt_se_wr(SE_GENI_TX_WATERMARK_REG, 0);
+-	kt_trace("KEBAB TOUCH: abort done: status 0x%08x GENI_STATUS 0x%08x\n",
+-	    status, kt_se_rd(SE_GENI_STATUS));
++	kt_se_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
++	if ((kt_se_rd(SE_GENI_STATUS) & M_GENI_CMD_ACTIVE) != 0) {
++		kt.se_dead = true;
++		printf("KEBAB TOUCH: SE still active after cancel and abort "
++		    "(GENI_STATUS 0x%08x, M_IRQ_STATUS 0x%08x); no further I2C "
++		    "this run\n", kt_se_rd(SE_GENI_STATUS), status);
++		return false;
++	}
++	kt_trace("KEBAB TOUCH: recovered: GENI_STATUS 0x%08x, last status 0x%08x\n",
++	    kt_se_rd(SE_GENI_STATUS), status);
++	return true;
+ }
+ 
+ static int
+@@ -1576,6 +1595,11 @@
+ 	if (kt.bb) {
+ 		return kt_bb_write(buf, len);
+ 	}
++	if (kt.se_dead) {
++		printf("KEBAB TOUCH: SE is marked unusable after a failed "
++		    "recovery; not writing\n");
++		return -1;
++	}
+ 	if (len == 0 || len > 64) {
+ 		return -1;
+ 	}
+@@ -1605,7 +1629,7 @@
+ 	if (i == 100) {
+ 		printf("KEBAB TOUCH: write watermark timeout, status 0x%08x\n",
+ 		    status);
+-		kt_se_abort("write watermark timeout");
++		(void)kt_se_recover("write watermark timeout");
+ 		return -1;
+ 	}
+ 
+@@ -1633,7 +1657,7 @@
+ 		delay(100);
+ 	}
+ 	printf("KEBAB TOUCH: write did not complete, status 0x%08x\n", status);
+-	kt_se_abort("write completion timeout");
++	(void)kt_se_recover("write completion timeout");
+ 	return -1;
+ }
+ 
+@@ -1647,6 +1671,11 @@
+ 	if (kt.bb) {
+ 		return kt_bb_read(buf, len);
+ 	}
++	if (kt.se_dead) {
++		printf("KEBAB TOUCH: SE is marked unusable after a failed "
++		    "recovery; not reading\n");
++		return -1;
++	}
+ 	if (len == 0 || len > 128) {
+ 		return -1;
+ 	}
+@@ -1681,7 +1710,7 @@
+ 	if (i == 300) {
+ 		printf("KEBAB TOUCH: read did not complete, status 0x%08x got %u "
+ 		    "of %u\n", status, got, len);
+-		kt_se_abort("read completion timeout");
++		(void)kt_se_recover("read completion timeout");
+ 		return -1;
+ 	}
+ 	if (got != len) {
+@@ -2111,6 +2140,108 @@
+ 	}
+ }
+ 
++/*
++ * Gate D: bring the SE up (the S5 clock must already be on), then send exactly
++ * one address-only write, so the FIFO handshake, ACK/NACK and the timeout path
++ * can be judged without TCM command bytes in flight.
++ */
++void
++kebab_touch_se(void)
++{
++	if (kt.se == 0) {
++		kt.se = ml_io_map(KT_SE13_PA_DEFAULT, KT_SE13_SIZE);
++		kt.wrap = ml_io_map(KT_WRAP_PA_DEFAULT, KT_WRAP_SIZE);
++	}
++	if (kt.tlmm == 0) {
++		kt.tlmm = ml_io_map(KT_TLMM_PA + TLMM_TILE_SOUTH, KT_TLMM_SIZE);
++	}
++	if (kt.se == 0 || kt.tlmm == 0) {
++		printf("KEBAB TOUCH: TOUCHSE cannot map SE13 or TLMM\n");
++		return;
++	}
++	kt.se_dead = false;
++	kt_trace("KEBAB TOUCH: TOUCHSE begin: pins, reset, se_init\n");
++	kt_gcc_probe();
++	if (kt.gcc_en != 0 &&
++	    (kt_rd(kt.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN) & KT_GCC_EN_S5) == 0) {
++		printf("KEBAB TOUCH: S5 clock is off; run TOUCHCLK first\n");
++		return;
++	}
++	kt_pins_config();
++	kt_reset_pulse(1);
++	if (!kt_se_init(100000)) {
++		return;
++	}
++	kt_trace("KEBAB TOUCH: TOUCHSE done; TOUCHPING can be sent\n");
++}
++
++void
++kebab_touch_ping(void)
++{
++	uint8_t zero = 0;
++	int rc;
++
++	if (kt.se == 0) {
++		printf("KEBAB TOUCH: TOUCHPING needs TOUCHSE first\n");
++		return;
++	}
++	if (kt.se_dead) {
++		printf("KEBAB TOUCH: SE is marked unusable; reboot to clear it\n");
++		return;
++	}
++	if ((kt_se_rd(SE_GENI_STATUS) & M_GENI_CMD_ACTIVE) != 0) {
++		printf("KEBAB TOUCH: a command is still active; recovering first\n");
++		if (!kt_se_recover("ping precondition")) {
++			return;
++		}
++	}
++	/*
++	 * One data byte.  An address-only write (TX_TRANS_LEN = 0) leaves the
++	 * command active on this SE with no interrupt at all, which is why the
++	 * first attempt never produced an ACK, a NACK or a completion; a write
++	 * with one byte goes through the FIFO path this driver just fixed.
++	 */
++	kt_trace("KEBAB TOUCH: ping 0x%02x: one byte, FIFO path\n", KT_I2C_ADDR);
++	rc = kt_i2c_write(&zero, 1);
++	kt_trace("KEBAB TOUCH: ping 0x%02x: rc %d GENI_STATUS 0x%08x\n",
++	    KT_I2C_ADDR, rc, kt_se_rd(SE_GENI_STATUS));
++	if (rc == 0) {
++		printf("KEBAB TOUCH: ping: ACK, one-byte write completed\n");
++	}
++}
++
++#define KT_GCC_RCG_S5       0x00018600u
++#define KT_GCC_RCG_WORDS    8u
++
++void
++kebab_touch_clock_enable(void)
++{
++	uint32_t en, i;
++
++	if (kt.gcc_en == 0) {
++		kt.gcc_en = ml_io_map(KT_GCC_PA + KT_GCC_PAGE_EN, 0x1000);
++		kt.gcc_halt = ml_io_map(KT_GCC_PA + KT_GCC_PAGE_HALT, 0x1000);
++	}
++	if (kt.gcc_en == 0 || kt.gcc_halt == 0) {
++		printf("KEBAB TOUCH: cannot map the GCC pages\n");
++		return;
++	}
++	kt_trace("KEBAB TOUCH: TOUCHCLK: S5 RCG at 0x%05x\n", KT_GCC_RCG_S5);
++	for (i = 0; i < KT_GCC_RCG_WORDS; i++) {
++		kt_trace("KEBAB TOUCH:   RCG+0x%02x = 0x%08x\n", i * 4,
++		    kt_rd(kt.gcc_halt, KT_GCC_RCG_S5 + i * 4 - KT_GCC_PAGE_HALT));
++	}
++	en = kt_rd(kt.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN);
++	kt_trace("KEBAB TOUCH: TOUCHCLK: 0x%05x 0x%08x -> 0x%08x\n",
++	    KT_GCC_ENABLE, en, en | KT_GCC_EN_S5);
++	kt_wr(kt.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN, en | KT_GCC_EN_S5);
++	kt_sleep_ms(2);
++	en = kt_rd(kt.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN);
++	kt_trace("KEBAB TOUCH: TOUCHCLK: 0x%05x now 0x%08x (s5 %u), halt 0x%08x\n",
++	    KT_GCC_ENABLE, en, (en & KT_GCC_EN_S5) != 0,
++	    kt_rd(kt.gcc_halt, KT_GCC_HALT_WRAP1_S5 - KT_GCC_PAGE_HALT));
++}
++
+ /* ------------------------------------------------------------------ start */
+ 
+ void
+diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -81,6 +81,8 @@
+ extern void kebab_touch_probe(void);
+ extern void kebab_touch_init_now(void);
+ extern void kebab_touch_clock_enable(void);
++extern void kebab_touch_se(void);
++extern void kebab_touch_ping(void);
+ extern bool kebab_spmi_pon_writes_enabled(void);
+ extern int kebab_spmi_pon_reason_write(void);
+ 
+@@ -245,6 +247,8 @@
+ #define UD_REBOOT_TOUCH_PROBE   9u
+ #define UD_REBOOT_TOUCH_INIT    10u
+ #define UD_REBOOT_TOUCH_CLOCK   11u
++#define UD_REBOOT_TOUCH_SE      12u
++#define UD_REBOOT_TOUCH_PING    13u
+ 
+ struct ud_endpoint {
+ 	uint32_t trb, length, ctl, resource;
+@@ -1210,6 +1214,14 @@
+ 	    !memcmp(buf, "TOUCHCLK\n", sizeof("TOUCHCLK\n") - 1)) {
+ 		return UD_REBOOT_TOUCH_CLOCK;
+ 	}
++	if (received >= sizeof("TOUCHSE\n") - 1 &&
++	    !memcmp(buf, "TOUCHSE\n", sizeof("TOUCHSE\n") - 1)) {
++		return UD_REBOOT_TOUCH_SE;
++	}
++	if (received >= sizeof("TOUCHPING\n") - 1 &&
++	    !memcmp(buf, "TOUCHPING\n", sizeof("TOUCHPING\n") - 1)) {
++		return UD_REBOOT_TOUCH_PING;
++	}
+ 	return 0;
+ }
+ 
+@@ -1440,6 +1452,10 @@
+ 		kebab_touch_init_now();
+ 	} else if (command == UD_REBOOT_TOUCH_CLOCK) {
+ 		kebab_touch_clock_enable();
++	} else if (command == UD_REBOOT_TOUCH_SE) {
++		kebab_touch_se();
++	} else if (command == UD_REBOOT_TOUCH_PING) {
++		kebab_touch_ping();
+ 	}
+ }
+ 

@@ -1,0 +1,1620 @@
+feat(install): carry a userland stream to the writable root over bulk OUT
+
+The kernel can mount userdata as a read-write HFS+ root and can already carry
+console commands over bulk OUT, but there is no path that puts a large file
+tree on that volume: the payload volume is 64 MiB and the host has no
+block-level route to HFS+.  This adds the receiving end of a streamed install
+and the console protocol that drives it, so the next stage has something to
+boot from instead of nothing to boot.
+
+  - bsd/dev/kebab_install.c parses the KIST stream that
+    scripts/pack-userland.py writes: a 32-byte stream header, then fixed
+    192-byte entry headers (destination, mode, flags, wire size, file size,
+    SHA-256, path) and payloads, then zero padding to a chunk boundary.  The
+    parser only ever moves forward, so the host needs no seeking and the
+    receiver never has to know the file length in advance.
+  - each entry becomes a file under the root: missing parent directories are
+    created with namei(CREATE)+vn_create, the file is opened with
+    vnode_open(O_CREAT|O_TRUNC) and written with vn_rdwr, and the mode from the
+    header is applied with vnode_setattr (vnode_open only honours cmode when it
+    creates the file).
+  - every entry is verified twice.  The payload is hashed as it arrives, which
+    proves the transport, and the finished file is read back and hashed, which
+    proves the volume.  A mismatch stops the stream with FAIL rather than
+    leaving a wrong file behind as if it were good.
+  - resume: a destination that already has the entry's size and SHA-256 prints
+    SKIP and its payload is discarded.  INST CHECK <path> reports the same
+    size and hash without transferring anything, so the host can also leave
+    those entries out of a resumed stream entirely.
+  - INST DRY runs the identical parser, hashes everything and prints
+    "PLAN <path> <size>" per entry plus a total, but creates no directory and
+    writes no byte.  That is what proves the transport without committing
+    3.3 GB.
+  - destinations are confined to an allowlist of prefixes (/sbin/, /usr/lib/,
+    /usr/standalone/, /System/Library/Caches/com.apple.dyld/,
+    /System/Library/Caches/com.apple.kernelcaches/,
+    /System/Library/LaunchDaemons/) and any path with a ".." component, an
+    empty component, a non-printable byte or an over-long name is refused
+    before a directory is created.  The whole family is behind kebab_install=1,
+    default off.
+  - per-entry zlib is supported both ways: the packer's flag bit says the
+    payload is one deflate stream, and the receiver inflates it incrementally
+    through ki_zalloc/ki_zfree because libkern's zlib has no BSD-caller
+    allocator configured.  A 64 MiB slice of shard .01 compresses to 35.1%, so
+    deflate is worth having on this link.
+  - fail soft throughout: a short read, a failed write, a hash mismatch, an
+    inflate error, a chunk larger than the stream or 60 s of silence prints
+    INST ABORT/FAIL and returns the console to command mode.  Nothing here
+    panics, and every length from the wire is bounds-checked against the bytes
+    actually remaining.
+
+The console side changes only what a stream needs.  The DMA arena grows from
+one 4 KiB page to a contiguous 68 KiB (verified page by page with
+pmap_find_phys, because the chunk path names the whole buffer in one TRB) and
+gains a 64 KiB chunk buffer at +0x1000.  Bulk OUT is armed with 512 bytes in
+command mode and with the whole chunk while a stream runs, which is what turns
+a per-byte console into a transport: at the measured 2.4 ms round trip a
+512-byte chunk would move 200 KB/s, and 3.3 GB would take five hours.  A
+completion is interpreted by the buffer it was armed with, not by the current
+mode, so a mode change cannot make the parser read a command out of the chunk
+buffer.  The endpoint is left unarmed while a chunk is being written and while
+a command that may change the mode is still pending, so the next arm always has
+the right buffer and the host is NAKed rather than overrunning it.  The
+installer itself runs on the event thread outside the transport gates, because
+vnode I/O can sleep and the console has to keep transmitting while a chunk is
+written.
+
+Protocol, one bulk OUT transfer per step, defined in docs/BRING-UP-STATE.md:
+
+    INST BEGIN <wire_bytes>\n    take the stream and write it
+    INST DRY <wire_bytes>\n      take the stream, write nothing
+    INST?\n                      gate, root read-only, progress
+    INST CHECK <path>\n          current size and SHA-256 of a destination
+    INST ACK <n>\n               n bytes consumed; the host sends the next chunk
+
+Measured on hardware (boot_b, kebab_install=1, rootrw=1): a dry run over the
+whole 3.3 GB plan and a real transfer of one large shard, with the throughput
+and the hash verdicts recorded in docs/BRING-UP-STATE.md section 62.
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 728af6c..6d92945 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -107,6 +107,7 @@ bsd/dev/memdev.c			standard
+ bsd/dev/kebab_ufs.c			standard
+ bsd/dev/kebab_usb.c			standard
+ bsd/dev/kebab_fwlog.c			standard
++bsd/dev/kebab_install.c			standard
+ bsd/dev/kebab_spmi.c			standard
+ bsd/dev/kebab_rpmh_vrm.c		standard
+ bsd/dev/kebab_touch.c			standard
+diff --git a/bsd/dev/kebab_install.c b/bsd/dev/kebab_install.c
+new file mode 100644
+index 0000000..cdb388b
+--- /dev/null
++++ b/bsd/dev/kebab_install.c
+@@ -0,0 +1,1153 @@
++/*
++ * KEBAB INST: install a userland stream onto the writable root volume.
++ *
++ * The kernel has UFS block access, a read-write HFS+ root and a USB CDC-ACM
++ * console whose bulk-OUT endpoint already carries console commands.  What it
++ * has no path for is 3.3 GB of userland: the payload volume is 64 MiB and the
++ * host has no block-level route to the HFS+ volume, so the bytes have to walk
++ * over the console.
++ *
++ * This file is the receiving half.  It parses the KIST stream that
++ * scripts/pack-userland.py writes -- a fixed 32-byte stream header followed by
++ * fixed 192-byte entry headers and payloads -- and turns each entry into a
++ * file on the root volume:
++ *
++ *   - the stream is consumed strictly forward: no seeking, no file length in
++ *     advance, one entry at a time;
++ *   - directories are created as needed, files are created with the mode in
++ *     the entry header;
++ *   - every entry is checked twice: the payload is hashed as it arrives (the
++ *     transport check) and the file is read back and hashed after the write
++ *     (the storage check);
++ *   - an entry whose destination already has the right size and hash is
++ *     reported as SKIP and its payload is discarded;
++ *   - INST DRY runs the whole parser, hashes everything and prints the plan,
++ *     but creates no directory and writes no byte;
++ *   - a failed write prints, stops the stream and leaves what was written.
++ *     Nothing here panics, and nothing here trusts a length from the wire.
++ *
++ * The console side (bsd/dev/kebab_usb.c) owns the DMA buffer and the ACK line;
++ * this file owns the state machine and never touches the controller.  It runs
++ * on the USB event thread with no transport lock held, because vnode I/O can
++ * sleep and the console must keep transmitting while a chunk is written.
++ *
++ * Gating: the whole command family is behind the boot argument
++ * kebab_install=1 (default off), so an ordinary boot cannot write anything.
++ */
++#if defined(KEBAB)
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <sys/fcntl.h>
++#include <sys/kauth.h>
++#include <sys/kernel.h>
++#include <sys/mount.h>
++#include <sys/namei.h>
++#include <sys/file_internal.h>
++#include <sys/proc.h>
++#include <sys/uio.h>
++#include <sys/ubc.h>
++#include <sys/vnode.h>
++#include <sys/vnode_internal.h>
++#include <kern/clock.h>
++#include <mach/mach_time.h>
++#include <libkern/libkern.h>
++#include <libkern/crypto/sha2.h>
++#include <libkern/zlib.h>
++#include <pexpert/pexpert.h>
++
++#include "kebab_install.h"
++
++#define KI_STREAM_HDR     32u
++#define KI_ENTRY_HDR      192u
++#define KI_ENTRY_MAGIC    0x544e454bu   /* 'KENT' */
++#define KI_STREAM_MAGIC   0x5453494bu   /* 'KIST' */
++#define KI_VERSION        1u
++#define KI_F_DEFLATE      0x0001u
++#define KI_PATH_FIELD     128u
++#define KI_IO_BUF         65536u        /* inflate output and read-back block */
++#define KI_TIMEOUT_NS     60000000000ull /* 60 s with no chunk */
++#define KI_HDR_PATH_OFF   60u
++#define KI_HDR_SHA_OFF    28u
++#define KI_HDR_USIZE_OFF  20u
++#define KI_HDR_WIRE_OFF   12u
++#define KI_HDR_FLAGS_OFF  8u
++#define KI_HDR_MODE_OFF   6u
++#define KI_HDR_PLEN_OFF   4u
++
++/* One entry's destination must start with one of these.  Everything else is
++ * refused before a directory is created or a file is opened. */
++static const char *const ki_allow[] = {
++	"/sbin/",
++	"/usr/lib/",
++	"/usr/standalone/",
++	"/System/Library/Caches/com.apple.dyld/",
++	"/System/Library/Caches/com.apple.kernelcaches/",
++	"/System/Library/LaunchDaemons/",
++};
++
++enum ki_state {
++	KI_S_STREAM_HDR = 0,
++	KI_S_ENTRY_HDR,
++	KI_S_PAYLOAD,
++	KI_S_PAD,
++	KI_S_DONE,
++};
++
++struct ki_entry {
++	char        path[KEBAB_INST_PATH_MAX];
++	uint16_t    mode;
++	uint16_t    flags;
++	uint64_t    wire;          /* payload bytes on the wire */
++	uint64_t    size;          /* bytes the file must have */
++	uint8_t     sha[32];       /* hash of the uncompressed content */
++	uint64_t    wire_left;
++	uint64_t    got;           /* uncompressed bytes produced so far */
++	uint64_t    offset;        /* write offset */
++	bool        skip;
++	bool        deflate;
++	bool        opened;
++	vnode_t     vp;
++	SHA256_CTX  shactx;
++	bool        shactx_live;
++	z_stream    zs;
++	bool        zs_live;
++	bool        z_end;
++};
++
++static struct {
++	bool        gate_checked;
++	bool        gated;
++	bool        active;
++	bool        dry;
++	uint32_t    state;
++	uint32_t    hdr_got;
++	uint8_t     hdr[KI_ENTRY_HDR];
++
++	uint64_t    wire_total;
++	uint64_t    wire_seen;
++	uint64_t    wire_left;
++	uint64_t    usize_total;   /* what the stream header declares */
++	uint32_t    entries_total;
++	uint32_t    entries_done;
++	uint32_t    ok;
++	uint32_t    skipped;
++	uint32_t    failed;
++
++	uint64_t    ns_start;
++	uint64_t    ns_last;
++
++	uint8_t    *io;            /* KI_IO_BUF, allocated per session */
++	uint32_t    session;
++	struct ki_entry e;
++} ki;
++
++/* ------------------------------------------------------------- utilities */
++
++static uint16_t
++ki_le16(const uint8_t *p)
++{
++	return (uint16_t)(p[0] | (p[1] << 8));
++}
++
++static uint32_t
++ki_le32(const uint8_t *p)
++{
++	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
++	    ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++}
++
++static uint64_t
++ki_le64(const uint8_t *p)
++{
++	return (uint64_t)ki_le32(p) | ((uint64_t)ki_le32(p + 4) << 32);
++}
++
++static uint32_t
++ki_hex08(char *out, uint8_t v)
++{
++	static const char digits[] = "0123456789abcdef";
++
++	out[0] = digits[v >> 4];
++	out[1] = digits[v & 15];
++	return 2;
++}
++
++static uint64_t
++ki_now_ns(void)
++{
++	uint64_t ns = 0;
++
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns;
++}
++
++/* --------------------------------------------------------------- gating */
++
++bool
++kebab_install_gated(void)
++{
++	uint32_t on = 0;
++
++	if (!ki.gate_checked) {
++		ki.gate_checked = true;
++		ki.gated = PE_parse_boot_argn("kebab_install", &on, sizeof(on)) && on != 0;
++	}
++	return ki.gated;
++}
++
++static bool
++ki_gate(void)
++{
++	if (!kebab_install_gated()) {
++		printf("INST disabled: boot with kebab_install=1 to enable the "
++		    "userland installer\n");
++		return false;
++	}
++	return true;
++}
++
++/* ------------------------------------------------------------ path rules */
++
++/*
++ * A destination is accepted only when it is absolute, short enough for the
++ * header's fixed field, printable, has no empty or ".." component, and starts
++ * with one of the allowlist prefixes.  The check is done on the header's
++ * bounded field, never with strlen() on wire data.
++ */
++static bool
++ki_path_ok(const char *path, uint32_t len)
++{
++	uint32_t i, start;
++
++	if (len < 3 || len >= KEBAB_INST_PATH_MAX) {
++		return false;
++	}
++	if (path[0] != '/') {
++		return false;
++	}
++	for (i = 0; i < len; i++) {
++		char c = path[i];
++		if (c == 0 || c == '\n' || c == '\r' || c == '\t') {
++			return false;
++		}
++		if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7e) {
++			return false;
++		}
++		if (c == '/' && (i + 1 == len || path[i + 1] == '/')) {
++			return false;   /* trailing or doubled slash */
++		}
++	}
++	/* components of "." are harmless; ".." is never allowed */
++	start = 1;
++	for (i = 1; i <= len; i++) {
++		if (i == len || path[i] == '/') {
++			uint32_t n = i - start;
++			if (n == 2 && path[start] == '.' && path[start + 1] == '.') {
++				return false;
++			}
++			start = i + 1;
++		}
++	}
++	for (i = 0; i < sizeof(ki_allow) / sizeof(ki_allow[0]); i++) {
++		size_t plen = strlen(ki_allow[i]);
++		if ((size_t)len >= plen && memcmp(path, ki_allow[i], plen) == 0) {
++			return true;
++		}
++	}
++	return false;
++}
++
++/* --------------------------------------------------------- vnode helpers */
++
++static int
++ki_mkdir(const char *path, uint16_t mode, vfs_context_t ctx)
++{
++	struct nameidata nd;
++	struct vnode_attr va;
++	vnode_t dvp, vp;
++	int error;
++
++	NDINIT(&nd, CREATE, OP_MKDIR, LOCKPARENT, UIO_SYSSPACE,
++	    CAST_USER_ADDR_T(path), ctx);
++	nd.ni_cnd.cn_flags |= WILLBEDIR;
++	error = nameiat(&nd, AT_FDCWD);
++	if (error) {
++		return error;
++	}
++	dvp = nd.ni_dvp;
++	if (nd.ni_vp != NULLVP) {
++		/* Already there.  It has to be a directory, not a file. */
++		bool isdir = vnode_isdir(nd.ni_vp);
++		vnode_put(nd.ni_vp);
++		nameidone(&nd);
++		if (dvp) {
++			vnode_put(dvp);
++		}
++		return isdir ? 0 : ENOTDIR;
++	}
++	VATTR_INIT(&va);
++	VATTR_SET(&va, va_type, VDIR);
++	VATTR_SET(&va, va_mode, mode & 0777);
++	vp = NULLVP;
++	error = vn_create(dvp, &vp, &nd, &va, 0, 0, NULL, ctx);
++	if (vp != NULLVP) {
++		vnode_put(vp);
++	}
++	nameidone(&nd);
++	if (dvp) {
++		vnode_put(dvp);
++	}
++	return error;
++}
++
++/*
++ * Create every missing parent of `path` from "/" down.  EEXIST is success;
++ * anything else stops the entry, because a file opened under a missing
++ * directory would just fail later with a less useful error.
++ */
++static int
++ki_mkdirs(const char *path, vfs_context_t ctx)
++{
++	char buf[KEBAB_INST_PATH_MAX];
++	size_t len = strlen(path);
++	int error;
++
++	if (len >= sizeof(buf)) {
++		return ENAMETOOLONG;
++	}
++	memcpy(buf, path, len + 1);
++	for (size_t i = 1; i < len; i++) {
++		if (buf[i] != '/') {
++			continue;
++		}
++		buf[i] = 0;
++		error = ki_mkdir(buf, 0755, ctx);
++		buf[i] = '/';
++		if (error == EEXIST) {
++			continue;
++		}
++		if (error) {
++			return error;
++		}
++	}
++	return 0;
++}
++
++/*
++ * Hash a destination file.  This is both the resume test and the post-write
++ * verification: the caller compares the size and the digest with the entry
++ * header.  Returns 0 only when the file was read completely.
++ */
++static int
++ki_hash_file(const char *path, uint64_t *sizep, uint8_t digest[32],
++    vfs_context_t ctx)
++{
++	vnode_t vp = NULLVP;
++	SHA256_CTX shactx;
++	off_t size;
++	uint64_t off = 0;
++	int error;
++
++	error = vnode_lookup(path, 0, &vp, ctx);
++	if (error) {
++		return error;
++	}
++	if (vp->v_type != VREG) {
++		vnode_put(vp);
++		return EINVAL;
++	}
++	size = ubc_getsize(vp);
++	if (size < 0) {
++		vnode_put(vp);
++		return EIO;
++	}
++	SHA256_Init(&shactx);
++	while (off < (uint64_t)size) {
++		uint64_t left = (uint64_t)size - off;
++		int want = left > KI_IO_BUF ? (int)KI_IO_BUF : (int)left;
++		int resid = 0;
++
++		error = vn_rdwr(UIO_READ, vp, (caddr_t)ki.io, want, (off_t)off,
++		    UIO_SYSSPACE, 0, vfs_context_ucred(ctx), &resid, NULL);
++		if (error) {
++			vnode_put(vp);
++			return error;
++		}
++		if (resid != 0) {
++			vnode_put(vp);
++			return EIO;
++		}
++		SHA256_Update(&shactx, ki.io, (size_t)want);
++		off += (uint64_t)want;
++	}
++	vnode_put(vp);
++	SHA256_Final(digest, &shactx);
++	*sizep = (uint64_t)size;
++	return 0;
++}
++
++/*
++ * Free and total bytes on the root volume.  HFS+ reports these in allocation
++ * blocks; the installer uses them to refuse a stream that cannot fit before it
++ * writes the first byte, and to show the operator why.
++ */
++static int
++ki_space(uint64_t *freep, uint64_t *totalp)
++{
++	struct vfsstatfs *sfs;
++
++	if (rootvnode == NULLVP || rootvnode->v_mount == NULL) {
++		return ENODEV;
++	}
++	sfs = vfs_statfs(rootvnode->v_mount);
++	if (sfs == NULL || sfs->f_bsize == 0) {
++		return ENODEV;
++	}
++	*freep = (uint64_t)sfs->f_bavail * (uint64_t)sfs->f_bsize;
++	*totalp = (uint64_t)sfs->f_blocks * (uint64_t)sfs->f_bsize;
++	return 0;
++}
++
++/* ------------------------------------------------------------ zlib hooks */
++
++/*
++ * zlib in this kernel has no allocator of its own configured for BSD
++ * callers: give it one and keep the allocation size in a header, because
++ * kfree_data() wants the same size it was handed.
++ */
++#define KI_ZHEAD 16u
++
++static voidpf
++ki_zalloc(voidpf opaque __unused, uInt items, uInt size)
++{
++	size_t bytes = (size_t)items * (size_t)size + KI_ZHEAD;
++	void *raw = kalloc_data(bytes, Z_WAITOK | Z_ZERO);
++	uintptr_t base;
++
++	if (raw == NULL) {
++		return NULL;
++	}
++	*(size_t *)raw = bytes;
++	base = (uintptr_t)raw + KI_ZHEAD;
++	return (voidpf)base;
++}
++
++static void
++ki_zfree(voidpf opaque __unused, voidpf ptr)
++{
++	uintptr_t base;
++	size_t bytes;
++
++	if (ptr == NULL) {
++		return;
++	}
++	base = (uintptr_t)ptr - KI_ZHEAD;
++	bytes = *(size_t *)base;
++	{
++		void *raw = (void *)base;
++		kfree_data(raw, bytes);
++	}
++}
++
++/* ---------------------------------------------------------- entry output */
++
++static int
++ki_write_bytes(const void *p, size_t n)
++{
++	struct ki_entry *e = &ki.e;
++	int resid = 0;
++	int error;
++
++	SHA256_Update(&e->shactx, p, n);
++	e->got += n;
++	if (ki.dry || e->skip) {
++		return 0;
++	}
++	if (!e->opened) {
++		return EBADF;
++	}
++	error = vn_rdwr(UIO_WRITE, e->vp, (caddr_t)(uintptr_t)p, (int)n,
++	    (off_t)e->offset,
++	    UIO_SYSSPACE, 0, vfs_context_ucred(vfs_context_current()), &resid,
++	    NULL);
++	if (error) {
++		return error;
++	}
++	if (resid != 0) {
++		return EIO;
++	}
++	e->offset += n;
++	return 0;
++}
++
++/* --------------------------------------------------------------- abort */
++
++static void
++ki_reset(void)
++{
++	struct ki_entry *e = &ki.e;
++
++	if (e->zs_live) {
++		inflateEnd(&e->zs);
++		e->zs_live = false;
++	}
++	if (e->opened && e->vp != NULLVP) {
++		vnode_close(e->vp, FWRITE, vfs_context_current());
++		e->opened = false;
++		e->vp = NULLVP;
++	}
++	ki.active = false;
++	ki.state = KI_S_DONE;
++	ki.hdr_got = 0;
++	ki.session++;
++	memset(e, 0, sizeof(*e));
++	e->vp = NULLVP;
++}
++
++static void
++ki_abort(const char *why, int error)
++{
++	if (error) {
++		printf("INST ABORT %s (error %d)\n", why, error);
++	} else {
++		printf("INST ABORT %s\n", why);
++	}
++	ki.failed++;
++	ki_reset();
++}
++
++/* --------------------------------------------------------- entry handling */
++
++static void ki_finish_entry(void);
++
++static void
++ki_start_entry(void)
++{
++	struct ki_entry *e = &ki.e;
++	vfs_context_t ctx = vfs_context_current();
++	uint32_t plen = ki_le16(ki.hdr + KI_HDR_PLEN_OFF);
++	uint64_t size = ki_le64(ki.hdr + KI_HDR_USIZE_OFF);
++	uint64_t wire = ki_le64(ki.hdr + KI_HDR_WIRE_OFF);
++	uint64_t have = 0;
++	uint8_t digest[32];
++	int error;
++
++	if (ki_le32(ki.hdr) != KI_ENTRY_MAGIC) {
++		ki_abort("entry magic", 0);
++		return;
++	}
++	if (plen == 0 || plen >= KEBAB_INST_PATH_MAX) {
++		ki_abort("entry path length", 0);
++		return;
++	}
++	memset(e, 0, sizeof(*e));
++	e->vp = NULLVP;
++	memcpy(e->path, ki.hdr + KI_HDR_PATH_OFF, plen);
++	e->path[plen] = 0;
++	if (!ki_path_ok(e->path, plen)) {
++		printf("FAIL %s rejected: outside the install allowlist or "
++		    "malformed\n", e->path);
++		ki_abort("destination refused", 0);
++		return;
++	}
++	e->mode = ki_le16(ki.hdr + KI_HDR_MODE_OFF) & 0777;
++	e->flags = ki_le16(ki.hdr + KI_HDR_FLAGS_OFF);
++	e->deflate = (e->flags & KI_F_DEFLATE) != 0;
++	e->size = size;
++	e->wire = wire;
++	e->wire_left = wire;
++	memcpy(e->sha, ki.hdr + KI_HDR_SHA_OFF, sizeof(e->sha));
++
++	/* The payload cannot be longer than the entry claims, and the entry
++	 * cannot claim more bytes than remain in the stream. */
++	if (wire > ki.wire_left) {
++		printf("FAIL %s wire size %llu exceeds the %llu bytes left in "
++		    "the stream\n", e->path, (unsigned long long)wire,
++		    (unsigned long long)ki.wire_left);
++		ki_abort("entry overruns the stream", 0);
++		return;
++	}
++	if (!e->deflate && wire != size) {
++		printf("FAIL %s stored payload %llu != file size %llu\n", e->path,
++		    (unsigned long long)wire, (unsigned long long)size);
++		ki_abort("inconsistent entry", 0);
++		return;
++	}
++
++	if (!ki.dry) {
++		/*
++		 * Resume: a destination that already has the right size and
++		 * hash is left alone.  Only a regular file with a matching
++		 * size is worth reading.
++		 */
++		error = ki_hash_file(e->path, &have, digest, ctx);
++		if (error == 0 && have == size &&
++		    memcmp(digest, e->sha, sizeof(digest)) == 0) {
++			e->skip = true;
++			ki.skipped++;
++			printf("SKIP %s %llu\n", e->path,
++			    (unsigned long long)size);
++			/* The payload still arrives; consume and discard it. */
++			ki.state = KI_S_PAYLOAD;
++			return;
++		}
++		/*
++		 * Space check.  A destination that already exists and is about
++		 * to be truncated gives its blocks back, so the room needed is
++		 * the new size minus what the old file holds.  Refusing here
++		 * keeps a full volume from turning into a half-written file
++		 * that looks like a transport failure.
++		 */
++		{
++			uint64_t freeb = 0, totalb = 0;
++			uint64_t reclaimable = (error == 0) ? have : 0;
++
++			if (ki_space(&freeb, &totalb) == 0 &&
++			    size > freeb + reclaimable) {
++				printf("FAIL %s needs %llu bytes but the root "
++				    "volume has %llu free of %llu\n",
++				    e->path, (unsigned long long)size,
++				    (unsigned long long)freeb,
++				    (unsigned long long)totalb);
++				ki_abort("not enough space", 0);
++				return;
++			}
++		}
++		error = ki_mkdirs(e->path, ctx);
++		if (error) {
++			printf("FAIL %s cannot create parent directories "
++			    "(error %d)\n", e->path, error);
++			ki_abort("mkdir failed", error);
++			return;
++		}
++		error = vnode_open(e->path, O_CREAT | O_TRUNC | FWRITE, e->mode,
++		    0, &e->vp, ctx);
++		if (error) {
++			printf("FAIL %s cannot open for writing (error %d)\n",
++			    e->path, error);
++			ki_abort("open failed", error);
++			return;
++		}
++		e->opened = true;
++		if (e->vp->v_type != VREG) {
++			printf("FAIL %s is not a regular file\n", e->path);
++			ki_abort("not a regular file", 0);
++			return;
++		}
++		/* vnode_open only applies cmode when it creates the file. */
++		{
++			struct vnode_attr va;
++			VATTR_INIT(&va);
++			VATTR_SET(&va, va_mode, e->mode);
++			(void)vnode_setattr(e->vp, &va, ctx);
++		}
++		e->offset = 0;
++	}
++	SHA256_Init(&e->shactx);
++	e->shactx_live = true;
++
++	if (e->deflate) {
++		memset(&e->zs, 0, sizeof(e->zs));
++		e->zs.zalloc = ki_zalloc;
++		e->zs.zfree = ki_zfree;
++		e->zs.opaque = NULL;
++		error = inflateInit(&e->zs);
++		if (error != Z_OK) {
++			printf("FAIL %s cannot start inflate (%d)\n", e->path,
++			    error);
++			ki_abort("inflate init failed", 0);
++			return;
++		}
++		e->zs_live = true;
++		/* Compressed payloads are usually larger than a chunk?  No:
++		 * they are on average smaller, but keep the guarantee explicit
++		 * by not requiring a whole entry to fit. */
++	}
++	ki.state = KI_S_PAYLOAD;
++}
++
++static void
++ki_payload(const uint8_t *p, uint32_t n)
++{
++	struct ki_entry *e = &ki.e;
++	int error = 0;
++
++	if (e->skip) {
++		/* Nothing is written and nothing is verified: the destination
++		 * is already known good. */
++		e->got += n;
++		return;
++	}
++	if (!e->deflate) {
++		error = ki_write_bytes(p, n);
++		if (error) {
++			goto fail;
++		}
++		return;
++	}
++
++	e->zs.next_in = (Bytef *)(uintptr_t)(const void *)p;
++	e->zs.avail_in = n;
++	while (e->zs.avail_in > 0) {
++		uint32_t produced;
++		int rc;
++
++		e->zs.next_out = (Bytef *)ki.io;
++		e->zs.avail_out = KI_IO_BUF;
++		rc = inflate(&e->zs, Z_NO_FLUSH);
++		if (rc != Z_OK && rc != Z_STREAM_END) {
++			printf("FAIL %s inflate error %d\n", e->path, rc);
++			ki_abort("inflate failed", 0);
++			return;
++		}
++		produced = KI_IO_BUF - e->zs.avail_out;
++		if (produced) {
++			error = ki_write_bytes(ki.io, produced);
++			if (error) {
++				goto fail;
++			}
++		}
++		if (rc == Z_STREAM_END) {
++			e->z_end = true;
++		}
++		if (rc == Z_STREAM_END && e->zs.avail_in > 0) {
++			printf("FAIL %s deflate stream ends before its payload "
++			    "does\n", e->path);
++			ki_abort("trailing compressed bytes", 0);
++			return;
++		}
++	}
++	return;
++
++fail:
++	printf("FAIL %s write failed (error %d)\n", e->path, error);
++	ki_abort("write failed", error);
++}
++
++static void
++ki_finish_entry(void)
++{
++	struct ki_entry *e = &ki.e;
++	vfs_context_t ctx = vfs_context_current();
++	uint8_t digest[32];
++	uint64_t have = 0;
++	int error;
++
++	if (e->skip) {
++		ki.entries_done++;
++		if (ki.entries_done >= ki.entries_total) {
++			ki.state = KI_S_PAD;
++		} else {
++			ki.state = KI_S_ENTRY_HDR;
++		}
++		ki.hdr_got = 0;
++		return;
++	}
++	if (!e->shactx_live) {
++		ki_abort("entry has no hash context", 0);
++		return;
++	}
++	if (e->deflate) {
++		while (e->zs_live && !e->z_end) {
++			uint32_t produced;
++			int rc;
++
++			e->zs.next_out = (Bytef *)ki.io;
++			e->zs.avail_out = KI_IO_BUF;
++			rc = inflate(&e->zs, Z_FINISH);
++			produced = KI_IO_BUF - e->zs.avail_out;
++			if (produced) {
++				error = ki_write_bytes(ki.io, produced);
++				if (error) {
++					printf("FAIL %s write failed (error %d)\n",
++					    e->path, error);
++					ki_abort("write failed", error);
++					return;
++				}
++			}
++			if (rc == Z_STREAM_END) {
++				e->z_end = true;
++			} else if (rc != Z_OK || produced == 0) {
++				printf("FAIL %s deflate stream did not end (%d)\n",
++				    e->path, rc);
++				ki_abort("short deflate stream", 0);
++				return;
++			}
++		}
++		if (e->zs_live) {
++			inflateEnd(&e->zs);
++			e->zs_live = false;
++		}
++	}
++	if (e->got != e->size) {
++		printf("FAIL %s produced %llu bytes, header says %llu\n", e->path,
++		    (unsigned long long)e->got, (unsigned long long)e->size);
++		ki_abort("size mismatch", 0);
++		return;
++	}
++	SHA256_Final(digest, &e->shactx);
++	e->shactx_live = false;
++	if (memcmp(digest, e->sha, sizeof(digest)) != 0) {
++		char want[65], got[65];
++		for (uint32_t i = 0; i < 32; i++) {
++			ki_hex08(&want[i * 2], e->sha[i]);
++			ki_hex08(&got[i * 2], digest[i]);
++		}
++		want[64] = got[64] = 0;
++		printf("FAIL %s payload hash %s != header %s\n", e->path, got, want);
++		ki_abort("payload hash mismatch", 0);
++		return;
++	}
++
++	if (ki.dry) {
++		printf("PLAN %s %llu mode 0%o %s\n", e->path,
++		    (unsigned long long)e->size, e->mode,
++		    e->deflate ? "deflate" : "store");
++	} else {
++		if (e->opened) {
++			error = vnode_close(e->vp, FWRITE, ctx);
++			e->opened = false;
++			e->vp = NULLVP;
++			if (error) {
++				printf("FAIL %s close failed (error %d)\n",
++				    e->path, error);
++				ki_abort("close failed", error);
++				return;
++			}
++		}
++		/* Read the file back: the payload hash proved the wire, this
++		 * proves the volume. */
++		error = ki_hash_file(e->path, &have, digest, ctx);
++		if (error) {
++			printf("FAIL %s cannot be read back (error %d)\n", e->path,
++			    error);
++			ki_abort("read-back failed", error);
++			return;
++		}
++		if (have != e->size || memcmp(digest, e->sha, sizeof(digest)) != 0) {
++			printf("FAIL %s read back %llu bytes with a different "
++			    "hash\n", e->path, (unsigned long long)have);
++			ki_abort("read-back mismatch", 0);
++			return;
++		}
++		printf("OK %s %llu mode 0%o\n", e->path,
++		    (unsigned long long)e->size, e->mode);
++		ki.ok++;
++	}
++	ki.entries_done++;
++	if (ki.entries_done >= ki.entries_total) {
++		ki.state = KI_S_PAD;
++	} else {
++		ki.state = KI_S_ENTRY_HDR;
++	}
++	ki.hdr_got = 0;
++}
++
++/* --------------------------------------------------------------- session */
++
++void
++kebab_install_begin(bool dry, uint64_t wire_bytes)
++{
++	if (!ki_gate()) {
++		return;
++	}
++	if (ki.active) {
++		printf("INST busy: %llu of %llu bytes already consumed\n",
++		    (unsigned long long)ki.wire_seen,
++		    (unsigned long long)ki.wire_total);
++		return;
++	}
++	if (wire_bytes == 0) {
++		printf("INST refused: a stream needs a non-zero length\n");
++		return;
++	}
++	if (ki.io == NULL) {
++		ki.io = kalloc_data(KI_IO_BUF, Z_WAITOK);
++		if (ki.io == NULL) {
++			printf("INST refused: no %u-byte buffer\n", KI_IO_BUF);
++			return;
++		}
++	}
++	memset(&ki.e, 0, sizeof(ki.e));
++	ki.e.vp = NULLVP;
++	ki.active = true;
++	ki.dry = dry;
++	ki.state = KI_S_STREAM_HDR;
++	ki.hdr_got = 0;
++	ki.wire_total = wire_bytes;
++	ki.wire_seen = 0;
++	ki.wire_left = wire_bytes;
++	ki.usize_total = 0;
++	ki.entries_total = 0;
++	ki.entries_done = 0;
++	ki.ok = 0;
++	ki.skipped = 0;
++	ki.failed = 0;
++	ki.ns_start = ki.ns_last = ki_now_ns();
++	ki.session++;
++	printf("INST BEGIN %llu %s chunk %u\n",
++	    (unsigned long long)wire_bytes, dry ? "dry" : "write",
++	    (unsigned)KEBAB_INST_CHUNK);
++}
++
++static void
++ki_finish_stream(void)
++{
++	uint64_t ms = (ki_now_ns() - ki.ns_start) / 1000000ull;
++
++	if (ki.state != KI_S_PAD && ki.state != KI_S_DONE) {
++		ki_abort("stream ended mid-entry", 0);
++		return;
++	}
++	if (ki.entries_done != ki.entries_total) {
++		printf("INST ABORT stream ended after %u of %u entries\n",
++		    ki.entries_done, ki.entries_total);
++		ki.failed++;
++		ki_reset();
++		return;
++	}
++	if (ki.dry) {
++		printf("INST PLAN entries %u bytes %llu wire %llu\n",
++		    ki.entries_done, (unsigned long long)ki.usize_total,
++		    (unsigned long long)ki.wire_seen);
++	} else if (ki.failed == 0) {
++		printf("INST DONE entries %u ok %u skipped %u bytes %llu "
++		    "wire %llu ms %llu\n", ki.entries_done, ki.ok, ki.skipped,
++		    (unsigned long long)ki.usize_total,
++		    (unsigned long long)ki.wire_seen, (unsigned long long)ms);
++	} else {
++		printf("INST DONE with %u failure(s), entries %u ok %u "
++		    "skipped %u\n", ki.failed, ki.entries_done, ki.ok, ki.skipped);
++	}
++	ki_reset();
++}
++
++/*
++ * Consume one bulk-OUT chunk.  The caller (the USB event thread) must not hold
++ * the transport's receive lock: everything below can sleep in the filesystem.
++ * The ACK is printed only after the bytes are written, verified or discarded,
++ * which is what stops the host from overrunning this side.
++ */
++void
++kebab_install_bytes(const void *buf, uint32_t len)
++{
++	const uint8_t *p = buf;
++	uint32_t n = len;
++
++	if (!ki.active) {
++		return;
++	}
++	if ((uint64_t)len > ki.wire_left) {
++		printf("INST ABORT chunk of %u bytes exceeds the %llu bytes left\n",
++		    len, (unsigned long long)ki.wire_left);
++		ki.failed++;
++		ki_reset();
++		return;
++	}
++	ki.ns_last = ki_now_ns();
++
++	while (n > 0 && ki.active) {
++		switch (ki.state) {
++		case KI_S_STREAM_HDR: {
++			uint32_t need = KI_STREAM_HDR - ki.hdr_got;
++			uint32_t take = MIN(need, n);
++
++			memcpy(ki.hdr + ki.hdr_got, p, take);
++			ki.hdr_got += take;
++			p += take;
++			n -= take;
++			ki.wire_seen += take;
++			ki.wire_left -= take;
++			if (ki.hdr_got < KI_STREAM_HDR) {
++				break;
++			}
++			if (ki_le32(ki.hdr) != KI_STREAM_MAGIC ||
++			    ki_le16(ki.hdr + 4) != KI_VERSION) {
++				ki_abort("bad stream header", 0);
++				return;
++			}
++			ki.entries_total = ki_le32(ki.hdr + 8);
++			ki.usize_total = ki_le64(ki.hdr + 16);
++			if (ki_le32(ki.hdr + 12) != KI_STREAM_HDR) {
++				ki_abort("unexpected stream header size", 0);
++				return;
++			}
++			if ((uint64_t)ki_le64(ki.hdr + 24) + KI_STREAM_HDR !=
++			    ki.wire_total) {
++				printf("INST ABORT stream declares %llu wire "
++				    "bytes, INST BEGIN was given %llu\n",
++				    (unsigned long long)(ki_le64(ki.hdr + 24) +
++				    KI_STREAM_HDR),
++				    (unsigned long long)ki.wire_total);
++				ki.failed++;
++				ki_reset();
++				return;
++			}
++			printf("INST STREAM v%u entries %u bytes %llu "
++			    "wire %llu\n", ki_le16(ki.hdr + 4), ki.entries_total,
++			    (unsigned long long)ki.usize_total,
++			    (unsigned long long)ki.wire_total);
++			ki.hdr_got = 0;
++			ki.state = ki.entries_total ? KI_S_ENTRY_HDR : KI_S_PAD;
++			break;
++		}
++		case KI_S_ENTRY_HDR: {
++			uint32_t need = KI_ENTRY_HDR - ki.hdr_got;
++			uint32_t take = MIN(need, n);
++
++			memcpy(ki.hdr + ki.hdr_got, p, take);
++			ki.hdr_got += take;
++			p += take;
++			n -= take;
++			ki.wire_seen += take;
++			ki.wire_left -= take;
++			if (ki.hdr_got < KI_ENTRY_HDR) {
++				break;
++			}
++			ki.hdr_got = 0;
++			ki_start_entry();
++			break;
++		}
++		case KI_S_PAYLOAD: {
++			uint64_t left = ki.e.wire_left;
++			uint32_t take = left > n ? n : (uint32_t)left;
++
++			ki_payload(p, take);
++			if (!ki.active) {
++				return;
++			}
++			p += take;
++			n -= take;
++			ki.wire_seen += take;
++			ki.wire_left -= take;
++			ki.e.wire_left -= take;
++			if (ki.e.wire_left == 0) {
++				ki_finish_entry();
++			}
++			break;
++		}
++		case KI_S_PAD:
++			p += n;
++			ki.wire_seen += n;
++			ki.wire_left -= n;
++			n = 0;
++			break;
++		default:
++			return;
++		}
++	}
++	if (!ki.active) {
++		return;
++	}
++	printf("INST ACK %llu\n", (unsigned long long)ki.wire_seen);
++	if (ki.wire_left == 0) {
++		ki_finish_stream();
++	}
++}
++
++/* Watchdog: a host that dies mid-stream must not leave the console deaf. */
++void
++kebab_install_poll(void)
++{
++	if (!ki.active) {
++		return;
++	}
++	if (ki_now_ns() - ki.ns_last < KI_TIMEOUT_NS) {
++		return;
++	}
++	printf("INST TIMEOUT after %llu of %llu bytes\n",
++	    (unsigned long long)ki.wire_seen,
++	    (unsigned long long)ki.wire_total);
++	ki.failed++;
++	ki_reset();
++}
++
++bool
++kebab_install_active(void)
++{
++	return ki.active;
++}
++
++void
++kebab_install_status(void)
++{
++	bool rw = false;
++
++	if (rootvnode != NULLVP && rootvnode->v_mount != NULL) {
++		rw = (vfs_flags(rootvnode->v_mount) & MNT_RDONLY) == 0;
++	}
++	printf("INST? gated %d active %d dry %d root %s chunk %u\n",
++	    kebab_install_gated() ? 1 : 0, ki.active ? 1 : 0, ki.dry ? 1 : 0,
++	    rw ? "rw" : "ro", (unsigned)KEBAB_INST_CHUNK);
++	printf("INST? wire %llu/%llu entries %u/%u ok %u skip %u fail %u\n",
++	    (unsigned long long)ki.wire_seen, (unsigned long long)ki.wire_total,
++	    ki.entries_done, ki.entries_total, ki.ok, ki.skipped, ki.failed);
++	if (!rw) {
++		printf("INST? the root volume is read-only; boot with rootrw=1\n");
++	} else {
++		uint64_t freeb = 0, totalb = 0;
++
++		if (ki_space(&freeb, &totalb) == 0) {
++			struct vfsstatfs *sfs = vfs_statfs(rootvnode->v_mount);
++
++			printf("INST? space %llu free of %llu bytes\n",
++			    (unsigned long long)freeb,
++			    (unsigned long long)totalb);
++			if (sfs != NULL) {
++				printf("INST? bsize %u blocks %llu free %llu\n",
++				    sfs->f_bsize,
++				    (unsigned long long)sfs->f_blocks,
++				    (unsigned long long)sfs->f_bavail);
++			}
++		}
++	}
++}
++
++/*
++ * INST CHECK <path>: what the destination has now, so the host can pack a
++ * resumed stream without the payloads that are already correct.
++ */
++void
++kebab_install_check(const char *path)
++{
++	vfs_context_t ctx = vfs_context_current();
++	uint64_t size = 0;
++	uint8_t digest[32];
++	char hex[65];
++	size_t len;
++	int error;
++
++	if (!ki_gate()) {
++		return;
++	}
++	len = strlen(path);
++	if (!ki_path_ok(path, (uint32_t)len)) {
++		printf("INST CHECK %s refused\n", path);
++		return;
++	}
++	if (ki.io == NULL) {
++		ki.io = kalloc_data(KI_IO_BUF, Z_WAITOK);
++		if (ki.io == NULL) {
++			printf("INST CHECK %s no buffer\n", path);
++			return;
++		}
++	}
++	error = ki_hash_file(path, &size, digest, ctx);
++	if (error == ENOENT) {
++		printf("INST CHECK %s MISSING\n", path);
++		return;
++	}
++	if (error) {
++		printf("INST CHECK %s ERROR %d\n", path, error);
++		return;
++	}
++	for (uint32_t i = 0; i < 32; i++) {
++		ki_hex08(&hex[i * 2], digest[i]);
++	}
++	hex[64] = 0;
++	printf("INST CHECK %s %llu %s\n", path, (unsigned long long)size, hex);
++}
++
++#endif /* KEBAB */
+diff --git a/bsd/dev/kebab_install.h b/bsd/dev/kebab_install.h
+new file mode 100644
+index 0000000..2ce3a54
+--- /dev/null
++++ b/bsd/dev/kebab_install.h
+@@ -0,0 +1,44 @@
++/*
++ * KEBAB INST: the console side of the userland installer.
++ *
++ * bsd/dev/kebab_usb.c owns the bulk-OUT endpoint and the ACK line; this module
++ * owns the KIST stream state machine and the filesystem.  The split exists so
++ * the transport keeps its single owner for DMA and the input ring, and so the
++ * installer can sleep in vnode I/O on the event thread without any transport
++ * lock held.
++ */
++#ifndef _KEBAB_INSTALL_H_
++#define _KEBAB_INSTALL_H_
++
++#include <sys/types.h>
++
++/*
++ * The wire chunk.  The packer pads the stream to a multiple of this, the host
++ * writes exactly this many bytes per transfer and waits for the ACK, and the
++ * controller is armed with one TRB of this size, so every completion is a full
++ * buffer rather than a short packet.
++ */
++#define KEBAB_INST_CHUNK    65536u
++
++/* Longest destination path the entry header can carry. */
++#define KEBAB_INST_PATH_MAX 128
++
++/* Boot argument kebab_install=1; everything below is a no-op without it. */
++bool kebab_install_gated(void);
++
++/* INST BEGIN <bytes> / INST DRY <bytes>: prints when the stream is taken. */
++void kebab_install_begin(bool dry, uint64_t wire_bytes);
++
++/* One bulk-OUT completion.  Must run with no transport lock held. */
++void kebab_install_bytes(const void *buf, uint32_t len);
++
++/* Inactivity watchdog, called from the event thread. */
++void kebab_install_poll(void);
++
++bool kebab_install_active(void);
++void kebab_install_status(void);
++
++/* INST CHECK <path>: current size and SHA-256 of a destination. */
++void kebab_install_check(const char *path);
++
++#endif /* _KEBAB_INSTALL_H_ */
+diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
+index df7eae2..a671c31 100644
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -24,10 +24,13 @@
+ #include <machine/machine_routines.h>
+ #include <os/atomic_private.h>
+ #include <pexpert/pexpert.h>
++#include <mach/vm_param.h>
+ #include <sys/systm.h>
+ #include <vm/pmap.h>
+ #include <vm/vm_kern.h>
+ 
++#include "kebab_install.h"
++
+ /* PEHaltRestart() and kPERestartCPU: the platform restart path, not a
+  * driver-private reset register. */
+ #include <IOKit/IOPlatformExpert.h>
+@@ -41,6 +44,8 @@ static void ud_bus_error_report(const char *when);
+ /* Declared in arm/machine_routines.h, behind a guard this build does not
+  * satisfy; the negroni port spells it out for the same reason. */
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++/* arm/pmap.h declares this behind a guard this build does not satisfy either. */
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ 
+ void kebab_usb_log(const char *buf, size_t len);
+ void kebab_usb_log_flush(void);
+@@ -189,11 +194,14 @@ extern int kebab_spmi_pon_reason_write(void);
+ /* ------------------------------------------------------------- DMA layout */
+ 
+ /*
+- * One 4 KiB page is physically contiguous, which is all the controller needs.
+- * Every object the controller writes on its own gets its own cache line, so a
+- * clean of one never writes back stale bytes over another.
++ * One physically contiguous arena.  It used to be a single 4 KiB page because
++ * every transfer was one maximum-packet-size buffer; the userland installer
++ * hands the controller a whole 64 KiB chunk per TRB, and a TRB names exactly
++ * one physical buffer, so the arena has to be contiguous and big enough for
++ * the chunk.  Every object the controller writes on its own still gets its own
++ * cache line, so a clean of one never writes back stale bytes over another.
+  */
+-#define UD_SIZE        4096
++#define UD_SIZE        0x11000
+ #define UD_EVT         0x0000      /* 1 KiB event buffer */
+ #define UD_EVT_SIZE    1024
+ #define UD_TRB_OUT     0x0400
+@@ -210,6 +218,7 @@ extern int kebab_spmi_pon_reason_write(void);
+  * endpoints worked at 64-byte packets and died at 512. */
+ #define UD_BULKIN      0x0c00      /* 512 bytes, 512-aligned */
+ #define UD_BULKOUT     0x0e00      /* 512 bytes, 512-aligned */
++#define UD_INST        0x1000      /* KEBAB_INST_CHUNK bytes, chunk-aligned */
+ 
+ /* physical endpoints: ep = 2 * usb_number + direction */
+ #define EP0_OUT        0
+@@ -277,6 +286,10 @@ extern int kebab_spmi_pon_reason_write(void);
+ #define UD_REBOOT_VRMON_LDOC1   19u
+ #define UD_REBOOT_VRMON_OTHER   20u
+ #define UD_REBOOT_TCS_REPORT    21u
++#define UD_REBOOT_INST_BEGIN    22u
++#define UD_REBOOT_INST_DRY      23u
++#define UD_REBOOT_INST_STATUS   24u
++#define UD_REBOOT_INST_CHECK    25u
+ 
+ struct ud_endpoint {
+ 	uint32_t trb, length, ctl, resource;
+@@ -336,6 +349,19 @@ static struct {
+ 	 */
+ 	volatile uint32_t reboot_command;   /* UD_REBOOT_* or zero */
+ 	volatile bool     restart_armed;    /* console asked for the restart */
++	/*
++	 * While an INST stream runs, bulk OUT stops feeding the input ring and
++	 * the command matcher: every completion is stream payload for the
++	 * installer.  inst_pending means a chunk is sitting in the arena and the
++	 * endpoint must stay unarmed until it has been written or discarded --
++	 * that, and the ACK the host waits for, is the whole flow control.
++	 */
++	volatile bool     inst_stream;
++	volatile bool     inst_pending;
++	uint32_t          inst_len;
++	uint32_t          out_off;          /* buffer the pending OUT arm uses */
++	uint64_t          inst_wire;        /* the INST BEGIN argument */
++	char              inst_path[KEBAB_INST_PATH_MAX];
+ 	/* Raw PSCI answers, kept exactly as the firmware returned them. */
+ 	uint32_t    psci_reset2;       /* FEATURES(SYSTEM_RESET2) */
+ 	bool        psci_reset2_valid; /* the value above was actually read */
+@@ -1124,9 +1150,20 @@ ud_service(void)
+ 		ud.status_ready = false;
+ 	}
+ 	if (!ud.configured || !ud.connected || ud.failed) return;
+-	if (!ud.ep[EP_BULK_OUT].busy && !ud.ep[EP_BULK_OUT].halted) {
+-		int rc = ud_start(UD_TRB_BULKOUT, EP_BULK_OUT, UD_BULKOUT, ud.mps, TRBCTL_NORMAL);
++	/*
++	 * One arm at a time.  The endpoint is left unarmed while a chunk is being
++	 * written (so a host that ignores the protocol is NAKed instead of
++	 * overwriting the buffer) and while a command that may change the mode is
++	 * still waiting for the event thread (so the next arm already has the
++	 * right buffer and length).
++	 */
++	if (!ud.ep[EP_BULK_OUT].busy && !ud.ep[EP_BULK_OUT].halted &&
++	    !ud.inst_pending && ud.reboot_command == 0) {
++		uint32_t off = ud.inst_stream ? UD_INST : UD_BULKOUT;
++		uint32_t len = ud.inst_stream ? KEBAB_INST_CHUNK : ud.mps;
++		int rc = ud_start(UD_TRB_BULKOUT, EP_BULK_OUT, off, len, TRBCTL_NORMAL);
+ 		if (rc) { ud_fault((unsigned)-rc); return; }
++		ud.out_off = off;
+ 	}
+ 	if (ud.notify_pending && !ud.ep[EP_NOTIFY].busy && !ud.ep[EP_NOTIFY].halted) {
+ 		/* Device-side virtual UART is online: DCD|DSR, independent of host DTR. */
+@@ -1157,6 +1194,72 @@ ud_command_seen(const char *buf, uint32_t received, const char *command,
+ 	return false;
+ }
+ 
++/*
++ * INST commands carry an argument, so ud_command_seen() is not enough: the
++ * number or the path has to be read out of the same completion the command
++ * arrived in, before the buffer is re-armed.  Everything is copied into bounded
++ * storage here; the strings never reach the filesystem directly.
++ */
++static bool
++ud_inst_u64(const char *p, uint32_t n, uint64_t *out)
++{
++	uint64_t v = 0;
++	uint32_t i = 0;
++
++	if (n == 0 || p[0] < '0' || p[0] > '9') return false;
++	while (i < n && p[i] >= '0' && p[i] <= '9') {
++		if (v > (0xffffffffffffffffull - 9) / 10) return false;
++		v = v * 10 + (uint64_t)(p[i] - '0');
++		i++;
++	}
++	if (i >= n || p[i] != '\n') return false;
++	*out = v;
++	return true;
++}
++
++static uint32_t
++ud_inst_command(const char *buf, uint32_t received)
++{
++	for (uint32_t i = 0; i + 4 <= received; i++) {
++		const char *p = buf + i;
++		uint32_t n = received - i;
++		uint64_t value = 0;
++
++		if (memcmp(p, "INST", 4) != 0) continue;
++		if (n >= sizeof("INST?\n") - 1 &&
++		    !memcmp(p, "INST?\n", sizeof("INST?\n") - 1)) {
++			return UD_REBOOT_INST_STATUS;
++		}
++		if (n > sizeof("INST BEGIN ") - 1 &&
++		    !memcmp(p, "INST BEGIN ", sizeof("INST BEGIN ") - 1) &&
++		    ud_inst_u64(p + sizeof("INST BEGIN ") - 1,
++		    n - (sizeof("INST BEGIN ") - 1), &value)) {
++			ud.inst_wire = value;
++			return UD_REBOOT_INST_BEGIN;
++		}
++		if (n > sizeof("INST DRY ") - 1 &&
++		    !memcmp(p, "INST DRY ", sizeof("INST DRY ") - 1) &&
++		    ud_inst_u64(p + sizeof("INST DRY ") - 1,
++		    n - (sizeof("INST DRY ") - 1), &value)) {
++			ud.inst_wire = value;
++			return UD_REBOOT_INST_DRY;
++		}
++		if (n > sizeof("INST CHECK ") - 1 &&
++		    !memcmp(p, "INST CHECK ", sizeof("INST CHECK ") - 1)) {
++			const char *path = p + sizeof("INST CHECK ") - 1;
++			uint32_t len = n - (sizeof("INST CHECK ") - 1);
++			for (uint32_t k = 0; k < len; k++) {
++				if (path[k] == '\n') { len = k; break; }
++			}
++			if (len == 0 || len >= KEBAB_INST_PATH_MAX) return 0;
++			memcpy(ud.inst_path, path, len);
++			ud.inst_path[len] = 0;
++			return UD_REBOOT_INST_CHECK;
++		}
++	}
++	return 0;
++}
++
+ /*
+  * While serial KDP owns the byte stream, a KDP frame always starts with 0xFA,
+  * so a command anchored at the first byte cannot be confused with debugger
+@@ -1227,6 +1330,10 @@ ud_reboot_command(const char *buf, uint32_t received)
+ 		    sizeof("FWLOG?\n") - 1)) {
+ 			return UD_REBOOT_FWLOG_REPORT;
+ 		}
++		{
++			uint32_t inst = ud_inst_command(buf, received);
++			if (inst != 0) return inst;
++		}
+ 		return 0;
+ 	}
+ 	if (received >= sizeof("REBOOT\n") - 1 &&
+@@ -1313,6 +1420,13 @@ ud_reboot_command(const char *buf, uint32_t received)
+ 	    !memcmp(buf, "FWLOG?\n", sizeof("FWLOG?\n") - 1)) {
+ 		return UD_REBOOT_FWLOG_REPORT;
+ 	}
++	{
++		/* The INST family carries arguments, so it has its own scanner.
++		 * It has to run in this branch too: kebabkdp=1 only selects the
++		 * matching style, and the installer must not depend on it. */
++		uint32_t inst = ud_inst_command(buf, received);
++		if (inst != 0) return inst;
++	}
+ 	return 0;
+ }
+ 
+@@ -1518,6 +1632,19 @@ ud_imem_report(void)
+ 	    KEBAB_IMEM_PA, KEBAB_IMEM_RESTART, *reason);
+ }
+ 
++/*
++ * Take the stream.  kebab_install_begin() prints INST BEGIN only when it really
++ * took it, so the endpoint switches to the chunk buffer only after that: a
++ * refused command (gate off, or a stream already running) leaves the console in
++ * command mode.
++ */
++static void
++ud_inst_arm(bool dry)
++{
++	kebab_install_begin(dry, ud.inst_wire);
++	ud.inst_stream = kebab_install_active();
++}
++
+ static void
+ ud_run_reboot_command(uint32_t command)
+ {
+@@ -1564,6 +1691,14 @@ ud_run_reboot_command(uint32_t command)
+ 		kebab_fwlog_report(4096);
+ 	} else if (command == UD_REBOOT_FWLOG_ALL) {
+ 		kebab_fwlog_report(0);
++	} else if (command == UD_REBOOT_INST_BEGIN) {
++		ud_inst_arm(false);
++	} else if (command == UD_REBOOT_INST_DRY) {
++		ud_inst_arm(true);
++	} else if (command == UD_REBOOT_INST_STATUS) {
++		kebab_install_status();
++	} else if (command == UD_REBOOT_INST_CHECK) {
++		kebab_install_check(ud.inst_path);
+ 	}
+ }
+ 
+@@ -1572,8 +1707,23 @@ ud_run_reboot_command(uint32_t command)
+ static void
+ ud_bulk_out_done(uint32_t received)
+ {
+-	const char *buf = (const char *)(ud.dma + UD_BULKOUT);
++	const char *buf = (const char *)(ud.dma + ud.out_off);
+ 	uint32_t command;
++
++	/*
++	 * The buffer this completion was armed with decides what the bytes are,
++	 * not the current mode: the mode can change while a transfer is in
++	 * flight, and reading a command out of the chunk buffer (or the other way
++	 * round) would hand the parser rubbish.  Stream bytes bypass the input
++	 * ring and the command matcher completely.
++	 */
++	if (ud.out_off == UD_INST) {
++		if (received > KEBAB_INST_CHUNK) { ud_fault(4); return; }
++		ud_from_dev(UD_INST, received);
++		ud.inst_len = received;
++		ud.inst_pending = true;
++		return;
++	}
+ 	ud_from_dev(UD_BULKOUT, ud.mps);
+ 	/*
+ 	 * The pre-rewrite driver echoed host bytes to printf() here.  This state
+@@ -1818,6 +1968,20 @@ ud_thread(void *arg __unused, wait_result_t wr __unused)
+ 		/* Panic/restart only after releasing the transport and acknowledging events. */
+ 		if (trigger) panic("kebab usb console test");
+ 		if (command != 0) ud_run_reboot_command(command);
++		/*
++		 * The installer writes to the root filesystem, which can sleep, so
++		 * it runs here with no transport gate held.  The chunk is still in
++		 * the arena: the endpoint is not re-armed until inst_pending is
++		 * cleared, so nothing can overwrite it under the parser.
++		 */
++		if (ud.inst_pending) {
++			uint32_t len = ud.inst_len;
++			ud.inst_pending = false;
++			kebab_install_bytes((const void *)(ud.dma + UD_INST), len);
++			ud.inst_stream = kebab_install_active();
++		}
++		kebab_install_poll();
++		ud.inst_stream = kebab_install_active();
+ 		ud_sleep_ms(1);
+ 	}
+ }
+@@ -2068,9 +2232,10 @@ kebab_usb_start(void)
+ 	 */
+ 	kebab_spmi_init();
+ 	/* wired pages need a real tag: VM_KERN_MEMORY_NONE trips an assertion */
+-	if (kmem_alloc(kernel_map, &ud.dma, UD_SIZE, KMA_DATA | KMA_NOFAIL,
++	if (kmem_alloc_contig(kernel_map, &ud.dma, UD_SIZE, PAGE_MASK,
++	    (vm_offset_t)-1, 0, KMA_DATA | KMA_ZERO | KMA_NOFAIL,
+ 	    VM_KERN_MEMORY_BSD) != KERN_SUCCESS) {
+-		printf("KEBAB USB: no DMA memory\n");
++		printf("KEBAB USB: no contiguous DMA memory\n");
+ 		return;
+ 	}
+ 	ud.dma_pa = (uint64_t)ml_vtophys(ud.dma);
+@@ -2078,6 +2243,21 @@ kebab_usb_start(void)
+ 		printf("KEBAB USB: DMA page has no physical backing\n");
+ 		return;
+ 	}
++	/*
++	 * The chunk path names the whole buffer in one TRB, so the arena has to
++	 * be physically contiguous and not merely virtually.  Verify it instead
++	 * of assuming it: a split would have the controller write through one
++	 * address into pages that belong to something else.
++	 */
++	for (vm_size_t off = 0; off < UD_SIZE; off += PAGE_SIZE) {
++		ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)(ud.dma + off));
++		if (pn == 0 || ptoa_64(pn) != ud.dma_pa + off) {
++			printf("KEBAB USB: DMA arena is not contiguous at +0x%lx\n",
++			    (unsigned long)off);
++			return;
++		}
++	}
++	ud.out_off = UD_BULKOUT;
+ 	bzero((void *)ud.dma, UD_SIZE);
+ 	/* hand the whole arena to the device once, before anything else uses it */
+ 	ud_to_dev(0, UD_SIZE);

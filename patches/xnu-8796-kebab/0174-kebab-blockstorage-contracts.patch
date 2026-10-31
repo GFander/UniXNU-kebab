@@ -1,0 +1,403 @@
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1193,6 +1193,11 @@
+ 	 * kebab_dsc_map=1.
+ 	 */
+ 	kebab_dsc_boot();
++	/* Default-off, read-only factory/request tests on the normal init thread. */
++	{
++		extern void kebab_driver_selftest(void);
++		kebab_driver_selftest();
++	}
+ #endif /* KEBAB */
+ 
+ #if defined(KEBAB)
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -22,3 +22,5 @@
+ # family is built from source; see docs/BRING-UP-STATE.md section 87.
+ iokit/Kernel/arm/KebabBlockStorageDevice.cpp	optional iokitcpp
+ iokit/Kernel/arm/KebabPrelinkBindings.cpp	optional iokitcpp
++
++iokit/Kernel/arm/KebabDriverSelfTest.cpp	optional iokitcpp
+--- a/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
++++ b/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
+@@ -47,6 +47,7 @@
+ 
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOBSD.h>
++#include <IOKit/IOBufferMemoryDescriptor.h>
+ #include <libkern/c++/OSBoolean.h>
+ #include <libkern/c++/OSNumber.h>
+ #include <libkern/c++/OSString.h>
+@@ -54,6 +55,7 @@
+ #include <IOKit/storage/IOBlockStorageDevice.h>
+ #include <pexpert/pexpert.h>
+ #include <sys/errno.h>
++#include <kern/locks.h>
+ 
+ extern "C" {
+ #include "../../../bsd/dev/kebab_ufs.h"
+@@ -64,6 +66,7 @@
+ /* Defined at the end of this file; the prototype keeps -Wmissing-prototypes quiet. */
+ extern "C" int kebab_blockstorage_start(void);
+ extern "C" int kebab_blockstorage_rootdev(dev_t *, char *, size_t, IOService **);
++extern "C" bool kebab_blockstorage_selftest(void);
+ 
+ /* Staging buffer for one transfer chunk. A multiple of the 4 KiB UFS block. */
+ #define KEBAB_BLOCK_CHUNK	(64 * 1024)
+@@ -83,6 +86,7 @@
+ 	UInt64	fBlockCount;
+ 	bool	fWritable;
+ 	bool	fMediaStateReported;
++	bool	fOnline;
+ 	void *	fBounce;
+ 	IOLock *fLock;
+ 
+@@ -91,6 +95,7 @@
+ public:
+ 	bool init(OSDictionary *properties) APPLE_KEXT_OVERRIDE;
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void free(void) APPLE_KEXT_OVERRIDE;
+ 
+ 	IOReturn doEjectMedia(void) APPLE_KEXT_OVERRIDE;
+@@ -120,7 +125,12 @@
+ 
+ OSDefineMetaClassAndStructors(KebabBlockStorageDevice, IOBlockStorageDevice);
+ 
++/* C backend owns the controller; this boot-lifetime bridge owns only its
++ * staging buffer. Publication is serialized independently of the backend lock:
++ * matching can call geometry/read methods, so never hold kebab_ufs_lock here. */
+ static KebabBlockStorageDevice *kebab_block_device;
++static LCK_GRP_DECLARE(kebab_block_group, "kebab_block");
++static LCK_MTX_DECLARE(kebab_block_publish_lock, &kebab_block_group);
+ 
+ static char kebabVendorString[] = "KEBAB";
+ static char kebabProductString[] = "UFS userdata";
+@@ -141,6 +151,8 @@
+ 		return kIOReturnBadArgument;
+ 	case EAGAIN:
+ 		return kIOReturnBusy;
++	case ETIMEDOUT:
++		return kIOReturnTimeout;
+ 	case EIO:
+ 		return kIOReturnIOError;
+ 	default:
+@@ -156,10 +168,16 @@
+ 	if (!IOBlockStorageDevice::init(properties)) {
+ 		return false;
+ 	}
++	fBounce = NULL;
++	fLock = NULL;
++	fOnline = false;
++	fMediaStateReported = false;
+ 	fBlockSize = kebab_ufs_block_size();
+ 	bytes = kebab_ufs_partition_bytes();
+ 	fWritable = kebab_ufs_writable();
+-	if (fBlockSize == 0 || bytes == 0 || (bytes % fBlockSize) != 0) {
++	if (fBlockSize == 0 || fBlockSize > KEBAB_BLOCK_CHUNK ||
++	    KEBAB_BLOCK_CHUNK % fBlockSize != 0 || bytes == 0 ||
++	    (bytes % fBlockSize) != 0) {
+ 		IOLog("KEBAB BLOCK: no usable UFS geometry (%llu bytes, %llu-byte blocks)\n",
+ 		    (unsigned long long)bytes, (unsigned long long)fBlockSize);
+ 		return false;
+@@ -180,6 +198,9 @@
+ 	if (!IOBlockStorageDevice::start(provider)) {
+ 		return false;
+ 	}
++	IOLockLock(fLock);
++	fOnline = true;
++	IOLockUnlock(fLock);
+ 	IOLog("KEBAB BLOCK: block storage up: %llu MiB, %llu-byte blocks, %s\n",
+ 	    (unsigned long long)(fBlockCount * fBlockSize >> 20),
+ 	    (unsigned long long)fBlockSize, fWritable ? "read-write" : "read-only");
+@@ -187,6 +208,17 @@
+ }
+ 
+ void
++KebabBlockStorageDevice::stop(IOService *provider)
++{
++	/* Wait for the current chunk loop; reject later callers before I/O. */
++	IOLockLock(fLock);
++	fOnline = false;
++	fMediaStateReported = false;
++	IOLockUnlock(fLock);
++	IOBlockStorageDevice::stop(provider);
++}
++
++void
+ KebabBlockStorageDevice::free(void)
+ {
+ 	if (fBounce != NULL) {
+@@ -283,11 +315,13 @@
+ 	if (mediaPresent == NULL) {
+ 		return kIOReturnBadArgument;
+ 	}
+-	*mediaPresent = true;
++	IOLockLock(fLock);
++	*mediaPresent = fOnline;
+ 	if (changedState != NULL) {
+ 		*changedState = !fMediaStateReported;
+ 		fMediaStateReported = true;
+ 	}
++	IOLockUnlock(fLock);
+ 	return kIOReturnSuccess;
+ }
+ 
+@@ -338,8 +372,15 @@
+ 
+ 	offset = block * fBlockSize;
+ 	length = nblks * fBlockSize;
++	if (buffer->getLength() < length) {
++		return kIOReturnBadArgument;
++	}
+ 
+ 	IOLockLock(fLock);
++	if (!fOnline) {
++		IOLockUnlock(fLock);
++		return kIOReturnNoDevice;
++	}
+ 	for (done = 0; done < length; ) {
+ 		UInt64 left = length - done;
+ 		IOByteCount chunk = (IOByteCount)(left < (UInt64)KEBAB_BLOCK_CHUNK ?
+@@ -370,6 +411,10 @@
+ 	}
+ 	IOLockUnlock(fLock);
+ 
++	/* Accepted requests complete exactly once, outside both bridge/backend
++	 * locks. Immediate validation/offline rejection never calls completion.
++	 * Execution remains synchronous polling; NULL completion keeps the old
++	 * synchronous return convention used by diagnostics. */
+ 	if (completion != NULL && completion->action != NULL) {
+ 		completion->action(completion->target, completion->parameter,
+ 		    status, done);
+@@ -385,10 +430,11 @@
+ 	(void)block;
+ 	(void)nblks;
+ 	(void)options;
+-	if (!fWritable) {
+-		return kIOReturnSuccess;
+-	}
+-	return statusForError(kebab_ufs_sync());
++	IOLockLock(fLock);
++	IOReturn status = !fOnline ? kIOReturnNoDevice :
++	    !fWritable ? kIOReturnSuccess : statusForError(kebab_ufs_sync());
++	IOLockUnlock(fLock);
++	return status;
+ }
+ 
+ IOReturn
+@@ -404,7 +450,11 @@
+ IOReturn
+ KebabBlockStorageDevice::requestIdle(void)
+ {
+-	return kIOReturnSuccess;
++	/* Idle is a hint; this backend does not implement a hardware power state. */
++	IOLockLock(fLock);
++	IOReturn status = fOnline ? kIOReturnSuccess : kIOReturnNoDevice;
++	IOLockUnlock(fLock);
++	return status;
+ }
+ 
+ /*
+@@ -412,21 +462,15 @@
+  * zero when the service is disabled or published, an errno otherwise; callers
+  * ignore the result.
+  */
+-extern "C" int
+-kebab_blockstorage_start(void)
+-{
+-	static bool registered;
+-	uint32_t enabled = 0;
++static int
++kebab_blockstorage_publish(void)
++{
+ 	uint64_t bytes;
+ 	uint64_t block_size;
+ 	IOService *provider;
+ 	KebabBlockStorageDevice *device;
+ 
+-	if (!PE_parse_boot_argn("ufsmedia", &enabled, sizeof(enabled)) ||
+-	    enabled == 0) {
+-		return 0;
+-	}
+-	if (registered) {
++	if (kebab_block_device != NULL) {
+ 		return 0;
+ 	}
+ 	bytes = kebab_ufs_partition_bytes();
+@@ -473,7 +517,6 @@
+ 	 */
+ 	kebab_block_device = device;
+ 	device->registerService();
+-	registered = true;
+ 	IOLog("KEBAB BLOCK: registered Generic device for %llu MiB, %llu-byte blocks, %s; "
+ 	    "IOMedia child not yet verified\n",
+ 	    (unsigned long long)(bytes >> 20), (unsigned long long)block_size,
+@@ -481,6 +524,19 @@
+ 	return 0;
+ }
+ 
++
++extern "C" int
++kebab_blockstorage_start(void)
++{
++	uint32_t enabled = 0;
++	if (!PE_parse_boot_argn("ufsmedia", &enabled, sizeof(enabled)) || !enabled) {
++		return 0;
++	}
++	lck_mtx_lock(&kebab_block_publish_lock);
++	int error = kebab_blockstorage_publish();
++	lck_mtx_unlock(&kebab_block_publish_lock);
++	return error;
++}
+ 
+ /* Called only for ufsmedia_root=1, after the UFS geometry is available.
+  * Select the actual whole-partition IOMedia below our own bridge, never an
+@@ -554,3 +610,62 @@
+ {
+ 	return kIOReturnUnsupported;
+ }
++
++struct KebabBlockTestCompletion {
++	unsigned calls;
++	IOReturn status;
++	UInt64 bytes;
++	bool mediaPresent;
++};
++
++static void
++kebab_block_test_completed(void *target, void *, IOReturn status, UInt64 bytes)
++{
++	KebabBlockTestCompletion *result = (KebabBlockTestCompletion *)target;
++	result->calls++;
++	result->status = status;
++	result->bytes = bytes;
++	/* Reentry also checks that the bridge lock is not held at completion. */
++	(void)kebab_block_device->reportMediaState(&result->mediaPresent);
++}
++
++extern "C" bool
++kebab_blockstorage_selftest(void)
++{
++	KebabBlockStorageDevice *device = kebab_block_device;
++	UInt64 blockSize = 0, last = 0;
++	bool protectedMedia = false;
++	if (device == NULL || device->reportBlockSize(&blockSize) != kIOReturnSuccess ||
++	    blockSize != 4096 || device->reportMaxValidBlock(&last) != kIOReturnSuccess ||
++	    device->reportWriteProtection(&protectedMedia) != kIOReturnSuccess ||
++	    !protectedMedia) {
++		IOLog("KEBAB DRIVER TEST: UFS requires online 4K read-only media\n");
++		return false;
++	}
++	IOBufferMemoryDescriptor *data = IOBufferMemoryDescriptor::withOptions(
++	    kIODirectionIn, (vm_size_t)blockSize, PAGE_SIZE);
++	if (data == NULL) {
++		return false;
++	}
++	KebabBlockTestCompletion result = {};
++	IOStorageCompletion completion = { &result, kebab_block_test_completed, NULL };
++	IOReturn read = device->doAsyncReadWrite(data, 0, 1, NULL, &completion);
++	uint32_t magic = 0;
++	data->readBytes(32, &magic, sizeof(magic));
++	bool passed = read == kIOReturnSuccess && result.calls == 1 &&
++	    result.status == kIOReturnSuccess && result.bytes == blockSize &&
++	    result.mediaPresent && magic == 0x4253584e; /* NXSB, read only */
++	data->setLength((vm_size_t)blockSize - 1);
++	IOReturn shortBuffer = device->doAsyncReadWrite(data, 0, 1, NULL, &completion);
++	data->setLength((vm_size_t)blockSize);
++	IOReturn bounds = device->doAsyncReadWrite(data, last, 2, NULL, &completion);
++	data->setDirection(kIODirectionOut);
++	IOReturn write = device->doAsyncReadWrite(data, 0, 1, NULL, &completion);
++	passed &= shortBuffer == kIOReturnBadArgument && bounds == kIOReturnBadArgument &&
++	    write == kIOReturnNotWritable && result.calls == 1;
++	data->release();
++	IOLog("KEBAB DRIVER TEST: UFS NXSB/completion/reentry/short/bounds/RO %s "
++	    "(0x%x/0x%x/0x%x/0x%x, calls=%u)\n", passed ? "PASS" : "FAIL",
++	    read, shortBuffer, bounds, write, result.calls);
++	return passed;
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabDriverSelfTest.cpp
+@@ -0,0 +1,80 @@
++/*
++ * Optional read-only native factory tests. This exercises this kernel's
++ * IOService/IOUserClient path, not the private userland framework ABI.
++ * Off by default; never run from early/panic USB or an interrupt context.
++ */
++#include <pexpert/arm64/board_config.h>
++#if defined(KEBAB)
++#include <IOKit/IOLib.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <kern/task.h>
++#include <pexpert/pexpert.h>
++
++extern "C" void kebab_driver_selftest(void);
++extern "C" bool kebab_blockstorage_selftest(void);
++
++static bool
++kebab_client_selftest(const char *name, bool surface)
++{
++	OSDictionary *matching = IOService::serviceMatching(name);
++	if (matching == NULL) {
++		return false;
++	}
++	IOService *service = IOService::waitForMatchingService(matching,
++	    5ULL * kSecondScale);
++	matching->release();
++	if (!service) {
++		IOLog("KEBAB DRIVER TEST: %s not published\n", name);
++		return false;
++	}
++	IOUserClient *client = NULL;
++	IOReturn status = service->newUserClient(kernel_task, NULL, 0, NULL, &client);
++	if (status != kIOReturnSuccess || client == NULL) {
++		IOLog("KEBAB DRIVER TEST: %s open failed 0x%x\n", name, status);
++		service->release();
++		return false;
++	}
++	IOExternalMethodArguments args = {};
++	uint8_t limits[0x18] = {};
++	uint64_t dimensions[2] = {};
++	uint32_t selector = surface ? 13 : 8;
++	if (surface) {
++		args.structureOutput = limits;
++		args.structureOutputSize = sizeof(limits);
++	} else {
++		args.scalarOutput = dimensions;
++		args.scalarOutputCount = 2;
++	}
++	status = client->externalMethod(selector, &args, NULL, NULL, NULL);
++	bool passed = status == kIOReturnSuccess && (surface ?
++	    args.structureOutputSize == sizeof(limits) && limits[0x16] == 1 :
++	    args.scalarOutputCount == 2 && dimensions[0] != 0 && dimensions[1] != 0);
++	/* A missing output must be refused without touching a NULL pointer. */
++	bzero(&args, sizeof(args));
++	IOReturn invalid = client->externalMethod(selector, &args, NULL, NULL, NULL);
++	passed &= invalid == (surface ? kIOReturnNoSpace : kIOReturnBadArgument);
++	IOReturn closed = client->clientClose();
++	IOReturn afterClose = client->externalMethod(selector, &args, NULL, NULL, NULL);
++	passed &= closed == kIOReturnSuccess && afterClose == kIOReturnNoDevice;
++	client->release();
++	service->release();
++	IOLog("KEBAB DRIVER TEST: %s factory/query/bad-output/close %s (0x%x/0x%x/0x%x)\n",
++	    name, passed ? "PASS" : "FAIL", status, invalid, afterClose);
++	return passed;
++}
++
++extern "C" void
++kebab_driver_selftest(void)
++{
++	uint32_t enabled = 0;
++	if (!PE_parse_boot_argn("kebab_driver_test", &enabled, sizeof(enabled)) || !enabled) {
++		return;
++	}
++	bool surface = kebab_client_selftest("IOCoreSurfaceRoot", true);
++	bool display = kebab_client_selftest("AppleCLCD", false);
++	bool storage = kebab_blockstorage_selftest();
++	IOLog("KEBAB DRIVER TEST: read-only native contracts %s\n",
++	    surface && display && storage ? "PASS" : "FAIL");
++}
++#endif /* KEBAB */

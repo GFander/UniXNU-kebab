@@ -1,0 +1,26 @@
+--- a/iokit/Kernel/IONVRAM.cpp
++++ b/iokit/Kernel/IONVRAM.cpp
+@@ -1406,6 +1406,7 @@
+ {
+  if(!image||size!=8192||current>=2)return false;
+  NVRAMWRITELOCK();CONTROLLERLOCK();
++ IOLog("KEBAB NVRAM: adopt format=%u native-var-count=%u\n",_format?_format->getVersion():0,_varDict?_varDict->getCount():0);
+  bool ok=_format&&_format->getVersion()==kNVRAMVersion1&&
+    static_cast<IONVRAMCHRPHandler *>(_format)->kebabLoadProxy(image,size,current);
+  if(ok){bool active=_format->getSystemPartitionActive();
+--- a/iokit/Kernel/IONVRAMCHRPHandler.cpp
++++ b/iokit/Kernel/IONVRAMCHRPHandler.cpp
+@@ -112,8 +112,11 @@
+ 
+ #if defined(KEBAB)
+  bool kebabLoadProxy(const uint8_t *image,unsigned size,unsigned current) {
+-  if(_nvramController||_generation||_varDict->getCount()||size!=8192||current>=2||!getNVRAMProperties()||_bankSize!=size||_bankCount!=2||_currentBank!=current)return false;
+-  if(unserializeImage(image,size)!=kIOReturnSuccess)return false;
++  bool properties=getNVRAMProperties();
++  IOLog("KEBAB NVRAM: adopt guard controller=%u generation=%u vars=%u size=%u current=%u properties=%u native-size=%u count=%u bank=%u\n",_nvramController!=nullptr,_generation,_varDict->getCount(),size,current,properties,_bankSize,_bankCount,_currentBank);
++  if(_nvramController||_generation||_varDict->getCount()||size!=8192||current>=2||!properties||_bankSize!=size||_bankCount!=2||_currentBank!=current)return false;
++  IOReturn decoded=unserializeImage(image,size);IOLog("KEBAB NVRAM: adopt decode=0x%x\n",decoded);
++  if(decoded!=kIOReturnSuccess)return false;
+   _commonUsed=0;_systemUsed=0;_newData=false;_reload=false;
+   return unserializeVariables()==kIOReturnSuccess;
+  }

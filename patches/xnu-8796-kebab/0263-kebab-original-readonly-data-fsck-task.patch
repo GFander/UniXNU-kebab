@@ -1,0 +1,174 @@
+--- a/bsd/dev/kebab_cryptex_media.c
++++ b/bsd/dev/kebab_cryptex_media.c
+@@ -357,6 +357,17 @@
+ }
+ 
+ int
++kebab_cryptex_fsck_verify(void)
++{
++ static const uint8_t expected[32]={0x69,0xd9,0x46,0x17,0xb4,0x85,0xa3,0x89,0xee,0x4f,0xcc,0x5f,0x3a,0x24,0xcb,0xfd,
++  0x99,0x14,0xee,0xaa,0x1a,0x4a,0xbe,0x24,0x38,0x37,0xcc,0xfa,0xf2,0xa4,0xf5,0x04};
++ int error=kebab_cryptex_mount_recheck();
++ if(!error)error=kcm_verify_boot_file("/System/Library/Filesystems/apfs.fs/fsck_apfs",458864,expected);
++ printf("KEBAB DATA FSCK: original signed fsck SHA/size/RO identity %s (%d)\n",error?"FAIL":"PASS",error);
++ return error;
++}
++
++int
+ kebab_cryptex_boot_files_verify(void)
+ {
+  static const uint8_t launchd[32] = {0x12,0x37,0x0e,0x5e,0xe3,0x5b,0xf2,0x8a,0xe4,0x79,0xb6,0xc4,0xb4,0x45,0x5f,0x4f,0x46,0x93,0xab,0x80,0x3e,0x37,0xc5,0xeb,0x30,0x32,0x53,0x7c,0x18,0xca,0xc6,0x1c};
+--- a/bsd/dev/kebab_cryptex_media.h
++++ b/bsd/dev/kebab_cryptex_media.h
+@@ -11,6 +11,7 @@
+ int kebab_cryptex_mount_recheck(void);
+ int kebab_cryptex_boot_files_verify(void);
+ int kebab_cryptex_tool_verify(void);
++int kebab_cryptex_fsck_verify(void);
+ /* Requires complete original OS Merkle verification, not two boot files. */
+ int kebab_cryptex_os_recheck(void);
+ /* Explicit development-fast policy is separate from complete-content proof. */
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -289,6 +289,8 @@
+ {
+  if(!kdf_live||kdf_policy())return;
+  int error=kebab_ufs_sync();kdf_live=false;kebab_file_keys_cancel();
+- printf("KEBAB DATA FORMAT: signed formatter exit=%d UFS sync=%d; live Root/class context revoked; encrypted mount not yet qualified\n",status,error);
++ unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
++ if(tool==7)printf("KEBAB DATA FSCK: original signed checker exit=%d UFS sync=%d; live Root/class context revoked\n",status,error);
++ else printf("KEBAB DATA FORMAT: signed formatter exit=%d UFS sync=%d; live Root/class context revoked; encrypted mount not yet qualified\n",status,error);
+ }
+ #endif
+--- a/bsd/kern/kebab_apfs_tool_impl.h
++++ b/bsd/kern/kebab_apfs_tool_impl.h
+@@ -5,6 +5,8 @@
+ #include "kebab_data_setup_policy.h"
+ #include "kebab_data_target_impl.h"
+ #define KAT_PATH "/System/Library/Filesystems/apfs.fs/newfs_apfs"
++#define KAT_FSCK_PATH "/System/Library/Filesystems/apfs.fs/fsck_apfs"
++extern int kebab_cryptex_fsck_verify(void);
+ extern int kebab_cryptex_tool_verify(void);
+ 
+ static int
+@@ -12,7 +14,7 @@
+ {
+ #if DEVELOPMENT || DEBUG
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+- if(tool==2||tool==3||tool==4||tool==6)return kdf_policy();
++ if(tool==2||tool==3||tool==4||tool==6||tool==7)return kdf_policy();
+  static const char *const names[]={"kebab_apfs_tool","ufsrw","rootrw","ufsmedia_root",
+   "kebab_apfs_probe","kebab_owner_fast","kebab_owner_startup","kebab_owner_dsc",
+   "kebab_owner_os","kebab_dsc","kebab_dsc_map","kebab_cryptex_media","kebab_boot_firmware",
+@@ -33,8 +35,8 @@
+ {
+  if(!p || proc_getpid(p)!=1 || !scratch)return EINVAL;
+  int error=kat_policy();if(error)return error;
+- error=kebab_cryptex_tool_verify();if(error)return error;
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
++ error=tool==7?kebab_cryptex_fsck_verify():kebab_cryptex_tool_verify();if(error)return error;
+  if(tool==2){
+   if(!kebab_file_keys_available()||!kebab_device_classbag_available())return EAUTH;
+   error=kdf_target_check();if(error)return error;
+@@ -71,3 +73,18 @@
+  }
+  return *cursor>base+4096-12*sizeof(user64_addr_t)?E2BIG:0;
+ }
++
++static int
++kat_fsck_arguments(user_addr_t base,user_addr_t *cursor,user64_addr_t argv[12])
++{
++ unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
++ if(tool!=7||kdf_policy())return EPERM;
++ static const char *const arguments[]={"-n","-l","/dev/disk1s2"};
++ if(!cursor||*cursor<base||base>UINT64_MAX-4096)return EINVAL;
++ for(unsigned i=0;i<sizeof(arguments)/sizeof(*arguments);++i){
++  size_t bytes=strlen(arguments[i])+1;if(*cursor>base+4096-bytes)return E2BIG;
++  argv[i+1]=*cursor;int error=copyout(arguments[i],*cursor,bytes);if(error)return error;
++  *cursor=USER_ADDR_ALIGN(*cursor+bytes,sizeof(user_addr_t));
++ }
++ return *cursor>base+4096-12*sizeof(user64_addr_t)?E2BIG:0;
++}
+--- a/bsd/kern/kebab_data_mount_impl.h
++++ b/bsd/kern/kebab_data_mount_impl.h
+@@ -5,7 +5,7 @@
+ kebab_data_mount_probe(proc_t p,user_addr_t scratch)
+ {
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+- if((tool!=3&&tool!=4&&tool!=6)||kdf_policy()||!p||proc_getpid(p)!=1||!scratch||!kdf_live||
++ if((tool!=3&&tool!=4&&tool!=6&&tool!=7)||kdf_policy()||!p||proc_getpid(p)!=1||!scratch||!kdf_live||
+      !kebab_file_keys_available()||!kebab_device_classbag_available())return EPERM;
+  struct kebab_volume_identity system,data;
+  int error=kebab_lookup_apfs_live_data(&system,&data);if(error)return error;
+@@ -42,6 +42,6 @@
+  printf("KEBAB DATA MOUNT: mounted /private/var dev=%u/%u readonly=%u System-readonly=%u identity=%s\n",
+      major(actual),minor(actual),(vfs_flags(mounted)&MNT_RDONLY)!=0,(vfs_flags(original)&MNT_RDONLY)!=0,error?"FAIL":"PASS");
+  vnode_put(point);
+- if(!error&&(tool==4||tool==6))error=kdp_files(p,scratch,mounted,tool==4);
++ if(!error&&(tool==4||tool==6||tool==7))error=kdp_files(p,scratch,mounted,tool==4);
+  return error;
+ }
+--- a/bsd/kern/kebab_data_setup_policy.h
++++ b/bsd/kern/kebab_data_setup_policy.h
+@@ -7,7 +7,7 @@
+ {
+ #if DEVELOPMENT || DEBUG
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+- if(tool!=2&&tool!=3&&tool!=4&&tool!=6)return EPERM;
++ if(tool!=2&&tool!=3&&tool!=4&&tool!=6&&tool!=7)return EPERM;
+  static const char *const names[]={"kebab_apfs_tool","ufsrw","rootrw","ufsmedia_root","cpus",
+   "kebab_apfs_probe","kebab_data_root","kebab_file_keys_test","kebab_aks_fs","kebab_aks_fv","kebab_cpx_xts",
+   "kebab_owner_fast","kebab_owner_startup","kebab_owner_dsc","kebab_owner_os","kebab_dsc","kebab_dsc_map",
+@@ -16,7 +16,9 @@
+   "kebab_hardware_nonce","kebab_cpx_handles","kebab_aes_key_probe","kebab_cryptex_dirs"};
+  static const unsigned expected[]={2,1,0,2,8,17,2,9,1,1,1,1,1,1,1,1,1,1,2,1,1,1,1,0,0,0,0,0,0,0};
+  for(unsigned i=0;i<sizeof(expected)/sizeof(*expected);++i){
+-  unsigned value=0;PE_parse_boot_argn(names[i],&value,sizeof(value));unsigned wanted=expected[i];if(i==0)wanted=tool;if(i==1&&(tool==3||tool==6))wanted=0;
++  unsigned value=0;PE_parse_boot_argn(names[i],&value,sizeof(value));unsigned wanted=expected[i];if(i==0)wanted=tool;if(i==1&&(tool==3||tool==6||tool==7))wanted=0;
++  /* Final readonly fsck may explicitly request the existing full owner scan. */
++  if(i==11&&tool==7&&(value==0||value==1))wanted=value;
+   if(value!=wanted)return EPERM;
+  }
+  return 0;
+--- a/bsd/kern/kebab_device_classbag_file_impl.h
++++ b/bsd/kern/kebab_device_classbag_file_impl.h
+@@ -38,7 +38,7 @@
+  if(!error)error=kebab_device_classbag_open(kdb_container_uuid,kdb_system_uuid,w->readback,4096);
+  if(!error&&!kebab_device_classbag_available())error=EAUTH;
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+- if(!error&&tool!=2&&tool!=3&&tool!=4&&tool!=6){
++ if(!error&&tool!=2&&tool!=3&&tool!=4&&tool!=6&&tool!=7){
+   /* Failed authentication must revoke cached class material, then valid
+    * durable bytes must restore it. Never touch the stored record. */
+   w->readback[129]^=1;
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7058,6 +7058,10 @@
+          error=kat_format_arguments(argv0,&scratch_addr,argv64bit);if(error)return error;
+          argument_bytes=sizeof(argv64bit);
+         }
++        if(tool_mode==7 && strcmp(path,KAT_FSCK_PATH)==0){
++         error=kat_fsck_arguments(argv0,&scratch_addr,argv64bit);if(error)return error;
++         argument_bytes=sizeof(argv64bit);
++        }
+ #endif
+ 
+ 		error = copyout(argv64bit, scratch_addr, argument_bytes);
+@@ -7149,6 +7153,17 @@
+  if (kebab_apfs_probe_error) panic("kebab APFS probe failed: %d", kebab_apfs_probe_error);
+  int owner_dsc_prepare_error = kebab_dsc_after_mount();
+  if (owner_dsc_prepare_error) panic("kebab owner DSC prepare failed: %d", owner_dsc_prepare_error);
++ if(tool_mode==7){
++  extern int kebab_data_mount_probe(proc_t,user_addr_t);
++  int checked=kebab_data_mount_probe(p,(user_addr_t)scratch_addr);
++  if(checked)panic("KEBAB DATA FSCK: cold encrypted Data/file prerequisites failed %d",checked);
++  checked=kat_prepare(p,(user_addr_t)scratch_addr);
++  if(checked)panic("KEBAB DATA FSCK: signed tool/profile/console rejected %d",checked);
++  printf("KEBAB DATA FSCK: exec original signed fsck_apfs -n -l /dev/disk1s2; all storage RO, no repairs\n");
++  checked=load_init_program_at_path(p,(user_addr_t)scratch_addr,KAT_FSCK_PATH);
++  if(!checked)return;
++  panic("KEBAB DATA FSCK: original checker exec failed %d",checked);
++ }
+  if(tool_mode==3||tool_mode==4||tool_mode==6){
+   extern int kebab_data_mount_probe(proc_t,user_addr_t);
+   int mounted=kebab_data_mount_probe(p,(user_addr_t)scratch_addr);

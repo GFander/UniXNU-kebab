@@ -1,0 +1,12 @@
+{
+  "version": "0419",
+  "candidate_accepted": false,
+  "resource_discovery_qualified": false,
+  "reason": "Actual query after input routing fix returned EEXIST17; duplicate selected identifier has not been explained; no rail writes",
+  "diagnostic_next_version": "0420",
+  "diagnostic_patch": "0312-kebab-bluetooth-command-db-conflict-evidence.patch",
+  "actual_log_sha256": "1f1f9d58c17ba0a809b60fd83a32f953bb88f0b00b2f38feb786cab50717a174",
+  "original_normal_substrate_regression_passed": true,
+  "watchdog_last_observed": 270.708,
+  "bluetooth_functional": false
+}

@@ -1,0 +1,681 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -71,6 +71,7 @@
+ int kebab_console_muted;      /* read by the console path */
+ 
+ #if defined(KEBAB)
++#include "KebabUserClientContract.h"
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+@@ -164,8 +165,13 @@
+ 	IOWorkLoop         *fWorkLoop;
+ 	IOTimerEventSource *fVsync;
+ 	uint64_t            fVsyncCount;
++	bool                fVsyncAdded;
++	bool                fStopping;
+ 
+ 	static void vsyncFired(OSObject *owner, IOTimerEventSource *sender);
++	static IOReturn stopEventsAction(OSObject *owner, void *, void *, void *, void *);
++	void stopEvents();
++	void releaseResources();
+ 
+ public:
+ 	uint64_t      fPhys;
+@@ -194,8 +200,14 @@
+ 	uint32_t      fPowerSavings;
+ 	uint32_t      fLayerSurface[KEBAB_FB_LAYERS]; /* displayed per layer */
+ 
++	bool init(OSDictionary *properties = NULL) APPLE_KEXT_OVERRIDE;
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+-	void addClient(IOMobileFramebufferUserClient *client);
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free() APPLE_KEXT_OVERRIDE;
++	bool available();
++	/* Used only while fLock is already held (not a recursive lock). */
++	bool availableLocked() const { return !fStopping; }
++	bool addClient(IOMobileFramebufferUserClient *client);
+ 	void removeClient(IOMobileFramebufferUserClient *client);
+ 	void swap(const uint8_t *rec);
+ 	void present(const uint8_t *rec, uint32_t swapID);
+@@ -213,9 +225,14 @@
+ 	mach_port_t         fPort;
+ 	io_user_reference_t fFunc[KEBAB_FB_NOTIFY_TYPES];
+ 	io_user_reference_t fRefcon[KEBAB_FB_NOTIFY_TYPES];
++	IOLock             *fCallLock;
++	bool                fClosed;
++	void closeConnection();
+ 
+ 	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free() APPLE_KEXT_OVERRIDE;
+ 	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
+ 	IOReturn registerNotificationPort(mach_port_t port, UInt32 type,
+ 	    io_user_reference_t refCon) APPLE_KEXT_OVERRIDE;
+@@ -226,6 +243,99 @@
+ };
+ 
+ OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
++
++bool
++AppleCLCD::init(OSDictionary *properties)
++{
++	if (!IOMobileFramebuffer::init(properties)) {
++		return false;
++	}
++	fWorkLoop = NULL;
++	fVsync = NULL;
++	fVsyncAdded = false;
++	fStopping = true;
++	fMap = NULL;
++	fSurface = NULL;
++	fLock = NULL;
++	fClients = NULL;
++	fPixels = 0;
++	fConsolePaused = false;
++	return true;
++}
++
++/* The work-loop gate excludes a timer already in flight. No provider/client
++ * lock is held while waiting for it, and waiters keep their state until free. */
++void
++AppleCLCD::stopEvents()
++{
++	if (fWorkLoop != NULL) {
++		fWorkLoop->runAction(&AppleCLCD::stopEventsAction, this);
++	} else {
++		stopEventsAction(this, NULL, NULL, NULL, NULL);
++	}
++}
++
++IOReturn
++AppleCLCD::stopEventsAction(OSObject *owner, void *, void *, void *, void *)
++{
++	AppleCLCD *fb = static_cast<AppleCLCD *>(owner);
++	if (fb->fLock != NULL) {
++		IOLockLock(fb->fLock);
++	}
++	fb->fStopping = true;
++	fb->fPendingValid = false;
++	if (fb->fLock != NULL) {
++		IOLockWakeup(fb->fLock, &fb->fCompletedID, false);
++		IOLockUnlock(fb->fLock);
++	}
++	if (fb->fVsync != NULL) {
++		fb->fVsync->cancelTimeout();
++		if (fb->fVsyncAdded) {
++			fb->fWorkLoop->removeEventSource(fb->fVsync);
++			fb->fVsyncAdded = false;
++		}
++	}
++	return kIOReturnSuccess;
++}
++
++void
++AppleCLCD::releaseResources()
++{
++	stopEvents();
++	OSSafeReleaseNULL(fVsync);
++	OSSafeReleaseNULL(fWorkLoop);
++	OSArray *clients = fClients;
++	fClients = NULL;
++	OSSafeReleaseNULL(clients);
++	OSSafeReleaseNULL(fMap);
++	if (fSurface != NULL) {
++		kebab_surface_release_physical(fSurface);
++		fSurface = NULL;
++	}
++	fPixels = 0;
++	if (fLock != NULL) {
++		if (fConsolePaused) {
++			kebab_console_muted = 0;
++			fConsolePaused = false;
++		}
++		IOLockFree(fLock);
++		fLock = NULL;
++	}
++}
++
++void
++AppleCLCD::stop(IOService *provider)
++{
++	stopEvents();
++	IOMobileFramebuffer::stop(provider);
++}
++
++void
++AppleCLCD::free()
++{
++	releaseResources();
++	IOMobileFramebuffer::free();
++}
+ 
+ bool
+ AppleCLCD::start(IOService *provider)
+@@ -261,7 +371,7 @@
+ 	fRowBytes = (uint32_t)video.v_rowBytes;
+ 	if (fPhys == 0 || fWidth == 0 || fHeight == 0 || fRowBytes < fWidth * 4) {
+ 		IOLog("KEBAB FB: no boot framebuffer\n");
+-		return false;
++		goto fail;
+ 	}
+ 	/*
+ 	 * Present the iPhone X display the identity describes, not the panel:
+@@ -285,15 +395,15 @@
+ 	fWorkLoop = IOWorkLoop::workLoop();
+ 	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
+ 		IOLog("KEBAB FB: setup failed\n");
+-		OSSafeReleaseNULL(fSurface);    /* stays published: also held by the table */
+-		OSSafeReleaseNULL(fWorkLoop);
+-		return false;
++		goto fail;
+ 	}
+ 	fVsync = IOTimerEventSource::timerEventSource(this, &AppleCLCD::vsyncFired);
+ 	if (fVsync == NULL || fWorkLoop->addEventSource(fVsync) != kIOReturnSuccess) {
+ 		IOLog("KEBAB FB: no vsync timer\n");
+-		return false;
+-	}
++		goto fail;
++	}
++	fVsyncAdded = true;
++	fStopping = false;
+ 	fVsync->setTimeoutUS(KEBAB_FB_VSYNC_US);
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+@@ -304,6 +414,11 @@
+ 	    "presented as %ux%u (panel origin %d,%d)\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH, fOffX, fOffY);
+ 	return true;
++
++fail:
++	releaseResources();
++	IOMobileFramebuffer::stop(provider);
++	return false;
+ }
+ 
+ void
+@@ -322,6 +437,10 @@
+ 
+ 	fb->fVsyncCount++;
+ 	IOLockLock(fb->fLock);
++	if (fb->fStopping) {
++		IOLockUnlock(fb->fLock);
++		return;
++	}
+ 	for (unsigned int i = 0; i < fb->fClients->getCount(); i++) {
+ 		IOMobileFramebufferUserClient *client =
+ 		    (IOMobileFramebufferUserClient *)fb->fClients->getObject(i);
+@@ -355,21 +474,36 @@
+ 	sender->setTimeoutUS(KEBAB_FB_VSYNC_US);
+ }
+ 
+-void
++bool
++AppleCLCD::available()
++{
++	if (fLock == NULL) {
++		return false;
++	}
++	IOLockLock(fLock);
++	bool running = !fStopping;
++	IOLockUnlock(fLock);
++	return running;
++}
++
++bool
+ AppleCLCD::addClient(IOMobileFramebufferUserClient *client)
+ {
+ 	IOLockLock(fLock);
+-	fClients->setObject(client);
++	bool added = !fStopping && fClients->setObject(client);
+ 	IOLockUnlock(fLock);
++	return added;
+ }
+ 
+ void
+ AppleCLCD::removeClient(IOMobileFramebufferUserClient *client)
+ {
+ 	IOLockLock(fLock);
+-	unsigned int i = fClients->getNextIndexOfObject(client, 0);
+-	if (i != (unsigned int)-1) {
+-		fClients->removeObject(i);
++	if (fClients != NULL) {
++		unsigned int i = fClients->getNextIndexOfObject(client, 0);
++		if (i != (unsigned int)-1) {
++			fClients->removeObject(i);
++		}
+ 	}
+ 	IOLockUnlock(fLock);
+ }
+@@ -519,7 +653,13 @@
+ 		return false;
+ 	}
+ 	fTask = owningTask;
+-	return true;
++	fFB = NULL;
++	fPort = MACH_PORT_NULL;
++	fClosed = false;
++	bzero(fFunc, sizeof(fFunc));
++	bzero(fRefcon, sizeof(fRefcon));
++	fCallLock = IOLockAlloc();
++	return fCallLock != NULL;
+ }
+ 
+ bool
+@@ -529,23 +669,61 @@
+ 	if (fFB == NULL || !IOUserClient::start(provider)) {
+ 		return false;
+ 	}
+-	fFB->addClient(this);
++	if (!fFB->addClient(this)) {
++		IOUserClient::stop(provider);
++		fFB = NULL;
++		return false;
++	}
+ 	return true;
+ }
+ 
+-IOReturn
+-IOMobileFramebufferUserClient::clientClose(void)
+-{
++void
++IOMobileFramebufferUserClient::closeConnection()
++{
++	if (fCallLock == NULL) {
++		return;
++	}
++	KebabUserClientCall call(fCallLock);
++	if (fClosed) {
++		return;
++	}
++	fClosed = true;
+ 	if (fFB != NULL) {
+ 		fFB->removeClient(this);
+ 		IOLockLock(fFB->fLock);
+ 		mach_port_t old = fPort;
+ 		fPort = MACH_PORT_NULL;
++		bzero(fFunc, sizeof(fFunc));
++		bzero(fRefcon, sizeof(fRefcon));
+ 		IOLockUnlock(fFB->fLock);
+ 		if (old != MACH_PORT_NULL) {
+ 			releaseNotificationPort(old);
+ 		}
+ 	}
++}
++
++void
++IOMobileFramebufferUserClient::stop(IOService *provider)
++{
++	closeConnection();
++	IOUserClient::stop(provider);
++}
++
++void
++IOMobileFramebufferUserClient::free()
++{
++	closeConnection();
++	if (fCallLock != NULL) {
++		IOLockFree(fCallLock);
++		fCallLock = NULL;
++	}
++	IOUserClient::free();
++}
++
++IOReturn
++IOMobileFramebufferUserClient::clientClose(void)
++{
++	closeConnection();
+ 	terminate();
+ 	return kIOReturnSuccess;
+ }
+@@ -554,6 +732,10 @@
+ IOMobileFramebufferUserClient::registerNotificationPort(mach_port_t port, __unused UInt32 type,
+     __unused io_user_reference_t refCon)
+ {
++	KebabUserClientCall call(fCallLock);
++	if (fClosed || fFB == NULL || !fFB->available() || isInactive()) {
++		return kIOReturnNoDevice;
++	}
+ 	mach_port_t old;
+ 	IOLockLock(fFB->fLock);
+ 	old = fPort;
+@@ -650,6 +832,29 @@
+     __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target,
+     __unused void *reference)
+ {
++	static const KebabUserClientMethod methods[] = {
++		{ kKebabFBGetLayerDefaultSurface, 0, 1 }, { kKebabFBSwapBegin, 0, 1 },
++		{ kKebabFBSwapEnd, 0, 0 }, { kKebabFBSwapWait, 0, 0 },
++		{ kKebabFBGetID, 0, 1 }, { kKebabFBGetDisplaySize, 0, 2 },
++		{ kKebabFBRequestPowerChange, 1, 0 }, { kKebabFBSetDebugFlags, 1, 1 },
++		{ kKebabFBSetGammaTable, 0, 0 }, { kKebabFBIsMainDisplay, 0, 1 },
++		{ kKebabFBSetDisplayDevice, 1, 0 }, { kKebabFBGetGammaTable, 0, 0 },
++		{ kKebabFBGetDotPitch, 0, 1 }, { kKebabFBGetDisplayArea, 0, 0 },
++		{ kKebabFBVideoPowerSavings, 1, 0 }, { kKebabFBSetBrightnessCorrection, 0, 0 },
++		{ kKebabFBSetMatrix, 0, 0 }, { kKebabFBGetColorRemapMode, 0, 1 },
++		{ kKebabFBSetParameter, 0, 0 }, { kKebabFBNotifications, 3, 0 },
++		{ kKebabFBSupportedFrameInfo, 0, 0 }, { kKebabFBGetBlock, 0, 0 },
++		{ kKebabFBCopyDisplayedSurface, 0, 1 }, { kKebabFBSetContrast, 0, 0 },
++	};
++	KebabUserClientCall call(fCallLock);
++	if (fClosed || fFB == NULL || !fFB->available() || isInactive()) {
++		return kIOReturnNoDevice;
++	}
++	IOReturn validation = kebab_user_client_validate(selector, args, methods,
++	    sizeof(methods) / sizeof(methods[0]));
++	if (validation != kIOReturnSuccess) {
++		return validation;
++	}
+ 	IOReturn ret = kIOReturnSuccess;
+ 	uint64_t out[2] = { 0, 0 };
+ 	uint32_t outCount = 0;
+@@ -706,7 +911,7 @@
+ 		if (timeout > 0) {
+ 			uint64_t deadline = 0;
+ 			clock_interval_to_deadline(timeout, kMillisecondScale, &deadline);
+-			while (swapID > fFB->fCompletedID) {
++			while (swapID > fFB->fCompletedID && fFB->availableLocked()) {
+ 				int result = IOLockSleepDeadline(fFB->fLock, &fFB->fCompletedID,
+ 				    deadline, THREAD_ABORTSAFE);
+ 				if (result == THREAD_TIMED_OUT || result == THREAD_INTERRUPTED) {
+@@ -716,7 +921,8 @@
+ 		}
+ 		/* Three outcomes: completed (success), timed out, or the swap was
+ 		 * never queued (not found, above). */
+-		ret = swapID <= fFB->fCompletedID ? kIOReturnSuccess : kIOReturnTimeout;
++		ret = !fFB->availableLocked() ? kIOReturnNoDevice :
++		    swapID <= fFB->fCompletedID ? kIOReturnSuccess : kIOReturnTimeout;
+ 		IOLockUnlock(fFB->fLock);
+ 		break;
+ 	}
+--- a/iokit/Kernel/arm/KebabSurface.cpp
++++ b/iokit/Kernel/arm/KebabSurface.cpp
+@@ -38,6 +38,7 @@
+ #include "KebabSurface.h"
+ 
+ #if defined(KEBAB)
++#include "KebabUserClientContract.h"
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+@@ -208,21 +209,27 @@
+ }
+ 
+ /* The table lock; the framebuffer may publish a surface before the root starts. */
+-static void
++static bool
+ kebab_surface_init_lock(void)
+ {
+ 	if (kebab_surface_lock == NULL) {
+ 		IOLock *lock = IOLockAlloc();
++		if (lock == NULL) {
++			return false;
++		}
+ 		if (!OSCompareAndSwapPtr(NULL, lock, &kebab_surface_lock)) {
+ 			IOLockFree(lock);
+ 		}
+ 	}
++	return true;
+ }
+ 
+ static KebabSurface *
+ kebab_surface_alloc(void)
+ {
+-	kebab_surface_init_lock();
++	if (!kebab_surface_init_lock()) {
++		return NULL;
++	}
+ 	KebabSurface *s = OSTypeAlloc(KebabSurface);
+ 	if (s == NULL || !s->init()) {
+ 		OSSafeReleaseNULL(s);
+@@ -281,6 +288,15 @@
+ 	mach_port_name_t name = 0;
+ 	IOUserClient::copyPortNameForObjectInTask(task, s, &name);
+ 	return name;
++}
++
++void
++kebab_surface_release_physical(KebabSurface *surface)
++{
++	if (surface != NULL) {
++		kebab_surface_put(surface);
++		surface->release();
++	}
+ }
+ 
+ static uint32_t
+@@ -419,7 +435,10 @@
+ 	if (!IOService::start(provider)) {
+ 		return false;
+ 	}
+-	kebab_surface_init_lock();
++	if (!kebab_surface_init_lock()) {
++		return false;
++	}
++	setName("IOCoreSurfaceRoot");
+ 	setProperty(kIOUserClientClassKey, "IOSurfaceRootUserClient");
+ 	registerService();
+ 	IOLog("KEBAB SURF: IOCoreSurfaceRoot registered\n");
+@@ -431,7 +450,10 @@
+ 
+ 	task_t   fTask;
+ 	IOLock  *fLock;
++	IOLock  *fCallLock;
+ 	OSArray *fRefs;
++	bool     fClosed;
++	void closeConnection();
+ 
+ 	KebabSurfaceRef *findRef(uint32_t id, unsigned int *index);
+ 	IOReturn addRef(KebabSurface *s, KebabSurfaceRef **refOut, bool *existing);
+@@ -477,28 +499,48 @@
+ 		return false;
+ 	}
+ 	fTask = owningTask;
++	fClosed = false;
++	fCallLock = IOLockAlloc();
+ 	fLock = IOLockAlloc();
+ 	fRefs = OSArray::withCapacity(16);
+-	return fLock != NULL && fRefs != NULL;
++	return fCallLock != NULL && fLock != NULL && fRefs != NULL;
+ }
+ 
+ void
+ IOSurfaceRootUserClient::free()
+ {
++	closeConnection();
+ 	OSSafeReleaseNULL(fRefs);
+ 	if (fLock != NULL) {
+ 		IOLockFree(fLock);
+ 		fLock = NULL;
+ 	}
++	if (fCallLock != NULL) {
++		IOLockFree(fCallLock);
++		fCallLock = NULL;
++	}
+ 	IOUserClient::free();
++}
++
++void
++IOSurfaceRootUserClient::closeConnection()
++{
++	if (fCallLock == NULL) {
++		return;
++	}
++	KebabUserClientCall call(fCallLock);
++	if (!fClosed) {
++		fClosed = true;
++		if (fRefs != NULL) {
++			fRefs->flushCollection();
++		}
++	}
+ }
+ 
+ IOReturn
+ IOSurfaceRootUserClient::clientClose(void)
+ {
+-	IOLockLock(fLock);
+-	fRefs->flushCollection();
+-	IOLockUnlock(fLock);
++	closeConnection();
+ 	terminate();
+ 	return kIOReturnSuccess;
+ }
+@@ -1024,6 +1066,26 @@
+     __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target,
+     __unused void *reference)
+ {
++	static const KebabUserClientMethod methods[] = {
++		{ kKebabSurfaceCreate, 0, 0 },
++		{ kKebabSurfaceLookup, 1, 0 },
++		{ kKebabSurfaceSetValue, 0, 0 },
++		{ kKebabSurfaceUpdateValueCache, 0, 0 },
++		{ kKebabSurfaceRemoveValue, 0, 0 },
++		{ kKebabSurfaceLimits, 0, 0 },
++		{ kKebabSurfaceSetBulkAttachments, 0, 0 },
++		{ kKebabSurfaceLookupFromPort, 1, 0 },
++		{ kKebabSurfaceCreatePort, 1, 1 },
++	};
++	KebabUserClientCall call(fCallLock);
++	if (fClosed || isInactive()) {
++		return kIOReturnNoDevice;
++	}
++	IOReturn validation = kebab_user_client_validate(selector, args, methods,
++	    sizeof(methods) / sizeof(methods[0]));
++	if (validation != kIOReturnSuccess) {
++		return validation;
++	}
+ 	uint64_t arg0 = args->scalarInputCount > 0 ? args->scalarInput[0] : 0;
+ 
+ 	switch (selector) {
+@@ -1274,6 +1336,10 @@
+ IOSurfaceRootUserClient::trapUseCount(__unused void *id, __unused void *category,
+     void *, void *, void *, void *)
+ {
++	KebabUserClientCall call(fCallLock);
++	if (fClosed || isInactive()) {
++		return kIOReturnNoDevice;
++	}
+ 	return kIOReturnSuccess;
+ }
+ 
+@@ -1310,6 +1376,10 @@
+ IOSurfaceRootUserClient::trapLock(void *id, __unused void *options, void *seedOut,
+     void *, void *, void *)
+ {
++	KebabUserClientCall call(fCallLock);
++	if (fClosed || isInactive()) {
++		return kIOReturnNoDevice;
++	}
+ 	KebabSurface *s = kebab_surface_held(fLock, fRefs, (uint32_t)(uintptr_t)id);
+ 	if (s == NULL) {
+ 		return kIOReturnNotFound;
+@@ -1323,6 +1393,10 @@
+ IOSurfaceRootUserClient::trapUnlock(void *id, void *options, void *seedOut,
+     void *, void *, void *)
+ {
++	KebabUserClientCall call(fCallLock);
++	if (fClosed || isInactive()) {
++		return kIOReturnNoDevice;
++	}
+ 	KebabSurface *s = kebab_surface_held(fLock, fRefs, (uint32_t)(uintptr_t)id);
+ 	if (s == NULL) {
+ 		return kIOReturnNotFound;
+@@ -1336,6 +1410,10 @@
+ IOReturn
+ IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, void *)
+ {
++	KebabUserClientCall call(fCallLock);
++	if (fClosed || isInactive()) {
++		return kIOReturnNoDevice;
++	}
+ 	unsigned int index;
+ 	IOLockLock(fLock);
+ 	KebabSurfaceRef *ref = findRef((uint32_t)(uintptr_t)id, &index);
+--- a/iokit/Kernel/arm/KebabSurface.h
++++ b/iokit/Kernel/arm/KebabSurface.h
+@@ -69,6 +69,9 @@
+ KebabSurface *kebab_surface_create_physical(uint64_t phys, uint32_t width,
+     uint32_t height, uint32_t bytesPerRow, uint32_t pixelFormat);
+ 
++/* Balance the creator's table user and retained object, after device quiescence. */
++void kebab_surface_release_physical(KebabSurface *surface);
++
+ /* Send right for the surface in task (IOSurfaceLookupFromMachPort). */
+ mach_port_name_t kebab_surface_port_in_task(KebabSurface *surface, task_t task);
+ 
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabUserClientContract.h
+@@ -0,0 +1,57 @@
++/* Shared validation and call serialization for the built-in iOS16 clients. */
++#ifndef _KEBAB_USER_CLIENT_CONTRACT_H
++#define _KEBAB_USER_CLIENT_CONTRACT_H
++
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/IOLocks.h>
++
++struct KebabUserClientMethod {
++	uint32_t selector;
++	uint32_t minimumInput;
++	uint32_t minimumOutput;
++};
++
++/* Keep accepted trailing scalars and variable-size structure replies. The
++ * per-selector handlers retain their existing wire-layout/size checks. */
++static inline IOReturn
++kebab_user_client_validate(uint32_t selector, IOExternalMethodArguments *args,
++    const KebabUserClientMethod *methods, size_t count)
++{
++	if (args == NULL ||
++	    args->scalarInputCount > kIOExternalMethodScalarInputCountMax ||
++	    args->scalarOutputCount > kIOExternalMethodScalarOutputCountMax ||
++	    (args->scalarInputCount != 0 && args->scalarInput == NULL) ||
++	    (args->scalarOutputCount != 0 && args->scalarOutput == NULL) ||
++	    (args->structureInputDescriptor == NULL &&
++	    args->structureInputSize != 0 && args->structureInput == NULL) ||
++	    (args->structureOutputDescriptor == NULL &&
++	    args->structureOutputSize != 0 && args->structureOutput == NULL) ||
++	    (args->structureInputDescriptor != NULL &&
++	    args->structureInputDescriptor->getLength() > UINT32_MAX) ||
++	    (args->structureOutputDescriptor != NULL &&
++	    args->structureOutputDescriptor->getLength() > UINT32_MAX)) {
++		return kIOReturnBadArgument;
++	}
++	for (size_t i = 0; i < count; i++) {
++		if (methods[i].selector == selector) {
++			return args->scalarInputCount >= methods[i].minimumInput &&
++			       args->scalarOutputCount >= methods[i].minimumOutput ?
++			       kIOReturnSuccess : kIOReturnBadArgument;
++		}
++	}
++	return kIOReturnUnsupported;
++}
++
++/* Client methods and close share this gate, independently of provider locks.
++ * In particular, a close cannot destroy a Surface mapping while it is returned. */
++class KebabUserClientCall {
++	IOLock *fLock;
++public:
++	explicit KebabUserClientCall(IOLock *lock) : fLock(lock) { IOLockLock(fLock); }
++	~KebabUserClientCall() { IOLockUnlock(fLock); }
++	KebabUserClientCall(const KebabUserClientCall &) = delete;
++	KebabUserClientCall &operator=(const KebabUserClientCall &) = delete;
++};
++
++#endif /* _KEBAB_USER_CLIENT_CONTRACT_H */
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -47,6 +47,12 @@
+     "     'IONameMatch'     = cpu;"
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
++    "   {"
++    "     'IOClass'         = IOCoreSurfaceRoot;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOResourceMatch' = IOBSD;"
++    "     'IOMatchCategory' = IOCoreSurfaceRoot;"
++    "   },"
+ #endif
+ #if defined(ARM64_BOARD_CONFIG_NEGRONI)
+     "   {"

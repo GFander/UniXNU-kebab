@@ -1,0 +1,161 @@
+{
+  "version": "0221",
+  "prelink_sha256": "89fde10d1749dc39353a74c43b06d52c20dc864338dff0d0c4d2df3a91cd0583",
+  "scope": "Offline donor constants only; selector offset 0x38 proven by original helper at 0xfffffe0008927424.",
+  "matches": [
+    {
+      "selector_address": "0xfffffe0009ee6c98",
+      "candidate_domain_address": "0xfffffe0009ee6c60",
+      "string_fields": {
+        "0xfffffe0009ee6c60": {
+          "pointer": "0xfffffe0008059893",
+          "ascii": "test"
+        },
+        "0xfffffe0009ee6c68": {
+          "pointer": "0xfffffe0008059898",
+          "ascii": "com.apple.private.img4.nonce.test"
+        }
+      }
+    },
+    {
+      "selector_address": "0xfffffe0009ee6cd8",
+      "candidate_domain_address": "0xfffffe0009ee6ca0",
+      "string_fields": {
+        "0xfffffe0009ee6ca0": {
+          "pointer": "0xfffffe00080598ba",
+          "ascii": "trust cache"
+        },
+        "0xfffffe0009ee6ca8": {
+          "pointer": "0xfffffe00080598c6",
+          "ascii": "com.apple.private.img4.nonce.trust-cache"
+        }
+      }
+    },
+    {
+      "selector_address": "0xfffffe0009ee6d18",
+      "candidate_domain_address": "0xfffffe0009ee6ce0",
+      "string_fields": {
+        "0xfffffe0009ee6ce0": {
+          "pointer": "0xfffffe00080598ef",
+          "ascii": "personalized disk image"
+        },
+        "0xfffffe0009ee6ce8": {
+          "pointer": "0xfffffe0008059907",
+          "ascii": "com.apple.private.img4.nonce.pdi"
+        }
+      }
+    },
+    {
+      "selector_address": "0xfffffe0009ee6d58",
+      "candidate_domain_address": "0xfffffe0009ee6d20",
+      "string_fields": {
+        "0xfffffe0009ee6d20": {
+          "pointer": "0xfffffe0008059928",
+          "ascii": "cryptex"
+        },
+        "0xfffffe0009ee6d28": {
+          "pointer": "0xfffffe0008059930",
+          "ascii": "com.apple.private.img4.nonce.cryptex"
+        }
+      }
+    },
+    {
+      "selector_address": "0xfffffe0009ee6d98",
+      "candidate_domain_address": "0xfffffe0009ee6d60",
+      "string_fields": {
+        "0xfffffe0009ee6d60": {
+          "pointer": "0xfffffe0008059955",
+          "ascii": "developer disk image"
+        },
+        "0xfffffe0009ee6d68": {
+          "pointer": "0xfffffe000805996a",
+          "ascii": "com.apple.private.img4.nonce.ddi"
+        }
+      }
+    },
+    {
+      "selector_address": "0xfffffe0009ee6dd8",
+      "candidate_domain_address": "0xfffffe0009ee6da0",
+      "string_fields": {
+        "0xfffffe0009ee6da0": {
+          "pointer": "0xfffffe000805998b",
+          "ascii": "ephemeral cryptex"
+        },
+        "0xfffffe0009ee6da8": {
+          "pointer": "0xfffffe000805999d",
+          "ascii": "com.apple.private.img4.nonce.ephemeral-cryptex"
+        }
+      }
+    },
+    {
+      "selector_address": "0xfffffe0009ee6e18",
+      "candidate_domain_address": "0xfffffe0009ee6de0",
+      "string_fields": {
+        "0xfffffe0009ee6de0": {
+          "pointer": "0xfffffe00080599cc",
+          "ascii": "cryptex1 coprocessor snuf stub"
+        },
+        "0xfffffe0009ee6de8": {
+          "pointer": "0xfffffe00080599eb",
+          "ascii": "com.apple.private.img4.nonce.cryptex1.snuf-stub"
+        }
+      }
+    },
+    {
+      "selector_address": "0xfffffe0009ee6e58",
+      "candidate_domain_address": "0xfffffe0009ee6e20",
+      "string_fields": {
+        "0xfffffe0009ee6e20": {
+          "pointer": "0xfffffe0008059a1b",
+          "ascii": "cryptex1 coprocessor boot"
+        },
+        "0xfffffe0009ee6e28": {
+          "pointer": "0xfffffe0008059a35",
+          "ascii": "com.apple.private.img4.nonce.cryptex1.boot"
+        }
+      }
+    },
+    {
+      "selector_address": "0xfffffe0009ee6e98",
+      "candidate_domain_address": "0xfffffe0009ee6e60",
+      "string_fields": {
+        "0xfffffe0009ee6e60": {
+          "pointer": "0xfffffe0008059a60",
+          "ascii": "cryptex1 coprocessor asset"
+        },
+        "0xfffffe0009ee6e68": {
+          "pointer": "0xfffffe0008059a7b",
+          "ascii": "com.apple.private.img4.nonce.cryptex1.asset"
+        }
+      }
+    },
+    {
+      "selector_address": "0xfffffe0009ee6ed8",
+      "candidate_domain_address": "0xfffffe0009ee6ea0",
+      "string_fields": {
+        "0xfffffe0009ee6ea0": {
+          "pointer": "0xfffffe0008059aa7",
+          "ascii": "cryptex1 coprocessor supplemental content"
+        },
+        "0xfffffe0009ee6ea8": {
+          "pointer": "0xfffffe0008059ad1",
+          "ascii": "com.apple.private.img4.nonce.cryptex1.supplemental"
+        }
+      }
+    },
+    {
+      "selector_address": "0xfffffe0009ee6f18",
+      "candidate_domain_address": "0xfffffe0009ee6ee0",
+      "string_fields": {
+        "0xfffffe0009ee6ee0": {
+          "pointer": "0xfffffe0008059b04",
+          "ascii": "cryptex1 coprocessor simulator"
+        },
+        "0xfffffe0009ee6ee8": {
+          "pointer": "0xfffffe0008059b23",
+          "ascii": "com.apple.private.img4.nonce.cryptex1.simulator"
+        }
+      }
+    }
+  ]
+}

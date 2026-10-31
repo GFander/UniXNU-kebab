@@ -1,0 +1,391 @@
+--- a/bsd/kern/kebab_data_root_policy.h
++++ b/bsd/kern/kebab_data_root_policy.h
+@@ -1,11 +1,14 @@
+ /* Explicit boot-thread prerequisite only; never a general key service. */
+ #ifndef KEBAB_DATA_ROOT_POLICY_H
+ #define KEBAB_DATA_ROOT_POLICY_H
++#include "kebab_data_setup_policy.h"
+ static int
+ kdr_policy(unsigned mode)
+ {
+ #if DEVELOPMENT || DEBUG
+  if (mode != 1 && mode != 2) return EINVAL;
++ unsigned data_setup=0;PE_parse_boot_argn("kebab_file_keys_test",&data_setup,sizeof(data_setup));
++ if(data_setup==9)return mode==2?kdf_policy():EPERM;
+  static const char *const disabled[] = { "rootrw", "kebab_owner_fast", "kebab_install",
+      "kebab_owner_startup", "kebab_owner_dsc", "kebab_owner_os", "kebab_dsc", "kebab_dsc_map",
+      "kebab_cryptex_media", "kebab_nonce_root", "kebab_hardware_nonce", "kebab_boot_firmware",
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -20,6 +20,8 @@
+ extern int kebab_ufs_sync(void);
+ extern int kebab_aks_fs_publish_test(void);
+ extern int kebab_aks_fv_publish_test(void);
++extern int kebab_aks_services_start(void);
++static bool kdf_live;
+ extern int kebab_aks_fs_quiesce_test(void);
+ extern int kebab_cryptex_prepare_directories(mount_t);
+ extern int kebab_boot_firmware_prepare(mount_t);
+@@ -163,14 +165,14 @@
+ {
+  uint32_t mode = 0, rw = 0;
+  if (!PE_parse_boot_argn("kebab_apfs_probe", &mode, sizeof(mode)) || !mode) return 0;
+- if (mode > 16 || !scratch) return EINVAL;
++ if (mode > 17 || !scratch) return EINVAL;
+  unsigned nonce_root=0;
+  PE_parse_boot_argn("kebab_nonce_root",&nonce_root,sizeof(nonce_root));
+  if ((mode==4 && nonce_root!=1) || (mode==5 && nonce_root!=2) || ((mode<4 || mode>=6) && nonce_root)) return EINVAL;
+  unsigned aks=0;PE_parse_boot_argn("kebab_aks_fs",&aks,sizeof(aks));
+- if(aks && (aks!=1 || (mode!=13 && mode!=16)))return EINVAL;
++ if(aks && (aks!=1 || (mode!=13 && mode!=16 && mode!=17)))return EINVAL;
+  unsigned fv=0;PE_parse_boot_argn("kebab_aks_fv",&fv,sizeof(fv));
+- if(fv && (fv!=1 || aks!=1 || (mode!=13 && mode!=16)))return EINVAL;
++ if(fv && (fv!=1 || aks!=1 || (mode!=13 && mode!=16 && mode!=17)))return EINVAL;
+  unsigned handles=0;PE_parse_boot_argn("kebab_cpx_handles",&handles,sizeof(handles));
+  if(handles && (handles!=1 || mode!=13))return EINVAL;
+  unsigned data_key_mode=0;
+@@ -179,7 +181,7 @@
+  if ((mode>=8) && kdr_policy(data_key_mode)) return EPERM;
+  bool write_file = (mode == 2 || mode == 4 || mode == 6 || mode == 7 || mode == 8 || mode == 10 || mode == 12 || mode == 15);
+  PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
+- if (rw != ((write_file || mode==14)?1u:0u)) return EINVAL;
++ if (rw != ((write_file || mode==14 || mode==17)?1u:0u)) return EINVAL;
+  mount_t original_root = vnode_mount(rootvnode);
+  if (!(vfs_flags(original_root) & MNT_RDONLY) || strcmp(vfs_statfs(original_root)->f_fstypename, "apfs")) return EINVAL;
+  struct kebab_volume_identity system, data;
+@@ -236,6 +238,12 @@
+   error = kdr_file(mounted, data_key_mode);
+   unsigned key_test=0;PE_parse_boot_argn("kebab_file_keys_test",&key_test,sizeof(key_test));
+   if(!error && key_test)error=kebab_file_keys_commit();
++  if(mode==17){
++   if(!error)error=kdb_file(mounted,false);
++   if(!error)error=kebab_aks_services_start();
++   kdf_live=!error;
++   if(error)kebab_file_keys_cancel();
++  }else{
+   if(!error && key_test)error=kebab_file_keys_selftest();
+   if(!error && key_test)error=kebab_metadata_keys_selftest();
+   if(!error && key_test)error=kebab_volume_keys_selftest();
+@@ -246,6 +254,7 @@
+   if(!error && (mode==10 || mode==11))error=kfp_record(mounted,mode==10);
+   if(!error && mode>=12 && mode<=14)error=kfp_record_impl(mounted,mode==12,true);
+   if(key_test){kebab_file_keys_cancel();if(kebab_device_classbag_available()&&!error)error=EAUTH;int quiesce=aks?kebab_aks_fs_quiesce_test():0;if(!error)error=quiesce;if(aks)printf("KEBAB FILE KEYS: private context erased; AKS provider quiescent\n");else printf("KEBAB FILE KEYS: private context erased; no AKS service published\n");}
++  }
+   int proof_error = kebab_apfs_proof_file(mounted, false);
+   if (!error) error = proof_error;
+  }
+@@ -268,6 +277,16 @@
+  if (!error && mode==13) panic("KEBAB CPX PROOF: cold driver read verified; Data encryption still pending");
+  if (!error && mode==11) panic("KEBAB FILE KEYS: cold encrypted proof verified; no Data mount/userland started");
+  if (!error && !write_file) error = kebab_cryptex_mount_prepare(p, scratch);
++ if(error&&mode==17){kdf_live=false;kebab_file_keys_cancel();}
+  return error;
+ }
++/* Called after init's normal filesystem sync, while original tool resources
++ * have finished. An exit0 is a formatter result, not encrypted-mount acceptance. */
++void
++kebab_data_setup_finish(int status)
++{
++ if(!kdf_live||kdf_policy())return;
++ int error=kebab_ufs_sync();kdf_live=false;kebab_file_keys_cancel();
++ printf("KEBAB DATA FORMAT: signed formatter exit=%d UFS sync=%d; live Root/class context revoked; encrypted mount not yet qualified\n",status,error);
++}
+ #endif
+--- a/bsd/kern/kebab_apfs_tool_impl.h
++++ b/bsd/kern/kebab_apfs_tool_impl.h
+@@ -1,5 +1,9 @@
+-/* Fixed original formatter HELP only. No caller-supplied path/device/options. */
++/* Fixed original formatter tasks: HELP, or authorized identity-bound Data setup. */
+ #include <sys/fcntl.h>
++#include "kebab_apfs_probe.h"
++#include "kebab_file_keys.h"
++#include "kebab_data_setup_policy.h"
++#include "kebab_data_target_impl.h"
+ #define KAT_PATH "/System/Library/Filesystems/apfs.fs/newfs_apfs"
+ extern int kebab_cryptex_tool_verify(void);
+ 
+@@ -7,6 +11,8 @@
+ kat_policy(void)
+ {
+ #if DEVELOPMENT || DEBUG
++ unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
++ if(tool==2)return kdf_policy();
+  static const char *const names[]={"kebab_apfs_tool","ufsrw","rootrw","ufsmedia_root",
+   "kebab_apfs_probe","kebab_owner_fast","kebab_owner_startup","kebab_owner_dsc",
+   "kebab_owner_os","kebab_dsc","kebab_dsc_map","kebab_cryptex_media","kebab_boot_firmware",
+@@ -28,6 +34,11 @@
+  if(!p || proc_getpid(p)!=1 || !scratch)return EINVAL;
+  int error=kat_policy();if(error)return error;
+  error=kebab_cryptex_tool_verify();if(error)return error;
++ unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
++ if(tool==2){
++  if(!kebab_file_keys_available()||!kebab_device_classbag_available())return EAUTH;
++  error=kdf_target_check();if(error)return error;
++ }
+  user_addr_t console=scratch+0x800;
+  if(console<scratch)return EINVAL;
+  error=copyout("/dev/console",console,13);if(error)return error;
+@@ -45,3 +56,18 @@
+ }
+ 
+ 
++
++static int
++kat_format_arguments(user_addr_t base,user_addr_t *cursor,user64_addr_t argv[12])
++{
++ int error=kdf_policy();if(error)return error;
++ static const char *const arguments[]={"-E","-W","-R","d","-e","-v","Data","-w",KDF_DEVICE};
++ if(!cursor||*cursor<base||base>UINT64_MAX-4096)return EINVAL;
++ for(unsigned i=0;i<sizeof(arguments)/sizeof(*arguments);++i){
++  size_t bytes=strlen(arguments[i])+1;
++  if(*cursor>base+4096-bytes)return E2BIG;
++  argv[i+1]=*cursor;error=copyout(arguments[i],*cursor,bytes);if(error)return error;
++  *cursor=USER_ADDR_ALIGN(*cursor+bytes,sizeof(user_addr_t));
++ }
++ return *cursor>base+4096-12*sizeof(user64_addr_t)?E2BIG:0;
++}
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7047,13 +7047,20 @@
+ 	}
+ 
+ 	if (proc_is64bit(p)) {
+-		user64_addr_t argv64bit[3] = {};
++		user64_addr_t argv64bit[12] = {};
++        size_t argument_bytes=3*sizeof(user64_addr_t);
+ 
+ 		argv64bit[0] = argv0;
+ 		argv64bit[1] = argv1;
+ 		argv64bit[2] = USER_ADDR_NULL;
+-
+-		error = copyout(argv64bit, scratch_addr, sizeof(argv64bit));
++#if defined(KEBAB)
++        if(tool_mode==2 && strcmp(path,KAT_PATH)==0){
++         error=kat_format_arguments(argv0,&scratch_addr,argv64bit);if(error)return error;
++         argument_bytes=sizeof(argv64bit);
++        }
++#endif
++
++		error = copyout(argv64bit, scratch_addr, argument_bytes);
+ 		if (error) {
+ 			return error;
+ 		}
+@@ -7143,10 +7150,11 @@
+  int owner_dsc_prepare_error = kebab_dsc_after_mount();
+  if (owner_dsc_prepare_error) panic("kebab owner DSC prepare failed: %d", owner_dsc_prepare_error);
+  if(tool_mode) {
+-  if(tool_mode!=1)panic("KEBAB APFS TOOL: unsupported tool mode %u",tool_mode);
++  if(tool_mode!=1&&tool_mode!=2)panic("KEBAB APFS TOOL: unsupported tool mode %u",tool_mode);
+   int tool_error=kat_prepare(p,(user_addr_t)scratch_addr);
+   if(tool_error)panic("KEBAB APFS TOOL: profile/hash/console rejected %d",tool_error);
+-  printf("KEBAB APFS TOOL: exec original newfs_apfs -h; all storage RO, no device argument\n");
++  if(tool_mode==1)printf("KEBAB APFS TOOL: exec original newfs_apfs -h; all storage RO, no device argument\n");
++  else printf("KEBAB DATA FORMAT: exec signed original newfs_apfs -E -W -R d -e -v Data -w /dev/disk1s2; fixed verified Data only\n");
+   tool_error=load_init_program_at_path(p,(user_addr_t)scratch_addr,KAT_PATH);
+   if(!tool_error)return;
+   panic("KEBAB APFS TOOL: original formatter exec failed %d",tool_error);
+--- a/bsd/dev/kebab_cryptex_media.c
++++ b/bsd/dev/kebab_cryptex_media.c
+@@ -51,6 +51,8 @@
+ }
+ 
+ /* User-selected debugging policy. Never inferred from a stale receipt or xid. */
++#include "../kern/kebab_data_setup_policy.h"
++
+ static int
+ kcm_owner_fast_mode(void)
+ {
+@@ -65,7 +67,7 @@
+  for (unsigned i = 0; i < sizeof(disabled) / sizeof(disabled[0]); ++i) {
+   uint32_t value = 0;
+   PE_parse_boot_argn(disabled[i], &value, sizeof(value));
+-  if (value) return -1;
++  if (value && (strcmp(disabled[i],"ufsrw")||kdf_policy())) return -1;
+  }
+  for (unsigned i = 0; i < sizeof(required) / sizeof(required[0]); ++i) {
+   uint32_t value = 0;
+@@ -86,7 +88,7 @@
+  uint32_t enabled = 0, rw = 0;
+  PE_parse_boot_argn("kebab_cryptex_media", &enabled, sizeof(enabled));
+  PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
+- if (enabled != 1 || rw || rootvnode == NULLVP) return EROFS;
++ if (enabled != 1 || (rw && kdf_policy()) || rootvnode == NULLVP) return EROFS;
+  struct kebab_volume_identity system, preboot;
+  int error = kebab_lookup_apfs_preboot(&system, &preboot);
+  if (error) return error;
+--- a/bsd/kern/kebab_apfs_probe.h
++++ b/bsd/kern/kebab_apfs_probe.h
+@@ -11,6 +11,8 @@
+ extern "C" {
+ #endif
+ int kebab_lookup_apfs_preboot(struct kebab_volume_identity *, struct kebab_volume_identity *);
++int kebab_lookup_apfs_data(struct kebab_volume_identity *, struct kebab_volume_identity *);
++void kebab_data_setup_finish(int);
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/iokit/Kernel/arm/KebabVolumeLookup.cpp
++++ b/iokit/Kernel/arm/KebabVolumeLookup.cpp
+@@ -85,4 +85,14 @@
+      (system->major_number == data->major_number && system->minor_number == data->minor_number))) error = EINVAL;
+  return error;
+ }
++extern "C" int
++kebab_lookup_apfs_data(struct kebab_volume_identity *system,struct kebab_volume_identity *data)
++{
++ if(!system||!data)return EINVAL;
++ int error=kebab_lookup_uuid("DADD93F8-DBBF-4B17-A1DF-0F11E64172F7",system);
++ if(!error)error=kebab_lookup_uuid("4C56203C-CFE8-4DFF-BF8E-BB48D852C936",data);
++ if(!error&&(system->backing_id!=data->backing_id||
++     (system->major_number==data->major_number&&system->minor_number==data->minor_number)))error=EINVAL;
++ return error;
++}
+ #endif
+--- a/iokit/Kernel/arm/KebabKeyStore.cpp
++++ b/iokit/Kernel/arm/KebabKeyStore.cpp
+@@ -11,6 +11,7 @@
+ #include "../../../bsd/kern/kebab_file_keys.h"
+ int kebab_aks_fs_publish_test(void);
+ int kebab_aks_fs_quiesce_test(void);
++int kebab_aks_services_start(void);
+ }
+ 
+ struct KebabAKSFileSystemTable {
+@@ -81,12 +82,9 @@
+ }
+ #endif
+ 
+-extern "C" int
+-kebab_aks_fs_publish_test(void)
++static int
++kfk_start_provider(IOService *platform)
+ {
+-#if DEVELOPMENT || DEBUG
+- if(!kebab_file_keys_available())return EPERM;
+- IOService *platform=IOService::getPlatform();if(!platform)return ENXIO;
+  if(!kfk_provider) {
+   const void *existing=nullptr;
+   IOReturn result=platform->callPlatformFunction("AKSFileSystemKeyServices",false,&existing,nullptr,nullptr,nullptr);
+@@ -99,6 +97,42 @@
+   service->registerService();kfk_provider=service;
+   IOService::publishResource("AKSFileSystemKeyServices",service);
+  }
++ return 0;
++}
++
++/* Same native resources as qualified probes, without generating test VEKs or
++ * binding the owner scope to a diagnostic UUID before original APFS starts. */
++extern "C" int
++kebab_aks_services_start(void)
++{
++#if DEVELOPMENT || DEBUG
++ if(!kebab_file_keys_available()||!kebab_device_classbag_available())return EPERM;
++ IOService *platform=IOService::getPlatform();if(!platform)return ENXIO;
++ int error=kfk_start_provider(platform);if(error)return error;
++ if(!kfv_enabled){
++  const void *existing=nullptr;
++  IOReturn result=platform->callPlatformFunction("AKSFileVaultServices",false,&existing,nullptr,nullptr,nullptr);
++  if(result!=kIOReturnUnsupported)return EEXIST;
++  kfv_enabled=true;IOService::publishResource("AKSFileVaultServices",kfk_provider);
++ }
++ const void *fs=nullptr,*fv=nullptr;
++ IOReturn a=platform->callPlatformFunction("AKSFileSystemKeyServices",true,&fs,nullptr,nullptr,nullptr);
++ IOReturn b=platform->callPlatformFunction("AKSFileVaultServices",true,&fv,nullptr,nullptr,nullptr);
++ if(a!=kIOReturnSuccess||b!=kIOReturnSuccess||fs!=&kfk_services||fv!=&kfv_services)return EIO;
++ IOLog("KEBAB AKS LIVE: original FS/FV resources published; hardware Root +persistent bank retained; no test volume registration\n");
++ return 0;
++#else
++ return EPERM;
++#endif
++}
++
++extern "C" int
++kebab_aks_fs_publish_test(void)
++{
++#if DEVELOPMENT || DEBUG
++ if(!kebab_file_keys_available())return EPERM;
++ IOService *platform=IOService::getPlatform();if(!platform)return ENXIO;
++ int start_error=kfk_start_provider(platform);if(start_error)return start_error;
+  const KebabAKSFileSystemTable *table=nullptr;
+  IOReturn result=platform->callPlatformFunction("AKSFileSystemKeyServices",false,&table,nullptr,nullptr,nullptr);
+  int error=result==kIOReturnSuccess && table==&kfk_services?0:EIO;
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1820,6 +1820,9 @@
+ 	proc_crash_coredump(p);
+ 
+ 	sync(p, (void *)NULL, (int *)NULL);
++#if defined(KEBAB)
++ if(p==initproc){extern void kebab_data_setup_finish(int);kebab_data_setup_finish(WEXITSTATUS(rv));}
++#endif
+ 
+ 	if (p->p_exit_reason == OS_REASON_NULL) {
+ 		panic_with_options(0, NULL, DEBUGGER_OPTION_INITPROC_PANIC, "%s -- no exit reason available -- (signal %d, exit status %d %s)",
+--- a/bsd/kern/kebab_device_classbag_file_impl.h
++++ b/bsd/kern/kebab_device_classbag_file_impl.h
+@@ -37,7 +37,8 @@
+  if(!error&&create&&memcmp(w->record,w->readback,4096))error=EAUTH;
+  if(!error)error=kebab_device_classbag_open(kdb_container_uuid,kdb_system_uuid,w->readback,4096);
+  if(!error&&!kebab_device_classbag_available())error=EAUTH;
+- if(!error){
++ unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
++ if(!error&&tool!=2){
+   /* Failed authentication must revoke cached class material, then valid
+    * durable bytes must restore it. Never touch the stored record. */
+   w->readback[129]^=1;
+--- /dev/null
++++ b/bsd/kern/kebab_data_setup_policy.h
+@@ -0,0 +1,24 @@
++/* One explicit signed-formatter maintenance profile. Default boots remain RO.
++ * This does not authorize a caller-selected device/path/command line. */
++#ifndef KEBAB_DATA_SETUP_POLICY_H
++#define KEBAB_DATA_SETUP_POLICY_H
++static int
++kdf_policy(void)
++{
++#if DEVELOPMENT || DEBUG
++ static const char *const names[]={"kebab_apfs_tool","ufsrw","rootrw","ufsmedia_root","cpus",
++  "kebab_apfs_probe","kebab_data_root","kebab_file_keys_test","kebab_aks_fs","kebab_aks_fv","kebab_cpx_xts",
++  "kebab_owner_fast","kebab_owner_startup","kebab_owner_dsc","kebab_owner_os","kebab_dsc","kebab_dsc_map",
++  "kebab_cryptex_media","kebab_boot_firmware","kebab_qsee_probe","kebab_keymaster_version",
++  "kebab_wrapped_key_probe","kebab_qsee_time","kebab_install","kebab_driver_test","kebab_nonce_root",
++  "kebab_hardware_nonce","kebab_cpx_handles","kebab_aes_key_probe","kebab_cryptex_dirs"};
++ static const unsigned expected[]={2,1,0,2,8,17,2,9,1,1,1,1,1,1,1,1,1,1,2,1,1,1,1,0,0,0,0,0,0,0};
++ for(unsigned i=0;i<sizeof(expected)/sizeof(*expected);++i){
++  unsigned value=0;PE_parse_boot_argn(names[i],&value,sizeof(value));if(value!=expected[i])return EPERM;
++ }
++ return 0;
++#else
++ return EPERM;
++#endif
++}
++#endif
+--- /dev/null
++++ b/bsd/kern/kebab_data_target_impl.h
+@@ -0,0 +1,26 @@
++/* Formatter target is the one original empty Data volume, never the container.
++ * After recreation changes its UUID this precondition intentionally stops reuse. */
++#define KDF_DEVICE "/dev/disk1s2"
++static int
++kdf_target_check(void)
++{
++ struct kebab_volume_identity system,preboot,other,data;
++ int error=kebab_lookup_apfs_preboot(&system,&preboot);
++ if(!error)error=kebab_lookup_apfs_data(&other,&data);
++ if(error)return error;
++ if(memcmp(&system,&other,sizeof(system))||data.backing_id!=system.backing_id||
++     data.backing_id!=preboot.backing_id||data.major_number!=1||data.minor_number!=3||
++     strcmp(data.bsd_name,"disk1s2")||!strcmp(data.bsd_name,system.bsd_name)||
++     !strcmp(data.bsd_name,preboot.bsd_name)||!rootvnode||
++     !(vfs_flags(vnode_mount(rootvnode))&MNT_RDONLY))return EAUTH;
++ vnode_t device=vfs_devvp(vnode_mount(rootvnode));
++ dev_t actual=device?vnode_specrdev(device):NODEV;if(device)vnode_put(device);
++ if(actual!=makedev(system.major_number,system.minor_number))return EAUTH;
++ vnode_t node=NULLVP;error=vnode_lookup(KDF_DEVICE,VNODE_LOOKUP_NOFOLLOW,&node,vfs_context_current());
++ if(error)return error;
++ if(vnode_vtype(node)!=VBLK||vnode_specrdev(node)!=makedev(data.major_number,data.minor_number))error=EAUTH;
++ vnode_put(node);
++ if(!error)printf("KEBAB DATA FORMAT: target UUID4C56203C-CFE8-4DFF-BF8E-BB48D852C936 %s dev=%u/%u backing=%llx; System/Preboot distinct, System RO\n",
++     KDF_DEVICE,data.major_number,data.minor_number,(unsigned long long)data.backing_id);
++ return error;
++}

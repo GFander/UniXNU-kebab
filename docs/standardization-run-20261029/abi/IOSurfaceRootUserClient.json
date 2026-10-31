@@ -1,0 +1,84 @@
+{
+  "target": "iPhone10,3 20H392 / XNU8796.141.3 ARM64 16KiB",
+  "original_kernelcache_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "evidence_version": "0225",
+  "native_sha256": "e7cb391447d5a6aaf2feb45a3e5d48191996ca775f179a40adecc38f09b1655b",
+  "io_class": "IOSurfaceRootUserClient",
+  "source_path": "iokit/Kernel/arm/KebabSurface.cpp",
+  "source_sha256": "6805297d7d2649b50bde0c0de7cd10918fb5bc5528cde5a15be1393adc793f14",
+  "implementation": "native IOKit compatibility service/client",
+  "original_private_layout_recovered": false,
+  "donor_userland_abi_qualified": false,
+  "class_size_crosses_foreign_binary_boundary": false,
+  "native_methods": [
+    {
+      "name": "kKebabSurfaceCreate",
+      "selector": 0,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabSurfaceLookup",
+      "selector": 4,
+      "native_scalar_input_min": 1,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabSurfaceSetValue",
+      "selector": 9,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabSurfaceUpdateValueCache",
+      "selector": 10,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabSurfaceRemoveValue",
+      "selector": 11,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabSurfaceLimits",
+      "selector": 13,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabSurfaceSetBulkAttachments",
+      "selector": 27,
+      "native_scalar_input_min": 0,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabSurfaceLookupFromPort",
+      "selector": 34,
+      "native_scalar_input_min": 1,
+      "native_scalar_output_min": 0
+    },
+    {
+      "name": "kKebabSurfaceCreatePort",
+      "selector": 35,
+      "native_scalar_input_min": 1,
+      "native_scalar_output_min": 1
+    }
+  ],
+  "verification": [
+    "0191 Surface owner/client reference and close contracts",
+    "0203 native factory/query/close PASS",
+    "0204 actual root registry match"
+  ],
+  "pending": [
+    "donor IOSurface.framework call layouts",
+    "cross-process port/map behavior from real user processes",
+    "backboardd end-to-end"
+  ],
+  "limits": [
+    "Native compatibility implementation; no original graphics kext object/vtable is imported.",
+    "Native factory/query/bad-output/close tests are qualified; user-process IOServiceOpen and donor frameworks are not.",
+    "Scalar counts describe this implementation minima; partial structure conventions are preserved, not proven donor layouts."
+  ]
+}

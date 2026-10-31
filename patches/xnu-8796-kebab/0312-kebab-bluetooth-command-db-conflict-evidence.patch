@@ -1,0 +1,61 @@
+--- a/bsd/dev/kebab_bt_power_impl.h
++++ b/bsd/dev/kebab_bt_power_impl.h
+@@ -21,6 +21,9 @@
+  uint32_t version, standalone;
+  struct kbp_resource resources[KBP_RESOURCE_COUNT];
+ };
++struct kbp_conflict {
++ uint32_t resource, slave_table, entry, offset, first_address, second_address;
++};
+ struct kbp_io {
+  int (*read32)(void *, uint32_t, uint32_t *);
+  void *context;
+@@ -37,8 +40,10 @@
+ }
+ 
+ static int
+-kbp_discover(const struct kbp_io *io, size_t length, struct kbp_result *out)
++kbp_discover(const struct kbp_io *io, size_t length, struct kbp_result *out,
++    struct kbp_conflict *conflict)
+ {
++ if (conflict) memset(conflict, 0, sizeof(*conflict));
+  if (!out) return EINVAL;
+  memset(out, 0, sizeof(*out));
+  if (!io || !io->read32 || length < KBP_DB_HEADER || length > KBP_DB_SIZE ||
+@@ -79,10 +84,15 @@
+    if (error) return error;
+    for (unsigned index = 0; index < KBP_RESOURCE_COUNT; ++index) {
+     if (memcmp(name, kbp_names[index], 8)) continue;
+-    if (mask & (1u << index)) return EEXIST;
+     uint32_t address, tail;
+     error = kbp_word(io, length, offset + 16u, &address);
+     if (error) return error;
++    if (mask & (1u << index)) {
++     if (conflict) *conflict = (struct kbp_conflict) {
++      index, slave, entry, offset, found.resources[index].address, address
++     };
++     return EEXIST;
++    }
+     error = kbp_word(io, length, offset + 20u, &tail);
+     if (error) return error;
+     uint32_t bytes = tail & 0xffffu, relative = tail >> 16;
+--- a/bsd/dev/kebab_rpmh.c
++++ b/bsd/dev/kebab_rpmh.c
+@@ -694,11 +694,16 @@
+  }
+  const struct kbp_io io = { kbp_native_read32, NULL };
+  struct kbp_result result;
++ struct kbp_conflict conflict;
+  kebab_spmi_bus_lock();
+- int error = kbp_discover(&io, KBP_DB_SIZE, &result);
++ int error = kbp_discover(&io, KBP_DB_SIZE, &result, &conflict);
+  kebab_spmi_bus_unlock();
+  printf("KEBAB BTPWR: cmd-db=%08x+%x version=%u standalone=%u error=%d\n",
+      KBP_DB_PA, KBP_DB_SIZE, result.version, result.standalone, error);
++ if (error == EEXIST)
++  printf("KEBAB BTPWR: duplicate resource-index=%u table=%u entry=%u offset=%x first=%08x second=%08x\n",
++      conflict.resource, conflict.slave_table, conflict.entry, conflict.offset,
++      conflict.first_address, conflict.second_address);
+  if (!error) for (unsigned i = 0; i < KBP_RESOURCE_COUNT; ++i)
+   printf("KEBAB BTPWR: resource=%s address=%08x slave-version=%04x aux-bytes=%u\n",
+       kbp_names[i], result.resources[i].address,

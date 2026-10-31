@@ -1,0 +1,49 @@
+--- a/bsd/dev/kebab_fwlog.c
++++ b/bsd/dev/kebab_fwlog.c
+@@ -71,6 +71,18 @@
+ 	kebab_klog_ready = TRUE;
+ }
+ 
++/* Normal dispatch runs on the USB event thread: drain between chunks so
++ * a 64KiB dump cannot fill the 16KiB TX ring while that thread is printing.
++ * Panic logging already drains synchronously in kebab_usb_log(). */
++static void
++kebab_fwlog_drain(void)
++{
++#if defined(KEBAB)
++ extern void kebab_usb_log_flush(void);
++ if (!panic_active()) kebab_usb_log_flush();
++#endif
++}
++
+ void
+ kebab_fwlog_report(uint32_t max_bytes)
+ {
+@@ -97,6 +109,7 @@
+ 	if (avail == 0) {
+ 		printf("KEBAB FWLOG: ring=%u written=%u dump=0\n", KEBAB_KLOG_SIZE, head);
+ 		printf("KEBAB FWLOG: ---- empty ----\n");
++		kebab_fwlog_drain();
+ 		__sync_lock_release(&dump->busy);
+ 		return;
+ 	}
+@@ -104,6 +117,7 @@
+ 	printf("KEBAB FWLOG: ring=%u written=%u dump=%u%s\n", KEBAB_KLOG_SIZE, head, want,
+ 	    want < avail ? " (tail)" : "");
+ 	printf("KEBAB FWLOG: ---- begin ----\n");
++	kebab_fwlog_drain();
+ 
+ 	while (want) {
+ 		used = want > KEBAB_KLOG_CHUNK ? KEBAB_KLOG_CHUNK : want;
+@@ -112,9 +126,11 @@
+ 		}
+ 		chunk[used] = 0;
+ 		printf("%s", chunk);
++		kebab_fwlog_drain();
+ 		start += used;
+ 		want -= used;
+ 	}
+ 	printf("\nKEBAB FWLOG: ---- end ----\n");
++	kebab_fwlog_drain();
+ 	__sync_lock_release(&dump->busy);
+ }

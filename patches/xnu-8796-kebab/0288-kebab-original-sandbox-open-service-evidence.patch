@@ -1,0 +1,22 @@
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -4258,7 +4258,18 @@
+ 	}
+ 
+ #if CONFIG_MACF
+-	if (mac_iokit_check_open_service(kauth_cred_get(), service, connect_type) != 0) {
++	int open_service_policy = mac_iokit_check_open_service(kauth_cred_get(), service, connect_type);
++	if (open_service_policy != 0) {
++#if defined(KEBAB)
++        static unsigned reports;
++        if (__atomic_fetch_add(&reports, 1u, __ATOMIC_RELAXED) < 32) {
++            OSString *taskName = IOCopyLogNameForPID(proc_selfpid());
++            IOLog("KEBAB MACF OPEN: pid=%d task=%s service=%s name=%s type=%u policy=%d result=NotPermitted\n",
++                proc_selfpid(), taskName ? taskName->getCStringNoCopy() : "unknown",
++                service->getMetaClass()->getClassName(),service->getName(),connect_type,open_service_policy);
++            OSSafeReleaseNULL(taskName);
++        }
++#endif
+ 		return kIOReturnNotPermitted;
+ 	}
+ #endif

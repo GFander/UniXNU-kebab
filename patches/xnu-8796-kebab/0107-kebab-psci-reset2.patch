@@ -1,0 +1,321 @@
+fix(psci): correct PSCI_FEATURES semantics and re-test SYSTEM_RESET2
+
+PSCI_FEATURES returns PSCI_RET_NOT_SUPPORTED (0xffffffff) for a function the
+firmware does not implement.  Zero is the normal answer for "supported, no
+feature flags".  The previous diagnosis read zero as "not supported" and
+therefore recorded SYSTEM_RESET2 as absent, even though SYSTEM_RESET - which
+demonstrably resets this board - answers zero as well.  Test against
+0xffffffff, the same check Linux makes in drivers/firmware/psci.c, and keep
+the raw 32-bit answers so the console prints what the firmware actually said
+instead of a re-interpretation of it.
+
+  * PSCI? now prints the negative control FEATURES(0x8400ffff) first, then the
+    raw answers for SYSTEM_RESET and SYSTEM_RESET2.  PSCINEG? exposes the
+    negative control on its own.  If the control does not return 0xffffffff
+    the probe is marked untrustworthy and FASTBOOT2 refuses to run.
+  * FASTBOOT2 is gated on the corrected rule plus that control.  It logs the
+    old IMEM value, writes the cookie (still overridable with
+    kebab_fastboot_cookie), reads it back, issues dsb sy, and only then calls
+    SYSTEM_RESET2(reset_type=0, cookie=0).  A return is reported as the full
+    64-bit x0 and execution stops there: it never falls through to
+    SYSTEM_RESET.  If the cookie was never delivered the old IMEM value is
+    restored.
+  * The PSCI exports carry their real widths (uint32_t for PSCI_FEATURES,
+    uint64_t for SYSTEM_RESET2), so no narrowing or sign interpretation
+    happens between the SMC and the log.
+
+The earlier NOT_SUPPORTED conclusion was an artifact of the wrong comparison.
+This change re-measures both real FIDs and adds the experiment that follows
+from a supported answer.
+diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
+index 7185fea..3d05250 100644
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -63,9 +63,9 @@ static uint32_t ud_log_take(char *out, uint32_t max);
+  * SYSTEM_RESET2 directly, and the probe needs PSCI_FEATURES; neither belongs
+  * in a USB driver, so the platform expert exports them.
+  */
+-extern int kebab_psci_version(void);
+-extern int kebab_psci_features(uint32_t function);
+-extern int kebab_psci_system_reset2(uint32_t reset_type, uint32_t cookie);
++extern uint32_t kebab_psci_version(void);
++extern uint32_t kebab_psci_features(uint32_t function);
++extern uint64_t kebab_psci_system_reset2(uint32_t reset_type, uint32_t cookie);
+ 
+ /* ---------------------------------------------------------------- registers */
+ 
+@@ -209,11 +209,20 @@ extern int kebab_psci_system_reset2(uint32_t reset_type, uint32_t cookie);
+ #define KEBAB_PSCI_SYSTEM_RESET 0x84000009u
+ #define KEBAB_PSCI_RESET2       0xc4000012u
+ 
++/*
++ * A PSCI function ID that cannot exist, used as a negative control for
++ * PSCI_FEATURES.  The firmware must answer PSCI_RET_NOT_SUPPORTED; if it
++ * answers zero, every "supported" answer from the same probe is meaningless.
++ */
++#define KEBAB_PSCI_NEGATIVE_CONTROL 0x8400ffffu
++#define KEBAB_PSCI_RET_NOT_SUPPORTED 0xffffffffu
++
+ #define UD_REBOOT_PLAIN         1u
+ #define UD_REBOOT_FASTBOOT      2u
+ #define UD_REBOOT_FASTBOOT2     3u
+ #define UD_REBOOT_PSCI_REPORT   4u
+ #define UD_REBOOT_IMEM_REPORT   5u
++#define UD_REBOOT_PSCI_NEGATIVE 6u
+ 
+ struct ud_endpoint {
+ 	uint32_t trb, length, ctl, resource;
+@@ -273,7 +282,10 @@ static struct {
+ 	 */
+ 	volatile uint32_t reboot_command;   /* UD_REBOOT_* or zero */
+ 	volatile bool     restart_armed;    /* console asked for the restart */
+-	int         psci_reset2;       /* PSCI_FEATURES(SYSTEM_RESET2), -1 unknown */
++	/* Raw PSCI answers, kept exactly as the firmware returned them. */
++	uint32_t    psci_reset2;       /* FEATURES(SYSTEM_RESET2) */
++	bool        psci_reset2_valid; /* the value above was actually read */
++	bool        psci_probe_sane;   /* the negative control came back 0xffffffff */
+ 	uint32_t    tx_bytes;
+ 	uint32_t    rx_bytes;          /* bulk-OUT bytes accepted into in_ring */
+ 	uint32_t    rx_dropped;        /* bulk-OUT bytes lost to a full in_ring */
+@@ -1118,6 +1130,9 @@ ud_reboot_command(const char *buf, uint32_t received)
+ 		if (ud_command_seen(buf, received, "PSCI?\n", sizeof("PSCI?\n") - 1)) {
+ 			return UD_REBOOT_PSCI_REPORT;
+ 		}
++		if (ud_command_seen(buf, received, "PSCINEG?\n", sizeof("PSCINEG?\n") - 1)) {
++			return UD_REBOOT_PSCI_NEGATIVE;
++		}
+ 		if (ud_command_seen(buf, received, "IMEM?\n", sizeof("IMEM?\n") - 1)) {
+ 			return UD_REBOOT_IMEM_REPORT;
+ 		}
+@@ -1139,6 +1154,10 @@ ud_reboot_command(const char *buf, uint32_t received)
+ 	    !memcmp(buf, "PSCI?\n", sizeof("PSCI?\n") - 1)) {
+ 		return UD_REBOOT_PSCI_REPORT;
+ 	}
++	if (received >= sizeof("PSCINEG?\n") - 1 &&
++	    !memcmp(buf, "PSCINEG?\n", sizeof("PSCINEG?\n") - 1)) {
++		return UD_REBOOT_PSCI_NEGATIVE;
++	}
+ 	if (received >= sizeof("IMEM?\n") - 1 &&
+ 	    !memcmp(buf, "IMEM?\n", sizeof("IMEM?\n") - 1)) {
+ 		return UD_REBOOT_IMEM_REPORT;
+@@ -1190,18 +1209,24 @@ ud_platform_restart(void)
+ }
+ 
+ /*
+- * SYSTEM_RESET2 with reset_type 0 is the architectural warm reset.  It must be
+- * asked for explicitly and only when PSCI_FEATURES says it exists; this is not
+- * a vendor-specific reset type.
++ * SYSTEM_RESET2 with reset_type 0 is the architectural warm reset.  It is
++ * called only when the corrected PSCI_FEATURES rule says it exists and the
++ * negative control proved the probe itself is trustworthy; this is not a
++ * vendor-specific reset type.  A return means the firmware refused the call,
++ * so the IMEM cookie was never delivered and the caller must not reset again.
+  */
+-static int
++static uint64_t
+ ud_platform_restart2(void)
+ {
+-	int rc;
++	uint64_t rc;
+ 
+ 	printf("KEBAB REBOOT: PSCI SYSTEM_RESET2(reset_type=0, cookie=0)\n");
++	/* The reset only returns on failure, so let every line reach the host. */
++	kebab_usb_log_flush();
++	delay(300000);
+ 	rc = kebab_psci_system_reset2(0, 0);
+-	printf("KEBAB REBOOT: SYSTEM_RESET2 returned %d, the machine did not reset\n", rc);
++	printf("KEBAB REBOOT: SYSTEM_RESET2 returned 0x%08x%08x, the machine did not reset\n",
++	    (uint32_t)(rc >> 32), (uint32_t)rc);
+ 	return rc;
+ }
+ 
+@@ -1210,18 +1235,30 @@ ud_fastboot_restart(bool use_reset2)
+ {
+ 	volatile uint32_t *reason;
+ 	uint32_t previous, cookie, readback;
+-	int rc;
++	uint64_t rc;
+ 
+ 	if (ud.imem == 0) {
+-		printf("KEBAB FASTBOOT: cannot map IMEM at 0x%x; falling back to a plain restart\n",
+-		    KEBAB_IMEM_PA);
+-		(void)ud_platform_restart();
++		printf("KEBAB FASTBOOT: cannot map IMEM at 0x%x; %s\n", KEBAB_IMEM_PA,
++		    use_reset2 ? "not resetting" : "falling back to a plain restart");
++		if (!use_reset2) {
++			(void)ud_platform_restart();
++		}
+ 		return;
+ 	}
+-	if (use_reset2 && ud.psci_reset2 != 1) {
+-		printf("KEBAB FASTBOOT: SYSTEM_RESET2 is not supported (%d); not resetting\n",
+-		    ud.psci_reset2);
+-		return;
++	if (use_reset2) {
++		if (!ud.psci_reset2_valid) {
++			printf("KEBAB FASTBOOT: SYSTEM_RESET2 feature was never probed; not resetting\n");
++			return;
++		}
++		if (!ud.psci_probe_sane) {
++			printf("KEBAB FASTBOOT: PSCI probe failed its negative control; not resetting\n");
++			return;
++		}
++		if (ud.psci_reset2 == KEBAB_PSCI_RET_NOT_SUPPORTED) {
++			printf("KEBAB FASTBOOT: SYSTEM_RESET2 is not supported (0x%08x); not resetting\n",
++			    ud.psci_reset2);
++			return;
++		}
+ 	}
+ 	reason = (volatile uint32_t *)(ud.imem + KEBAB_IMEM_RESTART);
+ 	previous = *reason;
+@@ -1229,11 +1266,12 @@ ud_fastboot_restart(bool use_reset2)
+ 	printf("KEBAB FASTBOOT: IMEM restart_reason at 0x%x+0x%x is 0x%08x; writing 0x%08x\n",
+ 	    KEBAB_IMEM_PA, KEBAB_IMEM_RESTART, previous, cookie);
+ 	*reason = cookie;
+-	__asm__ volatile ("dsb sy" ::: "memory");
+ 	readback = *reason;
+ 	printf("KEBAB FASTBOOT: read back 0x%08x (%s)\n", readback,
+ 	    readback == cookie ? "MATCH" : "MISMATCH");
+-	rc = use_reset2 ? ud_platform_restart2() : ud_platform_restart();
++	/* The cookie has to be in memory before the firmware can read it. */
++	__asm__ volatile ("dsb sy" ::: "memory");
++	rc = use_reset2 ? ud_platform_restart2() : (uint64_t)ud_platform_restart();
+ 	if (rc != 0) {
+ 		/* The machine is still here, so a later reset must not inherit a
+ 		 * fastboot request that was never delivered. */
+@@ -1244,23 +1282,52 @@ ud_fastboot_restart(bool use_reset2)
+ }
+ 
+ /*
+- * Read-only probes.  PSCI_FEATURES(0xC4000012) is the architectural answer to
+- * "can this firmware do SYSTEM_RESET2"; 0 means not supported, 1 supported,
+- * 2 invalid parameter, negative a PSCI error.
++ * Read-only probes.  The first answer is the negative control: PSCI_FEATURES
++ * must report an impossible function ID as PSCI_RET_NOT_SUPPORTED.  Only if
++ * that holds does the rest of the report mean anything.  The two real IDs are
++ * printed raw; per the PSCI specification zero means "supported, no feature
++ * flags", so SYSTEM_RESET2 is supported unless the answer is 0xffffffff.
+  */
+ static void
+ ud_psci_report(void)
+ {
+-	int version = kebab_psci_version();
+-	int reset = kebab_psci_features(KEBAB_PSCI_SYSTEM_RESET);
+-	int reset2 = kebab_psci_features(KEBAB_PSCI_RESET2);
++	uint32_t version = kebab_psci_version();
++	uint32_t negative = kebab_psci_features(KEBAB_PSCI_NEGATIVE_CONTROL);
++	uint32_t reset = kebab_psci_features(KEBAB_PSCI_SYSTEM_RESET);
++	uint32_t reset2 = kebab_psci_features(KEBAB_PSCI_RESET2);
+ 
+ 	ud.psci_reset2 = reset2;
+-	printf("KEBAB PSCI: version 0x%08x; FEATURES(0x%08x)=%d FEATURES(0x%08x)=%d\n",
+-	    version, KEBAB_PSCI_SYSTEM_RESET, reset, KEBAB_PSCI_RESET2, reset2);
+-	printf("KEBAB PSCI: SYSTEM_RESET2 %s\n",
+-	    reset2 == 1 ? "supported" :
+-	    (reset2 == 0 ? "NOT_SUPPORTED" : "probe error"));
++	ud.psci_reset2_valid = true;
++	ud.psci_probe_sane = (negative == KEBAB_PSCI_RET_NOT_SUPPORTED);
++
++	printf("KEBAB PSCI: version 0x%08x\n", version);
++	printf("KEBAB PSCI: FEATURES(0x%08x)=0x%08x negative control %s\n",
++	    KEBAB_PSCI_NEGATIVE_CONTROL, negative,
++	    ud.psci_probe_sane ? "OK" : "BROKEN");
++	printf("KEBAB PSCI: FEATURES(0x%08x)=0x%08x SYSTEM_RESET %s\n",
++	    KEBAB_PSCI_SYSTEM_RESET, reset,
++	    reset != KEBAB_PSCI_RET_NOT_SUPPORTED ? "supported" : "NOT_SUPPORTED");
++	printf("KEBAB PSCI: FEATURES(0x%08x)=0x%08x SYSTEM_RESET2 %s\n",
++	    KEBAB_PSCI_RESET2, reset2,
++	    reset2 != KEBAB_PSCI_RET_NOT_SUPPORTED ? "supported" : "NOT_SUPPORTED");
++	if (!ud.psci_probe_sane) {
++		printf("KEBAB PSCI: negative control did not return 0xffffffff; "
++		    "the feature answers are not trustworthy and FASTBOOT2 is disabled\n");
++	}
++}
++
++/*
++ * The negative control is also available on its own, so a damaged feature table
++ * can be separated from a damaged probe without re-reading the other two.
++ */
++static void
++ud_psci_negative_report(void)
++{
++	uint32_t negative = kebab_psci_features(KEBAB_PSCI_NEGATIVE_CONTROL);
++
++	printf("KEBAB PSCI: FEATURES(0x%08x)=0x%08x negative control %s\n",
++	    KEBAB_PSCI_NEGATIVE_CONTROL, negative,
++	    negative == KEBAB_PSCI_RET_NOT_SUPPORTED ? "OK" : "BROKEN");
+ }
+ 
+ static void
+@@ -1288,6 +1355,8 @@ ud_run_reboot_command(uint32_t command)
+ 		(void)ud_platform_restart();
+ 	} else if (command == UD_REBOOT_PSCI_REPORT) {
+ 		ud_psci_report();
++	} else if (command == UD_REBOOT_PSCI_NEGATIVE) {
++		ud_psci_negative_report();
+ 	} else if (command == UD_REBOOT_IMEM_REPORT) {
+ 		ud_imem_report();
+ 	}
+@@ -1782,8 +1851,10 @@ kebab_usb_start(void)
+ 		    KEBAB_IMEM_PA, KEBAB_IMEM_RESTART,
+ 		    *(volatile uint32_t *)(ud.imem + KEBAB_IMEM_RESTART));
+ 	}
+-	/* Record the firmware's PSCI answer once, early, in normal context. */
+-	ud.psci_reset2 = -1;
++	/* Record the firmware's PSCI answers once, early, in normal context. */
++	ud.psci_reset2 = KEBAB_PSCI_RET_NOT_SUPPORTED;
++	ud.psci_reset2_valid = false;
++	ud.psci_probe_sane = false;
+ 	ud_psci_report();
+ 	/* wired pages need a real tag: VM_KERN_MEMORY_NONE trips an assertion */
+ 	if (kmem_alloc(kernel_map, &ud.dma, UD_SIZE, KMA_DATA | KMA_NOFAIL,
+diff --git a/iokit/Kernel/arm/KebabPlatformExpert.cpp b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+index cca0ed4..60a1297 100644
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -143,23 +143,38 @@ kebab_psci_call(uint64_t function, uint64_t arg1, uint64_t arg2)
+ }
+ 
+ /* PSCI_VERSION: major in bits 31:16, minor in bits 15:0. */
+-extern "C" int
++extern "C" uint32_t
+ kebab_psci_version(void)
+ {
+-	return (int32_t)kebab_psci_call(0x84000000ULL, 0, 0);
++	return (uint32_t)kebab_psci_call(0x84000000ULL, 0, 0);
+ }
+ 
+-/* PSCI_FEATURES: 0 not supported, 1 supported, 2 invalid parameter, <0 error. */
+-extern "C" int
++/*
++ * PSCI_FEATURES answers with PSCI_RET_NOT_SUPPORTED (0xFFFFFFFF) for a function
++ * the firmware does not implement.  Every other value means supported: zero is
++ * the normal "supported, no feature flags" answer, not a refusal.  Linux's
++ * drivers/firmware/psci.c tests only != PSCI_RET_NOT_SUPPORTED for this reason,
++ * and SYSTEM_RESET - which demonstrably resets this board - answers zero.
++ *
++ * Keep the raw 32-bit value so the console can print exactly what the firmware
++ * said instead of a re-interpretation of it.
++ */
++#define KEBAB_PSCI_RET_NOT_SUPPORTED 0xffffffffu
++
++extern "C" uint32_t
+ kebab_psci_features(uint32_t function)
+ {
+-	return (int32_t)kebab_psci_call(0x8400000aULL, function, 0);
++	return (uint32_t)kebab_psci_call(0x8400000aULL, function, 0);
+ }
+ 
+-extern "C" int
++/*
++ * SYSTEM_RESET2 is SMC64 and may return a 64-bit error.  On success it does not
++ * return at all, so the caller reports the whole x0 when it does.
++ */
++extern "C" uint64_t
+ kebab_psci_system_reset2(uint32_t reset_type, uint32_t cookie)
+ {
+-	return (int32_t)kebab_psci_call(0xc4000012ULL, reset_type, cookie);
++	return kebab_psci_call(0xc4000012ULL, reset_type, cookie);
+ }
+ 
+ /*

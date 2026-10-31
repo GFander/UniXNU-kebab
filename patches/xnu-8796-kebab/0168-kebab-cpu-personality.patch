@@ -1,0 +1,43 @@
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -41,6 +41,12 @@
+     "     'IONameMatch'     = 'oneplus,kebab';"
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
++    "   {"
++    "     'IOClass'         = KebabCPU;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = cpu;"
++    "     'IOProbeScore'    = 10000:32;"
++    "   },"
+ #endif
+ #if defined(ARM64_BOARD_CONFIG_NEGRONI)
+     "   {"
+@@ -48,12 +54,6 @@
+     "     'IOProviderClass' = IOPlatformExpertDevice;"
+     "     'IONameMatch'     = 'oneplus,negroni';"
+     "     'IOProbeScore'    = 10000:32;"
+-    "   },"
+-    "   {"
+-    "     'IOClass'         = KebabCPU;"
+-    "     'IOProviderClass' = IOPlatformExpertDevice;"
+-    "     'IONameMatch'     = 'oneplus,kebab';"
+-    "     'IOProbeScore'    = 9000:32;"
+     "   },"
+     "   {"
+     "     'IOClass'         = IOCoreSurfaceRoot;"
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -1654,7 +1654,12 @@
+ 			 * in the DT/IORegistry in the first place.
+ 			 */
+ 			if (logical_cpu_id < 0) {
++#if !defined(KEBAB)
+ 				nub->registerService();
++#endif
++				/* KEBAB's unselected CPUs must not fall through to a
++				 * donor AppleARMCPU service after KebabCPU::probe rejects
++				 * them. Keep the DT entry, but publish no CPU service. */
+ 				continue;
+ 			}
+ 

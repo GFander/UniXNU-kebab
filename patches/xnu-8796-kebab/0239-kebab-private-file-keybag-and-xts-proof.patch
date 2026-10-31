@@ -1,0 +1,600 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -668,3 +668,4 @@
+ bsd/kern/kebab_apfs_probe.c			standard
+ bsd/kern/kebab_scm_probe.c			standard
+ bsd/kern/kebab_qsee_probe.c			standard
++bsd/kern/kebab_file_keys.c			standard
+--- a/bsd/kern/kebab_data_root_policy.h
++++ b/bsd/kern/kebab_data_root_policy.h
+@@ -15,9 +15,14 @@
+   value = 0; PE_parse_boot_argn(disabled[i], &value, sizeof(value));
+   if (value) return EPERM;
+  }
++ unsigned key_test=0;
++ PE_parse_boot_argn("kebab_file_keys_test",&key_test,sizeof(key_test));
++ if(key_test>3 || (key_test && mode!=2))return EINVAL;
++ unsigned apfs_mode=key_test>=2?(key_test==2?10u:11u):(mode==1?8u:9u);
++ unsigned writable=(mode==1||key_test==2)?1u:0u;
+  const char *const required[] = { "kebab_data_root", "kebab_apfs_probe", "ufsrw",
+      "kebab_qsee_probe", "kebab_keymaster_version", "kebab_wrapped_key_probe", "kebab_qsee_time" };
+- const unsigned expected[] = { mode, mode == 1 ? 8u : 9u, mode == 1 ? 1u : 0u, 1, 1, 1, 1 };
++ const unsigned expected[] = { mode, apfs_mode, writable, 1, 1, 1, 1 };
+  for (unsigned i = 0; i < sizeof(required) / sizeof(required[0]); ++i) {
+   value = 0; PE_parse_boot_argn(required[i], &value, sizeof(value));
+   if (value != expected[i]) return EINVAL;
+--- a/bsd/kern/kebab_data_root_file_impl.h
++++ b/bsd/kern/kebab_data_root_file_impl.h
+@@ -45,10 +45,12 @@
+ {
+  int error = kdr_policy(mode);
+  if (error) return error;
++ unsigned key_test=0;PE_parse_boot_argn("kebab_file_keys_test",&key_test,sizeof(key_test));
++ bool writing=(mode==1 || (mode==2 && key_test==2));
+  if (!expected || !rootvnode || expected == vnode_mount(rootvnode) ||
+      strcmp(vfs_statfs(expected)->f_fstypename, "apfs") ||
+      !(vfs_flags(vnode_mount(rootvnode)) & MNT_RDONLY) ||
+-     (((vfs_flags(expected) & MNT_RDONLY) != 0) != (mode == 2))) return EROFS;
++     (((vfs_flags(expected) & MNT_RDONLY) != 0) == writing)) return EROFS;
+  vfs_context_t context = vfs_context_current();
+  uint8_t *record = kalloc_data(4096, Z_WAITOK | Z_ZERO);
+  uint8_t *readback = kalloc_data(4096, Z_WAITOK | Z_ZERO);
+--- a/bsd/kern/kebab_data_root_qsee_impl.h
++++ b/bsd/kern/kebab_data_root_qsee_impl.h
+@@ -1,3 +1,4 @@
++#include "kebab_file_keys.h"
+ /* Independent Data-root record. No raw secret is persisted or published.
+  * Included after the qualified nonce record helper, before storage transport. */
+ static uint8_t *qsee_data_record;
+@@ -51,6 +52,9 @@
+  for (unsigned i = 0; i < sizeof(witness); ++i) wipe[i] = 0;
+  printf("KEBAB DATA ROOT: %s hardware consistency witness %s; no secret published\n",
+      qsee_data_mode == 1 ? "generated independent" : "restored", difference ? "FAIL" : "PASS");
++ unsigned key_test=0;PE_parse_boot_argn("kebab_file_keys_test",&key_test,sizeof(key_test));
++ if(!difference && key_test && qsee_data_mode==2)
++  return kebab_file_keys_prepare((const uint8_t *)(page+0x3800),32)==0;
+  return !difference;
+ }
+ 
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -151,6 +151,7 @@
+ }
+ 
+ #include "kebab_data_root_file_impl.h"
++#include "kebab_file_keys_probe_impl.h"
+ 
+ int kebab_apfs_probe_prepare(proc_t, user_addr_t);
+ int
+@@ -158,15 +159,15 @@
+ {
+  uint32_t mode = 0, rw = 0;
+  if (!PE_parse_boot_argn("kebab_apfs_probe", &mode, sizeof(mode)) || !mode) return 0;
+- if (mode > 9 || !scratch) return EINVAL;
++ if (mode > 11 || !scratch) return EINVAL;
+  unsigned nonce_root=0;
+  PE_parse_boot_argn("kebab_nonce_root",&nonce_root,sizeof(nonce_root));
+- if ((mode==4 && nonce_root!=1) || (mode==5 && nonce_root!=2) || ((mode<4 || mode==6 || mode==7 || mode==8 || mode==9) && nonce_root)) return EINVAL;
++ if ((mode==4 && nonce_root!=1) || (mode==5 && nonce_root!=2) || ((mode<4 || mode>=6) && nonce_root)) return EINVAL;
+  unsigned data_key_mode=0;
+  PE_parse_boot_argn("kebab_data_root",&data_key_mode,sizeof(data_key_mode));
+- if ((mode==8 && data_key_mode!=1) || (mode==9 && data_key_mode!=2) || (mode<8 && data_key_mode)) return EINVAL;
+- if ((mode==8 || mode==9) && kdr_policy(data_key_mode)) return EPERM;
+- bool write_file = (mode == 2 || mode == 4 || mode == 6 || mode == 7 || mode == 8);
++ if ((mode==8 && data_key_mode!=1) || (mode>=9 && data_key_mode!=2) || (mode<8 && data_key_mode)) return EINVAL;
++ if ((mode>=8) && kdr_policy(data_key_mode)) return EPERM;
++ bool write_file = (mode == 2 || mode == 4 || mode == 6 || mode == 7 || mode == 8 || mode == 10);
+  PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
+  if ((write_file && rw != 1) || (!write_file && rw)) return EINVAL;
+  mount_t original_root = vnode_mount(rootvnode);
+@@ -221,8 +222,13 @@
+  if (!error && mode == 6) error = kebab_cryptex_prepare_directories(mounted);
+  if (!error && mode == 7) error = kebab_boot_firmware_prepare(mounted);
+  if (!error && mode == 7) error = kebab_apfs_proof_file(mounted, false);
+- if (!error && (mode==8 || mode==9)) {
++ if (!error && mode>=8) {
+   error = kdr_file(mounted, data_key_mode);
++  unsigned key_test=0;PE_parse_boot_argn("kebab_file_keys_test",&key_test,sizeof(key_test));
++  if(!error && key_test)error=kebab_file_keys_commit();
++  if(!error && key_test)error=kebab_file_keys_selftest();
++  if(!error && mode>=10)error=kfp_record(mounted,mode==10);
++  if(key_test){kebab_file_keys_cancel();printf("KEBAB FILE KEYS: private context erased; no AKS service published\n");}
+   int proof_error = kebab_apfs_proof_file(mounted, false);
+   if (!error) error = proof_error;
+  }
+@@ -237,6 +243,8 @@
+  if (!error && mode == 7) panic("KEBAB OWNER FW: maintenance durable, original proof/nonce preserved; no userland started");
+  if (!error && mode==8) panic("KEBAB DATA ROOT: independent opaque record durable; no Data mount/userland started");
+  if (!error && mode==9) panic("KEBAB DATA ROOT: cold hardware restore verified; no Data mount/userland started");
++ if (!error && mode==10) panic("KEBAB FILE KEYS: durable encrypted proof written; no Data mount/userland started");
++ if (!error && mode==11) panic("KEBAB FILE KEYS: cold encrypted proof verified; no Data mount/userland started");
+  if (!error && !write_file) error = kebab_cryptex_mount_prepare(p, scratch);
+  return error;
+ }
+--- /dev/null
++++ b/bsd/kern/kebab_file_keys.h
+@@ -0,0 +1,36 @@
++/* Fixed target key objects; deliberately separate from legacy cp_cred_s. */
++#ifndef KEBAB_FILE_KEYS_H
++#define KEBAB_FILE_KEYS_H
++#include <stdint.h>
++#include <stddef.h>
++#include <stdbool.h>
++struct kebab_aks_credential { uint8_t bytes[80]; };
++struct kebab_aks_raw_key {
++ void *key;
++ uint32_t key_len;
++ void *iv_key;
++ uint32_t iv_key_len;
++ uint32_t flags;
++};
++struct kebab_aks_wrapped_key { void *key; uint32_t key_len, dp_class; };
++_Static_assert(sizeof(struct kebab_aks_credential)==80, "target private credential");
++_Static_assert(sizeof(struct kebab_aks_raw_key)==32 && offsetof(struct kebab_aks_raw_key, iv_key)==16 &&
++    offsetof(struct kebab_aks_raw_key, flags)==28, "target raw output ABI");
++_Static_assert(sizeof(struct kebab_aks_wrapped_key)==16 && offsetof(struct kebab_aks_wrapped_key, dp_class)==12,
++    "target wrapped output ABI");
++#define KEBAB_KEYBAG_D_BYTES 88u
++#define KEBAB_FILE_KEY_BYTES 96u
++int kebab_file_keys_prepare(const uint8_t *, unsigned);
++int kebab_file_keys_commit(void);
++void kebab_file_keys_cancel(void);
++int kebab_keybag_d_create(const uint8_t uuid[16], void *, unsigned);
++int kebab_keybag_d_open(const uint8_t uuid[16], const void *, unsigned);
++int kebab_file_key_new(const struct kebab_aks_credential *, uint32_t,
++    struct kebab_aks_raw_key *, struct kebab_aks_wrapped_key *);
++int kebab_file_key_unwrap(const struct kebab_aks_credential *, const struct kebab_aks_wrapped_key *,
++    struct kebab_aks_raw_key *);
++int kebab_file_key_rewrap(const struct kebab_aks_credential *, uint32_t,
++    const struct kebab_aks_wrapped_key *, struct kebab_aks_wrapped_key *);
++int kebab_xts128_crypt(const uint8_t key[32], uint64_t unit, const void *, void *, size_t, bool);
++int kebab_file_keys_selftest(void);
++#endif
+--- /dev/null
++++ b/bsd/kern/kebab_file_keys.c
+@@ -0,0 +1,327 @@
++/* Owner keybag/file-key core. No AKS table or user client is published here.
++ * Only audited class D is enabled; unknown classes and flags fail closed. */
++#include <pexpert/arm64/board_config.h>
++#if defined(KEBAB)
++#include <sys/systm.h>
++#include <sys/random.h>
++#include <sys/cprotect.h>
++#include <kern/locks.h>
++#include <kern/lock_group.h>
++#include <kern/debug.h>
++#include <kern/kalloc.h>
++#include <arm/machine_routines.h>
++#include <libkern/crypto/aes.h>
++#include <libkern/crypto/crypto_internal.h>
++#include <libkern/crypto/sha2.h>
++#include <IOKit/IOReturn.h>
++#include "kebab_file_keys.h"
++extern int get_preemption_level(void);
++_Static_assert(sizeof(cp_raw_key_s)==sizeof(struct kebab_aks_raw_key) &&
++    offsetof(cp_raw_key_s,iv_key)==offsetof(struct kebab_aks_raw_key,iv_key) &&
++    offsetof(cp_raw_key_s,flags)==offsetof(struct kebab_aks_raw_key,flags), "native raw key compatibility");
++_Static_assert(sizeof(cp_wrapped_key_s)==sizeof(struct kebab_aks_wrapped_key), "native wrapped key compatibility");
++
++static LCK_GRP_DECLARE(kfk_group, "kebab file keys");
++static LCK_MTX_DECLARE(kfk_lock, &kfk_group);
++static uint8_t kfk_root_kek[32], kfk_class_d[32], kfk_uuid[16];
++static bool kfk_pending, kfk_ready, kfk_bag_ready;
++
++static void
++kfk_wipe(void *memory, size_t bytes)
++{
++ volatile uint8_t *p=memory;
++ while (bytes--) *p++=0;
++}
++
++static bool
++kfk_context(void)
++{
++ return !panic_active() && !ml_at_interrupt_context() && !get_preemption_level() && ml_get_interrupts_enabled();
++}
++
++static bool
++kfk_range(const void *p, size_t bytes)
++{
++ return p && bytes && (uintptr_t)p<=UINTPTR_MAX-bytes;
++}
++
++static bool
++kfk_overlap(const void *a, size_t n, const void *b, size_t m)
++{
++ return (uintptr_t)a<(uintptr_t)b+m && (uintptr_t)b<(uintptr_t)a+n;
++}
++
++/* RFC3394, using the already-qualified constant-time native AES provider.
++ * Sizes are bounded to the two private envelopes (and public KAT input). */
++static int
++kfk_wrap(const uint8_t kek[32], const uint8_t *input, size_t bytes, uint8_t *output, bool encrypt)
++{
++ if (!kfk_range(input, bytes) || !kfk_range(output, encrypt?bytes+8:bytes-8) ||
++     bytes%8 || bytes<(encrypt?16u:24u) || bytes>(encrypt?88u:96u)) return (int)kIOReturnBadArgument;
++ uint8_t work[96]={0}, block[16]={0};
++ aes_encrypt_ctx enc; aes_decrypt_ctx dec;
++ kfk_wipe(&enc,sizeof(enc)); kfk_wipe(&dec,sizeof(dec));
++ unsigned n=(unsigned)(encrypt?bytes/8:bytes/8-1);
++ int error=encrypt?aes_encrypt_key256(kek,&enc):aes_decrypt_key256(kek,&dec);
++ if (error) { error=(int)kIOReturnError; goto done; }
++ if (encrypt) { memset(work,0xa6,8);memcpy(work+8,input,bytes); }
++ else memcpy(work,input,bytes);
++ for (unsigned step=0;step<6*n;++step) {
++  unsigned j=encrypt?step/n:5-step/n;
++  unsigned i=encrypt?step%n+1:n-step%n;
++  uint64_t t=(uint64_t)n*j+i;
++  memcpy(block,work,8);memcpy(block+8,work+8*i,8);
++  if (!encrypt) for (unsigned b=0;b<8;++b) block[7-b]^=(uint8_t)(t>>(8*b));
++  if (encrypt?aes_encrypt(block,block,&enc):aes_decrypt(block,block,&dec)) { error=(int)kIOReturnError;goto done; }
++  if (encrypt) for (unsigned b=0;b<8;++b) block[7-b]^=(uint8_t)(t>>(8*b));
++  memcpy(work,block,8);memcpy(work+8*i,block+8,8);
++ }
++ if (!encrypt) {
++  unsigned diff=0;for(unsigned i=0;i<8;++i)diff|=work[i]^0xa6;
++  if (diff) { error=(int)kIOReturnNotPermitted;goto done; }
++ }
++ memcpy(output,work+(encrypt?0:8),encrypt?bytes+8:bytes-8);
++ error=0;
++done:
++ kfk_wipe(work,sizeof(work));kfk_wipe(block,sizeof(block));
++ kfk_wipe(&enc,sizeof(enc));kfk_wipe(&dec,sizeof(dec));
++ return error;
++}
++
++int
++kebab_file_keys_prepare(const uint8_t *secret, unsigned bytes)
++{
++ if (!kfk_context() || !secret || bytes!=32 || !g_crypto_funcs ||
++     !g_crypto_funcs->ccsha256_di || !g_crypto_funcs->cchmac_fn) return (int)kIOReturnBadArgument;
++ /* A separate domain from the root-record witness. Class keys are random
++  * per bag, never derived directly from a stable volume UUID. */
++ static const uint8_t domain[]="UniXNU.kebab.keybag-KEK.v1";
++ uint8_t kek[32];
++ g_crypto_funcs->cchmac_fn(g_crypto_funcs->ccsha256_di,bytes,secret,sizeof(domain),domain,kek);
++ lck_mtx_lock(&kfk_lock);
++ kfk_wipe(kfk_root_kek,sizeof(kfk_root_kek));kfk_wipe(kfk_class_d,sizeof(kfk_class_d));kfk_wipe(kfk_uuid,sizeof(kfk_uuid));
++ memcpy(kfk_root_kek,kek,32);kfk_pending=true;kfk_ready=false;kfk_bag_ready=false;
++ lck_mtx_unlock(&kfk_lock);kfk_wipe(kek,sizeof(kek));
++ return 0;
++}
++
++int
++kebab_file_keys_commit(void)
++{
++ if (!kfk_context()) return (int)kIOReturnNotPermitted;
++ lck_mtx_lock(&kfk_lock);
++ int error=kfk_pending?0:(int)kIOReturnNotReady;
++ if (!error) { kfk_pending=false;kfk_ready=true; }
++ lck_mtx_unlock(&kfk_lock);return error;
++}
++
++void
++kebab_file_keys_cancel(void)
++{
++ lck_mtx_lock(&kfk_lock);
++ kfk_ready=kfk_pending=kfk_bag_ready=false;
++ kfk_wipe(kfk_root_kek,sizeof(kfk_root_kek));kfk_wipe(kfk_class_d,sizeof(kfk_class_d));kfk_wipe(kfk_uuid,sizeof(kfk_uuid));
++ lck_mtx_unlock(&kfk_lock);
++}
++
++int
++kebab_keybag_d_create(const uint8_t uuid[16], void *output, unsigned capacity)
++{
++ if (!kfk_context() || !kfk_range(uuid,16) || !kfk_range(output,capacity) || capacity<88 || capacity>4096 ||
++     kfk_overlap(uuid,16,output,capacity)) return (int)kIOReturnBadArgument;
++ uint8_t plain[80]={0},sealed[88]={0};
++ memcpy(plain,"KB01",4);plain[4]=1;plain[6]=0x10;memcpy(plain+8,uuid,16);
++ lck_mtx_lock(&kfk_lock);
++ int error=(int)kIOReturnNotReady;
++ if (kfk_ready) {
++  read_random(plain+24,48); /* Independent epoch and class D key. */
++  error=kfk_wrap(kfk_root_kek,plain,sizeof(plain),sealed,true);
++  if (!error) memcpy(output,sealed,sizeof(sealed));
++ }
++ lck_mtx_unlock(&kfk_lock);kfk_wipe(plain,sizeof(plain));kfk_wipe(sealed,sizeof(sealed));return error;
++}
++
++int
++kebab_keybag_d_open(const uint8_t uuid[16], const void *input, unsigned bytes)
++{
++ if (!kfk_context() || !kfk_range(uuid,16) || !kfk_range(input,bytes) || bytes!=88) return (int)kIOReturnBadArgument;
++ uint8_t plain[80]={0};
++ lck_mtx_lock(&kfk_lock);
++ int error=kfk_ready?kfk_wrap(kfk_root_kek,input,bytes,plain,false):(int)kIOReturnNotReady;
++ if (!error && (memcmp(plain,"KB01\1\0\20\0",8) || memcmp(plain+8,uuid,16))) error=(int)kIOReturnNotPermitted;
++ for(unsigned i=72;!error && i<80;++i)if(plain[i])error=(int)kIOReturnNotPermitted;
++ if (!error) { memcpy(kfk_class_d,plain+40,32);memcpy(kfk_uuid,uuid,16);kfk_bag_ready=true; }
++ lck_mtx_unlock(&kfk_lock);kfk_wipe(plain,sizeof(plain));return error;
++}
++
++static int
++kfk_credential(const struct kebab_aks_credential *cred, uint32_t cls)
++{
++ if (!kfk_range(cred,sizeof(*cred))) return (int)kIOReturnBadArgument;
++ if (cls!=4) return (int)kIOReturnUnsupported;
++ if (!kfk_ready || !kfk_bag_ready) return (int)kIOReturnNotReady;
++ if (memcmp(cred->bytes+22,kfk_uuid,16)) return (int)kIOReturnNotPermitted;
++ for(unsigned i=8;i<12;++i)if(cred->bytes[i])return (int)kIOReturnUnsupported;
++ for(unsigned i=38;i<80;++i)if(cred->bytes[i])return (int)kIOReturnUnsupported;
++ return 0;
++}
++
++static bool
++kfk_raw(struct kebab_aks_raw_key *raw)
++{
++ return kfk_range(raw,sizeof(*raw)) && raw->key_len>=32 && raw->key_len<=64 &&
++     raw->iv_key_len>=16 && raw->iv_key_len<=64 && kfk_range(raw->key,raw->key_len) &&
++     kfk_range(raw->iv_key,raw->iv_key_len) && !kfk_overlap(raw->key,raw->key_len,raw->iv_key,raw->iv_key_len);
++}
++
++static bool
++kfk_output_alias(const struct kebab_aks_credential *cred, struct kebab_aks_raw_key *raw,
++    const struct kebab_aks_wrapped_key *wrapped)
++{
++ const void *headers[]={cred,raw,wrapped};
++ const size_t sizes[]={sizeof(*cred),sizeof(*raw),sizeof(*wrapped)};
++ for(unsigned i=0;i<3;++i) {
++  if (!kfk_range(headers[i],sizes[i]) || kfk_overlap(raw->key,raw->key_len,headers[i],sizes[i]) ||
++      kfk_overlap(raw->iv_key,raw->iv_key_len,headers[i],sizes[i]) ||
++      kfk_overlap(wrapped->key,wrapped->key_len,headers[i],sizes[i])) return true;
++ }
++ return false;
++}
++
++static void
++kfk_plain(uint8_t out[88], const struct kebab_aks_credential *cred, const uint8_t raw[48])
++{
++ memset(out,0,88);memcpy(out,"KF01\1\0",6);memcpy(out+6,cred->bytes+20,2);
++ memcpy(out+8,cred->bytes+22,16);memcpy(out+24,cred->bytes,8);out[32]=4;out[36]=32;out[38]=16;
++ memcpy(out+40,raw,48);
++}
++
++static bool
++kfk_identity(const uint8_t in[88], const struct kebab_aks_credential *cred)
++{
++ uint8_t expected[88];uint8_t zero[48]={0};kfk_plain(expected,cred,zero);
++ unsigned diff=0;for(unsigned i=0;i<40;++i)diff|=in[i]^expected[i];kfk_wipe(expected,sizeof(expected));
++ return diff==0;
++}
++
++int
++kebab_file_key_new(const struct kebab_aks_credential *cred, uint32_t cls,
++    struct kebab_aks_raw_key *raw, struct kebab_aks_wrapped_key *wrapped)
++{
++ if (!kfk_context() || !kfk_raw(raw) || !kfk_range(wrapped,sizeof(*wrapped)) ||
++     wrapped->key_len<96 || wrapped->key_len>128 || !kfk_range(wrapped->key,wrapped->key_len) ||
++     kfk_output_alias(cred,raw,wrapped) ||
++     kfk_overlap(raw->key,raw->key_len,wrapped->key,wrapped->key_len) ||
++     kfk_overlap(raw->iv_key,raw->iv_key_len,wrapped->key,wrapped->key_len)) return (int)kIOReturnBadArgument;
++ uint8_t material[48]={0},plain[88]={0},sealed[96]={0};
++ lck_mtx_lock(&kfk_lock);int error=kfk_credential(cred,cls);
++ if (!error) {
++  read_random(material,sizeof(material));kfk_plain(plain,cred,material);
++  error=kfk_wrap(kfk_class_d,plain,sizeof(plain),sealed,true);
++  if (!error) {
++   memcpy(wrapped->key,sealed,96);wrapped->key_len=96;wrapped->dp_class=4;
++   memcpy(raw->key,material,32);memcpy(raw->iv_key,material+32,16);
++   raw->key_len=32;raw->iv_key_len=16;raw->flags=0;
++  }
++ }
++ lck_mtx_unlock(&kfk_lock);kfk_wipe(material,sizeof(material));kfk_wipe(plain,sizeof(plain));kfk_wipe(sealed,sizeof(sealed));return error;
++}
++
++int
++kebab_file_key_unwrap(const struct kebab_aks_credential *cred, const struct kebab_aks_wrapped_key *wrapped,
++    struct kebab_aks_raw_key *raw)
++{
++ if (!kfk_context() || !kfk_raw(raw) || !kfk_range(wrapped,sizeof(*wrapped)) ||
++     wrapped->key_len!=96 || !kfk_range(wrapped->key,96) ||
++     kfk_output_alias(cred,raw,wrapped) ||
++     kfk_overlap(raw->key,raw->key_len,wrapped->key,96) ||
++     kfk_overlap(raw->iv_key,raw->iv_key_len,wrapped->key,96)) return (int)kIOReturnBadArgument;
++ uint8_t plain[88]={0};
++ lck_mtx_lock(&kfk_lock);int error=kfk_credential(cred,wrapped->dp_class);
++ if (!error) error=kfk_wrap(kfk_class_d,wrapped->key,96,plain,false);
++ if (!error && !kfk_identity(plain,cred)) error=(int)kIOReturnNotPermitted;
++ if (!error) {
++  memcpy(raw->key,plain+40,32);memcpy(raw->iv_key,plain+72,16);raw->key_len=32;raw->iv_key_len=16;raw->flags=0;
++ }
++ lck_mtx_unlock(&kfk_lock);kfk_wipe(plain,sizeof(plain));return error;
++}
++
++int
++kebab_file_key_rewrap(const struct kebab_aks_credential *cred, uint32_t cls,
++    const struct kebab_aks_wrapped_key *input, struct kebab_aks_wrapped_key *output)
++{
++ if (!kfk_context() || !kfk_range(input,sizeof(*input)) || !kfk_range(output,sizeof(*output)) ||
++     input->key_len!=96 || output->key_len<96 || output->key_len>128 || !kfk_range(input->key,96) ||
++     !kfk_range(output->key,output->key_len)) return (int)kIOReturnBadArgument;
++ if (!kfk_range(cred,sizeof(*cred)) || kfk_overlap(output->key,output->key_len,cred,sizeof(*cred)) ||
++     kfk_overlap(output->key,output->key_len,input,sizeof(*input)) ||
++     kfk_overlap(output->key,output->key_len,output,sizeof(*output)) ||
++     kfk_overlap(input->key,96,input,sizeof(*input)) || kfk_overlap(input->key,96,output,sizeof(*output))) return (int)kIOReturnBadArgument;
++ uint8_t plain[88]={0};lck_mtx_lock(&kfk_lock);int error=kfk_credential(cred,cls);
++ if (!error && input->dp_class!=4) error=(int)kIOReturnUnsupported;
++ if (!error) error=kfk_wrap(kfk_class_d,input->key,96,plain,false);
++ if (!error && !kfk_identity(plain,cred)) error=(int)kIOReturnNotPermitted;
++ if (!error) { memmove(output->key,input->key,96);output->key_len=96;output->dp_class=4; }
++ lck_mtx_unlock(&kfk_lock);kfk_wipe(plain,sizeof(plain));return error;
++}
++
++int
++kebab_xts128_crypt(const uint8_t key[32], uint64_t unit, const void *input, void *output, size_t bytes, bool encrypt)
++{
++ if (!kfk_range(key,32) || !kfk_range(input,bytes) || !kfk_range(output,bytes) || bytes%4096 ||
++     bytes>16u*1024u*1024u || unit>UINT64_MAX-(bytes/4096-1) ||
++     (input!=output && kfk_overlap(input,bytes,output,bytes))) return (int)kIOReturnBadArgument;
++ aes_encrypt_ctx data_enc,tweak_enc; aes_decrypt_ctx data_dec;
++ uint8_t tweak[16]={0},block[16]={0},iv[16]={0};
++ kfk_wipe(&data_enc,sizeof(data_enc));kfk_wipe(&data_dec,sizeof(data_dec));kfk_wipe(&tweak_enc,sizeof(tweak_enc));
++ int error=aes_encrypt_key128(key+16,&tweak_enc);
++ if (!error) error=encrypt?aes_encrypt_key128(key,&data_enc):aes_decrypt_key128(key,&data_dec);
++ if (error) { error=(int)kIOReturnError;goto done; }
++ for(size_t offset=0;offset<bytes;offset+=4096,++unit) {
++  memset(iv,0,16);for(unsigned i=0;i<8;++i)iv[i]=(uint8_t)(unit>>(8*i));
++  if (aes_encrypt(iv,tweak,&tweak_enc)) { error=(int)kIOReturnError;goto done; }
++  for(unsigned at=0;at<4096;at+=16) {
++   const uint8_t *in=(const uint8_t *)input+offset+at;uint8_t *out=(uint8_t *)output+offset+at;
++   for(unsigned i=0;i<16;++i)block[i]=in[i]^tweak[i];
++   if (encrypt?aes_encrypt(block,block,&data_enc):aes_decrypt(block,block,&data_dec)) { error=(int)kIOReturnError;goto done; }
++   for(unsigned i=0;i<16;++i)out[i]=block[i]^tweak[i];
++   unsigned carry=0;
++   for(unsigned i=0;i<16;++i) { unsigned next=tweak[i]>>7;tweak[i]=(uint8_t)((tweak[i]<<1)|carry);carry=next; }
++   tweak[0]^=(uint8_t)(0x87u & (0u-carry));
++  }
++ }
++done:
++ kfk_wipe(&data_enc,sizeof(data_enc));kfk_wipe(&data_dec,sizeof(data_dec));kfk_wipe(&tweak_enc,sizeof(tweak_enc));
++ kfk_wipe(tweak,sizeof(tweak));kfk_wipe(block,sizeof(block));kfk_wipe(iv,sizeof(iv));return error;
++}
++
++int
++kebab_file_keys_selftest(void)
++{
++ static const uint8_t kw_expected[24]={0x64,0xe8,0xc3,0xf9,0xce,0x0f,0x5b,0xa2,0x63,0xe9,0x77,0x79,
++     0x05,0x81,0x8a,0x2a,0x93,0xc8,0x19,0x1e,0x7d,0x6e,0x8a,0xe7};
++ static const uint8_t xts_digest[32]={0xe4,0x41,0x9c,0x20,0x34,0x78,0x44,0xa0,0x13,0xee,0x15,0x9b,0xbd,0x42,0x7a,0x12,
++     0x3c,0x33,0x0c,0x21,0xbf,0xe0,0x32,0x76,0x9d,0x0c,0x51,0x7f,0x5d,0xed,0xaa,0x05};
++ struct { uint8_t plain[4096],cipher[4096],back[4096]; } *work=kalloc_data(sizeof(*work),Z_WAITOK|Z_ZERO);
++ if (!work) return (int)kIOReturnNoMemory;
++ uint8_t key[32],plain[16],sealed[24],restored[16],digest[32];
++ for(unsigned i=0;i<32;++i)key[i]=(uint8_t)i;
++ for(unsigned i=0;i<16;++i)plain[i]=(uint8_t)(17*i);
++ int error=kfk_wrap(key,plain,16,sealed,true);
++ if (!error && memcmp(sealed,kw_expected,24))error=(int)kIOReturnError;
++ if (!error)error=kfk_wrap(key,sealed,24,restored,false);
++ if (!error && memcmp(plain,restored,16))error=(int)kIOReturnError;
++ for(unsigned i=0;i<4096;++i)work->plain[i]=(uint8_t)i;
++ if (!error)error=kebab_xts128_crypt(key,0x123456789abcdefull,work->plain,work->cipher,4096,true);
++ if (!error) {
++  SHA256_CTX hash;SHA256_Init(&hash);SHA256_Update(&hash,work->cipher,4096);SHA256_Final(digest,&hash);
++  if(memcmp(digest,xts_digest,32))error=(int)kIOReturnError;
++ }
++ if (!error)error=kebab_xts128_crypt(key,0x123456789abcdefull,work->cipher,work->back,4096,false);
++ if (!error && memcmp(work->plain,work->back,4096))error=(int)kIOReturnError;
++ printf("KEBAB FILE KEYS: native RFC3394/AES128-XTS public KAT %s\n",error?"FAIL":"PASS");
++ kfk_wipe(key,sizeof(key));kfk_wipe(plain,sizeof(plain));kfk_wipe(sealed,sizeof(sealed));
++ kfk_wipe(restored,sizeof(restored));kfk_wipe(digest,sizeof(digest));kfk_wipe(work,sizeof(*work));kfree_data(work,sizeof(*work));
++ return error;
++}
++#endif
+--- /dev/null
++++ b/bsd/kern/kebab_file_keys_probe_impl.h
+@@ -0,0 +1,115 @@
++/* Fixed encrypted diagnostic record, not the real Data volume or an AKS shim. */
++#include "kebab_file_keys.h"
++#define KFK_PROOF_PATH "/private/preboot/.hios-file-keys-proof-v1"
++#define KFK_PROOF_BYTES 12288u
++static const uint8_t kfp_uuid[16]={0x70,0x75,0x62,0x6c,0x69,0x63,0x41,0x11,0x90,0x11,0x22,0x33,0x44,0x55,0x66,0x77};
++
++static int
++kfp_preservation(mount_t expected, uint8_t *buffer, uint8_t digest[32])
++{
++ SHA256_CTX hash;SHA256_Init(&hash);
++ int error=kdr_read(KEBAB_NONCE_PATH,expected,buffer,vfs_context_current());
++ if(!error)SHA256_Update(&hash,buffer,4096);
++ if(!error)error=kdr_read(KDR_PATH,expected,buffer,vfs_context_current());
++ if(!error)SHA256_Update(&hash,buffer,4096);
++ SHA256_Final(digest,&hash);return error;
++}
++
++static int
++kfp_metadata(vnode_t file, mount_t expected, vfs_context_t context)
++{
++ if(!vnode_isreg(file)||vnode_mount(file)!=expected)return EAUTH;
++ struct vnode_attr a;VATTR_INIT(&a);
++ VATTR_WANTED(&a,va_data_size);VATTR_WANTED(&a,va_mode);VATTR_WANTED(&a,va_uid);VATTR_WANTED(&a,va_gid);
++ VATTR_WANTED(&a,va_flags);VATTR_WANTED(&a,va_nlink);
++ int error=vnode_getattr(file,&a,context);
++ if(!error && (!VATTR_IS_SUPPORTED(&a,va_data_size)||!VATTR_IS_SUPPORTED(&a,va_mode)||
++     !VATTR_IS_SUPPORTED(&a,va_uid)||!VATTR_IS_SUPPORTED(&a,va_gid)||!VATTR_IS_SUPPORTED(&a,va_flags)||
++     !VATTR_IS_SUPPORTED(&a,va_nlink)||a.va_data_size!=KFK_PROOF_BYTES||(a.va_mode&07777)!=0600||
++     a.va_uid||a.va_gid||a.va_flags||a.va_nlink!=1))error=EAUTH;
++ size_t count=0;if(!error)error=vn_listxattr(file,NULL,&count,XATTR_NODEFAULT|XATTR_NOSECURITY|XATTR_NOFOLLOW,context);
++ return !error && count?EAUTH:error;
++}
++
++static void
++kfp_header(uint8_t *record)
++{
++ bzero(record,4096);memcpy(record,"HIOS-FILE-PROOF",16);
++ uint32_t fields[]={1,KFK_PROOF_BYTES};memcpy(record+16,fields,sizeof(fields));
++ memcpy(record+24,kfp_uuid,16);
++ uint64_t crypto=0x1020304050607080ull,unit=0x123456789abcdefull;
++ memcpy(record+40,&crypto,8);memcpy(record+48,&unit,8);
++ const uint32_t sizes[]={4,88,96,8192};memcpy(record+56,sizes,sizeof(sizes));
++ record[72]=1;
++}
++
++static int
++kfp_record(mount_t expected, bool create)
++{
++ if(kdr_policy(2) || !expected || !rootvnode || expected==vnode_mount(rootvnode) ||
++     !(vfs_flags(vnode_mount(rootvnode))&MNT_RDONLY) || strcmp(vfs_statfs(expected)->f_fstypename,"apfs") ||
++     (((vfs_flags(expected)&MNT_RDONLY)!=0)==create))return EROFS;
++ struct kfp_work { uint8_t record[KFK_PROOF_BYTES],readback[KFK_PROOF_BYTES],plain[8192],back[8192],key[64],iv[16]; };
++ struct kfp_work *w=kalloc_data(sizeof(*w),Z_WAITOK|Z_ZERO);
++ if(!w)return ENOMEM;
++ vfs_context_t context=vfs_context_current();vnode_t file=NULLVP;
++ uint8_t before[32]={0},after[32]={0};bool measured=false;
++ int error=kfp_preservation(expected,w->readback,before);
++ if(error)goto done;
++ measured=true;
++ if(create) {
++  error=vnode_open(KFK_PROOF_PATH,O_NOFOLLOW|FREAD,0,0,&file,context);
++  if(!error){int ignored=vnode_close(file,FREAD,context);(void)ignored;file=NULLVP;error=EEXIST;goto done;}
++  if(error!=ENOENT)goto done;
++  error=0;kfp_header(w->record);
++ } else {
++  error=vnode_open(KFK_PROOF_PATH,O_NOFOLLOW|FREAD,0,0,&file,context);if(error)goto done;
++  error=kfp_metadata(file,expected,context);
++  if(!error){int residual=0;error=vn_rdwr(UIO_READ,file,(caddr_t)w->record,KFK_PROOF_BYTES,0,UIO_SYSSPACE,IO_NOCACHE,vfs_context_ucred(context),&residual,NULL);if(!error&&residual)error=EIO;}
++  int close_error=vnode_close(file,FREAD,context);file=NULLVP;if(!error)error=close_error;
++  if(error)goto done;
++  kfp_header(w->readback);
++  if(memcmp(w->record,w->readback,128)){error=EAUTH;goto done;}
++  for(unsigned i=128+88+96;i<4096;++i)if(w->record[i]){error=EAUTH;goto done;}
++ }
++ struct kebab_aks_credential cred={{0}};
++ memcpy(cred.bytes,w->record+40,8);memcpy(cred.bytes+20,w->record+72,2);memcpy(cred.bytes+22,kfp_uuid,16);
++ struct kebab_aks_raw_key raw={w->key,64,w->iv,16,0};
++ struct kebab_aks_wrapped_key wrapped={w->record+128+88,create?128u:96u,4};
++ if(create && kebab_keybag_d_create(kfp_uuid,w->record+128,88)){error=EIO;goto done;}
++ if(kebab_keybag_d_open(kfp_uuid,w->record+128,88)){error=EAUTH;goto done;}
++ if(create?kebab_file_key_new(&cred,4,&raw,&wrapped):kebab_file_key_unwrap(&cred,&wrapped,&raw)){error=EAUTH;goto done;}
++ for(unsigned i=0;i<8192;++i)w->plain[i]=(uint8_t)(i*13+i/251);
++ if(create) {
++  if(kebab_xts128_crypt(w->key,0x123456789abcdefull,w->plain,w->record+4096,8192,true)){error=EIO;goto done;}
++  if(!memcmp(w->plain,w->record+4096,8192)){error=EAUTH;goto done;}
++ }
++ if(kebab_xts128_crypt(w->key,0x123456789abcdefull,w->record+4096,w->back,8192,false)||memcmp(w->plain,w->back,8192)){error=EAUTH;goto done;}
++ printf("KEBAB FILE KEYS: hardware-root keybag/file-key/XTS %s PASS bytes=8192; synthetic volume only\n",create?"encrypt/read":"cold decrypt");
++ /* In-memory negative test, never modifying the stored proof. */
++ w->record[128+88]^=1;memset(w->key,0xa5,64);raw.key_len=64;raw.iv_key_len=16;
++ int rejected=kebab_file_key_unwrap(&cred,&wrapped,&raw);
++ w->record[128+88]^=1;
++ if(!rejected){error=EAUTH;goto done;}
++ for(unsigned i=0;i<64;++i)if(w->key[i]!=0xa5){error=EAUTH;goto done;}
++ printf("KEBAB FILE KEYS: wrapped-key tamper rejected, no partial raw output PASS\n");
++ if(create) {
++  error=vnode_open(KFK_PROOF_PATH,O_CREAT|O_EXCL|O_NOFOLLOW|FWRITE,0600,0,&file,context);if(error)goto done;
++  if(!vnode_isreg(file)||vnode_mount(file)!=expected)error=EAUTH;
++  if(!error){int residual=0;error=vn_rdwr(UIO_WRITE,file,(caddr_t)w->record,KFK_PROOF_BYTES,0,UIO_SYSSPACE,IO_SYNC|IO_NOCACHE,vfs_context_ucred(context),&residual,NULL);if(!error&&residual)error=EIO;int sync_error=VNOP_FSYNC(file,MNT_WAIT,context);if(!error)error=sync_error;}
++  int close_error=vnode_close(file,FWRITE,context);file=NULLVP;if(!error)error=close_error;
++  if(error)goto done;
++  error=vnode_open(KFK_PROOF_PATH,O_NOFOLLOW|FREAD,0,0,&file,context);if(error)goto done;
++  error=kfp_metadata(file,expected,context);
++  if(!error){int residual=0;error=vn_rdwr(UIO_READ,file,(caddr_t)w->readback,KFK_PROOF_BYTES,0,UIO_SYSSPACE,IO_NOCACHE,vfs_context_ucred(context),&residual,NULL);if(!error&&residual)error=EIO;}
++  close_error=vnode_close(file,FREAD,context);file=NULLVP;if(!error)error=close_error;
++  if(!error&&memcmp(w->record,w->readback,KFK_PROOF_BYTES))error=EAUTH;
++ }
++done:
++ if(measured){int preserve=kfp_preservation(expected,w->readback,after);if(!preserve&&memcmp(before,after,32))preserve=EAUTH;printf("KEBAB FILE KEYS: existing nonce/Data root records preserved=%u\n",!preserve);if(!error)error=preserve;}
++ printf("KEBAB FILE KEYS: fixed encrypted proof %s %s (%d); no real Data mount\n",create?"exclusive write/read":"cold read",error?"FAIL":"PASS",error);
++ volatile uint8_t *a=before,*b=after,*bytes=(volatile uint8_t *)w;
++ for(unsigned i=0;i<32;++i){a[i]=0;b[i]=0;}
++ for(size_t i=0;i<sizeof(*w);++i)bytes[i]=0;
++ kfree_data(w,sizeof(*w));return error;
++}

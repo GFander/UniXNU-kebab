@@ -1,0 +1,138 @@
+--- a/bsd/dev/kebab_ufs.c
++++ b/bsd/dev/kebab_ufs.c
+@@ -32,6 +32,7 @@
+ #include <sys/proc.h>
+ #include <sys/uio.h>
+ #include <miscfs/devfs/devfs.h>
++#include <kern/debug.h>
+ #include <kern/locks.h>
+ #include <kern/clock.h>
+ #include <machine/machine_routines.h>
+@@ -50,6 +51,7 @@
+ 
+ #include "kebab_ufs.h"
+ 
++extern int get_preemption_level(void);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ extern void console_write(char *buf, int len);
+ /* osfmk/arm/machine_routines.h, not exported to the BSD layer */
+@@ -450,6 +452,62 @@
+ 	}
+ 	printf("KEBAB UFS: no GPT partition named \"%s\"\n", want);
+ 	return ENOENT;
++}
++
++
++/* Inspection is deliberately limited to the public executable keymaster_b.
++ * The device's saved GPT places it on LU4. Never expose arbitrary LU/LBA reads,
++ * RPMB, keystore or other partitions. All state is restored under the same
++ * mutex that serializes the mounted root's transfers, including error paths.
++ */
++static uint32_t
++ufs_inspect_crc32(const uint8_t *bytes, uint32_t size)
++{
++	uint32_t crc=UINT32_MAX;
++	for (uint32_t i=0; i<size; i++) {
++		crc^=bytes[i];
++		for (unsigned j=0; j<8; j++) crc=(crc>>1)^(0xedb88320u & (0u-(crc&1)));
++	}
++	return ~crc;
++}
++
++int kebab_ufs_keymaster_firmware(void *output, uint32_t size);
++int
++kebab_ufs_keymaster_firmware(void *output, uint32_t size)
++{
++	if (!output || size!=0x80000) return EINVAL;
++	if (panic_active() || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()) return EBUSY;
++	lck_mtx_lock(&kebab_ufs_lock);
++	int error=ENXIO;
++	uint8_t saved_lun=su.lun;
++	uint64_t saved_capacity=su.device_blocks,saved_first=su.first_block,saved_blocks=su.nblocks;
++	if (!su.ready || su.failed || saved_lun!=0 || su.writable) goto restore;
++	su.lun=4;
++	error=ufs_read_capacity(); if (error) goto restore;
++	error=ufs_read_blocks(1,1); if (error) goto restore;
++	uint8_t *b=(uint8_t *)(su.dma+DMA_BOUNCE);
++	uint32_t header_size,header_crc,table_crc,nent,esz;
++	uint64_t entry_lba,current_lba;
++	memcpy(&header_size,b+12,4); memcpy(&header_crc,b+16,4);
++	memcpy(&current_lba,b+24,8); memcpy(&entry_lba,b+72,8);
++	memcpy(&nent,b+80,4); memcpy(&esz,b+84,4); memcpy(&table_crc,b+88,4);
++	if (memcmp(b,"EFI PART",8) || current_lba!=1 || header_size<92 || header_size>UFS_BLOCK ||
++	    esz!=128 || !nent || nent>BOUNCE_SIZE/esz) { error=EINVAL; goto restore; }
++	bzero(b+16,4);
++	if (ufs_inspect_crc32(b,header_size)!=header_crc) { error=EINVAL; goto restore; }
++	error=ufs_read_blocks(entry_lba,(nent*esz+UFS_BLOCK-1)/UFS_BLOCK); if (error) goto restore;
++	if (ufs_inspect_crc32(b,nent*esz)!=table_crc) { error=EINVAL; goto restore; }
++	error=ufs_find_partition("keymaster_b"); if (error) goto restore;
++	if (su.nblocks!=size/UFS_BLOCK) { error=EINVAL; goto restore; }
++	error=ufs_read_blocks(su.first_block,(uint32_t)su.nblocks); if (error) goto restore;
++	/* Only an ARM64 little-endian ELF executable is eligible for extraction. */
++	if (memcmp(b,"\177ELF\002\001\001",7) || b[18]!=0xb7 || b[19]!=0) { error=EINVAL; goto restore; }
++	memcpy(output,b,size);
++restore:
++	su.lun=saved_lun; su.device_blocks=saved_capacity;
++	su.first_block=saved_first; su.nblocks=saved_blocks;
++	lck_mtx_unlock(&kebab_ufs_lock);
++	return error;
+ }
+ 
+ static int
+--- a/bsd/kern/kebab_qsee_probe.c
++++ b/bsd/kern/kebab_qsee_probe.c
+@@ -6,6 +6,8 @@
+ #if defined(KEBAB)
+ #include <sys/param.h>
+ #include <sys/systm.h>
++#include <kern/kalloc.h>
++#include <kern/clock.h>
+ #include <kern/debug.h>
+ #include <mach/vm_param.h>
+ #include <vm/pmap.h>
+@@ -470,6 +472,37 @@
+ 	return true;
+ }
+ 
++
++/* One-shot public firmware extraction for ABI inspection, not a key dump.
++ * BSD boot thread prints paced lines so the independent USB worker drains TX.
++ * No normal/panic USB command can select another partition or invoke this.
++ */
++extern int kebab_ufs_keymaster_firmware(void *, uint32_t);
++static void
++qsee_firmware_readback(void)
++{
++	int enabled=0;
++	PE_parse_boot_argn("kebab_keymaster_firmware",&enabled,sizeof(enabled));
++	if (enabled!=1) return;
++	uint8_t *image=kalloc_data(0x80000,Z_WAITOK|Z_ZERO);
++	if (!image) { printf("KEBAB KMFW: allocation failed\n"); return; }
++	int error=kebab_ufs_keymaster_firmware(image,0x80000);
++	if (!error) {
++		printf("KEBAB KMFW: begin keymaster_b size=524288 readonly=1\n");
++		static const char hex[]="0123456789abcdef";
++		for (unsigned off=0; off<0x80000; off+=64) {
++			char line[129];
++			for (unsigned i=0; i<64; i++) {
++				line[2*i]=hex[image[off+i]>>4]; line[2*i+1]=hex[image[off+i]&15];
++			}
++			line[128]=0; printf("KEBAB KMFW: %06x %s\n",off,line);
++			delay(2000);
++		}
++		printf("KEBAB KMFW: end\n");
++	} else printf("KEBAB KMFW: read refused/error=%d\n",error);
++	kfree_data(image,0x80000);
++}
++
+ void kebab_qsee_probe(void);
+ void
+ kebab_qsee_probe(void)
+@@ -483,6 +516,7 @@
+ 	static bool attempted;
+ 	if (attempted) { printf("KEBAB QSEE: already attempted\n"); return; }
+ 	attempted=true;
++	qsee_firmware_readback();
+ 	printf("KEBAB QSEE: fixed lookup begin; experimental key commands require a separate flag\n");
+ 	if (PAGE_SIZE!=0x4000 || qsee_available(0x02000601)!=1 || qsee_available(0x32000103)!=1) return;
+ 

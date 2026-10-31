@@ -1,0 +1,168 @@
+--- a/bsd/net/skywalk_stubs.c
++++ b/bsd/net/skywalk_stubs.c
+@@ -135,6 +135,9 @@
+ STUB(kern_packet_get_transport_traffic_background)
+ STUB(kern_packet_get_transport_traffic_realtime)
+ STUB(kern_packet_set_compression_generation_count);
++STUB(kern_packet_set_fpd_command);
++STUB(kern_packet_set_fpd_context_id);
++STUB(kern_packet_set_fpd_sequence_number);
+ STUB(kern_packet_set_flow_uuid);
+ STUB(kern_packet_set_inet_checksum);
+ STUB(kern_packet_set_headroom);
+--- a/bsd/skywalk/packet/os_packet.h
++++ b/bsd/skywalk/packet/os_packet.h
+@@ -875,6 +875,13 @@
+     kern_buflet_t pbuf);
+ extern void kern_pbufpool_destroy(kern_pbufpool_t);
+ extern kern_segment_idx_t kern_segment_get_index(const kern_segment_t);
++
++/*
++ * FPD.
++ */
++extern errno_t kern_packet_set_fpd_command(const kern_packet_t, uint8_t);
++extern errno_t kern_packet_set_fpd_context_id(const kern_packet_t, uint16_t);
++extern errno_t kern_packet_set_fpd_sequence_number(const kern_packet_t, uint32_t);
+ __END_DECLS
+ #endif /* KERNEL */
+ #endif /* PRIVATE */
+--- a/bsd/skywalk/packet/packet_kern.c
++++ b/bsd/skywalk/packet/packet_kern.c
+@@ -285,6 +285,36 @@
+     uint16_t *val, const boolean_t tx)
+ {
+ 	return __packet_get_inet_checksum(ph, start, val, tx);
++}
++
++errno_t
++kern_packet_set_fpd_command(const kern_packet_t ph,
++							uint8_t cmd)
++{
++	errno_t result;
++
++	if (cmd > 7)
++		return 22;
++	result = 0;
++	PKT_ADDR(ph)->pkt_fpd_metadata |= ((cmd & 7) << 6) | 0x8000;
++	return result;
++}
++
++errno_t
++kern_packet_set_fpd_sequence_number(const kern_packet_t ph,
++									uint32_t seq_num)
++{
++	PKT_ADDR(ph)->pkt_fpd_seqnum = seq_num;
++	PKT_ADDR(ph)->pkt_fpd_metadata |= 0x8000;
++	return 0;
++}
++
++errno_t
++kern_packet_set_fpd_context_id(const kern_packet_t ph,
++							   uint16_t ctx_id)
++{
++	PKT_ADDR(ph)->pkt_fpd_metadata |= ctx_id & 0x3F | 0x8000;
++	return 0;
+ }
+ 
+ void
+--- a/bsd/skywalk/packet/packet_var.h
++++ b/bsd/skywalk/packet/packet_var.h
+@@ -474,7 +474,9 @@
+ 
+ 	void *      pkt_priv;   /* free to use for every layer */
+ 
+-
++	uint32_t               pkt_fpd_seqnum;   // @ 0xd0
++	uint16_t               pkt_fpd_metadata; // @ 0xd4
++	
+ 	/*
+ 	 * Kernel specific.
+ 	 *
+--- a/bsd/sys/kas_info.h
++++ b/bsd/sys/kas_info.h
+@@ -44,7 +44,12 @@
+ #define KAS_INFO_KERNEL_TEXT_SLIDE_SELECTOR     (0) /* returns uint64_t */
+ #define KAS_INFO_KERNEL_SEGMENT_VMADDR_SELECTOR (1)
+ 
+-#define KAS_INFO_MAX_SELECTOR                   (2)
++// CoreSymbolication`_createSymbolicatorWithMachKernelExcludingSearchPathsFlagsAndNotification
++// expects kas_info to not return an error for these two segments; required for DTrace to work.
++#define KAS_INFO_KERNEL_SPECIAL_SEGMENT_1       (2)
++#define KAS_INFO_KERNEL_SPECIAL_SEGMENT_2       (3)
++
++#define KAS_INFO_MAX_SELECTOR                   (4)
+ 
+ #ifndef KERNEL
+ 
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -3707,6 +3707,9 @@
+ 		}
+ 	}
+ 	break;
++	case KAS_INFO_KERNEL_SPECIAL_SEGMENT_1:
++	case KAS_INFO_KERNEL_SPECIAL_SEGMENT_2:
++	break;
+ 	default:
+ 		return EINVAL;
+ 	}
+--- a/makedefs/MakeInc.cmd
++++ b/makedefs/MakeInc.cmd
+@@ -187,10 +187,10 @@
+ 	export CXX := $(shell $(XCRUN) -sdk $(SDKROOT) -find clang++)
+ endif
+ ifeq ($(origin MIG),undefined)
+-	export MIG := $(shell $(XCRUN) -sdk $(SDKROOT) -find mig)
++	export MIG := $(shell find $(FAKEROOT_DIR) -name "mig")
+ endif
+ ifeq ($(origin MIGCOM),undefined)
+-	export MIGCOM := $(shell $(XCRUN) -sdk $(SDKROOT) -find migcom)
++	export MIGCOM := $(shell find $(FAKEROOT_DIR) -name "migcom")
+ endif
+ ifeq ($(origin MIGCC),undefined)
+ 	export MIGCC := $(CC)
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -649,8 +649,7 @@
+ 	-Wl,-headerpad,152
+ 
+ # LDFLAGS_KERNEL_SDK	= -L$(SDKROOT)/usr/local/lib/kernel -lfirehose_kernel
+-export KERNEL_SDKROOT ?= $(SDKROOT)
+-LDFLAGS_KERNEL_SDK	= -L$(KERNEL_SDKROOT)/usr/local/lib/kernel -L$(KERNEL_SDKROOT)/usr/local/lib/kernel/platform
++LDFLAGS_KERNEL_SDK	= -L$(FAKEROOT_DIR)/usr/local/lib/kernel -lfirehose_kernel
+ 
+ LDFLAGS_KERNEL_RELEASE	=
+ LDFLAGS_KERNEL_DEVELOPMENT =
+@@ -892,8 +891,8 @@
+ INCFLAGS_EXTERN	= -I$(SRCROOT)/EXTERNAL_HEADERS
+ INCFLAGS_GEN	= -I$(SRCROOT)/$(COMPONENT) -I$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)
+ INCFLAGS_LOCAL	= -I.
+-INCFLAGS_SDK	= -I$(KERNEL_SDKROOT)/usr/local/include/kernel -I$(KERNEL_SDKROOT)/usr/local/include
+-INCFLAGS_PLATFORM = -I$(KERNEL_SDKROOT)/$(KPINCDIR)/platform
++INCFLAGS_SDK	= -I$(FAKEROOT_DIR)/usr/local/include/kernel
++INCFLAGS_PLATFORM = -I$(SDKROOT)/$(KPINCDIR)/platform
+ 
+ INCFLAGS	= $(INCFLAGS_LOCAL) $(INCFLAGS_GEN) $(INCFLAGS_IMPORT) $(INCFLAGS_EXTERN) $(INCFLAGS_MAKEFILE) $(INCFLAGS_SDK) $(INCFLAGS_PLATFORM)
+ 
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -2142,7 +2142,7 @@
+ nonspeculative_timebase(void)
+ {
+ #if defined(HAS_ACNTVCT)
+-	return __builtin_arm_rsr64("ACNTVCT_EL0");
++	return __builtin_arm_rsr64("S3_4_c15_c10_6");
+ #elif __ARM_ARCH_8_6__
+ 	return __builtin_arm_rsr64("CNTVCTSS_EL0");
+ #else
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -756,7 +756,7 @@
+ 	dsb		ish
+ 
+ 
+-#if defined(BCM2837)
++#if defined(BCM2837) && (!defined(XNU_NATIVE_ARCH_TIMER) || !XNU_NATIVE_ARCH_TIMER)
+ 	// Setup timer interrupt routing; must be done before MMU is enabled
+ 	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
+ 	and		x15, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0

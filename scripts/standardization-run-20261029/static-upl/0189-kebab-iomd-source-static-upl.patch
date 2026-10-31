@@ -1,0 +1,32 @@
+--- a/iokit/Kernel/arm/NativeAES.cpp
++++ b/iokit/Kernel/arm/NativeAES.cpp
+@@ -124,6 +124,9 @@
+     IOAESEncrypt, &key, 16, 80, callback, &completion) == kIOReturnBadArgument && completion.count == 1;
+   IOLog("KEBAB AES KAT: bounds=%u count=%u\n", interface, completion.count);
+   for (unsigned i = 0; i < 16; ++i) publicIV.bytes[i] = static_cast<unsigned char>(i);
++  extern vm_offset_t vm_kernel_stext, vm_kext_base, static_memory_end;
++  IOLog("KEBAB AES KAT: input=%p native-start=0x%lx prelink-start=0x%lx static-end=0x%lx\n",
++        input, vm_kernel_stext, vm_kext_base, static_memory_end);
+   IOReturn rawStatus = kIOReturnNotReady;
+   if (interface) rawStatus = provider->performAES(const_cast<unsigned char *>(input), output, kernel_task,
+     64, &publicIV, IOAESEncrypt, &key, nullptr, nullptr);
+--- a/iokit/Kernel/IOMemoryDescriptor.cpp
++++ b/iokit/Kernel/IOMemoryDescriptor.cpp
+@@ -4023,7 +4023,17 @@
+ extern vm_offset_t              static_memory_end;
+ 
+ #if defined(__arm64__)
++#include <pexpert/arm64/board_config.h>
++#if defined(KEBAB)
++/* This source kernel precedes its prelink ranges. Excluding its static
++ * pages sends kernel constants through VM-object UPL lookup, which can
++ * return zero-fill pages rather than the boot loader's actual mappings.
++ * Keep the original static-UPL path for both source and prelinked pages;
++ * io_get_kernel_static_upl still rejects an unmapped physical page. */
++#define io_kernel_static_start ((vm_kernel_stext < vm_kext_base) ? vm_kernel_stext : vm_kext_base)
++#else
+ #define io_kernel_static_start vm_kext_base
++#endif
+ #else /* defined(__arm64__) */
+ #define io_kernel_static_start vm_kernel_stext
+ #endif /* defined(__arm64__) */

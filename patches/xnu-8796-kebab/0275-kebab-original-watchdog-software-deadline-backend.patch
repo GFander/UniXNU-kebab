@@ -1,0 +1,242 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7174,6 +7174,9 @@
+    if(checked)panic("KEBAB SYSTEM BAG: original disk envelope init/auth failed %d",checked);
+    checked=kebab_aks_userclient_start();
+    if(checked)panic("KEBAB AKS UC: live bank/native user-client publication failed %d",checked);
++   extern int kebab_watchdog_prepare(void);
++   checked=kebab_watchdog_prepare();
++   if(checked)panic("KEBAB WATCHDOG: original service/backend prepare failed %d",checked);
+   }
+   printf("KEBAB DATA USERLAND: genuine encrypted Data mounted; hardware Root/class bank and native FS/FV services live; original launchd handoff, storage profile verified\n");
+  }
+--- a/iokit/Kernel/arm/kebab_watchdog_impl.h
++++ b/iokit/Kernel/arm/kebab_watchdog_impl.h
+@@ -0,0 +1,183 @@
++// Adapted from mouse233/unixnu-fuxi RamWatchdog.cpp (MIT), blob 29b2a369bc1d6b8ff3ea5b27320fcca5e9e403d9.
++// Requalified for original iOS16 20H392; no shared addresses with iOS17.
++// SPDX-License-Identifier: MIT
++// RAM bring-up backend for the unchanged 21H461 IOWatchdog/client protocol.
++// This is a software deadline observer, not a claim of Snapdragon hardware WDT.
++#include "KebabOriginalWatchdogABI.h"
++#include <IOKit/IOLib.h>
++#include <libkern/c++/OSIterator.h>
++#include <libkern/c++/OSSymbol.h>
++#include <mach/kmod.h>
++#include <kern/clock.h>
++#include <kern/thread_call.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++#include <sys/errno.h>
++
++extern "C" {
++extern kmod_info_t g_kernel_kmod_info;
++kern_return_t OSKextLoadKextWithIdentifier(const char *);
++bool kebab_original_watchdog_start(IOWatchdog *, IOService *, unsigned, unsigned);
++// stage, accepted clients, polls, original heartbeat sequence, enabled, deadline,
++// backend enable count, backend disable count. RAM only, never a disk log.
++volatile uint64_t kebab_watchdog_state[8];
++const char *kebab_watchdog_step = "arguments";
++int kebab_watchdog_detail;
++int kebab_watchdog_prepare(void);
++}
++
++class KebabWatchdog : public IOWatchdog {
++    OSDeclareDefaultStructors(KebabWatchdog)
++    thread_call_t timer = nullptr;
++    unsigned armed = 0;
++    static void expired(thread_call_param_t parameter, thread_call_param_t) {
++        auto *self = static_cast<KebabWatchdog *>(parameter);
++        if (!__atomic_load_n(&self->armed, __ATOMIC_ACQUIRE)) return;
++        // These fields and their lock are qualified from the original methods
++        // that enable/disable/pet the watchdog. Never write original state here.
++        auto *lock = *reinterpret_cast<IOSimpleLock **>(reinterpret_cast<char *>(self) + 0xa0);
++        if (!lock) panic("KEBAB WATCHDOG missing original heartbeat lock");
++        bool interrupts = ml_set_interrupts_enabled(false);
++        IOSimpleLockLock(lock);
++        bool enabled = *reinterpret_cast<unsigned char *>(reinterpret_cast<char *>(self) + 0xa8);
++        uint64_t sequence = *reinterpret_cast<uint64_t *>(reinterpret_cast<char *>(self) + 0xb8);
++        uint64_t deadline = *reinterpret_cast<uint64_t *>(reinterpret_cast<char *>(self) + 0xc8);
++        uint64_t now = mach_absolute_time();
++        IOSimpleLockUnlock(lock);
++        ml_set_interrupts_enabled(interrupts);
++        __atomic_add_fetch(&kebab_watchdog_state[2], 1, __ATOMIC_RELAXED);
++        kebab_watchdog_state[3] = sequence;
++        kebab_watchdog_state[4] = enabled;
++        kebab_watchdog_state[5] = deadline;
++        if (enabled && (!deadline || now >= deadline))
++            panic("KEBAB WATCHDOG software deadline expired: beats=%llu now=%llx deadline=%llx",
++                sequence, now, deadline);
++        uint64_t polls=kebab_watchdog_state[2];
++        if(polls<=3 || !(polls%30)) IOLog("KEBAB WATCHDOG: clients=%llu polls=%llu beats=%llu enabled=%u remaining=%lld\\n",kebab_watchdog_state[1],polls,sequence,enabled,(long long)(deadline-now));
++        if (__atomic_load_n(&self->armed, __ATOMIC_ACQUIRE)) self->schedule();
++    }
++    void schedule() {
++        uint64_t next;
++        clock_interval_to_deadline(1, NSEC_PER_SEC, &next);
++        thread_call_enter_delayed(timer, next);
++    }
++public:
++    void registerService(IOOptionBits options = 0) override {
++        // The original start calls this virtual with options=0. Its asynchronous
++        // default does not guarantee the MatchedState required by our lookup.
++        IOService::registerService((options & ~IOOptionBits(kIOServiceAsynchronous)) | kIOServiceSynchronous);
++    }
++    bool prepareTimer() {
++        timer = thread_call_allocate(expired, this);
++        return timer != nullptr;
++    }
++    bool start(IOService *provider) override {
++        // Same option arguments as the original hardware subclass's zero-flag
++        // path; no boot-arg change to the original monitoring/permission policy.
++        return timer && kebab_original_watchdog_start(this, provider, 0, 0);
++    }
++    void stop(IOService *provider) override {
++        IOWatchdog::stop(provider);
++    }
++    void free() override {
++        __atomic_store_n(&armed, 0, __ATOMIC_RELEASE);
++        if (timer) { thread_call_cancel_wait(timer); thread_call_free(timer); timer = nullptr; }
++        IOService::free();
++    }
++    IOReturn newUserClient(task_t task, void *security, UInt32 type,
++                          OSDictionary *properties, IOUserClient **client) override {
++        IOReturn result = IOWatchdog::newUserClient(task, security, type, properties, client);
++        if (result == kIOReturnSuccess && client && *client) {
++            __atomic_add_fetch(&kebab_watchdog_state[1], 1, __ATOMIC_RELAXED);
++            IOLog("KEBAB WATCHDOG: original user-client accepted type=%u\\n",type);
++        }
++        return result;
++    }
++    // Exact three abstract slots of the original IOWatchdog, after IOService.
++    // The deadline is owned by its original heartbeat/enable/disable handlers.
++    void enableBackend() override {
++        __atomic_store_n(&armed, 1, __ATOMIC_RELEASE);
++        __atomic_add_fetch(&kebab_watchdog_state[6], 1, __ATOMIC_RELAXED);
++        schedule();
++    }
++    void disableBackend() override {
++        __atomic_store_n(&armed, 0, __ATOMIC_RELEASE);
++        __atomic_add_fetch(&kebab_watchdog_state[7], 1, __ATOMIC_RELAXED);
++        if (timer) thread_call_cancel(timer);
++    }
++    void restartBackend() override {
++        // Re-evaluate the actual original deadline; do not manufacture a pet.
++        if (__atomic_load_n(&armed, __ATOMIC_ACQUIRE)) schedule();
++    }
++};
++OSDefineMetaClassAndStructors(KebabWatchdog, IOWatchdog)
++
++static KebabWatchdog *watchdog; // Published service retained for this RAM boot.
++static const OSMetaClass *lookup(const char *name) {
++    const OSSymbol *key = OSSymbol::withCString(name);
++    const OSMetaClass *meta = key ? OSMetaClass::getMetaClassWithName(key) : nullptr;
++    OSSafeReleaseNULL(key);
++    return meta;
++}
++static int countServices(IOService *expected) {
++    OSDictionary *match = IOService::serviceMatching("IOWatchdog");
++    if (!match) return -ENOMEM;
++    OSIterator *iterator = IOService::getMatchingServices(match);
++    match->release();
++    if (!iterator) return 0;
++    int count = 0;
++    bool owns = expected == nullptr;
++    while (OSObject *object = iterator->getNextObject()) {
++        ++count;
++        if (object == expected) owns = true;
++    }
++    bool valid = iterator->isValid();
++    iterator->release();
++    if (!valid) return -EAGAIN;
++    return owns ? count : -ENXIO;
++}
++extern "C" int kebab_watchdog_prepare(void) {
++    kebab_watchdog_step = "arguments";
++    kebab_watchdog_detail = 0;
++    if (watchdog) return EALREADY;
++    kebab_watchdog_step = "load";
++    kebab_watchdog_detail = OSKextLoadKextWithIdentifier("com.apple.driver.AppleARMWatchdogTimer");
++    if (kebab_watchdog_detail) return ENXIO;
++    kebab_watchdog_state[0] = 1;
++    kebab_watchdog_step = "metaclass";
++    const OSMetaClass *base = lookup("IOWatchdog"), *client = lookup("IOWatchdogUserClient");
++    if (!base || base != &IOWatchdog::gMetaClass || base->getClassSize() != 0xf8 ||
++        !client || client->getClassSize() != 0xe8) return ENOEXEC;
++    kebab_watchdog_step = "preexisting";
++    int before = countServices(nullptr);
++    kebab_watchdog_detail = before;
++    if (before != 0) return before < 0 ? -before : EEXIST;
++    const OSMetaClass *subclass = lookup("KebabWatchdog");
++    if (!subclass || subclass->getSuperClass() != base) return ENOEXEC;
++    kebab_watchdog_step = "provider";
++    IOService *provider = IOService::getResourceService();
++    if (!provider) return ENXIO;
++    kebab_watchdog_step = "allocate";
++    watchdog = new KebabWatchdog;
++    if (!watchdog) return ENOMEM;
++    kebab_watchdog_step = "init";
++    if (!watchdog->init()) return ENOMEM;
++    kebab_watchdog_step = "timer";
++    if (!watchdog->prepareTimer()) return ENOMEM;
++    watchdog->setProperty("UniXNUWatchdogBackend", "software-original-deadline");
++    watchdog->setProperty("HardwareWatchdogImplemented", false);
++    kebab_watchdog_step = "attach";
++    if (!watchdog->attach(provider)) return ENXIO;
++    kebab_watchdog_step = "start";
++    if (!watchdog->start(provider)) return ENXIO;
++    kebab_watchdog_state[0] = 2;
++    kebab_watchdog_step = "match";
++    kebab_watchdog_detail = countServices(watchdog);
++    if (kebab_watchdog_detail != 1)
++        return kebab_watchdog_detail < 0 ? -kebab_watchdog_detail :
++            kebab_watchdog_detail > 1 ? EEXIST : ENXIO;
++    kebab_watchdog_state[0] = 3;
++    kebab_watchdog_step = "ready";
++    IOLog("KEBAB WATCHDOG registered matched started: original IOWatchdog/client; software deadline backend\n");
++    return 0;
++}
+--- a/iokit/Kernel/arm/KebabOriginalWatchdogABI.h
++++ b/iokit/Kernel/arm/KebabOriginalWatchdogABI.h
+@@ -0,0 +1,16 @@
++// Pinned original iOS16/20H392 abstract class. Requalified from the original
++// kernelcache; the native subclass never writes the opaque original state.
++#pragma once
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++class IOWatchdog : public IOService {
++ OSDeclareAbstractStructors(IOWatchdog)
++ unsigned char originalPrivate[0xf8-sizeof(IOService)];
++public:
++ void stop(IOService *) override;
++ IOReturn newUserClient(task_t,void *,UInt32,OSDictionary *,IOUserClient **) override;
++ virtual void enableBackend()=0;
++ virtual void disableBackend()=0;
++ virtual void restartBackend()=0;
++};
++static_assert(sizeof(IOWatchdog)==0xf8,"20H392 original watchdog storage");
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -310,4 +310,5 @@
+ #if defined(KEBAB)
+ #include <sys/errno.h>
+ #include "kebab_rtc_platform_impl.h"
++#include "kebab_watchdog_impl.h"
+ #endif
+--- a/iokit/Kernel/arm/OriginalAESBindings.cpp
++++ b/iokit/Kernel/arm/OriginalAESBindings.cpp
+@@ -25,3 +25,14 @@
+ __asm__(".globl __ZNK16IOAESAccelerator12getMetaClassEv\n.set __ZNK16IOAESAccelerator12getMetaClassEv, 0xfffffe00089110c4");
+ 
+ #endif /* KEBAB */
++
++#if defined(KEBAB)
++// Original addresses + the existing fixed prelink slide -0x1effcdc8000.
++// This is static linking to unchanged original methods, not binary patching.
++__asm__(".globl __ZN10IOWatchdogC2EPK11OSMetaClass\n.set __ZN10IOWatchdogC2EPK11OSMetaClass, 0xfffffe0009e0d128");
++__asm__(".globl __ZN10IOWatchdogD2Ev\n.set __ZN10IOWatchdogD2Ev, 0xfffffe0009e0d148");
++__asm__(".globl __ZN10IOWatchdog10gMetaClassE\n.set __ZN10IOWatchdog10gMetaClassE, 0xfffffe000adf1928");
++__asm__(".globl __ZTV10IOWatchdog\n.set __ZTV10IOWatchdog, 0xfffffe000a21df58");
++__asm__(".globl _kebab_original_watchdog_start\n.set _kebab_original_watchdog_start, 0xfffffe0009e0d1c0");
++
++#endif

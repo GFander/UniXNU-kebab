@@ -1,0 +1,14 @@
+--- a/bsd/kern/kebab_file_keys.h
++++ b/bsd/kern/kebab_file_keys.h
+@@ -53,7 +53,10 @@
+ int kebab_metadata_keys_selftest(void);
+ /* Separate original FileVault descriptor family: lengths are64-bit, not FS32. */
+ #define KEBAB_RAW_KEY_WRAPPED 1u
+-struct kebab_fv_credential { uint8_t bytes[24]; };
++/* Audited two-word zero-parameter profile: target providers consume offsets0/8.
++ * Caller-local zero initialization of24B is not a24B credential contract. */
++struct kebab_fv_credential { uint8_t bytes[16]; };
++KEBAB_KEY_STATIC_ASSERT(sizeof(struct kebab_fv_credential)==16,"bounded FV parameter prefix");
+ struct kebab_fv_wrapped_key { void *key; uint64_t key_len; };
+ struct kebab_fv_raw_key { void *key; uint64_t key_len; uint32_t flags; };
+ KEBAB_KEY_STATIC_ASSERT(sizeof(struct kebab_fv_wrapped_key)==16 &&

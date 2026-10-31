@@ -1,0 +1,23 @@
+--- a/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
++++ b/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
+@@ -434,7 +434,19 @@
+  PE_parse_boot_argn("kebab_cpx_xts",&cpxEnabled,sizeof(cpxEnabled));
+  KebabBlockCrypto crypto;
+  status=kebab_block_crypto_prepare(attributes,length,cpxEnabled==1 && !fFileStorage,crypto);
+- if(status!=kIOReturnSuccess)return status;
++ if(status!=kIOReturnSuccess){
++  static unsigned reported=0;
++  if(reported++<4){
++   bufattr_t attr=attributes?attributes->bufattr:nullptr;cpx_t cpx=attr?bufattr_cpx(attr):nullptr;
++   IOLog("KEBAB CPX REQUEST: status=%x enabled=%u file=%u block=%llx bytes=%llx options=%x raw=%u wrapped=%u composite=%u synthetic=%u offsetIV=%u keylen=%u maxlen=%u cpoff=%llx adjusted=%llx\n",
++       status,cpxEnabled,!fFileStorage?0u:1u,(unsigned long long)block,(unsigned long long)length,
++       attributes?attributes->options:0,attr?bufattr_rawencrypted(attr):0,cpx?cpx_is_sep_wrapped_key(cpx):0,
++       cpx?cpx_is_composite_key(cpx):0,cpx?cpx_synthetic_offset_for_iv(cpx):0,cpx?cpx_use_offset_for_iv(cpx):0,
++       cpx?cpx_key_len(cpx):0,cpx?cpx_max_key_len(cpx):0,(unsigned long long)(attr?bufattr_cpoff(attr):0),
++       (unsigned long long)(attributes?attributes->adjustedOffset:0));
++  }
++  return status;
++ }
+  if(crypto.active && (offset&4095))return kIOReturnBadArgument;
+ 	if (fFileStorage) {
+ 		return enqueueFileRead(buffer, offset, length, completion);

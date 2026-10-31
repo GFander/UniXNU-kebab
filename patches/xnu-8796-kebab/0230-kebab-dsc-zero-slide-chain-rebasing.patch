@@ -1,0 +1,55 @@
+--- a/bsd/kern/kebab_dyldcache.c
++++ b/bsd/kern/kebab_dyldcache.c
+@@ -31,7 +31,7 @@
+  * shifted by the same slide, srfmp->slide carries that value into
+  * shared_region->sr_slide for the lazy rebase pager, and the resulting base is
+  * what shared_region_check_np() returns to dyld.  "kebab_dsc_slide=<bytes>"
+- * forces a slide; the default is 0, which keeps the unslid mapping path.
++ * forces a slide; the default is 0, which still decodes chains through the rebase pager.
+  *
+  * This file is compiled only for KEBAB.  Nothing happens unless "kebab_dsc" is
+  * on the boot command line; "kebab_dsc_map=1" is the second switch that turns
+@@ -1112,11 +1112,9 @@
+ {
+ 	uint32_t i, j;
+ 
+-	if (slide == 0) {
+-		plan->slide = 0;
+-		return 0;
+-	}
+-	if (kebab_dsc_slide_requested && plan->max_slide == 0) {
++	/* Zero ASLR displacement still needs the rebase pager: the original
++	 * cache v2 chains retain delta bits even when no address is shifted. */
++	if (slide && kebab_dsc_slide_requested && plan->max_slide == 0) {
+ 		printf("KEBAB DSC: slide 0x%llx requested but the cache maxSlide "
+ 		    "is 0\n", (unsigned long long)slide);
+ 		return EINVAL;
+@@ -1126,12 +1124,12 @@
+ 		    (unsigned long long)slide, KEBAB_DSC_PAGE_SIZE);
+ 		return EINVAL;
+ 	}
+-	if (plan->max_slide == 0 || slide >= plan->max_slide) {
++	if (slide && (plan->max_slide == 0 || slide >= plan->max_slide)) {
+ 		printf("KEBAB DSC: slide 0x%llx is not below maxSlide 0x%llx\n",
+ 		    (unsigned long long)slide, (unsigned long long)plan->max_slide);
+ 		return EINVAL;
+ 	}
+-	if (plan->slide_mappings == 0) {
++	if (slide && plan->slide_mappings == 0) {
+ 		printf("KEBAB DSC: slide 0x%llx requested but no mapping carries "
+ 		    "slide info\n", (unsigned long long)slide);
+ 		return EINVAL;
+@@ -1170,9 +1168,11 @@
+ 				    (unsigned long long)KEBAB_DSC_REGION_END);
+ 				return EINVAL;
+ 			}
++			uint64_t info_start = m->sms_slide_start + slide;
++			uint64_t info_end = info_start + m->sms_slide_size;
+ 			if (m->sms_slide_size != 0 &&
+-			    (m->sms_slide_start + slide < m->sms_slide_start ||
+-			    m->sms_slide_start + slide + m->sms_slide_size > KEBAB_DSC_REGION_END)) {
++			    (info_start < m->sms_slide_start || info_end < info_start ||
++			    info_start < KEBAB_DSC_REGION_BASE || info_end > KEBAB_DSC_REGION_END)) {
+ 				printf("KEBAB DSC: slide 0x%llx pushes %s mapping %u "
+ 				    "slide info outside the shared region\n",
+ 				    (unsigned long long)slide, f->name, j);

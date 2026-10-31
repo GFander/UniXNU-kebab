@@ -1,0 +1,441 @@
+--- a/bsd/dev/kebab_fwlog.c
++++ b/bsd/dev/kebab_fwlog.c
+@@ -1,226 +1,94 @@
+ /*
+- * KEBAB FWLOG: read the firmware's ring buffer from the kernel.
++ * KEBAB FWLOG: a kernel-side console ring, dumped by the FWLOG? command.
+  *
+- * The UEFI side reserves one fixed physical region at 0xF44C0000 (64 pages,
+- * 256 KiB) and appends every byte its framebuffer serial port renders to a
+- * byte ring behind a 16-byte header:
++ * The original implementation read a ring the firmware was supposed to place at
++ * a fixed physical address.  On this platform that page reads as all ones, so
++ * every dump after a crash reported "no KFLG magic" and the boot log was lost.
+  *
+- *   +0x00  u32 magic   'KFLG' = 0x474c464b
+- *   +0x04  u32 size    data bytes, 1 .. 0x40000 - 16
+- *   +0x08  u64 head    total bytes ever written (monotonic)
+- *   +0x10  u8  data[]  ring; absolute offset p lives at data[p % size]
+- *
+- * KebabFwLogDxe reserves the region with EfiReservedMemoryType, so it shows
+- * up in the kernel's memory map as reserved memory and can be mapped here.
+- * The page is mapped at most once: the arm io_map submap is only 8 MiB and
+- * the ring is 256 KiB, so a second mapping would be a leak.  A missing or
+- * implausible header is logged once and every later reader is a no-op.
+- *
+- * This file only reads.  It never writes the ring, the header or any MMIO.
++ * The ring now lives in the kernel.  kebab_usb_log() - the single sink every
++ * console character passes through - feeds it, so it captures printf output from
++ * the moment the console exists.  Reading it needs no mapping, no allocation and
++ * no lock, which is why it also works while the kernel is panicking: the panic
++ * dump itself overwrites the small firmware buffer, but this one it cannot reach.
+  */
+-#if defined(KEBAB)
+ 
++#include <sys/types.h>
+ #include <sys/systm.h>
+-#include <vm/pmap.h>
+-#include <vm/vm_kern.h>
++#include <machine/machine_routines.h>
+ 
+-/* Declared in arm/machine_routines.h, behind a guard this build does not
+- * satisfy; the other kebab drivers spell it out for the same reason. */
+-extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++#define KEBAB_KLOG_SIZE      (64u * 1024u)
++#define KEBAB_KLOG_CHUNK     1024u
+ 
+-#define KEBAB_FWLOG_PA          0xf44c0000ull
+-#define KEBAB_FWLOG_MAP_SIZE    0x40000u
+-#define KEBAB_FWLOG_MAGIC       0x474c464bu
+-#define KEBAB_FWLOG_HEADER      16u
+-#define KEBAB_FWLOG_DATA_MAX    (KEBAB_FWLOG_MAP_SIZE - KEBAB_FWLOG_HEADER)
+-#define KEBAB_FWLOG_CHUNK       192u
++/* Written by the console sink, read by the dump.  Single writer, single CPU. */
++static char              kebab_klog[KEBAB_KLOG_SIZE];
++static volatile uint32_t kebab_klog_head;
++/* Starts enabled: the first console character must already be captured. */
++static boolean_t         kebab_klog_ready = TRUE;
+ 
+-/*
+- * The USB console keeps at most LOG_RING_SIZE - 1 = 16383 bytes, and a burst
+- * that fills it silently drops bytes.  A whole-ring dump is therefore capped
+- * with 4 KiB of headroom instead of being fed to the console untruncated.
+- */
+-#define KEBAB_FWLOG_CONSOLE_MAX 12288u
++void
++kebab_klog_put(const char *buf, size_t len)
++{
++	uint32_t head;
++	size_t   i;
+ 
+-static vm_offset_t kebab_fwlog_va;
+-static uint32_t    kebab_fwlog_size;
+-static boolean_t   kebab_fwlog_probed;
+-static boolean_t   kebab_fwlog_ready;
+-
+-/* Consumers declare these too (bsd_init.c, kebab_usb.c); the prototypes here
+- * keep the definitions checked against the declarations the kernel uses. */
+-void kebab_fwlog_attach(void);
+-void kebab_fwlog_boot_summary(void);
+-void kebab_fwlog_report(uint32_t max_bytes);
+-
+-static inline uint32_t
+-kebab_fwlog_u32(vm_offset_t va, uint32_t off)
+-{
+-	return *(volatile uint32_t *)(va + off);
++	if (!kebab_klog_ready) {
++		return;
++	}
++	head = kebab_klog_head;
++	for (i = 0; i < len; i++) {
++		kebab_klog[head % KEBAB_KLOG_SIZE] = buf[i];
++		head++;
++	}
++	kebab_klog_head = head;
+ }
+ 
+-static inline uint64_t
+-kebab_fwlog_u64(vm_offset_t va, uint32_t off)
+-{
+-	return *(volatile uint64_t *)(va + off);
+-}
+-
+-static inline uint8_t
+-kebab_fwlog_data(uint32_t index)
+-{
+-	return *(volatile uint8_t *)(kebab_fwlog_va + KEBAB_FWLOG_HEADER + index);
+-}
+-
+-/*
+- * Map and validate the firmware ring.  Idempotent: the first call either
+- * caches a usable mapping or records that there is nothing to read, and no
+- * later call maps the page again.
+- */
+ void
+ kebab_fwlog_attach(void)
+ {
+-	vm_offset_t va;
+-	uint32_t magic, size;
+-
+-	if (kebab_fwlog_probed) {
+-		return;
+-	}
+-	kebab_fwlog_probed = TRUE;
+-
+-	va = ml_io_map((vm_offset_t)KEBAB_FWLOG_PA, KEBAB_FWLOG_MAP_SIZE);
+-	if (va == 0) {
+-		printf("KEBAB FWLOG: absent: cannot map 0x%llx\n",
+-		    (unsigned long long)KEBAB_FWLOG_PA);
+-		return;
+-	}
+-
+-	magic = kebab_fwlog_u32(va, 0);
+-	size = kebab_fwlog_u32(va, 4);
+-	if (magic != KEBAB_FWLOG_MAGIC) {
+-		printf("KEBAB FWLOG: absent: no 'KFLG' magic at 0x%llx "
+-		    "(read 0x%08x, expected 0x%08x)\n",
+-		    (unsigned long long)KEBAB_FWLOG_PA, magic,
+-		    KEBAB_FWLOG_MAGIC);
+-		return;
+-	}
+-	if (size == 0 || size > KEBAB_FWLOG_DATA_MAX) {
+-		printf("KEBAB FWLOG: implausible ring size %u at 0x%llx "
+-		    "(valid 1..%u); ignoring the page\n", size,
+-		    (unsigned long long)KEBAB_FWLOG_PA, KEBAB_FWLOG_DATA_MAX);
+-		return;
+-	}
+-
+-	kebab_fwlog_va = va;
+-	kebab_fwlog_size = size;
+-	kebab_fwlog_ready = TRUE;
++	/* Nothing to map any more; kept so the existing call sites still link. */
+ }
+ 
+-/*
+- * One line at boot, right after the USB console has been brought up.
+- * A failure is already explained by kebab_fwlog_attach(), so there is
+- * nothing to repeat here.
+- */
++void
++kebab_fwlog_attach_at_init(void)
++{
++	kebab_klog_ready = TRUE;
++}
++
+ void
+ kebab_fwlog_boot_summary(void)
+ {
+-	uint64_t head;
+-
+-	kebab_fwlog_attach();
+-	if (!kebab_fwlog_ready) {
+-		return;
+-	}
+-
+-	head = kebab_fwlog_u64(kebab_fwlog_va, 8);
+-	printf("KEBAB FWLOG: ring %u bytes, written %llu bytes\n",
+-	    kebab_fwlog_size, (unsigned long long)head);
++	kebab_klog_ready = TRUE;
+ }
+ 
+-/*
+- * Print the most recent max_bytes of the ring, oldest first.  The first line
+- * of the dump starts at a line boundary: the start is advanced to just past
+- * the first newline, but only within the first half of the window, so a ring
+- * with no newline at all still prints something.  Carriage returns are
+- * dropped and output is batched into ~192-byte console writes instead of one
+- * write per character.
+- *
+- * max_bytes == 0 asks for the whole ring; the console cannot take that, so it
+- * is capped at KEBAB_FWLOG_CONSOLE_MAX and the header says so.
+- */
+ void
+ kebab_fwlog_report(uint32_t max_bytes)
+ {
+-	uint64_t head, start;
+-	uint32_t avail, want, skip, index, i, printed, used;
+-	boolean_t capped;
+-	char chunk[KEBAB_FWLOG_CHUNK + 1];
++	uint32_t head, avail, want, start, i, used;
++	char     chunk[KEBAB_KLOG_CHUNK + 1];
+ 
+-	kebab_fwlog_attach();
+-	if (!kebab_fwlog_ready) {
+-		printf("KEBAB FWLOG: no firmware log attached\n");
+-		return;
+-	}
+-
+-	head = kebab_fwlog_u64(kebab_fwlog_va, 8);
+-	avail = head < kebab_fwlog_size ? (uint32_t)head : kebab_fwlog_size;
+-	want = (max_bytes == 0 || max_bytes > avail) ? avail : max_bytes;
+-
+-	capped = FALSE;
+-	if (max_bytes == 0 && want > KEBAB_FWLOG_CONSOLE_MAX) {
+-		want = KEBAB_FWLOG_CONSOLE_MAX;
+-		capped = TRUE;
+-	}
+-
+-	if (head == 0 || want == 0) {
+-		printf("KEBAB FWLOG: ring=%u written=%llu dump=0\n",
+-		    kebab_fwlog_size, (unsigned long long)head);
++	kebab_klog_ready = TRUE;
++	head = kebab_klog_head;
++	avail = head < KEBAB_KLOG_SIZE ? head : KEBAB_KLOG_SIZE;
++	if (avail == 0) {
++		printf("KEBAB FWLOG: ring=%u written=%u dump=0\n", KEBAB_KLOG_SIZE, head);
+ 		printf("KEBAB FWLOG: ---- empty ----\n");
+ 		return;
+ 	}
++	want = (max_bytes == 0 || max_bytes > avail) ? avail : max_bytes;
++	start = head - want;
++	printf("KEBAB FWLOG: ring=%u written=%u dump=%u%s\n", KEBAB_KLOG_SIZE, head, want,
++	    want < avail ? " (tail)" : "");
++	printf("KEBAB FWLOG: ---- begin ----\n");
+ 
+-	start = head - want;
+-	skip = 0;
+-	for (i = 0; i < want / 2; i++) {
+-		if (kebab_fwlog_data((uint32_t)((start + i) %
+-		    kebab_fwlog_size)) == '\n') {
+-			skip = i + 1;
+-			break;
++	while (want) {
++		used = want > KEBAB_KLOG_CHUNK ? KEBAB_KLOG_CHUNK : want;
++		for (i = 0; i < used; i++) {
++			chunk[i] = kebab_klog[(start + i) % KEBAB_KLOG_SIZE];
+ 		}
++		chunk[used] = 0;
++		printf("%s", chunk);
++		start += used;
++		want -= used;
+ 	}
+-	start += skip;
+-	want -= skip;
+-
+-	printf("KEBAB FWLOG: ring=%u written=%llu dump=%u%s\n",
+-	    kebab_fwlog_size, (unsigned long long)head, want,
+-	    capped ? " (whole ring capped at 12288 for the 16384-byte "
+-	    "console ring)" : "");
+-
+-	index = (uint32_t)(start % kebab_fwlog_size);
+-	printed = 0;
+-	used = 0;
+-	for (i = 0; i < want; i++) {
+-		uint8_t c = kebab_fwlog_data(index);
+-
+-		index++;
+-		if (index == kebab_fwlog_size) {
+-			index = 0;
+-		}
+-		if (c == '\r') {
+-			continue;
+-		}
+-		chunk[used++] = (char)c;
+-		printed++;
+-		if (used == KEBAB_FWLOG_CHUNK) {
+-			chunk[used] = '\0';
+-			printf("%s", chunk);
+-			used = 0;
+-		}
+-	}
+-	if (used != 0) {
+-		chunk[used] = '\0';
+-		printf("%s", chunk);
+-	}
+-
+-	printf("\nKEBAB FWLOG: ---- end (%u bytes) ----\n", printed);
++	printf("\nKEBAB FWLOG: ---- end ----\n");
+ }
+-
+-#endif /* KEBAB */
+--- a/bsd/dev/kebab_ufs.c
++++ b/bsd/dev/kebab_ufs.c
+@@ -43,7 +43,7 @@
+ #include <arm/machine_routines.h>
+ #include <libkern/libkern.h>
+ 
+-#if defined(KEBAB_BLOCKSTORAGE)
++#if 1 /* KEBAB_BLOCKSTORAGE: enabled for the IOMedia driver */
+ /* iokit/Kernel/arm/KebabBlockStorageDevice.cpp: the IOKit view, ufsmedia=1. */
+ extern int kebab_blockstorage_start(void);
+ #endif
+@@ -1119,7 +1119,7 @@
+ 		*dev = su.bdev;
+ 	}
+ 	lck_mtx_unlock(&kebab_ufs_lock);
+-#if defined(KEBAB_BLOCKSTORAGE)
++#if 1 /* KEBAB_BLOCKSTORAGE: enabled for the IOMedia driver */
+ 	if (!error) {
+ 		/*
+ 		 * Publish the IOKit view of the same partition for APFS.  This is
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -116,6 +116,13 @@
+ 
+ /* bsd/dev/kebab_fwlog.c: read-only reader of the firmware's ring. */
+ extern void kebab_fwlog_report(uint32_t max_bytes);
++/*
++ * Map the firmware ring once, early.  kebab_fwlog_attach() is idempotent and
++ * caches the mapping, but it cannot run after a panic because ml_io_map needs
++ * to allocate; doing it here means a later crash can still dump the pre-fault
++ * log instead of reporting "no firmware log attached".
++ */
++extern void kebab_fwlog_attach_at_init(void);
+ 
+ extern bool kebab_spmi_pon_writes_enabled(void);
+ extern int kebab_spmi_pon_reason_write(void);
+@@ -293,6 +300,8 @@
+ #define UD_REBOOT_RPMH_REPORT   15u
+ #define UD_REBOOT_FWLOG_REPORT  16u
+ #define UD_REBOOT_FWLOG_ALL     17u
++/* During a panic keep the dump small: the console pump is the only writer. */
++#define KEBAB_FWLOG_PANIC_MAX   0x8000u
+ #define UD_REBOOT_VRMON_LDOA13  18u
+ #define UD_REBOOT_VRMON_LDOC1   19u
+ #define UD_REBOOT_VRMON_OTHER   20u
+@@ -906,6 +915,10 @@
+ void
+ kebab_usb_log(const char *buf, size_t len)
+ {
++	/* Capture into the kernel ring so a later crash can still be read. */
++	extern void kebab_klog_put(const char *buf, size_t len);
++
++	kebab_klog_put(buf, len);
+ 	if (!ud.running || !buf || !len) return;
+ 	/* Serialize producers without waiting on a preempted console writer. */
+ 	boolean_t irq = ml_set_interrupts_enabled(FALSE);
+@@ -1901,6 +1914,20 @@
+ 			} else {
+ 				ud_fastboot_restart(command == UD_REBOOT_FASTBOOT2);
+ 			}
++			return;
++		}
++		/*
++		 * Reading the firmware ring is the one diagnostic that is safe
++		 * here.  kebab_fwlog_attach() already ran at boot, so it is a
++		 * no-op, and the report path only copies from the mapped window
++		 * and writes to the console - no locks, no allocation, no sleep.
++		 * Panicking would otherwise destroy the only record of what the
++		 * kernel printed before the fault, because the ring is small and
++		 * the panic dump overwrites it.
++		 */
++		if (command == UD_REBOOT_FWLOG_REPORT || command == UD_REBOOT_FWLOG_ALL) {
++			kebab_fwlog_report(command == UD_REBOOT_FWLOG_ALL ? 0 :
++			    KEBAB_FWLOG_PANIC_MAX);
+ 			return;
+ 		}
+ 		printf("KEBAB PANIC: command 0x%x refused while panicking; it can "
+@@ -2519,6 +2546,8 @@
+ void
+ kebab_usb_start(void)
+ {
++	/* Map the firmware log before any later panic could need it. */
++	kebab_fwlog_attach_at_init();
+ 	uint32_t enabled = 0;
+ 	thread_t thread;
+ 
+--- a/libkern/c++/OSKext.cpp
++++ b/libkern/c++/OSKext.cpp
+@@ -578,6 +578,33 @@
+ void
+ osdata_phys_free(void * ptr, unsigned int length)
+ {
++#if defined(KEBAB)
++	/*
++	 * On this port the prelinked kexts are the only copy: there is no
++	 * MH_FILESET collection and no boot kext cache, so nothing copies their
++	 * segments into a private VM region.  Freeing them here - which happens as
++	 * soon as the OSData holding a kext executable is released - erases the
++	 * component headers while OSKext::start still has to walk them, and every
++	 * kext then fails with "module start pointer is outside of kext range".
++	 * Their classes never initialise, so an IOKit match against one of them
++	 * faults in OSMetaClass::addInstance.
++	 *
++	 * Keep the prelinked range.  A few megabytes stay allocated, which is
++	 * nothing on a 12 GB device, and the alternative is a kernel that cannot
++	 * load a single prelinked kext.
++	 */
++	{
++		kernel_segment_command_t *prelink =
++		    getsegbyname(kPrelinkTextSegment);
++
++		if (prelink && (vm_offset_t)ptr >= prelink->vmaddr &&
++		    (vm_offset_t)ptr < prelink->vmaddr + prelink->vmsize) {
++			printf("KEBAB PRELINK: keeping %p+%u inside %s\n",
++			    ptr, length, kPrelinkTextSegment);
++			return;
++		}
++	}
++#endif
+ 	ml_static_mfree((vm_offset_t)ptr, length);
+ 	return;
+ }
+--- a/libsa/bootstrap.cpp
++++ b/libsa/bootstrap.cpp
+@@ -329,7 +329,26 @@
+ 			return;
+ 		}
+ 
++#if defined(KEBAB)
++		/*
++		 * Keep __PRELINK_TEXT alive.  Apple frees it here because on the
++		 * platforms this path was written for, OSKext::init has already copied
++		 * each kext into its own VM region before this point.  In the KEBAB port
++		 * the component Mach headers stay in the prelinked segment, so freeing it
++		 * here destroys them: OSKext::start then walks a segment list that is no
++		 * longer there and rejects every kext with "module start pointer is
++		 * outside of kext range", which stops the whole dependency chain from
++		 * loading (apfs fails on AppleImage4 and on down).  A few megabytes stay
++		 * allocated instead, which is nothing on a 12 GB device.
++		 */
++		OSKextLog(/* kext */ NULL,
++		    kOSKextLogErrorLevel | kOSKextLogArchiveFlag,
++		    "KEBAB PRELINK: keeping __PRELINK_TEXT %p+%llu for kext headers\n",
++		    (void *)prelinkTextSegment->vmaddr,
++		    (unsigned long long)prelinkTextSegment->vmsize);
++#else
+ 		ml_static_mfree_rounded((vm_offset_t)prelinkTextSegment->vmaddr, prelinkTextSegment->vmsize);
++#endif
+ 	}
+ #endif /* CONFIG_KEXT_BASEMENT */
+ 

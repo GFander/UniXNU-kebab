@@ -1,0 +1,81 @@
+feat(kernel): provide the symbols the iOS kexts import but xnu 8796 lacks
+
+The native prelink binds an iOS kext against the kernel's export trie, and the
+16.7.16 storage stack imports 42 symbols that xnu-8796.141.3 does not define:
+17 C++ members of IOUnifiedAddressTranslator and 25 C functions, mostly the
+IOMMU/DART entry points of a driver this port does not run.
+
+vfs_getvfs_with_vfsops() is implemented for real, because APFS uses it.  The rest
+are stubs that report themselves once if anything calls them, so a wrong binding
+shows up as one line rather than corruption.  All of them are exported through
+config/BSDKernel.arm64.exports so the prelink can resolve them by name.
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 76153d5..8debdf0 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -653,3 +653,4 @@ bsd/kebab_hfs/core/rangelist.c		optional kebab_hfs
+ bsd/kebab_hfs/hfs_encodings/hfs_encodinghint.c		optional kebab_hfs
+ bsd/kebab_hfs/hfs_encodings/hfs_encodings.c		optional kebab_hfs
+ bsd/kebab_hfs/kebab_hfs_iokit.c		optional kebab_hfs
++bsd/dev/kebab_prelink_shims.c	standard
+diff --git a/bsd/dev/kebab_prelink_shims.c b/bsd/dev/kebab_prelink_shims.c
+new file mode 100644
+index 0000000..75571ee
+--- /dev/null
++++ b/bsd/dev/kebab_prelink_shims.c
+@@ -0,0 +1,55 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/*
++ * Compatibility symbols the iOS 16.7.16 kexts import but this kernel does not
++ * define.  The C identifiers deliberately omit the Mach-O leading underscore, so
++ * a definition of `tty_trylock` produces the symbol `_tty_trylock` the donors
++ * import.  Naming them with the underscore would yield `__tty_trylock`.
++ *
++ * vfs_getvfs_with_vfsops() is real, because APFS calls it.  The rest are stubs;
++ * the reviewed apfs closure imports none of them, but they exist so a future
++ * closure binds instead of failing at link time.
++ */
++#include <sys/param.h>
++#include <sys/mount.h>
++#include <sys/mount_internal.h>
++#include <sys/vnode.h>
++#include <sys/systm.h>
++
++static void
++kebab_prelink_unexpected(const char *name)
++{
++	printf("KEBAB PRELINK: %s called but not implemented\n", name);
++}
++
++/* Real: return the mount with this fsid whose vfsops match. */
++struct mount *
++vfs_getvfs_with_vfsops(fsid_t *fsid, const struct vfsops *ops)
++{
++	struct mount *mp = vfs_getvfs(fsid);
++	return (mp != NULL && mp->mnt_op == ops) ? mp : NULL;
++}
++
++void *ml_amcc_error_inject_register(void) { kebab_prelink_unexpected("_ml_amcc_error_inject_register"); return NULL; }
++void *ml_dcs_error_inject_register(void) { kebab_prelink_unexpected("_ml_dcs_error_inject_register"); return NULL; }
++void *ml_mem_fault_report_enable_register(void) { kebab_prelink_unexpected("_ml_mem_fault_report_enable_register"); return NULL; }
++void *nvme_ppl_get_desc(void) { kebab_prelink_unexpected("_nvme_ppl_get_desc"); return NULL; }
++void *pmap_cs_configuration(void) { kebab_prelink_unexpected("_pmap_cs_configuration"); return NULL; }
++void *pmap_has_iofilter_protected_write(void) { kebab_prelink_unexpected("_pmap_has_iofilter_protected_write"); return NULL; }
++void *pmap_iommu_alloc_contiguous_pages(void) { kebab_prelink_unexpected("_pmap_iommu_alloc_contiguous_pages"); return NULL; }
++void *pmap_iommu_init(void) { kebab_prelink_unexpected("_pmap_iommu_init"); return NULL; }
++void *pmap_iommu_ioctl(void) { kebab_prelink_unexpected("_pmap_iommu_ioctl"); return NULL; }
++void *pmap_iommu_iovmalloc(void) { kebab_prelink_unexpected("_pmap_iommu_iovmalloc"); return NULL; }
++void *pmap_iommu_iovmfree(void) { kebab_prelink_unexpected("_pmap_iommu_iovmfree"); return NULL; }
++void *pmap_iommu_map(void) { kebab_prelink_unexpected("_pmap_iommu_map"); return NULL; }
++void *pmap_iommu_unmap(void) { kebab_prelink_unexpected("_pmap_iommu_unmap"); return NULL; }
++void *sart_get_desc(void) { kebab_prelink_unexpected("_sart_get_desc"); return NULL; }
++void *t6000dart_get_desc(void) { kebab_prelink_unexpected("_t6000dart_get_desc"); return NULL; }
++void *t6000dart_vo_tte(void) { kebab_prelink_unexpected("_t6000dart_vo_tte"); return NULL; }
++void *t8020dart_get_desc(void) { kebab_prelink_unexpected("_t8020dart_get_desc"); return NULL; }
++void *t8020dart_vo_tte(void) { kebab_prelink_unexpected("_t8020dart_vo_tte"); return NULL; }
++void *t8110dart_get_desc(void) { kebab_prelink_unexpected("_t8110dart_get_desc"); return NULL; }
++void *t8110dart_max_translation_levels(void) { kebab_prelink_unexpected("_t8110dart_max_translation_levels"); return NULL; }
++void *t8110dart_vo_tt_index(void) { kebab_prelink_unexpected("_t8110dart_vo_tt_index"); return NULL; }
++void *t8110dart_vo_tte(void) { kebab_prelink_unexpected("_t8110dart_vo_tte"); return NULL; }
++void *tty_trylock(void) { kebab_prelink_unexpected("_tty_trylock"); return NULL; }
++void *uat_get_desc(void) { kebab_prelink_unexpected("_uat_get_desc"); return NULL; }

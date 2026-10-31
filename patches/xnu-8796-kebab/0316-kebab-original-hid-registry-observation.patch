@@ -1,0 +1,21 @@
+--- a/iokit/Kernel/arm/KebabDriverManifest.h
++++ b/iokit/Kernel/arm/KebabDriverManifest.h
+@@ -5,7 +5,7 @@
+  X("platform", "KebabPlatformExpert", "ADT platform/resources") \
+  X("image4", "AppleImage4", "original defaults-nub service; startup qualification separate") \
+  X("aes", "IOAESAccelerator", "original crypto-family identity; backend qualification separate") \
+- X("cpu", "KebabCPU", "single boot CPU; no SMP qualification") \
++ X("cpu", "KebabCPU", "observed topology/counters above; frequency policy separate") \
+  X("ufs", "KebabBlockStorageDevice", "boot C UFS + native storage bridge") \
+  X("usb", NULL, "resident DWC3 C core; no normal IOService") \
+  X("spmi", "KebabSPMIBus", "ADT arbiter + boot C backend") \
+@@ -15,4 +15,8 @@
+  X("geni", "KebabGeniBus", "SE13/bitbang transport; boot C mappings") \
+  X("touch", "KebabTouch", "typed TCM state; C polling lifetime; no HID") \
+  X("display", "AppleCLCD", "CPU framebuffer; no GPU/vsync qualification") \
+- X("surface", "IOCoreSurfaceRoot", "compatibility selectors; private ABI incomplete")
++ X("surface", "IOCoreSurfaceRoot", "compatibility selectors; private ABI incomplete") \
++ X("hid-resource", "IOHIDResource", "original HIDFamily registry match; not input qualification") \
++ X("hid-interface", "IOHIDInterface", "actual original interfaces; no invented usage/transport") \
++ X("hid-event-service", "IOHIDEventService", "actual published event services; event consumption separate") \
++ X("hid-event-driver", "IOHIDEventDriver", "actual original report translator matches")

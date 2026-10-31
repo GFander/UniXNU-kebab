@@ -1,0 +1,89 @@
+{
+  "version": "0211",
+  "compare": "0207",
+  "observations": {
+    "spmi": [
+      "KEBAB SPMI: === SPMI-1: arbiter version ===",
+      "KEBAB SPMI: core 0x0c440000+0x1100 mapped; core+0x0000 = 0x50010000",
+      "KEBAB SPMI: version family v5",
+      "KEBAB SPMI: SPMI-1 PASS",
+      "KEBAB SPMI: === SPMI-2: PPID 0x008 -> APID ===",
+      "KEBAB SPMI: scan APID 0x000..0x1ff: core+0x900 + 4*apid, 512 entries bounded by core size 0x1100",
+      "KEBAB SPMI: negative control PPID 0xf00 -> 0 APID(s) (expected 0)",
+      "KEBAB SPMI: scanned 512 entries: 352 non-zero mapping(s), 3 map PPID 0x008",
+      "KEBAB SPMI: PPID 0x008 APID 0x001 map[core+0x904]=0x00000800 own[cnfg+0x704]=0x00000001 -> write_ee 0x1 irq_owner 0 irq_ee 0xff",
+      "KEBAB SPMI: PPID 0x008 APID 0x00d map[core+0x934]=0x01000800 own[cnfg+0x734]=0x00000000 -> write_ee 0x0 irq_owner 1 irq_ee 0x0 (owned by this EE)",
+      "KEBAB SPMI: PPID 0x008 APID 0x075 map[core+0xad4]=0x00000800 own[cnfg+0x8d4]=0x00000004 -> write_ee 0x4 irq_owner 0 irq_ee 0xff",
+      "KEBAB SPMI: SPMI-2 PASS: 3 APID(s) map PPID 0x008"
+    ],
+    "pon": [
+      "KEBAB SPMI: === SPMI-3: PON registers through the observer ===",
+      "KEBAB SPMI: PPID 0x008 APID 0x001 map[core+0x904]=0x00000800 own[cnfg+0x704]=0x00000001 -> write_ee 0x1 irq_owner 0 irq_ee 0xff",
+      "KEBAB SPMI: PPID 0x008 APID 0x00d map[core+0x934]=0x01000800 own[cnfg+0x734]=0x00000000 -> write_ee 0x0 irq_owner 1 irq_ee 0x0 (owned by this EE)",
+      "KEBAB SPMI: PPID 0x008 APID 0x075 map[core+0xad4]=0x00000800 own[cnfg+0x8d4]=0x00000004 -> write_ee 0x4 irq_owner 0 irq_ee 0xff",
+      "KEBAB SPMI: using APID 0x00d for PPID 0x008, SID 0, ee 0",
+      "KEBAB SPMI: REG 0x0805 read 1: APID 0x00d obsrvr+0x680 cmd 0x78000050 status 0x00000001 -> 0x04",
+      "KEBAB SPMI: REG 0x0805 read 2: APID 0x00d obsrvr+0x680 cmd 0x78000050 status 0x00000001 -> 0x04",
+      "KEBAB SPMI: PON subtype 0x0805 reads 0x04 / 0x04 -> STABLE",
+      "KEBAB SPMI: REG 0x088f read 1: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x00",
+      "KEBAB SPMI: REG 0x088f read 2: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x00",
+      "KEBAB SPMI: SOFT_RB_SPARE 0x088f reads 0x00 / 0x00 -> STABLE",
+      "KEBAB SPMI: PON generation: Gen2 (subtype 0x04); the Gen2 SOFT_RB_SPARE layout would apply",
+      "KEBAB SPMI: SPMI-3 PASS"
+    ],
+    "tcs": [
+      "KEBAB TCS: === read-only TCS dump, APPS RSC drv-2 ===",
+      "KEBAB TCS: drv-2 0x18220000, tcs_base = drv + 0xd00 = <kernel-va>, stride 672",
+      "KEBAB TCS: rsc irq: enable[tcs_base+0x0] 0x00000001 status[+0x4] 0x00000000 clear[+0x8] 0x00000000",
+      "KEBAB TCS: tcs 0 at <kernel-va>: CONTROL[+0x14] 0x01010000 (AMC_ENABLE 1, AMC_TRIGGER 1) CMD_ENABLE[+0x1c] 0x00000003 CMD_WAIT[+0x10] 0x00000000 CMD_STATUS[+0x3c] 0x00010101 (ISSUED 1, COMPL 1)",
+      "KEBAB TCS: tcs 1 at <kernel-va>: CONTROL[+0x14] 0x00010000 (AMC_ENABLE 1, AMC_TRIGGER 0) CMD_ENABLE[+0x1c] 0x00000000 CMD_WAIT[+0x10] 0x00000000 CMD_STATUS[+0x3c] 0x00000000 (ISSUED 0, COMPL 0)",
+      "KEBAB TCS: VERDICT: TCS1 is idle and clean; a kernel-side send is plausible",
+      "KEBAB TCS: done; no register was written, cleared or recovered"
+    ],
+    "power": [
+      "KEBAB SPMI: === PWR: touch rails, observer reads only ===",
+      "KEBAB SPMI: PWR: pm8150_l13: SID 1 base 0x4c00 PPID 0x14c",
+      "KEBAB SPMI: PWR: pm8150_l13: APID 0x0c9 write_ee 0x4 irq_owner 1",
+      "KEBAB SPMI: PWR: pm8150_l13: type 0x04 subtype 0x7b",
+      "KEBAB SPMI: PWR: pm8150_l13: enable 0x00 (bit7 0), range 0xc0, set 0x0b",
+      "KEBAB SPMI: PWR: pm8150a_l1: SID 5 base 0x4000 PPID 0x540",
+      "KEBAB SPMI: PWR: pm8150a_l1: APID 0x11b write_ee 0x4 irq_owner 1",
+      "KEBAB SPMI: PWR: pm8150a_l1: type 0x04 subtype 0x71",
+      "KEBAB SPMI: PWR: pm8150a_l1: enable 0x00 (bit7 0), range 0x08, set 0x07",
+      "KEBAB SPMI: PWR: mappings per SID: 0:66 1:51 2:67 3:5 4:43 5:53 6:5 7:0",
+      "KEBAB SPMI: PWR: mapping present for SID 1 base 0x4000 (PPID 0x140)",
+      "KEBAB SPMI: PWR: mapping present for SID 1 base 0x4c00 (PPID 0x14c)",
+      "KEBAB SPMI: PWR: mapping present for SID 2 base 0x4000 (PPID 0x240)",
+      "KEBAB SPMI: PWR: mapping present for SID 5 base 0x4000 (PPID 0x540)",
+      "KEBAB SPMI: PWR: done; no peripheral write was issued"
+    ],
+    "touch": [
+      "KEBAB TOUCH: read-only probe begin; no register is written",
+      "KEBAB TOUCH: state: initialized 0, dead 0, rails 0, unavailable 0, last mode never read",
+      "KEBAB TOUCH: GCC 0x52008 = 0x063c83c0: wrap1_s5 0 m_ahb 1 s_ahb 1",
+      "KEBAB TOUCH: GCC halt m_ahb 0x00000000 s_ahb 0x80000002 wrap1_s5 0x80004220",
+      "KEBAB TOUCH: probe wrapper QUP_HW_VER 0x20050000",
+      "KEBAB TOUCH: probe GENI_FW_REVISION_RO 0x00000303 protocol 3",
+      "KEBAB TOUCH: probe GENI_STATUS 0x00000000 M_IRQ_STATUS 0x00000000 S_IRQ_STATUS 0x00000000",
+      "KEBAB TOUCH: probe DMA_MODE_EN 0x00000000 CGC_CTRL 0x0000007f",
+      "KEBAB TOUCH: probe TX_WATERMARK 0x00000000 M_IRQ_EN 0x33c0007e",
+      "KEBAB TOUCH: probe SER_M_CLK_CFG 0x00000011 SCL_COUNTERS 0x00000000",
+      "KEBAB TOUCH: probe TX_FIFO_STATUS 0x00000000 RX_FIFO_STATUS 0x00000000",
+      "KEBAB TOUCH: probe pin 36 ctl 0x00000001 io 0x00000000",
+      "KEBAB TOUCH: probe pin 37 ctl 0x00000001 io 0x00000000",
+      "KEBAB TOUCH: probe pin 38 ctl 0x00000001 io 0x00000000",
+      "KEBAB TOUCH: probe pin 39 ctl 0x00000001 io 0x00000000",
+      "KEBAB TOUCH: read-only probe end"
+    ]
+  },
+  "key_raw": [
+    "0x04",
+    "0x01",
+    "0x01",
+    "0x10"
+  ],
+  "root_readonly": true,
+  "file_hashes_match": true,
+  "panic_fastboot_verified": true,
+  "device": "c073a488\t fastboot"
+}

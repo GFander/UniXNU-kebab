@@ -1,0 +1,42 @@
+fix(cs): propagate CS_SIGNED for a validated signature
+
+launchd aborts its first boot task on this port:
+
+  initproc exited -- exit reason namespace 7 subcode 0x1
+  failed to get the code signing identity for a boot-task
+  (mount-phase-1, /sbin/mount) errno: 2
+
+cs_identity_get() returns NULL unless proc_getcsflags() carries CS_SIGNED, and
+csproc_get_blob() refuses to hand out a blob for the same reason.  CS_SIGNED is
+an AMFI bit on Apple platforms, so it is deliberately absent from the
+load_result.csflags mask in exec_mach_imgact(), and the port never set it: every
+identity and entitlement path therefore behaved as though the process were
+unsigned.  Propagate it from the same CS_VALID decision that already gates the
+blob, so the flag cannot claim more than the blob proves.  kebab_cs still decides
+what is trusted; this only makes the process's flags agree with the blob that was
+attached.
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -1432,6 +1432,22 @@
+ 		imgp->ip_csflags |= CS_PLATFORM_BINARY;
+ 	}
+ 
++	/*
++	 * CS_SIGNED is AMFI's bit as well, which is why it is absent from the mask
++	 * above: on Apple platforms AMFI sets it when a trust cache vouches for the
++	 * blob.  This port replaces AMFI with kebab_cs, and a blob that validated
++	 * already carries CS_VALID from cs_blob_init_validated().  Without
++	 * CS_SIGNED every csproc_get_blob() caller behaves as though the process
++	 * were unsigned, so cs_identity_get() returns NULL and launchd aborts a
++	 * boot task with "failed to get the code signing identity" (namespace 7,
++	 * subcode 0x1).  Propagating it from the same CS_VALID decision cannot
++	 * claim more than the blob proves, and it does not widen kebab_cs's
++	 * policy: a blob that did not validate never reaches this point.
++	 */
++	if (load_result.csflags & CS_VALID) {
++		imgp->ip_csflags |= CS_SIGNED; /* kebab: propagate validated signature */
++	}
++
+ 	if (proc_getcsflags(p) & CS_EXEC_SET_HARD) {
+ 		imgp->ip_csflags |= CS_HARD;
+ 	}

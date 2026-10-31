@@ -1,0 +1,253 @@
+--- a/iokit/Kernel/arm/KebabCPU.cpp
++++ b/iokit/Kernel/arm/KebabCPU.cpp
+@@ -1,7 +1,7 @@
+ /*
+  * A55 SMP bring-up for kebab using XNU's legacy IOCPU interface and PSCI.
+  * The architected timer and SGI1 already enter through pe_fiq/sleh_irq.
+- * CPU_OFF, suspend and the A76 cores still require separate platform work.
++ * CPU_OFF, suspend and heterogeneous scheduling still require separate platform work.
+  */
+ #include <pexpert/arm64/board_config.h>
+ 
+@@ -17,9 +17,11 @@
+ #include <kern/thread.h>
+ #include <mach/mach_time.h>
+ #include <pexpert/pexpert.h>
++#include "KebabCPUProtocol.h"
+ 
+ extern "C" void kebab_secondary_entry(void);
+ extern "C" boolean_t kebab_cpu_signal_is_enabled(unsigned int cpu);
++extern "C" bool kebab_cpu_irq_snapshot(unsigned int cpu, uint64_t *timer, uint64_t *sgi);
+ 
+ class KebabCPU;
+ static KebabCPU *kebab_cpus[MAX_CPUS];
+@@ -86,7 +88,7 @@
+ 	if (*(const uint32_t *)reg->getBytesNoCopy() != cpu->phys_id) {
+ 		return false;
+ 	}
+-	/* MPIDR Aff1 = core: 0x000-0x500 A55, 0x600/0x700 A76 */
++	/* OnePlus kona.dtsi: Aff1 identifies PE 0..7; performance domains 4+3+1. */
+ 	if (cpu->phys_id > 0x700 || (cpu->phys_id & 0xff) != 0 ||
+ 	    topology->num_cpus > KEBAB_SMP_MAX_CPUS) {
+ 		panic("KEBAB CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
+@@ -95,7 +97,7 @@
+ 	if (!IOCPU::start(provider)) {
+ 		return false;
+ 	}
+-	cpuName = OSSymbol::withCStringNoCopy("Kryo 470");
++	cpuName = OSSymbol::withCStringNoCopy("SM8250 Kryo 585");
+ 	if (cpuName == NULL) {
+ 		return false;
+ 	}
+@@ -178,15 +180,32 @@
+ 			}
+ 			IOSleep(1);
+ 		}
+-		IOLog("KEBAB CPU: cpu=%u mpidr=0x%x came alive; SGI1 OK\n",
+-		    i, topology->cpus[i].phys_id);
++		/* Observe actual interrupt entries, then send a fresh probe from this
++		 * startup thread. initCPU's software state alone is not the test. */
++		uint64_t timers = 0, sgis = 0, before_sgi = 0;
++		if (!kebab_cpu_irq_snapshot(i, &timers, &before_sgi)) {
++			panic("KEBAB CPU: missing IRQ observer for cpu=%u", i);
++		}
++		cpu->signalCPU(cpu);
++		nanoseconds_to_deadline(5 * NSEC_PER_SEC, &deadline);
++		do {
++			(void)kebab_cpu_irq_snapshot(i, &timers, &sgis);
++			if (timers && sgis > before_sgi) break;
++			if (mach_absolute_time() > deadline) {
++				panic("KEBAB CPU: cpu=%u IRQ probe timeout timer=%llu SGI=%llu/%llu",
++				    i, timers, sgis, before_sgi);
++			}
++			IOSleep(1);
++		} while (true);
++		IOLog("KEBAB CPU: cpu=%u mpidr=0x%x alive; timer=%llu SGI=%llu->%llu PASS\n",
++		    i, topology->cpus[i].phys_id, timers, before_sgi, sgis);
+ 	}
+ 	/* Publish exactly once, after every selected CPU has completed initCPU(). */
+ 	ml_cpu_init_completed();
+ 	__atomic_load_n(&kebab_cpus[topology->boot_cpu->cpu_id], __ATOMIC_ACQUIRE)->cpusRunning();
+ 	IOService::publishResource(gIOAllCPUInitializedKey, kOSBooleanTrue);
+ 	ml_set_max_cpus(topology->max_cpu_id + 1);
+-	IOLog("KEBAB CPU: %u/%u CPUs initialized, SGI1 verified\n",
++	IOLog("KEBAB CPU: %u/%u CPUs initialized, timer/fresh SGI1 verified\n",
+ 	    topology->num_cpus, topology->num_cpus);
+ 	thread_terminate(current_thread());
+ }
+@@ -227,16 +246,12 @@
+ 	if (logical >= topology->num_cpus) {
+ 		panic("KEBAB CPU: invalid SGI target %u", logical);
+ 	}
+-	/* Use the TARGET affinity, including Aff1, never the sender's MPIDR. */
+-	uint64_t mpidr = topology->cpus[logical].phys_id;
+-	unsigned int aff0 = mpidr & 0xff;
+-	if (aff0 >= 16) {
+-		panic("KEBAB CPU: SGI target requires unsupported range selector");
+-	}
+-	uint64_t sgi = (((mpidr >> 32) & 0xff) << 48) |
+-	    (((mpidr >> 16) & 0xff) << 32) |
+-	    (((mpidr >> 8) & 0xff) << 16) |
+-	    ((uint64_t)KEBAB_IPI_SGI << 24) | (1ULL << aff0);
++	/* Arm IHI 0069G ICC_SGI1R_EL1: target Aff1, INTID and Aff0 list.
++	 * These are PE affinities, not Linux frequency-domain/Apple cluster IDs. */
++	uint64_t sgi = 0;
++	if (!kebab_sgi1r_for_mpidr(topology->cpus[logical].phys_id, KEBAB_IPI_SGI, &sgi)) {
++		panic("KEBAB CPU: unsupported SM8250 SGI affinity");
++	}
+ 	__builtin_arm_dsb(DSB_ISHST);
+ 	__builtin_arm_wsr64("ICC_SGI1R_EL1", sgi);
+ 	__builtin_arm_isb(ISB_SY);
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabCPUProtocol.h
+@@ -0,0 +1,13 @@
++/* Fixed SM8250 affinity contract, from OnePlus kona.dtsi and Arm IHI 0069G. */
++#ifndef KEBAB_CPU_PROTOCOL_H
++#define KEBAB_CPU_PROTOCOL_H
++static inline bool
++kebab_sgi1r_for_mpidr(uint64_t mpidr, unsigned int intid, uint64_t *value)
++{
++	if (value == NULL || intid > 15 || mpidr > 0x700 || (mpidr & 0xff) != 0) {
++		return false;
++	}
++	*value = ((mpidr >> 8) << 16) | ((uint64_t)intid << 24) | 1;
++	return true;
++}
++#endif
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -20,8 +20,10 @@
+ #if defined(KEBAB)
+ /* Phone default; QEMU virt wires the architected virtual timer to INTID 27. */
+ SECURITY_READ_ONLY_LATE(uint32_t) kebab_vtimer_intid = KEBAB_VTIMER_INTID;
+-/* kebab (GICv3): 2 frames per PE; SM8450 kebab (GICv4, VLPI frames): 4. */
++/* SM8250 uses two redistributor frames per PE. */
+ SECURITY_READ_ONLY_LATE(uint32_t) kebab_gicr_stride = GICR_PE_SIZE;
++/* Parse only on the boot PE; SecureDT/boot-arg walkers are not IRQ-safe. */
++SECURITY_READ_ONLY_LATE(int) kebab_irq_trace = 0;
+ #endif
+ 
+ static vm_offset_t gicd_base;
+@@ -84,6 +86,9 @@
+ {
+ 	int error;
+ 	DTEntry entry;
++#if defined(KEBAB)
++	bool boot_gic = (gicd_base == 0);
++#endif
+ 
+ 	// gicd_base is 0x0 only before it's initialized by the boot processor.
+ 	// Avoid calling SecureDT* routines on secondary processors to avoid
+@@ -109,6 +114,7 @@
+ 		}
+ 
+ #if defined(KEBAB)
++		(void)PE_parse_boot_argn("kebabtrace", &kebab_irq_trace, sizeof(kebab_irq_trace));
+ 		/* Read only on the boot CPU, before the GIC and RO-late lockdown. */
+ 		void const *timer_prop;
+ 		unsigned int timer_size;
+@@ -169,7 +175,7 @@
+ 
+ 	// Mark this PE to be awake
+ 	uint32_t gicr_waker = gicr_read32(GICR_WAKER);
+-	if (gicr_waker & GICR_WAKER_CHILDRENASLEEP) {
++	if (gicr_waker & (GICR_WAKER_PROCESSORSLEEP | GICR_WAKER_CHILDRENASLEEP)) {
+ 		gicr_waker &= ~GICR_WAKER_PROCESSORSLEEP;
+ 
+ 		gicr_write32(GICR_WAKER, gicr_waker);
+@@ -231,12 +237,20 @@
+ 	__builtin_arm_wsr64("ICC_CTLR_EL1", icc_ctlr);
+ 
+ #if defined(KEBAB)
+-	// ABL leaves only ARE_NS set; Linux writes ARE_NS | EnableGrp1A | EnableGrp1
+-	uint32_t gicd_ctlr = gicd_read32(GICD_CTLR);
+-	gicd_ctlr |= GICD_CTLR_ARE_NS | GICD_CTLR_ENABLEGRP1A | GICD_CTLR_ENABLEGRP1;
+-	gicd_write32(GICD_CTLR, gicd_ctlr);
+-	while (gicd_read32(GICD_CTLR) & GICD_CTLR_RWP) {
+-		;
++	/* GICD is global. Secondaries configure only their GICR/ICC state;
++	 * do not race a distributor RMW on every CPU_ON. Arm IHI 0069G. */
++	if (boot_gic) {
++		uint32_t gicd_ctlr = gicd_read32(GICD_CTLR);
++		gicd_ctlr |= GICD_CTLR_ARE_NS | GICD_CTLR_ENABLEGRP1A | GICD_CTLR_ENABLEGRP1;
++		gicd_write32(GICD_CTLR, gicd_ctlr);
++		uint64_t deadline;
++		nanoseconds_to_deadline(NSEC_PER_SEC, &deadline);
++		while (gicd_read32(GICD_CTLR) & GICD_CTLR_RWP) {
++			if (mach_absolute_time() > deadline) {
++				panic("KEBAB GIC: distributor RWP timeout");
++			}
++		}
++		__builtin_arm_dsb(DSB_SY);
+ 	}
+ 	__builtin_arm_wsr64("ICC_IGRPEN1_EL1", 1);
+ 	__builtin_arm_isb(ISB_SY);
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1976,6 +1976,25 @@
+ }
+ #endif /* KEBAB */
+ 
++#if defined(KEBAB)
++extern int kebab_irq_trace;
++/* One cache line per PE avoids a contended global counter on every IRQ.
++ * Only that PE writes; normal startup observes with acquire loads. */
++static struct {
++	uint64_t timer, sgi;
++	uint32_t other;
++} __attribute__((aligned(64))) kebab_irq_observers[MAX_CPUS];
++bool kebab_cpu_irq_snapshot(unsigned int cpu, uint64_t *timer, uint64_t *sgi);
++bool
++kebab_cpu_irq_snapshot(unsigned int cpu, uint64_t *timer, uint64_t *sgi)
++{
++	if (cpu >= MAX_CPUS || timer == NULL || sgi == NULL) return false;
++	*timer = __atomic_load_n(&kebab_irq_observers[cpu].timer, __ATOMIC_ACQUIRE);
++	*sgi = __atomic_load_n(&kebab_irq_observers[cpu].sgi, __ATOMIC_ACQUIRE);
++	return true;
++}
++#endif
++
+ void
+ sleh_irq(arm_saved_state_t *state)
+ {
+@@ -1997,25 +2016,26 @@
+ 		return; /* spurious */
+ 	}
+ 	/* Bring-up trace (boot-arg kebabtrace=1): timer IRQs at powers of two, the first other IRQs. */
+-	static uint32_t kebab_vtimer_irqs, kebab_other_irqs;
+-	static int kebab_trace = -1;
+-	if (kebab_trace < 0) {
+-		int on = 0;
+-		(void)PE_parse_boot_argn("kebabtrace", &on, sizeof(on));
+-		kebab_trace = on != 0;
+-	}
+-	if (!kebab_trace) {
++	unsigned int kebab_cpu = (unsigned int)cpu_number();
++	assert(kebab_cpu < MAX_CPUS);
++	uint64_t timer_count = 0;
++	if (intid == kebab_vtimer_intid) {
++		timer_count = __atomic_add_fetch(&kebab_irq_observers[kebab_cpu].timer, 1, __ATOMIC_RELEASE);
++	} else if (intid == KEBAB_IPI_SGI) {
++		(void)__atomic_add_fetch(&kebab_irq_observers[kebab_cpu].sgi, 1, __ATOMIC_RELEASE);
++	}
++	if (!kebab_irq_trace) {
+ 		/* off */
+ 	} else if (intid == kebab_vtimer_intid) {
+-		uint32_t n = ++kebab_vtimer_irqs;
++		uint64_t n = timer_count;
+ 		if ((n & (n - 1)) == 0) {
+-			kprintf("KEBAB VTIMER irq %u tval %lld\n", n, (long long)(int32_t)__builtin_arm_rsr64("CNTV_TVAL_EL0"));
+-		}
+-		if (n == 16384) {
++			kprintf("KEBAB VTIMER cpu=%u irq %llu tval %lld\n", kebab_cpu, n, (long long)(int32_t)__builtin_arm_rsr64("CNTV_TVAL_EL0"));
++		}
++		if (kebab_cpu == 0 && n == 16384) {
+ 			kebab_dump_kernel_threads();
+ 		}
+-	} else if (intid >= 16 && kebab_other_irqs < 16) {
+-		kebab_other_irqs++;
++	} else if (intid >= 16 && kebab_irq_observers[kebab_cpu].other < 16) {
++		kebab_irq_observers[kebab_cpu].other++;
+ 		kprintf("KEBAB IRQ intid=%u handler=%p\n", intid, cdp->interrupt_handler);
+ 	}
+ 	if (intid == kebab_vtimer_intid) {

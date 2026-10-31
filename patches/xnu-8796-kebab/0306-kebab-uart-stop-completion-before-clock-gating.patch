@@ -1,0 +1,45 @@
+--- a/bsd/dev/kebab_bt_uart_impl.h
++++ b/bsd/dev/kebab_bt_uart_impl.h
+@@ -60,15 +60,29 @@
+  e=kbu_write(io,KBU_GCC,0x17730,cmd|1u);if(e)return e;
+  return kbu_poll_clear(io,KBU_GCC,0x17730,1u,500);
+ }
++/* Inactive status alone can precede the firmware CANCEL/ABORT response.
++ * Match the vendor stop contract: observe its completion IRQ as well, while
++ * serial clocks are still running, before acknowledging or gating clocks. */
++static int
++kbu_stop_done(const struct kbu_io *io,uint32_t active,uint32_t completed)
++{
++ for(unsigned i=0;i<1000;++i){
++  uint32_t status,irq;int e=kbu_read(io,KBU_SE,0x40,&status);if(e)return e;
++  e=kbu_read(io,KBU_SE,active==1?0x610:0x640,&irq);if(e)return e;
++  if(!(status&active)&&(irq&completed))return 0;
++  io->wait(io->ctx,1);
++ }
++ return ETIMEDOUT;
++}
+ static int
+ kbu_stop(const struct kbu_io *io,uint32_t ctrl,uint32_t active)
+ {
+  uint32_t v;int e=kbu_read(io,KBU_SE,0x40,&v);if(e||!(v&active))return e;
+  e=kbu_write(io,KBU_SE,ctrl,4);if(e)return e;
+- e=kbu_poll_clear(io,KBU_SE,0x40,active,1000);
+- if(!e)return 0;
++ e=kbu_stop_done(io,active,1u<<4);
++ if(e!=ETIMEDOUT)return e;
+  e=kbu_write(io,KBU_SE,ctrl,2);if(e)return e;
+- return kbu_poll_clear(io,KBU_SE,0x40,active,1000);
++ return kbu_stop_done(io,active,1u<<5);
+ }
+ /* Caller retains bytes from a consumed FIFO word when a consumer asks for
+  * fewer than four. This is the same byte reader used by the loopback probe;
+@@ -223,6 +237,9 @@
+   if(!c)c=s;
+   /* Never change clocks/config under an engine which failed to stop. */
+   if(!c){
++   /* Acknowledge the completed sequencers before disabling serial clocks.
++    * The later acknowledgement still handles level watermark reassertion. */
++   for(unsigned i=0;i<2&&!c;++i){uint32_t status;c=kbu_read(io,KBU_SE,i?0x640:0x610,&status);if(!c)c=kbu_write(io,KBU_SE,i?0x648:0x618,status);}
+    uint32_t status;int x=kbu_read(io,KBU_SE,0x804,&status);if(!x&&(status&0x1ffffffu))x=EIO;if(!c)c=x;
+    x=kbu_read(io,KBU_SE,0x800,&status);if(!x&&(status&0xfffffffu))x=EIO;if(!c)c=x;
+    x=kbu_read(io,KBU_SE,0x40,&status);if(!x&&(status&0x1001u))x=EIO;if(!c)c=x;

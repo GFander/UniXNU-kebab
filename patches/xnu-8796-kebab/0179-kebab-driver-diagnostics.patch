@@ -1,0 +1,161 @@
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -314,6 +314,9 @@
+ #define UD_REBOOT_VOL_DRY       27u
+ #define UD_REBOOT_VOL_STATUS    28u
+ #define UD_REBOOT_SYNC          29u
++#define UD_REBOOT_DRV_REPORT    30u
++
++extern void kebab_driver_report(void);
+ 
+ struct ud_endpoint {
+ 	uint32_t trb, length, ctl, resource;
+@@ -1463,6 +1466,38 @@
+ 		    sizeof("TCS?\n") - 1)) {
+ 			return UD_REBOOT_TCS_REPORT;
+ 		}
++		if (ud_command_seen(buf, received, "TOUCH?\n",
++		    sizeof("TOUCH?\n") - 1)) {
++			return UD_REBOOT_TOUCH_PROBE;
++		}
++		if (ud_command_seen(buf, received, "TOUCHINIT\n",
++		    sizeof("TOUCHINIT\n") - 1)) {
++			return UD_REBOOT_TOUCH_INIT;
++		}
++		if (ud_command_seen(buf, received, "TOUCHCLK\n",
++		    sizeof("TOUCHCLK\n") - 1)) {
++			return UD_REBOOT_TOUCH_CLOCK;
++		}
++		if (ud_command_seen(buf, received, "TOUCHSE\n",
++		    sizeof("TOUCHSE\n") - 1)) {
++			return UD_REBOOT_TOUCH_SE;
++		}
++		if (ud_command_seen(buf, received, "TOUCHPING\n",
++		    sizeof("TOUCHPING\n") - 1)) {
++			return UD_REBOOT_TOUCH_PING;
++		}
++		if (ud_command_seen(buf, received, "PWR?\n",
++		    sizeof("PWR?\n") - 1)) {
++			return UD_REBOOT_PWR_REPORT;
++		}
++		if (ud_command_seen(buf, received, "RPMH?\n",
++		    sizeof("RPMH?\n") - 1)) {
++			return UD_REBOOT_RPMH_REPORT;
++		}
++		if (ud_command_seen(buf, received, "DRV?\n",
++		    sizeof("DRV?\n") - 1)) {
++			return UD_REBOOT_DRV_REPORT;
++		}
+ 		/* "FWLOG? all\n" must be tried before the bare form. */
+ 		if (ud_command_seen(buf, received, "FWLOG? all\n",
+ 		    sizeof("FWLOG? all\n") - 1)) {
+@@ -1561,6 +1596,10 @@
+ 	if (received >= sizeof("RPMH?\n") - 1 &&
+ 	    !memcmp(buf, "RPMH?\n", sizeof("RPMH?\n") - 1)) {
+ 		return UD_REBOOT_RPMH_REPORT;
++	}
++	if (received >= sizeof("DRV?\n") - 1 &&
++	    !memcmp(buf, "DRV?\n", sizeof("DRV?\n") - 1)) {
++		return UD_REBOOT_DRV_REPORT;
+ 	}
+ 	if (received >= sizeof("FWLOG? all\n") - 1 &&
+ 	    !memcmp(buf, "FWLOG? all\n", sizeof("FWLOG? all\n") - 1)) {
+@@ -1909,6 +1948,8 @@
+ 		ud_psci_negative_report();
+ 	} else if (command == UD_REBOOT_IMEM_REPORT) {
+ 		ud_imem_report();
++	} else if (command == UD_REBOOT_DRV_REPORT) {
++		kebab_driver_report();
+ 	} else if (command == UD_REBOOT_SPMI_REPORT) {
+ 		kebab_spmi_report();
+ 	} else if (command == UD_REBOOT_PON_REPORT) {
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -26,3 +26,5 @@
+ iokit/Kernel/arm/KebabDriverSelfTest.cpp	optional iokitcpp
+ 
+ iokit/Kernel/arm/KebabSPMI.cpp	optional iokitcpp
++
++iokit/Kernel/arm/KebabDriverDiagnostics.cpp	optional iokitcpp
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabDriverDiagnostics.cpp
+@@ -0,0 +1,61 @@
++/* Normal console only. The C dispatcher refuses DRV? before reaching IOKit
++ * during panic. No blocking wait, hardware writes, or matching side effects. */
++#include <pexpert/arm64/board_config.h>
++#if defined(KEBAB)
++#include <IOKit/IOService.h>
++#include <IOKit/IOLib.h>
++#include <libkern/c++/OSIterator.h>
++#include "KebabDriverManifest.h"
++
++struct KebabDriverManifestEntry {
++	const char *group, *service, *scope;
++};
++#define KEBAB_DRIVER_ENTRY(group, service, scope) { group, service, scope },
++static const KebabDriverManifestEntry manifest[] = {
++	KEBAB_DRIVER_MANIFEST(KEBAB_DRIVER_ENTRY)
++};
++#undef KEBAB_DRIVER_ENTRY
++
++extern "C" void kebab_driver_report(void);
++extern "C" void
++kebab_driver_report(void)
++{
++	IOLog("KEBAB DRV: manifest v1; registry state is observed now; C entries have no service\n");
++	for (unsigned i = 0; i < sizeof(manifest) / sizeof(manifest[0]); i++) {
++		const KebabDriverManifestEntry &entry = manifest[i];
++		if (entry.service == NULL) {
++			IOLog("KEBAB DRV: %s backend=C service=none scope=%s\n", entry.group, entry.scope);
++			continue;
++		}
++		OSDictionary *matching = IOService::serviceMatching(entry.service);
++		if (matching == NULL) {
++			IOLog("KEBAB DRV: %s query=allocation-failed\n", entry.group);
++			continue;
++		}
++		OSIterator *iterator = IOService::getMatchingServices(matching);
++		matching->release();
++		unsigned count = 0;
++		if (iterator) {
++			while (count < 8) {
++				IOService *service = OSDynamicCast(IOService, iterator->getNextObject());
++				if (service == NULL) { break; }
++				IORegistryEntry *provider = service->copyParentEntry(gIOServicePlane);
++				IOLog("KEBAB DRV: %s class=%s id=%llx state=0x%x inactive=%u provider=%s\n",
++				    entry.group, service->getMetaClass()->getClassName(), service->getRegistryEntryID(),
++				    (unsigned)service->getState(), service->isInactive(),
++				    provider == NULL ? "none" : provider->getName());
++				OSSafeReleaseNULL(provider);
++				count++;
++			}
++			IOLog("KEBAB DRV: %s class=%s matched=%u%s valid=%u scope=%s\n",
++			    entry.group, entry.service, count, count == 8 ? "+" : "",
++			    iterator->isValid(), entry.scope);
++			iterator->release();
++		} else {
++			IOLog("KEBAB DRV: %s class=%s query=unavailable scope=%s\n",
++			    entry.group, entry.service, entry.scope);
++		}
++	}
++	IOLog("KEBAB DRV: end; matched service does not certify user ABI or hardware capability\n");
++}
++#endif /* KEBAB */
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabDriverManifest.h
+@@ -0,0 +1,15 @@
++/* Names describe the native implementation, not private Apple ABI coverage.
++ * A NULL service means the backend is a resident C core with no IOKit identity.
++ * DRV? independently queries the registry for every non-NULL class. */
++#define KEBAB_DRIVER_MANIFEST(X) \
++ X("platform", "KebabPlatformExpert", "ADT platform/resources") \
++ X("cpu", "KebabCPU", "single boot CPU; no SMP qualification") \
++ X("ufs", "KebabBlockStorageDevice", "boot C UFS + native storage bridge") \
++ X("usb", NULL, "resident DWC3 C core; no normal IOService") \
++ X("spmi", "KebabSPMIBus", "ADT arbiter + boot C backend") \
++ X("pon", "KebabPon", "scoped PON; panic uses C core directly") \
++ X("keys", "KebabPmicKeys", "raw PMIC sampling; no HID") \
++ X("rpmh", "KebabVrm", "RSC policy/readback; no IOPM") \
++ X("touch", NULL, "resident GENI/TCM C core; TOUCH?; no HID") \
++ X("display", "AppleCLCD", "CPU framebuffer; no GPU/vsync qualification") \
++ X("surface", "IOCoreSurfaceRoot", "compatibility selectors; private ABI incomplete")

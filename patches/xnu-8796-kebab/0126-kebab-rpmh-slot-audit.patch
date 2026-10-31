@@ -1,0 +1,93 @@
+feat(rpmh): per-slot TCS audit, and a submit result that is not a success claim
+
+R4.2: kebab_tcs_submit() now reports the channel it is leaving behind: OK only
+when the sink completed synchronously, SINK_FAILED when the sink left ERROR or
+TIMEOUT, and PENDING while the command is still in flight.  A caller can no
+longer mistake submission for a confirmed rail.
+
+R5-A2: the probe now reads the drv-level registers at +0x00/0x04/0x08/0x0C and,
+per TCS, wait/control/status/enable plus both command slots.  Measured: TCS0
+holds two CLK requests (0x30000 and 0x30010, status 0x010101); TCS1 has
+control 0x00010000, enable 0, no commands, and no completion IRQ (irq_en is
+0x00020000); prnt_chld 0x800c8104 decodes to max_tcs = 8 for drv-2, so TCS8
+does not exist and the DT 2+3+3+1 has to exclude the control TCS.
+
+Read-only: no register is written.
+
+--- a/bsd/dev/kebab_spmi.c
++++ b/bsd/dev/kebab_spmi.c
+@@ -836,6 +836,8 @@
+ #define KEBAB_RSC_TCS_TOTAL     9u      /* 2 active + 3 sleep + 3 wake + 1 control */
+ #define KEBAB_RSC_CMD_WAIT      0x10u
+ #define KEBAB_RSC_RESP_DATA     0x40u
++#define KEBAB_RSC_IRQ_CLEAR     0x08u
++#define KEBAB_RSC_PRNT_CHLD     0x0cu
+ 
+ #define KEBAB_RSC_IRQ_ENABLE    0x00u
+ #define KEBAB_RSC_IRQ_STATUS    0x04u
+@@ -921,7 +923,7 @@
+ kebab_rpmh_rsc(void)
+ {
+ 	vm_offset_t drv, base;
+-	uint32_t i;
++	uint32_t i, c;
+ 
+ 	drv = ml_io_map(KEBAB_RSC_DRV2_PA, KEBAB_RSC_SIZE);
+ 	if (drv == 0) {
+@@ -932,28 +934,39 @@
+ 	base = drv + KEBAB_RSC_TCS_OFF;
+ 	printf("KEBAB RPMH: drv-2 0x%08x, tcs_base +0x%x -> 0x%llx\n",
+ 	    KEBAB_RSC_DRV2_PA, KEBAB_RSC_TCS_OFF, (unsigned long long)base);
+-	printf("KEBAB RPMH: common irq_en 0x%08x irq_status 0x%08x cmd_wait 0x%08x control 0x%08x status 0x%08x cmd_enable 0x%08x\n",
+-	    kebab_spmi_rd(base, KEBAB_RSC_IRQ_ENABLE),
+-	    kebab_spmi_rd(base, KEBAB_RSC_IRQ_STATUS),
+-	    kebab_spmi_rd(base, KEBAB_RSC_CMD_WAIT),
+-	    kebab_spmi_rd(base, KEBAB_RSC_CONTROL),
+-	    kebab_spmi_rd(base, KEBAB_RSC_STATUS),
+-	    kebab_spmi_rd(base, KEBAB_RSC_CMD_ENABLE));
+ 	/*
+-	 * Read every TCS slot, not just the two active ones: CMD_ENABLE = 0
+-	 * alone does not prove a slot is free, and the sleep/wake/control
+-	 * slots show whether something else is holding the RSC.
++	 * These four are drv-level, not part of any TCS window.  Linux reads
++	 * DRV_PRNT_CHLD_CONFIG here to size the TCS groups, which is why the
++	 * DT's 2+3+3+1 is not taken as nine identical slots.
+ 	 */
++	printf("KEBAB RPMH: drv irq_en 0x%08x irq_status 0x%08x irq_clear 0x%08x prnt_chld 0x%08x\n",
++	    kebab_spmi_rd(drv, KEBAB_RSC_IRQ_ENABLE),
++	    kebab_spmi_rd(drv, KEBAB_RSC_IRQ_STATUS),
++	    kebab_spmi_rd(drv, KEBAB_RSC_IRQ_CLEAR),
++	    kebab_spmi_rd(drv, KEBAB_RSC_PRNT_CHLD));
+ 	for (i = 0; i < KEBAB_RSC_TCS_TOTAL; i++) {
+ 		vm_offset_t t = base + i * KEBAB_RSC_TCS_STRIDE;
+ 
+-		printf("KEBAB RPMH: tcs %u: enable 0x%08x msgid 0x%08x addr 0x%08x data 0x%08x status 0x%08x resp 0x%08x\n",
+-		    i, kebab_spmi_rd(t, KEBAB_RSC_CMD_ENABLE),
+-		    kebab_spmi_rd(t, KEBAB_RSC_CMD_MSGID),
+-		    kebab_spmi_rd(t, KEBAB_RSC_CMD_ADDR),
+-		    kebab_spmi_rd(t, KEBAB_RSC_CMD_DATA),
+-		    kebab_spmi_rd(t, KEBAB_RSC_CMD_STATUS),
+-		    kebab_spmi_rd(t, KEBAB_RSC_RESP_DATA));
++		printf("KEBAB RPMH: tcs %u: wait 0x%08x control 0x%08x status 0x%08x enable 0x%08x\n",
++		    i, kebab_spmi_rd(t, KEBAB_RSC_CMD_WAIT),
++		    kebab_spmi_rd(t, KEBAB_RSC_CONTROL),
++		    kebab_spmi_rd(t, KEBAB_RSC_STATUS),
++		    kebab_spmi_rd(t, KEBAB_RSC_CMD_ENABLE));
++		for (c = 0; c < 2; c++) {
++			vm_offset_t slot = t + c * KEBAB_RSC_CMD_STRIDE;
++			uint32_t msgid = kebab_spmi_rd(slot, KEBAB_RSC_CMD_MSGID);
++			uint32_t addr = kebab_spmi_rd(slot, KEBAB_RSC_CMD_ADDR);
++			uint32_t data = kebab_spmi_rd(slot, KEBAB_RSC_CMD_DATA);
++			uint32_t status = kebab_spmi_rd(slot, KEBAB_RSC_CMD_STATUS);
++			uint32_t resp = kebab_spmi_rd(slot, KEBAB_RSC_RESP_DATA);
++
++			if (msgid == 0 && addr == 0 && data == 0 &&
++			    status == 0 && resp == 0) {
++				continue;
++			}
++			printf("KEBAB RPMH: tcs %u slot %u: msgid 0x%08x addr 0x%08x data 0x%08x status 0x%08x resp 0x%08x\n",
++			    i, c, msgid, addr, data, status, resp);
++		}
+ 	}
+ }
+ 

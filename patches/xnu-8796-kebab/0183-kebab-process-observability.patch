@@ -1,0 +1,182 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -661,3 +661,5 @@
+ bsd/dev/kebab_prelink_shims.c	standard
+ 
+ bsd/dev/kebab_geni.c			standard
++
++bsd/kern/kebab_bootdiag.c			standard
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -315,6 +315,10 @@
+ #define UD_REBOOT_VOL_STATUS    28u
+ #define UD_REBOOT_SYNC          29u
+ #define UD_REBOOT_DRV_REPORT    30u
++#define UD_REBOOT_PROC_REPORT   31u
++#define UD_REBOOT_PID1_REPORT   32u
++extern void kebab_process_report(void);
++extern void kebab_pid1_report(void);
+ 
+ extern void kebab_driver_report(void);
+ 
+@@ -1494,6 +1498,12 @@
+ 		    sizeof("RPMH?\n") - 1)) {
+ 			return UD_REBOOT_RPMH_REPORT;
+ 		}
++		if (ud_command_seen(buf, received, "PROC?\n", sizeof("PROC?\n") - 1)) {
++			return UD_REBOOT_PROC_REPORT;
++		}
++		if (ud_command_seen(buf, received, "PID1?\n", sizeof("PID1?\n") - 1)) {
++			return UD_REBOOT_PID1_REPORT;
++		}
+ 		if (ud_command_seen(buf, received, "DRV?\n",
+ 		    sizeof("DRV?\n") - 1)) {
+ 			return UD_REBOOT_DRV_REPORT;
+@@ -1596,6 +1606,12 @@
+ 	if (received >= sizeof("RPMH?\n") - 1 &&
+ 	    !memcmp(buf, "RPMH?\n", sizeof("RPMH?\n") - 1)) {
+ 		return UD_REBOOT_RPMH_REPORT;
++	}
++	if (received >= sizeof("PROC?\n") - 1 && !memcmp(buf, "PROC?\n", sizeof("PROC?\n") - 1)) {
++		return UD_REBOOT_PROC_REPORT;
++	}
++	if (received >= sizeof("PID1?\n") - 1 && !memcmp(buf, "PID1?\n", sizeof("PID1?\n") - 1)) {
++		return UD_REBOOT_PID1_REPORT;
+ 	}
+ 	if (received >= sizeof("DRV?\n") - 1 &&
+ 	    !memcmp(buf, "DRV?\n", sizeof("DRV?\n") - 1)) {
+@@ -1948,6 +1964,10 @@
+ 		ud_psci_negative_report();
+ 	} else if (command == UD_REBOOT_IMEM_REPORT) {
+ 		ud_imem_report();
++	} else if (command == UD_REBOOT_PROC_REPORT) {
++		kebab_process_report();
++	} else if (command == UD_REBOOT_PID1_REPORT) {
++		kebab_pid1_report();
+ 	} else if (command == UD_REBOOT_DRV_REPORT) {
+ 		kebab_driver_report();
+ 	} else if (command == UD_REBOOT_SPMI_REPORT) {
+--- /dev/null
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -0,0 +1,59 @@
++/* Normal USB boot observability. Snapshot a bounded set of referenced objects;
++ * never print while holding a proc/task/thread lock. No thread suspension,
++ * saved-state modification, filesystem operation, or user memory access.
++ * The USB panic dispatcher rejects these commands before calling this file. */
++#if defined(KEBAB)
++#include <sys/param.h>
++#include <sys/proc.h>
++#include <sys/proc_internal.h>
++#include <sys/systm.h>
++#include <kern/task.h>
++
++extern void kebab_pid1_task_report(task_t task);
++void kebab_process_report(void);
++void kebab_pid1_report(void);
++
++static int
++kebab_process_line(proc_t process, void *arg)
++{
++	unsigned *count = arg;
++	char name[MAXCOMLEN + 1] = {};
++	int pid = proc_pid(process), parent = proc_ppid(process);
++	proc_name(pid, name, sizeof(name));
++	proc_lock(process);
++	unsigned state = process->p_stat, flags = process->p_flag;
++	proc_unlock(process);
++	printf("KEBAB PROC: pid=%d parent=%d state=%u flags=0x%x name=%s\n",
++	    pid, parent, state, flags, name);
++	return ++*count >= 64 ? PROC_RETURNED_DONE : PROC_RETURNED;
++}
++
++void
++kebab_process_report(void)
++{
++	unsigned count = 0;
++	printf("KEBAB PROC: active process snapshot begin (cap64)\n");
++	proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS, kebab_process_line, &count, NULL, NULL);
++	printf("KEBAB PROC: snapshot end count=%u%s\n", count, count == 64 ? "+" : "");
++}
++
++void
++kebab_pid1_report(void)
++{
++	proc_t process = proc_find(1);
++	if (process == PROC_NULL) {
++		printf("KEBAB PID1: process absent\n");
++		return;
++	}
++	task_t task = proc_task(process);
++	if (task == TASK_NULL) {
++		proc_rele(process);
++		printf("KEBAB PID1: task absent\n");
++		return;
++	}
++	task_reference(task);
++	proc_rele(process);
++	kebab_pid1_task_report(task);
++	task_deallocate(task);
++}
++#endif /* KEBAB */
+--- a/osfmk/conf/files
++++ b/osfmk/conf/files
+@@ -361,3 +361,5 @@
+ 
+ osfmk/prng/prng_random.c	standard
+ osfmk/prng/entropy.c   standard
++
++osfmk/kern/kebab_bootdiag.c			standard
+--- /dev/null
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -0,0 +1,51 @@
++/* Mach-private half of normal PID1 observability. The caller holds a task
++ * reference. Copy at most 32 thread references under task_lock, then observe
++ * each under sched_lock; release everything before printing or returning. */
++#if defined(KEBAB)
++#include <kern/task.h>
++#include <kern/thread.h>
++#include <kern/queue.h>
++#include <kern/sched_prim.h>
++#include <kern/spl.h>
++#include <mach/thread_info.h>
++#include <kern/misc_protos.h>
++void kebab_pid1_task_report(task_t task);
++void
++kebab_pid1_task_report(task_t task)
++{
++	thread_t observed[32], thread;
++	unsigned count = 0, thread_total = 0;
++	task_lock(task);
++	if (task->active) {
++		thread_total = task->thread_count;
++		queue_iterate(&task->threads, thread, thread_t, task_threads) {
++			if (count == sizeof(observed) / sizeof(observed[0])) { break; }
++			thread_reference(thread);
++			observed[count++] = thread;
++		}
++	}
++	task_unlock(task);
++	printf("KEBAB PID1: thread snapshot count=%u thread_total=%u (cap32; no suspension)\n", count, thread_total);
++	for (unsigned i = 0; i < count; i++) {
++		thread = observed[i];
++		thread_basic_info_data_t basic = {};
++		mach_msg_type_number_t size = THREAD_BASIC_INFO_COUNT;
++		kern_return_t result = thread_info_internal(thread, THREAD_BASIC_INFO,
++		    (thread_info_t)&basic, &size);
++		spl_t priority = splsched();
++		thread_lock(thread);
++		uint64_t tid = thread_tid(thread);
++		uint64_t event = thread->wait_event;
++		uint64_t continuation = (uint64_t)(uintptr_t)thread->continuation;
++		unsigned state = thread->state;
++		thread_unlock(thread);
++		splx(priority);
++		printf("KEBAB PID1: tid=%llu info=0x%x state=0x%x run=%d flags=0x%x suspend=%d sleep=%d wait=0x%llx continuation=0x%llx user=%d.%06d sys=%d.%06d\n",
++		    tid, result, state, basic.run_state, basic.flags, basic.suspend_count, basic.sleep_time,
++		    event, continuation, basic.user_time.seconds, basic.user_time.microseconds,
++		    basic.system_time.seconds, basic.system_time.microseconds);
++		thread_deallocate(thread);
++	}
++	printf("KEBAB PID1: snapshot end; addresses name kernel waits, not user PCs\n");
++}
++#endif /* KEBAB */

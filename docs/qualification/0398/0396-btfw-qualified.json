@@ -1,0 +1,25 @@
+{
+  "version": "0396",
+  "native_sha256": "ce33dbbc233eb1f1081dc37c1f4b4f13a481e3df596960a1cf6d1e26bc65aa3c",
+  "source_version": "0396",
+  "actual_capture_sha256": "c5a74c189514ae4ab43e8d12930ed1dc4a6e6936815b00e8547e9c5badbeef8d",
+  "probes": 2,
+  "files": {
+    "htbtfw20.tlv": {
+      "bytes": 205836,
+      "sha256": "e4d3d107db0e5e76b4d4ee14961c35bdeeb3533f316c6ed23546ea120eaad286"
+    },
+    "htnv20.bin": {
+      "bytes": 5815,
+      "sha256": "ad187a1d94c60cb39fd7bb30e1ddbb0c5dffbebc4e61f474dab21d482644eb1b"
+    }
+  },
+  "fresh_gpt_fixed_partition_read": true,
+  "read_only_firmware_loader_qualified": true,
+  "public_consumer_api_repeated_read": true,
+  "original_systembag_initialized": true,
+  "controller_download": false,
+  "hci_transport": false,
+  "bluetooth_functional": false,
+  "scan_connection_data_exchange_tested": false
+}

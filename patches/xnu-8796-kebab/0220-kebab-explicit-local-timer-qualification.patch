@@ -1,0 +1,93 @@
+--- a/iokit/Kernel/arm/KebabCPU.cpp
++++ b/iokit/Kernel/arm/KebabCPU.cpp
+@@ -15,6 +15,10 @@
+ #include <kern/clock.h>
+ #include <kern/processor.h>
+ #include <kern/thread.h>
++extern "C" {
++#include <kern/timer_call.h>
++}
++#include <machine/machine_routines.h>
+ #include <mach/mach_time.h>
+ #include <pexpert/pexpert.h>
+ #include "KebabCPUProtocol.h"
+@@ -44,9 +48,13 @@
+ class KebabCPU : public IOCPU {
+ 	OSDeclareDefaultStructors(KebabCPU);
+ 	const OSSymbol *cpuName = NULL;
++	timer_call_data_t timerProbe;
++	uint32_t timerProbeCPU = 0;
+ 	uint32_t initialized = 0; /* release/acquire publication after initCPU sends SGI */
+ 
+ public:
++	static void armTimerProbe(void *arg);
++	static void timerProbeFired(timer_call_param_t arg, timer_call_param_t unused);
+ 	static void startAll(void *arg, wait_result_t result);
+ 	IOService *probe(IOService *provider, SInt32 *score) APPLE_KEXT_OVERRIDE;
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+@@ -102,6 +110,7 @@
+ 		return false;
+ 	}
+ 	setCPUNumber(cpu->cpu_id);
++	timer_call_setup(&timerProbe, &KebabCPU::timerProbeFired, this);
+ 
+ 	ml_processor_info_t info = {};
+ 	info.cpu_id = reinterpret_cast<cpu_id_t>(this);
+@@ -187,17 +196,24 @@
+ 			panic("KEBAB CPU: missing IRQ observer for cpu=%u", i);
+ 		}
+ 		cpu->signalCPU(cpu);
++		/* An idle PE need not have a natural timer deadline. Ask XNU to
++		 * queue a non-migratable critical callout on that PE via its xcall
++		 * interface, after its self-IPI has enabled signal handling. */
++		kr = cpu_xcall((int)i, &KebabCPU::armTimerProbe, cpu);
++		if (kr != KERN_SUCCESS) panic("KEBAB CPU: cpu=%u timer xcall failed: %d", i, kr);
+ 		nanoseconds_to_deadline(5 * NSEC_PER_SEC, &deadline);
+ 		do {
+ 			(void)kebab_cpu_irq_snapshot(i, &timers, &sgis);
+-			if (timers && sgis > before_sgi) break;
++			if (timers && sgis > before_sgi &&
++			    __atomic_load_n(&cpu->timerProbeCPU, __ATOMIC_ACQUIRE) == i + 1) break;
+ 			if (mach_absolute_time() > deadline) {
+-				panic("KEBAB CPU: cpu=%u IRQ probe timeout timer=%llu SGI=%llu/%llu",
+-				    i, timers, sgis, before_sgi);
++				panic("KEBAB CPU: cpu=%u IRQ probe timeout timer=%llu SGI=%llu/%llu callbackCPU=%u",
++				    i, timers, sgis, before_sgi,
++				    __atomic_load_n(&cpu->timerProbeCPU, __ATOMIC_ACQUIRE));
+ 			}
+ 			IOSleep(1);
+ 		} while (true);
+-		IOLog("KEBAB CPU: cpu=%u mpidr=0x%x alive; timer=%llu SGI=%llu->%llu PASS\n",
++		IOLog("KEBAB CPU: cpu=%u mpidr=0x%x alive; timer=%llu SGI=%llu->%llu local-callout=PASS\n",
+ 		    i, topology->cpus[i].phys_id, timers, before_sgi, sgis);
+ 	}
+ 	/* Publish exactly once, after every selected CPU has completed initCPU(). */
+@@ -208,6 +224,28 @@
+ 	IOLog("KEBAB CPU: %u/%u CPUs initialized, timer/fresh SGI1 verified\n",
+ 	    topology->num_cpus, topology->num_cpus);
+ 	thread_terminate(current_thread());
++}
++
++/* Apple XNU 8796 timer_call.h: LOCAL prevents queue migration; the xcall
++ * places it on its target PE without programming timer sysregs here. */
++void
++KebabCPU::armTimerProbe(void *arg)
++{
++	KebabCPU *cpu = static_cast<KebabCPU *>(arg);
++	if (cpu_number() != (int)cpu->getCPUNumber()) {
++		__atomic_store_n(&cpu->timerProbeCPU, UINT32_MAX, __ATOMIC_RELEASE);
++		return;
++	}
++	uint64_t deadline;
++	nanoseconds_to_deadline(NSEC_PER_MSEC, &deadline);
++	(void)timer_call_enter(&cpu->timerProbe, deadline, TIMER_CALL_SYS_CRITICAL | TIMER_CALL_LOCAL);
++}
++
++void
++KebabCPU::timerProbeFired(timer_call_param_t arg, timer_call_param_t unused __unused)
++{
++	KebabCPU *cpu = static_cast<KebabCPU *>(arg);
++	__atomic_store_n(&cpu->timerProbeCPU, (uint32_t)cpu_number() + 1, __ATOMIC_RELEASE);
+ }
+ 
+ void

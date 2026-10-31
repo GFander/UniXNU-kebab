@@ -1,0 +1,16 @@
+--- a/bsd/dev/kebab_bt_firmware_impl.h
++++ b/bsd/dev/kebab_bt_firmware_impl.h
+@@ -74,6 +74,13 @@
+  if(!error){
+   printf("KEBAB BTFW: LU4 bluetooth_b READONLY %u bytes; BPB bps=%u spc=%u reserved=%u fats=%u root=%u fat16=%u fat32=%u signature=%x\n",
+       KBF_IMAGE_BYTES,kbf_u16(image+11),image[13],kbf_u16(image+14),image[16],kbf_u16(image+17),kbf_u16(image+22),kbf_u32(image+36),kbf_u16(image+510));
++  printf("KEBAB BTFW: BPB total16=%u total32=%u media=%x type16hex=%llx\n",kbf_u16(image+19),kbf_u32(image+32),image[21],(unsigned long long)kbf_u64(image+54));
++  uint64_t fat_at=(uint64_t)kbf_u16(image+11)*kbf_u16(image+14),fat_length=(uint64_t)kbf_u16(image+11)*kbf_u16(image+22);
++  if(fat_at<KBF_IMAGE_BYTES&&fat_length>=16&&fat_length<=KBF_IMAGE_BYTES-fat_at){
++   printf("KEBAB BTFW: FAT0 head=%llx/%llx crc=%x",(unsigned long long)kbf_u64(image+fat_at),(unsigned long long)kbf_u64(image+fat_at+8),ufs_inspect_crc32(image+fat_at,(uint32_t)fat_length));
++   if(image[16]==2&&fat_length<=(KBF_IMAGE_BYTES-fat_at)/2)printf(" FAT1 crc=%x",ufs_inspect_crc32(image+fat_at+fat_length,(uint32_t)fat_length));
++   printf("\n");
++  }
+   error=kbf_init(&fat,image,KBF_IMAGE_BYTES);
+  }
+  if(!error){

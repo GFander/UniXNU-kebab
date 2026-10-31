@@ -1,0 +1,154 @@
+--- a/bsd/kern/kebab_qsee_probe.c
++++ b/bsd/kern/kebab_qsee_probe.c
+@@ -82,8 +82,8 @@
+ }
+ 
+ /* Hardware-wrapped storage-key experiment. No key bytes or hashes are logged.
+- * Fixed legacy commands and tag layout were audited in this board's pinned
+- * libqtikeymaster4.so. FBE_ICE and RAW export match LineageOS vold's path.
++ * The active CBOR commands and tag layout were audited in this board's pinned
++ * libqtikeymaster4.so. STORAGE_KEY and RAW export follow the platform contract.
+  * This verifies an in-memory prerequisite; it does not provision a device root.
+  */
+ static bool
+@@ -116,6 +116,48 @@
+ qsee_blob_bounds(uint32_t offset, uint32_t bytes, uint32_t header, uint32_t maximum)
+ {
+ 	return offset>=header && bytes>0 && bytes<=maximum && offset<=0x1800 && bytes<=0x1800-offset;
++}
++
++/* Minimal definite CBOR for this audited scalar request and one-byte-string
++ * response. No generic encoder/parser is exposed to a user or TA command.
++ */
++static unsigned
++qsee_cbor_header(uint8_t *out, unsigned major, uint32_t value)
++{
++	unsigned type=major<<5;
++	if (value<24) { out[0]=type|value; return 1; }
++	if (value<=0xff) { out[0]=type|24; out[1]=value; return 2; }
++	if (value<=0xffff) { out[0]=type|25; out[1]=value>>8; out[2]=value; return 3; }
++	out[0]=type|26;
++	for (unsigned i=0; i<4; i++) out[i+1]=(uint8_t)(value>>(24-i*8));
++	return 5;
++}
++
++static bool
++qsee_cbor_read(const uint8_t *data, unsigned bytes, unsigned *cursor, unsigned major, uint32_t *value)
++{
++	if (*cursor>=bytes) return false;
++	unsigned header=data[(*cursor)++];
++	if ((header>>5)!=major) return false;
++	unsigned ai=header & 31;
++	if (ai<24) { *value=ai; return true; }
++	unsigned count=ai==24 ? 1 : ai==25 ? 2 : ai==26 ? 4 : 0;
++	if (!count || count>bytes-*cursor) return false;
++	*value=0;
++	for (unsigned i=0; i<count; i++) *value=(*value<<8)|data[(*cursor)++];
++	return true;
++}
++
++static bool
++qsee_export_blob(const uint8_t *data, unsigned bytes, unsigned *offset, unsigned *size)
++{
++	unsigned cursor=0; uint32_t count,label,length;
++	if (!qsee_cbor_read(data,bytes,&cursor,5,&count) || count!=1 ||
++	    !qsee_cbor_read(data,bytes,&cursor,0,&label) || label!=36 ||
++	    !qsee_cbor_read(data,bytes,&cursor,2,&length) ||
++	    length<=64 || length>0x800 || length!=bytes-cursor) return false;
++	*offset=cursor; *size=length;
++	return true;
+ }
+ 
+ static bool
+@@ -131,47 +173,63 @@
+ 	qsee_erase(page);
+ 	uint32_t *request=(uint32_t *)(page+0x100);
+ 	uint32_t *response=(uint32_t *)(page+0x2000);
+-	/* Generate header: command, params offset, count. Each scalar is tag+u64.
+-	 * No imported key, fixed key material, attestation, or rollback flags.
++	/* Active 4.1/4.558 path: command followed by a definite CBOR map.
++	 * Label22 is parameter count; repeated PURPOSE labels preserve the set.
+ 	 */
+-	const uint32_t params[][3]={
+-		{0x10000002,32,0},       /* AES */
+-		{0x30000003,256,0},      /* key size */
+-		{0x20000001,0,0},        /* encrypt */
+-		{0x20000001,1,0},        /* decrypt */
+-		{0x700002d2,1,0},        /* Keymaster 4.1 STORAGE_KEY, BOOL|722 */
++	const uint32_t params[][2]={
++		{0x10000002,32}, {0x30000003,256},
++		{0x20000001,0}, {0x20000001,1}, {0x700002d2,1},
+ 	};
+-	request[0]=0x108; request[1]=12; request[2]=sizeof(params)/sizeof(params[0]);
+-	memcpy(request+3,params,sizeof(params));
++	request[0]=0x2108;
++	uint8_t *encoded=(uint8_t *)(request+1);
++	unsigned used=qsee_cbor_header(encoded,5,6);
++	used+=qsee_cbor_header(encoded+used,0,22);
++	used+=qsee_cbor_header(encoded+used,0,5);
++	for (unsigned i=0; i<5; i++) {
++		used+=qsee_cbor_header(encoded+used,0,params[i][0]);
++		if ((params[i][0]>>28)==7) encoded[used++]=0xf5;
++		else used+=qsee_cbor_header(encoded+used,0,params[i][1]);
++	}
+ 	memset(response,0xa5,0x1800);
+-	struct qsee_result r=qsee_storage_send(page,pa,app,12+sizeof(params));
+-	printf("KEBAB QSEE: storage generate transport=%d result=0x%llx\n",r.status,r.value);
++	struct qsee_result r=qsee_storage_send(page,pa,app,4+used);
++	printf("KEBAB QSEE: storage generate CBOR transport=%d result=0x%llx\n",r.status,r.value);
+ 	if (qsee_pending(r)) return false;
+ 	if (r.status || r.value) goto done;
+-	printf("KEBAB QSEE: storage generate reply=%d offset=%u bytes=%u\n",
+-	    (int32_t)response[0],response[2],response[3]);
+-	if (response[0] || !qsee_blob_bounds(response[2],response[3],16,0x1000)) goto done;
+-	uint32_t blob_size=response[3];
+-	memcpy((void *)(page+0x1000),(uint8_t *)response+response[2],blob_size);
++	printf("KEBAB QSEE: storage generate CBOR reply=%d bytes=%u\n",(int32_t)response[0],response[1]);
++	if (response[0] || !qsee_blob_bounds(8,response[1],8,0xc00)) goto done;
++	/* New keyblob ABI preserves the complete returned CBOR object. */
++	uint32_t blob_size=response[1];
++	memcpy((void *)(page+0x1000),response+2,blob_size);
+ 	/* Export the same long-term key twice, then derive twice. Only equality
+ 	 * of the returned software secrets is reported; no raw-key fallback.
+ 	 */
+ 	for (unsigned trial=0; trial<2; trial++) {
+ 		bzero(request,0x1000-0x100);
+-		request[0]=0x10c; request[1]=32; request[2]=blob_size; request[3]=3; /* RAW */
+-		if (blob_size>0x1000-0x120) goto done;
+-		memcpy(request+8,(void *)(page+0x1000),blob_size);
++		request[0]=0x210c;
++		encoded=(uint8_t *)(request+1);
++		used=qsee_cbor_header(encoded,5,3);
++		used+=qsee_cbor_header(encoded+used,0,22);
++		used+=qsee_cbor_header(encoded+used,0,0);
++		used+=qsee_cbor_header(encoded+used,0,23);
++		used+=qsee_cbor_header(encoded+used,2,blob_size);
++		if (used+blob_size+8>0x1000-0x104) goto done;
++		memcpy(encoded+used,(void *)(page+0x1000),blob_size); used+=blob_size;
++		used+=qsee_cbor_header(encoded+used,0,24);
++		used+=qsee_cbor_header(encoded+used,0,3); /* RAW, empty app ID/data. */
+ 		memset(response,0xa5,0x1800);
+-		response[3]=20; response[4]=0x1800-20; /* Caller output capacity. */
+-		r=qsee_storage_send(page,pa,app,32+blob_size);
+-		printf("KEBAB QSEE: storage export trial=%u transport=%d result=0x%llx\n",trial,r.status,r.value);
++		r=qsee_storage_send(page,pa,app,4+used);
++		printf("KEBAB QSEE: storage export CBOR trial=%u transport=%d result=0x%llx\n",trial,r.status,r.value);
+ 		if (qsee_pending(r)) return false;
+ 		if (r.status || r.value) goto done;
+-		printf("KEBAB QSEE: storage export reply=%d offset=%u bytes=%u\n",
+-		    (int32_t)response[0],response[3],response[4]);
+-		if (response[0] || !qsee_blob_bounds(response[3],response[4],20,0x800) || response[4]<=64) goto done;
+-		uint32_t wrapped_size=response[4];
+-		uint64_t wrapped_pa=pa+0x2000+response[3];
++		printf("KEBAB QSEE: storage export CBOR reply=%d bytes=%u\n",(int32_t)response[0],response[1]);
++		unsigned offset,wrapped_size;
++		if (response[0] || !qsee_blob_bounds(8,response[1],8,0x1700) ||
++		    !qsee_export_blob((uint8_t *)(response+2),response[1],&offset,&wrapped_size)) {
++			printf("KEBAB QSEE: rejected invalid wrapped-key CBOR\n"); goto done;
++		}
++		/* Copy opaque wrapped bytes to a private cache-line-aligned input. */
++		memcpy((void *)(page+0x400),(uint8_t *)(response+2)+offset,wrapped_size);
++		uint64_t wrapped_pa=pa+0x400;
+ 		vm_offset_t secret=page+0x3800+trial*0x40;
+ 		memset((void *)secret,0xa5,32);
+ 		qsee_cache(page,true);

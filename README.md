@@ -1,4 +1,34 @@
+最新输入阶段：0429/0430，正常默认0430。297 common +4 host /5259源码一致。
+
+实机音量上/下的按下、松开已被原版HID解析器接受，并匹配原版IOHIDInterface/EventDriver；已修复RTC/NVRAM误把Data设备号写死为1/3的问题，真实1/4挂载保留全部原认证检查。两次正常启动的原密钥、加密Data、MKB、defaults与watchdog回归通过。触摸、界面事件消费、GPU、显示呈现及可用SpringBoard仍未完成；蓝牙继续延期。见[本轮范围](docs/HID-INPUT-AND-DATA-IDENTITY-20261031.md)及[验收资料](docs/qualification/0430/README.md)。以下为历史阶段。
+
+最新图形/输入前置阶段：0425–0427；正常默认0427。295 common +4 host /5252源码一致。
+
+已修正iOS16 selector74可选追踪契约，并在两次正常启动中加入原版IOHIDFamily/EventDriver闭包；实机确认一个原版IOHIDResource。真实触摸/按键HID事件、GPU、图像呈现与可用SpringBoard尚未完成，主CADisplay断言仍在。见[本轮范围](docs/GRAPHICS-PREREQUISITE-20261031.md)、[最新版指南复核](docs/GPU-DISPLAY-INPUT-REVIEW-0424.md)及[实机/源码证据](docs/qualification/0427/README.md)。蓝牙继续延期至可用SpringBoard之后。以下是历史阶段。
+
+最新阶段：0423/0424 实机板型与共享锁收尾验收通过；正常默认0424。293 common +4 host /5252源文件一致。
+
+按用户最新安排，蓝牙从现在起延期到GPU、显示、输入和可用SpringBoard之后。实际板型19805、供电拓扑、内部UART、固件/资源只读采集及测试证据已保存；控制器/HCI/RF仍未完成，蓝牙不可用。见[归档与恢复入口](docs/BLUETOOTH-DEFERRED-20261031.md)及[本轮实机/源码证据](docs/qualification/0424/README.md)。下列旧阶段顺序与“待读取板型”描述属于历史，以上述归档为准。
+
+当前阶段验收：0422；正常默认0422。292 common +4 host /5249 源码一致。
+
+真实蓝牙供电资源只读发现与等价别名检查已通过0421/0422完整重启实测。控制器供电、HCI、扫描/连接/数据仍未完成，蓝牙整体不可用。见[本阶段范围](docs/BLUETOOTH-POWER-DISCOVERY-20261031.md)、[LineageOS对照](docs/BLUETOOTH-LINEAGE-COMPARISON-20261031.md)和[源码/实机证据](docs/qualification/0422/README.md)。
+
 # UniXNU-kebab
+
+## 0404/0405历史基线（2026-10-31）
+
+新增真实SE6时钟准备与状态读取，0402及完整重启0403均验证首次获取、重复调用和UART微码/FIFO参数；修正既有GENI把字宽当深度的错误。0404原版只读Data检查通过。控制器供电、UART字节收发、HCI及蓝牙真实业务仍未完成，[范围报告](docs/BLUETOOTH-SE6-CLOCK-20261031.md)。
+
+当前进度以[最新状态](docs/STATUS.md)、[Sandbox/watchdog验收](docs/SANDBOX-WATCHDOG-20261031.md)和[最新源码回放与实机证据](docs/qualification/0404/README.md)为准。
+
+原版APFS和真实加密Data、硬件Root/nonce、原版MKB_INIT及C/D文件、持久RTC/NVRAM、原版watchdog监控均已通过对应实测。新接通原版Sandbox与真实Kebab平台watchdog类授权：原任务允许、无关服务拒绝。A/B密钥和若干原版AKS接口、剩余daemon行为及GPU/显示/输入仍需开发，尚未到达可用SpringBoard。
+
+这里公开279个板级补丁、4个Mac构建补丁以及5246源文件的独立回放证据，不分发固件/IPSW、原版闭源组件、设备密钥或私人Data。`board.toml`的早期standalone入口未参与本次端到端prelink实机验收；源码回放通过也不能代替boot镜像实测。
+
+以下保留早期移植记录，其中HFS+、单核和当时阻塞点是历史状态，请勿把它们当作最新验收结果。
+
+---
 
 一加 8T（kebab，SM8250）的 UniXNU 设备仓库：**16 KiB 页**的 XNU 移植，目标是用
 iPhone X 的身份启动 iOS 16.7.16 用户态。
@@ -9,7 +39,8 @@ iPhone X 的身份启动 iOS 16.7.16 用户态。
 ```
 board.toml                   unixnu 读取的板级描述
 configs/                     defconfig 与 iPhone X 的 /product 子树
-patches/xnu-8796-kebab/      本机内核补丁集（83 个，按文件名顺序应用）
+patches/xnu-8796-kebab/      本机内核补丁集（108 个文件，按文件名顺序应用）
+firmware/                    固件侧 DXE 驱动（KFLG 日志环、RPMh 探针）与中文集成说明
 scripts/make-kebab-adt.py    设备树（ADT）生成器
 drivers/KebabCPU/            子模块 -> GFander/KebabCPU（PSCI / 多核）
 drivers/KebabEarlyConsole/   子模块 -> GFander/KebabEarlyConsole（面板控制台）
@@ -389,15 +420,17 @@ GPIO 36/37 mux 到 qup13，reset 38，irq 39）。地址取自设备自己的 DT
 不需要下载 6.17 GB：
 
 ```
-/usr/lib/dyld     922,912   dyld-1067
-/sbin/launchd     541,600
+/usr/lib/dyld         922,912   dyld-1067
+/sbin/launchd         541,600
+/usr/libexec/xpcproxy  96,352   launchd 的 job spawn 入口
 ```
 
 iOS 的文件是 `UF_COMPRESSED` + decmpfs **type 4**（64 KiB zlib 分块，存在资源叉里），
 不是 LZFSE。资源叉的 oid 是 inode+1，chunk offset 相对 `0x104`。
 
-根卷需要两块：OS 卷给 `/usr/lib/dyld`，`Cryptex1,SystemOS` 给 44 个分片的共享缓存。
-**libSystem 在任何地方都不是文件**，它由共享缓存提供。
+根卷需要两块：OS 卷给 `/usr/lib/dyld` 和 `/usr/libexec/xpcproxy`，
+`Cryptex1,SystemOS` 给 44 个分片的共享缓存。**xpcproxy 不在 cryptex**：那个卷的
+`/usr` 下只有 `lib/`。**libSystem 在任何地方都不是文件**，它由共享缓存提供。
 
 签名侧：IPSW 里有独立的 `087-86698-044.dmg.trustcache`（2,760 条），
 内核在 `bsd_init` 从 `/System/Library/Caches/com.apple.kernelcaches/static.trustcache`

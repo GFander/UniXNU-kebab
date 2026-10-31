@@ -1,0 +1,24 @@
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -1449,6 +1449,11 @@
+ 		    sizeof("TOUCHPING\n") - 1)) {
+ 			return UD_REBOOT_TOUCH_PING;
+ 		}
++		/* BTPWR contains the older PWR token. Match the specific command
++		 * before the completion scanner can find that suffix. */
++		if (ud_command_seen(buf, received, "BTPWR?\n", sizeof("BTPWR?\n") - 1)) {
++			return UD_REBOOT_BTPWR_REPORT;
++		}
+ 		if (ud_command_seen(buf, received, "PWR?\n",
+ 		    sizeof("PWR?\n") - 1)) {
+ 			return UD_REBOOT_PWR_REPORT;
+@@ -1466,9 +1471,6 @@
+ 		if (ud_command_seen(buf, received, "DRV?\n",
+ 		    sizeof("DRV?\n") - 1)) {
+ 			return UD_REBOOT_DRV_REPORT;
+-		}
+-		if (ud_command_seen(buf, received, "BTPWR?\n", sizeof("BTPWR?\n") - 1)) {
+-			return UD_REBOOT_BTPWR_REPORT;
+ 		}
+ 		if (ud_command_seen(buf, received, "BTUART\n", sizeof("BTUART\n") - 1)) {
+ 			return UD_REBOOT_BTUART_LOOPBACK;

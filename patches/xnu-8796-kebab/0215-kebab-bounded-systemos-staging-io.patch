@@ -1,0 +1,26 @@
+--- a/bsd/dev/kebab_install.c
++++ b/bsd/dev/kebab_install.c
+@@ -691,7 +691,8 @@
+ 		int resid = 0;
+ 
+ 		error = vn_rdwr(UIO_READ, vp, (caddr_t)ki.io, want, (off_t)off,
+-		    UIO_SYSSPACE, 0, vfs_context_ucred(ctx), &resid, NULL);
++		    UIO_SYSSPACE, !strcmp(path, KEBAB_CRYPTEX_STAGE_PATH) ? IO_NOCACHE : 0,
++		    vfs_context_ucred(ctx), &resid, NULL);
+ 		if (error) {
+ 			vnode_put(vp);
+ 			return error;
+@@ -1220,8 +1221,11 @@
+ 	}
+ 	error = vn_rdwr(UIO_WRITE, e->vp, (caddr_t)(uintptr_t)p, (int)n,
+ 	    (off_t)e->offset,
+-	    UIO_SYSSPACE, 0, vfs_context_ucred(vfs_context_current()), &resid,
+-	    NULL);
++	    /* The original SystemOS is much larger than the bring-up memory
++	     * arena. This maintenance profile must drain dirty data as it goes,
++	     * rather than depend on a multi-GiB UBC working set. */
++	    UIO_SYSSPACE, ki_cryptex ? (IO_SYNC | IO_NOCACHE) : 0,
++	    vfs_context_ucred(vfs_context_current()), &resid, NULL);
+ 	if (error) {
+ 		return error;
+ 	}

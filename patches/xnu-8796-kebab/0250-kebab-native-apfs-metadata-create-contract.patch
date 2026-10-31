@@ -1,0 +1,166 @@
+--- a/bsd/kern/kebab_file_keys.c
++++ b/bsd/kern/kebab_file_keys.c
+@@ -277,6 +277,7 @@
+ #include "kebab_volume_keys_impl.h"
+ #include "kebab_cpx_handles_impl.h"
+ #include "kebab_volume_wrapped_impl.h"
++#include "kebab_apfs_metadata_native_impl.h"
+ 
+ int
+ kebab_xts128_crypt(const uint8_t key[32], uint64_t unit, const void *input, void *output, size_t bytes, bool encrypt)
+--- a/bsd/kern/kebab_file_keys.h
++++ b/bsd/kern/kebab_file_keys.h
+@@ -43,6 +43,10 @@
+     const struct kebab_aks_raw_key *, struct kebab_aks_wrapped_key *);
+ int kebab_metadata_key_unwrap(const struct kebab_aks_credential *, const struct kebab_aks_wrapped_key *,
+     struct kebab_aks_raw_key *);
++int kebab_metadata_key_create_wrapped(const struct kebab_aks_credential *,uint32_t,
++    struct kebab_aks_raw_key *,struct kebab_aks_wrapped_key *);
++int kebab_metadata_key_unwrap_wrapped(const struct kebab_aks_credential *,const struct kebab_aks_wrapped_key *,
++    struct kebab_aks_raw_key *);
+ int kebab_metadata_keys_selftest(void);
+ /* Separate original FileVault descriptor family: lengths are64-bit, not FS32. */
+ #define KEBAB_RAW_KEY_WRAPPED 1u
+--- a/iokit/Kernel/arm/KebabKeyStore.cpp
++++ b/iokit/Kernel/arm/KebabKeyStore.cpp
+@@ -18,17 +18,17 @@
+  decltype(&kebab_file_key_rewrap) rewrap;
+  decltype(&kebab_file_key_new) new_key;
+  void *unsupported18, *unsupported20, *unsupported28, *unsupported30;
+- decltype(&kebab_metadata_key_unwrap) metadata_unwrap;
++ decltype(&kebab_metadata_key_unwrap_wrapped) metadata_unwrap;
+  void *unsupported40;
+- decltype(&kebab_metadata_key_wrap) metadata_wrap;
++ decltype(&kebab_metadata_key_create_wrapped) metadata_wrap;
+  void *unsupported50_b0[13];
+ };
+ static_assert(sizeof(KebabAKSFileSystemTable)==184,"target23-slot table");
+ static_assert(offsetof(KebabAKSFileSystemTable,metadata_unwrap)==0x38,"target metadata unwrap");
+ static_assert(offsetof(KebabAKSFileSystemTable,metadata_wrap)==0x48,"target metadata wrap");
+ static const KebabAKSFileSystemTable kfk_services={kebab_file_key_unwrap,kebab_file_key_rewrap,
+- kebab_file_key_new,nullptr,nullptr,nullptr,nullptr,kebab_metadata_key_unwrap,nullptr,
+- kebab_metadata_key_wrap,{nullptr}};
++ kebab_file_key_new,nullptr,nullptr,nullptr,nullptr,kebab_metadata_key_unwrap_wrapped,nullptr,
++ kebab_metadata_key_create_wrapped,{nullptr}};
+ 
+ class KebabKeyStore : public IOService {
+  OSDeclareDefaultStructors(KebabKeyStore)
+@@ -64,20 +64,21 @@
+  for(unsigned i=0;i<16;++i)cred.bytes[22+i]=(uint8_t)(0x80+i);
+  for(unsigned i=0;i<64;++i)work->key[i]=(uint8_t)i;
+  for(unsigned i=0;i<16;++i)work->iv[i]=(uint8_t)(0x90+i);
+- struct kebab_aks_raw_key raw={work->key,32,work->iv,16,0};
++ struct kebab_aks_raw_key raw={work->key,64,work->iv,16,0};
+  struct kebab_aks_raw_key output={work->back,64,work->back_iv,16,0};
+- struct kebab_aks_wrapped_key wrapped={work->sealed,128,0},rewrapped={work->rewrapped,128,0};
++ struct kebab_aks_wrapped_key wrapped={work->sealed,40,0},rewrapped={work->rewrapped,128,0};
+  int error=table->metadata_wrap(&cred,14,&raw,&wrapped);
+  if(!error)error=table->metadata_unwrap(&cred,&wrapped,&output);
+- if(!error && (output.key_len!=32 || output.iv_key_len!=16 ||
+-     memcmp(work->key,work->back,32) || memcmp(work->iv,work->back_iv,16)))error=EIO;
++ if(!error && (wrapped.key_len!=40 || output.key_len!=64 || raw.key_len!=64 || output.iv_key_len!=16 ||
++     raw.flags!=KEBAB_RAW_KEY_WRAPPED || output.flags!=KEBAB_RAW_KEY_WRAPPED ||
++     memcmp(work->key,work->back,64) || memcmp(work->iv,work->back_iv,16)))error=EIO;
+  if(!error) {
+   wrapped.key_len=128;
+   if(table->metadata_wrap(&cred,3,&raw,&wrapped)!=(int)kIOReturnUnsupported)error=EIO;
+  }
+  if(!error)error=kebab_keybag_d_create(cred.bytes+22,work->bag,88);
+  if(!error)error=kebab_keybag_d_open(cred.bytes+22,work->bag,88);
+- cred.bytes[0]=1;cred.bytes[20]=1;raw.key_len=64;wrapped.key_len=128;
++ cred.bytes[0]=1;cred.bytes[20]=1;raw.key_len=64;raw.flags=0;wrapped.key_len=128;
+  if(!error)error=table->new_key(&cred,4,&raw,&wrapped);
+  output.key_len=64;output.iv_key_len=16;
+  if(!error)error=table->unwrap(&cred,&wrapped,&output);
+@@ -118,7 +119,7 @@
+  IOReturn result=platform->callPlatformFunction("AKSFileSystemKeyServices",false,&table,nullptr,nullptr,nullptr);
+  int error=result==kIOReturnSuccess && table==&kfk_services?0:EIO;
+  if(!error)error=kfk_service_roundtrip(table);
+- IOLog("KEBAB AKS FS: native platform/table184B metadata14/classD new/unwrap/rewrap %s (%d); unsupported slots NULL; no Data mount\n",error?"FAIL":"PASS",error);
++ IOLog("KEBAB AKS FS: native platform/table184B metadata14-create40/opaque64/classD new/unwrap/rewrap %s (%d); unsupported slots NULL; no Data mount\n",error?"FAIL":"PASS",error);
+  return error;
+ #else
+  return EPERM;
+--- /dev/null
++++ b/bsd/kern/kebab_apfs_metadata_native_impl.h
+@@ -0,0 +1,80 @@
++/* Canonical original metadata creation: capacity64/IV16 in, opaque64/IV16
++ * out, wrapped record40. Numeric14 only; no Class3 unlock policy is implied.
++ * Private KM01 codec remains separate and is not this native contract. */
++static bool
++kmd_buffers(const struct kebab_aks_credential *cred,const struct kebab_aks_raw_key *raw,
++    const struct kebab_aks_wrapped_key *wrapped,bool create)
++{
++ if(!kfk_range(cred,sizeof(*cred)) || !kfk_range(raw,sizeof(*raw)) ||
++    !kfk_range(wrapped,sizeof(*wrapped)) || raw->key_len!=64 || raw->iv_key_len!=16 ||
++    wrapped->key_len<40 || wrapped->key_len>(create?128u:40u) ||
++    !kfk_range(raw->key,64) || !kfk_range(raw->iv_key,16) ||
++    !kfk_range(wrapped->key,wrapped->key_len))return false;
++ const void *p[]={cred,raw,wrapped,raw->key,raw->iv_key,wrapped->key};
++ const size_t n[]={sizeof(*cred),sizeof(*raw),sizeof(*wrapped),64,16,wrapped->key_len};
++ for(unsigned i=0;i<6;++i)for(unsigned j=i+1;j<6;++j)
++  if(kfk_overlap(p[i],n[i],p[j],n[j]))return false;
++ return true;
++}
++
++static int
++kmd_kek(const uint8_t uuid[16],uint8_t key[32])
++{
++ if(!kfk_ready || !g_crypto_funcs || !g_crypto_funcs->ccsha256_di ||
++    !g_crypto_funcs->cchmac_fn)return (int)kIOReturnNotReady;
++ static const uint8_t domain[]="UniXNU.kebab.apfs-metadata.v1";
++ uint8_t input[sizeof(domain)+20];
++ memcpy(input,domain,sizeof(domain));memcpy(input+sizeof(domain),uuid,16);
++ bzero(input+sizeof(domain)+16,4);input[sizeof(domain)+16]=14;
++ g_crypto_funcs->cchmac_fn(g_crypto_funcs->ccsha256_di,32,kfk_root_kek,sizeof(input),input,key);
++ kfk_wipe(input,sizeof(input));return 0;
++}
++
++static void
++kmd_iv(const uint8_t uuid[16],const uint8_t key[32],uint8_t iv[16])
++{
++ static const uint8_t domain[]="UniXNU.kebab.apfs-metadata-IV.v1";
++ uint8_t input[sizeof(domain)+16],digest[32];
++ memcpy(input,domain,sizeof(domain));memcpy(input+sizeof(domain),uuid,16);
++ g_crypto_funcs->cchmac_fn(g_crypto_funcs->ccsha256_di,32,key,sizeof(input),input,digest);
++ memcpy(iv,digest,16);kfk_wipe(input,sizeof(input));kfk_wipe(digest,sizeof(digest));
++}
++
++int
++kebab_metadata_key_create_wrapped(const struct kebab_aks_credential *cred,uint32_t selector,
++    struct kebab_aks_raw_key *raw,struct kebab_aks_wrapped_key *wrapped)
++{
++ if(!kfk_context() || !kmd_buffers(cred,raw,wrapped,true))return (int)kIOReturnBadArgument;
++ if(selector!=14 || !kfk_meta_credential(cred) || raw->flags)return (int)kIOReturnUnsupported;
++ uint8_t uuid[16],key[32]={0},kek[32]={0},iv[16]={0},sealed[40]={0},token[64]={0};memcpy(uuid,cred->bytes+22,16);
++ lck_mtx_lock(&kfk_lock);int error=kmd_kek(uuid,kek);
++ if(!error){read_random(key,32);kmd_iv(uuid,key,iv);error=kfk_wrap(kek,key,32,sealed,true);}
++ if(!error)error=kch_create_locked(uuid,key,token);
++ if(!error) {
++  memcpy(wrapped->key,sealed,40);memcpy(raw->key,token,64);memcpy(raw->iv_key,iv,16);
++  wrapped->key_len=40;wrapped->dp_class=14;raw->key_len=64;raw->iv_key_len=16;raw->flags=KEBAB_RAW_KEY_WRAPPED;
++ }
++ lck_mtx_unlock(&kfk_lock);
++ kfk_wipe(uuid,sizeof(uuid));kfk_wipe(key,sizeof(key));kfk_wipe(kek,sizeof(kek));
++ kfk_wipe(iv,sizeof(iv));kfk_wipe(sealed,sizeof(sealed));kfk_wipe(token,sizeof(token));return error;
++}
++
++int
++kebab_metadata_key_unwrap_wrapped(const struct kebab_aks_credential *cred,
++    const struct kebab_aks_wrapped_key *wrapped,struct kebab_aks_raw_key *raw)
++{
++ if(!kfk_context() || !kmd_buffers(cred,raw,wrapped,false))return (int)kIOReturnBadArgument;
++ if(wrapped->dp_class!=14 || !kfk_meta_credential(cred))return (int)kIOReturnUnsupported;
++ uint8_t uuid[16],sealed[40],key[32]={0},kek[32]={0},iv[16]={0},token[64]={0};
++ memcpy(uuid,cred->bytes+22,16);memcpy(sealed,wrapped->key,40);
++ lck_mtx_lock(&kfk_lock);int error=kmd_kek(uuid,kek);
++ if(!error)error=kfk_wrap(kek,sealed,40,key,false);
++ if(!error){kmd_iv(uuid,key,iv);error=kch_create_locked(uuid,key,token);}
++ if(!error) {
++  memcpy(raw->key,token,64);memcpy(raw->iv_key,iv,16);
++  raw->key_len=64;raw->iv_key_len=16;raw->flags=KEBAB_RAW_KEY_WRAPPED;
++ }
++ lck_mtx_unlock(&kfk_lock);
++ kfk_wipe(uuid,sizeof(uuid));kfk_wipe(sealed,sizeof(sealed));kfk_wipe(key,sizeof(key));
++ kfk_wipe(kek,sizeof(kek));kfk_wipe(iv,sizeof(iv));kfk_wipe(token,sizeof(token));return error;
++}

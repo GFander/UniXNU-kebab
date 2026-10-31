@@ -1,0 +1,140 @@
+{
+  "read_only": true,
+  "container": {
+    "APFSContainerUUID": "0E25F331-6279-458A-9CFE-F39598DA17AA",
+    "CapacityCeiling": 241008750592,
+    "CapacityFree": 235612553216,
+    "ContainerReference": "disk5",
+    "DesignatedPhysicalStore": "disk4",
+    "Fusion": false,
+    "PhysicalStores": [
+      {
+        "DeviceIdentifier": "disk4",
+        "Size": 241008750592
+      }
+    ],
+    "Volumes": [
+      {
+        "APFSVolumeUUID": "DADD93F8-DBBF-4B17-A1DF-0F11E64172F7",
+        "CapacityInUse": 5259288576,
+        "CapacityQuota": 0,
+        "CapacityReserve": 0,
+        "CryptoMigrationOn": false,
+        "DeviceIdentifier": "disk5s1",
+        "Encryption": false,
+        "FileVault": false,
+        "Locked": false,
+        "Name": "SydneyUpdate20H392.D22D221OS",
+        "Roles": [
+          "System"
+        ]
+      },
+      {
+        "APFSVolumeUUID": "4C56203C-CFE8-4DFF-BF8E-BB48D852C936",
+        "CapacityInUse": 20480,
+        "CapacityQuota": 0,
+        "CapacityReserve": 0,
+        "CryptoMigrationOn": false,
+        "DeviceIdentifier": "disk5s2",
+        "Encryption": false,
+        "FileVault": false,
+        "Locked": false,
+        "Name": "Data",
+        "Roles": [
+          "Data"
+        ]
+      },
+      {
+        "APFSVolumeUUID": "EF45F98E-9F6C-43DB-B7C6-F418CA77429B",
+        "CapacityInUse": 20480,
+        "CapacityQuota": 0,
+        "CapacityReserve": 0,
+        "CryptoMigrationOn": false,
+        "DeviceIdentifier": "disk5s3",
+        "Encryption": false,
+        "FileVault": false,
+        "Locked": false,
+        "Name": "Preboot",
+        "Roles": [
+          "Preboot"
+        ]
+      }
+    ]
+  },
+  "copied": {
+    "sbin/mount_apfs": {
+      "bytes": 72960,
+      "sha256": "ccac6fa5b10c74ac9458212044bdc4115831c7a01be04d61d04e86bdec52dc27"
+    },
+    "sbin/mount": {
+      "bytes": 91952,
+      "sha256": "ac55c4c7d200d0153cc266b39d69d4d771a9707ac91eefec94f83eb2522364df"
+    },
+    "System/Library/Filesystems/apfs.fs/mount_apfs": {
+      "bytes": 72960,
+      "sha256": "ccac6fa5b10c74ac9458212044bdc4115831c7a01be04d61d04e86bdec52dc27"
+    }
+  },
+  "paths": [
+    {
+      "path": "private/var",
+      "exists": true,
+      "symlink": false,
+      "mode": "0o40755"
+    },
+    {
+      "path": "private/preboot",
+      "exists": true,
+      "symlink": false,
+      "mode": "0o40755"
+    },
+    {
+      "path": "private/var/tmp",
+      "exists": true,
+      "symlink": false,
+      "mode": "0o41777"
+    },
+    {
+      "path": "System/Volumes/Data",
+      "exists": false,
+      "symlink": false,
+      "mode": null
+    },
+    {
+      "path": "usr/standalone/firmware",
+      "exists": true,
+      "symlink": false,
+      "mode": "0o40755"
+    }
+  ],
+  "initial_var": [
+    "Keychains",
+    "Managed Preferences",
+    "MobileAsset",
+    "MobileDevice",
+    "MobileSoftwareUpdate",
+    "audit",
+    "buddy",
+    "datamigrator",
+    "db",
+    "dextcores",
+    "empty",
+    "folders",
+    "hardware",
+    "installd",
+    "log",
+    "logs",
+    "mobile",
+    "msgs",
+    "networkd",
+    "preferences",
+    "protected",
+    "root",
+    "run",
+    "select",
+    "staged_system_apps",
+    "tmp",
+    "vm",
+    "wireless"
+  ]
+}

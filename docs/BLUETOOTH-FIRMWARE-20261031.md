@@ -1,0 +1,32 @@
+# 蓝牙固定分区固件读取器
+
+本项只验收真实固件字节的读取路径。蓝牙功能仍未完成；硬件初始化、固件下载、HCI、扫描、连接和实际数据业务均是独立的后续门槛。不能以 bluetoothd 不退出或增加服务名称代替它们。
+
+## 实机发现及修复
+
+本机当前槽 b 的 `bluetooth_b` 位于 UFS LU4，分区长 1 MiB。读取前重新读取并校验 GPT 头与分区项 CRC、分区名称、唯一性、容量和范围，不采用旧 GPT 文本中的硬编码地址。
+
+分区包含一个较大 FAT16 逻辑卷的已占用前缀：BPB 为 4096 字节扇区、每簇 4 扇区、两份各 3 扇区的 FAT；逻辑容量 64 MiB，而物理分区只有 1 MiB。FAT 位宽按逻辑几何确定，所有实际读取仍严格限于物理分区。两份 FAT 必须一致，所有元数据和文件链中的完整簇必须驻留；这不是完整文件系统检查，也不支持可写挂载。
+
+真实目录长名为 `image`，短名却为 `PCAFUI~2`；`htbtfw20.tlv` 和 `htnv20.bin` 也使用不规则短名别名。只按普通 8.3 名称查找会返回 ENOENT。读取器现在支持固定目标名称的完整单槽 LFN，验证序号、类型、零簇号、关联短名校验和、NUL 终止与 FFFF 填充。允许的名称最长 12 个 ASCII 字符，无须任意路径或通用 Unicode 文件名接口。语义参考 [Microsoft FAT specification，长目录项章节](https://www.cs.fsu.edu/~cop4610t/assignments/project3/spec/fatspec.pdf)。
+
+只读加载器共享现有 UFS 锁；成功和失败路径均恢复原 LUN、设备容量和根卷范围。现有 keymaster 固件检查器保持不变。panic、IRQ、禁止中断或禁止抢占的上下文拒绝该诊断；panic FASTBOOT 保留。
+
+## 验证范围
+
+0396 实机两轮读取原分区中的 patch 205836 字节、NVM 5815 字节。每轮先解析完整文件，再通过供后续驱动消费的公开接口独立重读并比较 SHA-256。固件未写入控制器，未声称 ROM 版本或硬件兼容性已经核对。
+
+原生编译及全量构建通过；276 common + 4 host 补丁重放后，5241 个源码文件与 Mac 构建源一致。实际生产读取函数的 2261 项 ASAN/UBSAN 主机用例覆盖 GPT、FAT12/16/32、真实逻辑/物理几何、不规则 LFN、跨簇关联、损坏及并发根 I/O 状态恢复。3 个存储行为突变及 2 个 LFN 验证突变必须编译成功并被行为断言拒绝。完整 USB 分发器快照验证 panic 拒绝不安全诊断。主机 UFS/IOKit 为明确的模拟，不能替代本机或 RF 证据。
+
+0397 完整内核重启后再进行两轮实际读取，patch/NVM 哈希与0396一致。两次启动均通过硬件Root/nonce、原版MKB、C/D明文/密文、defaults及原版watchdog回归，观察超过180秒。0398原版签名fsck只读退出0、DataOK、crypto-io启用、无新增警告和修复；0399已恢复正常默认并通过同样回归。验收收据见[0398证据](qualification/0398/README.md)。这仅接受固件读取子目标，蓝牙硬件功能继续开发。
+
+## 后续功能门槛
+
+1. 按固定的 LineageOS SM8250 板级资料核对真实电源、时钟、NORTH tile GPIO 和 SE6 四线 UART，读取本机控制器 ROM 版本及能力。
+2. 只读核对本机 persist 出厂地址/校准来源，按真实控制器版本选择固件/NVM，接通 HCI 命令/事件及 IBS 唤醒、流控和错误恢复。
+3. 实现原版 iOS 消费接口及权限，实际接入 bluetoothd。
+4. 与真实对端验证 BLE 扫描、连接、GATT 数据，经典蓝牙业务、重连、开关和重启。音频另验真实音频链路。
+
+闭源 HAL、固件字节、校准、设备地址及原始私有日志不随代码发布。保留现有硬件 Root/nonce、真实加密 Data、原版 system bag、watchdog 和 daily-fast 策略。完整 A/B/口令/SEP、剩余 daemon 及可用 SpringBoard 仍未完成。
+
+源码已发布：[9f48d5969d63](https://github.com/GFander/UniXNU-kebab/commit/9f48d5969d63128914b37c94145555e7a5d93610)（ios16），远端已核对。

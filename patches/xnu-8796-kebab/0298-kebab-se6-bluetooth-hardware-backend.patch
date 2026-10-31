@@ -1,0 +1,190 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -663,6 +663,7 @@
+ bsd/dev/kebab_prelink_shims.c	standard
+ 
+ bsd/dev/kebab_geni.c			standard
++bsd/dev/kebab_bluetooth.c			standard
+ 
+ bsd/kern/kebab_bootdiag.c			standard
+ bsd/kern/kebab_apfs_probe.c			standard
+--- /dev/null
++++ b/bsd/dev/kebab_bluetooth.c
+@@ -0,0 +1,69 @@
++/* QCA6390 / QUPv3 SE6 board backend. Explicit normal-console acquisition;
++ * no automatic radio start, fabricated controller, address or power votes. */
++#if defined(KEBAB)
++#include <sys/types.h>
++#include <sys/errno.h>
++#include <sys/systm.h>
++#include <kern/debug.h>
++#include <kern/locks.h>
++#include <libkern/libkern.h>
++#include <machine/machine_routines.h>
++#include "kebab_bluetooth.h"
++#include "kebab_geni.h"
++#include "kebab_bt_hw_impl.h"
++extern vm_offset_t ml_io_map(vm_offset_t,vm_size_t);
++/* osfmk/arm/cpu_data.h is private to Mach; same exact ABI as the UFS core. */
++extern int get_preemption_level(void);
++/* Persistent C mappings match the existing boot-owned GENI backend lifetime. */
++static struct {
++ vm_offset_t gpio_low,gpio_high,gcc_vote,gcc_branch,se;
++} kbh_native;
++
++static int
++kbh_native_read(void *ctx,enum kbh_space space,uint32_t offset,uint32_t *value)
++{
++ (void)ctx;
++ if(!value||!kbh_allowed(space,offset))return EINVAL;
++ vm_offset_t *mapping;uint32_t physical,base,size;
++ if(space==KBH_GPIO){
++  if(offset>=0x7c000){mapping=&kbh_native.gpio_high;base=0x7c000;size=0x1000;}
++  else{mapping=&kbh_native.gpio_low;base=0x10000;size=0x6000;}
++  physical=0x0f900000+base; /* NORTH; touch uses a separate SOUTH tile. */
++ }else if(space==KBH_GCC){
++  if(offset==0x52008){mapping=&kbh_native.gcc_vote;base=0x52000;}
++  else{mapping=&kbh_native.gcc_branch;base=0x17000;}
++  physical=0x00100000+base;size=0x1000;
++ }else{
++  mapping=&kbh_native.se;base=0;physical=0x00998000;size=0x4000;
++ }
++ if(offset<base||offset-base>size-4)return EINVAL;
++ if(!*mapping)*mapping=ml_io_map(physical,size);
++ if(!*mapping)return ENOMEM;
++ __asm__ volatile("dsb sy" ::: "memory");
++ *value=*(volatile uint32_t *)(*mapping+offset-base);
++ __asm__ volatile("dsb sy" ::: "memory");
++ return 0;
++}
++
++void
++kebab_bluetooth_hardware_report(void)
++{
++ if(panic_active()||ml_at_interrupt_context()||get_preemption_level()||!ml_get_interrupts_enabled()){
++  printf("KEBAB BTHW: refused unsafe context; no mappings or register access\n");return;
++ }
++ struct kbh_snapshot status;
++ /* The same mutex serializes touch's shared GCC vote register updates. */
++ kebab_geni_transaction_lock();
++ int error=kbh_snapshot_read(kbh_native_read,NULL,&status);
++ kebab_geni_transaction_unlock();
++ printf("KEBAB BTHW: fixed SE6/NORTH read-only snapshot error=%d valid=%x/%x/%x\n",error,status.gpio_valid,status.clock_valid,status.se_valid);
++ for(unsigned i=0;i<6;++i)if((status.gpio_valid&(3u<<(i*2)))==(3u<<(i*2)))
++  printf("KEBAB BTHW: GPIO%u ctl=%08x io=%08x mux=%u input=%u output=%u oe=%u\n",kbh_pins[i],status.gpio[i][0],status.gpio[i][1],(status.gpio[i][0]>>2)&15,status.gpio[i][1]&1,(status.gpio[i][1]>>1)&1,(status.gpio[i][0]>>9)&1);
++ for(unsigned i=0;i<9;++i)if(status.clock_valid&(1u<<i))
++  printf("KEBAB BTHW: GCC offset=%05x value=%08x\n",kbh_clock_offsets[i],status.clock[i]);
++ for(unsigned i=0;i<12;++i)if(status.se_valid&(1u<<i))
++  printf("KEBAB BTHW: SE6 offset=%03x value=%08x\n",kbh_se_offsets[i],status.se[i]);
++ if(error==EAGAIN)printf("KEBAB BTHW: SE6 registers deferred: required clock votes/CBCR running state absent\n");
++ printf("KEBAB BTHW: no GPIO/clock/power/controller writes; HCI and radio functionality not established\n");
++}
++#endif
+--- /dev/null
++++ b/bsd/dev/kebab_bluetooth.h
+@@ -0,0 +1,11 @@
++/* Native board Bluetooth transport. No userspace wire ABI or fake service. */
++#ifndef KEBAB_BLUETOOTH_H
++#define KEBAB_BLUETOOTH_H
++#ifdef __cplusplus
++extern "C" {
++#endif
++void kebab_bluetooth_hardware_report(void);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/bsd/dev/kebab_bt_hw_impl.h
+@@ -0,0 +1,61 @@
++/* Read-only board resource acquisition shared by hardware bring-up/tests.
++ * Register facts: LineageOS SM8250 98a7970af93b7e01ee77156e7fa0eb7e059a57f0
++ * kona-qupv3.dtsi, kona-pinctrl.dtsi, gcc-kona.c, qcom-geni-se.h,
++ * clk-branch.c. This is an independently written fixed-resource adapter. */
++enum kbh_space { KBH_GPIO, KBH_GCC, KBH_SE };
++static const uint32_t kbh_pins[6]={16,17,18,19,21,124};
++static const uint32_t kbh_clock_offsets[9]={
++ 0x52008,0x17004,0x17008,0x1772c,0x17730,0x17734,0x17738,0x1773c,0x17740
++};
++/* Status only: never read a FIFO data register, consume a byte or clear IRQs. */
++static const uint32_t kbh_se_offsets[12]={
++ 0x68,0x6c,0x40,0x48,0x4c,0x908,0xe24,0xe28,0x800,0x804,0x610,0x640
++};
++#define KBH_REQUIRED_VOTES ((1u<<16)|(1u<<6)|(1u<<7))
++#define KBH_CLOCK_OFF (1u<<31)
++struct kbh_snapshot {
++ uint32_t gpio[6][2],clock[9],se[12];
++ uint32_t gpio_valid,clock_valid,se_valid;
++};
++typedef int (*kbh_reader)(void *,enum kbh_space,uint32_t,uint32_t *);
++static bool
++kbh_allowed(enum kbh_space space,uint32_t offset)
++{
++ if(space==KBH_GPIO){
++  for(unsigned i=0;i<6;++i)if(offset==kbh_pins[i]*0x1000||offset==kbh_pins[i]*0x1000+4)return true;
++ }else if(space==KBH_GCC){
++  for(unsigned i=0;i<9;++i)if(offset==kbh_clock_offsets[i])return true;
++ }else if(space==KBH_SE){
++  for(unsigned i=0;i<12;++i)if(offset==kbh_se_offsets[i])return true;
++ }
++ return false;
++}
++static int
++kbh_snapshot_read(kbh_reader read,void *ctx,struct kbh_snapshot *out)
++{
++ if(!read||!out)return EINVAL;
++ memset(out,0,sizeof(*out));
++ for(unsigned i=0;i<6;++i){
++  for(unsigned j=0;j<2;++j){
++   int error=read(ctx,KBH_GPIO,kbh_pins[i]*0x1000+j*4,&out->gpio[i][j]);
++   if(error)return error;
++   out->gpio_valid|=1u<<(i*2+j);
++  }
++ }
++ for(unsigned i=0;i<9;++i){
++  int error=read(ctx,KBH_GCC,kbh_clock_offsets[i],&out->clock[i]);
++  if(error)return error;
++  out->clock_valid|=1u<<i;
++ }
++ /* A halted bus must not be probed. Require the board votes AND all three
++  * actual CBCRs to be running; a missing vote is diagnostic evidence only. */
++ if((out->clock[0]&KBH_REQUIRED_VOTES)!=KBH_REQUIRED_VOTES||
++     ((out->clock[1]|out->clock[2]|out->clock[3])&KBH_CLOCK_OFF))return EAGAIN;
++ for(unsigned i=0;i<12;++i){
++  int error=read(ctx,KBH_SE,kbh_se_offsets[i],&out->se[i]);
++  if(error)return error;
++  out->se_valid|=1u<<i;
++ }
++ if(((out->se[0]>>8)&0xff)!=2)return EPROTONOSUPPORT;
++ return 0;
++}
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -272,6 +272,8 @@
+ #define UD_REBOOT_PID1_REPORT   32u
+ #define UD_REBOOT_QSEELOG_REPORT 33u
+ #define UD_REBOOT_BTFW_REPORT 34u
++#define UD_REBOOT_BTHW_REPORT 35u
++extern void kebab_bluetooth_hardware_report(void);
+ extern void kebab_bluetooth_firmware_report(void);
+ extern void kebab_qsee_log_report(void);
+ extern void kebab_process_report(void);
+@@ -1459,6 +1461,9 @@
+ 		    sizeof("DRV?\n") - 1)) {
+ 			return UD_REBOOT_DRV_REPORT;
+ 		}
++		if (ud_command_seen(buf, received, "BTHW?\n", sizeof("BTHW?\n") - 1)) {
++			return UD_REBOOT_BTHW_REPORT;
++		}
+ 		if (ud_command_seen(buf, received, "BTFW?\n", sizeof("BTFW?\n") - 1)) {
+ 			return UD_REBOOT_BTFW_REPORT;
+ 		}
+@@ -1715,6 +1720,8 @@
+ 		kebab_pid1_report();
+ 	} else if (command == UD_REBOOT_QSEELOG_REPORT) {
+ 		kebab_qsee_log_report();
++	} else if (command == UD_REBOOT_BTHW_REPORT) {
++		kebab_bluetooth_hardware_report();
+ 	} else if (command == UD_REBOOT_BTFW_REPORT) {
+ 		kebab_bluetooth_firmware_report();
+ 	} else if (command == UD_REBOOT_DRV_REPORT) {

@@ -1,0 +1,111 @@
+{
+  "boot_version": "0193",
+  "native_sha256": "754293bead19aa20f28800abee39429862d5252c4ae0fa4e3cc63ca98a9afdae",
+  "boot_sha256": "cb8c775e1007912305942352e00fa1f17a00995e80d826e8cbd073509c6d27a0",
+  "sources": {
+    "/home/albert/s4/x": {
+      "iokit/KernelConfigTables.cpp": "db4712bd8e9fef3401fa4d2e3ea417e169530e2b9032b293d9cefbe7e8bdabca",
+      "iokit/Kernel/arm/KebabFramebuffer.cpp": "bc6c2c8b70d023eda3f49a515128761728bb238391a059b007472bad151109a0",
+      "iokit/Kernel/arm/KebabSurface.cpp": "6805297d7d2649b50bde0c0de7cd10918fb5bc5528cde5a15be1393adc793f14",
+      "iokit/Kernel/arm/KebabSurface.h": "7e74bc8865f152bc5a4ce646ff8b20870605746f18705905ad79671ab2a4f9f7",
+      "iokit/Kernel/arm/KebabUserClientContract.h": "184f0e7ee79c9fb137b4b03ca09ce975554ec6af44baa9941485002f037ae2da",
+      "iokit/conf/files.arm64": "95923cd626cb2a2448edd727d1df95f335338746f44efbfd43fa091353c49fd8",
+      "iokit/Kernel/arm/KebabBlockStorageDevice.cpp": "16aa66e9bbc54ae1e506242c82f494d93461721da55e0fd928fa684d90726c34",
+      "iokit/Kernel/arm/KebabDriverSelfTest.cpp": "a3fcbbb1dcb82384fcf50a883dae23554918f548bd757efdca29f8f9065d8daf",
+      "bsd/kern/bsd_init.c": "eec5dc66ba4e1acb8b118c1f573ae95f11cd284eacc5694f1753e8f8dfe9b5b1",
+      "iokit/Kernel/arm/KebabPlatformExpert.cpp": "efbc014b0df04b6eaf6e1b688f25bca92a97767a240c67f6f2dad176ed2e9466",
+      "iokit/Kernel/arm/KebabCPU.cpp": "c11a5b0b4bd3144b3139ef7ce394afa1788f7542f379c426f52b966c2243d01d",
+      "bsd/dev/kebab_ufs.c": "68fac484f1eda939a12f6a59c09637b072820e8e9b17054111ad9af0e7bb54a7",
+      "bsd/dev/kebab_usb.c": "5c696c3c8a2007fe132e86eeac2bfd3904fe5d9857f7cf26dd9475422dccfb80",
+      "bsd/dev/kebab_spmi.c": "ff192c1a23de1340367159a0f0e9949c2f57f63cf6deb6661695406245fa82c1",
+      "bsd/dev/kebab_rpmh_vrm.c": "eed3ca3043162c6de94a6783128200217e8766923172dec78a29f962287de42d",
+      "bsd/dev/kebab_touch.c": "774e2d46a9dd5d829aa90221f274a39165aaa0e632641c3819d647c0ae7a8965",
+      "bsd/dev/kebab_touch_tcm.c": "3cfd0c2a9a6a67f207844efeb032ddeae99b4630726213b5ac15876d257984c0",
+      "bsd/dev/kebab_keys.c": "2402f15c3c442f7a751ecf2809996f1688383da70f8705117a036bc34ff96ff0",
+      "bsd/dev/kebab_keys_core.c": "f23fc14cbc437f196d5211f4098b0618b6372e9a399da6184c24daf2a7f21c6e"
+    },
+    "/Users/albertlee/kebab-build/dxb/xnu": {
+      "iokit/KernelConfigTables.cpp": "db4712bd8e9fef3401fa4d2e3ea417e169530e2b9032b293d9cefbe7e8bdabca",
+      "iokit/Kernel/arm/KebabFramebuffer.cpp": "bc6c2c8b70d023eda3f49a515128761728bb238391a059b007472bad151109a0",
+      "iokit/Kernel/arm/KebabSurface.cpp": "6805297d7d2649b50bde0c0de7cd10918fb5bc5528cde5a15be1393adc793f14",
+      "iokit/Kernel/arm/KebabSurface.h": "7e74bc8865f152bc5a4ce646ff8b20870605746f18705905ad79671ab2a4f9f7",
+      "iokit/Kernel/arm/KebabUserClientContract.h": "184f0e7ee79c9fb137b4b03ca09ce975554ec6af44baa9941485002f037ae2da",
+      "iokit/conf/files.arm64": "95923cd626cb2a2448edd727d1df95f335338746f44efbfd43fa091353c49fd8",
+      "iokit/Kernel/arm/KebabBlockStorageDevice.cpp": "16aa66e9bbc54ae1e506242c82f494d93461721da55e0fd928fa684d90726c34",
+      "iokit/Kernel/arm/KebabDriverSelfTest.cpp": "a3fcbbb1dcb82384fcf50a883dae23554918f548bd757efdca29f8f9065d8daf",
+      "bsd/kern/bsd_init.c": "eec5dc66ba4e1acb8b118c1f573ae95f11cd284eacc5694f1753e8f8dfe9b5b1",
+      "iokit/Kernel/arm/KebabPlatformExpert.cpp": "efbc014b0df04b6eaf6e1b688f25bca92a97767a240c67f6f2dad176ed2e9466",
+      "iokit/Kernel/arm/KebabCPU.cpp": "c11a5b0b4bd3144b3139ef7ce394afa1788f7542f379c426f52b966c2243d01d",
+      "bsd/dev/kebab_ufs.c": "68fac484f1eda939a12f6a59c09637b072820e8e9b17054111ad9af0e7bb54a7",
+      "bsd/dev/kebab_usb.c": "5c696c3c8a2007fe132e86eeac2bfd3904fe5d9857f7cf26dd9475422dccfb80",
+      "bsd/dev/kebab_spmi.c": "ff192c1a23de1340367159a0f0e9949c2f57f63cf6deb6661695406245fa82c1",
+      "bsd/dev/kebab_rpmh_vrm.c": "eed3ca3043162c6de94a6783128200217e8766923172dec78a29f962287de42d",
+      "bsd/dev/kebab_touch.c": "774e2d46a9dd5d829aa90221f274a39165aaa0e632641c3819d647c0ae7a8965",
+      "bsd/dev/kebab_touch_tcm.c": "3cfd0c2a9a6a67f207844efeb032ddeae99b4630726213b5ac15876d257984c0",
+      "bsd/dev/kebab_keys.c": "2402f15c3c442f7a751ecf2809996f1688383da70f8705117a036bc34ff96ff0",
+      "bsd/dev/kebab_keys_core.c": "f23fc14cbc437f196d5211f4098b0618b6372e9a399da6184c24daf2a7f21c6e"
+    },
+    "/Users/albertlee/kebab-build/verify-0181": {
+      "iokit/KernelConfigTables.cpp": "db4712bd8e9fef3401fa4d2e3ea417e169530e2b9032b293d9cefbe7e8bdabca",
+      "iokit/Kernel/arm/KebabFramebuffer.cpp": "bc6c2c8b70d023eda3f49a515128761728bb238391a059b007472bad151109a0",
+      "iokit/Kernel/arm/KebabSurface.cpp": "6805297d7d2649b50bde0c0de7cd10918fb5bc5528cde5a15be1393adc793f14",
+      "iokit/Kernel/arm/KebabSurface.h": "7e74bc8865f152bc5a4ce646ff8b20870605746f18705905ad79671ab2a4f9f7",
+      "iokit/Kernel/arm/KebabUserClientContract.h": "184f0e7ee79c9fb137b4b03ca09ce975554ec6af44baa9941485002f037ae2da",
+      "iokit/conf/files.arm64": "95923cd626cb2a2448edd727d1df95f335338746f44efbfd43fa091353c49fd8",
+      "iokit/Kernel/arm/KebabBlockStorageDevice.cpp": "16aa66e9bbc54ae1e506242c82f494d93461721da55e0fd928fa684d90726c34",
+      "iokit/Kernel/arm/KebabDriverSelfTest.cpp": "a3fcbbb1dcb82384fcf50a883dae23554918f548bd757efdca29f8f9065d8daf",
+      "bsd/kern/bsd_init.c": "eec5dc66ba4e1acb8b118c1f573ae95f11cd284eacc5694f1753e8f8dfe9b5b1",
+      "iokit/Kernel/arm/KebabPlatformExpert.cpp": "efbc014b0df04b6eaf6e1b688f25bca92a97767a240c67f6f2dad176ed2e9466",
+      "iokit/Kernel/arm/KebabCPU.cpp": "c11a5b0b4bd3144b3139ef7ce394afa1788f7542f379c426f52b966c2243d01d",
+      "bsd/dev/kebab_ufs.c": "68fac484f1eda939a12f6a59c09637b072820e8e9b17054111ad9af0e7bb54a7",
+      "bsd/dev/kebab_usb.c": "5c696c3c8a2007fe132e86eeac2bfd3904fe5d9857f7cf26dd9475422dccfb80",
+      "bsd/dev/kebab_spmi.c": "ff192c1a23de1340367159a0f0e9949c2f57f63cf6deb6661695406245fa82c1",
+      "bsd/dev/kebab_rpmh_vrm.c": "eed3ca3043162c6de94a6783128200217e8766923172dec78a29f962287de42d",
+      "bsd/dev/kebab_touch.c": "774e2d46a9dd5d829aa90221f274a39165aaa0e632641c3819d647c0ae7a8965",
+      "bsd/dev/kebab_touch_tcm.c": "3cfd0c2a9a6a67f207844efeb032ddeae99b4630726213b5ac15876d257984c0",
+      "bsd/dev/kebab_keys.c": "2402f15c3c442f7a751ecf2809996f1688383da70f8705117a036bc34ff96ff0",
+      "bsd/dev/kebab_keys_core.c": "f23fc14cbc437f196d5211f4098b0618b6372e9a399da6184c24daf2a7f21c6e"
+    }
+  },
+  "unchanged_implementation_files": [
+    "bsd/dev/kebab_keys.c",
+    "bsd/dev/kebab_keys_core.c",
+    "bsd/dev/kebab_rpmh_vrm.c",
+    "bsd/dev/kebab_spmi.c",
+    "bsd/dev/kebab_touch.c",
+    "bsd/dev/kebab_touch_tcm.c",
+    "bsd/dev/kebab_ufs.c",
+    "bsd/dev/kebab_usb.c",
+    "iokit/Kernel/arm/KebabCPU.cpp",
+    "iokit/Kernel/arm/KebabPlatformExpert.cpp"
+  ],
+  "native_selftests": [
+    "IOCoreSurfaceRoot factory/query/bad-output/close PASS",
+    "AppleCLCD factory/query/bad-output/close PASS",
+    "UFS NXSB/completion/reentry/short/bounds/RO PASS",
+    "read-only native contracts PASS"
+  ],
+  "device_file_hashes": [
+    {
+      "path": "/sbin/launchd",
+      "size": 541600,
+      "sha256": "12370e5ee35bf28ae479b6c4b4455f4f4693ab803e37c5eb3032537c18cac61c"
+    },
+    {
+      "path": "/usr/lib/dyld",
+      "size": 922912,
+      "sha256": "5806834564fe6462ae981d0915d612b1eb2f6f168822b5d278bee56254933757"
+    }
+  ],
+  "source_patch_names": [
+    "0173-kebab-iokit-driver-lifecycle.patch",
+    "0174-kebab-blockstorage-contracts.patch"
+  ],
+  "apfs_root": "DADD93F8-DBBF-4B17-A1DF-0F11E64172F7 / disk1s1 major1 minor2 / read-only",
+  "final_device": "c073a488 fastboot",
+  "limitations": [
+    "No entire boot/userdata physical readback claimed.",
+    "Native factories tested, not complete original userland graphics/HID ABI.",
+    "No full launchd/backboardd/SpringBoard progress claimed."
+  ]
+}

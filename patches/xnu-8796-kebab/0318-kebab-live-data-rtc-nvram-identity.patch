@@ -1,0 +1,72 @@
+--- a/bsd/dev/kebab_cryptex_media.c
++++ b/bsd/dev/kebab_cryptex_media.c
+@@ -412,6 +412,7 @@
+ #include "kebab_owner_os_impl.h"
+ #include "kebab_data_template_impl.h"
+ #include "kebab_systembag_init_impl.h"
++#include "kebab_data_identity_impl.h"
+ #include "kebab_rtc_offset_impl.h"
+ #include "kebab_nvram_store_impl.h"
+ 
+--- /dev/null
++++ b/bsd/dev/kebab_data_identity_impl.h
+@@ -0,0 +1,19 @@
++/* Data dev_t minors are allocated at runtime. Do not confuse the APFS volume
++ * BSD name with its current device number. UUID/backing and mounted-vnode
++ * identity remain mandatory; a different live volume is never accepted. */
++static int
++kcm_data_mount_identity(mount_t data)
++{
++ if(!data||!kcm_system||data==kcm_system||
++     !(vfs_flags(data)&MNT_CPROTECT)||strcmp(vfs_statfs(data)->f_fstypename,"apfs"))return EAUTH;
++ struct kebab_volume_identity system,target;
++ int error=kebab_lookup_apfs_live_data(&system,&target);if(error)return error;
++ if(kcm_device(data)!=makedev(target.major_number,target.minor_number)||
++     vnode_mount(rootvnode)!=kcm_system||!kcm_mount_readonly(kcm_system)||
++     kcm_device(kcm_system)!=makedev(system.major_number,system.minor_number))return EAUTH;
++ vnode_t point=NULLVP;
++ error=vnode_lookup("/private/var",VNODE_LOOKUP_NOFOLLOW,&point,vfs_context_current());
++ if(error)return error;
++ if(!vnode_isdir(point)||vnode_mount(point)!=data)error=EAUTH;
++ vnode_put(point);return error;
++}
+--- a/bsd/dev/kebab_nvram_store_impl.h
++++ b/bsd/dev/kebab_nvram_store_impl.h
+@@ -32,7 +32,7 @@
+ }
+ static int knv_metadata(vnode_t file){
+  mount_t data=vnode_mount(file);
+- if(!vnode_isreg(file)||data==kcm_system||kcm_device(data)!=makedev(1,3)||!(vfs_flags(data)&MNT_CPROTECT)||(vfs_flags(data)&MNT_RDONLY)||strcmp(vfs_statfs(data)->f_fstypename,"apfs"))return EAUTH;
++ if(!vnode_isreg(file)||data==kcm_system||kcm_data_mount_identity(data)||!(vfs_flags(data)&MNT_CPROTECT)||(vfs_flags(data)&MNT_RDONLY)||strcmp(vfs_statfs(data)->f_fstypename,"apfs"))return EAUTH;
+  struct vnode_attr a;VATTR_INIT(&a);VATTR_WANTED(&a,va_uid);VATTR_WANTED(&a,va_gid);VATTR_WANTED(&a,va_mode);VATTR_WANTED(&a,va_flags);VATTR_WANTED(&a,va_nlink);VATTR_WANTED(&a,va_data_size);VATTR_WANTED(&a,va_dataprotect_class);
+  int error=vnode_getattr(file,&a,vfs_context_current());if(error)return error;
+  if(!VATTR_IS_SUPPORTED(&a,va_uid)||!VATTR_IS_SUPPORTED(&a,va_gid)||!VATTR_IS_SUPPORTED(&a,va_mode)||!VATTR_IS_SUPPORTED(&a,va_flags)||!VATTR_IS_SUPPORTED(&a,va_nlink)||!VATTR_IS_SUPPORTED(&a,va_data_size)||!VATTR_IS_SUPPORTED(&a,va_dataprotect_class)||a.va_uid||a.va_gid||(a.va_mode&07777)!=0600||a.va_flags||a.va_nlink!=1||a.va_data_size!=2*KNV_BANK||a.va_dataprotect_class!=4)return EAUTH;
+@@ -66,7 +66,7 @@
+  lck_mtx_lock(&knv_lock);if(knv_ready){lck_mtx_unlock(&knv_lock);return EALREADY;}
+  vnode_t file=NULLVP;int error=knv_open(&file,false);bool created=false;
+  if(error==ENOENT){error=kdi_new(KNV_PATH,&file);created=!error;
+-  if(!error&&(kcm_device(vnode_mount(file))!=makedev(1,3)||(vfs_flags(vnode_mount(file))&MNT_RDONLY)))error=EAUTH;
++  if(!error&&(kcm_data_mount_identity(vnode_mount(file))||(vfs_flags(vnode_mount(file))&MNT_RDONLY)))error=EAUTH;
+   if(!error){knv_make(knv_banks[0],1);knv_make(knv_banks[1],2);int residual=0;error=vn_rdwr(UIO_WRITE,file,(caddr_t)knv_banks,sizeof(knv_banks),0,UIO_SYSSPACE,IO_SYNC|IO_NOCACHE,vfs_context_ucred(vfs_context_current()),&residual,NULL);
+    if(!error&&residual)error=EIO;if(!error)error=VNOP_FSYNC(file,MNT_WAIT,vfs_context_current());if(!error)error=VFS_SYNC(vnode_mount(file),MNT_WAIT,vfs_context_current());if(!error)error=kebab_ufs_sync();}
+  }
+--- a/bsd/dev/kebab_rtc_offset_impl.h
++++ b/bsd/dev/kebab_rtc_offset_impl.h
+@@ -29,7 +29,7 @@
+ {
+  mount_t data=vnode_mount(file);
+  if(!vnode_isreg(file)||data==kcm_system||!(vfs_flags(data)&MNT_CPROTECT)||
+-     strcmp(vfs_statfs(data)->f_fstypename,"apfs")||kcm_device(data)!=makedev(1,3))return EAUTH;
++     strcmp(vfs_statfs(data)->f_fstypename,"apfs")||kcm_data_mount_identity(data))return EAUTH;
+  struct vnode_attr a;VATTR_INIT(&a);VATTR_WANTED(&a,va_uid);VATTR_WANTED(&a,va_gid);VATTR_WANTED(&a,va_mode);
+  VATTR_WANTED(&a,va_flags);VATTR_WANTED(&a,va_nlink);VATTR_WANTED(&a,va_data_size);VATTR_WANTED(&a,va_dataprotect_class);
+  int error=vnode_getattr(file,&a,vfs_context_current());if(error)return error;
+@@ -113,7 +113,7 @@
+   int64_t offset=0;uint32_t counter=0;struct krc_record records[2]={};
+   if(!error)error=kebab_rtc_offset_snapshot(&offset,&counter);
+   if(!error){krc_make(&records[0],1,offset,counter);krc_make(&records[1],2,offset,counter);int residual=0;
+-   if(kcm_device(vnode_mount(file))!=makedev(1,3)||(vfs_flags(vnode_mount(file))&MNT_RDONLY))error=EAUTH;
++   if(kcm_data_mount_identity(vnode_mount(file))||(vfs_flags(vnode_mount(file))&MNT_RDONLY))error=EAUTH;
+    if(!error)error=vn_rdwr(UIO_WRITE,file,(caddr_t)records,128,0,UIO_SYSSPACE,IO_SYNC|IO_NOCACHE,vfs_context_ucred(vfs_context_current()),&residual,NULL);
+    if(!error&&residual)error=EIO;if(!error)error=VNOP_FSYNC(file,MNT_WAIT,vfs_context_current());
+    if(!error)error=VFS_SYNC(vnode_mount(file),MNT_WAIT,vfs_context_current());if(!error)error=kebab_ufs_sync();

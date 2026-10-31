@@ -1,0 +1,16 @@
+--- a/bsd/kern/kebab_scm_probe.c
++++ b/bsd/kern/kebab_scm_probe.c
+@@ -87,7 +87,13 @@
+ 	static const struct { const char *name; uint32_t target; } queries[] = {
+ 		{ "ice-invalidate", 0x02001003 },
+ 		{ "ice-set", 0x02001004 },
++		/* Linux v6.16 ES ABI; availability only, never invoke these. */
++		{ "ice-derive-secret", 0x02001007 },
++		{ "ice-generate", 0x02001008 },
++		{ "ice-prepare", 0x02001009 },
++		{ "ice-import", 0x0200100a },
+ 		{ "qsee-version", 0x32000603 },
++		{ "qsee-app-lookup", 0x32000103 },
+ 	};
+ 	for (unsigned i = 0; i < sizeof(queries) / sizeof(queries[0]); i++) {
+ 		result = kebab_scm_query(function, queries[i].target);

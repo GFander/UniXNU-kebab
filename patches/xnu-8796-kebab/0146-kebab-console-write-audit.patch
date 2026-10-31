@@ -1,0 +1,103 @@
+fix(console): assert the /dev/console write path stays sleepable
+
+0145 routed cnopen/cnwrite to the kebab character device, so a userland
+write to /dev/console now takes the same console_write() -> _cnputc()
+path as kprintf.  That is deliberate (one ring, one USB tee, one panel),
+but it means a userland write holds the console ring mutex and may
+sleep, and the audit in docs/BRING-UP-STATE.md 76 asked whether that can
+deadlock the machine and take the only observation channel with it.
+
+It cannot, and the reasons are in the code this patch leaves alone:
+kebab_usb_log() is a bounded non-blocking handoff that drops its bytes
+when another CPU is inside it, and it drains synchronously only under
+panic_active(); ud_enter()/ud_rx_enter() are IRQ-masking try-locks that
+record a stranded owner and let ud_panic_takeover() reclaim it; _cnputc()
+tees to the USB ring and then calls kebab_early_putc(), which takes no
+lock at all.  The panic report never enters the console ring: it goes
+paniclog_append_noflush -> consdebug_putc_unbuffered ->
+console_write_unbuffered -> _cnputc, so a userland writer cannot hold a
+lock the panic path needs.  cnread() returns EOF in kernel context with
+no wait, and seltrue() reports EOF as readable, so a reader that ignores
+EOF spins in userland only, where it holds no kernel lock and cannot
+starve the USB event thread.
+
+What the audit did not have was the invariant stated where a future
+change would break it.  Refuse a console write that arrives with
+interrupts masked: that is the state ud_enter() leaves behind for the
+USB transmit gate (and of an interrupt handler), console_write() would
+panic there with "Console I/O from interrupt-disabled context", and a
+drain taken under the gate would park the kernel's own log behind the
+USB port.  EDEADLK is diagnosable and unreachable from write(2), the
+only caller today.
+
+Also correct the 0145 claim that select() reports the device "writable
+and never readable".  seltrue() reports both, and readable is the right
+answer: read() returns 0 and EOF is a readable condition, exactly as
+/dev/null behaves.  Reporting write-only would make select() wait on an
+fd whose read() completes, so a job polling stdin would never see the
+EOF.
+
+Tests: -fsyntax-only with the real KEBAB flags for bsd/dev/kebab_ufs.c,
+16 warnings before and after (13 pre-existing -Wdeclaration-after-
+statement in that file); full DEVELOPMENT/ARM64/KEBAB build from a reset
+tree with all 125 patches.  See docs/BRING-UP-STATE.md 76 for the
+object-identity check that shows kprintf's mechanism did not change.
+No hardware: the board is stranded.
+--- a/bsd/dev/kebab_ufs.c
++++ b/bsd/dev/kebab_ufs.c
+@@ -40,6 +40,7 @@
+ #include <vm/vm_kern.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/device_tree.h>
++#include <arm/machine_routines.h>
+ #include <libkern/libkern.h>
+ 
+ #include "kebab_ufs.h"
+@@ -822,7 +823,8 @@
+  * a userland write reaches the USB console and the screen from one place.
+  *
+  * Reads return EOF: there is no keyboard or serial input behind this node.
+- * Select reports the device writable and never readable.
++ * Select reports the device ready in both directions (seltrue), so a reader is
++ * handed the EOF instead of blocking on a port that can never produce a byte.
+  */
+ bool
+ kebab_console_available(void)
+@@ -856,6 +858,21 @@
+ {
+ 	char buf[64];
+ 
++	/*
++	 * Audit guard (docs/BRING-UP-STATE.md 76): this is where userland bytes
++	 * enter the kernel console, and console_write() takes the console ring
++	 * mutex, so the caller has to be a sleepable thread.  Interrupts masked is
++	 * exactly the state ud_enter() leaves behind for the USB transmit gate, and
++	 * the state of an interrupt handler; console_write() would panic there
++	 * ("Console I/O from interrupt-disabled context") and a drain under the gate
++	 * would park the log behind the USB port.  The only caller today is write(2);
++	 * if that ever changes, fail the write with a diagnosable error instead of
++	 * losing the kernel's own console.
++	 */
++	if (!ml_get_interrupts_enabled()) {
++		return EDEADLK;
++	}
++
+ 	while (uio_resid(uio) > 0) {
+ 		size_t want = MIN(sizeof(buf), (size_t)uio_resid(uio));
+ 		int error = uiomove(buf, (int)want, uio);
+@@ -878,6 +895,15 @@
+ kebab_console_select(dev_t dev, int flag, __unused void *wql,
+     __unused struct proc *p)
+ {
++	/*
++	 * seltrue() reports readable and writable.  Readable is the truthful
++	 * answer, not an oversight: read() returns 0 immediately and EOF is a
++	 * readable condition, so this node behaves like /dev/null.  Reporting
++	 * write-only would make select() wait on an fd whose read() completes, and a
++	 * job polling stdin for input would never see the EOF.  A program that
++	 * ignores EOF spins in userland but holds no kernel lock, so it cannot
++	 * starve the USB event thread (BRING-UP-STATE 76).
++	 */
+ 	return seltrue(dev, flag, p);
+ }
+ 

@@ -3,3 +3,16 @@ __pycache__/
 *.pyc
 *.orig
 *.rej
+
+# Private owner workbench outputs; release only reviewed source and receipts.
+*.img
+*.bin
+*.dmg
+*.ipsw
+*.raw
+*.key
+*.keyblob
+*.record
+*.tar.gz
+*.log
+!docs/qualification/**/*.log

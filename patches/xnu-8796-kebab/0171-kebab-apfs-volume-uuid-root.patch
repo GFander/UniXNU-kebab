@@ -1,0 +1,52 @@
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -772,26 +772,37 @@
+ 	}
+ 
+ #if defined(KEBAB)
+-	/* Initialize UFS first. APFS may opt into the actual IOMedia BSD identity. */
++	/* ufsmedia_root=2 initializes the physical provider, then lets the
++	 * ordinary UUID matcher select an APFS volume below its container.
++	 * Mode 1 is the whole-media diagnostic; mode 0 keeps the legacy disk. */
+ 	if (strcmp(rdBootVar, "ufsroot0") == 0) {
+-		OSSafeReleaseNULL(matching);
+ 		int ufs_error = kebab_ufs_rootdev(root);
+ 		if (ufs_error) {
+ 			panic("IOFindBSDRoot: KEBAB UFS root %s unavailable: %d", rdBootVar, ufs_error);
+ 		}
+ 		uint32_t media_root = 0;
+-		service = NULL;
+-		if (PE_parse_boot_argn("ufsmedia_root", &media_root, sizeof(media_root)) && media_root) {
+-			ufs_error = kebab_blockstorage_rootdev(root, rootName, rootNameSize, &service);
+-			if (ufs_error) {
+-				panic("IOFindBSDRoot: KEBAB IOMedia root unavailable: %d", ufs_error);
++		PE_parse_boot_argn("ufsmedia_root", &media_root, sizeof(media_root));
++		if (media_root == 2) {
++			if (matching == NULL) {
++				panic("IOFindBSDRoot: KEBAB APFS UUID mode requires /chosen/root-matching");
+ 			}
++			rdBootVar[0] = 0;
++			IOLog("KEBAB BLOCK: UFS provider ready; selecting APFS volume through root-matching\n");
+ 		} else {
+-			strlcpy(rootName, rdBootVar, rootNameSize);
+-		}
+-		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
+-		*oflags = 0;
+-		goto iofrootx;
++			OSSafeReleaseNULL(matching);
++			service = NULL;
++			if (media_root == 1) {
++				ufs_error = kebab_blockstorage_rootdev(root, rootName, rootNameSize, &service);
++				if (ufs_error) {
++					panic("IOFindBSDRoot: KEBAB IOMedia root unavailable: %d", ufs_error);
++				}
++			} else {
++				strlcpy(rootName, rdBootVar, rootNameSize);
++			}
++			IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
++			*oflags = 0;
++			goto iofrootx;
++		}
+ 	}
+ #endif
+ 

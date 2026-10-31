@@ -1,0 +1,278 @@
+--- a/bsd/kern/kebab_file_keys.c
++++ b/bsd/kern/kebab_file_keys.c
+@@ -21,6 +21,7 @@
+     offsetof(cp_raw_key_s,flags)==offsetof(struct kebab_aks_raw_key,flags), "native raw key compatibility");
+ _Static_assert(sizeof(cp_wrapped_key_s)==sizeof(struct kebab_aks_wrapped_key), "native wrapped key compatibility");
+ 
++_Static_assert(CP_RAW_KEY_WRAPPEDKEY==KEBAB_RAW_KEY_WRAPPED,"native wrapped-key flag");
+ static LCK_GRP_DECLARE(kfk_group, "kebab file keys");
+ static LCK_MTX_DECLARE(kfk_lock, &kfk_group);
+ static uint8_t kfk_root_kek[32], kfk_class_d[32], kfk_uuid[16];
+@@ -275,6 +276,7 @@
+ #include "kebab_metadata_keys_impl.h"
+ #include "kebab_volume_keys_impl.h"
+ #include "kebab_cpx_handles_impl.h"
++#include "kebab_volume_wrapped_impl.h"
+ 
+ int
+ kebab_xts128_crypt(const uint8_t key[32], uint64_t unit, const void *input, void *output, size_t bytes, bool encrypt)
+--- a/bsd/kern/kebab_file_keys.h
++++ b/bsd/kern/kebab_file_keys.h
+@@ -45,6 +45,7 @@
+     struct kebab_aks_raw_key *);
+ int kebab_metadata_keys_selftest(void);
+ /* Separate original FileVault descriptor family: lengths are64-bit, not FS32. */
++#define KEBAB_RAW_KEY_WRAPPED 1u
+ struct kebab_fv_credential { uint8_t bytes[24]; };
+ struct kebab_fv_wrapped_key { void *key; uint64_t key_len; };
+ struct kebab_fv_raw_key { void *key; uint64_t key_len; uint32_t flags; };
+@@ -56,6 +57,10 @@
+     struct kebab_fv_wrapped_key *,struct kebab_fv_raw_key *);
+ int kebab_volume_key_unwrap(const struct kebab_fv_credential *,const void *,const void *,
+     const struct kebab_fv_wrapped_key *,struct kebab_fv_raw_key *);
++int kebab_volume_key_new_wrapped(const struct kebab_fv_credential *,const void *,const void *,const uint8_t[16],
++    struct kebab_fv_wrapped_key *,struct kebab_fv_raw_key *);
++int kebab_volume_key_unwrap_wrapped(const struct kebab_fv_credential *,const void *,const void *,
++    const struct kebab_fv_wrapped_key *,struct kebab_fv_raw_key *);
+ int kebab_volume_keys_selftest(void);
+ int kebab_vek_cpx_handle_create(const uint8_t[16],const uint8_t[32],uint8_t[64]);
+ int kebab_vek_cpx_handle_open(const uint8_t[64],uint8_t[32]);
+--- a/bsd/kern/kebab_volume_keys_impl.h
++++ b/bsd/kern/kebab_volume_keys_impl.h
+@@ -36,40 +36,39 @@
+  kfk_wipe(input,sizeof(input));return 0;
+ }
+ 
+-int
+-kebab_volume_key_new(const struct kebab_fv_credential *cred, const void *auxiliary,
+-    const void *passphrase, const uint8_t uuid[16], struct kebab_fv_wrapped_key *wrapped,
+-    struct kebab_fv_raw_key *raw)
++/* Internal helpers require kfk_lock; both public representations commit under
++ * the same Root epoch. No nested public calls or unlock/relock window. */
++static bool
++kfv_new_uuid_valid(const uint8_t uuid[16],const struct kebab_fv_credential *cred,
++    const struct kebab_fv_wrapped_key *wrapped,const struct kebab_fv_raw_key *raw)
+ {
+- if(!kfk_context() || !kfv_buffers(cred,wrapped,raw,true) || !kfk_range(uuid,16))return (int)kIOReturnBadArgument;
+- if(!kfv_credential(cred) || auxiliary || passphrase || raw->flags)return (int)kIOReturnUnsupported;
++ if(!kfk_range(uuid,16))return false;
+  unsigned nonzero=0;for(unsigned i=0;i<16;++i)nonzero|=uuid[i];
+- if(!nonzero || kfk_overlap(uuid,16,cred,sizeof(*cred)) || kfk_overlap(uuid,16,wrapped,sizeof(*wrapped)) ||
+-    kfk_overlap(uuid,16,raw,sizeof(*raw)) || kfk_overlap(uuid,16,wrapped->key,(size_t)wrapped->key_len) ||
+-    kfk_overlap(uuid,16,raw->key,(size_t)raw->key_len))return (int)kIOReturnBadArgument;
+- uint8_t plain[72]={0},sealed[96]={0},kek[32]={0};
++ return nonzero && !kfk_overlap(uuid,16,cred,sizeof(*cred)) &&
++  !kfk_overlap(uuid,16,wrapped,sizeof(*wrapped)) && !kfk_overlap(uuid,16,raw,sizeof(*raw)) &&
++  !kfk_overlap(uuid,16,wrapped->key,(size_t)wrapped->key_len) &&
++  !kfk_overlap(uuid,16,raw->key,(size_t)raw->key_len);
++}
++
++static int
++kfv_generate_locked(const uint8_t uuid[16],uint8_t sealed[96],uint8_t key[32])
++{
++ uint8_t plain[72]={0},kek[32]={0};
+  memcpy(plain,"KV01\1\0",6);memcpy(plain+8,uuid,16);plain[36]=32;memcpy(sealed,uuid,16);
+- lck_mtx_lock(&kfk_lock);int error=kfv_kek(uuid,kek);
++ int error=kfv_kek(uuid,kek);
+  if(!error) {
+   read_random(plain+24,8);read_random(plain+40,32);
+   error=kfk_wrap(kek,plain,72,sealed+16,true);
+  }
+- if(!error) {
+-  memcpy(wrapped->key,sealed,96);memcpy(raw->key,plain+40,32);
+-  wrapped->key_len=96;raw->key_len=32;raw->flags=0;
+- }
+- lck_mtx_unlock(&kfk_lock);
+- kfk_wipe(plain,sizeof(plain));kfk_wipe(sealed,sizeof(sealed));kfk_wipe(kek,sizeof(kek));return error;
++ if(!error)memcpy(key,plain+40,32);
++ kfk_wipe(plain,sizeof(plain));kfk_wipe(kek,sizeof(kek));return error;
+ }
+ 
+-int
+-kebab_volume_key_unwrap(const struct kebab_fv_credential *cred, const void *auxiliary,
+-    const void *passphrase, const struct kebab_fv_wrapped_key *wrapped, struct kebab_fv_raw_key *raw)
++static int
++kfv_open_locked(const uint8_t sealed[96],uint8_t key[32])
+ {
+- if(!kfk_context() || !kfv_buffers(cred,wrapped,raw,false))return (int)kIOReturnBadArgument;
+- if(!kfv_credential(cred) || auxiliary || passphrase)return (int)kIOReturnUnsupported;
+- uint8_t plain[72]={0},header[40]={0},sealed[96]={0},kek[32]={0};memcpy(sealed,wrapped->key,96);
+- lck_mtx_lock(&kfk_lock);int error=kfv_kek(sealed,kek);
++ uint8_t plain[72]={0},header[40]={0},kek[32]={0};
++ int error=kfv_kek(sealed,kek);
+  if(!error)error=kfk_wrap(kek,sealed+16,80,plain,false);
+  if(!error) {
+   memcpy(header,"KV01\1\0",6);memcpy(header+8,sealed,16);memcpy(header+24,plain+24,8);header[36]=32;
+@@ -78,10 +77,39 @@
+   for(unsigned i=0;i<16;++i)nonzero|=sealed[i];
+   if(difference || !nonzero)error=(int)kIOReturnNotPermitted;
+  }
+- if(!error){memcpy(raw->key,plain+40,32);raw->key_len=32;raw->flags=0;}
++ if(!error)memcpy(key,plain+40,32);
++ kfk_wipe(plain,sizeof(plain));kfk_wipe(header,sizeof(header));kfk_wipe(kek,sizeof(kek));return error;
++}
++
++int
++kebab_volume_key_new(const struct kebab_fv_credential *cred,const void *auxiliary,
++    const void *passphrase,const uint8_t uuid[16],struct kebab_fv_wrapped_key *wrapped,
++    struct kebab_fv_raw_key *raw)
++{
++ if(!kfk_context() || !kfv_buffers(cred,wrapped,raw,true) ||
++    !kfv_new_uuid_valid(uuid,cred,wrapped,raw))return (int)kIOReturnBadArgument;
++ if(!kfv_credential(cred) || auxiliary || passphrase || raw->flags)return (int)kIOReturnUnsupported;
++ uint8_t volume[16],sealed[96]={0},key[32]={0};memcpy(volume,uuid,16);
++ lck_mtx_lock(&kfk_lock);int error=kfv_generate_locked(volume,sealed,key);
++ if(!error) {
++  memcpy(wrapped->key,sealed,96);memcpy(raw->key,key,32);
++  wrapped->key_len=96;raw->key_len=32;raw->flags=0;
++ }
+  lck_mtx_unlock(&kfk_lock);
+- kfk_wipe(plain,sizeof(plain));kfk_wipe(header,sizeof(header));
+- kfk_wipe(sealed,sizeof(sealed));kfk_wipe(kek,sizeof(kek));return error;
++ kfk_wipe(volume,sizeof(volume));kfk_wipe(sealed,sizeof(sealed));kfk_wipe(key,sizeof(key));return error;
++}
++
++int
++kebab_volume_key_unwrap(const struct kebab_fv_credential *cred,const void *auxiliary,
++    const void *passphrase,const struct kebab_fv_wrapped_key *wrapped,struct kebab_fv_raw_key *raw)
++{
++ if(!kfk_context() || !kfv_buffers(cred,wrapped,raw,false))return (int)kIOReturnBadArgument;
++ if(!kfv_credential(cred) || auxiliary || passphrase)return (int)kIOReturnUnsupported;
++ uint8_t sealed[96],key[32]={0};memcpy(sealed,wrapped->key,96);
++ lck_mtx_lock(&kfk_lock);int error=kfv_open_locked(sealed,key);
++ if(!error){memcpy(raw->key,key,32);raw->key_len=32;raw->flags=0;}
++ lck_mtx_unlock(&kfk_lock);
++ kfk_wipe(sealed,sizeof(sealed));kfk_wipe(key,sizeof(key));return error;
+ }
+ 
+ int
+--- a/bsd/kern/kebab_cpx_handles_impl.h
++++ b/bsd/kern/kebab_cpx_handles_impl.h
+@@ -13,19 +13,26 @@
+  kfk_wipe(input,sizeof(input));return 0;
+ }
+ 
++/* Internal encoding requires kfk_lock and stable private inputs. */
++static int
++kch_create_locked(const uint8_t uuid[16],const uint8_t key[32],uint8_t output[64])
++{
++ uint8_t token[64]={0},kek[32]={0};memcpy(token,"HT01",4);memcpy(token+8,uuid,16);
++ unsigned nonzero=0;for(unsigned i=8;i<24;++i)nonzero|=token[i];
++ int error=nonzero?kch_kek(token,kek):(int)kIOReturnBadArgument;
++ if(!error)error=kfk_wrap(kek,key,32,token+24,true);
++ if(!error)memcpy(output,token,64);
++ kfk_wipe(token,sizeof(token));kfk_wipe(kek,sizeof(kek));return error;
++}
++
+ int
+-kebab_vek_cpx_handle_create(const uint8_t uuid[16], const uint8_t key[32], uint8_t output[64])
++kebab_vek_cpx_handle_create(const uint8_t uuid[16],const uint8_t key[32],uint8_t output[64])
+ {
+  if(!kfk_context() || !kfk_range(uuid,16) || !kfk_range(key,32) || !kfk_range(output,64) ||
+     kfk_overlap(uuid,16,key,32) || kfk_overlap(uuid,16,output,64) ||
+     kfk_overlap(key,32,output,64))return (int)kIOReturnBadArgument;
+- uint8_t token[64]={0},kek[32]={0};memcpy(token,"HT01",4);memcpy(token+8,uuid,16);
+- unsigned nonzero=0;for(unsigned i=8;i<24;++i)nonzero|=token[i];
+- if(!nonzero)return (int)kIOReturnBadArgument;
+- lck_mtx_lock(&kfk_lock);int error=kch_kek(token,kek);
+- if(!error)error=kfk_wrap(kek,key,32,token+24,true);
+- if(!error)memcpy(output,token,64);
+- lck_mtx_unlock(&kfk_lock);kfk_wipe(token,sizeof(token));kfk_wipe(kek,sizeof(kek));return error;
++ lck_mtx_lock(&kfk_lock);int error=kch_create_locked(uuid,key,output);
++ lck_mtx_unlock(&kfk_lock);return error;
+ }
+ 
+ int
+--- a/iokit/Kernel/arm/kebab_filevault_provider_impl.h
++++ b/iokit/Kernel/arm/kebab_filevault_provider_impl.h
+@@ -1,8 +1,8 @@
+ /* Original11-slot FileVault table plus NULL sentinel; only audited operations.
+  * State, commit, class loading/unloading and rewrap deliberately unavailable. */
+ struct KebabAKSFileVaultTable {
+- decltype(&kebab_volume_key_new) new_key;
+- decltype(&kebab_volume_key_unwrap) unwrap;
++ decltype(&kebab_volume_key_new_wrapped) new_key;
++ decltype(&kebab_volume_key_unwrap_wrapped) unwrap;
+  void *unsupported10,*unsupported18;
+  decltype(&kebab_volume_key_length) wrapped_length;
+  void *unsupported28_50[6];
+@@ -10,7 +10,7 @@
+ };
+ static_assert(offsetof(KebabAKSFileVaultTable,wrapped_length)==0x20,"original FV length query slot");
+ static_assert(offsetof(KebabAKSFileVaultTable,sentinel)==88 && sizeof(KebabAKSFileVaultTable)==96,"original FV11-slot + NULL sentinel");
+-static const KebabAKSFileVaultTable kfv_services={kebab_volume_key_new,kebab_volume_key_unwrap,
++static const KebabAKSFileVaultTable kfv_services={kebab_volume_key_new_wrapped,kebab_volume_key_unwrap_wrapped,
+  nullptr,nullptr,kebab_volume_key_length,{nullptr},nullptr};
+ static bool kfv_enabled;
+ 
+@@ -18,7 +18,7 @@
+ static int
+ kfv_service_roundtrip(const KebabAKSFileVaultTable *table)
+ {
+- struct Work {uint8_t sealed[96],key[64],back[64];};
++ struct Work {uint8_t sealed[96],key[64],back[64],decoded[32],other[32];};
+  Work *work=static_cast<Work *>(IOMalloc(sizeof(Work)));if(!work)return ENOMEM;
+  bzero(work,sizeof(*work));struct kebab_fv_credential cred={};uint8_t uuid[16];
+  for(unsigned i=0;i<16;++i)uuid[i]=(uint8_t)(0xd0+i);
+@@ -29,8 +29,11 @@
+  struct kebab_fv_raw_key raw={work->key,64,0},out={work->back,64,0};
+  if(!error)error=table->new_key(&cred,nullptr,nullptr,uuid,&wrapped,&raw);
+  if(!error)error=table->unwrap(&cred,nullptr,nullptr,&wrapped,&out);
+- if(!error && (wrapped.key_len!=96 || raw.key_len!=32 || out.key_len!=32 ||
+-    out.flags || memcmp(work->key,work->back,32)))error=EIO;
++ if(!error && (wrapped.key_len!=96 || raw.key_len!=64 || out.key_len!=64 ||
++    raw.flags!=KEBAB_RAW_KEY_WRAPPED || out.flags!=KEBAB_RAW_KEY_WRAPPED))error=EIO;
++ if(!error)error=kebab_vek_cpx_handle_open(work->key,work->decoded);
++ if(!error)error=kebab_vek_cpx_handle_open(work->back,work->other);
++ if(!error && memcmp(work->decoded,work->other,32))error=EIO;
+  uint64_t sentinel=0x1122334455667788ULL;capacity=sentinel;
+  if(!error && (table->wrapped_length(&cred,2,&capacity)!=(int)kIOReturnUnsupported || capacity!=sentinel))error=EIO;
+  volatile uint8_t *bytes=reinterpret_cast<volatile uint8_t *>(work);
+@@ -56,7 +59,7 @@
+  IOReturn result=platform->callPlatformFunction("AKSFileVaultServices",true,&table,nullptr,nullptr,nullptr);
+  int error=result==kIOReturnSuccess && table==&kfv_services?0:EIO;
+  if(!error)error=kfv_service_roundtrip(table);
+- IOLog("KEBAB AKS FV: native platform/11-slot VEK new/unwrap/length %s (%d); state/control/class-load NULL; no Data mount\n",error?"FAIL":"PASS",error);
++ IOLog("KEBAB AKS FV: native platform/11-slot opaque64 VEK new/unwrap/length %s (%d); state/control/class-load NULL; no Data mount\n",error?"FAIL":"PASS",error);
+  return error;
+ #else
+  return EPERM;
+--- /dev/null
++++ b/bsd/kern/kebab_volume_wrapped_impl.h
+@@ -0,0 +1,36 @@
++/* Original FV raw descriptor now carries a real opaque wrapped object64, not
++ * raw32 with a wrapped bit. Both WVEK and CPX object commit atomically under
++ * one Root lock; state/lock/class policy is unchanged and remains unavailable. */
++int
++kebab_volume_key_new_wrapped(const struct kebab_fv_credential *cred,const void *auxiliary,
++    const void *passphrase,const uint8_t uuid[16],struct kebab_fv_wrapped_key *wrapped,
++    struct kebab_fv_raw_key *raw)
++{
++ if(!kfk_context() || !kfv_buffers(cred,wrapped,raw,true) || raw->key_len!=64 ||
++    !kfv_new_uuid_valid(uuid,cred,wrapped,raw))return (int)kIOReturnBadArgument;
++ if(!kfv_credential(cred) || auxiliary || passphrase || raw->flags)return (int)kIOReturnUnsupported;
++ uint8_t volume[16],sealed[96]={0},key[32]={0},token[64]={0};memcpy(volume,uuid,16);
++ lck_mtx_lock(&kfk_lock);int error=kfv_generate_locked(volume,sealed,key);
++ if(!error)error=kch_create_locked(volume,key,token);
++ if(!error) {
++  memcpy(wrapped->key,sealed,96);memcpy(raw->key,token,64);
++  wrapped->key_len=96;raw->key_len=64;raw->flags=KEBAB_RAW_KEY_WRAPPED;
++ }
++ lck_mtx_unlock(&kfk_lock);
++ kfk_wipe(volume,sizeof(volume));kfk_wipe(sealed,sizeof(sealed));
++ kfk_wipe(key,sizeof(key));kfk_wipe(token,sizeof(token));return error;
++}
++
++int
++kebab_volume_key_unwrap_wrapped(const struct kebab_fv_credential *cred,const void *auxiliary,
++    const void *passphrase,const struct kebab_fv_wrapped_key *wrapped,struct kebab_fv_raw_key *raw)
++{
++ if(!kfk_context() || !kfv_buffers(cred,wrapped,raw,false) || raw->key_len!=64)return (int)kIOReturnBadArgument;
++ if(!kfv_credential(cred) || auxiliary || passphrase)return (int)kIOReturnUnsupported;
++ uint8_t sealed[96],key[32]={0},token[64]={0};memcpy(sealed,wrapped->key,96);
++ lck_mtx_lock(&kfk_lock);int error=kfv_open_locked(sealed,key);
++ if(!error)error=kch_create_locked(sealed,key,token);
++ if(!error){memcpy(raw->key,token,64);raw->key_len=64;raw->flags=KEBAB_RAW_KEY_WRAPPED;}
++ lck_mtx_unlock(&kfk_lock);
++ kfk_wipe(sealed,sizeof(sealed));kfk_wipe(key,sizeof(key));kfk_wipe(token,sizeof(token));return error;
++}

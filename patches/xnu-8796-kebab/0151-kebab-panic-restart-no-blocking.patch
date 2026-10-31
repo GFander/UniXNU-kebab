@@ -1,0 +1,197 @@
+fix(panic): never run the install flush on the panic restart path
+
+A userspace panic could not reset: the board parked with a nested panic
+instead of a PSCI reset.
+
+    Nested panic detected ... Attempt to take mutex ... with preemption
+    disabled @lock_mtx.c:194
+
+panic() disables preemption (osfmk/kern/debug.c), and every call after that
+point inherits it.  With kebabkdp=1 removed, 0134 clears panicDebugging, so
+the panic reaches kdp_machine_reboot_type() -> PEHaltRestart() ->
+KebabPlatformExpert::haltRestart(), which with a live console hands the CPU
+to kebab_usb_panic_spin(), the non-returning console pump.  The pump executes
+host console commands, and it shared ud_run_reboot_command() with the normal
+console thread.  For REBOOT/FASTBOOT/FASTBOOT2 that dispatcher runs
+kebab_install_sync_for_reset() from 0148:
+
+    VFS_SYNC(rootvnode->v_mount, MNT_WAIT, vfs_context_current())
+    kebab_ufs_sync()  ->  lck_mtx_lock(&kebab_ufs_lock)
+
+MNT_WAIT sleeps on HFS+/UBC/mount locks and the UFS sync takes a mutex, so
+the first one to be reached panicked with preemption disabled and the machine
+never reset.  Two comments asserted the opposite ("The panic path does not
+call this"; "a panic still resets without waiting for a filesystem sync");
+nothing enforced it.
+
+Enforce it in three places:
+
+  * ud_run_reboot_command() takes a "panicking" argument.  While panicking a
+    reset request is degraded to a plain PSCI SYSTEM_RESET and says so: the
+    flush is skipped on purpose, because losing a write that was still queued
+    is preferable to never resetting.  Every other command is a diagnostic
+    that reaches a driver lock (kebab_touch's ktq.lock, RPMH, SPMI) or
+    allocates, so it is refused with one line and the pump keeps running.
+  * kebab_install_sync_for_reset() refuses to run when panic_active(), so no
+    future caller can reintroduce this.
+  * KebabPlatformExpert::haltRestart() sends kPEHaltCPU to PSCI as well once
+    panicking, instead of falling through to IODTPlatformExpert's
+    shutdown-notification arm (thread_call_allocate(), IORegistryEntry::
+    fromPath(), PM clients), which allocates and takes mutexes and is only
+    skipped today because a kPEPanicBegin happened to be delivered first.
+
+The console pump itself is unchanged and still lock-free.  Nothing changes
+outside a panic: REBOOT/FASTBOOT from the console thread still run the
+durable flush before the reset.
+
+diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -1792,16 +1792,52 @@
+ 	ud.vol_stream = kebab_vol_active();
+ }
+ 
+-static void
+-ud_run_reboot_command(uint32_t command)
++/*
++ * Console command dispatcher.
++ *
++ * "panicking" is not a hint: the panic console pump (kebab_usb_panic_spin())
++ * calls this with preemption already disabled, inside a panic, on the CPU that
++ * panicked.  Nothing reachable from here in that mode may sleep, take a mutex
++ * or allocate, because any of the three turns the panic into a nested panic --
++ * which is exactly what parked this board with a wedged controller after a
++ * userspace panic.
++ *
++ * The reset commands are the only ones that matter in a panic, and they are
++ * degraded to a plain PSCI SYSTEM_RESET: the durable-install flush is skipped
++ * on purpose.  VFS_SYNC(MNT_WAIT) sleeps on HFS+/UBC/mount locks and
++ * kebab_ufs_sync() takes kebab_ufs_lock before SYNCHRONIZE CACHE, so the flush
++ * is the one thing that must not run here; losing a write that was still queued
++ * is preferable to never resetting.  Every other command is a diagnostic that
++ * reaches a driver lock or allocates, so it is refused with one line and the
++ * pump keeps running.
++ */
++static void
++ud_run_reboot_command(uint32_t command, boolean_t panicking)
+ {
++	if (panicking) {
++		if (command == UD_REBOOT_FASTBOOT || command == UD_REBOOT_FASTBOOT2 ||
++		    command == UD_REBOOT_PLAIN) {
++			printf("KEBAB PANIC: reset requested (%s); skipping the install "
++			    "flush (VFS_SYNC and kebab_ufs_lock cannot run with "
++			    "preemption disabled) and resetting via PSCI SYSTEM_RESET\n",
++			    command == UD_REBOOT_FASTBOOT ? "FASTBOOT" :
++			    command == UD_REBOOT_FASTBOOT2 ? "FASTBOOT2" : "REBOOT");
++			/* Does not return on success; prints and keeps the pump alive on
++			 * failure, which is the only safe answer left in a panic. */
++			(void)ud_platform_restart();
++			return;
++		}
++		printf("KEBAB PANIC: command 0x%x refused while panicking; it can "
++		    "sleep or take a mutex, and only a reset is safe here\n", command);
++		return;
++	}
+ 	/*
+ 	 * A console-requested reset is the transition from the install phase to
+ 	 * the next boot.  Make every written byte durable before the PSCI call:
+ 	 * VFS_SYNC flushes the HFS+ metadata/data still in the UBC and
+-	 * SYNCHRONIZE CACHE flushes the drive's write cache.  The panic path
+-	 * calls ud_platform_restart() directly (ud_panic_reboot()), so a panic
+-	 * still resets without waiting for a filesystem sync.
++	 * SYNCHRONIZE CACHE flushes the drive's write cache.  This is the
++	 * non-panic arm only; the panic pump takes the branch above and never
++	 * waits for a filesystem sync.
+ 	 */
+ 	if (command == UD_REBOOT_FASTBOOT || command == UD_REBOOT_FASTBOOT2 ||
+ 	    command == UD_REBOOT_PLAIN) {
+@@ -2150,7 +2186,7 @@
+ 		}
+ 		/* Panic/restart only after releasing the transport and acknowledging events. */
+ 		if (trigger) panic("kebab usb console test");
+-		if (command != 0) ud_run_reboot_command(command);
++		if (command != 0) ud_run_reboot_command(command, FALSE);
+ 		/*
+ 		 * The installer writes to the root filesystem, which can sleep, so
+ 		 * it runs here with no transport gate held.  The chunk is still in
+@@ -2957,9 +2993,11 @@
+ 		/*
+ 		 * A host command is answered outside the transport gate: the restart
+ 		 * path prints through the same console, and it must not run with
+-		 * ud.owner held or with the panic-CPU fence still in the way.
++		 * ud.owner held or with the panic-CPU fence still in the way.  This is
++		 * the panic pump, so the dispatcher gets panicking=TRUE and may only
++		 * reset: no filesystem sync, no driver locks, no allocation.
+ 		 */
+-		if (command != 0) ud_run_reboot_command(command);
++		if (command != 0) ud_run_reboot_command(command, TRUE);
+ 		/*
+ 		 * Keep the KDP hand-back from 0099: a debugger that reconnects after
+ 		 * the panic parks here must not have its 0xFA CONNECT frame eaten as
+diff --git a/bsd/dev/kebab_install.c b/bsd/dev/kebab_install.c
+--- a/bsd/dev/kebab_install.c
++++ b/bsd/dev/kebab_install.c
+@@ -54,6 +54,7 @@
+ #include <sys/vnode.h>
+ #include <sys/vnode_internal.h>
+ #include <kern/clock.h>
++#include <kern/debug.h>
+ #include <mach/mach_time.h>
+ #include <libkern/libkern.h>
+ #include <libkern/crypto/sha2.h>
+@@ -977,8 +978,9 @@
+ /*
+  * Reset-path flush.  FASTBOOT/REBOOT are console commands, so they run after
+  * the stream and after any install; the data has to be on the device before
+- * the reset, not merely in the UBC or the drive's write cache.  The panic path
+- * does not call this: a panic must not wait for a filesystem sync.
++ * the reset, not merely in the UBC or the drive's write cache.  A panic must
++ * not wait for a filesystem sync, and the guard below is what makes that true
++ * instead of a comment that nothing enforces.
+  */
+ bool
+ kebab_install_sync_for_reset(const char *why)
+@@ -987,6 +989,21 @@
+ 	int vfs_error;
+ 	int dev_error;
+ 
++	/*
++	 * A panic runs with preemption disabled, so any mutex acquisition on this
++	 * path is an immediate nested panic.  The console command dispatcher used
++	 * to reach this function from the panic pump, which meant a REBOOT from
++	 * the host after a panic ran VFS_SYNC(MNT_WAIT) and then took
++	 * kebab_ufs_lock with preemption disabled.  The dispatcher no longer calls
++	 * this while panicking; this guard keeps the rule true for any future
++	 * caller.
++	 */
++	if (panic_active()) {
++		printf("KEBAB SYNC: %s refused: a panic may not run a filesystem "
++		    "sync (VFS_SYNC/kebab_ufs_lock would nest)\n", why);
++		return false;
++	}
++
+ 	vfs_error = ki_vfs_sync();
+ 	dev_error = kebab_ufs_sync();
+ 	if (dev_error == EROFS) {
+diff --git a/iokit/Kernel/arm/KebabPlatformExpert.cpp b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -218,5 +218,18 @@
+ 		}
+ 		return kebab_psci_system_reset();
+ 	}
++	/*
++	 * A halt requested after a panic has nothing left to halt: the other CPUs
++	 * are parked and the console pump is either running or unavailable.
++	 * IODTPlatformExpert::haltRestart(kPEHaltCPU) is the shutdown-notification
++	 * arm -- thread_call_allocate(), IORegistryEntry::fromPath() and
++	 * pmRootDomain->handlePlatformHaltRestart() -- which allocates and takes
++	 * mutexes.  PEHaltRestartInternal() skips it only because a kPEPanicBegin
++	 * was delivered earlier, and a panic restart must not depend on that.
++	 */
++	if (panic_active() && type == kPEHaltCPU) {
++		printf("KEBAB PANIC: halt requested after a panic; rebooting via PSCI SYSTEM_RESET\n");
++		return kebab_psci_system_reset();
++	}
+ 	return IODTPlatformExpert::haltRestart(type);
+ }

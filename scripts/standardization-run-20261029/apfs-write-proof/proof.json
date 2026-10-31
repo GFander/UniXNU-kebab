@@ -1,0 +1,7 @@
+{
+  "path": "/private/preboot/.hios-apfs-proof-v1",
+  "size": 65559,
+  "sha256": "3f2f47b49455f2d5cce7d745829440ccf0e8f1beda6c5120641c25213f78c957",
+  "pattern": "byte(i) = (17*i + (i>>8) + 0x5a) & 255",
+  "scope": "Preboot fixed exclusive test file only; System remains read-only"
+}

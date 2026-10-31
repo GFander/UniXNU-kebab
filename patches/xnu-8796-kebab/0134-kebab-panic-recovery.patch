@@ -1,0 +1,280 @@
+fix(panic): keep the USB console or reboot after a panic
+
+A panic that stops the console's transmit gate used to park forever:
+ud_panic_takeover() only took over when ml_dbgwrap_cpu_is_halted()
+reported the recorded owner stopped.  That API reads the DBGWRAP DBGACK
+bit of the Apple CoreSight UTT window, which this board's generated ADT
+does not map, and a SIGPdebug-parked CPU never sets it either.  The
+panic loop then retried the refused takeover every millisecond without
+ever polling the controller: the CDC-ACM port stayed enumerated while
+every bulk write timed out, and this board has no watchdog reset.
+
+Take over unconditionally once panic_active(): fence the controller
+with ud_controller_restart(), then clear the transmit gate, the receive
+lock and the log producer.  If the console still cannot be serviced
+(takeover refused for a second, controller reset failed, or the console
+never came up), print one diagnostic line and reset through
+PEHaltRestart(kPERestartCPU) instead of parking.
+
+Make the default panic policy safe as well: KEBAB now clears
+panicDebugging unless a debugger was explicitly requested through
+kebabkdp=1 or kdp_match_name.  debug=0x14e alone no longer parks in
+"Waiting for remote debugger connection"; DB_HALT and kebabkdp=1 keep
+their existing debugger behaviour.  Panic restart types that cannot
+enter the console pump now reach PSCI SYSTEM_RESET instead of returning
+-1 and letting halt_all_cpus() park the board.
+
+The panic report, EP0 probe dump, port reopen, KDP attach, REBOOT and
+FASTBOOT paths are unchanged.
+
+diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -2215,55 +2215,82 @@
+ 	return false;
+ }
+ 
+-/* Only called from the non-returning panic loop, after panic_cpu is set.
++/*
++ * Force the transport into a state the panic loop can own.
++ *
++ * Only called from the non-returning panic loop, after ud.panic_cpu is set.
+  * A stopped scheduler is not proof that a DMA transfer or CPU transaction
+- * finished. An unowned gate is a clean handoff; a stranded owner requires
+- * proof that its stack cannot resume, then a controller reset fence. */
++ * finished, so a foreign owner normally has to be proven stopped before the
++ * controller is reset and the gate is taken.
++ *
++ * That proof does not exist in a panic.  DebuggerHaltOtherCores() parks the
++ * other CPUs with a SIGPdebug IPI, not with a DBGWRAP halt, and
++ * ml_dbgwrap_cpu_is_halted() only reads the DBGACK bit of the Apple CoreSight
++ * UTT window, which this board does not map.  The recorded owner can
++ * therefore never be reported halted even though its stack cannot resume.
++ * Waiting for that report stranded the gate forever: the panic loop retried
++ * every millisecond and never touched the controller again, which is exactly
++ * the dead CDC-ACM port.  Once panic_active() is true, fence the controller
++ * and take both locks unconditionally; no other CPU is going to release them.
++ *
++ * The non-panic arm is unreachable from the panic loop and is kept only as a
++ * defensive check for a future caller that might run next to live CPUs.
++ */
+ static bool
+ ud_panic_takeover(void)
+ {
+-	uint32_t cpu = (uint32_t)cpu_number() + 1;
+-	uint32_t old = os_atomic_load(&ud.owner, acquire);
+-	if (old) {
+-		bool stopped = old == cpu;
+-		if (!stopped && old <= MAX_CPUS)
+-			stopped = ml_dbgwrap_cpu_is_halted((int)old - 1);
+-		/* Do not steal from an unacknowledged peer, even after a timeout.
+-		 * IRQs are masked in ud_enter, so an ordinary debugger IPI cannot
+-		 * park the worker inside this gate. It can finish and release it. */
+-		if (!stopped) return false;
++	uint32_t cpu;
++	bool panic;
++	uint32_t old;
++	uint32_t rx;
++	uint32_t writer;
++	boolean_t irq;
++
++	cpu = (uint32_t)cpu_number() + 1;
++	panic = panic_active() != 0;
++	old = os_atomic_load(&ud.owner, acquire);
++	rx = os_atomic_load(&ud.rx_owner, acquire);
++
++	if (old || rx) {
++		if (!panic) {
++			bool stopped;
++
++			stopped = true;
++			if (old && old != cpu &&
++			    (old > MAX_CPUS ||
++			    !ml_dbgwrap_cpu_is_halted((int)old - 1))) {
++				stopped = false;
++			}
++			if (rx && rx != cpu &&
++			    (rx > MAX_CPUS ||
++			    !ml_dbgwrap_cpu_is_halted((int)rx - 1))) {
++				stopped = false;
++			}
++			if (!stopped) {
++				printf("KEBAB USB: console takeover refused: owner %u/%u is not halted\n",
++				    old, rx);
++				return false;
++			}
++		}
++		/*
++		 * A stopped CPU may have left an endpoint command or DMA in flight.
++		 * The core reset is the ownership fence: it returns every transfer
++		 * before any event memory or TRB is reused.
++		 */
+ 		(void)ud_controller_restart();
+ 		os_atomic_store(&ud.owner, 0u, release);
+ 		ud.owner_depth = 0;
+-	}
+-	/*
+-	 * The receive lock is a second thing that can be stranded, and a stopped
+-	 * CPU inside the event drain leaves event ownership just as unknown as a
+-	 * stopped CPU inside a transfer.  Same rule: only a demonstrably halted
+-	 * peer, and only behind a completed controller reset.
+-	 */
+-	{
+-		uint32_t rx = os_atomic_load(&ud.rx_owner, acquire);
+-		if (rx) {
+-			bool stopped = true;
+-			if (rx != cpu) {
+-				stopped = rx <= MAX_CPUS &&
+-				    ml_dbgwrap_cpu_is_halted((int)rx - 1);
+-			}
+-			if (!stopped) return false;
+-			(void)ud_controller_restart();
+-			ud.rx_depth = 0;
+-			os_atomic_store(&ud.rx_owner, 0u, release);
+-		}
+-	}
+-	boolean_t irq;
++		os_atomic_store(&ud.rx_owner, 0u, release);
++		ud.rx_depth = 0;
++	}
+ 	if (!ud_enter(&irq)) return false;
+ 	for (unsigned ep = 0; ep < 6; ep++)
+ 		if (ud.ep[ep].busy) ud.takeover_active |= 1u << ep;
+ 	/* A producer publishes head after each byte. If its stack was abandoned,
+-	 * all published bytes are valid; the unpublished slot can be overwritten. */
+-	uint32_t writer = os_atomic_load(&ud.log_busy, acquire);
+-	if (writer && (writer == cpu ||
++	 * all published bytes are valid; the unpublished slot can be overwritten.
++	 * In a panic only this CPU is running, so any recorded producer is dead. */
++	writer = os_atomic_load(&ud.log_busy, acquire);
++	if (writer && (writer == cpu || panic ||
+ 	    (writer <= MAX_CPUS && ml_dbgwrap_cpu_is_halted((int)writer - 1)))) {
+ 		os_atomic_store(&ud.log_busy, 0u, release);
+ 		kebab_usb_ep0_note(0, NOTE_LOG_TAKEOVER, 0);
+@@ -2825,6 +2852,26 @@
+ 
+ 
+ /*
++ * A panic whose console cannot be serviced must not park: this board has no
++ * watchdog that would reset it, so an unattended boot would need a physical
++ * power cycle.  Print the one line that tells the next session which case
++ * happened, try to flush it, and reset through the same
++ * PEHaltRestart(kPERestartCPU) path the REBOOT command uses.  A return means
++ * the firmware refused the reset; stay in the loop with the diagnosis on the
++ * ring rather than claiming success.
++ */
++static void __dead2
++ud_panic_reboot(const char *why)
++{
++	printf("KEBAB USB: panic console cannot be serviced (%s); rebooting instead of parking\n",
++	    why);
++	kebab_usb_log_flush();
++	(void)ud_platform_restart();
++	printf("KEBAB USB: panic reboot returned; the machine did not reset\n");
++	for (;;) delay(1000);
++}
++
++/*
+  * Keep the pipe alive after a panic instead of letting the machine halt with a dead
+  * controller. panic_spin_forever() calls this terminal loop: the host
+  * can then reconnect, keep reading later console output, and the device no longer
+@@ -2833,20 +2880,41 @@
+ void
+ kebab_usb_panic_spin(void)
+ {
++	bool taken;
++	unsigned refused;
++	boolean_t irq;
++	uint32_t cpu;
++
+ 	(void)ml_set_interrupts_enabled(FALSE);
+-	uint32_t cpu = (uint32_t)cpu_number() + 1;
++	cpu = (uint32_t)cpu_number() + 1;
+ 	if (!os_atomic_cmpxchg(&ud.panic_cpu, 0u, cpu, acq_rel)) {
+ 		/* A second/nested terminal spinner must not re-enter the transport. */
+ 		for (;;) delay(1000);
+ 	}
+-	bool taken = false;
++	taken = false;
++	refused = 0;
+ 	for (;;) {
+ 		uint32_t command = 0;
+ 		if (!taken) {
+ 			taken = ud_panic_takeover();
+-			if (!taken) { delay(1000); continue; }
+-		}
+-		boolean_t irq;
++			if (!taken) {
++				/*
++				 * A takeover that keeps failing means the port is
++				 * unreachable.  One second of retries is enough for a
++				 * live peer that is about to release the gate; in a
++				 * panic nobody will.
++				 */
++				if (++refused >= 1000) {
++					ud_panic_reboot("transport takeover refused");
++				}
++				delay(1000);
++				continue;
++			}
++			if (ud.dead || !ud.running) {
++				ud_panic_reboot(ud.dead ? "controller dead" :
++				    "console not running");
++			}
++		}
+ 		if (ud.running && ud_enter(&irq)) {
+ 			if (ud_rx_enter()) {
+ 				ud_poll_locked();
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -439,6 +439,24 @@
+ 			kdp_explicitly_requested = TRUE;
+ 		}
+ 	}
++
++	/*
++	 * This port's only debugger transport is the USB CDC-ACM console, so the
++	 * stock arm64 panic-debugging default is a trap.  debug=0x14e contains
++	 * DB_NMI, which sets panicDebugging and makes a panic stop before
++	 * panic_spin_forever(): it either waits for KDP on the same port or
++	 * spins with nothing servicing it.  Without a debugger attached that is
++	 * indistinguishable from a hang, and this board has no watchdog reset.
++	 *
++	 * Keep the stock behaviour only when a debugger was actually asked for
++	 * (kebabkdp=1 or kdp_match_name); otherwise the panic path is allowed to
++	 * reach the reboot decision.  halt_in_debugger is deliberately not
++	 * touched: DB_HALT still stops at an explicit Debugger() entry, and
++	 * kebabkdp=1 still restores the KDP attach path.
++	 */
++	if (!kdp_explicitly_requested) {
++		panicDebugging = FALSE;
++	}
+ #endif /* defined(KEBAB) */
+ 
+ #endif /* MACH_KDP */
+diff --git a/iokit/Kernel/arm/KebabPlatformExpert.cpp b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -202,7 +202,20 @@
+ 	    type == kPEPanicRestartCPU || type == kPEPanicRestartCPUNoCallouts)) {
+ 		kebab_usb_panic_spin();          /* does not return */
+ 	}
+-	if (type == kPERestartCPU) {
++	/*
++	 * A panic restart that did not take the console loop above has no
++	 * console to keep.  The stock path would return -1 without touching the
++	 * hardware and halt_all_cpus() would then park the board until a power
++	 * cycle, so reset here instead.  This is the "cannot be serviced" arm of
++	 * the panic policy: the console pump is the only reason to stay alive
++	 * after a panic, and it is unavailable.
++	 */
++	if (type == kPERestartCPU ||
++	    type == kPEPanicRestartCPU ||
++	    type == kPEPanicRestartCPUNoCallouts) {
++		if (panic_active() && !kebab_usb_console_ready()) {
++			printf("KEBAB PANIC: no console to service; rebooting via PSCI SYSTEM_RESET\n");
++		}
+ 		return kebab_psci_system_reset();
+ 	}
+ 	return IODTPlatformExpert::haltRestart(type);

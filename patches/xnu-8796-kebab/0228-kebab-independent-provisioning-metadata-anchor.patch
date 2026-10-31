@@ -1,0 +1,62 @@
+--- a/bsd/dev/kebab_owner_os_impl.h
++++ b/bsd/dev/kebab_owner_os_impl.h
+@@ -263,6 +263,7 @@
+  scan.uio = uio_create(1, 0, UIO_SYSSPACE, UIO_READ);
+  int error = !scan.frames || !scan.buffer || !scan.uio ? ENOMEM : 0;
+  uint32_t depth = 0;
++ bool has_admin = false;
+  uint8_t root[32] = {0};
+  if (!error) strlcpy(scan.frames[0].path, "/", sizeof(scan.frames[0].path));
+  vfs_context_t context = vfs_context_current();
+@@ -285,8 +286,20 @@
+   }
+   uint8_t children[32] = {0}, node[32];
+   if (frame->metadata.kind == 1) {
+-   SHA256_CTX hash; SHA256_Init(&hash); koos_u32(&hash, frame->count);
++   /* The deployment host created exactly four non-executable fsevents
++    * records. Authenticate that whole subtree independently; the original
++    * OS root, including every original file, still has to match unchanged. */
++   if (!depth) {
++    for (uint32_t i = 0; i < frame->count; ++i) {
++     if (strcmp(frame->children[i].name, ".fseventsd")) continue;
++     if (memcmp(frame->children[i].digest, koos_expected_admin, 32)) error = EAUTH;
++     else has_admin = true;
++    }
++    if (error) break;
++   }
++   SHA256_CTX hash; SHA256_Init(&hash); koos_u32(&hash, frame->count - (!depth && has_admin ? 1u : 0u));
+    for (uint32_t i = 0; i < frame->count; ++i) {
++    if (!depth && has_admin && !strcmp(frame->children[i].name, ".fseventsd")) continue;
+     koos_u32(&hash, (uint32_t)strlen(frame->children[i].name));
+     SHA256_Update(&hash, frame->children[i].name, strlen(frame->children[i].name));
+     SHA256_Update(&hash, frame->children[i].digest, 32);
+@@ -306,7 +319,8 @@
+   struct koos_frame *parent = &scan.frames[depth];
+   memcpy(parent->children[parent->index++].digest, node, 32);
+  }
+- if (!error && (scan.nodes != KOOS_EXPECTED_NODES || memcmp(root, koos_expected_root, 32))) error = EAUTH;
++ if (!error && (scan.nodes != KOOS_EXPECTED_NODES + (has_admin ? KOOS_OWNER_ADMIN_NODES : 0u) ||
++     memcmp(root, koos_expected_root, 32))) error = EAUTH;
+  if (!error) error = koos_identity();
+  if (scan.frames) {
+   for (uint32_t i = 0; i < KOOS_DEPTH; ++i) if (scan.frames[i].children)
+@@ -319,8 +333,8 @@
+   koos_root = rootvnode;
+   __atomic_store_n(&koos_verified, 1, __ATOMIC_RELEASE);
+  }
+- printf("KEBAB OWNER OS: complete original 20H392 tree %s (%d), nodes=%u bytes=%llu xattrs=%llu root=",
+-     error ? "FAIL" : "PASS", error, scan.nodes, scan.bytes, scan.xattr_bytes);
++ printf("KEBAB OWNER OS: complete original 20H392 tree %s (%d), nodes=%u bytes=%llu xattrs=%llu owner-metadata=%u root=",
++     error ? "FAIL" : "PASS", error, scan.nodes, scan.bytes, scan.xattr_bytes, has_admin);
+  for (unsigned i = 0; i < 32; ++i) printf("%02x", root[i]);
+  printf("\n");
+  return error;
+--- a/bsd/dev/kebab_owner_os_anchor.h
++++ b/bsd/dev/kebab_owner_os_anchor.h
+@@ -1,2 +1,6 @@
+ #define KOOS_EXPECTED_NODES 318071u
+ static const uint8_t koos_expected_root[32] = {0x27,0xa9,0xaa,0x1b,0x7f,0x9a,0xf2,0x1f,0x72,0xc8,0xb4,0x7b,0x3e,0xe4,0x0f,0xf6,0x33,0x9f,0x6b,0x4a,0x55,0xec,0x2a,0xdc,0x6f,0x17,0x40,0xcb,0x1f,0xe1,0x64,0x68};
++
++/* Exact host-provisioning metadata; never substitutes for the original OS root. */
++#define KOOS_OWNER_ADMIN_NODES 4u
++static const uint8_t koos_expected_admin[32]={0xb9,0xb9,0xfe,0x73,0x89,0x24,0x26,0x9f,0x9b,0x1a,0x2f,0xeb,0x9f,0x9d,0x2d,0x51,0xc6,0xaa,0x84,0x73,0xfa,0xa9,0x95,0xf7,0xae,0x9d,0x86,0x4b,0xea,0x68,0x76,0x3c};

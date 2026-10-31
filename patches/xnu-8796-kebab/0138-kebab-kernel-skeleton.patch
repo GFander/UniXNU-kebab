@@ -1,0 +1,788 @@
+diff --git a/bsd/dev/kebab_install.c b/bsd/dev/kebab_install.c
+index cdb388b..95d2d07 100644
+--- a/bsd/dev/kebab_install.c
++++ b/bsd/dev/kebab_install.c
+@@ -10,15 +10,18 @@
+  * This file is the receiving half.  It parses the KIST stream that
+  * scripts/pack-userland.py writes -- a fixed 32-byte stream header followed by
+  * fixed 192-byte entry headers and payloads -- and turns each entry into a
+- * file on the root volume:
++ * file, directory or symlink on the root volume:
+  *
+  *   - the stream is consumed strictly forward: no seeking, no file length in
+  *     advance, one entry at a time;
+  *   - directories are created as needed, files are created with the mode in
+- *     the entry header;
+- *   - every entry is checked twice: the payload is hashed as it arrives (the
+- *     transport check) and the file is read back and hashed after the write
+- *     (the storage check);
++ *     the entry header, and v2 DIR/LINK entries create a directory with the
++ *     exact mode (01777 included) or a symlink with the target in the payload;
++ *   - every created inode is explicitly chowned to uid 0/gid 0 and its
++ *     resulting uid/gid/mode is read back and printed;
++ *   - every file entry is checked twice: the payload is hashed as it arrives
++ *     (the transport check) and the file is read back and hashed after the
++ *     write (the storage check);
+  *   - an entry whose destination already has the right size and hash is
+  *     reported as SKIP and its payload is discarded;
+  *   - INST DRY runs the whole parser, hashes everything and prints the plan,
+@@ -63,8 +66,15 @@
+ #define KI_ENTRY_HDR      192u
+ #define KI_ENTRY_MAGIC    0x544e454bu   /* 'KENT' */
+ #define KI_STREAM_MAGIC   0x5453494bu   /* 'KIST' */
+-#define KI_VERSION        1u
++#define KI_VERSION        2u
++#define KI_VERSION_MIN    1u
+ #define KI_F_DEFLATE      0x0001u
++#define KI_F_DIR          0x0002u
++#define KI_F_SYMLINK      0x0004u
++#define KI_F_TYPE         0x0006u
++#define KI_SF_DEFLATE     0x0001u
++#define KI_SF_SKELETON    0x0002u
++#define KI_MODE_MASK      07777u
+ #define KI_PATH_FIELD     128u
+ #define KI_IO_BUF         65536u        /* inflate output and read-back block */
+ #define KI_TIMEOUT_NS     60000000000ull /* 60 s with no chunk */
+@@ -87,6 +97,30 @@ static const char *const ki_allow[] = {
+ 	"/System/Library/LaunchDaemons/",
+ };
+ 
++/*
++ * A skeleton stream may only write the exact paths below.  This table is
++ * mirrored by scripts/make-minimal-userland.py's SKELETON_* tables; the host
++ * verifier checks the generated stream against the same list.
++ */
++static const char *const ki_skel_allow[] = {
++	"/dev",
++	"/private",
++	"/private/etc",
++	"/private/etc/passwd",
++	"/private/etc/master.passwd",
++	"/private/etc/group",
++	"/private/tmp",
++	"/private/var",
++	"/private/var/db",
++	"/private/var/log",
++	"/private/var/root",
++	"/private/var/run",
++	"/private/var/tmp",
++	"/etc",
++	"/tmp",
++	"/var",
++};
++
+ enum ki_state {
+ 	KI_S_STREAM_HDR = 0,
+ 	KI_S_ENTRY_HDR,
+@@ -97,6 +131,7 @@ enum ki_state {
+ 
+ struct ki_entry {
+ 	char        path[KEBAB_INST_PATH_MAX];
++	char        link[KEBAB_INST_PATH_MAX];  /* symlink target, v2 only */
+ 	uint16_t    mode;
+ 	uint16_t    flags;
+ 	uint64_t    wire;          /* payload bytes on the wire */
+@@ -107,6 +142,8 @@ struct ki_entry {
+ 	uint64_t    offset;        /* write offset */
+ 	bool        skip;
+ 	bool        deflate;
++	bool        is_dir;
++	bool        is_link;
+ 	bool        opened;
+ 	vnode_t     vp;
+ 	SHA256_CTX  shactx;
+@@ -121,6 +158,9 @@ static struct {
+ 	bool        gated;
+ 	bool        active;
+ 	bool        dry;
++	bool        skel;          /* v2 stream flag: skeleton allowlist */
++	uint16_t    version;
++	uint16_t    stream_flags;
+ 	uint32_t    state;
+ 	uint32_t    hdr_got;
+ 	uint8_t     hdr[KI_ENTRY_HDR];
+@@ -212,12 +252,13 @@ ki_gate(void)
+ 
+ /*
+  * A destination is accepted only when it is absolute, short enough for the
+- * header's fixed field, printable, has no empty or ".." component, and starts
+- * with one of the allowlist prefixes.  The check is done on the header's
+- * bounded field, never with strlen() on wire data.
++ * header's fixed field, printable and has no empty or ".." component.  A
++ * normal stream then has to match one of the allowlist prefixes; a v2
++ * skeleton stream has to match one of the exact skeleton paths.  The check is
++ * done on the header's bounded field, never with strlen() on wire data.
+  */
+ static bool
+-ki_path_ok(const char *path, uint32_t len)
++ki_path_ok(const char *path, uint32_t len, bool skel)
+ {
+ 	uint32_t i, start;
+ 
+@@ -250,6 +291,17 @@ ki_path_ok(const char *path, uint32_t len)
+ 			start = i + 1;
+ 		}
+ 	}
++	if (skel) {
++		for (i = 0; i < sizeof(ki_skel_allow) /
++		    sizeof(ki_skel_allow[0]); i++) {
++			size_t slen = strlen(ki_skel_allow[i]);
++			if ((size_t)len == slen &&
++			    memcmp(path, ki_skel_allow[i], slen) == 0) {
++				return true;
++			}
++		}
++		return false;
++	}
+ 	for (i = 0; i < sizeof(ki_allow) / sizeof(ki_allow[0]); i++) {
+ 		size_t plen = strlen(ki_allow[i]);
+ 		if ((size_t)len >= plen && memcmp(path, ki_allow[i], plen) == 0) {
+@@ -259,10 +311,104 @@ ki_path_ok(const char *path, uint32_t len)
+ 	return false;
+ }
+ 
++/* INST CHECK may name either family: it only reads. */
++static bool
++ki_path_ok_any(const char *path, uint32_t len)
++{
++	return ki_path_ok(path, len, true) || ki_path_ok(path, len, false);
++}
++
+ /* --------------------------------------------------------- vnode helpers */
+ 
++/*
++ * Force uid 0/gid 0 and the exact permission value.  HFS+ applies the
++ * process umask and may inherit the parent's gid at create time, so every
++ * inode the installer creates goes through this before it is reported.
++ */
++static int
++ki_set_attrs(vnode_t vp, uint16_t mode, vfs_context_t ctx)
++{
++	struct vnode_attr va;
++
++	VATTR_INIT(&va);
++	VATTR_SET(&va, va_uid, 0);
++	VATTR_SET(&va, va_gid, 0);
++	VATTR_SET(&va, va_mode, mode & KI_MODE_MASK);
++	return vnode_setattr(vp, &va, ctx);
++}
++
++/* A symlink's mode is fixed at creation; only the ownership is forced. */
++static int
++ki_set_owner(vnode_t vp, vfs_context_t ctx)
++{
++	struct vnode_attr va;
++
++	VATTR_INIT(&va);
++	VATTR_SET(&va, va_uid, 0);
++	VATTR_SET(&va, va_gid, 0);
++	return vnode_setattr(vp, &va, ctx);
++}
++
++static int
++ki_read_attrs(vnode_t vp, vfs_context_t ctx, uint32_t *uidp, uint32_t *gidp,
++    uint16_t *modep)
++{
++	struct vnode_attr va;
++	int error;
++
++	VATTR_INIT(&va);
++	VATTR_WANTED(&va, va_uid);
++	VATTR_WANTED(&va, va_gid);
++	VATTR_WANTED(&va, va_mode);
++	error = vnode_getattr(vp, &va, ctx);
++	if (error) {
++		return error;
++	}
++	*uidp = (uint32_t)va.va_uid;
++	*gidp = (uint32_t)va.va_gid;
++	*modep = (uint16_t)(va.va_mode & KI_MODE_MASK);
++	return 0;
++}
++
++/*
++ * Read the inode back and print uid/gid/mode.  A mismatch is a failure: the
++ * whole point of creating the skeleton in the kernel is that the result is
++ * verified on the volume, not assumed from the request.
++ */
++static bool
++ki_report_attrs(struct ki_entry *e, vnode_t vp, vfs_context_t ctx)
++{
++	uint32_t uid = 0, gid = 0;
++	uint16_t mode = 0;
++	int error;
++
++	error = ki_read_attrs(vp, ctx, &uid, &gid, &mode);
++	if (error) {
++		printf("FAIL %s cannot read attributes (error %d)\n", e->path,
++		    error);
++		return false;
++	}
++	if (e->is_dir) {
++		printf("OK %s 0 dir mode 0%o uid %u gid %u\n", e->path, mode, uid,
++		    gid);
++	} else if (e->is_link) {
++		printf("OK %s %llu link -> %s mode 0%o uid %u gid %u\n", e->path,
++		    (unsigned long long)e->size, e->link, mode, uid, gid);
++	} else {
++		printf("OK %s %llu mode 0%o uid %u gid %u\n", e->path,
++		    (unsigned long long)e->size, mode, uid, gid);
++	}
++	if (uid != 0 || gid != 0 ||
++	    (!e->is_link && mode != e->mode)) {
++		printf("FAIL %s attrs uid %u gid %u mode 0%o, wanted 0:0 mode "
++		    "0%o\n", e->path, uid, gid, mode, e->mode);
++		return false;
++	}
++	return true;
++}
++
+ static int
+-ki_mkdir(const char *path, uint16_t mode, vfs_context_t ctx)
++ki_mkdir(const char *path, uint16_t mode, vfs_context_t ctx, bool exact)
+ {
+ 	struct nameidata nd;
+ 	struct vnode_attr va;
+@@ -280,32 +426,97 @@ ki_mkdir(const char *path, uint16_t mode, vfs_context_t ctx)
+ 	if (nd.ni_vp != NULLVP) {
+ 		/* Already there.  It has to be a directory, not a file. */
+ 		bool isdir = vnode_isdir(nd.ni_vp);
++		if (isdir && exact) {
++			error = ki_set_attrs(nd.ni_vp, mode, ctx);
++		} else {
++			error = 0;
++		}
+ 		vnode_put(nd.ni_vp);
+ 		nameidone(&nd);
+ 		if (dvp) {
+ 			vnode_put(dvp);
+ 		}
+-		return isdir ? 0 : ENOTDIR;
++		return isdir ? error : ENOTDIR;
+ 	}
+ 	VATTR_INIT(&va);
+ 	VATTR_SET(&va, va_type, VDIR);
+-	VATTR_SET(&va, va_mode, mode & 0777);
++	VATTR_SET(&va, va_mode, mode & KI_MODE_MASK);
+ 	vp = NULLVP;
+ 	error = vn_create(dvp, &vp, &nd, &va, 0, 0, NULL, ctx);
++	if (error == 0 && vp != NULLVP) {
++		error = ki_set_attrs(vp, mode, ctx);
++	}
++	if (vp != NULLVP) {
++		vnode_put(vp);
++	}
++	nameidone(&nd);
++	if (dvp) {
++		vnode_put(dvp);
++	}
++	return error;
++}
++
++/*
++ * Create a symlink.  On a re-run the link already exists; the caller treats
++ * EEXIST as SKIP after verifying it is at least a symlink.  The target comes
++ * from the payload and is never used as a format string.
++ */
++static int
++ki_symlink(const char *path, char *target, uint16_t mode,
++    vfs_context_t ctx, vnode_t *vpp)
++{
++	struct nameidata nd;
++	struct vnode_attr va;
++	vnode_t dvp, vp;
++	int error;
++
++	*vpp = NULLVP;
++	NDINIT(&nd, CREATE, OP_SYMLINK, LOCKPARENT, UIO_SYSSPACE,
++	    CAST_USER_ADDR_T(path), ctx);
++	error = nameiat(&nd, AT_FDCWD);
++	if (error) {
++		return error;
++	}
++	dvp = nd.ni_dvp;
++	vp = nd.ni_vp;
+ 	if (vp != NULLVP) {
+ 		vnode_put(vp);
++		nameidone(&nd);
++		if (dvp) {
++			vnode_put(dvp);
++		}
++		return EEXIST;
++	}
++	VATTR_INIT(&va);
++	VATTR_SET(&va, va_type, VLNK);
++	VATTR_SET(&va, va_mode, mode & KI_MODE_MASK);
++	error = vnode_authattr_new(dvp, &va, 0, ctx);
++	if (error == 0) {
++		error = VNOP_SYMLINK(dvp, &vp, &nd.ni_cnd, &va, target, ctx);
++	}
++	if (error == 0 && vp != NULLVP) {
++		error = vnode_setattr_fallback(vp, &va, ctx);
++		if (error == 0) {
++			error = ki_set_owner(vp, ctx);
++		}
+ 	}
+ 	nameidone(&nd);
+ 	if (dvp) {
+ 		vnode_put(dvp);
+ 	}
++	if (error && vp != NULLVP) {
++		vnode_put(vp);
++		vp = NULLVP;
++	}
++	*vpp = vp;
+ 	return error;
+ }
+ 
+ /*
+  * Create every missing parent of `path` from "/" down.  EEXIST is success;
+  * anything else stops the entry, because a file opened under a missing
+- * directory would just fail later with a less useful error.
++ * directory would just fail later with a less useful error.  Missing parents
++ * are 0755; an explicit DIR entry later applies its exact mode.
+  */
+ static int
+ ki_mkdirs(const char *path, vfs_context_t ctx)
+@@ -323,7 +534,7 @@ ki_mkdirs(const char *path, vfs_context_t ctx)
+ 			continue;
+ 		}
+ 		buf[i] = 0;
+-		error = ki_mkdir(buf, 0755, ctx);
++		error = ki_mkdir(buf, 0755, ctx, false);
+ 		buf[i] = '/';
+ 		if (error == EEXIST) {
+ 			continue;
+@@ -522,6 +733,18 @@ ki_abort(const char *why, int error)
+ 
+ static void ki_finish_entry(void);
+ 
++static void
++ki_next_entry(void)
++{
++	ki.entries_done++;
++	if (ki.entries_done >= ki.entries_total) {
++		ki.state = KI_S_PAD;
++	} else {
++		ki.state = KI_S_ENTRY_HDR;
++		ki.hdr_got = 0;
++	}
++}
++
+ static void
+ ki_start_entry(void)
+ {
+@@ -531,8 +754,9 @@ ki_start_entry(void)
+ 	uint64_t size = ki_le64(ki.hdr + KI_HDR_USIZE_OFF);
+ 	uint64_t wire = ki_le64(ki.hdr + KI_HDR_WIRE_OFF);
+ 	uint64_t have = 0;
++	uint16_t eflags;
+ 	uint8_t digest[32];
+-	int error;
++	int error = 0;
+ 
+ 	if (ki_le32(ki.hdr) != KI_ENTRY_MAGIC) {
+ 		ki_abort("entry magic", 0);
+@@ -546,20 +770,48 @@ ki_start_entry(void)
+ 	e->vp = NULLVP;
+ 	memcpy(e->path, ki.hdr + KI_HDR_PATH_OFF, plen);
+ 	e->path[plen] = 0;
+-	if (!ki_path_ok(e->path, plen)) {
+-		printf("FAIL %s rejected: outside the install allowlist or "
+-		    "malformed\n", e->path);
++	if (!ki_path_ok(e->path, plen, ki.skel)) {
++		printf("FAIL %s rejected: outside the %s allowlist or "
++		    "malformed\n", e->path, ki.skel ? "skeleton" : "install");
+ 		ki_abort("destination refused", 0);
+ 		return;
+ 	}
+-	e->mode = ki_le16(ki.hdr + KI_HDR_MODE_OFF) & 0777;
++	e->mode = ki_le16(ki.hdr + KI_HDR_MODE_OFF) &
++	    (ki.version == 1 ? 0777u : KI_MODE_MASK);
+ 	e->flags = ki_le16(ki.hdr + KI_HDR_FLAGS_OFF);
+-	e->deflate = (e->flags & KI_F_DEFLATE) != 0;
++	eflags = e->flags;
++	e->deflate = (eflags & KI_F_DEFLATE) != 0;
++	e->is_dir = (eflags & KI_F_DIR) != 0;
++	e->is_link = (eflags & KI_F_SYMLINK) != 0;
+ 	e->size = size;
+ 	e->wire = wire;
+ 	e->wire_left = wire;
+ 	memcpy(e->sha, ki.hdr + KI_HDR_SHA_OFF, sizeof(e->sha));
+ 
++	if (ki.version < 2 && (eflags & KI_F_TYPE)) {
++		printf("FAIL %s: a v%u stream cannot carry a DIR/LINK entry\n",
++		    e->path, ki.version);
++		ki_abort("entry type needs KIST v2", 0);
++		return;
++	}
++	if ((eflags & KI_F_TYPE) == KI_F_TYPE) {
++		printf("FAIL %s: entry is both a directory and a symlink\n",
++		    e->path);
++		ki_abort("ambiguous entry type", 0);
++		return;
++	}
++	if (eflags & ~(KI_F_DEFLATE | KI_F_TYPE)) {
++		printf("FAIL %s: unknown entry flags 0x%04x\n", e->path, eflags);
++		ki_abort("unknown entry flags", 0);
++		return;
++	}
++	if ((e->is_dir || e->is_link) && e->deflate) {
++		printf("FAIL %s: DIR/LINK entry carries a deflated payload\n",
++		    e->path);
++		ki_abort("deflated non-file entry", 0);
++		return;
++	}
++
+ 	/* The payload cannot be longer than the entry claims, and the entry
+ 	 * cannot claim more bytes than remain in the stream. */
+ 	if (wire > ki.wire_left) {
+@@ -576,11 +828,62 @@ ki_start_entry(void)
+ 		return;
+ 	}
+ 
+-	if (!ki.dry) {
++	if (e->is_dir) {
++		static const uint8_t zero_sha[32];
++
++		if (wire != 0 || size != 0 ||
++		    memcmp(e->sha, zero_sha, sizeof(zero_sha)) != 0) {
++			printf("FAIL %s: directory entry has a payload or a "
++			    "hash\n", e->path);
++			ki_abort("malformed directory entry", 0);
++			return;
++		}
++		if (ki.dry) {
++			printf("PLAN %s 0 dir mode 0%o\n", e->path, e->mode);
++		} else {
++			vnode_t vp = NULLVP;
++
++			error = ki_mkdir(e->path, e->mode, ctx, true);
++			if (error == 0) {
++				error = vnode_lookup(e->path, 0, &vp, ctx);
++			}
++			if (error) {
++				printf("FAIL %s cannot create directory "
++				    "(error %d)\n", e->path, error);
++				ki_abort("mkdir failed", error);
++				return;
++			}
++			if (!ki_report_attrs(e, vp, ctx)) {
++				vnode_put(vp);
++				ki_abort("directory attributes", 0);
++				return;
++			}
++			vnode_put(vp);
++			ki.ok++;
++		}
++		ki_next_entry();
++		return;
++	}
++
++	if (e->is_link) {
++		if (wire == 0 || wire >= KEBAB_INST_PATH_MAX) {
++			printf("FAIL %s: symlink target length %llu\n", e->path,
++			    (unsigned long long)wire);
++			ki_abort("bad symlink target length", 0);
++			return;
++		}
++		SHA256_Init(&e->shactx);
++		e->shactx_live = true;
++		ki.state = KI_S_PAYLOAD;
++		return;
++	}
++
++	if (!ki.dry && !ki.skel) {
+ 		/*
+ 		 * Resume: a destination that already has the right size and
+ 		 * hash is left alone.  Only a regular file with a matching
+-		 * size is worth reading.
++		 * size is worth reading.  Skeleton files are always rewritten
++		 * so their ownership and mode are re-applied.
+ 		 */
+ 		error = ki_hash_file(e->path, &have, digest, ctx);
+ 		if (error == 0 && have == size &&
+@@ -593,6 +896,8 @@ ki_start_entry(void)
+ 			ki.state = KI_S_PAYLOAD;
+ 			return;
+ 		}
++	}
++	if (!ki.dry) {
+ 		/*
+ 		 * Space check.  A destination that already exists and is about
+ 		 * to be truncated gives its blocks back, so the room needed is
+@@ -600,20 +905,18 @@ ki_start_entry(void)
+ 		 * keeps a full volume from turning into a half-written file
+ 		 * that looks like a transport failure.
+ 		 */
+-		{
+-			uint64_t freeb = 0, totalb = 0;
+-			uint64_t reclaimable = (error == 0) ? have : 0;
+-
+-			if (ki_space(&freeb, &totalb) == 0 &&
+-			    size > freeb + reclaimable) {
+-				printf("FAIL %s needs %llu bytes but the root "
+-				    "volume has %llu free of %llu\n",
+-				    e->path, (unsigned long long)size,
+-				    (unsigned long long)freeb,
+-				    (unsigned long long)totalb);
+-				ki_abort("not enough space", 0);
+-				return;
+-			}
++		uint64_t freeb = 0, totalb = 0;
++		uint64_t reclaimable = (error == 0) ? have : 0;
++
++		if (ki_space(&freeb, &totalb) == 0 &&
++		    size > freeb + reclaimable) {
++			printf("FAIL %s needs %llu bytes but the root "
++			    "volume has %llu free of %llu\n",
++			    e->path, (unsigned long long)size,
++			    (unsigned long long)freeb,
++			    (unsigned long long)totalb);
++			ki_abort("not enough space", 0);
++			return;
+ 		}
+ 		error = ki_mkdirs(e->path, ctx);
+ 		if (error) {
+@@ -636,12 +939,15 @@ ki_start_entry(void)
+ 			ki_abort("not a regular file", 0);
+ 			return;
+ 		}
+-		/* vnode_open only applies cmode when it creates the file. */
+-		{
+-			struct vnode_attr va;
+-			VATTR_INIT(&va);
+-			VATTR_SET(&va, va_mode, e->mode);
+-			(void)vnode_setattr(e->vp, &va, ctx);
++		/* vnode_open only applies cmode when it creates the file, and
++		 * the filesystem may apply its umask and inherit the parent's
++		 * gid.  Force the exact uid/gid/mode. */
++		error = ki_set_attrs(e->vp, e->mode, ctx);
++		if (error) {
++			printf("FAIL %s cannot set attributes (error %d)\n",
++			    e->path, error);
++			ki_abort("setattr failed", error);
++			return;
+ 		}
+ 		e->offset = 0;
+ 	}
+@@ -674,6 +980,18 @@ ki_payload(const uint8_t *p, uint32_t n)
+ 	struct ki_entry *e = &ki.e;
+ 	int error = 0;
+ 
++	if (e->is_link) {
++		if (e->got + n > KEBAB_INST_PATH_MAX - 1) {
++			printf("FAIL %s symlink target longer than %u bytes\n",
++			    e->path, KEBAB_INST_PATH_MAX - 1);
++			ki_abort("symlink target too long", 0);
++			return;
++		}
++		memcpy(e->link + e->got, p, n);
++		SHA256_Update(&e->shactx, p, n);
++		e->got += n;
++		return;
++	}
+ 	if (e->skip) {
+ 		/* Nothing is written and nothing is verified: the destination
+ 		 * is already known good. */
+@@ -735,21 +1053,20 @@ ki_finish_entry(void)
+ 	uint64_t have = 0;
+ 	int error;
+ 
++	/* A directory entry is completely handled by ki_start_entry(). */
++	if (e->is_dir) {
++		ki_next_entry();
++		return;
++	}
+ 	if (e->skip) {
+-		ki.entries_done++;
+-		if (ki.entries_done >= ki.entries_total) {
+-			ki.state = KI_S_PAD;
+-		} else {
+-			ki.state = KI_S_ENTRY_HDR;
+-		}
+-		ki.hdr_got = 0;
++		ki_next_entry();
+ 		return;
+ 	}
+ 	if (!e->shactx_live) {
+ 		ki_abort("entry has no hash context", 0);
+ 		return;
+ 	}
+-	if (e->deflate) {
++	if (!e->is_link && e->deflate) {
+ 		while (e->zs_live && !e->z_end) {
+ 			uint32_t produced;
+ 			int rc;
+@@ -801,6 +1118,62 @@ ki_finish_entry(void)
+ 		return;
+ 	}
+ 
++	if (e->is_link) {
++		e->link[e->got] = 0;
++		if (ki.dry) {
++			printf("PLAN %s %llu link -> %s mode 0%o\n", e->path,
++			    (unsigned long long)e->size, e->link, e->mode);
++		} else {
++			vnode_t vp = NULLVP;
++			bool existing = false;
++
++			error = ki_mkdirs(e->path, ctx);
++			if (error == 0) {
++				error = ki_symlink(e->path, e->link, e->mode, ctx,
++				    &vp);
++			}
++			if (error == EEXIST) {
++				existing = true;
++				error = vnode_lookup(e->path,
++				    VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
++			}
++			if (error) {
++				printf("FAIL %s cannot create symlink "
++				    "(error %d)\n", e->path, error);
++				ki_abort("symlink failed", error);
++				return;
++			}
++			if (existing) {
++				/*
++				 * A re-run: accept an existing symlink as
++				 * already present.  The creation path above is
++				 * the one that proves the target.
++				 */
++				if (!vnode_islnk(vp)) {
++					printf("FAIL %s exists and is not a "
++					    "symlink\n", e->path);
++					vnode_put(vp);
++					ki_abort("existing non-symlink", 0);
++					return;
++				}
++				printf("SKIP %s %llu link exists\n", e->path,
++				    (unsigned long long)e->size);
++				ki.skipped++;
++				vnode_put(vp);
++			} else {
++				if (!ki_report_attrs(e, vp, ctx)) {
++					vnode_put(vp);
++					ki_abort("symlink attributes", 0);
++					return;
++				}
++				vnode_put(vp);
++				ki.ok++;
++			}
++		}
++		ki_next_entry();
++		return;
++	}
++
+ 	if (ki.dry) {
+ 		printf("PLAN %s %llu mode 0%o %s\n", e->path,
+ 		    (unsigned long long)e->size, e->mode,
+@@ -832,17 +1205,26 @@ ki_finish_entry(void)
+ 			ki_abort("read-back mismatch", 0);
+ 			return;
+ 		}
+-		printf("OK %s %llu mode 0%o\n", e->path,
+-		    (unsigned long long)e->size, e->mode);
++		{
++			vnode_t vp = NULLVP;
++
++			error = vnode_lookup(e->path, 0, &vp, ctx);
++			if (error) {
++				printf("FAIL %s cannot look up after write "
++				    "(error %d)\n", e->path, error);
++				ki_abort("lookup failed", error);
++				return;
++			}
++			if (!ki_report_attrs(e, vp, ctx)) {
++				vnode_put(vp);
++				ki_abort("file attributes", 0);
++				return;
++			}
++			vnode_put(vp);
++		}
+ 		ki.ok++;
+ 	}
+-	ki.entries_done++;
+-	if (ki.entries_done >= ki.entries_total) {
+-		ki.state = KI_S_PAD;
+-	} else {
+-		ki.state = KI_S_ENTRY_HDR;
+-	}
+-	ki.hdr_got = 0;
++	ki_next_entry();
+ }
+ 
+ /* --------------------------------------------------------------- session */
+@@ -874,6 +1256,9 @@ kebab_install_begin(bool dry, uint64_t wire_bytes)
+ 	ki.e.vp = NULLVP;
+ 	ki.active = true;
+ 	ki.dry = dry;
++	ki.skel = false;
++	ki.version = 0;
++	ki.stream_flags = 0;
+ 	ki.state = KI_S_STREAM_HDR;
+ 	ki.hdr_got = 0;
+ 	ki.wire_total = wire_bytes;
+@@ -963,11 +1348,38 @@ kebab_install_bytes(const void *buf, uint32_t len)
+ 			if (ki.hdr_got < KI_STREAM_HDR) {
+ 				break;
+ 			}
+-			if (ki_le32(ki.hdr) != KI_STREAM_MAGIC ||
+-			    ki_le16(ki.hdr + 4) != KI_VERSION) {
+-				ki_abort("bad stream header", 0);
++			if (ki_le32(ki.hdr) != KI_STREAM_MAGIC) {
++				ki_abort("bad stream magic", 0);
+ 				return;
+ 			}
++			{
++				uint16_t kver = ki_le16(ki.hdr + 4);
++				uint16_t sflags = ki_le16(ki.hdr + 6);
++
++				if (kver < KI_VERSION_MIN ||
++				    kver > KI_VERSION) {
++					printf("INST ABORT unsupported KIST "
++					    "version %u (want %u..%u)\n",
++					    kver, KI_VERSION_MIN, KI_VERSION);
++					ki.failed++;
++					ki_reset();
++					return;
++				}
++				if (kver == 1) {
++					if (sflags & ~KI_SF_DEFLATE) {
++						ki_abort("v1 stream flags", 0);
++						return;
++					}
++				} else if (sflags &
++				    ~(KI_SF_DEFLATE | KI_SF_SKELETON)) {
++					ki_abort("unknown stream flags", 0);
++					return;
++				}
++				ki.version = kver;
++				ki.stream_flags = sflags;
++				ki.skel = (kver >= 2) &&
++				    (sflags & KI_SF_SKELETON) != 0;
++			}
+ 			ki.entries_total = ki_le32(ki.hdr + 8);
+ 			ki.usize_total = ki_le64(ki.hdr + 16);
+ 			if (ki_le32(ki.hdr + 12) != KI_STREAM_HDR) {
+@@ -985,8 +1397,9 @@ kebab_install_bytes(const void *buf, uint32_t len)
+ 				ki_reset();
+ 				return;
+ 			}
+-			printf("INST STREAM v%u entries %u bytes %llu "
+-			    "wire %llu\n", ki_le16(ki.hdr + 4), ki.entries_total,
++			printf("INST STREAM v%u%s entries %u bytes %llu "
++			    "wire %llu\n", ki.version,
++			    ki.skel ? " skeleton" : "", ki.entries_total,
+ 			    (unsigned long long)ki.usize_total,
+ 			    (unsigned long long)ki.wire_total);
+ 			ki.hdr_got = 0;
+@@ -1123,7 +1536,7 @@ kebab_install_check(const char *path)
+ 		return;
+ 	}
+ 	len = strlen(path);
+-	if (!ki_path_ok(path, (uint32_t)len)) {
++	if (!ki_path_ok_any(path, (uint32_t)len)) {
+ 		printf("INST CHECK %s refused\n", path);
+ 		return;
+ 	}

@@ -1,0 +1,638 @@
+EXTENT {'module': 'com.apple.iokit.IOCryptoAcceleratorFamily', 'segment': '__TEXT', 'va': 18446741874820827456, 'size': 2847}
+EXTENT {'module': 'com.apple.iokit.IOCryptoAcceleratorFamily', 'segment': '__TEXT_EXEC', 'va': 18446741874830020608, 'size': 10852}
+EXTENT {'module': 'com.apple.iokit.IOCryptoAcceleratorFamily', 'segment': '__DATA_CONST', 'va': 18446741874852890624, 'size': 5872}
+EXTENT {'module': 'com.apple.iokit.IOCryptoAcceleratorFamily', 'segment': '__DATA', 'va': 18446741874866949888, 'size': 512}
+STRING b'IOAESAccelerator\x00' 0xfffffe000804cf30
+STRING b'IOCryptoAccelerator\x00' 0xfffffe000804d3cc
+STRING b'AES-CBC\x00' 0xfffffe000804cfc4
+VTABLE 0xfffffe0009ee09f8 181
+SLOT 0 0xfffffe000891107c
+SLOT 1 0xfffffe0008911080
+SLOT 7 0xfffffe00089110c4
+SLOT 86 0xfffffe00089113ec
+SLOT 111 0xfffffe00089119f4
+SLOT 117 0xfffffe0008911920
+SLOT 168 0xfffffe00089113e0
+SLOT 169 0xfffffe0008911a24
+SLOT 170 0xfffffe0008911c8c
+SLOT 171 0xfffffe0008912110
+SLOT 172 0xfffffe0008912118
+SLOT 173 0xfffffe00089120dc
+SLOT 174 0xfffffe000891205c
+SLOT 175 0xfffffe0008912100
+SLOT 176 0xfffffe000891210c
+SLOT 177 0xfffffe0008912420
+SLOT 178 0xfffffe000891212c
+SLOT 179 0xfffffe0008912244
+SLOT 180 0xfffffe00089122ac
+VTABLE 0xfffffe0009ee1178 188
+SLOT 0 0xfffffe0008912968
+SLOT 1 0xfffffe000891296c
+SLOT 7 0xfffffe00089129b0
+SLOT 86 0xfffffe0008912b24
+SLOT 111 0xfffffe00069c00e4
+SLOT 117 0xfffffe00069c04c4
+SLOT 168 0xfffffe0008912b94
+SLOT 169 0xfffffe0006a166c8
+SLOT 170 0xfffffe0006a15fb4
+SLOT 171 0xfffffe0008912adc
+SLOT 172 0xfffffe0008912b74
+SLOT 173 0xfffffe0006a16650
+SLOT 174 0xfffffe0006a166b4
+SLOT 175 0xfffffe0006a166bc
+SLOT 176 0xfffffe0006a166d4
+SLOT 177 0xfffffe0006a166e0
+SLOT 178 0xfffffe0006a166ec
+SLOT 179 0xfffffe0006a16824
+SLOT 180 0xfffffe0006a1693c
+SLOT 181 0xfffffe0006a16944
+SLOT 182 0xfffffe0006a16954
+SLOT 183 0xfffffe0006a16a04
+SLOT 184 0xfffffe0006a1694c
+SLOT 185 0xfffffe0006a16ab4
+SLOT 186 0xfffffe0008912cc8
+SLOT 187 0xfffffe0008912d20
+VTABLE 0xfffffe0009ee1808 169
+SLOT 0 0xfffffe0008913584
+SLOT 1 0xfffffe0008913588
+SLOT 7 0xfffffe00089135cc
+SLOT 86 0xfffffe00069bd920
+SLOT 111 0xfffffe00069c00e4
+SLOT 117 0xfffffe00069c04c4
+SLOT 168 0xfffffe00089136f8
+METACLASS INIT? 0xfffffe0008911018
+0xfffffe0008911000 stp x29, x30, [sp, #-0x10]!
+0xfffffe0008911004 mov x29, sp
+0xfffffe0008911008 adrp x1, #0xfffffe000804c000
+0xfffffe000891100c add x1, x1, #0xf30
+0xfffffe0008911010 adrp x2, #0xfffffe000ac49000
+0xfffffe0008911014 add x2, x2, #0xd8
+0xfffffe0008911018 mov w3, #0x120
+0xfffffe000891101c bl #0xfffffe00089138b4
+0xfffffe0008911020 adrp x8, #0xfffffe0009ee0000
+0xfffffe0008911024 add x8, x8, #0xfc8
+0xfffffe0008911028 str x8, [x0]
+0xfffffe000891102c ldp x29, x30, [sp], #0x10
+0xfffffe0008911030 ret 
+0xfffffe0008911034 b #0xfffffe00089138c0
+0xfffffe0008911038 stp x29, x30, [sp, #-0x10]!
+0xfffffe000891103c mov x29, sp
+0xfffffe0008911040 bl #0xfffffe0008913540
+0xfffffe0008911044 adrp x8, #0xfffffe0009ee0000
+0xfffffe0008911048 add x8, x8, #0xa08
+0xfffffe000891104c str x8, [x0]
+0xfffffe0008911050 ldp x29, x30, [sp], #0x10
+0xfffffe0008911054 ret 
+0xfffffe0008911058 stp x29, x30, [sp, #-0x10]!
+METACLASS INIT? 0xfffffe00089110e8
+0xfffffe00089110c8 add x0, x0, #0x50
+0xfffffe00089110cc ret 
+0xfffffe00089110d0 stp x29, x30, [sp, #-0x10]!
+0xfffffe00089110d4 mov x29, sp
+0xfffffe00089110d8 adrp x1, #0xfffffe000804c000
+0xfffffe00089110dc add x1, x1, #0xf30
+0xfffffe00089110e0 adrp x2, #0xfffffe000ac49000
+0xfffffe00089110e4 add x2, x2, #0xd8
+0xfffffe00089110e8 mov w3, #0x120
+0xfffffe00089110ec bl #0xfffffe00089138b4
+0xfffffe00089110f0 adrp x8, #0xfffffe0009ee0000
+0xfffffe00089110f4 add x8, x8, #0xfc8
+0xfffffe00089110f8 str x8, [x0]
+0xfffffe00089110fc ldp x29, x30, [sp], #0x10
+0xfffffe0008911100 ret 
+0xfffffe0008911104 stp x20, x19, [sp, #-0x20]!
+0xfffffe0008911108 stp x29, x30, [sp, #0x10]
+0xfffffe000891110c add x29, sp, #0x10
+0xfffffe0008911110 adrp x0, #0xfffffe0009ee1000
+0xfffffe0008911114 add x0, x0, #0xdf0
+0xfffffe0008911118 mov w1, #0x120
+0xfffffe000891111c bl #0xfffffe000891386c
+0xfffffe0008911120 mov x19, x0
+METACLASS INIT? 0xfffffe0008911208
+0xfffffe00089111e8 ldp x20, x19, [sp], #0x20
+0xfffffe00089111ec ret 
+0xfffffe00089111f0 stp x29, x30, [sp, #-0x10]!
+0xfffffe00089111f4 mov x29, sp
+0xfffffe00089111f8 adrp x1, #0xfffffe000804c000
+0xfffffe00089111fc add x1, x1, #0xf7c
+0xfffffe0008911200 adrp x2, #0xfffffe0009ee0000
+0xfffffe0008911204 ldr x2, [x2, #0x8e8]
+0xfffffe0008911208 mov w3, #0x90
+0xfffffe000891120c bl #0xfffffe00089138b4
+0xfffffe0008911210 adrp x8, #0xfffffe0009ee1000
+0xfffffe0008911214 add x8, x8, #0xf0
+0xfffffe0008911218 str x8, [x0]
+0xfffffe000891121c ldp x29, x30, [sp], #0x10
+0xfffffe0008911220 ret 
+0xfffffe0008911224 b #0xfffffe00089138c0
+0xfffffe0008911228 stp x29, x30, [sp, #-0x10]!
+0xfffffe000891122c mov x29, sp
+0xfffffe0008911230 bl #0xfffffe0008913968
+0xfffffe0008911234 adrp x8, #0xfffffe0009ee1000
+0xfffffe0008911238 add x8, x8, #0x60
+0xfffffe000891123c str x8, [x0]
+0xfffffe0008911240 ldp x29, x30, [sp], #0x10
+METACLASS INIT? 0xfffffe00089112d8
+0xfffffe00089112b8 add x0, x0, #0x78
+0xfffffe00089112bc ret 
+0xfffffe00089112c0 stp x29, x30, [sp, #-0x10]!
+0xfffffe00089112c4 mov x29, sp
+0xfffffe00089112c8 adrp x1, #0xfffffe000804c000
+0xfffffe00089112cc add x1, x1, #0xf7c
+0xfffffe00089112d0 adrp x2, #0xfffffe0009ee0000
+0xfffffe00089112d4 ldr x2, [x2, #0x8e8]
+0xfffffe00089112d8 mov w3, #0x90
+0xfffffe00089112dc bl #0xfffffe00089138b4
+0xfffffe00089112e0 adrp x8, #0xfffffe0009ee1000
+0xfffffe00089112e4 add x8, x8, #0xf0
+0xfffffe00089112e8 str x8, [x0]
+0xfffffe00089112ec ldp x29, x30, [sp], #0x10
+0xfffffe00089112f0 ret 
+0xfffffe00089112f4 stp x20, x19, [sp, #-0x20]!
+0xfffffe00089112f8 stp x29, x30, [sp, #0x10]
+0xfffffe00089112fc add x29, sp, #0x10
+0xfffffe0008911300 adrp x0, #0xfffffe0009ee1000
+0xfffffe0008911304 add x0, x0, #0xe30
+0xfffffe0008911308 mov w1, #0x90
+0xfffffe000891130c bl #0xfffffe000891386c
+0xfffffe0008911310 mov x19, x0
+METACLASS INIT? 0xfffffe000891179c
+0xfffffe000891177c add x2, x2, #0xfe4
+0xfffffe0008911780 add x0, sp, #0x18
+0xfffffe0008911784 mov w1, #0xa
+0xfffffe0008911788 bl #0xfffffe0008913a40
+0xfffffe000891178c ldr w0, [x19, #0x114]
+0xfffffe0008911790 add x5, sp, #0x18
+0xfffffe0008911794 mov w1, #0
+0xfffffe0008911798 mov w2, #0
+0xfffffe000891179c mov w3, #0
+0xfffffe00089117a0 mov w4, #0x1b6
+0xfffffe00089117a4 bl #0xfffffe00089139e0
+0xfffffe00089117a8 str x0, [x19, #0x118]
+0xfffffe00089117ac cbz x0, #0xfffffe0008911850
+0xfffffe00089117b0 strh wzr, [x19, #0x112]
+0xfffffe00089117b4 str wzr, [sp, #0x10]
+0xfffffe00089117b8 mov w8, #4
+0xfffffe00089117bc str x8, [sp, #0x18]
+0xfffffe00089117c0 adrp x0, #0xfffffe000804c000
+0xfffffe00089117c4 add x0, x0, #0xfee
+0xfffffe00089117c8 add x1, sp, #0x10
+0xfffffe00089117cc add x2, sp, #0x18
+0xfffffe00089117d0 mov x3, #0
+0xfffffe00089117d4 mov x4, #0
+METACLASS INIT? 0xfffffe00089123e8
+0xfffffe00089123c8 sub x0, x29, #0x40
+0xfffffe00089123cc mov x1, sp
+0xfffffe00089123d0 bl #0xfffffe0008913884
+0xfffffe00089123d4 ldr x8, [x22]
+0xfffffe00089123d8 ldr x8, [x8, #0xe8]
+0xfffffe00089123dc sub x2, x29, #0x40
+0xfffffe00089123e0 mov x0, x22
+0xfffffe00089123e4 mov x1, x21
+0xfffffe00089123e8 mov w3, #0x14
+0xfffffe00089123ec blr x8
+0xfffffe00089123f0 ldur x8, [x29, #-0x28]
+0xfffffe00089123f4 adrp x9, #0xfffffe0009ee0000
+0xfffffe00089123f8 ldr x9, [x9, #0x940]
+0xfffffe00089123fc ldr x9, [x9]
+0xfffffe0008912400 cmp x9, x8
+0xfffffe0008912404 b.ne #0xfffffe000891241c
+0xfffffe0008912408 ldp x29, x30, [sp, #0xb0]
+0xfffffe000891240c ldp x20, x19, [sp, #0xa0]
+0xfffffe0008912410 ldp x22, x21, [sp, #0x90]
+0xfffffe0008912414 add sp, sp, #0xc0
+0xfffffe0008912418 ret 
+0xfffffe000891241c bl #0xfffffe00089139bc
+0xfffffe0008912420 sub sp, sp, #0xd0
+METACLASS INIT? 0xfffffe0008912528
+0xfffffe0008912508 b.ne #0xfffffe00089124e8
+0xfffffe000891250c str w10, [sp, #0x4c]
+0xfffffe0008912510 madd x8, x22, x23, x8
+0xfffffe0008912514 add x2, x8, #8
+0xfffffe0008912518 ldr x8, [x21]
+0xfffffe000891251c ldr x8, [x8, #0xd0]
+0xfffffe0008912520 mov x0, x21
+0xfffffe0008912524 mov x1, #0
+0xfffffe0008912528 mov w3, #0x10
+0xfffffe000891252c blr x8
+0xfffffe0008912530 add x0, sp, #0x58
+0xfffffe0008912534 mov w1, #0
+0xfffffe0008912538 mov w2, #0x10
+0xfffffe000891253c bl #0xfffffe0008913a04
+0xfffffe0008912540 ldr x8, [x19]
+0xfffffe0008912544 ldr x8, [x8, #0x550]
+0xfffffe0008912548 stp xzr, xzr, [sp]
+0xfffffe000891254c add x4, sp, #0x58
+0xfffffe0008912550 add x6, sp, #0x28
+0xfffffe0008912554 str xzr, [sp, #0x10]
+0xfffffe0008912558 mov x0, x19
+0xfffffe000891255c mov x1, x21
+0xfffffe0008912560 mov x2, x20
+METACLASS INIT? 0xfffffe0008912564
+0xfffffe0008912544 ldr x8, [x8, #0x550]
+0xfffffe0008912548 stp xzr, xzr, [sp]
+0xfffffe000891254c add x4, sp, #0x58
+0xfffffe0008912550 add x6, sp, #0x28
+0xfffffe0008912554 str xzr, [sp, #0x10]
+0xfffffe0008912558 mov x0, x19
+0xfffffe000891255c mov x1, x21
+0xfffffe0008912560 mov x2, x20
+0xfffffe0008912564 mov w3, #0x10
+0xfffffe0008912568 mov w5, #0
+0xfffffe000891256c mov x7, #0
+0xfffffe0008912570 blr x8
+0xfffffe0008912574 cbnz w0, #0xfffffe00089125c0
+0xfffffe0008912578 ldr x8, [x19, #0xd0]
+0xfffffe000891257c mul x27, x22, x24
+0xfffffe0008912580 add x8, x8, x27
+0xfffffe0008912584 add x2, x8, #0xc
+0xfffffe0008912588 ldr x8, [x20]
+0xfffffe000891258c ldr x8, [x8, #0xc8]
+0xfffffe0008912590 mov x0, x20
+0xfffffe0008912594 mov x1, #0
+0xfffffe0008912598 mov w3, #0x10
+0xfffffe000891259c blr x8
+METACLASS INIT? 0xfffffe0008912598
+0xfffffe0008912578 ldr x8, [x19, #0xd0]
+0xfffffe000891257c mul x27, x22, x24
+0xfffffe0008912580 add x8, x8, x27
+0xfffffe0008912584 add x2, x8, #0xc
+0xfffffe0008912588 ldr x8, [x20]
+0xfffffe000891258c ldr x8, [x8, #0xc8]
+0xfffffe0008912590 mov x0, x20
+0xfffffe0008912594 mov x1, #0
+0xfffffe0008912598 mov w3, #0x10
+0xfffffe000891259c blr x8
+0xfffffe00089125a0 ldr x8, [x19, #0x98]
+0xfffffe00089125a4 mul x9, x22, x23
+0xfffffe00089125a8 ldr w8, [x8, x9]
+0xfffffe00089125ac ldr x9, [x19, #0xd0]
+0xfffffe00089125b0 add x9, x9, x27
+0xfffffe00089125b4 str wzr, [x9, #0x2c]
+0xfffffe00089125b8 stp w8, w25, [x9, #4]
+0xfffffe00089125bc strb w26, [x9]
+0xfffffe00089125c0 add x22, x22, #1
+0xfffffe00089125c4 ldr w9, [x19, #0xd8]
+0xfffffe00089125c8 cmp x22, x9
+0xfffffe00089125cc b.lo #0xfffffe00089124bc
+0xfffffe00089125d0 ldr x8, [x19]
+METACLASS INIT? 0xfffffe0008912674
+0xfffffe0008912654 madd x8, x22, x23, x8
+0xfffffe0008912658 ldr w9, [x8, #4]
+0xfffffe000891265c str w9, [sp, #0x4c]
+0xfffffe0008912660 add x2, x8, #8
+0xfffffe0008912664 ldr x8, [x21]
+0xfffffe0008912668 ldr x8, [x8, #0xd0]
+0xfffffe000891266c mov x0, x21
+0xfffffe0008912670 mov x1, #0
+0xfffffe0008912674 mov w3, #0x10
+0xfffffe0008912678 blr x8
+0xfffffe000891267c add x0, sp, #0x58
+0xfffffe0008912680 mov w1, #0
+0xfffffe0008912684 mov w2, #0x10
+0xfffffe0008912688 bl #0xfffffe0008913a04
+0xfffffe000891268c ldr x8, [x19]
+0xfffffe0008912690 ldr x8, [x8, #0x550]
+0xfffffe0008912694 stp xzr, xzr, [sp]
+0xfffffe0008912698 add x4, sp, #0x58
+0xfffffe000891269c add x6, sp, #0x28
+0xfffffe00089126a0 str xzr, [sp, #0x10]
+0xfffffe00089126a4 mov x0, x19
+0xfffffe00089126a8 mov x1, x21
+0xfffffe00089126ac mov x2, x20
+METACLASS INIT? 0xfffffe00089126b0
+0xfffffe0008912690 ldr x8, [x8, #0x550]
+0xfffffe0008912694 stp xzr, xzr, [sp]
+0xfffffe0008912698 add x4, sp, #0x58
+0xfffffe000891269c add x6, sp, #0x28
+0xfffffe00089126a0 str xzr, [sp, #0x10]
+0xfffffe00089126a4 mov x0, x19
+0xfffffe00089126a8 mov x1, x21
+0xfffffe00089126ac mov x2, x20
+0xfffffe00089126b0 mov w3, #0x10
+0xfffffe00089126b4 mov w5, #0
+0xfffffe00089126b8 mov x7, #0
+0xfffffe00089126bc blr x8
+0xfffffe00089126c0 cbnz w0, #0xfffffe000891270c
+0xfffffe00089126c4 ldr x8, [x19, #0xd0]
+0xfffffe00089126c8 mul x27, x22, x24
+0xfffffe00089126cc add x8, x8, x27
+0xfffffe00089126d0 add x2, x8, #0xc
+0xfffffe00089126d4 ldr x8, [x20]
+0xfffffe00089126d8 ldr x8, [x8, #0xc8]
+0xfffffe00089126dc mov x0, x20
+0xfffffe00089126e0 mov x1, #0
+0xfffffe00089126e4 mov w3, #0x10
+0xfffffe00089126e8 blr x8
+METACLASS INIT? 0xfffffe00089126e4
+0xfffffe00089126c4 ldr x8, [x19, #0xd0]
+0xfffffe00089126c8 mul x27, x22, x24
+0xfffffe00089126cc add x8, x8, x27
+0xfffffe00089126d0 add x2, x8, #0xc
+0xfffffe00089126d4 ldr x8, [x20]
+0xfffffe00089126d8 ldr x8, [x8, #0xc8]
+0xfffffe00089126dc mov x0, x20
+0xfffffe00089126e0 mov x1, #0
+0xfffffe00089126e4 mov w3, #0x10
+0xfffffe00089126e8 blr x8
+0xfffffe00089126ec ldr x8, [x19, #0x98]
+0xfffffe00089126f0 mul x9, x22, x23
+0xfffffe00089126f4 ldr w8, [x8, x9]
+0xfffffe00089126f8 ldr x9, [x19, #0xd0]
+0xfffffe00089126fc add x9, x9, x27
+0xfffffe0008912700 str wzr, [x9, #0x2c]
+0xfffffe0008912704 stp w8, w25, [x9, #4]
+0xfffffe0008912708 strb w26, [x9]
+0xfffffe000891270c add x22, x22, #1
+0xfffffe0008912710 ldr w8, [x19, #0xd8]
+0xfffffe0008912714 cmp x22, x8
+0xfffffe0008912718 b.lo #0xfffffe0008912614
+0xfffffe000891271c add x0, sp, #0x58
+METACLASS INIT? 0xfffffe0008912740
+0xfffffe0008912720 mov w1, #0
+0xfffffe0008912724 mov w2, #0x10
+0xfffffe0008912728 bl #0xfffffe0008913a04
+0xfffffe000891272c ldr x8, [x21]
+0xfffffe0008912730 ldr x8, [x8, #0xd0]
+0xfffffe0008912734 add x2, sp, #0x58
+0xfffffe0008912738 mov x0, x21
+0xfffffe000891273c mov x1, #0
+0xfffffe0008912740 mov w3, #0x10
+0xfffffe0008912744 blr x8
+0xfffffe0008912748 adrp x8, #0xfffffe0009ee0000
+0xfffffe000891274c ldr x8, [x8, #0x960]
+0xfffffe0008912750 ldr x1, [x8]
+0xfffffe0008912754 adrp x0, #0xfffffe000804d000
+0xfffffe0008912758 add x0, x0, #0x3b5
+0xfffffe000891275c mov x2, #0
+0xfffffe0008912760 mov x3, #0
+0xfffffe0008912764 mov x4, #0
+0xfffffe0008912768 bl #0xfffffe0008913908
+0xfffffe000891276c cbz x0, #0xfffffe000891281c
+0xfffffe0008912770 ldr x8, [x0]
+0xfffffe0008912774 ldr x8, [x8, #0x118]
+0xfffffe0008912778 adrp x1, #0xfffffe000804d000
+METACLASS INIT? 0xfffffe0008912840
+0xfffffe0008912820 ldr x8, [x8, #0x550]
+0xfffffe0008912824 stp xzr, xzr, [sp]
+0xfffffe0008912828 add x4, sp, #0x58
+0xfffffe000891282c add x6, sp, #0x28
+0xfffffe0008912830 str xzr, [sp, #0x10]
+0xfffffe0008912834 mov x0, x19
+0xfffffe0008912838 mov x1, x21
+0xfffffe000891283c mov x2, x20
+0xfffffe0008912840 mov w3, #0x10
+0xfffffe0008912844 mov w5, #0
+0xfffffe0008912848 mov x7, #0
+0xfffffe000891284c blr x8
+0xfffffe0008912850 stp xzr, xzr, [sp, #0x18]
+0xfffffe0008912854 ldr x8, [x20]
+0xfffffe0008912858 ldr x8, [x8, #0xc8]
+0xfffffe000891285c add x2, sp, #0x18
+0xfffffe0008912860 mov x0, x20
+0xfffffe0008912864 mov x1, #0
+0xfffffe0008912868 mov w3, #0x10
+0xfffffe000891286c blr x8
+0xfffffe0008912870 adrp x1, #0xfffffe000804d000
+0xfffffe0008912874 add x1, x1, #0x1b0
+0xfffffe0008912878 add x2, sp, #0x18
+METACLASS INIT? 0xfffffe0008912868
+0xfffffe0008912848 mov x7, #0
+0xfffffe000891284c blr x8
+0xfffffe0008912850 stp xzr, xzr, [sp, #0x18]
+0xfffffe0008912854 ldr x8, [x20]
+0xfffffe0008912858 ldr x8, [x8, #0xc8]
+0xfffffe000891285c add x2, sp, #0x18
+0xfffffe0008912860 mov x0, x20
+0xfffffe0008912864 mov x1, #0
+0xfffffe0008912868 mov w3, #0x10
+0xfffffe000891286c blr x8
+0xfffffe0008912870 adrp x1, #0xfffffe000804d000
+0xfffffe0008912874 add x1, x1, #0x1b0
+0xfffffe0008912878 add x2, sp, #0x18
+0xfffffe000891287c mov x0, x19
+0xfffffe0008912880 mov w3, #0x10
+0xfffffe0008912884 bl #0xfffffe0008912360
+0xfffffe0008912888 cbz x21, #0xfffffe000891289c
+0xfffffe000891288c ldr x8, [x21]
+0xfffffe0008912890 ldr x8, [x8, #0x28]
+0xfffffe0008912894 mov x0, x21
+0xfffffe0008912898 blr x8
+0xfffffe000891289c cbz x20, #0xfffffe00089128b0
+0xfffffe00089128a0 ldr x8, [x20]
+METACLASS INIT? 0xfffffe0008912880
+0xfffffe0008912860 mov x0, x20
+0xfffffe0008912864 mov x1, #0
+0xfffffe0008912868 mov w3, #0x10
+0xfffffe000891286c blr x8
+0xfffffe0008912870 adrp x1, #0xfffffe000804d000
+0xfffffe0008912874 add x1, x1, #0x1b0
+0xfffffe0008912878 add x2, sp, #0x18
+0xfffffe000891287c mov x0, x19
+0xfffffe0008912880 mov w3, #0x10
+0xfffffe0008912884 bl #0xfffffe0008912360
+0xfffffe0008912888 cbz x21, #0xfffffe000891289c
+0xfffffe000891288c ldr x8, [x21]
+0xfffffe0008912890 ldr x8, [x8, #0x28]
+0xfffffe0008912894 mov x0, x21
+0xfffffe0008912898 blr x8
+0xfffffe000891289c cbz x20, #0xfffffe00089128b0
+0xfffffe00089128a0 ldr x8, [x20]
+0xfffffe00089128a4 ldr x8, [x8, #0x28]
+0xfffffe00089128a8 mov x0, x20
+0xfffffe00089128ac blr x8
+0xfffffe00089128b0 ldur x8, [x29, #-0x58]
+0xfffffe00089128b4 adrp x9, #0xfffffe0009ee0000
+0xfffffe00089128b8 ldr x9, [x9, #0x940]
+METACLASS INIT? 0xfffffe0008912904
+0xfffffe00089128e4 ret 
+0xfffffe00089128e8 bl #0xfffffe00089139bc
+0xfffffe00089128ec stp x29, x30, [sp, #-0x10]!
+0xfffffe00089128f0 mov x29, sp
+0xfffffe00089128f4 adrp x1, #0xfffffe000804d000
+0xfffffe00089128f8 add x1, x1, #2
+0xfffffe00089128fc adrp x2, #0xfffffe0009ee0000
+0xfffffe0008912900 ldr x2, [x2, #0x870]
+0xfffffe0008912904 mov w3, #0xe8
+0xfffffe0008912908 bl #0xfffffe00089138b4
+0xfffffe000891290c adrp x8, #0xfffffe0009ee1000
+0xfffffe0008912910 add x8, x8, #0x780
+0xfffffe0008912914 str x8, [x0]
+0xfffffe0008912918 ldp x29, x30, [sp], #0x10
+0xfffffe000891291c ret 
+0xfffffe0008912920 b #0xfffffe00089138c0
+0xfffffe0008912924 stp x29, x30, [sp, #-0x10]!
+0xfffffe0008912928 mov x29, sp
+0xfffffe000891292c bl #0xfffffe00089138d8
+0xfffffe0008912930 adrp x8, #0xfffffe0009ee1000
+0xfffffe0008912934 add x8, x8, #0x188
+0xfffffe0008912938 str x8, [x0]
+0xfffffe000891293c ldp x29, x30, [sp], #0x10
+METACLASS INIT? 0xfffffe00089129d4
+0xfffffe00089129b4 add x0, x0, #0xb0
+0xfffffe00089129b8 ret 
+0xfffffe00089129bc stp x29, x30, [sp, #-0x10]!
+0xfffffe00089129c0 mov x29, sp
+0xfffffe00089129c4 adrp x1, #0xfffffe000804d000
+0xfffffe00089129c8 add x1, x1, #2
+0xfffffe00089129cc adrp x2, #0xfffffe0009ee0000
+0xfffffe00089129d0 ldr x2, [x2, #0x870]
+0xfffffe00089129d4 mov w3, #0xe8
+0xfffffe00089129d8 bl #0xfffffe00089138b4
+0xfffffe00089129dc adrp x8, #0xfffffe0009ee1000
+0xfffffe00089129e0 add x8, x8, #0x780
+0xfffffe00089129e4 str x8, [x0]
+0xfffffe00089129e8 ldp x29, x30, [sp], #0x10
+0xfffffe00089129ec ret 
+0xfffffe00089129f0 stp x20, x19, [sp, #-0x20]!
+0xfffffe00089129f4 stp x29, x30, [sp, #0x10]
+0xfffffe00089129f8 add x29, sp, #0x10
+0xfffffe00089129fc adrp x0, #0xfffffe0009ee1000
+0xfffffe0008912a00 add x0, x0, #0xe70
+0xfffffe0008912a04 mov w1, #0xe8
+0xfffffe0008912a08 bl #0xfffffe000891386c
+0xfffffe0008912a0c mov x19, x0
+METACLASS INIT? 0xfffffe0008913458
+0xfffffe0008913438 stp x29, x30, [sp, #-0x10]!
+0xfffffe000891343c mov x29, sp
+0xfffffe0008913440 adrp x0, #0xfffffe000ac49000
+0xfffffe0008913444 add x0, x0, #0x50
+0xfffffe0008913448 adrp x1, #0xfffffe000804c000
+0xfffffe000891344c add x1, x1, #0xf30
+0xfffffe0008913450 adrp x2, #0xfffffe000ac49000
+0xfffffe0008913454 add x2, x2, #0xd8
+0xfffffe0008913458 mov w3, #0x120
+0xfffffe000891345c bl #0xfffffe00089138b4
+0xfffffe0008913460 adrp x8, #0xfffffe0009ee0000
+0xfffffe0008913464 add x8, x8, #0xfc8
+0xfffffe0008913468 str x8, [x0]
+0xfffffe000891346c adrp x0, #0xfffffe000ac49000
+0xfffffe0008913470 add x0, x0, #0x78
+0xfffffe0008913474 adrp x1, #0xfffffe000804c000
+0xfffffe0008913478 add x1, x1, #0xf7c
+0xfffffe000891347c adrp x2, #0xfffffe0009ee0000
+0xfffffe0008913480 ldr x2, [x2, #0x8e8]
+0xfffffe0008913484 mov w3, #0x90
+0xfffffe0008913488 bl #0xfffffe00089138b4
+0xfffffe000891348c adrp x8, #0xfffffe0009ee1000
+0xfffffe0008913490 add x8, x8, #0xf0
+METACLASS INIT? 0xfffffe0008913484
+0xfffffe0008913464 add x8, x8, #0xfc8
+0xfffffe0008913468 str x8, [x0]
+0xfffffe000891346c adrp x0, #0xfffffe000ac49000
+0xfffffe0008913470 add x0, x0, #0x78
+0xfffffe0008913474 adrp x1, #0xfffffe000804c000
+0xfffffe0008913478 add x1, x1, #0xf7c
+0xfffffe000891347c adrp x2, #0xfffffe0009ee0000
+0xfffffe0008913480 ldr x2, [x2, #0x8e8]
+0xfffffe0008913484 mov w3, #0x90
+0xfffffe0008913488 bl #0xfffffe00089138b4
+0xfffffe000891348c adrp x8, #0xfffffe0009ee1000
+0xfffffe0008913490 add x8, x8, #0xf0
+0xfffffe0008913494 str x8, [x0]
+0xfffffe0008913498 bl #0xfffffe0008913824
+0xfffffe000891349c adrp x8, #0xfffffe000ac49000
+0xfffffe00089134a0 str x0, [x8, #0xa0]
+0xfffffe00089134a4 adrp x0, #0xfffffe000ac49000
+0xfffffe00089134a8 add x0, x0, #0xb0
+0xfffffe00089134ac adrp x1, #0xfffffe000804d000
+0xfffffe00089134b0 add x1, x1, #2
+0xfffffe00089134b4 adrp x2, #0xfffffe0009ee0000
+0xfffffe00089134b8 ldr x2, [x2, #0x870]
+0xfffffe00089134bc mov w3, #0xe8
+METACLASS INIT? 0xfffffe00089134bc
+0xfffffe000891349c adrp x8, #0xfffffe000ac49000
+0xfffffe00089134a0 str x0, [x8, #0xa0]
+0xfffffe00089134a4 adrp x0, #0xfffffe000ac49000
+0xfffffe00089134a8 add x0, x0, #0xb0
+0xfffffe00089134ac adrp x1, #0xfffffe000804d000
+0xfffffe00089134b0 add x1, x1, #2
+0xfffffe00089134b4 adrp x2, #0xfffffe0009ee0000
+0xfffffe00089134b8 ldr x2, [x2, #0x870]
+0xfffffe00089134bc mov w3, #0xe8
+0xfffffe00089134c0 bl #0xfffffe00089138b4
+0xfffffe00089134c4 adrp x8, #0xfffffe0009ee1000
+0xfffffe00089134c8 add x8, x8, #0x780
+0xfffffe00089134cc str x8, [x0]
+0xfffffe00089134d0 ldp x29, x30, [sp], #0x10
+0xfffffe00089134d4 ret 
+0xfffffe00089134d8 stp x29, x30, [sp, #-0x10]!
+0xfffffe00089134dc mov x29, sp
+0xfffffe00089134e0 adrp x0, #0xfffffe000ac49000
+0xfffffe00089134e4 add x0, x0, #0xb0
+0xfffffe00089134e8 bl #0xfffffe00089138c0
+0xfffffe00089134ec adrp x0, #0xfffffe000ac49000
+0xfffffe00089134f0 add x0, x0, #0x78
+0xfffffe00089134f4 bl #0xfffffe00089138c0
+METACLASS INIT? 0xfffffe0008913520
+0xfffffe0008913500 ldp x29, x30, [sp], #0x10
+0xfffffe0008913504 b #0xfffffe00089138c0
+0xfffffe0008913508 stp x29, x30, [sp, #-0x10]!
+0xfffffe000891350c mov x29, sp
+0xfffffe0008913510 adrp x1, #0xfffffe000804d000
+0xfffffe0008913514 add x1, x1, #0x3cc
+0xfffffe0008913518 adrp x2, #0xfffffe0009ee0000
+0xfffffe000891351c ldr x2, [x2, #0x900]
+0xfffffe0008913520 mov w3, #0x88
+0xfffffe0008913524 bl #0xfffffe00089138b4
+0xfffffe0008913528 adrp x8, #0xfffffe0009ee1000
+0xfffffe000891352c add x8, x8, #0xd78
+0xfffffe0008913530 str x8, [x0]
+0xfffffe0008913534 ldp x29, x30, [sp], #0x10
+0xfffffe0008913538 ret 
+0xfffffe000891353c b #0xfffffe00089138c0
+0xfffffe0008913540 stp x29, x30, [sp, #-0x10]!
+0xfffffe0008913544 mov x29, sp
+0xfffffe0008913548 bl #0xfffffe0008913998
+0xfffffe000891354c adrp x8, #0xfffffe0009ee1000
+0xfffffe0008913550 add x8, x8, #0x818
+0xfffffe0008913554 str x8, [x0]
+0xfffffe0008913558 ldp x29, x30, [sp], #0x10
+METACLASS INIT? 0xfffffe00089135f0
+0xfffffe00089135d0 add x0, x0, #0xd8
+0xfffffe00089135d4 ret 
+0xfffffe00089135d8 stp x29, x30, [sp, #-0x10]!
+0xfffffe00089135dc mov x29, sp
+0xfffffe00089135e0 adrp x1, #0xfffffe000804d000
+0xfffffe00089135e4 add x1, x1, #0x3cc
+0xfffffe00089135e8 adrp x2, #0xfffffe0009ee0000
+0xfffffe00089135ec ldr x2, [x2, #0x900]
+0xfffffe00089135f0 mov w3, #0x88
+0xfffffe00089135f4 bl #0xfffffe00089138b4
+0xfffffe00089135f8 adrp x8, #0xfffffe0009ee1000
+0xfffffe00089135fc add x8, x8, #0xd78
+0xfffffe0008913600 str x8, [x0]
+0xfffffe0008913604 ldp x29, x30, [sp], #0x10
+0xfffffe0008913608 ret 
+0xfffffe000891360c stp x20, x19, [sp, #-0x20]!
+0xfffffe0008913610 stp x29, x30, [sp, #0x10]
+0xfffffe0008913614 add x29, sp, #0x10
+0xfffffe0008913618 adrp x0, #0xfffffe0009ee1000
+0xfffffe000891361c add x0, x0, #0xeb0
+0xfffffe0008913620 mov w1, #0x88
+0xfffffe0008913624 bl #0xfffffe000891386c
+0xfffffe0008913628 mov x19, x0
+METACLASS INIT? 0xfffffe0008913744
+0xfffffe0008913724 stp x29, x30, [sp, #-0x10]!
+0xfffffe0008913728 mov x29, sp
+0xfffffe000891372c adrp x0, #0xfffffe000ac49000
+0xfffffe0008913730 add x0, x0, #0xd8
+0xfffffe0008913734 adrp x1, #0xfffffe000804d000
+0xfffffe0008913738 add x1, x1, #0x3cc
+0xfffffe000891373c adrp x2, #0xfffffe0009ee0000
+0xfffffe0008913740 ldr x2, [x2, #0x900]
+0xfffffe0008913744 mov w3, #0x88
+0xfffffe0008913748 bl #0xfffffe00089138b4
+0xfffffe000891374c adrp x8, #0xfffffe0009ee1000
+0xfffffe0008913750 add x8, x8, #0xd78
+0xfffffe0008913754 str x8, [x0]
+0xfffffe0008913758 ldp x29, x30, [sp], #0x10
+0xfffffe000891375c ret 
+0xfffffe0008913760 adrp x0, #0xfffffe000ac49000
+0xfffffe0008913764 add x0, x0, #0xd8
+0xfffffe0008913768 b #0xfffffe00089138c0
+0xfffffe000891376c adrp x8, #0xfffffe000ac49000
+0xfffffe0008913770 add x8, x8, #0x40
+0xfffffe0008913774 ldr x2, [x8]
+0xfffffe0008913778 cbz x2, #0xfffffe0008913780
+0xfffffe000891377c br x2

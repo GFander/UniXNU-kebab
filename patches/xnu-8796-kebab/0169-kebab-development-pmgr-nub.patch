@@ -1,0 +1,88 @@
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -14,6 +14,8 @@
+ class AppleCLCD;
+ extern "C" int kebab_display_start(IOService *provider);
+ #include <kern/debug.h>
++#include <pexpert/pexpert.h>
++#include <libkern/c++/OSMetaClass.h>
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
+@@ -22,6 +24,68 @@
+ extern "C" bool kebab_usb_console_ready(void);
+ extern "C" bool kebab_usb_restart_armed(void);
+ extern "C" void kebab_usb_panic_spin(void);
++
++/*
++ * Development-only compatibility with the unchanged donor AMFI. Its AON
++ * helpers explicitly accept a NULL ApplePMGR provider: reads return -1 and
++ * writes do nothing. Publish the original nub, never a fabricated PMIC or
++ * a claim that Snapdragon implements Apple's persistent AON latch.
++ *
++ * The donor's metaclass allocates its full 0x740-byte instance. Standard
++ * init is the rebound IOService::init, not the hardware init overload.
++ * The private provider at +0x88 must remain NULL before publication.
++ */
++static IOService *kebab_development_pmgr;
++
++static void
++kebab_publish_development_pmgr(IOService *platform)
++{
++	uint32_t enabled = 0;
++	if (!PE_parse_boot_argn("kebab_pmgr_nub", &enabled, sizeof(enabled)) ||
++	    enabled != 1 || kebab_development_pmgr != NULL) {
++		return;
++	}
++	OSObject *object = OSMetaClass::allocClassWithName("ApplePMGRNub");
++	IOService *nub = OSDynamicCast(IOService, object);
++	if (nub == NULL) {
++		OSSafeReleaseNULL(object);
++		IOLog("KEBAB PMGR: original ApplePMGRNub class unavailable\n");
++		return;
++	}
++	if (!nub->init()) {
++		nub->release();
++		IOLog("KEBAB PMGR: development nub init failed\n");
++		return;
++	}
++	/* This offset belongs to the audited donor ABI, beyond IOService.
++	 * Read it only; do not alter the original object's private state. */
++	if (sizeof(IOService) > 0x88 ||
++	    nub->getMetaClass()->getClassSize() != 0x740 ||
++	    *reinterpret_cast<void *const *>(reinterpret_cast<uintptr_t>(nub) + 0x88) != NULL) {
++		nub->release();
++		IOLog("KEBAB PMGR: donor ABI/provider mismatch; refusing publication\n");
++		return;
++	}
++	nub->setProperty("kebab,development-compatibility", true);
++	nub->setProperty("kebab,persistent-aon-latch", false);
++	if (!nub->attach(platform)) {
++		nub->release();
++		IOLog("KEBAB PMGR: development nub attach failed\n");
++		return;
++	}
++	if (*reinterpret_cast<void *const *>(reinterpret_cast<uintptr_t>(nub) + 0x88) != NULL) {
++		nub->detach(platform);
++		nub->release();
++		IOLog("KEBAB PMGR: attach changed private provider; refusing publication\n");
++		return;
++	}
++	/* Retain the allocation for the platform's lifetime. Do not start the
++	 * hardware service or call any Apple register accessor from here. */
++	kebab_development_pmgr = nub;
++	nub->registerService();
++	IOLog("KEBAB PMGR: provider-less development ApplePMGRNub published; "
++	    "AON reads unsupported (0xffffffff), writes ignored; no PMIC MMIO\n");
++}
+ 
+ class KebabPlatformExpert : public IODTPlatformExpert {
+ 	OSDeclareDefaultStructors(KebabPlatformExpert);
+@@ -45,6 +109,7 @@
+ 	if (!IODTPlatformExpert::start(provider)) {
+ 		return false;
+ 	}
++	kebab_publish_development_pmgr(this);
+ 	registerService();
+ 	IOLog("KEBAB: platform expert registered\n");
+ 	return true;

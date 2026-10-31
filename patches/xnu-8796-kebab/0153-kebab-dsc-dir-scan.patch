@@ -1,0 +1,226 @@
+fix(dsc): stop the directory scan dropping the tail of every window
+
+The shared cache was not mapped because one subcache file was never seen:
+
+    KEBAB DSC: subcache 38 suffix ".38" uuid 0f806d3d...: NO FILE WITH THIS UUID
+    KEBAB DSC: resolved 37/42 subcaches by uuid; dylddata=1 dyldlinkedit=1
+
+The file is installed and hash-verified, its own header carries that UUID,
+and no "cannot open" or "not a dyld cache header" line was printed, so the
+name was never offered to the resolver.  The cause is the scan's bound:
+
+    while (pos + sizeof(struct dirent) <= used)
+
+sizeof(struct dirent) is 1048 (d_name[1024]), which is the *largest* record
+HFS+ can emit, so it is not a lower bound at all.  hfs_vnop_readdir() emits
+variable-length records:
+
+    STD_DIRENT_LEN(namlen) = (sizeof(struct dirent) - 256)
+                             + ((namlen + 1 + 3) & ~3)
+
+which is 816-836 bytes for the 44 names in this directory.  The bound
+therefore stopped as soon as fewer than 1048 bytes remained, leaving the last
+complete record of every 8 KiB window unread, and because the next
+VNOP_READDIR resumed from the offset the driver reported, that name was
+skipped permanently and silently.  44 entries fit 5 windows, so 5 names were
+never offered -- the same count as the 5 subcaches that failed to resolve.
+
+Bound the walk on the fixed header, offsetof(struct dirent, d_name), and
+trust d_reclen after bounds-checking it: reclen >= DIRENT_MIN and
+reclen <= used - pos, plus d_namlen + 1 <= reclen - DIRENT_MIN before the
+name is copied out.
+
+Make a partial scan loud instead of silent.  A remainder shorter than a
+dirent header, a d_reclen that does not fit the window, or a readdir that
+returns zero records without EOF now prints the offsets (pos, used,
+d_reclen, readdir offset) and fails the plan, so a truncated candidate list
+can never again look like a successful one.
+
+Add the offered-versus-resolved accounting to the normal success line:
+
+    KEBAB DSC: plan 43 files / 51 mappings, ..., dynamic config page absent;
+               dir 44 entries, 44 offered, 44 resolved
+
+and the same three numbers to the verbose detail line.  A directory that
+loses a name is now visible without kebab_dsc_verbose=1.
+
+diff --git a/bsd/kern/kebab_dyldcache.c b/bsd/kern/kebab_dyldcache.c
+--- a/bsd/kern/kebab_dyldcache.c
++++ b/bsd/kern/kebab_dyldcache.c
+@@ -84,6 +84,12 @@
+ #define KEBAB_DSC_PATH_MAX              256
+ #define KEBAB_DSC_NAME_MAX              64
+ #define KEBAB_DSC_DIRBUF                8192
++/*
++ * Smallest record the scan can consume: the fixed part of a struct dirent,
++ * i.e. offsetof(struct dirent, d_name).  sizeof(struct dirent) is the largest
++ * record HFS+ can emit, not the smallest, so it must never bound the walk.
++ */
++#define KEBAB_DSC_DIRENT_MIN            ((uint32_t)offsetof(struct dirent, d_name))
+ #define KEBAB_DSC_MAX_CANDIDATES        96
+ #define KEBAB_DSC_MAX_SUBCACHES         64
+ #define KEBAB_DSC_MAX_FILES             (1 + KEBAB_DSC_MAX_SUBCACHES)
+@@ -283,6 +289,9 @@
+ 	uint32_t        subcache_count;
+ 	uint32_t        dylddata_count;
+ 	uint32_t        dyldlinkedit_count;
++	/* directory scan accounting, printed by the non-verbose summary line */
++	uint32_t        dir_entries;    /* records the scan walked */
++	uint32_t        names_offered;  /* cache-looking names it offered */
+ 	uint32_t        total_mappings;
+ 	uint32_t        slide_mappings;
+ 	uint64_t        region_start;
+@@ -433,13 +442,14 @@
+  */
+ static int
+ kebab_dsc_list_dir(const char *dir, struct kebab_dsc_candidate *candidates,
+-    uint32_t max_candidates, uint32_t *candidate_count)
++    uint32_t max_candidates, uint32_t *candidate_count, uint32_t *entry_count)
+ {
+ 	vfs_context_t ctx = vfs_context_current();
+ 	vnode_t dvp = NULLVP;
+ 	uio_t auio = NULL;
+ 	char *buf = NULL;
+ 	uint32_t count = 0;
++	uint32_t entries = 0;
+ 	off_t offset = 0;
+ 	boolean_t eofflag = FALSE;
+ 	int error = 0;
+@@ -488,18 +498,63 @@
+ 		used = KEBAB_DSC_DIRBUF - (uint32_t)uio_resid(auio);
+ 		offset = uio_offset(auio);
+ 		if (used == 0) {
++			if (!eofflag) {
++				printf("KEBAB DSC: directory scan: readdir returned no "
++				    "records at offset %lld without setting EOF; refusing "
++				    "a partial scan\n", (long long)offset);
++				error = EIO;
++				goto out;
++			}
+ 			break;
+ 		}
+ 
+-		while (pos + sizeof(struct dirent) <= used) {
+-			struct dirent *dp = (struct dirent *)(void *)(buf + pos);
+-			uint32_t reclen = dp->d_reclen;
++		/*
++		 * Walk every complete record in the window.  The bound used to be
++		 * `pos + sizeof(struct dirent) <= used`, which is the size of the
++		 * largest record HFS+ can emit (d_name[1024]) and therefore never a
++		 * lower bound: STD_DIRENT_LEN(namlen) is 792 + align4(namlen + 1),
++		 * i.e. 816-836 bytes for this directory.  The old bound stopped as
++		 * soon as less than 1048 bytes remained, leaving the last complete
++		 * record of every 8 KiB window unread, and because the next
++		 * VNOP_READDIR resumed from the offset the driver reported, that
++		 * name was never offered to the resolver at all -- and never
++		 * reported either.
++		 *
++		 * Instead, require only the fixed header, then trust (and
++		 * bounds-check) d_reclen.  A window that cannot be consumed whole
++		 * is a hard error: a partial candidate list is what silently
++		 * dropped a subcache, so it must not be mistaken for success.
++		 */
++		while (pos < used) {
++			struct dirent *dp;
++			uint32_t reclen;
+ 
+-			if (reclen == 0 || pos + reclen > used) {
+-				break;
++			if (used - pos < KEBAB_DSC_DIRENT_MIN) {
++				printf("KEBAB DSC: directory scan: %u trailing byte(s) at "
++				    "offset %u of %u are shorter than a dirent header; "
++				    "refusing a partial scan\n", used - pos, pos, used);
++				error = EIO;
++				goto out;
+ 			}
++			dp = (struct dirent *)(void *)(buf + pos);
++			reclen = dp->d_reclen;
++			if (reclen < KEBAB_DSC_DIRENT_MIN || reclen > used - pos) {
++				printf("KEBAB DSC: directory scan: record at offset %u "
++				    "claims d_reclen %u but %u byte(s) remain in the "
++				    "%u-byte window (readdir offset %lld); refusing a "
++				    "partial scan\n", pos, reclen, used - pos, used,
++				    (long long)offset);
++				error = EIO;
++				goto out;
++			}
++			/*
++			 * d_namlen is what the name copy trusts, so it has to fit
++			 * inside the record that was just validated.
++			 */
+ 			if (dp->d_ino != 0 && dp->d_namlen > 0 &&
+-			    dp->d_namlen < KEBAB_DSC_NAME_MAX) {
++			    dp->d_namlen < KEBAB_DSC_NAME_MAX &&
++			    (uint32_t)dp->d_namlen + 1 <=
++			    reclen - KEBAB_DSC_DIRENT_MIN) {
+ 				char name[KEBAB_DSC_NAME_MAX];
+ 
+ 				memcpy(name, dp->d_name, dp->d_namlen);
+@@ -516,11 +571,13 @@
+ 					count++;
+ 				}
+ 			}
++			entries++;
+ 			pos += reclen;
+ 		}
+ 	}
+ 
+ 	*candidate_count = count;
++	*entry_count = entries;
+ 	error = 0;
+ 
+ out:
+@@ -1269,7 +1326,10 @@
+ 	    plan->slide_mappings,
+ 	    (unsigned long long)KEBAB_DSC_REGION_BASE,
+ 	    (unsigned long long)KEBAB_DSC_REGION_END);
+-	printf("KEBAB DSC: resolved %u/%u subcaches by uuid; dylddata=%u dyldlinkedit=%u\n",
++	printf("KEBAB DSC: dir %u entries, %u cache names offered, %u resolved; "
++	    "resolved %u/%u subcaches by uuid; dylddata=%u dyldlinkedit=%u\n",
++	    plan->dir_entries, plan->names_offered,
++	    plan->file_count + (plan->symbols_present ? 1 : 0),
+ 	    plan->file_count > 0 ? plan->file_count - 1 : 0, plan->subcache_count,
+ 	    plan->dylddata_count, plan->dyldlinkedit_count);
+ 	if (plan->symbols_present) {
+@@ -1343,14 +1403,16 @@
+ {
+ 	printf("KEBAB DSC: plan %u files / %u mappings, 0x%llx mapped, extent "
+ 	    "0x%llx (end 0x%llx), base 0x%llx, slide 0x%llx, dynamic config "
+-	    "page %s\n",
++	    "page %s; dir %u entries, %u offered, %u resolved\n",
+ 	    plan->file_count, plan->total_mappings,
+ 	    (unsigned long long)plan->total_mapped,
+ 	    (unsigned long long)(plan->highest_end - plan->region_start),
+ 	    (unsigned long long)plan->highest_end,
+ 	    (unsigned long long)plan->region_start,
+ 	    (unsigned long long)plan->slide,
+-	    plan->dynamic_config_size != 0 ? "appended" : "absent");
++	    plan->dynamic_config_size != 0 ? "appended" : "absent",
++	    plan->dir_entries, plan->names_offered,
++	    plan->file_count + (plan->symbols_present ? 1 : 0));
+ }
+ 
+ static void
+@@ -1383,6 +1445,7 @@
+ 	struct kebab_dsc_subcache_entry *entries = NULL;
+ 	struct kebab_dsc_file *main_file;
+ 	uint32_t candidate_count = 0;
++	uint32_t entry_count = 0;
+ 	uint32_t i, j;
+ 	vnode_t main_vp = NULLVP;
+ 	off_t main_size = 0;
+@@ -1479,11 +1542,13 @@
+ 		goto out;
+ 	}
+ 	error = kebab_dsc_list_dir(dir, candidates, KEBAB_DSC_MAX_CANDIDATES,
+-	    &candidate_count);
++	    &candidate_count, &entry_count);
+ 	if (error != 0) {
+ 		printf("KEBAB DSC: reading directory %s failed (error %d)\n", dir, error);
+ 		goto out;
+ 	}
++	plan->dir_entries = entry_count;
++	plan->names_offered = candidate_count;
+ 	if (candidate_count == 0) {
+ 		printf("KEBAB DSC: directory %s has no %s* files\n", dir,
+ 		    KEBAB_DSC_PREFIX);

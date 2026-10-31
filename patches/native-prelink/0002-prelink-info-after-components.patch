@@ -1,0 +1,41 @@
+--- a/emit_prelink.py
++++ b/emit_prelink.py
+@@ -284,7 +284,11 @@
+                     '_PrelinkLinkKASLROffsets': struct.pack(f'<{len(offsets) + 1}I', len(offsets), *offsets),
+                     '_PrelinkKCID': hashlib.sha256(native_data + original_data).digest()[:16]}
+     xml = ET.tostring(to_xml(new_metadata), encoding='utf-8').replace(b' />', b'/>') + b'\0'
+-    info_va = align(max(s['va'] + s['size'] for s in native['segments'] if s['size']))
++    # XNU's non-fileset arm_vm_init uses the end of __PRELINK_INFO as
++    # vm_kernel_slid_top. Keep it above the appended components too, or
++    # ml_static_slide() zeros their segment/section addresses at boot.
++    info_va = align(max(s['va'] + s['size']
++                        for s in [*native['segments'], *new_segments] if s['size']))
+     append_segment('__PRELINK_INFO', info_va, xml, align(len(xml)), 3)
+     # Expand the existing command in verified Mach-O header padding; mapped
+     # payload offsets and all original kernel/component instruction bytes stay put.
+--- a/test_emit_prelink.py
++++ b/test_emit_prelink.py
+@@ -67,6 +67,23 @@
+ 
+ 
+ class EmitTests(unittest.TestCase):
++    def test_prelink_info_bounds_components_above_native_kernel(self):
++        native, original = images()
++        output, report = emit(native, original, ['test.component'], 0x200000)
++        segments = macho(output)['segments']
++        info = next(s for s in segments if s['name'] == '__PRELINK_INFO')
++        other_top = max(s['va'] + s['size'] for s in segments
++                        if s['size'] and s['name'] != '__PRELINK_INFO')
++        # arm_vm_init uses the end of __PRELINK_INFO as vm_kernel_slid_top.
++        # ml_static_slide returns zero for any address outside that range.
++        self.assertGreaterEqual(info['va'], other_top)
++        header = report['sparse_index']['headers'][0]
++        component = macho(output, backed_offset(segments, header, 32, len(output)))
++        for seg in component['segments']:
++            if seg['size']:
++                self.assertLess(seg['va'] + seg['size'] - 1,
++                                info['va'] + info['size'])
++
+     def test_explicit_early_security_initializer_metadata(self):
+         native, original = images()
+         output, report = emit(native, original, ['test.component'], 0x4000, {'test.component': 0x3000})

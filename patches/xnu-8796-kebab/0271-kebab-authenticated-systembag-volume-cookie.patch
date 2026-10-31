@@ -1,0 +1,116 @@
+--- a/bsd/kern/kebab_device_classbag_impl.h
++++ b/bsd/kern/kebab_device_classbag_impl.h
+@@ -107,3 +107,25 @@
+  if(!error)memcpy(output,kdb_record,4096);
+  lck_mtx_unlock(&kfk_lock);return error;
+ }
++
++/* AKS cookie is opaque to original APFS/userland. This backend authenticates
++ * the real bank ID, container and System IDs under the restored hardware Root.
++ * Only factory device context0 is implemented, not alternate users/passcodes. */
++int
++kebab_device_classbag_cookie(const uint8_t context[16],void *output,unsigned bytes)
++{
++ if(!kfk_context()||bytes!=34||!kfk_range(context,16)||!kfk_range(output,bytes)||
++     kfk_overlap(context,16,output,bytes))return (int)kIOReturnBadArgument;
++ unsigned diff=0;for(unsigned i=0;i<16;++i)diff|=context[i];
++ if(diff)return (int)kIOReturnNotPermitted;
++ static const uint8_t domain[]="UniXNU.kebab.system-bag-volume-cookie.v1";
++ uint8_t message[sizeof(domain)+64],result[34]={0x4b,1};
++ lck_mtx_lock(&kfk_lock);int error=(kfk_ready&&kdb_ready)?0:(int)kIOReturnNotReady;
++ if(!error){
++  memcpy(message,domain,sizeof(domain));memcpy(message+sizeof(domain),kdb_identifier,16);
++  memcpy(message+sizeof(domain)+16,context,16);memcpy(message+sizeof(domain)+32,kdb_record+24,32);
++  g_crypto_funcs->cchmac_fn(g_crypto_funcs->ccsha256_di,32,kfk_root_kek,sizeof(message),message,result+2);
++  memcpy(output,result,sizeof(result));
++ }
++ lck_mtx_unlock(&kfk_lock);kfk_wipe(message,sizeof(message));kfk_wipe(result,sizeof(result));return error;
++}
+--- a/bsd/kern/kebab_file_keys.h
++++ b/bsd/kern/kebab_file_keys.h
+@@ -33,6 +33,7 @@
+ int kebab_device_classbag_open(const uint8_t[16],const uint8_t[16],const void *,unsigned);
+ bool kebab_device_classbag_available(void);
+ int kebab_device_classbag_export(void *,unsigned);
++int kebab_device_classbag_cookie(const uint8_t[16],void *,unsigned);
+ int kebab_keybag_d_create(const uint8_t uuid[16], void *, unsigned);
+ int kebab_keybag_d_open(const uint8_t uuid[16], const void *, unsigned);
+ int kebab_file_key_new(const struct kebab_aks_credential *, uint32_t,
+--- /dev/null
++++ b/iokit/Kernel/arm/kebab_aks_cookie_impl.h
+@@ -0,0 +1,53 @@
++/* Included inside the native IOUserClient implementation. Original iOS16
++ * aks_params layout: LE32 count, then LE32 length + four-byte padded bytes. */
++static bool
++kuc_fields(const void *input,unsigned size,unsigned count,const uint8_t **fields,uint32_t *lengths)
++{
++ if(!input||size<4||count>3)return false;
++ const uint8_t *p=static_cast<const uint8_t *>(input);uint32_t actual;
++ memcpy(&actual,p,4);if(actual!=count)return false;
++ unsigned at=4;
++ for(unsigned i=0;i<count;++i){
++  if(at>size||size-at<4)return false;
++  uint32_t n;memcpy(&n,p+at,4);at+=4;
++  if(n>size-at||n>UINT32_MAX-3)return false;
++  fields[i]=p+at;lengths[i]=n;
++  unsigned padded=(n+3)&~3u;if(padded>size-at)return false;
++  for(unsigned j=n;j<padded;++j)if(p[at+j])return false;
++  at+=padded;
++ }
++ return at==size;
++}
++
++static IOReturn
++kuc_cookie_method(uint32_t selector,IOExternalMethodArguments *a)
++{
++ const uint8_t *fields[3]={};uint32_t lengths[3]={};
++ if(!a->scalarInput||a->scalarInputCount!=(selector==68?1u:2u)||a->scalarInput[0]||
++     (selector==65&&a->scalarInput[1])||a->scalarOutputCount||a->structureInputDescriptor||
++     !kuc_fields(a->structureInput,a->structureInputSize,selector==68?1:3,fields,lengths))return kIOReturnBadArgument;
++ uint8_t cookie[34]={};IOReturn result=kIOReturnBadArgument;
++ if(selector==68){
++  if(lengths[0]!=16||(a->structureOutputDescriptor&&a->structureOutput))return kIOReturnBadArgument;
++  size_t capacity=a->structureOutputDescriptor?a->structureOutputDescriptor->getLength():a->structureOutputSize;
++  if(capacity<34||(!a->structureOutputDescriptor&&!a->structureOutput))return kIOReturnNoSpace;
++  result=(IOReturn)kebab_device_classbag_cookie(fields[0],cookie,sizeof(cookie));
++  if(result==kIOReturnSuccess){
++   if(a->structureOutputDescriptor){
++    if(a->structureOutputDescriptor->writeBytes(0,cookie,sizeof(cookie))!=sizeof(cookie))result=kIOReturnIOError;
++    else a->structureOutputDescriptorSize=sizeof(cookie);
++   }else{memcpy(a->structureOutput,cookie,sizeof(cookie));a->structureOutputSize=sizeof(cookie);}
++  }
++ }else{
++  if(lengths[0]!=16||lengths[1]!=34||lengths[2]!=16||a->structureOutputSize||a->structureOutputDescriptor)return kIOReturnBadArgument;
++  if(memcmp(fields[0],kuc_data_uuid,16))return kIOReturnNotPermitted;
++  result=(IOReturn)kebab_device_classbag_cookie(fields[2],cookie,sizeof(cookie));
++  if(result==kIOReturnSuccess){
++   unsigned diff=0;for(unsigned i=0;i<sizeof(cookie);++i)diff|=cookie[i]^fields[1][i];
++   if(diff)result=kIOReturnNotPermitted;
++   else result=(IOReturn)kebab_volume_factory_activate(fields[0]);
++   IOLog("KEBAB AKS UC: authenticated system bag -> original Data factory C/D mapping result=%x\n",result);
++  }
++ }
++ bzero(cookie,sizeof(cookie));return result;
++}
+--- a/iokit/Kernel/arm/kebab_aks_userclient_impl.h
++++ b/iokit/Kernel/arm/kebab_aks_userclient_impl.h
+@@ -10,6 +10,8 @@
+  return kebab_file_keys_available()&&kebab_device_classbag_available()&&
+      kebab_volume_class_available(kuc_data_uuid,3)&&kebab_volume_class_available(kuc_data_uuid,4);
+ }
++
++#include "kebab_aks_cookie_impl.h"
+ 
+ class AppleKeyStoreUserClient final : public IOUserClient {
+  OSDeclareDefaultStructors(AppleKeyStoreUserClient)
+@@ -32,7 +34,9 @@
+   if(in||out||si||a->structureInputDescriptor||a->structureOutputSize||a->structureOutputDescriptor)result=kIOReturnBadArgument;
+   else{opened=true;result=kIOReturnSuccess;}
+  }else if(!opened)result=kIOReturnNotOpen;
+- else if(selector==14){
++ else if(selector==65||selector==68){
++  result=kuc_cookie_method(selector,a);
++ }else if(selector==14){
+   if(in||out!=1||!a->scalarOutput||si||a->structureInputDescriptor||a->structureOutputSize||a->structureOutputDescriptor)result=kIOReturnBadArgument;
+   else{a->scalarOutput[0]=0;a->scalarOutputCount=1;result=kIOReturnSuccess;}
+  }else if(selector==7){

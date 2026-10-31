@@ -1,0 +1,21 @@
+[2026-10-29T04:16:44] sending 'TOUCHSE' on COM7
+[   0.098] KEBAB TOUCH: TOUCHSE begin: pins, reset, se_init
+[   0.098] KEBAB TOUCH: GCC 0x52008 = 0x0e3c83c0: wrap1_s5 1 m_ahb 1 s_ahb 1
+[   0.098] KEBAB TOUCH: GCC halt m_ahb 0x00000000 s_ahb 0x80000002 wrap1_s5 0x00004220
+[   0.098] KEBAB TOUCH: qup13 pin 36: reading TLMM_CTL at 0x0f524000
+[   0.098] KEBAB TOUCH: qup13 pin 36: ctl 0x00000001 -> 0x00000004
+[   0.098] KEBAB TOUCH: pin 36 mux qup13, ctl 0x00000001 -> 0x00000004
+[   0.098] KEBAB TOUCH: qup13 pin 37: reading TLMM_CTL at 0x0f525000
+[   0.098] KEBAB TOUCH: qup13 pin 37: ctl 0x00000001 -> 0x00000004
+[   0.098] KEBAB TOUCH: pin 37 mux qup13, ctl 0x00000001 -> 0x00000004
+[   0.098] KEBAB TOUCH: reset pin 38 level 0: reading TLMM_CTL/TLMM_IO
+[   0.099] KEBAB TOUCH: reset ctl 0x00000001 io 0x00000000 -> level 0
+[   0.099] KEBAB TOUCH: reset pin 38 level 1: reading TLMM_CTL/TLMM_IO
+[   0.099] KEBAB TOUCH: reset ctl 0x00000200 io 0x00000000 -> level 1
+[   0.285] KEBAB TOUCH: reset pulse (mode 1), ctl 0x00000200 io 0x00000003
+[   0.285] KEBAB TOUCH: se_init: clear IRQs
+[   0.285] KEBAB TOUCH: se_init: force default, output ctrl
+[   0.285] KEBAB TOUCH: se_init: packing + byte granularity
+[   0.285] KEBAB TOUCH: se_init: clock select + SCL counters
+[   0.285] KEBAB TOUCH: TOUCHSE done; TOUCHPING can be sent
+[2026-10-29T04:16:47] done, 1090 bytes

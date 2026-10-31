@@ -1,0 +1,890 @@
+--- /dev/null
++++ b/bsd/dev/kebab_hid_bridge.h
+@@ -0,0 +1,29 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++#ifndef KEBAB_HID_BRIDGE_H
++#define KEBAB_HID_BRIDGE_H
++#include <sys/types.h>
++#define KEBAB_HID_KEYS 1u
++#define KEBAB_HID_TOUCH 2u
++#define KEBAB_HID_CONTACTS 10u
++struct kebab_hid_frame {
++    uint64_t timestamp_ns;
++    uint32_t keys; /* bit0 power, bit1 volume up, bit2 volume down */
++    uint16_t active;
++    uint16_t x[KEBAB_HID_CONTACTS], y[KEBAB_HID_CONTACTS];
++    uint8_t pressure[KEBAB_HID_CONTACTS];
++};
++struct kebab_hid_backend {
++    uint32_t ready, interval_us, contacts, error;
++    uint64_t produced, dropped;
++};
++#ifdef __cplusplus
++extern "C" {
++#endif
++void kebab_hid_backend_ready(unsigned role, unsigned interval_us, unsigned contacts);
++void kebab_hid_backend_sample(unsigned role, const struct kebab_hid_frame *frame);
++void kebab_hid_backend_error(unsigned role, unsigned error);
++int kebab_hid_backend_requested(unsigned role);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/bsd/dev/kebab_hid_queue.h
+@@ -0,0 +1,77 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/* Actual complete hardware snapshots; caller serializes every operation. */
++#ifndef KEBAB_HID_QUEUE_H
++#define KEBAB_HID_QUEUE_H
++#ifdef KEBAB_HID_KERNEL
++#include <libkern/libkern.h>
++#else
++#include <stdint.h>
++#include <string.h>
++#endif
++#include "kebab_hid_bridge.h"
++#define KEBAB_HID_QUEUE_LENGTH 64u
++struct kebab_hid_queue {
++    struct kebab_hid_frame frames[KEBAB_HID_QUEUE_LENGTH], latest;
++    uint64_t produced, dropped;
++    uintptr_t owner;
++    unsigned head, count, latest_valid;
++};
++static inline int
++kebab_hid_frame_valid(unsigned role, const struct kebab_hid_frame *f)
++{
++    if (!f || !f->timestamp_ns || (role!=KEBAB_HID_KEYS && role!=KEBAB_HID_TOUCH)) return 0;
++    if (role==KEBAB_HID_KEYS) return !(f->keys & ~7u) && f->active==0;
++    if (f->keys || (f->active & ~1023u)) return 0;
++    for (unsigned i=0;i<KEBAB_HID_CONTACTS;i++)
++        if ((f->active & (1u<<i)) && (f->x[i]>=1125 || f->y[i]>=2436)) return 0;
++    return 1;
++}
++static inline int
++kebab_hid_frame_equal(unsigned role, const struct kebab_hid_frame *a,
++    const struct kebab_hid_frame *b)
++{
++    if (role==KEBAB_HID_KEYS) return a->keys==b->keys;
++    if (a->active!=b->active) return 0;
++    for (unsigned i=0;i<KEBAB_HID_CONTACTS;i++)
++        if ((a->active & (1u<<i)) && (a->x[i]!=b->x[i] || a->y[i]!=b->y[i] || a->pressure[i]!=b->pressure[i])) return 0;
++    return 1;
++}
++/* Returns 0 for malformed/rollback; 1 for a valid unchanged snapshot; 2 queued.
++ * Overflow drops are explicit and never count as successful HID delivery. */
++static inline int
++kebab_hid_queue_push(struct kebab_hid_queue *q, unsigned role,
++    const struct kebab_hid_frame *f)
++{
++    if (!kebab_hid_frame_valid(role,f) || (q->latest_valid && f->timestamp_ns<q->latest.timestamp_ns)) return 0;
++    int changed=!q->latest_valid || !kebab_hid_frame_equal(role,f,&q->latest);
++    q->latest=*f; q->latest_valid=1;
++    if (!changed) return 1;
++    q->produced++;
++    if (q->count==KEBAB_HID_QUEUE_LENGTH) {
++        q->head=(q->head+1)%KEBAB_HID_QUEUE_LENGTH; q->count--; q->dropped++;
++    }
++    unsigned at=(q->head+q->count)%KEBAB_HID_QUEUE_LENGTH;
++    q->frames[at]=*f; q->count++; return 2;
++}
++static inline int
++kebab_hid_queue_claim(struct kebab_hid_queue *q, uintptr_t owner)
++{
++    if (!owner || q->owner) return 0;
++    q->owner=owner; q->head=q->count=0;
++    if (q->latest_valid) {q->frames[0]=q->latest; q->count=1;}
++    return 1;
++}
++static inline int
++kebab_hid_queue_pop(struct kebab_hid_queue *q, uintptr_t owner,
++    struct kebab_hid_frame *out)
++{
++    if (!out || !owner || owner!=q->owner || !q->count) return 0;
++    *out=q->frames[q->head];q->head=(q->head+1)%KEBAB_HID_QUEUE_LENGTH;q->count--;return 1;
++}
++static inline int
++kebab_hid_queue_release(struct kebab_hid_queue *q, uintptr_t owner)
++{
++    if (!owner || owner!=q->owner) return 0;
++    q->owner=0;q->head=q->count=0;return 1;
++}
++#endif
+--- /dev/null
++++ b/bsd/dev/kebab_hid_reports.h
+@@ -0,0 +1,58 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++#ifndef KEBAB_HID_REPORTS_H
++#define KEBAB_HID_REPORTS_H
++#include "kebab_hid_queue.h"
++#define KEBAB_HID_KEYS_REPORT 2u
++#define KEBAB_HID_TOUCH_REPORT 3u
++#define KEBAB_HID_CONTACT_FEATURE 4u
++#define KEBAB_HID_TOUCH_BYTES (1u+7u*KEBAB_HID_CONTACTS+1u)
++static const uint8_t kebab_hid_keys_descriptor[]={
++    0x05,0x0c,0x09,0x01,0xa1,0x01,0x85,KEBAB_HID_KEYS_REPORT,
++    0x09,0x30,0x09,0xe9,0x09,0xea,0x15,0x00,0x25,0x01,
++    0x75,0x01,0x95,0x03,0x81,0x02,0x75,0x05,0x95,0x01,0x81,0x03,0xc0
++};
++#define KEBAB_HID_FINGER \
++    0x09,0x22,0xa1,0x02, \
++    0x09,0x42,0x15,0x00,0x25,0x01,0x75,0x01,0x95,0x01,0x81,0x02, \
++    0x09,0x47,0x81,0x02,0x75,0x06,0x95,0x01,0x81,0x03, \
++    0x09,0x51,0x15,0x00,0x25,0x09,0x75,0x08,0x95,0x01,0x81,0x02, \
++    0x05,0x01,0x09,0x30,0x15,0x00,0x26,0x64,0x04,0x75,0x10,0x95,0x01,0x81,0x02, \
++    0x09,0x31,0x26,0x83,0x09,0x81,0x02, \
++    0x05,0x0d,0x09,0x30,0x15,0x00,0x26,0xff,0x00,0x75,0x08,0x95,0x01,0x81,0x02,0xc0,
++static const uint8_t kebab_hid_touch_descriptor[]={
++    0x05,0x0d,0x09,0x04,0xa1,0x01,0x85,KEBAB_HID_TOUCH_REPORT,
++    KEBAB_HID_FINGER KEBAB_HID_FINGER KEBAB_HID_FINGER KEBAB_HID_FINGER KEBAB_HID_FINGER
++    KEBAB_HID_FINGER KEBAB_HID_FINGER KEBAB_HID_FINGER KEBAB_HID_FINGER KEBAB_HID_FINGER
++    0x09,0x54,0x15,0x00,0x25,0x0a,0x75,0x08,0x95,0x01,0x81,0x02,
++    0x85,KEBAB_HID_CONTACT_FEATURE,0x09,0x55,0x15,0x00,0x25,0x0a,
++    0x75,0x08,0x95,0x01,0xb1,0x02,0xc0
++};
++#undef KEBAB_HID_FINGER
++/* prev is the last successfully submitted physical snapshot. Preserve IDs;
++ * vanished contacts get a real lift at their last known coordinates. */
++static inline unsigned
++kebab_hid_encode(unsigned role, const struct kebab_hid_frame *f,
++    const struct kebab_hid_frame *prev, uint8_t *out, unsigned cap)
++{
++    if (!out || !kebab_hid_frame_valid(role,f) || (prev && !kebab_hid_frame_valid(role,prev))) return 0;
++    if (role==KEBAB_HID_KEYS) {
++        if (cap<2) return 0;out[0]=KEBAB_HID_KEYS_REPORT;out[1]=(uint8_t)f->keys;return 2;
++    }
++    if (cap<KEBAB_HID_TOUCH_BYTES) return 0;
++    memset(out,0,KEBAB_HID_TOUCH_BYTES);out[0]=KEBAB_HID_TOUCH_REPORT;
++    unsigned slot=0;
++    uint16_t was=prev?prev->active:0;
++    for (unsigned id=0;id<KEBAB_HID_CONTACTS;id++) {
++        int down=!!(f->active&(1u<<id));
++        if (!down && !(was&(1u<<id))) continue;
++        const struct kebab_hid_frame *p=down?f:prev;
++        uint8_t *dst=out+1+7*slot++;
++        dst[0]=down?3:2;dst[1]=(uint8_t)id;
++        dst[2]=(uint8_t)p->x[id];dst[3]=(uint8_t)(p->x[id]>>8);
++        dst[4]=(uint8_t)p->y[id];dst[5]=(uint8_t)(p->y[id]>>8);
++        dst[6]=down?p->pressure[id]:0;
++    }
++    out[KEBAB_HID_TOUCH_BYTES-1]=(uint8_t)slot;
++    return KEBAB_HID_TOUCH_BYTES;
++}
++#endif
+--- a/bsd/dev/kebab_keys.c
++++ b/bsd/dev/kebab_keys.c
+@@ -47,6 +47,7 @@
+ 
+ #define KEBAB_KEYS_KERNEL 1
+ #include "kebab_keys_core.h"
++#include "kebab_hid_bridge.h"
+ 
+ /*
+  * bsd/dev/kebab_spmi.c: read 0x0810, 0x0c510, 0x0c610 and 0x0c504 through the
+@@ -370,6 +371,7 @@
+ 	unsigned k;
+ 
+ 	if (kebab_spmi_keys_sample(raw) != 0) {
++		kebab_hid_backend_error(KEBAB_HID_KEYS, EIO);
+ 		kk.errors++;
+ 		if (kk.errors == 1 ||
+ 		    (kk.errors - kk.last_error_report) >= 250) {
+@@ -419,6 +421,15 @@
+ 
+ 	now_ns = kk_now_ns();
+ 	count = kebab_keys_feed(&kk.keys, &sample, now_ns, events);
++	if (status == KEBAB_KEYS_SAMPLE_OK) {
++		struct kebab_hid_frame frame = {0};
++		frame.timestamp_ns = now_ns;
++		for (unsigned key = 0; key < KEBAB_KEYS_KEY_COUNT; key++)
++			if (kebab_keys_pressed(&kk.keys, key)) frame.keys |= 1u << key;
++		kebab_hid_backend_sample(KEBAB_HID_KEYS, &frame);
++	} else {
++		kebab_hid_backend_error(KEBAB_HID_KEYS, EIO);
++	}
+ 
+ 	for (i = 0; i < count; i++) {
+ 		printf("KEBAB KEYS: %s %s raw pon=0x%02x gpio6=0x%02x "
+@@ -481,8 +492,9 @@
+ 	const char *up_text;
+ 	const char *down_text;
+ 
+-	if (!PE_parse_boot_argn("kebab_keys", &enabled, sizeof(enabled)) ||
+-	    enabled == 0) {
++	if (!PE_parse_boot_argn("kebab_keys", &enabled, sizeof(enabled)))
++		enabled = kebab_hid_backend_requested(KEBAB_HID_KEYS);
++	if (enabled == 0) {
+ 		return 0;
+ 	}
+ 	kk.poll_ms = 16;
+@@ -528,7 +540,8 @@
+ 	 * inactive input that reads low would otherwise become a permanent
+ 	 * press of an active-low key.
+ 	 */
+-	if (kebab_spmi_keys_config(gpio6, gpio7) == 0) {
++	int hid_config_status = kebab_spmi_keys_config(gpio6, gpio7);
++	if (hid_config_status == 0) {
+ 		up_ok = (gpio6[0] & 0x03) == 0 && (gpio6[1] & 0x07) < 4 &&
+ 		    (gpio6[2] & 0x80) != 0;
+ 		down_ok = (gpio7[0] & 0x03) == 0 && (gpio7[1] & 0x07) < 4 &&
+@@ -602,6 +615,12 @@
+ 	 * leave a device that can be opened and then never receives a record.
+ 	 */
+ 	kk.polling = true;
++	/* Preserve raw diagnostic policy, but do not advertise all HID keys
++	 * when their input configuration has not actually been confirmed. */
++	if (hid_config_status == 0 && up_ok && down_ok)
++		kebab_hid_backend_ready(KEBAB_HID_KEYS, kk.poll_ms * 1000u, 0);
++	else
++		kebab_hid_backend_error(KEBAB_HID_KEYS, ENOTSUP);
+ 	printf("KEBAB KEYS: node publication deferred until devfs is ready\n");
+ 	printf("KEBAB KEYS: polling every %u ms%s\n", kk.poll_ms,
+ 	    kk.verbose ? ", raw changes shown" : "");
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -160,6 +160,7 @@
+  * decoded.
+  */
+ #include "kebab_touch_tcm.h"
++#include "kebab_hid_bridge.h"
+ #include "kebab_geni.h"
+ #define KT_RAIL_SETTLE_MS 15
+ 
+@@ -1305,6 +1306,22 @@
+ 
+ 	nev = kebab_tcm_track(&kt.tracker, &report, events,
+ 	    2 * KEBAB_TCM_MAX_OBJECTS);
++	/* A separate complete snapshot, not the diagnostic character queue.
++	 * No IOKit calls occur while the GENI transaction is held. */
++	if (kt.app_valid && kt.app.status == 0) {
++		struct kebab_hid_frame frame = {0};
++		frame.timestamp_ns = now_ns; frame.active = kt.tracker.active;
++		for (unsigned id = 0; id < KEBAB_TCM_MAX_OBJECTS; id++) {
++			if (!(frame.active & (1u << id))) continue;
++			kebab_tcm_point point = kebab_tcm_transform(kt.tracker.last_x[id],
++			    kt.tracker.last_y[id], kt.max_x, kt.max_y);
++			frame.x[id] = (uint16_t)point.logical_x;
++			frame.y[id] = (uint16_t)point.logical_y;
++			for (unsigned object = 0; object < report.objects; object++)
++				if (report.object[object].index == id) frame.pressure[id] = report.object[object].z;
++		}
++		kebab_hid_backend_sample(KEBAB_HID_TOUCH, &frame);
++	}
+ 	for (i = 0; i < nev; i++) {
+ 		const kebab_tcm_event *ev = &events[i];
+ 		struct kt_point p;
+@@ -1449,6 +1466,7 @@
+ 		int n = kt_poll_once();
+ 		uint32_t errors = n < 0 ? kebab_geni_record_poll_error() : 0;
+ 		kebab_geni_transaction_unlock();
++		kebab_hid_backend_error(KEBAB_HID_TOUCH, n < 0 ? EIO : 0);
+ 
+ 		if (n < 0) {
+ 			if (errors == 1 || (errors % 500u) == 0) {
+@@ -1484,8 +1502,9 @@
+ 
+ 	thread_t thread;
+ 
+-	if (!PE_parse_boot_argn("kebab_touch", &enabled, sizeof(enabled)) ||
+-	    enabled == 0) {
++	if (!PE_parse_boot_argn("kebab_touch", &enabled, sizeof(enabled)))
++		enabled = kebab_hid_backend_requested(KEBAB_HID_TOUCH);
++	if (enabled == 0) {
+ 		return 0;
+ 	}
+ 	kt.raw = PE_parse_boot_argn("kebab_touch_raw", &value, sizeof(value)) &&
+@@ -1512,6 +1531,8 @@
+ 	}
+ 	if (PE_parse_boot_argn("kebab_touch_power", &value, sizeof(value))) {
+ 		power = value;
++	} else if (kebab_hid_backend_requested(KEBAB_HID_TOUCH)) {
++		power = 1;
+ 	}
+ 
+ 	kt.dump = PE_parse_boot_argn("kebab_touch_dump", &value,
+@@ -1644,6 +1665,9 @@
+ 		return -1;
+ 	}
+ 	thread_deallocate(thread);
++	if (kt.app_valid && kt.app.status == 0 && kt.max_x && kt.max_y &&
++	    kt.max_objects && kt.max_objects <= KEBAB_TCM_MAX_OBJECTS)
++		kebab_hid_backend_ready(KEBAB_HID_TOUCH, 5000, kt.max_objects);
+ 
+ 	/*
+ 	 * Only publish the node once there is a thread that can fill it. Code
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -33,4 +33,6 @@
+ iokit/Kernel/arm/KebabDriverDiagnostics.cpp	optional iokitcpp
+ 
+ iokit/Kernel/arm/KebabGeni.cpp	optional iokitcpp
++iokit/Kernel/arm/KebabHIDInput.cpp	optional iokitcpp
++iokit/Kernel/arm/KebabOriginalHIDBindings.cpp	optional iokitcpp
+ iokit/Kernel/arm/KebabVolumeLookup.cpp	optional iokitcpp
+--- a/iokit/Kernel/arm/KebabDriverDiagnostics.cpp
++++ b/iokit/Kernel/arm/KebabDriverDiagnostics.cpp
+@@ -11,6 +11,7 @@
+ extern "C" bool kebab_cpu_irq_snapshot(unsigned int, uint64_t *, uint64_t *);
+ extern "C" boolean_t kebab_cpu_signal_is_enabled(unsigned int);
+ extern "C" boot_args *BootArgs;
++extern "C" void kebab_hid_input_report(void);
+ 
+ struct KebabDriverManifestEntry {
+ 	const char *group, *service, *scope;
+@@ -74,6 +75,7 @@
+ 			    entry.group, entry.service, entry.scope);
+ 		}
+ 	}
++	kebab_hid_input_report();
+ 	IOLog("KEBAB DRV: end; matched service does not certify user ABI or hardware capability\n");
+ }
+ #endif /* KEBAB */
+--- a/iokit/Kernel/arm/KebabDriverManifest.h
++++ b/iokit/Kernel/arm/KebabDriverManifest.h
+@@ -16,6 +16,8 @@
+  X("touch", "KebabTouch", "typed TCM state; C polling lifetime; no HID") \
+  X("display", "AppleCLCD", "CPU framebuffer; no GPU/vsync qualification") \
+  X("surface", "IOCoreSurfaceRoot", "compatibility selectors; private ABI incomplete") \
++ X("hid-transport", "KebabHIDTransport", "actual backend-ready transport; no synthetic input") \
++ X("hid-device", "KebabHIDDevice", "original IOHIDDevice subclass; physical reports only") \
+  X("hid-resource", "IOHIDResource", "original HIDFamily registry match; not input qualification") \
+  X("hid-interface", "IOHIDInterface", "actual original interfaces; no invented usage/transport") \
+  X("hid-event-service", "IOHIDEventService", "actual published event services; event consumption separate") \
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabHIDInput.cpp
+@@ -0,0 +1,334 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/* Hardware snapshots -> unchanged 20H392 HID parser. No synthetic keys. */
++#include "KebabOriginalHIDDevice.h"
++#include <IOKit/IOBufferMemoryDescriptor.h>
++#include <IOKit/IOLib.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <libkern/c++/OSBoolean.h>
++#include <libkern/c++/OSNumber.h>
++#include <libkern/c++/OSString.h>
++#include <kern/clock.h>
++#include <kern/locks.h>
++#include <pexpert/pexpert.h>
++#include <sys/errno.h>
++#define KEBAB_HID_KERNEL 1
++#include "../../../bsd/dev/kebab_hid_reports.h"
++
++static LCK_GRP_DECLARE(khid_group,"kebab-hid");
++static LCK_MTX_DECLARE(khid_lock,&khid_group);
++struct KebabHIDChannel {
++    kebab_hid_queue queue;
++    kebab_hid_backend backend;
++    uint64_t sent;
++    uint32_t result;
++};
++static KebabHIDChannel channels[3];
++static bool validRole(unsigned role) {return role==KEBAB_HID_KEYS || role==KEBAB_HID_TOUCH;}
++extern "C" int
++kebab_hid_backend_requested(unsigned role)
++{
++    if (!validRole(role)) return 0;
++    uint32_t legacy=0;
++    bool specified=PE_parse_boot_argn(role==KEBAB_HID_KEYS?"kebab_keys":"kebab_touch",&legacy,sizeof(legacy));
++    if (specified && legacy==0) return 0;
++    if (specified && legacy==2) return 1;
++    uint32_t mask=0;
++    return PE_get_default("kebab,hid-input",&mask,sizeof(mask)) && !(mask&~3u) &&
++        (mask&(1u<<(role-1)));
++}
++
++extern "C" void
++kebab_hid_backend_ready(unsigned role,unsigned interval,unsigned contacts)
++{
++    if (!validRole(role) || interval<1000 || interval>1000000 ||
++        (role==KEBAB_HID_TOUCH && (!contacts || contacts>KEBAB_HID_CONTACTS))) return;
++    lck_mtx_lock(&khid_lock);
++    channels[role].backend.ready=1;
++    channels[role].backend.interval_us=interval;
++    channels[role].backend.contacts=contacts;
++    channels[role].backend.error=0;
++    lck_mtx_unlock(&khid_lock);
++}
++extern "C" void
++kebab_hid_backend_error(unsigned role,unsigned error)
++{
++    if (!validRole(role)) return;
++    lck_mtx_lock(&khid_lock);
++    if (error || channels[role].backend.error==EIO) channels[role].backend.error=error;
++    lck_mtx_unlock(&khid_lock);
++}
++extern "C" void
++kebab_hid_backend_sample(unsigned role,const kebab_hid_frame *frame)
++{
++    if (!validRole(role)) return;
++    lck_mtx_lock(&khid_lock);
++    KebabHIDChannel &c=channels[role];
++    if ((role==KEBAB_HID_TOUCH && c.backend.ready && frame &&
++        (frame->active & ~((1u<<c.backend.contacts)-1))) ||
++        !kebab_hid_queue_push(&c.queue,role,frame)) c.backend.error=EINVAL;
++    else if (c.backend.ready) c.backend.error=0;
++    lck_mtx_unlock(&khid_lock);
++}
++static kebab_hid_backend
++backend(unsigned role)
++{
++    kebab_hid_backend status={};
++    lck_mtx_lock(&khid_lock);
++    if (validRole(role)) {
++        status=channels[role].backend;
++        status.produced=channels[role].queue.produced;
++        status.dropped=channels[role].queue.dropped;
++    }
++    lck_mtx_unlock(&khid_lock);return status;
++}
++static bool claim(unsigned role,uintptr_t owner)
++{
++    lck_mtx_lock(&khid_lock);
++    bool ok=validRole(role) && channels[role].backend.ready && !channels[role].backend.error &&
++        kebab_hid_queue_claim(&channels[role].queue,owner);
++    lck_mtx_unlock(&khid_lock);return ok;
++}
++static void unclaim(unsigned role,uintptr_t owner)
++{
++    lck_mtx_lock(&khid_lock);
++    if (validRole(role)) (void)kebab_hid_queue_release(&channels[role].queue,owner);
++    lck_mtx_unlock(&khid_lock);
++}
++static bool pop(unsigned role,uintptr_t owner,kebab_hid_frame *out)
++{
++    lck_mtx_lock(&khid_lock);
++    bool ok=validRole(role) && !channels[role].backend.error &&
++        kebab_hid_queue_pop(&channels[role].queue,owner,out);
++    lck_mtx_unlock(&khid_lock);return ok;
++}
++static bool latest(unsigned role,uintptr_t owner,kebab_hid_frame *out)
++{
++    lck_mtx_lock(&khid_lock);
++    bool ok=validRole(role) && channels[role].backend.ready && !channels[role].backend.error &&
++        channels[role].queue.owner==owner && channels[role].queue.latest_valid;
++    if (ok) *out=channels[role].queue.latest;
++    lck_mtx_unlock(&khid_lock);return ok;
++}
++extern "C" void kebab_hid_input_report(void);
++extern "C" void
++kebab_hid_input_report(void)
++{
++    /* Copy status only: never place the two complete queues on kernel stack. */
++    for (unsigned role=1;role<=2;role++) {
++        kebab_hid_backend state={};uint64_t sent;uint32_t result;
++        lck_mtx_lock(&khid_lock);
++        state=channels[role].backend;state.produced=channels[role].queue.produced;
++        state.dropped=channels[role].queue.dropped;sent=channels[role].sent;result=channels[role].result;
++        lck_mtx_unlock(&khid_lock);
++        IOLog("KEBAB HID: role=%u ready=%u interval=%u contacts=%u backend-error=%u produced=%llu dropped=%llu sent=%llu result=0x%x\n",
++            role,state.ready,state.interval_us,state.contacts,state.error,state.produced,state.dropped,sent,result);
++    }
++}
++
++class KebabHIDTransport : public IOService {
++    OSDeclareDefaultStructors(KebabHIDTransport);
++    IOWorkLoop *loop=nullptr;
++    IOTimerEventSource *timer=nullptr;
++    unsigned role=0,attempts=0;
++    bool added=false,stopping=true,published=false;
++    static void tick(OSObject *,IOTimerEventSource *);
++    static IOReturn stopAction(OSObject *,void *,void *,void *,void *);
++    void stopTimer();
++public:
++    bool start(IOService *) override;
++    void stop(IOService *) override;
++    void free() override;
++};
++OSDefineMetaClassAndStructors(KebabHIDTransport,IOService);
++bool KebabHIDTransport::start(IOService *provider)
++{
++    OSNumber *number=OSDynamicCast(OSNumber,getProperty("kebab,hid-role"));
++    role=number?number->unsigned32BitValue():0;
++    if (!provider || !validRole(role) ||
++        !provider->metaCast(role==KEBAB_HID_KEYS?"KebabPmicKeys":"KebabTouch")) return false;
++    if (!kebab_hid_backend_requested(role)) return false;
++    if (!IOService::start(provider)) return false;
++    loop=IOWorkLoop::workLoop();
++    timer=IOTimerEventSource::timerEventSource(this,tick);
++    if (!loop || !timer || loop->addEventSource(timer)!=kIOReturnSuccess) {
++        stopTimer();IOService::stop(provider);return false;
++    }
++    added=true;stopping=false;timer->setTimeoutMS(50);
++    IOLog("KEBAB HID: transport role=%u waiting for actual backend initialization\n",role);
++    return true;
++}
++void KebabHIDTransport::tick(OSObject *owner,IOTimerEventSource *source)
++{
++    KebabHIDTransport *self=static_cast<KebabHIDTransport *>(owner);
++    if (self->stopping) return;
++    kebab_hid_backend status=backend(self->role);
++    if (status.ready && !status.error) {
++        self->published=true;
++        self->setProperty("kebab,hid-role",self->role,32);
++        self->setProperty("BackendReady",true);
++        IOLog("KEBAB HID: transport role=%u actual backend ready; publish original HID device matching\n",self->role);
++        self->registerService();return;
++    }
++    if (++self->attempts>=2400) {
++        self->setProperty("BackendReady",false);
++        IOLog("KEBAB HID: transport role=%u unavailable after120s ready=%u error=%u; no HID device published\n",self->role,status.ready,status.error);return;
++    }
++    source->setTimeoutMS(50);
++}
++IOReturn KebabHIDTransport::stopAction(OSObject *owner,void *,void *,void *,void *)
++{
++    KebabHIDTransport *self=static_cast<KebabHIDTransport *>(owner);self->stopping=true;
++    if (self->timer) {
++        self->timer->cancelTimeout();
++        if (self->added) {self->loop->removeEventSource(self->timer);self->added=false;}
++    }
++    return kIOReturnSuccess;
++}
++void KebabHIDTransport::stopTimer()
++{
++    if (loop) loop->runAction(stopAction,this);else stopAction(this,nullptr,nullptr,nullptr,nullptr);
++}
++void KebabHIDTransport::stop(IOService *provider) {stopTimer();IOService::stop(provider);}
++void KebabHIDTransport::free() {stopTimer();OSSafeReleaseNULL(timer);OSSafeReleaseNULL(loop);IOService::free();}
++
++class KebabHIDDevice : public IOHIDDevice {
++    OSDeclareDefaultStructors(KebabHIDDevice);
++    IOWorkLoop *loop=nullptr;
++    IOTimerEventSource *timer=nullptr;
++    unsigned role=0,interval=0,contacts=0;
++    bool added=false,claimed=false,originalStarted=false,stopping=true,faulted=false;
++    kebab_hid_frame previous={};
++    bool havePrevious=false;
++    uint64_t sent=0,lastDropped=0;
++    static void tick(OSObject *,IOTimerEventSource *);
++    static IOReturn stopAction(OSObject *,void *,void *,void *,void *);
++    void stopInput();
++public:
++    bool start(IOService *) override;
++    void stop(IOService *) override;
++    void free() override;
++    IOWorkLoop *getWorkLoop() const override {return loop;}
++    OSString *newTransportString() const override {return OSString::withCString(role==KEBAB_HID_KEYS?"SPMI":"I2C");}
++    OSString *newManufacturerString() const override {return OSString::withCString(role==KEBAB_HID_KEYS?"Qualcomm":"Synaptics");}
++    OSString *newProductString() const override {return OSString::withCString(role==KEBAB_HID_KEYS?"PM8150 physical keys":"S3908 touchscreen");}
++    OSNumber *newReportIntervalNumber() const override {return OSNumber::withNumber(interval,32);}
++    IOReturn newReportDescriptor(IOMemoryDescriptor **) const override;
++    IOReturn getReport(IOMemoryDescriptor *,IOHIDReportType,IOOptionBits) override;
++};
++OSDefineMetaClassAndStructors(KebabHIDDevice,IOHIDDevice);
++IOReturn KebabHIDDevice::newReportDescriptor(IOMemoryDescriptor **out) const
++{
++    if (!out) return kIOReturnBadArgument;
++    *out=nullptr;
++    if (!validRole(role)) return kIOReturnNotReady;
++    const uint8_t *bytes=role==KEBAB_HID_KEYS?kebab_hid_keys_descriptor:kebab_hid_touch_descriptor;
++    unsigned n=role==KEBAB_HID_KEYS?sizeof(kebab_hid_keys_descriptor):sizeof(kebab_hid_touch_descriptor);
++    *out=IOBufferMemoryDescriptor::withBytes(bytes,n,kIODirectionNone);
++    return *out?kIOReturnSuccess:kIOReturnNoMemory;
++}
++bool KebabHIDDevice::start(IOService *provider)
++{
++    if (!provider || !provider->metaCast("KebabHIDTransport")) return false;
++    OSNumber *number=OSDynamicCast(OSNumber,provider->getProperty("kebab,hid-role"));
++    role=number?number->unsigned32BitValue():0;
++    kebab_hid_backend status=backend(role);
++    if (!validRole(role) || !status.ready || status.error) return false;
++    interval=status.interval_us;contacts=status.contacts;
++    loop=IOWorkLoop::workLoop();timer=IOTimerEventSource::timerEventSource(this,tick);
++    if (!loop || !timer || loop->addEventSource(timer)!=kIOReturnSuccess) {stopInput();return false;}
++    added=true;
++    if (!claim(role,(uintptr_t)this)) {stopInput();return false;}
++    claimed=true;
++    setProperty("Built-In",true);
++    if (role==KEBAB_HID_TOUCH) {
++        setProperty("DisplayIntegrated",true);setProperty("DigitizerCollectionDispatch",true);
++    }
++    __atomic_store_n(&stopping,false,__ATOMIC_RELEASE);
++    /* Original start invokes virtual stop on partial failure. Arm ownership
++     * before entering it so that callback also cleans original event sources. */
++    originalStarted=true;
++    if (!IOHIDDevice::start(provider)) {
++        stopInput();
++        if (originalStarted) {IOHIDDevice::stop(provider);originalStarted=false;}
++        return false;
++    }
++    IOLog("KEBAB HID: original IOHIDDevice started role=%u interval=%u contacts=%u; real snapshots only\n",role,interval,contacts);
++    timer->setTimeoutUS(interval);return true;
++}
++IOReturn KebabHIDDevice::getReport(IOMemoryDescriptor *memory,IOHIDReportType type,IOOptionBits options)
++{
++    if (!memory) return kIOReturnBadArgument;
++    if (__atomic_load_n(&stopping,__ATOMIC_ACQUIRE)) return kIOReturnNoDevice;
++    uint8_t report[KEBAB_HID_TOUCH_BYTES]={};unsigned n=0,id=options&255;
++    if (role==KEBAB_HID_TOUCH && type==kIOHIDReportTypeFeature && id==KEBAB_HID_CONTACT_FEATURE) {
++        report[0]=KEBAB_HID_CONTACT_FEATURE;report[1]=(uint8_t)contacts;n=2;
++    } else if (type==kIOHIDReportTypeInput && id==(role==KEBAB_HID_KEYS?KEBAB_HID_KEYS_REPORT:KEBAB_HID_TOUCH_REPORT)) {
++        kebab_hid_frame frame={};
++        if (!latest(role,(uintptr_t)this,&frame)) return kIOReturnNotReady;
++        n=kebab_hid_encode(role,&frame,nullptr,report,sizeof(report));
++    } else return kIOReturnUnsupported;
++    if (!n) return kIOReturnBadArgument;
++    if (memory->getLength()<n) return kIOReturnNoSpace;
++    return memory->writeBytes(0,report,n)==n?kIOReturnSuccess:kIOReturnVMError;
++}
++void KebabHIDDevice::tick(OSObject *owner,IOTimerEventSource *source)
++{
++    KebabHIDDevice *self=static_cast<KebabHIDDevice *>(owner);
++    bool stopped=__atomic_load_n(&self->stopping,__ATOMIC_ACQUIRE);
++    if (stopped || self->faulted) return;
++    kebab_hid_backend state=backend(self->role);
++    if (state.dropped!=self->lastDropped) {
++        IOLog("KEBAB HID: role=%u queue loss=%llu; input history not certified\n",self->role,state.dropped);
++        self->lastDropped=state.dropped;
++    }
++    unsigned consumed=0;
++    for (;consumed<8;consumed++) {
++        kebab_hid_frame frame={};
++        if (!pop(self->role,(uintptr_t)self,&frame)) break;
++        uint8_t report[KEBAB_HID_TOUCH_BYTES]={};
++        unsigned n=kebab_hid_encode(self->role,&frame,self->havePrevious?&self->previous:nullptr,report,sizeof(report));
++        IOBufferMemoryDescriptor *memory=n?IOBufferMemoryDescriptor::withBytes(report,n,kIODirectionNone):nullptr;
++        uint64_t timestamp=0;nanoseconds_to_absolutetime(frame.timestamp_ns,&timestamp);
++        IOReturn result=memory?self->handleReportWithTime(timestamp,memory,kIOHIDReportTypeInput,0):(n?kIOReturnNoMemory:kIOReturnBadArgument);
++        OSSafeReleaseNULL(memory);
++        lck_mtx_lock(&khid_lock);
++        channels[self->role].result=result;
++        if (result==kIOReturnSuccess) channels[self->role].sent++;
++        lck_mtx_unlock(&khid_lock);
++        if (result!=kIOReturnSuccess) {
++            self->faulted=true;
++            self->setProperty("InputDispatchError",result,32);
++            IOLog("KEBAB HID: role=%u original report failed=0x%x time=%llu; no ambiguous automatic retry\n",self->role,result,frame.timestamp_ns);return;
++        }
++        self->previous=frame;self->havePrevious=true;self->sent++;
++        if (self->sent<=16 || !(self->sent&(self->sent-1)))
++            IOLog("KEBAB HID: report role=%u count=%llu time=%llu keys=%u active=0x%x original-result=0\n",self->role,self->sent,frame.timestamp_ns,frame.keys,frame.active);
++    }
++    source->setTimeoutUS(consumed==8?1000:self->interval);
++}
++IOReturn KebabHIDDevice::stopAction(OSObject *owner,void *,void *,void *,void *)
++{
++    KebabHIDDevice *self=static_cast<KebabHIDDevice *>(owner);
++    __atomic_store_n(&self->stopping,true,__ATOMIC_RELEASE);
++    if (self->timer) {
++        self->timer->cancelTimeout();
++        if (self->added) {self->loop->removeEventSource(self->timer);self->added=false;}
++    }
++    if (self->claimed) {unclaim(self->role,(uintptr_t)self);self->claimed=false;}
++    return kIOReturnSuccess;
++}
++void KebabHIDDevice::stopInput()
++{
++    if (loop) loop->runAction(stopAction,this);else stopAction(this,nullptr,nullptr,nullptr,nullptr);
++}
++void KebabHIDDevice::stop(IOService *provider)
++{
++    stopInput();if (originalStarted) {IOHIDDevice::stop(provider);originalStarted=false;}
++}
++void KebabHIDDevice::free()
++{
++    stopInput();
++    OSSafeReleaseNULL(timer);OSSafeReleaseNULL(loop);
++    IOHIDDevice::free();
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabOriginalHIDBindings.cpp
+@@ -0,0 +1,58 @@
++/* Exact 20H392 original IOHIDDevice bindings; generated by target ABI audit. */
++__asm__(".globl __ZN11IOHIDDevice10conformsToEjj\n.set __ZN11IOHIDDevice10conformsToEjj, 0xfffffe00089641b0");
++__asm__(".globl __ZN11IOHIDDevice10gMetaClassE\n.set __ZN11IOHIDDevice10gMetaClassE, 0xfffffe000ac4a8e0");
++__asm__(".globl __ZN11IOHIDDevice10handleOpenEP9IOServicejPv\n.set __ZN11IOHIDDevice10handleOpenEP9IOServicejPv, 0xfffffe0008961a60");
++__asm__(".globl __ZN11IOHIDDevice10handleStopEP9IOService\n.set __ZN11IOHIDDevice10handleStopEP9IOService, 0xfffffe0008961a5c");
++__asm__(".globl __ZN11IOHIDDevice11handleCloseEP9IOServicej\n.set __ZN11IOHIDDevice11handleCloseEP9IOServicej, 0xfffffe0008961eb4");
++__asm__(".globl __ZN11IOHIDDevice11handleStartEP9IOService\n.set __ZN11IOHIDDevice11handleStartEP9IOService, 0xfffffe0008961a54");
++__asm__(".globl __ZN11IOHIDDevice11setPropertyEPK8OSSymbolP8OSObject\n.set __ZN11IOHIDDevice11setPropertyEPK8OSSymbolP8OSObject, 0xfffffe000896253c");
++__asm__(".globl __ZN11IOHIDDevice12handleReportEP18IOMemoryDescriptor15IOHIDReportTypej\n.set __ZN11IOHIDDevice12handleReportEP18IOMemoryDescriptor15IOHIDReportTypej, 0xfffffe0008962730");
++__asm__(".globl __ZN11IOHIDDevice12updateReportEP19IOReportChannelListjPvS2_\n.set __ZN11IOHIDDevice12updateReportEP19IOReportChannelListjPvS2_, 0xfffffe0008960558");
++__asm__(".globl __ZN11IOHIDDevice13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient\n.set __ZN11IOHIDDevice13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient, 0xfffffe0008961fe0");
++__asm__(".globl __ZN11IOHIDDevice13willTerminateEP9IOServicej\n.set __ZN11IOHIDDevice13willTerminateEP9IOServicej, 0xfffffe000896078c");
++__asm__(".globl __ZN11IOHIDDevice14completeReportEP8OSActionij\n.set __ZN11IOHIDDevice14completeReportEP8OSActionij, 0xfffffe0008964320");
++__asm__(".globl __ZN11IOHIDDevice15configureReportEP19IOReportChannelListjPvS2_\n.set __ZN11IOHIDDevice15configureReportEP19IOReportChannelListjPvS2_, 0xfffffe000896054c");
++__asm__(".globl __ZN11IOHIDDevice15createInterfaceEj\n.set __ZN11IOHIDDevice15createInterfaceEj, 0xfffffe0008963f08");
++__asm__(".globl __ZN11IOHIDDevice15registerElementEP19IOHIDElementPrivatePj\n.set __ZN11IOHIDDevice15registerElementEP19IOHIDElementPrivatePj, 0xfffffe00089632ac");
++__asm__(".globl __ZN11IOHIDDevice16destroyInterfaceEj\n.set __ZN11IOHIDDevice16destroyInterfaceEj, 0xfffffe00089640a4");
++__asm__(".globl __ZN11IOHIDDevice17postElementValuesEPjj\n.set __ZN11IOHIDDevice17postElementValuesEPjj, 0xfffffe00089635b8");
++__asm__(".globl __ZN11IOHIDDevice17postElementValuesEPjjjjP15IOHIDCompletion\n.set __ZN11IOHIDDevice17postElementValuesEPjjjjP15IOHIDCompletion, 0xfffffe0008964ad4");
++__asm__(".globl __ZN11IOHIDDevice17publishPropertiesEP9IOService\n.set __ZN11IOHIDDevice17publishPropertiesEP9IOService, 0xfffffe0008960d28");
++__asm__(".globl __ZN11IOHIDDevice17stopEventDeliveryEP15IOHIDEventQueuej\n.set __ZN11IOHIDDevice17stopEventDeliveryEP15IOHIDEventQueuej, 0xfffffe00089633dc");
++__asm__(".globl __ZN11IOHIDDevice18checkEventDeliveryEP15IOHIDEventQueuejPb\n.set __ZN11IOHIDDevice18checkEventDeliveryEP15IOHIDEventQueuejPb, 0xfffffe0008963510");
++__asm__(".globl __ZN11IOHIDDevice18matchPropertyTableEP12OSDictionaryPi\n.set __ZN11IOHIDDevice18matchPropertyTableEP12OSDictionaryPi, 0xfffffe0008960b74");
++__asm__(".globl __ZN11IOHIDDevice18startEventDeliveryEP15IOHIDEventQueuejj\n.set __ZN11IOHIDDevice18startEventDeliveryEP15IOHIDEventQueuejj, 0xfffffe00089632d0");
++__asm__(".globl __ZN11IOHIDDevice19newDeviceUsagePairsEv\n.set __ZN11IOHIDDevice19newDeviceUsagePairsEv, 0xfffffe00089629e4");
++__asm__(".globl __ZN11IOHIDDevice19updateElementValuesEPjj\n.set __ZN11IOHIDDevice19updateElementValuesEPjj, 0xfffffe000896359c");
++__asm__(".globl __ZN11IOHIDDevice19updateElementValuesEPjjjjP15IOHIDCompletionP24IOBufferMemoryDescriptor\n.set __ZN11IOHIDDevice19updateElementValuesEPjjjjP15IOHIDCompletionP24IOBufferMemoryDescriptor, 0xfffffe0008964acc");
++__asm__(".globl __ZN11IOHIDDevice20handleReportWithTimeEyP18IOMemoryDescriptor15IOHIDReportTypej\n.set __ZN11IOHIDDevice20handleReportWithTimeEyP18IOMemoryDescriptor15IOHIDReportTypej, 0xfffffe000896383c");
++__asm__(".globl __ZN11IOHIDDevice25handleReportWithTimeAsyncEyP18IOMemoryDescriptor15IOHIDReportTypejjP15IOHIDCompletion\n.set __ZN11IOHIDDevice25handleReportWithTimeAsyncEyP18IOMemoryDescriptor15IOHIDReportTypejjP15IOHIDCompletion, 0xfffffe0008963dd4");
++__asm__(".globl __ZN11IOHIDDevice4freeEv\n.set __ZN11IOHIDDevice4freeEv, 0xfffffe000895eca0");
++__asm__(".globl __ZN11IOHIDDevice4initEP12OSDictionary\n.set __ZN11IOHIDDevice4initEP12OSDictionary, 0xfffffe000895ec34");
++__asm__(".globl __ZN11IOHIDDevice4stopEP9IOService\n.set __ZN11IOHIDDevice4stopEP9IOService, 0xfffffe0008960564");
++__asm__(".globl __ZN11IOHIDDevice5startEP9IOService\n.set __ZN11IOHIDDevice5startEP9IOService, 0xfffffe000895ef90");
++__asm__(".globl __ZN11IOHIDDevice7messageEjP9IOServicePv\n.set __ZN11IOHIDDevice7messageEjP9IOServicePv, 0xfffffe000896231c");
++__asm__(".globl __ZN11IOHIDDevice8DispatchE5IORPC\n.set __ZN11IOHIDDevice8DispatchE5IORPC, 0xfffffe000898fed8");
++__asm__(".globl __ZN11IOHIDDevice9getReportEP18IOMemoryDescriptor15IOHIDReportTypej\n.set __ZN11IOHIDDevice9getReportEP18IOMemoryDescriptor15IOHIDReportTypej, 0xfffffe00089627cc");
++__asm__(".globl __ZN11IOHIDDevice9getReportEP18IOMemoryDescriptor15IOHIDReportTypejjP15IOHIDCompletion\n.set __ZN11IOHIDDevice9getReportEP18IOMemoryDescriptor15IOHIDReportTypejjP15IOHIDCompletion, 0xfffffe00089637ec");
++__asm__(".globl __ZN11IOHIDDevice9setReportEP18IOMemoryDescriptor15IOHIDReportTypej\n.set __ZN11IOHIDDevice9setReportEP18IOMemoryDescriptor15IOHIDReportTypej, 0xfffffe0008962900");
++__asm__(".globl __ZN11IOHIDDevice9setReportEP18IOMemoryDescriptor15IOHIDReportTypejjP15IOHIDCompletion\n.set __ZN11IOHIDDevice9setReportEP18IOMemoryDescriptor15IOHIDReportTypejjP15IOHIDCompletion, 0xfffffe000896380c");
++__asm__(".globl __ZN11IOHIDDeviceC2EPK11OSMetaClass\n.set __ZN11IOHIDDeviceC2EPK11OSMetaClass, 0xfffffe000895eb9c");
++__asm__(".globl __ZN11IOHIDDeviceD2Ev\n.set __ZN11IOHIDDeviceD2Ev, 0xfffffe000895ebbc");
++__asm__(".globl __ZNK11IOHIDDevice12handleIsOpenEPK9IOService\n.set __ZNK11IOHIDDevice12handleIsOpenEPK9IOService, 0xfffffe0008961fa0");
++__asm__(".globl __ZNK11IOHIDDevice15newSerialNumberEv\n.set __ZNK11IOHIDDevice15newSerialNumberEv, 0xfffffe0008962678");
++__asm__(".globl __ZNK11IOHIDDevice16newProductStringEv\n.set __ZNK11IOHIDDevice16newProductStringEv, 0xfffffe0008962658");
++__asm__(".globl __ZNK11IOHIDDevice16newVersionNumberEv\n.set __ZNK11IOHIDDevice16newVersionNumberEv, 0xfffffe0008962670");
++__asm__(".globl __ZNK11IOHIDDevice17newVendorIDNumberEv\n.set __ZNK11IOHIDDevice17newVendorIDNumberEv, 0xfffffe0008962660");
++__asm__(".globl __ZNK11IOHIDDevice18newProductIDNumberEv\n.set __ZNK11IOHIDDevice18newProductIDNumberEv, 0xfffffe0008962668");
++__asm__(".globl __ZNK11IOHIDDevice18newTransportStringEv\n.set __ZNK11IOHIDDevice18newTransportStringEv, 0xfffffe0008962648");
++__asm__(".globl __ZNK11IOHIDDevice19newLocationIDNumberEv\n.set __ZNK11IOHIDDevice19newLocationIDNumberEv, 0xfffffe0008963694");
++__asm__(".globl __ZNK11IOHIDDevice20newCountryCodeNumberEv\n.set __ZNK11IOHIDDevice20newCountryCodeNumberEv, 0xfffffe0008963834");
++__asm__(".globl __ZNK11IOHIDDevice21newManufacturerStringEv\n.set __ZNK11IOHIDDevice21newManufacturerStringEv, 0xfffffe0008962650");
++__asm__(".globl __ZNK11IOHIDDevice21newPrimaryUsageNumberEv\n.set __ZNK11IOHIDDevice21newPrimaryUsageNumberEv, 0xfffffe0008962680");
++__asm__(".globl __ZNK11IOHIDDevice21newSerialNumberStringEv\n.set __ZNK11IOHIDDevice21newSerialNumberStringEv, 0xfffffe00089635d0");
++__asm__(".globl __ZNK11IOHIDDevice23newReportIntervalNumberEv\n.set __ZNK11IOHIDDevice23newReportIntervalNumberEv, 0xfffffe0008963d48");
++__asm__(".globl __ZNK11IOHIDDevice23newVendorIDSourceNumberEv\n.set __ZNK11IOHIDDevice23newVendorIDSourceNumberEv, 0xfffffe000896382c");
++__asm__(".globl __ZNK11IOHIDDevice25newPrimaryUsagePageNumberEv\n.set __ZNK11IOHIDDevice25newPrimaryUsagePageNumberEv, 0xfffffe00089626d8");
++__asm__(".globl __ZNK11IOHIDDevice33getMemoryWithCurrentElementValuesEv\n.set __ZNK11IOHIDDevice33getMemoryWithCurrentElementValuesEv, 0xfffffe00089632bc");
++__asm__(".globl __ZTV11IOHIDDevice\n.set __ZTV11IOHIDDevice, 0xfffffe0009ef62c0");
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabOriginalHIDDevice.h
+@@ -0,0 +1,103 @@
++/*
++ *
++ * @APPLE_LICENSE_HEADER_START@
++ *
++ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
++ *
++ * This file contains Original Code and/or Modifications of Original Code
++ * as defined in and that are subject to the Apple Public Source License
++ * Version 2.0 (the 'License'). You may not use this file except in
++ * compliance with the License. Please obtain a copy of the License at
++ * http://www.opensource.apple.com/apsl/ and read it before using this
++ * file.
++ *
++ * The Original Code and all software distributed under the License are
++ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
++ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
++ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
++ * Please see the License for the specific language governing rights and
++ * limitations under the License.
++ *
++ * @APPLE_LICENSE_HEADER_END@
++ */
++
++// Target-specific declaration recovery for 20H392 ARM64, not a claim that
++// the public source release is the donor. All 207 compiled slots and the
++// 208-byte object are checked against the selected binary before linking.
++#pragma once
++#include <IOKit/IOService.h>
++#include <IOKit/IOMemoryDescriptor.h>
++class OSArray;
++class OSNumber;
++class OSString;
++class OSAction;
++class IOHIDElementPrivate;
++class IOHIDEventQueue;
++class IOBufferMemoryDescriptor;
++struct IOHIDCompletion;
++typedef uint32_t IOHIDElementCookie;
++enum IOHIDReportType { kIOHIDReportTypeInput=0, kIOHIDReportTypeOutput,
++    kIOHIDReportTypeFeature, kIOHIDReportTypeCount };
++class IOHIDDevice : public IOService {
++    OSDeclareDefaultStructors(IOHIDDevice);
++    uint64_t originalPrivate[9]; // Never accessed by the native subclass.
++public:
++    using IOService::setProperty;
++    virtual kern_return_t Dispatch(const IORPC rpc) APPLE_KEXT_OVERRIDE;
++    virtual void free() APPLE_KEXT_OVERRIDE;
++    virtual bool handleOpen(IOService * client, IOOptionBits options, void * argument) APPLE_KEXT_OVERRIDE;
++    virtual void handleClose(IOService * client, IOOptionBits options) APPLE_KEXT_OVERRIDE;
++    virtual bool handleIsOpen(const IOService * client) const APPLE_KEXT_OVERRIDE;
++    virtual bool handleStart( IOService * provider );
++    virtual void handleStop( IOService * provider );
++    virtual IOReturn newUserClient( task_t owningTask, void * security_id, UInt32 type, OSDictionary * properties, IOUserClient ** handler ) APPLE_KEXT_OVERRIDE;
++    virtual bool publishProperties( IOService * provider );
++    virtual bool init( OSDictionary * dictionary = 0 ) APPLE_KEXT_OVERRIDE;
++    virtual bool start( IOService * provider ) APPLE_KEXT_OVERRIDE;
++    virtual void stop( IOService * provider ) APPLE_KEXT_OVERRIDE;
++    virtual bool willTerminate( IOService * provider, IOOptionBits options ) APPLE_KEXT_OVERRIDE;
++    virtual bool matchPropertyTable(OSDictionary * table, SInt32 * score) APPLE_KEXT_OVERRIDE;
++    virtual IOReturn message( UInt32 type, IOService * provider, void * argument = 0 ) APPLE_KEXT_OVERRIDE;
++    virtual bool setProperty( const OSSymbol * aKey, OSObject * anObject) APPLE_KEXT_OVERRIDE;
++    virtual OSString * newTransportString() const;
++    virtual OSString * newManufacturerString() const;
++    virtual OSString * newProductString() const;
++    virtual OSNumber * newVendorIDNumber() const;
++    virtual OSNumber * newProductIDNumber() const;
++    virtual OSNumber * newVersionNumber() const;
++    virtual OSNumber * newSerialNumber() const;
++    virtual OSNumber * newPrimaryUsageNumber() const;
++    virtual OSNumber * newPrimaryUsagePageNumber() const;
++    virtual IOReturn newReportDescriptor( IOMemoryDescriptor ** descriptor ) const = 0;
++    virtual IOReturn handleReport( IOMemoryDescriptor * report, IOHIDReportType reportType = kIOHIDReportTypeInput, IOOptionBits options = 0 );
++    virtual IOReturn getReport( IOMemoryDescriptor * report, IOHIDReportType reportType, IOOptionBits options );
++    virtual IOReturn setReport( IOMemoryDescriptor * report, IOHIDReportType reportType, IOOptionBits options = 0 );
++    virtual IOMemoryDescriptor * getMemoryWithCurrentElementValues() const;
++    virtual bool registerElement( IOHIDElementPrivate * element, IOHIDElementCookie * cookie );
++    virtual IOReturn startEventDelivery( IOHIDEventQueue * queue, IOHIDElementCookie cookie, IOOptionBits options = 0 );
++    virtual IOReturn stopEventDelivery( IOHIDEventQueue * queue, IOHIDElementCookie cookie = 0 );
++    virtual IOReturn checkEventDelivery( IOHIDEventQueue * queue, IOHIDElementCookie cookie, bool * isActive );
++    virtual IOReturn updateElementValues(IOHIDElementCookie * cookies, UInt32 cookieCount = 1);
++    virtual IOReturn postElementValues(IOHIDElementCookie * cookies, UInt32 cookieCount = 1);
++    virtual OSString * newSerialNumberString() const;
++    virtual OSNumber * newLocationIDNumber() const;
++    virtual IOReturn getReport( IOMemoryDescriptor * report, IOHIDReportType reportType, IOOptionBits options, UInt32 completionTimeout, IOHIDCompletion * completion = 0);
++    virtual IOReturn setReport( IOMemoryDescriptor * report, IOHIDReportType reportType, IOOptionBits options, UInt32 completionTimeout, IOHIDCompletion * completion = 0);
++    virtual OSNumber * newVendorIDSourceNumber() const;
++    virtual OSNumber * newCountryCodeNumber() const;
++    virtual IOReturn handleReportWithTime( AbsoluteTime timeStamp, IOMemoryDescriptor * report, IOHIDReportType reportType = kIOHIDReportTypeInput, IOOptionBits options = 0);
++    virtual OSNumber * newReportIntervalNumber() const;
++    virtual IOReturn handleReportWithTimeAsync( AbsoluteTime timeStamp, IOMemoryDescriptor * report, IOHIDReportType reportType, IOOptionBits options, UInt32 completionTimeout, IOHIDCompletion * completion);
++    virtual OSArray * newDeviceUsagePairs();
++    virtual bool createInterface(IOOptionBits options = 0);
++    virtual void destroyInterface(IOOptionBits options = 0);
++    virtual bool conformsTo(UInt32 usagePage, UInt32 usage);
++    virtual void completeReport(OSAction * action, IOReturn status, uint32_t actualByteCount);
++    virtual IOReturn updateElementValues(IOHIDElementCookie * cookies, UInt32 cookieCount, IOOptionBits options, UInt32 completionTimeout, IOHIDCompletion * completion = 0, IOBufferMemoryDescriptor * elementData = 0);
++    virtual IOReturn postElementValues(IOHIDElementCookie * cookies, UInt32 cookieCount, IOOptionBits options, UInt32 completionTimeout, IOHIDCompletion * completion = 0);
++    IOReturn configureReport(IOReportChannelList *channels, IOReportConfigureAction action, void *result, void *destination) APPLE_KEXT_OVERRIDE;
++    IOReturn updateReport(IOReportChannelList *channels, IOReportUpdateAction action, void *result, void *destination) APPLE_KEXT_OVERRIDE;
++};
++static_assert(sizeof(IOService)==136 && sizeof(IOHIDDevice)==208,
++    "Wrong target IOService/IOHIDDevice layout");
+--- a/iokit/Kernel/arm/KebabSPMI.cpp
++++ b/iokit/Kernel/arm/KebabSPMI.cpp
+@@ -17,6 +17,7 @@
+ #include <pexpert/pexpert.h>
+ #include "../../../bsd/dev/kebab_spmi_bus.h"
+ #include "../../../bsd/dev/kebab_spmi_clients.h"
++#include "../../../bsd/dev/kebab_hid_bridge.h"
+ 
+ extern "C" bool kebab_spmi_services_selftest(void);
+ 
+@@ -110,7 +111,8 @@
+ 		return false;
+ 	}
+ 	uint32_t enabled = 0;
+-	fKeysEnabled = PE_parse_boot_argn("kebab_keys", &enabled, sizeof(enabled)) && enabled != 0;
++	fKeysEnabled = PE_parse_boot_argn("kebab_keys", &enabled, sizeof(enabled)) ?
++	    enabled != 0 : kebab_hid_backend_requested(KEBAB_HID_KEYS);
+ 	if (!addChild("pmic-pon", "spmi,specifier", provider->getProperty("kebab,pon")) ||
+ 	    !addChild("pmic-keys", "spmi,specifier", provider->getProperty("kebab,pmic-keys")) ||
+ 	    !addChild("rpmh-vrm-policy", "rpmh,rsc", provider->getProperty("kebab,rpmh-rsc"),
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -35,6 +35,11 @@
+ const char * gIOKernelConfigTables =
+     "("
+ #if defined(KEBAB)
++    "   { 'IOClass'=KebabHIDTransport; 'IOProviderClass'=KebabPmicKeys; 'kebab,hid-role'=1:32; 'IOMatchCategory'=KebabKeysHIDTransport; },"
++    "   { 'IOClass'=KebabHIDTransport; 'IOProviderClass'=KebabTouch; 'kebab,hid-role'=2:32; 'IOMatchCategory'=KebabTouchHIDTransport; },"
++    "   { 'IOClass'=KebabHIDDevice; 'IOProviderClass'=KebabHIDTransport; },"
++    "   { 'IOClass'=IOHIDEventDriver; 'IOProviderClass'=IOHIDInterface; 'CFBundleIdentifier'='com.apple.iokit.IOHIDFamily'; 'IOPropertyMatch'={ 'Transport'='SPMI'; }; 'DeviceUsagePairs'=({ 'DeviceUsagePage'=12:32; 'DeviceUsage'=1:32; }); 'IOProbeScore'=1000:32; },"
++    "   { 'IOClass'=IOHIDEventDriver; 'IOProviderClass'=IOHIDInterface; 'CFBundleIdentifier'='com.apple.iokit.IOHIDFamily'; 'IOPropertyMatch'={ 'Transport'='I2C'; }; 'DeviceUsagePairs'=({ 'DeviceUsagePage'=13:32; 'DeviceUsage'=4:32; }); 'IOProbeScore'=1000:32; },"
+     "   {"
+     "     'IOClass'         = KebabPlatformExpert;"
+     "     'IOProviderClass' = IOPlatformExpertDevice;"

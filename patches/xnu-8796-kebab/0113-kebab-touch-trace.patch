@@ -1,0 +1,360 @@
+fix(touch): make bring-up tracing visible and bound every wait
+
+The 0112 bit-bang boot enumerated the USB console and then went silent: no
+bytes, no panic, no reset, and the port stayed up.  That is the signature of
+the bring-up thread hanging before the USB event thread can drain the log ring
+(the event thread shares the single CPU, so a spin inside kebab_touch_start()
+keeps it from running), most likely on the first real TLMM access or on a
+bit-bang wait that never completes.
+
+Three changes make the next boot answer that question without another guess:
+
+  * The first MMIO access is preceded by a 3 s blocking sleep.  delay() uses
+    assert_wait/thread_block for millisecond intervals, so the USB event
+    thread runs and the host has time to open the CDC-ACM port before any
+    register is touched.  Without that window, phase lines queued just before
+    a hang would never leave the 16 KiB ring.
+  * Every phase prints through kt_trace(), which flushes the log ring
+    synchronously (the same path the panic/KDP code uses), and the first TLMM
+    read of each pin names the pin and absolute address *before* the read.
+    A silent console after "reading pin 36 TLMM_CTL ..." then means the read
+    itself hung, not that the driver never got there.
+  * Every bit-bang wait is bounded: clock stretch is 1 ms (200 x 5 us) and
+    prints on the first four failures, the TCM header retry drops from 100 to
+    20 with a traced retry head, and the bit-bang start/address/data/read
+    phases already report the failing phase and both line levels.
+
+delay(KT_BB_HALF_US) still spins for 5 us because blocking for an I2C half
+period is impossible; the fix is to keep those critical sections short and to
+give the console its window before the first access.  The SOUTH TLMM tile
+mapping from 0112 is unchanged.
+diff --git a/bsd/dev/kebab_touch.c b/bsd/dev/kebab_touch.c
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -60,6 +60,15 @@
+  * replacement: QUPv3 stays the default.  With bit-bang selected, no SE or
+  * wrapper register is read or written at all - only TLMM and the chip.
+  *
++ * BRING-UP SAFETY
++ *
++ * The USB console event thread shares the single CPU with this driver.  Every
++ * bring-up phase prints and then flushes synchronously, the first MMIO access
++ * is preceded by a 3 s blocking sleep so the host can open the CDC-ACM port,
++ * and every bit-bang wait is bounded (1 ms per clock stretch, 20 TCM header
++ * attempts).  A hang after a phase line therefore names the operation that
++ * caused it instead of hiding the whole bring-up.
++ *
+  * WHAT IS NOT CONFIRMED (read this before trusting a silent console)
+  *
+  *   1. The bootloader is assumed to have left QUPv3_1/SE13 clocked and its
+@@ -124,6 +133,7 @@
+ #include <machine/machine_routines.h>
+ #include <miscfs/devfs/devfs.h>
+ #include <pexpert/pexpert.h>
++#include <stdarg.h>
+ #include <sys/conf.h>
+ #include <sys/errno.h>
+ #include <sys/fcntl.h>
+@@ -137,6 +147,15 @@
+  * satisfy; the kebab UFS and USB drivers spell it out for the same reason. */
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
++/*
++ * Bring-up tracing.  The USB console is the only readable output after a
++ * hang, and its event thread cannot run while this thread spins, so each
++ * phase line is pushed out synchronously.  Both symbols are in kebab_usb.c;
++ * if the console never came up the calls are harmless.
++ */
++extern bool kebab_usb_console_ready(void);
++extern void kebab_usb_log_flush(void);
++
+ void kebab_touch_start(void);
+ 
+ /* ----------------------------------------------------------- address facts */
+@@ -413,6 +432,32 @@
+ } kt;
+ 
+ /*
++ * Print one bring-up phase and push it out now.  printf() only queues into the
++ * USB log ring; the event thread that drains it cannot run while this thread
++ * is spinning in a delay or stuck on a register, so a hang would otherwise
++ * hide the phase that caused it.  kebab_usb_log_flush() polls the controller
++ * synchronously and is the same path the panic/KDP code uses.
++ */
++static void
++kt_trace(const char *fmt, ...)
++{
++	char line[192];
++	va_list ap;
++	int n;
++
++	va_start(ap, fmt);
++	n = vsnprintf(line, sizeof(line), fmt, ap);
++	va_end(ap);
++	if (n <= 0) {
++		return;
++	}
++	printf("%s", line);
++	if (kebab_usb_console_ready()) {
++		kebab_usb_log_flush();
++	}
++}
++
++/*
+  * Single-producer/single-consumer ring. The poll thread is the only producer;
+  * read(2) is the consumer. Both take the mutex, which also gives msleep() a
+  * lock to drop while a reader waits. With no consumer the oldest record is
+@@ -877,13 +922,21 @@
+ 	uint32_t pin;
+ 
+ 	for (pin = KT_PIN_SDA; pin <= KT_PIN_SCL; pin++) {
+-		uint32_t old = kt_rd(kt.tlmm, TLMM_CTL(pin));
+-		uint32_t val = old;
++		uint32_t old;
++		uint32_t val;
++
++		kt_trace("KEBAB TOUCH: qup13 pin %u: reading TLMM_CTL at 0x%08x\n",
++		    pin, KT_TLMM_PA + TLMM_TILE_SOUTH +
++		    TLMM_REG_SIZE * pin);
++		old = kt_rd(kt.tlmm, TLMM_CTL(pin));
++		val = old;
+ 
+ 		val &= ~TLMM_MUX_MSK;
+ 		val |= TLMM_MUX_QUP13;
+ 		val &= ~TLMM_PULL_MSK;
+ 		val &= ~TLMM_DRV_MSK;
++		kt_trace("KEBAB TOUCH: qup13 pin %u: ctl 0x%08x -> 0x%08x\n",
++		    pin, old, val);
+ 		kt_wr(kt.tlmm, TLMM_CTL(pin), val);
+ 		printf("KEBAB TOUCH: pin %u mux qup13, ctl 0x%08x -> 0x%08x\n",
+ 		    pin, old, kt_rd(kt.tlmm, TLMM_CTL(pin)));
+@@ -894,8 +947,15 @@
+ static void
+ kt_reset_level(uint32_t level)
+ {
+-	uint32_t ctl = kt_rd(kt.tlmm, TLMM_CTL(KT_PIN_RESET));
+-	uint32_t io = kt_rd(kt.tlmm, TLMM_IO(KT_PIN_RESET));
++	uint32_t ctl;
++	uint32_t io;
++
++	kt_trace("KEBAB TOUCH: reset pin %u level %u: reading TLMM_CTL/TLMM_IO\n",
++	    KT_PIN_RESET, level);
++	ctl = kt_rd(kt.tlmm, TLMM_CTL(KT_PIN_RESET));
++	io = kt_rd(kt.tlmm, TLMM_IO(KT_PIN_RESET));
++	kt_trace("KEBAB TOUCH: reset ctl 0x%08x io 0x%08x -> level %u\n",
++	    ctl, io, level);
+ 
+ 	ctl &= ~TLMM_MUX_MSK;           /* mux 0 == plain GPIO */
+ 	ctl &= ~TLMM_PULL_MSK;
+@@ -1029,7 +1089,7 @@
+  */
+ 
+ #define KT_BB_HALF_US   5u      /* ~100 kHz, like the reference port */
+-#define KT_BB_STRETCH   1000u   /* 5 ms of clock stretching, then fail */
++#define KT_BB_STRETCH   200u    /* 1 ms of clock stretching, then fail */
+ 
+ static bool
+ kt_bb_level(uint32_t pin)
+@@ -1053,6 +1113,8 @@
+ 	kt_wr(kt.tlmm, TLMM_CTL(pin), ctl);
+ }
+ 
++static uint32_t kt_bb_stretch_bails;
++
+ static bool
+ kt_bb_clock_high(void)
+ {
+@@ -1063,6 +1125,10 @@
+ 		}
+ 		delay(KT_BB_HALF_US);
+ 	}
++	if (++kt_bb_stretch_bails <= 4) {
++		kt_trace("KEBAB TOUCH: SCL did not rise within %u us (SDA %u); bailing out of this transaction\n",
++		    KT_BB_STRETCH * KT_BB_HALF_US, kt_bb_level(KT_PIN_SDA));
++	}
+ 	return false;
+ }
+ 
+@@ -1147,7 +1213,7 @@
+ kt_bb_fail(const char *what, uint32_t phase)
+ {
+ 	if (kt.errors < 8) {
+-		printf("KEBAB TOUCH: bit-bang %s failed at phase %u (SDA %u SCL %u)\n",
++		kt_trace("KEBAB TOUCH: bit-bang %s failed at phase %u (SDA %u SCL %u)\n",
+ 		    what, phase, kt_bb_level(KT_PIN_SDA),
+ 		    kt_bb_level(KT_PIN_SCL));
+ 	}
+@@ -1162,6 +1228,7 @@
+ 	if (len == 0 || len > 64) {
+ 		return -1;
+ 	}
++	kt_trace("KEBAB TOUCH: bb write %u bytes (first 0x%02x)\n", len, buf[0]);
+ 	if (!kt_bb_start()) {
+ 		return kt_bb_fail("start", 0);
+ 	}
+@@ -1183,6 +1250,7 @@
+ 	if (len == 0 || len > 128) {
+ 		return -1;
+ 	}
++	kt_trace("KEBAB TOUCH: bb read %u bytes\n", len);
+ 	if (!kt_bb_start()) {
+ 		return kt_bb_fail("start", 0);
+ 	}
+@@ -1213,10 +1281,16 @@
+ 	uint32_t i;
+ 
+ 	for (i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
+-		uint32_t ctl = kt_rd(kt.tlmm, TLMM_CTL(pins[i]));
+-		uint32_t io = kt_rd(kt.tlmm, TLMM_IO(pins[i]));
++		uint32_t ctl;
++		uint32_t io;
+ 
+-		printf("KEBAB TOUCH: bit-bang pin %u ctl 0x%08x (mux %u pull %u drive %u oe %u) io 0x%08x\n",
++		/* Print first: if this read hangs, the last line names the pin. */
++		kt_trace("KEBAB TOUCH: reading pin %u TLMM_CTL at 0x%08x\n",
++		    pins[i], KT_TLMM_PA + TLMM_TILE_SOUTH +
++		    TLMM_REG_SIZE * pins[i]);
++		ctl = kt_rd(kt.tlmm, TLMM_CTL(pins[i]));
++		io = kt_rd(kt.tlmm, TLMM_IO(pins[i]));
++		kt_trace("KEBAB TOUCH: bit-bang pin %u ctl 0x%08x (mux %u pull %u drive %u oe %u) io 0x%08x\n",
+ 		    pins[i], ctl, (ctl & TLMM_MUX_MSK) >> 2, ctl & TLMM_PULL_MSK,
+ 		    (ctl & TLMM_DRV_MSK) >> 6, (ctl >> 9) & 1u, io);
+ 	}
+@@ -1227,9 +1301,11 @@
+ 		val &= ~(TLMM_MUX_MSK | TLMM_PULL_MSK | TLMM_DRV_MSK |
+ 		    TLMM_OE);
+ 		val |= 3u;              /* mux 0 GPIO, pull-up, released */
++		kt_trace("KEBAB TOUCH: writing pin %u ctl 0x%08x -> 0x%08x\n",
++		    pins[i], old, val);
+ 		kt_wr(kt.tlmm, TLMM_CTL(pins[i]), val);
+-		printf("KEBAB TOUCH: bit-bang pin %u ctl 0x%08x -> 0x%08x (mux 0 GPIO, pull-up, released)\n",
+-		    pins[i], old, kt_rd(kt.tlmm, TLMM_CTL(pins[i])));
++		kt_trace("KEBAB TOUCH: pin %u readback 0x%08x\n", pins[i],
++		    kt_rd(kt.tlmm, TLMM_CTL(pins[i])));
+ 	}
+ }
+ 
+@@ -1394,22 +1470,37 @@
+ 	if (len != 0 && payload != NULL) {
+ 		memcpy(&out[3], payload, len);
+ 	}
++	kt_trace("KEBAB TOUCH: TCM command 0x%02x, %u payload byte(s)\n", cmd,
++	    len);
+ 	err = kt_i2c_write(out, len + 3);
+ 	if (err != 0) {
+ 		printf("KEBAB TOUCH: command 0x%02x was not written\n", cmd);
+ 		return -1;
+ 	}
++	kt_trace("KEBAB TOUCH: TCM command 0x%02x written, waiting for header\n",
++	    cmd);
+ 
+-	for (i = 0; i < 100; i++) {
++	/*
++	 * A chip that never answers must not hold the single CPU forever: the
++	 * old 100 x 1 ms retry loop can spend more than a second per command,
++	 * and each bit-bang read can itself burn a bounded millisecond per
++	 * stuck bit.  20 attempts is enough for a healthy part (it answers on
++	 * the first) and keeps a dead bus bounded.
++	 */
++	for (i = 0; i < 20; i++) {
+ 		err = kt_i2c_read(hdr, TCM_HDR_SIZE);
+ 		if (err == 0 && hdr[0] == TCM_MARKER) {
+ 			break;
+ 		}
++		if (i < 4) {
++			kt_trace("KEBAB TOUCH: no TCM header yet, attempt %u (err %d marker 0x%02x)\n",
++			    i + 1, err, hdr[0]);
++		}
+ 		delay(1000);
+ 	}
+-	if (i == 100) {
+-		printf("KEBAB TOUCH: command 0x%02x: no TCM response (marker "
+-		    "0x%02x)\n", cmd, hdr[0]);
++	if (i == 20) {
++		printf("KEBAB TOUCH: command 0x%02x: no TCM response after %u attempts (marker 0x%02x)\n",
++		    cmd, i, hdr[0]);
+ 		if (kt.raw) {
+ 			kt_hexdump("header", hdr, TCM_HDR_SIZE);
+ 		}
+@@ -1821,6 +1912,18 @@
+ 	}
+ 
+ 	/*
++	 * The USB console event thread runs on the same CPU and cannot make
++	 * progress while this thread is busy, so give the host time to see the
++	 * CDC-ACM port and open it before the first register access.  delay()
++	 * blocks (rather than spins) for millisecond intervals, so the event
++	 * thread and the host enumeration run during this sleep.
++	 */
++	kt_trace("KEBAB TOUCH: bring-up start: bb=%u pins=%u reset=%u hz=%u; pausing 3 s for the USB console\n",
++	    (unsigned)kt.bb, pins, reset, hz);
++	kt_sleep_ms(3000);
++	kt_trace("KEBAB TOUCH: console window over, starting MMIO\n");
++
++	/*
+ 	 * The record storage is static; the mutex is not. Allocate it here so
+ 	 * the queue selftest can exercise the real push/pop path before the
+ 	 * device node or the poll thread exist.
+@@ -1834,6 +1937,8 @@
+ 	kt.queue_ok = kt_queue_selftest();
+ 
+ 	if (!kt.bb) {
++		kt_trace("KEBAB TOUCH: mapping SE13 0x%08x+0x%x, wrapper 0x%08x+0x%x\n",
++		    se_pa, KT_SE13_SIZE, KT_WRAP_PA_DEFAULT, KT_WRAP_SIZE);
+ 		kt.se = ml_io_map(se_pa, KT_SE13_SIZE);
+ 		if (kt.se == 0) {
+ 			printf("KEBAB TOUCH: cannot map SE13 at 0x%08x\n", se_pa);
+@@ -1846,19 +1951,25 @@
+ 		 * the point of the alternate path is to remove that dependency.
+ 		 * Only TLMM is mapped.
+ 		 */
+-		printf("KEBAB TOUCH: transport bit-banged GPIO I2C; QUPv3 SE13 is not used (SDA %u SCL %u reset %u IRQ %u)\n",
++		kt_trace("KEBAB TOUCH: transport bit-banged GPIO I2C; QUPv3 SE13 is not used (SDA %u SCL %u reset %u IRQ %u)\n",
+ 		    KT_PIN_SDA, KT_PIN_SCL, KT_PIN_RESET, KT_PIN_IRQ);
+ 	}
++	kt_trace("KEBAB TOUCH: mapping TLMM SOUTH at 0x%08x+0x%x\n",
++	    KT_TLMM_PA + TLMM_TILE_SOUTH, KT_TLMM_SIZE);
+ 	if (kt.bb || pins != 0 || reset != 0 || kt.raw) {
+ 		kt.tlmm = ml_io_map(KT_TLMM_PA + TLMM_TILE_SOUTH,
+ 		    KT_TLMM_SIZE);
+ 	}
++	kt_trace("KEBAB TOUCH: MMIO done: se 0x%llx wrap 0x%llx tlmm 0x%llx\n",
++	    (unsigned long long)kt.se, (unsigned long long)kt.wrap,
++	    (unsigned long long)kt.tlmm);
+ 	if (kt.bb && kt.tlmm == 0) {
+ 		printf("KEBAB TOUCH: bit-bang transport needs TLMM and it is not mapped\n");
+ 		return;
+ 	}
+ 
+ 	if (!kt.bb) {
++		kt_trace("KEBAB TOUCH: reading wrapper/SE revision registers\n");
+ 		printf("KEBAB TOUCH: S6SY761 on QUPv3 SE13 at 0x%08x (I2C 0x%02x, %u Hz)"
+ 		    ", wrapper 0x%08x\n", se_pa, KT_I2C_ADDR, hz,
+ 		    KT_WRAP_PA_DEFAULT);
+@@ -1867,14 +1978,18 @@
+ 		    kt_se_rd(GENI_FW_REVISION_RO));
+ 	}
+ 
++	kt_trace("KEBAB TOUCH: configuring pins (%s)\n",
++	    kt.bb ? "bit-bang GPIO" : "qup13");
+ 	if (kt.tlmm != 0 && kt.bb) {
+ 		kt_bb_pins_config();
+ 	} else if (kt.tlmm != 0 && pins != 0) {
+ 		kt_pins_config();
+ 	}
++	kt_trace("KEBAB TOUCH: pins done, reset pulse next\n");
+ 	if (kt.tlmm != 0 && reset != 0) {
+ 		kt_reset_pulse(reset);
+ 	}
++	kt_trace("KEBAB TOUCH: reset pulse done\n");
+ 	if (kt.raw) {
+ 		kt_dump_regs("before init");
+ 	}
+@@ -1890,6 +2005,7 @@
+ 	}
+ 
+ 	/* Identity first: this is what has to print on the first hardware run. */
++	kt_trace("KEBAB TOUCH: TCM identify begin\n");
+ 	kt_identify();
+ 	if (kt.tcm_seen && !kt.app_mode) {
+ 		printf("KEBAB TOUCH: not in application mode, asking the chip to "

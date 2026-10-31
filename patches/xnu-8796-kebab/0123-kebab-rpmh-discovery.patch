@@ -1,0 +1,232 @@
+feat(rpmh): read the command DB and drv-2 TCS without writing anything
+
+R1 to R3 of the RPMh discovery, behind one read-only command.
+
+RPMH? maps the command DB reserved region at 0x80860000 (128 KiB) and the
+APPS RSC drv-2 window at 0x18220000, checks the cmd-db magic and version,
+walks the eight slave headers, and prints the entries for ldoa13 and ldoc1
+only.  It then prints the drv-2 common registers and the two active TCS
+slots at tcs-offset 0xd00 with a 672-byte stride.  Every offset is checked
+against the mapped window first; nothing writes a register.
+
+Measured on the device:
+
+  cmd-db version 1, magic 0x0c0330db match
+  ldoa13: addr 0x00040c00 len 4 offset 104
+  ldoc1:  addr 0x00042f00 len 4 offset 192
+  drv-2:  irq_en 1, status 1, control 0x01010000, cmd_enable 3
+  tcs 0:  msgid 0x00010108 addr 0x00030000 data 5 status 0x00010101
+  tcs 1:  all zero
+
+The address carries the accelerator type in bits 19:16 (4 = VREG) and the
+VRM resource base in the low 16 bits, so the enable word for ldoa13 is at
+0x0c04 and for ldoc1 at 0x2f04, matching the VRM layout of voltage 0x0,
+enable 0x4, mode 0x8.
+
+The first run used a 64-entry sanity bound and silently skipped the VREG
+slave, which has 67 entries; the bound is now 1024 and the per-entry window
+check is what stops a bad walk.
+
+No TCS or VRM request is encoded or sent by this patch.
+
+diff --git a/bsd/dev/kebab_spmi.c b/bsd/dev/kebab_spmi.c
+--- a/bsd/dev/kebab_spmi.c
++++ b/bsd/dev/kebab_spmi.c
+@@ -806,6 +806,156 @@
+ 	}
+ }
+ 
++/* ------------------------------------------- RPMh discovery (read only) */
++
++/*
++ * The rails the S3908 needs are RPMh VRM resources.  Before any request can
++ * be formed, two things have to be read, never written:
++ *
++ *   - the command DB, a 128 KiB reserved region at 0x80860000 whose entries
++ *     map a resource name to the address a VRM command must carry;
++ *   - the APPS RSC's drv-2 window at 0x18220000, where the active TCS slots
++ *     live at tcs-offset 0xd00 with a 672-byte stride.
++ *
++ * Layouts are from the vendor cmd-db.c and rpmh-rsc.c.  Every offset is
++ * bounds-checked against the mapped window before it is read, and nothing
++ * below writes a register.
++ */
++#define KEBAB_CMD_DB_PA         0x80860000u
++#define KEBAB_CMD_DB_SIZE       0x00020000u
++#define KEBAB_CMD_DB_HEADER     144u    /* 4 + 4 + 8*16 + 4 + 4 */
++#define KEBAB_CMD_DB_SLAVES     8u
++#define KEBAB_CMD_DB_ENTRY      24u
++
++#define KEBAB_RSC_DRV2_PA       0x18220000u
++#define KEBAB_RSC_SIZE          0x00010000u
++#define KEBAB_RSC_TCS_OFF       0x00000d00u
++#define KEBAB_RSC_TCS_STRIDE    672u
++#define KEBAB_RSC_CMD_STRIDE    20u
++#define KEBAB_RSC_ACTIVE_TCS    2u
++
++#define KEBAB_RSC_IRQ_ENABLE    0x00u
++#define KEBAB_RSC_IRQ_STATUS    0x04u
++#define KEBAB_RSC_CONTROL       0x14u
++#define KEBAB_RSC_STATUS        0x18u
++#define KEBAB_RSC_CMD_ENABLE    0x1cu
++#define KEBAB_RSC_CMD_MSGID     0x30u
++#define KEBAB_RSC_CMD_ADDR      0x34u
++#define KEBAB_RSC_CMD_DATA      0x38u
++#define KEBAB_RSC_CMD_STATUS    0x3cu
++
++static void
++kebab_rpmh_cmd_db(void)
++{
++	vm_offset_t db;
++	uint32_t version, magic, i, j;
++
++	db = ml_io_map(KEBAB_CMD_DB_PA, KEBAB_CMD_DB_SIZE);
++	if (db == 0) {
++		printf("KEBAB RPMH: cannot map the command DB at 0x%08x\n",
++		    KEBAB_CMD_DB_PA);
++		return;
++	}
++	version = kebab_spmi_rd(db, 0);
++	magic = kebab_spmi_rd(db, 4);
++	printf("KEBAB RPMH: cmd-db 0x%08x+0x%x: version 0x%08x magic 0x%08x (%s)\n",
++	    KEBAB_CMD_DB_PA, KEBAB_CMD_DB_SIZE, version, magic,
++	    magic == 0x0c0330dbu ? "match" : "MISMATCH");
++	if (magic != 0x0c0330dbu) {
++		return;
++	}
++	for (i = 0; i < KEBAB_CMD_DB_SLAVES; i++) {
++		uint32_t off = 8u + i * 16u;
++		uint32_t w0 = kebab_spmi_rd(db, off);
++		uint32_t w1 = kebab_spmi_rd(db, off + 4u);
++		uint32_t slv = w0 & 0xffffu;
++		uint32_t hdr_off = (w0 >> 16) & 0xffffu;
++		uint32_t cnt = (w1 >> 16) & 0xffffu;
++
++		if (cnt == 0) {
++			continue;
++		}
++		printf("KEBAB RPMH: slave %u: %u entries at +0x%x\n",
++		    slv, cnt, hdr_off);
++		/*
++		 * Only bound the walk so a corrupt count cannot spin: the
++		 * per-entry check below rejects anything past the window.  67
++		 * entries is a normal VREG slave, so 64 was too tight.
++		 */
++		if (cnt > 1024u) {
++			printf("KEBAB RPMH: slave %u: count %u is implausible; skipped\n",
++			    slv, cnt);
++			continue;
++		}
++		for (j = 0; j < cnt; j++) {
++			uint32_t e = KEBAB_CMD_DB_HEADER + hdr_off +
++			    j * KEBAB_CMD_DB_ENTRY;
++			uint32_t w_id0, w_id1, addr, tail;
++			char id[9];
++
++			if (e + KEBAB_CMD_DB_ENTRY > KEBAB_CMD_DB_SIZE) {
++				printf("KEBAB RPMH: slave %u: entry %u outside the window; stopped\n",
++				    slv, j);
++				break;
++			}
++			w_id0 = kebab_spmi_rd(db, e);
++			w_id1 = kebab_spmi_rd(db, e + 4u);
++			addr = kebab_spmi_rd(db, e + 16u);
++			tail = kebab_spmi_rd(db, e + 20u);
++			memcpy(id, &w_id0, 4);
++			memcpy(id + 4, &w_id1, 4);
++			id[8] = 0;
++			if (strcmp(id, "ldoa13") != 0 && strcmp(id, "ldoc1") != 0) {
++				continue;
++			}
++			printf("KEBAB RPMH: %s: addr 0x%08x len %u offset %u\n",
++			    id, addr, tail & 0xffffu, (tail >> 16) & 0xffffu);
++		}
++	}
++}
++
++static void
++kebab_rpmh_rsc(void)
++{
++	vm_offset_t drv, base;
++	uint32_t i;
++
++	drv = ml_io_map(KEBAB_RSC_DRV2_PA, KEBAB_RSC_SIZE);
++	if (drv == 0) {
++		printf("KEBAB RPMH: cannot map the drv-2 window at 0x%08x\n",
++		    KEBAB_RSC_DRV2_PA);
++		return;
++	}
++	base = drv + KEBAB_RSC_TCS_OFF;
++	printf("KEBAB RPMH: drv-2 0x%08x, tcs_base +0x%x -> 0x%llx\n",
++	    KEBAB_RSC_DRV2_PA, KEBAB_RSC_TCS_OFF, (unsigned long long)base);
++	printf("KEBAB RPMH: common irq_en 0x%08x irq_status 0x%08x control 0x%08x status 0x%08x cmd_enable 0x%08x\n",
++	    kebab_spmi_rd(base, KEBAB_RSC_IRQ_ENABLE),
++	    kebab_spmi_rd(base, KEBAB_RSC_IRQ_STATUS),
++	    kebab_spmi_rd(base, KEBAB_RSC_CONTROL),
++	    kebab_spmi_rd(base, KEBAB_RSC_STATUS),
++	    kebab_spmi_rd(base, KEBAB_RSC_CMD_ENABLE));
++	for (i = 0; i < KEBAB_RSC_ACTIVE_TCS; i++) {
++		vm_offset_t t = base + i * KEBAB_RSC_TCS_STRIDE;
++
++		printf("KEBAB RPMH: tcs %u: enable 0x%08x msgid 0x%08x addr 0x%08x data 0x%08x status 0x%08x\n",
++		    i, kebab_spmi_rd(t, KEBAB_RSC_CMD_ENABLE),
++		    kebab_spmi_rd(t, KEBAB_RSC_CMD_MSGID),
++		    kebab_spmi_rd(t, KEBAB_RSC_CMD_ADDR),
++		    kebab_spmi_rd(t, KEBAB_RSC_CMD_DATA),
++		    kebab_spmi_rd(t, KEBAB_RSC_CMD_STATUS));
++	}
++}
++
++void
++kebab_rpmh_report(void)
++{
++	printf("KEBAB RPMH: === read-only discovery: cmd-db and drv-2 TCS ===\n");
++	kebab_rpmh_cmd_db();
++	kebab_rpmh_rsc();
++	printf("KEBAB RPMH: done; no register was written\n");
++}
++
+ void
+ kebab_spmi_power_report(void)
+ {
+diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -86,6 +86,9 @@
+ 
+ /* bsd/dev/kebab_spmi.c: read-only PMIC rail probe. */
+ extern void kebab_spmi_power_report(void);
++
++/* bsd/dev/kebab_spmi.c: read-only RPMh discovery. */
++extern void kebab_rpmh_report(void);
+ extern bool kebab_spmi_pon_writes_enabled(void);
+ extern int kebab_spmi_pon_reason_write(void);
+ 
+@@ -253,6 +256,7 @@
+ #define UD_REBOOT_TOUCH_SE      12u
+ #define UD_REBOOT_TOUCH_PING    13u
+ #define UD_REBOOT_PWR_REPORT    14u
++#define UD_REBOOT_RPMH_REPORT   15u
+ 
+ struct ud_endpoint {
+ 	uint32_t trb, length, ctl, resource;
+@@ -1230,6 +1234,10 @@
+ 	    !memcmp(buf, "PWR?\n", sizeof("PWR?\n") - 1)) {
+ 		return UD_REBOOT_PWR_REPORT;
+ 	}
++	if (received >= sizeof("RPMH?\n") - 1 &&
++	    !memcmp(buf, "RPMH?\n", sizeof("RPMH?\n") - 1)) {
++		return UD_REBOOT_RPMH_REPORT;
++	}
+ 	return 0;
+ }
+ 
+@@ -1466,6 +1474,8 @@
+ 		kebab_touch_ping();
+ 	} else if (command == UD_REBOOT_PWR_REPORT) {
+ 		kebab_spmi_power_report();
++	} else if (command == UD_REBOOT_RPMH_REPORT) {
++		kebab_rpmh_report();
+ 	}
+ }
+ 

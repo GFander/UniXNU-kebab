@@ -1,0 +1,10 @@
+{
+  "passed": true,
+  "actual_production_functions": true,
+  "io_vfs_iokit": "explicit mocks, not physical proof",
+  "result": "PASS: 46 actual kernel/user path and native RO library mount cases; VFS/IOKit calls mocked",
+  "source_sha256": {
+    "bsd/dev/kebab_cryptex_media.c": "c3db2f0618b36bcde85460345c39a1b3c7a3fe02a89cc72f3a44325d66b4a6ae",
+    "bsd/miscfs/bindfs/bind_vfsops.c": "033df49ce2138caf00db1144375265c9bb251315ccb297768d28474654079529"
+  }
+}

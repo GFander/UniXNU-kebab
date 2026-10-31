@@ -1,0 +1,115 @@
+{
+  "version": "0405",
+  "defaults_matching_complete": true,
+  "actual_log_sha256": "ce691c39956b85418b302a6a5f1e327edc75e41df7c9be35e5d997062189e3f9",
+  "native_sha256": "f15261dde02049a29796378de51c5503b20bc48e7c16a18cd533642001049074",
+  "real_apple_image4_start_succeeded": true,
+  "actual_busy_reference_released": true,
+  "busy_lifecycle": [
+    [
+      0,
+      0,
+      1,
+      "defaults"
+    ],
+    [
+      11,
+      1,
+      1,
+      "AppleImage4"
+    ],
+    [
+      14,
+      2,
+      -1,
+      "defaults"
+    ],
+    [
+      15,
+      1,
+      -1,
+      "AppleImage4"
+    ]
+  ],
+  "final_busy_state": 0,
+  "actual_waits": [
+    "IOAESAccelerator",
+    "IOResources/IONVRAM",
+    "IODTNVRAM"
+  ],
+  "hardware_nonce_and_data_restored_without_generation": true,
+  "native_nvram_existing_proxy_adopted": true,
+  "nvram_encrypted_data_banks_cold_restored": true,
+  "nvram_restored_bank": 1,
+  "nvram_restored_generation": 140,
+  "nvram_hardware_or_rollback_claim": false,
+  "nvram_durable_write_calls": 2,
+  "watchdog_enabled": true,
+  "original_iokit_monitoring_preserved": true,
+  "watchdog_heartbeat_times": [
+    38.37,
+    38.37,
+    48.365,
+    58.357,
+    68.362,
+    78.364,
+    88.371,
+    98.378,
+    108.324,
+    118.332,
+    128.382,
+    138.333,
+    148.345,
+    158.387,
+    168.388,
+    178.336,
+    188.342,
+    198.394,
+    208.396,
+    218.394,
+    228.345,
+    238.371
+  ],
+  "original_locked_observations": [
+    [
+      60.483,
+      30,
+      4
+    ],
+    [
+      90.503,
+      60,
+      7
+    ],
+    [
+      120.515,
+      90,
+      10
+    ],
+    [
+      150.525,
+      120,
+      13
+    ],
+    [
+      180.592,
+      150,
+      16
+    ],
+    [
+      210.59,
+      180,
+      19
+    ],
+    [
+      240.622,
+      210,
+      22
+    ]
+  ],
+  "systembag_and_hardware_c_d_preserved": true,
+  "rtc_record_reused": true,
+  "panic": [],
+  "full_ios_or_springboard": false,
+  "gpu_display_input_started": false
+}

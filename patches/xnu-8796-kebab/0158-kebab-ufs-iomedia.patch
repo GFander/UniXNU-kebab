@@ -1,0 +1,5457 @@
+diff --git a/bsd/dev/kebab_ufs.c b/bsd/dev/kebab_ufs.c
+index 06769d7..587af91 100644
+--- a/bsd/dev/kebab_ufs.c
++++ b/bsd/dev/kebab_ufs.c
+@@ -43,6 +43,11 @@
+ #include <arm/machine_routines.h>
+ #include <libkern/libkern.h>
+ 
++#if defined(KEBAB_BLOCKSTORAGE)
++/* iokit/Kernel/arm/KebabBlockStorageDevice.cpp: the IOKit view, ufsmedia=1. */
++extern int kebab_blockstorage_start(void);
++#endif
++
+ #include "kebab_ufs.h"
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+@@ -672,6 +677,19 @@ kebab_ufs_partition_bytes(void)
+ 	return bytes;
+ }
+ 
++uint32_t
++kebab_ufs_block_size(void)
++{
++	uint32_t bytes = 0;
++
++	lck_mtx_lock(&kebab_ufs_lock);
++	if (su.ready) {
++		bytes = UFS_BLOCK;
++	}
++	lck_mtx_unlock(&kebab_ufs_lock);
++	return bytes;
++}
++
+ bool
+ kebab_ufs_writable(void)
+ {
+@@ -1101,6 +1119,16 @@ kebab_ufs_rootdev(dev_t *dev)
+ 		*dev = su.bdev;
+ 	}
+ 	lck_mtx_unlock(&kebab_ufs_lock);
++#if defined(KEBAB_BLOCKSTORAGE)
++	if (!error) {
++		/*
++		 * Publish the IOKit view of the same partition for APFS.  This is
++		 * gated by boot-arg ufsmedia=1 and never fails the boot; the lock
++		 * above must not be held because the callback reads the geometry.
++		 */
++		kebab_blockstorage_start();
++	}
++#endif
+ 	return error;
+ }
+ #endif /* KEBAB */
+diff --git a/bsd/dev/kebab_ufs.h b/bsd/dev/kebab_ufs.h
+index 7ce9cfc..df06e77 100644
+--- a/bsd/dev/kebab_ufs.h
++++ b/bsd/dev/kebab_ufs.h
+@@ -23,6 +23,9 @@ int kebab_ufs_raw_read(uint64_t offset, void *data, uint32_t length);
+ /* userdata's size in bytes, zero when the disk did not come up. */
+ uint64_t kebab_ufs_partition_bytes(void);
+ 
++/* Physical block size of the partition in bytes, zero when the disk is down. */
++uint32_t kebab_ufs_block_size(void);
++
+ /* True when the disk is up and boot-arg ufsrw=1 allowed writes. */
+ bool kebab_ufs_writable(void);
+ 
+diff --git a/iokit/IOKit/storage/IOBlockStorageDevice.h b/iokit/IOKit/storage/IOBlockStorageDevice.h
+new file mode 100644
+index 0000000..3fb28ef
+--- /dev/null
++++ b/iokit/IOKit/storage/IOBlockStorageDevice.h
+@@ -0,0 +1,509 @@
++/*
++ * KEBAB: vendored from the macOS 14.5 SDK
++ *   System/Library/Frameworks/Kernel.framework/Versions/A/Headers/IOKit/storage/IOBlockStorageDevice.h
++ *
++ * The prelinked IOStorageFamily comes from iOS 16.7.16, whose
++ * IOBlockStorageDevice dispatch table was measured in the donor kernelcache
++ * and in the prelinked candidate (see docs/BRING-UP-STATE.md, section 87).
++ * The iOS class has exactly 22 virtual methods of its own, in the order below,
++ * and no OSMetaClass reserved padding slots:
++ *
++ *   doEjectMedia, doFormatMedia, doGetFormatCapacities, doLockUnlockMedia,
++ *   getVendorString, getProductString, getRevisionString,
++ *   getAdditionalDeviceInfoString, reportBlockSize, reportEjectability,
++ *   reportMaxValidBlock, reportMediaState, reportRemovability,
++ *   reportWriteProtection, getWriteCacheState, setWriteCacheState,
++ *   doAsyncReadWrite, requestIdle, doUnmap, doSetPriority, doSynchronize,
++ *   doGetProvisionStatus
++ *
++ * The macOS header also declares doSynchronizeCache, reportLockability,
++ * reportPollRequirements and doDiscard, which the iOS binary does not have.
++ * They are removed here so a subclass vtable lines up with the runtime class.
++ * doLockUnlockMedia is kept (and unguarded) because the iOS binary does have
++ * that slot. The reserved-slot declarations are dropped for the same reason.
++ *
++ * Everything else is Apple's text, unchanged.
++ */
++/*
++ * Copyright (c) 1998-2015 Apple Inc. All rights reserved.
++ *
++ * @APPLE_LICENSE_HEADER_START@
++ * 
++ * This file contains Original Code and/or Modifications of Original Code
++ * as defined in and that are subject to the Apple Public Source License
++ * Version 2.0 (the 'License'). You may not use this file except in
++ * compliance with the License. Please obtain a copy of the License at
++ * http://www.opensource.apple.com/apsl/ and read it before using this
++ * file.
++ * 
++ * The Original Code and all software distributed under the License are
++ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
++ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
++ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
++ * Please see the License for the specific language governing rights and
++ * limitations under the License.
++ * 
++ * @APPLE_LICENSE_HEADER_END@
++ */
++
++/*!
++ * @header IOBlockStorageDevice
++ * @abstract
++ * This header contains the IOBlockStorageDevice class definition.
++ */
++
++#ifndef _IOBLOCKSTORAGEDEVICE_H
++#define _IOBLOCKSTORAGEDEVICE_H
++
++#include <IOKit/IOTypes.h>
++#include <IOKit/storage/IOStorageDeviceCharacteristics.h>
++
++/*!
++ * @defined kIOBlockStorageDeviceClass
++ * @abstract
++ * The name of the IOBlockStorageDevice class.
++ */
++
++#define kIOBlockStorageDeviceClass "IOBlockStorageDevice"
++
++/*!
++ * @defined kIOBlockStorageDeviceWriteCacheStateKey
++ * @abstract
++ * The name of the property used to get or set the write cache state of the
++ * block storage device.
++ */
++#define kIOBlockStorageDeviceWriteCacheStateKey	"WriteCacheState"
++
++#ifdef KERNEL
++#ifdef __cplusplus
++
++/*
++ * Kernel
++ */
++
++#include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/IOMessage.h>
++#include <IOKit/IOService.h>
++#include <IOKit/storage/IOMedia.h>
++
++/*!
++ * @defined kIOMessageMediaParametersHaveChanged
++ * @abstract
++ * The message ID which indicates that the media parameters, such as the highest valid block
++ * for the device, have changed.
++ * @discussion
++ * The message is passed to all clients of the IOBlockStorageDevice via the message() method.
++ */
++#define kIOMessageMediaParametersHaveChanged iokit_family_msg(sub_iokit_block_storage, 2)
++
++/*!
++ * @defined kIOMessageMediaStateHasChanged
++ * @abstract
++ * The message ID which indicates that the media state has changed.
++ * @discussion
++ * The message is passed to all clients of the IOBlockStorageDevice via the message() method.
++ * The argument that is passed along with this message is an IOMediaState value.
++ */
++#define kIOMessageMediaStateHasChanged iokit_family_msg(sub_iokit_block_storage, 1)
++
++/* Property used for matching, so the generic driver gets the nub it wants. */
++/*!
++ * @defined kIOBlockStorageDeviceTypeKey
++ * @abstract The name of the property tested for nub type matching by the generic block
++ * storage driver.
++ */
++#define	kIOBlockStorageDeviceTypeKey	"device-type"
++/*!
++ * @defined kIOBlockStorageDeviceTypeGeneric
++ * @abstract A character string used for nub matching.
++ */
++#define	kIOBlockStorageDeviceTypeGeneric	"Generic"
++/*!
++ * @defined kIOBlockStorageDeviceTDMLocked
++ * @abstract A boolean property to tell if device is connected through TDM, and not
++ * authenticated yet
++ */
++#define	kIOBlockStorageDeviceTDMLocked		"AppleTDMLocked"
++/*!
++ * @struct IOBlockStorageDeviceExtent
++ * @abstract
++ * Extent for unmap storage requests.
++ * @field blockStart
++ * The starting block number of the operation.
++ * @field blockCount
++ * The integral number of blocks to be deleted.
++ */
++
++struct IOBlockStorageDeviceExtent
++{
++    UInt64 blockStart;
++    UInt64 blockCount;
++};
++
++/*!
++ * @struct IOBlockStorageProvisionDeviceExtent
++ * @discussion
++ * Extent for provision status.
++ * @field blockStart
++ * Starting block offset for the operation.
++ * @field blockCount
++ * Size of the operation.
++ * @field provisionType
++ * Block provision type, such as mapped, deallocated, or anchared. See
++ * IOStorageProvisionTypes
++ */
++
++struct IOBlockStorageProvisionDeviceExtent
++{
++    UInt64 blockStart;
++    UInt64 blockCount;
++    UInt8  provisionType;
++    UInt8  reserved[7];
++};
++
++/*!
++ * @class
++ * IOBlockStorageDevice
++ * @abstract
++ * A generic block storage device abstraction.
++ * @discussion
++ * The IOBlockStorageDevice class exports the generic block storage protocol,
++ * independent of the physical connection protocol (e.g. SCSI, ATA, USB),
++ * forwarding all requests to its provider (the Transport Driver).
++ * Though the nub does no actual processing of requests, it is necessary
++ * in a C++ environment. The Transport Driver can be of any type, as
++ * long as it inherits from IOService. Because Transport Drivers needn't
++ * derive from a type known to IOBlockStorageDriver, it isn't possible for
++ * IOBlockStorageDriver to include the appropriate header file to allow direct
++ * communication with the Transport Driver. Thus we achieve polymorphism by 
++ * having the Transport Driver instantiate a subclass of IOBlockStorageDevice.
++ * A typical implementation for a concrete subclass of IOBlockStorageDevice
++ * simply relays all methods to its provider (the Transport Driver), which
++ * implements the protocol- and device-specific behavior.
++ * 
++ * All pure-virtual functions must be implemented by the Transport Driver, which
++ * is responsible for instantiating the Nub.
++ */
++
++class __exported IOBlockStorageDevice : public IOService {
++
++    OSDeclareAbstractStructors(IOBlockStorageDevice)
++    
++protected:
++
++    struct ExpansionData { /* */ };
++    ExpansionData * _expansionData;
++
++public:
++
++    /* Overrides from IORegistryEntry */
++
++    using IORegistryEntry::getProperty;
++
++    /*!
++     * @function init
++     * @discussion
++     * This function is overridden so that IOBlockStorageDevice can set a
++     * property, used by IOBlockStorageDriver for matching. Since the concrete
++     * subclass of IOBlockStorageDevice can be of any class type, the property
++     * is used for matching.
++     * 
++     * This function is usually not overridden by developers.
++     */    
++    virtual bool	init(OSDictionary * properties) APPLE_KEXT_OVERRIDE;
++
++    virtual OSObject *	getProperty(const OSSymbol * key) const APPLE_KEXT_OVERRIDE;
++
++    virtual IOReturn	setProperties(OSObject * properties) APPLE_KEXT_OVERRIDE;
++
++    /* --- A subclass must implement the the following methods: --- */
++
++    /*!
++     * @function doEjectMedia
++     * @abstract
++     * Eject the media.
++     */
++    virtual IOReturn	doEjectMedia(void)	= 0;
++
++    /*!
++     * @function doFormatMedia
++     * @abstract
++     * Format the media to the specified byte capacity.
++     * @discussion
++     * The specified byte capacity must be one supported by the device.
++     * Supported capacities can be obtained by calling doGetFormatCapacities.
++     * @param byteCapacity
++     * The byte capacity to which the device is to be formatted, if possible.
++     */
++    virtual IOReturn	doFormatMedia(UInt64 byteCapacity)	= 0;
++
++    /*!
++     * @function doGetFormatCapacities
++     * @abstract
++     * Return the allowable formatting byte capacities.
++     * @discussion
++     * This function returns the supported byte capacities for the device.
++     * @param capacities
++     * Pointer for returning the list of capacities.
++     * @param capacitiesMaxCount
++     * The number of capacity values returned in "capacities," or if no buffer
++     * is given, the total number of capacity values available.
++     */
++    virtual UInt32	doGetFormatCapacities(UInt64 * capacities,
++                                            UInt32   capacitiesMaxCount) const	= 0;
++
++    /* KEBAB: present in the iOS 16.7.16 vtable; do not guard it. */
++    virtual IOReturn	doLockUnlockMedia(bool doLock) __attribute__ ((deprecated));
++
++    /*!
++     * @function getVendorString
++     * @abstract
++     * Return Vendor Name string for the device.
++     * @result
++     * A pointer to a static character string.
++     */
++    virtual char *	getVendorString(void)	= 0;
++    
++    /*!
++     * @function getProductString
++     * @abstract
++     * Return Product Name string for the device.
++     * @result
++     * A pointer to a static character string.
++     */
++    virtual char *	getProductString(void)	= 0;
++    
++    /*!
++     * @function getRevisionString
++     * @abstract
++     * Return Product Revision string for the device.
++     * @result
++     * A pointer to a static character string.
++     */
++    virtual char *	getRevisionString(void)	= 0;
++    
++    /*!
++     * @function getAdditionalDeviceInfoString
++     * @abstract
++     * Return additional informational string for the device.
++     * @result
++     * A pointer to a static character string.
++     */
++    virtual char *	getAdditionalDeviceInfoString(void)	= 0;
++
++    /*!
++     * @function reportBlockSize
++     * @abstract
++     * Report the block size for the device, in bytes.
++     * @param blockSize
++     * Pointer to returned block size value.
++     */    
++    virtual IOReturn	reportBlockSize(UInt64 *blockSize)	= 0;
++
++    /*!
++     * @function reportEjectability
++     * @abstract
++     * Report if the media is ejectable under software control.
++     * @discussion
++     * This method should only be called if the media is known to be removable.
++     * @param isEjectable
++     * Pointer to returned result. True indicates the media is ejectable, False indicates
++     * the media cannot be ejected under software control.
++     */
++    virtual IOReturn	reportEjectability(bool *isEjectable)	= 0;
++
++    /*!
++     * @function reportMaxValidBlock
++     * @abstract
++     * Report the highest valid block for the device.
++     * @param maxBlock
++     * Pointer to returned result
++     */    
++    virtual IOReturn	reportMaxValidBlock(UInt64 *maxBlock)	= 0;
++
++    /*!
++     * @function reportMediaState
++     * @abstract
++     * Report the device's media state.
++     * @discussion
++     * This method reports whether we have media in the drive or not, and
++     * whether the state has changed from the previously reported state.
++     * 
++     * A result of kIOReturnSuccess is always returned if the test for media is successful,
++     * regardless of media presence. The mediaPresent result should be used to determine
++     * whether media is present or not. A return other than kIOReturnSuccess indicates that
++     * the Transport Driver was unable to interrogate the device. In this error case, the
++     * outputs mediaState and changedState will *not* be stored.
++     * @param mediaPresent Pointer to returned media state. True indicates media is present
++     * in the device; False indicates no media is present.
++     */
++    virtual IOReturn	reportMediaState(bool *mediaPresent,bool *changedState = 0)	= 0;
++    
++    /*!
++     * @function reportRemovability
++     * @abstract
++     * Report whether the media is removable or not.
++     * @discussion
++     * This method reports whether the media is removable, but it does not
++     * provide detailed information regarding software eject or lock/unlock capability.
++     * @param isRemovable
++     * Pointer to returned result. True indicates that the media is removable; False
++     * indicates the media is not removable.
++     */
++    virtual IOReturn	reportRemovability(bool *isRemovable)  	= 0;
++    
++    /*!
++     * @function reportWriteProtection
++     * @abstract
++     * Report whether the media is write-protected or not.
++     * @param isWriteProtected
++     * Pointer to returned result. True indicates that the media is write-protected (it
++     * cannot be written); False indicates that the media is not write-protected (it
++     * is permissible to write).
++     */
++    virtual IOReturn	reportWriteProtection(bool *isWriteProtected)	= 0;
++
++    /*!
++     * @function getWriteCacheState
++     * @abstract
++     * Reports the current write cache state of the device.
++     * @discussion
++     * Reports the current write cache state of the device.  The write cache
++     * state is not guaranteed to persist across reboots and detaches.
++     * @param enabled
++     * Pointer to returned result. True indicates the write cache is enabled;
++     * False indicates the write cache is disabled.
++     */
++    virtual IOReturn	getWriteCacheState(bool *enabled);
++
++    /*!
++     * @function setWriteCacheState
++     * @abstract
++     * Sets the write cache state of the device.
++     * @discussion
++     * Sets the write cache state of the device.  The write cache state
++     * is not guaranteed to persist across reboots and detaches.
++     * @param enabled
++     * True to enable the write cache; False to disable the write cache.
++     */
++    virtual IOReturn	setWriteCacheState(bool enabled);
++
++    /*!
++     * @function doAsyncReadWrite
++     * @abstract
++     * Start an asynchronous read or write operation.
++     * @param buffer
++     * An IOMemoryDescriptor describing the data-transfer buffer. The data direction
++     * is contained in the IOMemoryDescriptor. Responsibility for releasing the descriptor
++     * rests with the caller.
++     * @param block
++     * The starting block number of the data transfer.
++     * @param nblks
++     * The integral number of blocks to be transferred.
++     * @param attributes
++     * Attributes of the data transfer.  See IOStorageAttributes.
++     * @param completion
++     * The completion routine to call once the data transfer is complete.
++     */
++    virtual IOReturn	doAsyncReadWrite(IOMemoryDescriptor *buffer,
++                                            UInt64 block, UInt64 nblks,
++                                            IOStorageAttributes *attributes,
++                                            IOStorageCompletion *completion)	= 0;
++
++    /*!
++     * @function requestIdle
++     * @abstract
++     * Request that the device enter an idle state.
++     * @discussion
++     * Request that the device enter an idle state.  The device will exit this state on the
++     * next read or write request, or as it sees necessary.  One example is for a DVD drive
++     * to spin down when it enters such an idle state, and spin up on the next read request
++     * from the system.
++     */
++    virtual IOReturn	requestIdle(void);
++
++    /*!
++     * @function doUnmap
++     * @abstract
++     * Delete unused data blocks from the media.
++     * @param extents
++     * List of extents.  See IOBlockStorageDeviceExtent.  It is legal for the callee to
++     * overwrite the contents of this buffer in order to satisfy the request.
++     * @param extentsCount
++     * Number of extents.
++     * @param options
++     * Options for the unmap.  See IOStorageUnmapOptions.
++     */
++    virtual IOReturn doUnmap(IOBlockStorageDeviceExtent * extents,
++                             UInt32                       extentsCount,
++                             IOStorageUnmapOptions        options = 0); /* 10.6.6 */
++
++    /*!
++     * @function doSetPriority
++     * @abstract
++     * Reprioritize read or write operations.
++     * @param extents
++     * List of extents.  See IOBlockStorageDeviceExtent.  It is legal for the callee to
++     * overwrite the contents of this buffer in order to satisfy the request.
++     * @param extentsCount
++     * Number of extents.
++     * @param priority
++     * New priority.  See IOStoragePriority.
++     */
++    virtual IOReturn doSetPriority(IOBlockStorageDeviceExtent * extents,
++                                   UInt32                       extentsCount,
++                                   IOStoragePriority            priority); /* 10.10.0 */
++
++    /*!
++     * @function doSynchronize
++     * @abstract
++     * Force data blocks in the hardware's buffer to be flushed to the media.
++     * @discussion
++     * This method should only be called if the media is writable.
++     * @param block
++     * The starting block number of the synchronization.
++     * @param nblks
++     * The integral number of blocks to be synchronized.  Set to zero to specify the
++     * end-of-media.
++     * @param options
++     * Options for the synchronization.  See IOStorageSynchronizeOptions.
++     */
++    virtual IOReturn	doSynchronize(UInt64                      block,
++                                      UInt64                      nblks,
++                                      IOStorageSynchronizeOptions options = 0); /* 10.11.0 */
++
++    /*!
++     * @function doGetProvisionStatus
++     * @discussion
++     * Get device block provision status
++     * @param block
++     * Block offset of logical extent on the device.
++     * @param nblks
++     * Blocks count of logical extent on the device.
++     * @param extentsCount
++     * Number of extents allocated in extents. On return, this parameter indicate number
++     * of provision extents returned.
++     * @param extents
++     * List of provision extents, block based. See IOStorageProvisionDeviceExtents.
++     * @param options
++     * Options for get provision status. See IOStorageGetProvisionStatusOptions.
++     * @result
++     * Returns the status of the getProvisionStatus.
++     */
++
++    virtual IOReturn doGetProvisionStatus(UInt64                                block,
++                                          UInt64                                nblks,
++                                          UInt32 *                              extentsCount,
++                                          IOBlockStorageProvisionDeviceExtent * extents,
++                                          IOStorageGetProvisionStatusOptions    options = 0); /* 10.12.0 */
++
++    /*
++     * KEBAB: no reserved vtable padding. The iOS 16.7.16 class ends after
++     * doGetProvisionStatus; 28 trailing slots would not exist at runtime.
++     */
++};
++
++#endif /* __cplusplus */
++#endif /* KERNEL */
++#endif /* !_IOBLOCKSTORAGEDEVICE_H */
+diff --git a/iokit/IOKit/storage/IOMedia.h b/iokit/IOKit/storage/IOMedia.h
+new file mode 100644
+index 0000000..2e9020a
+--- /dev/null
++++ b/iokit/IOKit/storage/IOMedia.h
+@@ -0,0 +1,814 @@
++/*
++ * KEBAB: vendored from the macOS 14.5 SDK
++ *   System/Library/Frameworks/Kernel.framework/Versions/A/Headers/IOKit/storage/IOMedia.h
++ * Kept in the tree so the kernel build does not depend on an SDK path that may
++ * move. See docs/BRING-UP-STATE.md section 87 for the list and the reason.
++ */
++/*
++ * Copyright (c) 1998-2014 Apple Inc. All rights reserved.
++ *
++ * @APPLE_LICENSE_HEADER_START@
++ * 
++ * This file contains Original Code and/or Modifications of Original Code
++ * as defined in and that are subject to the Apple Public Source License
++ * Version 2.0 (the 'License'). You may not use this file except in
++ * compliance with the License. Please obtain a copy of the License at
++ * http://www.opensource.apple.com/apsl/ and read it before using this
++ * file.
++ * 
++ * The Original Code and all software distributed under the License are
++ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
++ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
++ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
++ * Please see the License for the specific language governing rights and
++ * limitations under the License.
++ * 
++ * @APPLE_LICENSE_HEADER_END@
++ */
++
++/*!
++ * @header IOMedia
++ * @abstract
++ * This header contains the IOMedia class definition.
++ */
++
++#ifndef _IOMEDIA_H
++#define _IOMEDIA_H
++
++#include <IOKit/IOTypes.h>
++
++/*!
++ * @defined kIOMediaClass
++ * @abstract
++ * The name of the IOMedia class.
++ */
++
++#define kIOMediaClass "IOMedia"
++
++/*!
++ * @defined kIOMediaContentKey
++ * @abstract
++ * A property of IOMedia objects.
++ * @discussion
++ * The kIOMediaContentKey property has an OSString
++ * value and contains a description of the media's
++ * contents.  The description is the same as the hint at the time of the
++ * object's creation, but it is possible that the description has been overridden
++ * by a client (which has probed the media and identified the content correctly)
++ * of the media object.  It is more accurate than the hint for this reason.  The
++ * string is formed in the likeness of Apple's "Apple_HFS" strings or in the
++ * likeness of a UUID.
++ */
++
++#define kIOMediaContentKey "Content"
++
++/*!
++ * @defined kIOMediaContentHintKey
++ * @abstract
++ * A property of IOMedia objects.
++ * @discussion
++ * The kIOMediaContentHintKey property has an OSString
++ * value and contains a hint of the media's contents.
++ * The hint is set at the time of the object's creation, should the creator have
++ * a clue as to what it may contain.  The hint string does not change for the
++ * lifetime of the object and is formed in the likeness of Apple's "Apple_HFS"
++ * strings or in the likeness of a UUID.
++ */
++
++#define kIOMediaContentHintKey "Content Hint"
++
++/*!
++ * @defined kIOMediaEjectableKey
++ * @abstract
++ * A property of IOMedia objects.
++ * @discussion
++ * The kIOMediaEjectableKey property has an OSBoolean
++ * value and describes whether the media is ejectable
++ * from the drive mechanism under software control.  Implies IOMediaRemovable
++ * is also true.
++ */
++
++#define kIOMediaEjectableKey "Ejectable"
++
++/*!
++ * @defined kIOMediaLeafKey
++ * @abstract
++ * A property of IOMedia objects.
++ * @discussion
++ * The kIOMediaLeafKey property has an OSBoolean value and describes whether the media is a leaf, that is,
++ * it is the deepest media object in this branch of the I/O Registry.
++ */
++
++#define kIOMediaLeafKey "Leaf"
++
++/*!
++ * @defined kIOMediaOpenKey
++ * @abstract
++ * A property of IOMedia objects.
++ * @discussion
++ * The kIOMediaOpenKey property has an OSBoolean value and describes whether
++ * a client presently has an open on this media.
++ */
++
++#define kIOMediaOpenKey "Open"
++
++/*!
++ * @defined kIOMediaPreferredBlockSizeKey
++ * @abstract
++ * A property of IOMedia objects.
++ * @discussion
++ * The kIOMediaPreferredBlockSizeKey property has an
++ * OSNumber value and describes the media's natural
++ * block size in bytes.  This information is useful to clients that want to
++ * optimize access to the media.
++ */
++
++#define kIOMediaPreferredBlockSizeKey "Preferred Block Size"
++
++/*!
++ * @defined kIOMediaRemovableKey
++ * @abstract
++ * A property of IOMedia objects.
++ * @discussion
++ * The kIOMediaRemovableKey property has an OSBoolean
++ * value and describes whether the media is removable
++ * from the drive mechanism.
++ */
++
++#define kIOMediaRemovableKey "Removable"
++
++/*!
++ * @defined kIOMediaSizeKey
++ * @abstract
++ * A property of IOMedia objects.
++ * @discussion
++ * The kIOMediaSizeKey property has an OSNumber value and describes the total length of the media in
++ * bytes.
++ */
++
++#define kIOMediaSizeKey "Size"
++
++/*!
++ * @defined kIOMediaUUIDKey
++ * @abstract
++ * A property of IOMedia objects.
++ * @discussion
++ * The kIOMediaUUIDKey property has an OSString value and contains a persistent
++ * Universal Unique Identifier for the media if such an identifier is available.
++ */
++
++#define kIOMediaUUIDKey "UUID"
++
++/*!
++ * @defined kIOMediaWholeKey
++ * @abstract
++ * A property of IOMedia objects.
++ * @discussion
++ * The kIOMediaWholeKey property has an OSBoolean
++ * value and describes whether the media is whole, that is,
++ * it represents the whole disk (the physical disk, or a virtual replica
++ * thereof).
++ */
++
++#define kIOMediaWholeKey "Whole"
++
++/*!
++ * @defined kIOMediaWritableKey
++ * @abstract
++ * A property of IOMedia objects.
++ * @discussion
++ * The kIOMediaWritableKey property has an OSBoolean
++ * value and describes whether the media is writable.
++ */
++
++#define kIOMediaWritableKey "Writable"
++
++/*!
++ * @defined kIOMediaContentMaskKey
++ * @abstract
++ * A property of IOMedia clients.
++ * @discussion
++ * The kIOMediaContentMaskKey property has an OSString
++ * value and must exist in all IOMedia clients that
++ * drive new content (that is, produce new media objects).  When the client
++ * matches against the provider media, the value of the client's
++ * kIOMediaContentMaskKey property is used to replace the provider's
++ * kIOMediaContentKey property.
++ */
++
++#define kIOMediaContentMaskKey "Content Mask"
++
++/*!
++ * @defined kIOMediaIconKey
++ * @abstract
++ * A property of any object in the media stack.
++ * @discussion
++ * kIOMediaIconKey is a property of any object in the media stack that wishes
++ * to override the default icon shown for the media objects in the stack.  It
++ * is usually defined in a provider object below the media object.  It has an
++ * OSDictionary value, with properties identical to the kIOIconKey definition,
++ * that is, kCFBundleIdentifierKey and kIOBundleResourceFileKey.
++ */
++
++#define kIOMediaIconKey "IOMediaIcon"
++
++/*!
++ * @defined kIOMediaInvalidStartupDiskKey
++ * @abstract
++ * A property of IOMedia objects.
++ * @discussion
++ * The kIOMediaInvalidStartupDiskKey property has an OSBoolean
++ * value and describes whether the media cannot be used as a startup disk
++ */
++
++#define kIOMediaInvalidStartupDiskKey "Invalid Startup Disk"
++
++/*!
++ * @enum IOMediaAttributeMask
++ * @discussion
++ * The IOMediaAttributeMask bit mask describes various attributes of
++ * the media object, such as its ejectability and its removability.
++ * @constant kIOMediaAttributeEjectableMask
++ * Indicates whether the media is ejectable from the drive mechanism
++ * under software control.  Implies kIOMediaAttributeRemovableMask.
++ * @constant kIOMediaAttributeRemovableMask
++ * Indicates whether the media is removable from the drive mechanism.
++ */
++
++enum
++{
++    kIOMediaAttributeEjectableMask = 0x00000001,
++    kIOMediaAttributeRemovableMask = 0x00000002,
++    kIOMediaAttributeReservedMask  = 0xFFFFFFFC
++};
++
++typedef UInt32 IOMediaAttributeMask;
++
++#ifdef KERNEL
++#ifdef __cplusplus
++
++/*
++ * Kernel
++ */
++
++#include <IOKit/storage/IOStorage.h>
++
++/*!
++ * @class IOMedia
++ * @abstract
++ * A random-access disk device abstraction.
++ * @discussion
++ * The IOMedia class is a random-access disk device abstraction.   It provides a
++ * consistent interface for both real and virtual disk devices, for subdivisions
++ * of disks such as partitions, for supersets of disks such as RAID volumes, and
++ * so on.   It extends the IOStorage class by implementing the appropriate open,
++ * close, read, write, and matching semantics for media objects.  The properties
++ * it has reflect the properties of real disk devices,  such as ejectability and
++ * writability.
++ *
++ * The read and write interfaces support byte-level access to the storage space,
++ * with the appropriate deblocking handled by the block storage driver, however,
++ * a typical client will want to get the natural block size in order to optimize
++ * access to the real disk device.  A read or write is accepted so long as the
++ * client's access is valid, the media is formatted and the transfer is within
++ * the bounds of the media.  An optional non-zero base (offset) is then applied
++ * before the read or write is passed to the provider object.
++ */
++
++class __exported IOMedia : public IOStorage
++{
++    OSDeclareDefaultStructors(IOMedia)
++
++protected:
++
++#ifdef KERNEL_PRIVATE
++    struct ExpansionData {
++        IOLock *    _lock;
++        OSArray *   _probeList;
++        bool        _needRegisterService;
++    };
++    #define mediaManagementLock         ( IOMedia::_expansionData->_lock )
++    #define mediaProbeList              ( IOMedia::_expansionData->_probeList )
++    #define mediaNeedRegisterService    ( IOMedia::_expansionData->_needRegisterService )
++#else /* KERNEL_PRIVATE */
++    struct ExpansionData { /* */ };
++#endif /* KERNEL_PRIVATE */
++
++    ExpansionData * _expansionData;
++
++    UInt32          _attributes;
++
++    bool            _isWhole;
++    bool            _isWritable;
++
++    UInt64          _mediaBase;  /* (relative to the storage object below us) */
++    UInt64          _mediaSize;
++
++    IOStorageAccess _openLevel;
++    OSDictionary *  _openClients;
++
++    UInt32          _reserved0320;
++
++    UInt64          _preferredBlockSize;
++
++    /*
++     * Free all of this object's outstanding resources.
++     */
++
++    virtual void free() APPLE_KEXT_OVERRIDE;
++
++    /*!
++     * @function handleOpen
++     * @discussion
++     * The handleOpen method grants or denies permission to access this object
++     * to an interested client.  The argument is an IOStorageAccess value that
++     * specifies the level of access desired -- reader or reader-writer.
++     *
++     * This method can be invoked to upgrade or downgrade the access level for
++     * an existing client as well.  The previous access level will prevail for
++     * upgrades that fail, of course.   A downgrade should never fail.  If the
++     * new access level should be the same as the old for a given client, this
++     * method will do nothing and return success.  In all cases, one, singular
++     * close-per-client is expected for all opens-per-client received.
++     *
++     * This implementation replaces the IOService definition of handleOpen().
++     * @param client
++     * Client requesting the open.
++     * @param options
++     * Options for the open.  Set to zero.
++     * @param access
++     * Access level for the open.  Set to kIOStorageAccessReader or
++     * kIOStorageAccessReaderWriter.
++     * @result
++     * Returns true if the open was successful, false otherwise.
++     */
++
++    virtual bool handleOpen(IOService *  client,
++                            IOOptionBits options,
++                            void *       access) APPLE_KEXT_OVERRIDE;
++
++    /*!
++     * @function handleIsOpen
++     * @discussion
++     * The handleIsOpen method determines whether the specified client, or any
++     * client if none is specified, presently has an open on this object.
++     *
++     * This implementation replaces the IOService definition of handleIsOpen().
++     * @param client
++     * Client to check the open state of.  Set to zero to check the open state
++     * of all clients.
++     * @result
++     * Returns true if the client was (or clients were) open, false otherwise.
++     */
++
++    virtual bool handleIsOpen(const IOService * client) const APPLE_KEXT_OVERRIDE;
++
++    /*!
++     * @function handleClose
++     * @discussion
++     * The handleClose method closes the client's access to this object.
++     *
++     * This implementation replaces the IOService definition of handleClose().
++     * @param client
++     * Client requesting the close.
++     * @param options
++     * Options for the close.  Set to zero.
++     */
++
++    virtual void handleClose(IOService * client, IOOptionBits options) APPLE_KEXT_OVERRIDE;
++
++#ifdef KERNEL_PRIVATE
++private:
++
++    void scheduleProbe ( IOService * driver );
++    void scheduleRegisterService( void );
++
++public:
++
++    /*!
++     * @function close
++     * @abstract Releases active access to a provider.
++     * @discussion IOService provides generic open and close semantics to track
++     * clients of a provider that have established an active datapath.  The use
++     * of open and close, and rules regarding * ownership are  family  defined,
++     * and defined by the handleOpen and handleClose methods in the provider.
++     * @param client Designates the client of the provider requesting the
++     * close.
++     * @param options Options available for the close. The provider family  may
++     * implement options for close; IOService defines none.
++     */
++
++    virtual void close(  IOService *       client,
++                         IOOptionBits      options = 0 ) APPLE_KEXT_OVERRIDE;
++
++#endif /* KERNEL_PRIVATE */
++
++public:
++
++    using IOStorage::read;
++    using IOStorage::write;
++
++    /*
++     * This method is called for each client interested in the services we
++     * provide.  The superclass links us as a parent to this client in the
++     * I/O Kit registry on success.
++     */
++
++    virtual bool attachToChild(IORegistryEntry *       client,
++                               const IORegistryPlane * plane) APPLE_KEXT_OVERRIDE;
++
++    /*
++     * This method is called for each client that loses interest in the
++     * services we provide.  The superclass unlinks us from this client
++     * in the I/O Kit registry on success.
++     */
++
++    virtual void detachFromChild(IORegistryEntry *       client,
++                                 const IORegistryPlane * plane) APPLE_KEXT_OVERRIDE;
++
++    /*
++     * Obtain this object's provider.  We override the superclass's method to
++     * return a more specific subclass of OSObject -- IOStorage.  This method
++     * serves simply as a convenience to subclass developers.
++     */
++
++    virtual IOStorage * getProvider() const APPLE_KEXT_OVERRIDE;
++
++    /*
++     * Compare the properties in the supplied table to this object's properties.
++     */
++
++    virtual bool matchPropertyTable(OSDictionary * table, SInt32 * score) APPLE_KEXT_OVERRIDE;
++
++    /*!
++     * @function read
++     * @discussion
++     * Read data from the storage object at the specified byte offset into the
++     * specified buffer, asynchronously.   When the read completes, the caller
++     * will be notified via the specified completion action.
++     *
++     * The buffer will be retained for the duration of the read.
++     * @param client
++     * Client requesting the read.
++     * @param byteStart
++     * Starting byte offset for the data transfer.
++     * @param buffer
++     * Buffer for the data transfer.  The size of the buffer implies the size of
++     * the data transfer.
++     * @param attributes
++     * Attributes of the data transfer.  See IOStorageAttributes.  It is the
++     * responsibility of the callee to maintain the information for the duration
++     * of the data transfer, as necessary.
++     * @param completion
++     * Completion routine to call once the data transfer is complete.  It is the
++     * responsibility of the callee to maintain the information for the duration
++     * of the data transfer, as necessary.
++     */
++
++    virtual void read(IOService *           client,
++                      UInt64                byteStart,
++                      IOMemoryDescriptor *  buffer,
++                      IOStorageAttributes * attributes,
++                      IOStorageCompletion * completion) APPLE_KEXT_OVERRIDE;
++
++    /*!
++     * @function write
++     * @discussion
++     * Write data into the storage object at the specified byte offset from the
++     * specified buffer, asynchronously.   When the write completes, the caller
++     * will be notified via the specified completion action.
++     *
++     * The buffer will be retained for the duration of the write.
++     * @param client
++     * Client requesting the write.
++     * @param byteStart
++     * Starting byte offset for the data transfer.
++     * @param buffer
++     * Buffer for the data transfer.  The size of the buffer implies the size of
++     * the data transfer.
++     * @param attributes
++     * Attributes of the data transfer.  See IOStorageAttributes.  It is the
++     * responsibility of the callee to maintain the information for the duration
++     * of the data transfer, as necessary.
++     * @param completion
++     * Completion routine to call once the data transfer is complete.  It is the
++     * responsibility of the callee to maintain the information for the duration
++     * of the data transfer, as necessary.
++     */
++
++    virtual void write(IOService *           client,
++                       UInt64                byteStart,
++                       IOMemoryDescriptor *  buffer,
++                       IOStorageAttributes * attributes,
++                       IOStorageCompletion * completion) APPLE_KEXT_OVERRIDE;
++
++    /*!
++     * @function synchronize
++     * @discussion
++     * Flush the cached data in the storage object, if any.
++     * @param client
++     * Client requesting the synchronization.
++     * @param byteStart
++     * Starting byte offset for the synchronization.
++     * @param byteCount
++     * Size of the synchronization.  Set to zero to specify the end-of-media.
++     * @param options
++     * Options for the synchronization.  See IOStorageSynchronizeOptions.
++     * @result
++     * Returns the status of the synchronization.
++     */
++
++    virtual IOReturn synchronize(IOService *                 client,
++                                 UInt64                      byteStart,
++                                 UInt64                      byteCount,
++                                 IOStorageSynchronizeOptions options = 0) APPLE_KEXT_OVERRIDE;
++
++    /*!
++     * @function unmap
++     * @discussion
++     * Delete unused data from the storage object at the specified byte offsets.
++     * @param client
++     * Client requesting the operation.
++     * @param extents
++     * List of extents.  See IOStorageExtent.  It is legal for the callee to
++     * overwrite the contents of this buffer in order to satisfy the request.
++     * @param extentsCount
++     * Number of extents.
++     * @param options
++     * Options for the unmap.  See IOStorageUnmapOptions.
++     * @result
++     * Returns the status of the operation.
++     */
++
++    virtual IOReturn unmap(IOService *           client,
++                           IOStorageExtent *     extents,
++                           UInt32                extentsCount,
++                           IOStorageUnmapOptions options = 0) APPLE_KEXT_OVERRIDE;
++
++    /*!
++     * @function getProvisionStatus
++     * @discussion
++     * Get device block provision status
++     * @param client
++     * Client requesting the synchronization.
++     * @param byteStart
++     * Byte offset of logical extent on the device.
++     * @param byteCount
++     * Byte length of logical extent on the device, 0 mean the entire remaining space.
++     * @param extentsCount
++     * Number of extents allocated in extents. On return, this parameter indicate number
++     * of provision extents returned.
++     * @param extents
++     * List of provision extents. See IOStorageProvisionExtents.
++     * @result
++     * Returns the status of the getProvisionStatus.
++     */
++
++    virtual IOReturn getProvisionStatus(IOService *                         client,
++                                        UInt64                              byteStart,
++                                        UInt64                              byteCount,
++                                        UInt32 *                            extentsCount,
++                                        IOStorageProvisionExtent *          extents,
++                                        IOStorageGetProvisionStatusOptions  options = 0) APPLE_KEXT_OVERRIDE;
++
++    /*!
++     * @function lockPhysicalExtents
++     * @discussion
++     * Lock the contents of the storage object against relocation temporarily,
++     * for the purpose of getting physical extents.
++     * @param client
++     * Client requesting the operation.
++     * @result
++     * Returns true if the lock was successful, false otherwise.
++     */
++
++    virtual bool lockPhysicalExtents(IOService * client) APPLE_KEXT_OVERRIDE;
++
++    /*!
++     * @function copyPhysicalExtent
++     * @discussion
++     * Convert the specified byte offset into a physical byte offset, relative
++     * to a physical storage object.  This call should only be made within the
++     * context of lockPhysicalExtents().
++     * @param client
++     * Client requesting the operation.
++     * @param byteStart
++     * Starting byte offset for the operation.  Returns a physical byte offset,
++     * relative to the physical storage object, on success.
++     * @param byteCount
++     * Size of the operation.  Returns the actual number of bytes which can be
++     * transferred, relative to the physical storage object, on success. 
++     * @result
++     * A reference to the physical storage object, which should be released by
++     * the caller, or a null on error.
++     */
++
++    virtual IOStorage * copyPhysicalExtent(IOService * client,
++                                           UInt64 *    byteStart,
++                                           UInt64 *    byteCount) APPLE_KEXT_OVERRIDE;
++
++    /*!
++     * @function unlockPhysicalExtents
++     * @discussion
++     * Unlock the contents of the storage object for relocation again.  This
++     * call must balance a successful call to lockPhysicalExtents().
++     * @param client
++     * Client requesting the operation.
++     */
++
++    virtual void unlockPhysicalExtents(IOService * client) APPLE_KEXT_OVERRIDE;
++
++    /*!
++     * @function setPriority
++     * @discussion
++     * Reprioritize read or write requests at the specified byte offsets.
++     * @param client
++     * Client requesting the operation.
++     * @param extents
++     * List of extents.  See IOStorageExtent.  It is legal for the callee to
++     * overwrite the contents of this buffer in order to satisfy the request.
++     * @param extentsCount
++     * Number of extents.
++     * @param priority
++     * New priority.  See IOStoragePriority.
++     * @result
++     * Returns the status of the operation.
++     */
++
++    virtual IOReturn setPriority(IOService *       client,
++                                 IOStorageExtent * extents,
++                                 UInt32            extentsCount,
++                                 IOStoragePriority priority) APPLE_KEXT_OVERRIDE;
++
++    /*!
++     * @function getPreferredBlockSize
++     * @discussion
++     * Ask the media object for its natural block size.  This information
++     * is useful to clients that want to optimize access to the media.
++     * @result
++     * Natural block size, in bytes.
++     */
++
++    virtual UInt64 getPreferredBlockSize() const;
++
++    /*!
++     * @function getSize
++     * @discussion
++     * Ask the media object for its total length in bytes.
++     * @result
++     * Media size, in bytes.
++     */
++
++    virtual UInt64 getSize() const;
++
++    /*!
++     * @function getBase
++     * @discussion
++     * Ask the media object for its byte offset relative to the provider media.
++     * @result
++     * Media offset, in bytes.
++     */
++
++    virtual UInt64 getBase() const;
++
++    /*!
++     * @function isEjectable
++     * @discussion
++     * Ask the media object whether it is ejectable.
++     * @result
++     * Returns true if the media is ejectable, false otherwise.
++     */
++
++    virtual bool isEjectable() const;
++
++    /*!
++     * @function isFormatted
++     * @discussion
++     * Ask the media object whether it is formatted.
++     * @result
++     * Returns true if the media is formatted, false otherwise.
++     */
++
++    virtual bool isFormatted() const;
++
++    /*!
++     * @function isWhole
++     * @discussion
++     * Ask the media object whether it represents the whole disk.
++     * @result
++     * Returns true if the media represents the whole disk, false otherwise.
++     */
++
++    virtual bool isWhole() const;
++
++    /*!
++     * @function isWritable
++     * @discussion
++     * Ask the media object whether it is writable.
++     * @result
++     * Returns true if the media is writable, false otherwise.
++     */
++
++    virtual bool isWritable() const;
++
++    /*!
++     * @function getContent
++     * @discussion
++     * Ask the media object for a description of its contents.  The description
++     * is the same as the hint at the time of the object's creation,  but it is
++     * possible that the description has been overridden by a client (which has probed
++     * the media and identified the content correctly) of the media object.  It
++     * is more accurate than the hint for this reason.  The string is formed in
++     * the likeness of Apple's "Apple_HFS" strings or in the likeness of a UUID.
++     *
++     * The content description can be overridden by any client that matches onto
++     * this media object with a match category of kIOStorageCategory.  The media
++     * object checks for a kIOMediaContentMaskKey property in the client, and if
++     * it finds one, it copies it into kIOMediaContentKey property.
++     * @result
++     * Description of media's contents.
++     */
++
++    virtual const char * getContent() const;
++
++    /*!
++     * @function getContentHint
++     * @discussion
++     * Ask the media object for a hint of its contents.  The hint is set at the
++     * time of the object's creation, should the creator have a clue as to what
++     * it may contain.  The hint string does not change for the lifetime of the
++     * object and is also formed in the likeness of Apple's "Apple_HFS" strings
++     * or in the likeness of a UUID.
++     * @result
++     * Hint of media's contents.
++     */
++
++    virtual const char * getContentHint() const;
++
++    /*!
++     * @function init
++     * @discussion
++     * Initialize this object's minimal state.
++     * @param base
++     * Media offset, in bytes.
++     * @param size
++     * Media size, in bytes.
++     * @param preferredBlockSize
++     * Natural block size, in bytes.
++     * @param attributes
++     * Media attributes, such as ejectability and removability.  See
++     * IOMediaAttributeMask.
++     * @param isWhole
++     * Indicates whether the media represents the whole disk.
++     * @param isWritable
++     * Indicates whether the media is writable.
++     * @param contentHint
++     * Hint of media's contents (optional).  See getContentHint().
++     * @param properties
++     * Substitute property table for this object (optional).
++     * @result
++     * Returns true on success, false otherwise.
++     */
++
++    virtual bool init(UInt64               base,
++                      UInt64               size,
++                      UInt64               preferredBlockSize,
++                      IOMediaAttributeMask attributes,
++                      bool                 isWhole,
++                      bool                 isWritable,
++                      const char *         contentHint = 0,
++                      OSDictionary *       properties  = 0);
++
++    /*!
++     * @function getAttributes
++     * @discussion
++     * Ask the media object for its attributes.
++     * @result
++     * Media attributes, such as ejectability and removability.  See
++     * IOMediaAttributeMask.
++     */
++
++    virtual IOMediaAttributeMask getAttributes() const;
++
++    OSMetaClassDeclareReservedUnused(IOMedia,  0);
++    OSMetaClassDeclareReservedUnused(IOMedia,  1);
++    OSMetaClassDeclareReservedUnused(IOMedia,  2);
++    OSMetaClassDeclareReservedUnused(IOMedia,  3);
++    OSMetaClassDeclareReservedUnused(IOMedia,  4);
++    OSMetaClassDeclareReservedUnused(IOMedia,  5);
++    OSMetaClassDeclareReservedUnused(IOMedia,  6);
++    OSMetaClassDeclareReservedUnused(IOMedia,  7);
++    OSMetaClassDeclareReservedUnused(IOMedia,  8);
++    OSMetaClassDeclareReservedUnused(IOMedia,  9);
++    OSMetaClassDeclareReservedUnused(IOMedia, 10);
++    OSMetaClassDeclareReservedUnused(IOMedia, 11);
++    OSMetaClassDeclareReservedUnused(IOMedia, 12);
++    OSMetaClassDeclareReservedUnused(IOMedia, 13);
++    OSMetaClassDeclareReservedUnused(IOMedia, 14);
++    OSMetaClassDeclareReservedUnused(IOMedia, 15);
++};
++
++#endif /* __cplusplus */
++#endif /* KERNEL */
++#endif /* !_IOMEDIA_H */
+diff --git a/iokit/IOKit/storage/IOStorage.h b/iokit/IOKit/storage/IOStorage.h
+new file mode 100644
+index 0000000..19c8a7a
+--- /dev/null
++++ b/iokit/IOKit/storage/IOStorage.h
+@@ -0,0 +1,808 @@
++/*
++ * KEBAB: vendored from the macOS 14.5 SDK
++ *   System/Library/Frameworks/Kernel.framework/Versions/A/Headers/IOKit/storage/IOStorage.h
++ * Kept in the tree so the kernel build does not depend on an SDK path that may
++ * move. See docs/BRING-UP-STATE.md section 87 for the list and the reason.
++ */
++/*
++ * Copyright (c) 1998-2015 Apple Inc. All rights reserved.
++ *
++ * @APPLE_LICENSE_HEADER_START@
++ * 
++ * This file contains Original Code and/or Modifications of Original Code
++ * as defined in and that are subject to the Apple Public Source License
++ * Version 2.0 (the 'License'). You may not use this file except in
++ * compliance with the License. Please obtain a copy of the License at
++ * http://www.opensource.apple.com/apsl/ and read it before using this
++ * file.
++ * 
++ * The Original Code and all software distributed under the License are
++ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
++ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
++ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
++ * Please see the License for the specific language governing rights and
++ * limitations under the License.
++ * 
++ * @APPLE_LICENSE_HEADER_END@
++ */
++
++/*!
++ * @header IOStorage
++ * @abstract
++ * This header contains the IOStorage class definition.
++ */
++
++#ifndef _IOSTORAGE_H
++#define _IOSTORAGE_H
++
++#include <sys/kernel_types.h>
++#include <IOKit/IOTypes.h>
++
++/*!
++ * @defined kIOStorageClass
++ * @abstract
++ * The name of the IOStorage class.
++ */
++
++#define kIOStorageClass "IOStorage"
++
++/*!
++ * @defined kIOStorageCategory
++ * @abstract
++ * kIOStorageCategory is a value for IOService's kIOMatchCategoryKey property.
++ * @discussion
++ * The kIOStorageCategory value is the standard value for the IOService property
++ * kIOMatchCategoryKey ("IOMatchCategory") for all storage drivers.  All storage
++ * objects that expect to drive new content (that is, produce new media objects)
++ * are expected to compete within the kIOStorageCategory namespace.
++ *
++ * See the IOService documentation for more information on match categories.
++ */
++
++#define kIOStorageCategory "IOStorage"                /* (as IOMatchCategory) */
++
++/*!
++ * @defined kIOStorageFeaturesKey
++ * @abstract
++ * A property of any object in the storage stack.
++ * @discussion
++ * kIOStorageFeaturesKey is a property of any object in the storage stack that
++ * wishes to express support of additional features, such as Force Unit Access.
++ * It is typically defined in the device object below the block storage driver
++ * object.  It has an OSDictionary value, where each entry describes one given
++ * feature.
++ */
++
++#define kIOStorageFeaturesKey "IOStorageFeatures"
++
++/*!
++ * @defined kIOStorageFeatureBarrier
++ * @abstract
++ * Describes the presence of the Barrier feature.
++ * @discussion
++ * This property describes the ability of the storage stack to honor a write
++ * barrier, guaranteeing that on power loss, writes after the barrier will not
++ * be visible until all writes before the barrier are visible.  It is one of the
++ * feature entries listed under the top-level kIOStorageFeaturesKey property
++ * table.  It has an OSBoolean value.
++ */
++
++#define kIOStorageFeatureBarrier "Barrier"
++
++/*!
++ * @defined kIOStorageFeatureForceUnitAccess
++ * @abstract
++ * Describes the presence of the Force Unit Access feature.
++ * @discussion
++ * This property describes the ability of the storage stack to force a request
++ * to access the media.  It is one of the feature entries listed under the top-
++ * level kIOStorageFeaturesKey property table.  It has an OSBoolean value.
++ */
++
++#define kIOStorageFeatureForceUnitAccess "Force Unit Access"
++
++/*!
++ * @defined kIOStorageFeaturePriority
++ * @abstract
++ * Describes the presence of the Priority feature.
++ * @discussion
++ * This property describes the ability of the storage stack to enforce the
++ * priority of a request.  It is one of the feature entries listed under the
++ * top-level kIOStorageFeaturesKey property table.  It has an OSBoolean value.
++ */
++
++#define kIOStorageFeaturePriority "Priority"
++
++/*!
++ * @defined kIOStorageFeatureUnmap
++ * @abstract
++ * Describes the presence of the Unmap feature.
++ * @discussion
++ * This property describes the ability of the storage stack to delete unused
++ * data from the media.  It is one of the feature entries listed under the top-
++ * level kIOStorageFeaturesKey property table.  It has an OSBoolean value.
++ */
++
++#define kIOStorageFeatureUnmap "Unmap"
++
++/*!
++ * @enum IOStorageUnmapOptions
++ * @discussion
++ * Options for unmap storage requests.
++ * @constant kIOStorageUnmapOptionWhole
++ * Issue a single extent only.
++ */
++
++enum
++{
++    kIOStorageUnmapOptionNone       = 0x00000000,
++    kIOStorageUnmapOptionWhole      = 0x00000001,
++    kIOStorageUnmapOptionReserved   = 0xFFFFFFFE
++};
++
++typedef UInt32 IOStorageUnmapOptions;
++
++#ifdef KERNEL
++#ifdef __cplusplus
++
++/*
++ * Kernel
++ */
++
++#include <IOKit/assert.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/IOService.h>
++
++/*!
++ * @enum IOStorageAccess
++ * @discussion
++ * The IOStorageAccess enumeration describes the possible access levels for open
++ * requests.
++ * @constant kIOStorageAccessNone
++ * No access is requested; should not be passed to open().
++ * @constant kIOStorageAccessReader
++ * Read-only access is requested.
++ * @constant kIOStorageAccessWriter
++ * write-only access is requested.
++ * @constant kIOStorageAccessReaderWriter
++ * Read and write access is requested.
++ * @constant kIOStorageAccessSharedLock
++ * Shared access is requested.
++ * @constant kIOStorageAccessExclusiveLock
++ * Exclusive access is requested.
++ * @constant kIOStorageAccessInvalid
++ * Invalid access is requested.
++ * @constant kIOStorageAccessReserved
++ * Reserved Access.
++ */
++
++enum
++{
++    kIOStorageAccessNone          = 0x00,
++    kIOStorageAccessReader        = 0x01,
++    kIOStorageAccessWriter        = 0x02,
++    kIOStorageAccessReaderWriter  = 0x03,
++    kIOStorageAccessSharedLock    = 0x04,
++    kIOStorageAccessExclusiveLock = 0x08,
++    kIOStorageAccessInvalid       = 0x0D,
++    kIOStorageAccessReserved      = 0xFFFFFFF0
++};
++
++typedef UInt32 IOStorageAccess;
++
++/*!
++ * @enum IOStorageOptions
++ * @discussion
++ * Options for read and write storage requests.
++ * @constant kIOStorageOptionForceUnitAccess
++ * Force the request to access the media.
++ * @constant kIOStorageOptionIsEncrypted
++ * The data is already encrypted.
++ * @constant kIOStorageOptionIsStatic
++ * The data is likely to remain unaltered.
++ */
++
++enum
++{
++    kIOStorageOptionNone            = 0x0000,
++    kIOStorageOptionForceUnitAccess = 0x0001,
++    kIOStorageOptionIsEncrypted     = 0x0010,
++    kIOStorageOptionIsStatic        = 0x0020,
++    kIOStorageOptionReserved        = 0xFFCE
++};
++
++typedef UInt16 IOStorageOptions;
++
++/*!
++ * @enum IOStoragePriority
++ * @discussion
++ * Priority of read and write storage requests.  The lower the value, the
++ * higher the priority.
++ * @constant kIOStoragePriorityHigh
++ * This priority should only be used for I/O that is critical to system
++ * responsiveness.
++ * @constant kIOStoragePriorityDefault
++ * This priority is for work requested by the user, but that is not the user's
++ * current focus.
++ * @constant kIOStoragePriorityLow
++ * This priority is for short-running background work.
++ * @constant kIOStoragePriorityBackground
++ * This priority is for long-running, I/O intensive background work, such as
++ * backups, search indexing, or file synchronization.
++ */
++
++enum
++{
++    kIOStoragePriorityHigh       =  63,                         /*   0 to  63 */
++    kIOStoragePriorityDefault    = 127,                         /*  64 to 127 */
++    kIOStoragePriorityLow        = 191,                         /* 128 to 191 */
++    kIOStoragePriorityBackground = 255                          /* 192 to 255 */
++};
++
++typedef UInt8 IOStoragePriority;
++
++/*!
++ * @enum IOStorageSynchronizeOptions
++ * @discussion
++ * Options for synchronize storage requests.
++ * @constant kIOStorageSynchronizeOptionBarrier
++ * Issue a write barrier only.
++ */
++
++enum
++{
++    kIOStorageSynchronizeOptionNone     = 0x00000000,
++    kIOStorageSynchronizeOptionBarrier  = 0x00000002,
++    kIOStorageSynchronizeOptionReserved = 0xFFFFFFFD
++};
++
++typedef UInt32 IOStorageSynchronizeOptions;
++
++/*!
++ * @struct IOStorageAttributes
++ * @discussion
++ * Attributes of read and write storage requests.
++ * @field options
++ * Options for the request.  See IOStorageOptions.
++ * @field priority
++ * Priority of the request.  See IOStoragePriority.
++ * @field bufattr
++ * Reserved for future use.  Set to zero.
++ */
++
++struct IOStorageAttributes
++{
++    IOStorageOptions  options;
++    IOStoragePriority priority;
++    UInt8             reserved0024;
++    UInt32            reserved0032;
++    UInt64            reserved0064;
++    UInt64            adjustedOffset;
++    bufattr_t         bufattr;
++};
++
++/*!
++ * @struct IOStorageExtent
++ * @discussion
++ * Extent for unmap storage requests.
++ * @field byteStart
++ * Starting byte offset for the operation.
++ * @field byteCount
++ * Size of the operation.
++ */
++
++struct IOStorageExtent
++{
++    UInt64 byteStart;
++    UInt64 byteCount;
++};
++
++/*!
++ * @enum IOStorageProvisionTypes
++ * @discussion
++ * Device block provision types, such as mapped, deallocated, or anchored. See SCSI
++ * SBC4 specifiction, LBA status descriptor for definitions.
++ */
++
++enum
++{
++    kIOStorageProvisionTypeMapped      = 0x00,
++    kIOStorageProvisionTypeDeallocated = 0x01,
++    kIOStorageProvisionTypeAnchored    = 0x02
++};
++
++typedef UInt64 IOStorageGetProvisionStatusOptions;
++/*!
++ * @struct IOStorageProvisionExtent
++ * @discussion
++ * Extent for provision status.
++ * @field byteStart
++ * Starting byte offset for the operation.
++ * @field byteCount
++ * Size of the operation.
++ * @field provisionType
++ * Block provision type. See IOStorageProvisionTypes.
++ */
++
++struct IOStorageProvisionExtent
++{
++    UInt64 byteStart;
++    UInt64 byteCount;
++    UInt8  provisionType;
++    UInt8  reserved[7];
++};
++
++/*!
++ * @typedef IOStorageCompletionAction
++ * @discussion
++ * The IOStorageCompletionAction declaration describes the C (or C++) completion
++ * routine that is called once an asynchronous storage operation completes.
++ * @param target
++ * Opaque client-supplied pointer (or an instance pointer for a C++ callback).
++ * @param parameter
++ * Opaque client-supplied pointer.
++ * @param status
++ * Status of the data transfer.
++ * @param actualByteCount
++ * Actual number of bytes transferred in the data transfer.
++ */
++
++typedef void (*IOStorageCompletionAction)(void *   target,
++                                          void *   parameter,
++                                          IOReturn status,
++                                          UInt64   actualByteCount);
++
++/*!
++ * @struct IOStorageCompletion
++ * @discussion
++ * The IOStorageCompletion structure describes the C (or C++) completion routine
++ * that is called once an asynchronous storage operation completes.   The values
++ * passed for the target and parameter fields will be passed to the routine when
++ * it is called.
++ * @field target
++ * Opaque client-supplied pointer (or an instance pointer for a C++ callback).
++ * @field action
++ * Completion routine to call on completion of the data transfer.
++ * @field parameter
++ * Opaque client-supplied pointer.
++ */
++
++struct IOStorageCompletion
++{
++    void *                    target;
++    IOStorageCompletionAction action;
++    void *                    parameter;
++};
++
++/*!
++ * @class IOStorage
++ * @abstract
++ * The common base class for mass storage objects.
++ * @discussion
++ * The IOStorage class is the common base class for mass storage objects.  It is
++ * an abstract class that defines the open/close/read/write APIs that need to be
++ * implemented in a given subclass.  Synchronous versions of the read/write APIs
++ * are provided here -- they are coded in such a way as to wrap the asynchronous
++ * versions implemented in the subclass.
++ */
++
++class __exported IOStorage : public IOService
++{
++    OSDeclareAbstractStructors(IOStorage);
++
++protected:
++
++    struct ExpansionData { /* */ };
++    ExpansionData * _expansionData;
++
++    /*!
++     * @function handleOpen
++     * @discussion
++     * The handleOpen method grants or denies permission to access this object
++     * to an interested client.  The argument is an IOStorageAccess value that
++     * specifies the level of access desired -- reader or reader-writer.
++     *
++     * This method can be invoked to upgrade or downgrade the access level for
++     * an existing client as well.  The previous access level will prevail for
++     * upgrades that fail, of course.   A downgrade should never fail.  If the
++     * new access level should be the same as the old for a given client, this
++     * method will do nothing and return success.  In all cases, one, singular
++     * close-per-client is expected for all opens-per-client received.
++     * @param client
++     * Client requesting the open.
++     * @param options
++     * Options for the open.  Set to zero.
++     * @param access
++     * Access level for the open.  Set to kIOStorageAccessReader or
++     * kIOStorageAccessReaderWriter.
++     * @result
++     * Returns true if the open was successful, false otherwise.
++     */
++
++    virtual bool handleOpen(IOService *  client,
++                            IOOptionBits options,
++                            void *       access) APPLE_KEXT_OVERRIDE = 0;
++
++    /*!
++     * @function handleIsOpen
++     * @discussion
++     * The handleIsOpen method determines whether the specified client, or any
++     * client if none is specified, presently has an open on this object.
++     * @param client
++     * Client to check the open state of.  Set to zero to check the open state
++     * of all clients.
++     * @result
++     * Returns true if the client was (or clients were) open, false otherwise.
++     */
++
++    virtual bool handleIsOpen(const IOService * client) const APPLE_KEXT_OVERRIDE = 0;
++
++    /*!
++     * @function handleClose
++     * @discussion
++     * The handleClose method closes the client's access to this object.
++     * @param client
++     * Client requesting the close.
++     * @param options
++     * Options for the close.  Set to zero.
++     */
++
++    virtual void handleClose(IOService * client, IOOptionBits options) APPLE_KEXT_OVERRIDE = 0;
++
++public:
++
++#if TARGET_OS_OSX
++    virtual bool attach(IOService * provider) APPLE_KEXT_OVERRIDE;
++#endif /* TARGET_OS_OSX */
++
++    /*!
++     * @function complete
++     * @discussion
++     * Invokes the specified completion action of the read/write request.  If
++     * the completion action is unspecified, no action is taken.  This method
++     * serves simply as a convenience to storage subclass developers.
++     * @param completion
++     * Completion information for the data transfer.
++     * @param status
++     * Status of the data transfer.
++     * @param actualByteCount
++     * Actual number of bytes transferred in the data transfer.
++     */
++
++    static void complete(IOStorageCompletion * completion,
++                         IOReturn              status,
++                         UInt64                actualByteCount = 0);
++
++    /*!
++     * @function open
++     * @discussion
++     * Ask the storage object for permission to access its contents; the method
++     * is equivalent to IOService::open(), but with the correct parameter types.
++     *
++     * This method may also be invoked to upgrade or downgrade the access of an
++     * existing open (if it fails, the existing open prevails).
++     * @param client
++     * Client requesting the open.
++     * @param options
++     * Options for the open.  Set to zero.
++     * @param access
++     * Access level for the open.  Set to kIOStorageAccessReader or
++     * kIOStorageAccessReaderWriter.
++     * @result
++     * Returns true if the open was successful, false otherwise.
++     */
++
++    virtual bool open(IOService *     client,
++                      IOOptionBits    options,
++                      IOStorageAccess access);
++
++    /*!
++     * @function read
++     * @discussion
++     * Read data from the storage object at the specified byte offset into the
++     * specified buffer, synchronously.   When the read completes, this method
++     * will return to the caller.  The actual byte count field is optional.
++     * @param client
++     * Client requesting the read.
++     * @param byteStart
++     * Starting byte offset for the data transfer.
++     * @param buffer
++     * Buffer for the data transfer.  The size of the buffer implies the size of
++     * the data transfer.
++     * @param attributes
++     * Attributes of the data transfer.  See IOStorageAttributes.
++     * @param actualByteCount
++     * Returns the actual number of bytes transferred in the data transfer.
++     * @result
++     * Returns the status of the data transfer.
++     */
++
++    virtual IOReturn read(IOService *           client,
++                          UInt64                byteStart,
++                          IOMemoryDescriptor *  buffer,
++                          IOStorageAttributes * attributes      = 0,
++                          UInt64 *              actualByteCount = 0);
++
++    /*!
++     * @function write
++     * @discussion
++     * Write data into the storage object at the specified byte offset from the
++     * specified buffer, synchronously.   When the write completes, this method
++     * will return to the caller.  The actual byte count field is optional.
++     * @param client
++     * Client requesting the write.
++     * @param byteStart
++     * Starting byte offset for the data transfer.
++     * @param buffer
++     * Buffer for the data transfer.  The size of the buffer implies the size of
++     * the data transfer.
++     * @param attributes
++     * Attributes of the data transfer.  See IOStorageAttributes.
++     * @param actualByteCount
++     * Returns the actual number of bytes transferred in the data transfer.
++     * @result
++     * Returns the status of the data transfer.
++     */
++
++    virtual IOReturn write(IOService *           client,
++                           UInt64                byteStart,
++                           IOMemoryDescriptor *  buffer,
++                           IOStorageAttributes * attributes      = 0,
++                           UInt64 *              actualByteCount = 0);
++
++#if TARGET_OS_OSX
++    virtual IOReturn synchronizeCache(IOService * client) __attribute__ ((deprecated));
++#endif /* TARGET_OS_OSX */
++
++    /*!
++     * @function read
++     * @discussion
++     * Read data from the storage object at the specified byte offset into the
++     * specified buffer, asynchronously.   When the read completes, the caller
++     * will be notified via the specified completion action.
++     *
++     * The buffer will be retained for the duration of the read.
++     * @param client
++     * Client requesting the read.
++     * @param byteStart
++     * Starting byte offset for the data transfer.
++     * @param buffer
++     * Buffer for the data transfer.  The size of the buffer implies the size of
++     * the data transfer.
++     * @param attributes
++     * Attributes of the data transfer.  See IOStorageAttributes.  It is the
++     * responsibility of the callee to maintain the information for the duration
++     * of the data transfer, as necessary.
++     * @param completion
++     * Completion routine to call once the data transfer is complete.  It is the
++     * responsibility of the callee to maintain the information for the duration
++     * of the data transfer, as necessary.
++     */
++
++    virtual void read(IOService *           client,
++                      UInt64                byteStart,
++                      IOMemoryDescriptor *  buffer,
++                      IOStorageAttributes * attributes,
++                      IOStorageCompletion * completion) = 0;
++
++    /*!
++     * @function write
++     * @discussion
++     * Write data into the storage object at the specified byte offset from the
++     * specified buffer, asynchronously.   When the write completes, the caller
++     * will be notified via the specified completion action.
++     *
++     * The buffer will be retained for the duration of the write.
++     * @param client
++     * Client requesting the write.
++     * @param byteStart
++     * Starting byte offset for the data transfer.
++     * @param buffer
++     * Buffer for the data transfer.  The size of the buffer implies the size of
++     * the data transfer.
++     * @param attributes
++     * Attributes of the data transfer.  See IOStorageAttributes.  It is the
++     * responsibility of the callee to maintain the information for the duration
++     * of the data transfer, as necessary.
++     * @param completion
++     * Completion routine to call once the data transfer is complete.  It is the
++     * responsibility of the callee to maintain the information for the duration
++     * of the data transfer, as necessary.
++     */
++
++    virtual void write(IOService *           client,
++                       UInt64                byteStart,
++                       IOMemoryDescriptor *  buffer,
++                       IOStorageAttributes * attributes,
++                       IOStorageCompletion * completion) = 0;
++
++#if TARGET_OS_OSX
++    virtual IOReturn discard(IOService * client,
++                             UInt64      byteStart,
++                             UInt64      byteCount) __attribute__ ((deprecated));
++#endif /* TARGET_OS_OSX */
++
++    /*!
++     * @function unmap
++     * @discussion
++     * Delete unused data from the storage object at the specified byte offsets.
++     * @param client
++     * Client requesting the operation.
++     * @param extents
++     * List of extents.  See IOStorageExtent.  It is legal for the callee to
++     * overwrite the contents of this buffer in order to satisfy the request.
++     * @param extentsCount
++     * Number of extents.
++     * @param options
++     * Options for the unmap.  See IOStorageUnmapOptions.
++     * @result
++     * Returns the status of the operation.
++     */
++
++#if TARGET_OS_OSX
++    virtual IOReturn unmap(IOService *           client,
++                           IOStorageExtent *     extents,
++                           UInt32                extentsCount,
++                           IOStorageUnmapOptions options = 0); /* 10.6.6 */
++#else /* !TARGET_OS_OSX */
++    virtual IOReturn unmap(IOService *           client,
++                           IOStorageExtent *     extents,
++                           UInt32                extentsCount,
++                           IOStorageUnmapOptions options = 0) = 0;
++#endif /* !TARGET_OS_OSX */
++
++    /*!
++     * @function lockPhysicalExtents
++     * @discussion
++     * Lock the contents of the storage object against relocation temporarily,
++     * for the purpose of getting physical extents.
++     * @param client
++     * Client requesting the operation.
++     * @result
++     * Returns true if the lock was successful, false otherwise.
++     */
++
++    virtual bool lockPhysicalExtents(IOService * client); /* 10.7.0 */
++
++    /*!
++     * @function copyPhysicalExtent
++     * @discussion
++     * Convert the specified byte offset into a physical byte offset, relative
++     * to a physical storage object.  This call should only be made within the
++     * context of lockPhysicalExtents().
++     * @param client
++     * Client requesting the operation.
++     * @param byteStart
++     * Starting byte offset for the operation.  Returns a physical byte offset,
++     * relative to the physical storage object, on success.
++     * @param byteCount
++     * Size of the operation.  Returns the actual number of bytes which can be
++     * transferred, relative to the physical storage object, on success. 
++     * @result
++     * A reference to the physical storage object, which should be released by
++     * the caller, or a null on error.
++     */
++
++    virtual IOStorage * copyPhysicalExtent(IOService * client,
++                                           UInt64 *    byteStart,
++                                           UInt64 *    byteCount); /* 10.7.0 */
++
++    /*!
++     * @function unlockPhysicalExtents
++     * @discussion
++     * Unlock the contents of the storage object for relocation again.  This
++     * call must balance a successful call to lockPhysicalExtents().
++     * @param client
++     * Client requesting the operation.
++     */
++
++    virtual void unlockPhysicalExtents(IOService * client); /* 10.7.0 */
++
++    /*!
++     * @function setPriority
++     * @discussion
++     * Reprioritize read or write requests at the specified byte offsets.
++     * @param client
++     * Client requesting the operation.
++     * @param extents
++     * List of extents.  See IOStorageExtent.  It is legal for the callee to
++     * overwrite the contents of this buffer in order to satisfy the request.
++     * @param extentsCount
++     * Number of extents.
++     * @param priority
++     * New priority.  See IOStoragePriority.
++     * @result
++     * Returns the status of the operation.
++     */
++
++    virtual IOReturn setPriority(IOService *       client,
++                                 IOStorageExtent * extents,
++                                 UInt32            extentsCount,
++                                 IOStoragePriority priority); /* 10.10.0 */
++
++    /*!
++     * @function synchronize
++     * @discussion
++     * Flush the cached data in the storage object, if any.
++     * @param client
++     * Client requesting the synchronization.
++     * @param byteStart
++     * Starting byte offset for the synchronization.
++     * @param byteCount
++     * Size of the synchronization.  Set to zero to specify the end-of-media.
++     * @param options
++     * Options for the synchronization.  See IOStorageSynchronizeOptions.
++     * @result
++     * Returns the status of the synchronization.
++     */
++
++#if TARGET_OS_OSX
++    virtual IOReturn synchronize(IOService *                 client,
++                                 UInt64                      byteStart,
++                                 UInt64                      byteCount,
++                                 IOStorageSynchronizeOptions options = 0); /* 10.11.0 */
++#else /* !TARGET_OS_OSX */
++    virtual IOReturn synchronize(IOService *                 client,
++                                 UInt64                      byteStart,
++                                 UInt64                      byteCount,
++                                 IOStorageSynchronizeOptions options = 0) = 0;
++#endif /* !TARGET_OS_OSX */
++
++    /*!
++     * @function getProvisionStatus
++     * @discussion
++     * Get device block provision status
++     * @param client
++     * Client requesting the synchronization.
++     * @param byteStart
++     * Byte offset of logical extent on the device.
++     * @param byteCount
++     * Byte length of logical extent on the device, 0 mean the entire remaining space.
++     * @param extentsCount
++     * Number of extents allocated in extents. On return, this parameter indicate number
++     * of provision extents returned.
++     * @param extents
++     * List of provision extents. See IOStorageProvisionExtents.
++     * @param options
++     * Options for get provision status.  See IOStorageGetProvisionStatusOptions.
++     * @result
++     * Returns the status of the getProvisionStatus.
++     */
++
++    virtual IOReturn getProvisionStatus(IOService *                        client,
++                                        UInt64                             byteStart,
++                                        UInt64                             byteCount,
++                                        UInt32 *                           extentsCount,
++                                        IOStorageProvisionExtent *         extents,
++                                        IOStorageGetProvisionStatusOptions options = 0 ); /* 10.12.0 */
++
++    OSMetaClassDeclareReservedUsed(IOStorage,  0);
++    OSMetaClassDeclareReservedUsed(IOStorage,  1);
++    OSMetaClassDeclareReservedUsed(IOStorage,  2);
++    OSMetaClassDeclareReservedUsed(IOStorage,  3);
++    OSMetaClassDeclareReservedUsed(IOStorage,  4);
++    OSMetaClassDeclareReservedUsed(IOStorage,  5);
++    OSMetaClassDeclareReservedUsed(IOStorage,  6);
++    OSMetaClassDeclareReservedUnused(IOStorage,  7);
++    OSMetaClassDeclareReservedUnused(IOStorage,  8);
++    OSMetaClassDeclareReservedUnused(IOStorage,  9);
++    OSMetaClassDeclareReservedUnused(IOStorage, 10);
++    OSMetaClassDeclareReservedUnused(IOStorage, 11);
++    OSMetaClassDeclareReservedUnused(IOStorage, 12);
++    OSMetaClassDeclareReservedUnused(IOStorage, 13);
++    OSMetaClassDeclareReservedUnused(IOStorage, 14);
++    OSMetaClassDeclareReservedUnused(IOStorage, 15);
++};
++
++
++#if TARGET_OS_OSX
++#ifdef KERNEL_PRIVATE
++#define _kIOStorageSynchronizeOption_super__synchronizeCache 0xFFFFFFFF
++#define _respondsTo_synchronizeCache ( IOStorage::_expansionData )
++#endif /* KERNEL_PRIVATE */
++#endif /* TARGET_OS_OSX */
++
++#endif /* __cplusplus */
++#endif /* KERNEL */
++#endif /* !_IOSTORAGE_H */
+diff --git a/iokit/IOKit/storage/IOStorageControllerCharacteristics.h b/iokit/IOKit/storage/IOStorageControllerCharacteristics.h
+new file mode 100644
+index 0000000..7312e18
+--- /dev/null
++++ b/iokit/IOKit/storage/IOStorageControllerCharacteristics.h
+@@ -0,0 +1,1353 @@
++/*
++ * KEBAB: vendored from the macOS 14.5 SDK
++ *   System/Library/Frameworks/Kernel.framework/Versions/A/Headers/IOKit/storage/IOStorageControllerCharacteristics.h
++ * Kept in the tree so the kernel build does not depend on an SDK path that may
++ * move. See docs/BRING-UP-STATE.md section 87 for the list and the reason.
++ */
++/*
++ * Copyright (c) 1998-2014 Apple Inc. All rights reserved.
++ *
++ * @APPLE_LICENSE_HEADER_START@
++ * 
++ * This file contains Original Code and/or Modifications of Original Code
++ * as defined in and that are subject to the Apple Public Source License
++ * Version 2.0 (the 'License'). You may not use this file except in
++ * compliance with the License. Please obtain a copy of the License at
++ * http://www.opensource.apple.com/apsl/ and read it before using this
++ * file.
++ * 
++ * The Original Code and all software distributed under the License are
++ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
++ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
++ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
++ * Please see the License for the specific language governing rights and
++ * limitations under the License.
++ * 
++ * @APPLE_LICENSE_HEADER_END@
++ */
++
++#ifndef _IOKIT_IO_STORAGE_CONTROLLER_CHARACTERISTICS_H_
++#define _IOKIT_IO_STORAGE_CONTROLLER_CHARACTERISTICS_H_
++
++/* KEBAB: kernel-only copy; TargetConditionals.h is not on the include path. */
++
++/*
++ *	Controller Characteristics - Characteristics defined for controllers.
++ */
++
++
++/*!
++@defined kIOPropertyControllerCharacteristicsKey
++@discussion This key is used to define Controller Characteristics for a particular
++device and it has an associated dictionary which lists the
++controller characteristics.
++
++Requirement: Mandatory
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>Automatic</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyControllerCharacteristicsKey		"Controller Characteristics"
++
++
++/*!
++@defined kIOPropertySASAddressKey
++@discussion This key is the unique 64-bit SAS Address for the device server
++node located at this port, or for the initiating host port.
++
++Requirement: Mandatory for SAS.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>SAS Address</key>
++		<data>0011223344556677</data>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertySASAddressKey					"SAS Address"
++
++
++/*!
++@defined kIOPropertySCSIPortIdentifierKey
++@discussion This key is the unique port identifier for the device server
++node located at this port, or for the initiating host port.  The format for
++this data is allowed to be vendor-specific, as long as it is guaranteed to
++be unique.  Length is arbitrary, to allow for itnerfaces with non-standard
++identifier rules.  It is recommended to have this be a copy of an existing
++standard unique identifier for this port, should one  already exist for your
++interface type
++
++Requirement: Mandatory.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Unique SCSI Port Identifier</key>
++		<data>0011223344556677</data>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertySCSIPortIdentifierKey		"Unique SCSI Port Identifier"
++
++
++/*!
++@defined kIOPropertyFibreChannelNodeWorldWideNameKey
++@discussion This key is the unique 64-bit World Wide Name for the device server
++node located at this port, or for the initiating host port.
++
++Requirement: Mandatory for Fibre Channel Interface.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Node World Wide Name</key>
++		<data>0011223344556677</data>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyFibreChannelNodeWorldWideNameKey		"Node World Wide Name"
++
++
++/*!
++@defined kIOPropertyFibreChannelPortWorldWideNameKey
++@discussion This key is the unique 64-bit World Wide Name for the port.
++
++Requirement: Mandatory for Fibre Channel Interface.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port World Wide Name</key>
++		<data>0011223344556677</data>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyFibreChannelPortWorldWideNameKey		"Port World Wide Name"
++
++
++/*!
++@defined kIOPropertyFibreChannelAddressIdentifierKey
++@discussion This key is the 24-bit Address Identifier (S_ID or D_ID) as
++defined in the FC-FS specification. It contains the address identifier
++of the source or destination Nx_Port.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional (only necessary for Fibre Channel Interface).
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Address Identifier</key>
++		<data>001122</data>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyFibreChannelAddressIdentifierKey		"Address Identifier"
++
++
++/*!
++@defined kIOPropertyFibreChannelALPAKey
++@discussion This key is the 8-bit Arbitrated Loop Physical Address
++(AL_PA) value as defined in the FC-AL-2 specification.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional (only necessary for Fibre Channel Interface).
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>AL_PA</key>
++		<data>04</data>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyFibreChannelALPAKey					"AL_PA"
++
++
++/*!
++@defined kIOPropertyPortStatusKey
++@discussion This key is associated with the current port
++status of the physical link. The port status is either
++"Link Established", "No Link Established", or "Link Failed".
++
++Note: This value can change when the port status changes. It
++is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Status</key>
++		<string>Link Established</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortStatusKey						"Port Status"
++
++
++/*!
++@defined kIOPropertyPortSpeedKey
++@discussion This key is associated with the current port
++speed. The port speed can be any valid speed for the interconnect.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>Automatic (1 Gigabit)</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeedKey							"Port Speed"
++
++
++/*!
++@defined kIOPropertyPortTopologyKey
++@discussion This key is associated with the current port
++topology. The port topology can be any valid topology for the interconnect.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Topology</key>
++		<string>Automatic (N_Port)</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortTopologyKey						"Port Topology"
++
++
++/*!
++@defined kIOPropertyPortDescriptionKey
++@discussion This key is associated with an human
++readable port description. Examples include
++"Channel A", "Port 1", etc.
++
++Requirement: Optional for all interconnects.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Description</key>
++		<string>Channel A</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortDescriptionKey					"Port Description"
++
++
++/*!
++@defined kIOPropertySCSIParallelSignalingTypeKey
++@discussion This key is associated with the signaling type
++used for this SCSI Parallel bus. Valid values include
++"High Voltage Differential", "Low Voltage Differential",
++and "Single Ended".
++
++Requirement: Optional for SCSI Parallel Interface. Not
++defined for any other physical interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>SCSI Parallel Signaling Type</key>
++		<string>High Voltage Differential</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertySCSIParallelSignalingTypeKey			"SCSI Parallel Signaling Type"
++
++
++/*!
++@defined kIOPropertyFibreChannelCableDescriptionKey
++@discussion This key is associated with the cabling type
++used for this Fibre Channel port. Valid values include
++"Copper" and "Fiber Optic".
++
++Requirement: Optional for Fibre Channel Interface. Not
++defined for any other physical interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Fibre Channel Cabling Type</key>
++		<string>Copper</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyFibreChannelCableDescriptionKey		"Fibre Channel Cabling Type"
++
++
++/*!
++@defined kIOPropertyEncryptionTypeKey
++@discussion This key is associated with the encryption type
++used for this storage controller. Valid values currently include
++"AES-XTS", "AES-XEX" and "AES-CBC".
++
++Requirement: Optional for all storage controllers.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Encryption Type</key>
++		<string>AES-XTS</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyEncryptionTypeKey	"Encryption Type"
++
++
++/*!
++@defined kIOPropertyLowPowerModeKey
++@discussion This key is associated with whether the storage
++device has low-power mode enabled. If enabled, it will set this 
++key to true.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Low Power Mode</key>
++		<true/>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyLowPowerModeKey		"Low Power Mode"
++
++
++/*
++ *	Values - Values for the characteristics defined above.
++ */
++
++
++/*!
++@defined kIOPropertyPortStatusLinkEstablishedKey
++@discussion This key defines the value of Link Established for the key
++kIOPropertyPortStatusKey.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Status</key>
++		<string>Link Established</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortStatusLinkEstablishedKey			"Link Established"
++
++
++/*!
++@defined kIOPropertyPortStatusNoLinkEstablishedKey
++@discussion This key defines the value of No Link Established for the key
++kIOPropertyPortStatusKey.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Status</key>
++		<string>No Link Established</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortStatusNoLinkEstablishedKey		"No Link Established"
++
++
++/*!
++@defined kIOPropertyPortStatusLinkFailedKey
++@discussion This key defines the value of Link Failed for the key
++kIOPropertyPortStatusKey.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Status</key>
++		<string>Link Failed</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortStatusLinkFailedKey				"Link Failed"
++
++
++/*!
++@defined kIOPropertyPortSpeedAutomaticKey
++@discussion This key defines the value of Automatic for the key
++kIOPropertyPortSpeedKey. If the speed of the port is automatically
++adjusted by the host/device and a definitive speed is not known,
++this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>Automatic</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeedAutomaticKey				"Automatic"
++
++
++/*!
++@defined kIOPropertyPortSpeed1GigabitKey
++@discussion This key defines the value of 1 Gigabit for the key
++kIOPropertyPortSpeedKey. If the speed of the port is 1 Gigabit
++per second and is not automatically determined (i.e. the user
++configured the port to be exactly this speed),
++this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>1 Gigabit</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeed1GigabitKey					"1 Gigabit"
++
++/*!
++@defined kIOPropertyPortSpeed1_5GigabitKey
++@discussion This key defines the value of 1.5 Gigabit for the key
++kIOPropertyPortSpeedKey. If the speed of the port is 1.5 Gigabits
++per second and is not automatically determined (i.e. the user
++configured the port to be exactly this speed),
++this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>1.5 Gigabit</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeed1_5GigabitKey				"1.5 Gigabit"
++
++
++/*!
++@defined kIOPropertyPortSpeed2GigabitKey
++@discussion This key defines the value of 2 Gigabit for the key
++kIOPropertyPortSpeedKey. If the speed of the port is 2 Gigabits
++per second and is not automatically determined (i.e. the user
++configured the port to be exactly this speed),
++this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>2 Gigabit</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeed2GigabitKey					"2 Gigabit"
++
++
++/*!
++@defined kIOPropertyPortSpeed3GigabitKey
++@discussion This key defines the value of 3 Gigabit for the key
++kIOPropertyPortSpeedKey. If the speed of the port is 3 Gigabits
++per second and is not automatically determined (i.e. the user
++configured the port to be exactly this speed),
++this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>3 Gigabit</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeed3GigabitKey					"3 Gigabit"
++
++
++/*!
++@defined kIOPropertyPortSpeed4GigabitKey
++@discussion This key defines the value of 4 Gigabit for the key
++kIOPropertyPortSpeedKey. If the speed of the port is 4 Gigabits
++per second and is not automatically determined (i.e. the user
++configured the port to be exactly this speed),
++this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>4 Gigabit</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeed4GigabitKey					"4 Gigabit"
++
++/*!
++@defined kIOPropertyPortSpeed6GigabitKey
++@discussion This key defines the value of 6 Gigabit for the key
++kIOPropertyPortSpeedKey. If the speed of the port is 6 Gigabits
++per second and is not automatically determined (i.e. the user
++configured the port to be exactly this speed),
++this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>6 Gigabit</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeed6GigabitKey					"6 Gigabit"
++
++
++/*!
++@defined kIOPropertyPortSpeed8GigabitKey
++@discussion This key defines the value of 8 Gigabit for the key
++kIOPropertyPortSpeedKey. If the speed of the port is 8 Gigabits
++per second and is not automatically determined (i.e. the user
++configured the port to be exactly this speed),
++this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>8 Gigabit</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeed8GigabitKey					"8 Gigabit"
++
++
++/*!
++@defined kIOPropertyPortSpeed10GigabitKey
++@discussion This key defines the value of 10 Gigabit for the key
++kIOPropertyPortSpeedKey. If the speed of the port is 10 Gigabits
++per second and is not automatically determined (i.e. the user
++configured the port to be exactly this speed),
++this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>10 Gigabit</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeed10GigabitKey				"10 Gigabit"
++
++
++/*!
++@defined kIOPropertyPortSpeed12GigabitKey
++@discussion This key defines the value of 12 Gigabit for the key
++kIOPropertyPortSpeedKey. If the speed of the port is 12 Gigabits
++per second and is not automatically determined (i.e. the user
++configured the port to be exactly this speed),
++this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>12 Gigabit</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeed12GigabitKey				"12 Gigabit"
++
++
++/*!
++@defined kIOPropertyPortSpeed16GigabitKey
++@discussion This key defines the value of 16 Gigabit for the key
++kIOPropertyPortSpeedKey. If the speed of the port is 16 Gigabits
++per second and is not automatically determined (i.e. the user
++configured the port to be exactly this speed),
++this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>16 Gigabit</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++ */
++#define kIOPropertyPortSpeed16GigabitKey				"16 Gigabit"
++
++
++/*!
++@defined kIOPropertyPortSpeed40GigabitKey
++@discussion This key defines the value of 40 Gigabit for the key
++kIOPropertyPortSpeedKey. If the speed of the port is 40 Gigabits
++per second and is not automatically determined (i.e. the user
++configured the port to be exactly this speed),
++this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>40 Gigabit</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeed40GigabitKey				"40 Gigabit"
++
++
++/*!
++@defined kIOPropertyPortSpeedAutomatic1GigabitKey
++@discussion This key defines the value of Automatic (1 Gigabit)
++for the key kIOPropertyPortSpeedKey. If the speed of the port is
++1 Gigabit per second and is automatically determined by host
++software, this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>Automatic (1 Gigabit)</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeedAutomatic1GigabitKey		"Automatic (1 Gigabit)"
++
++
++/*!
++@defined kIOPropertyPortSpeedAutomatic1_5GigabitKey
++@discussion This key defines the value of Automatic (1.5 Gigabit) for the key
++kIOPropertyPortSpeedKey. If the speed of the port is
++1.5 Gigabits per second and is automatically determined by host
++software, this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>Automatic (1.5 Gigabit)</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeedAutomatic1_5GigabitKey		"Automatic (1.5 Gigabit)"
++
++
++/*!
++@defined kIOPropertyPortSpeedAutomatic2GigabitKey
++@discussion This key defines the value of Automatic (2 Gigabit)
++for the key kIOPropertyPortSpeedKey. If the speed of the port is
++2 Gigabits per second and is automatically determined by host
++software, this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>Automatic (2 Gigabit)</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeedAutomatic2GigabitKey		"Automatic (2 Gigabit)"
++
++
++/*!
++@defined kIOPropertyPortSpeedAutomatic3GigabitKey
++@discussion This key defines the value of Automatic (3 Gigabit)
++for the key kIOPropertyPortSpeedKey. If the speed of the port is
++3 Gigabits per second and is automatically determined by host
++software, this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>Automatic (3 Gigabit)</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeedAutomatic3GigabitKey		"Automatic (3 Gigabit)"
++
++
++/*!
++@defined kIOPropertyPortSpeedAutomatic4GigabitKey
++@discussion This key defines the value of Automatic (4 Gigabit)
++for the key kIOPropertyPortSpeedKey. If the speed of the port is
++4 Gigabits per second and is automatically determined by host
++software, this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>Automatic (4 Gigabit)</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeedAutomatic4GigabitKey		"Automatic (4 Gigabit)"
++
++
++/*!
++@defined kIOPropertyPortSpeedAutomatic6GigabitKey
++@discussion This key defines the value of Automatic (6 Gigabit)
++for the key kIOPropertyPortSpeedKey. If the speed of the port is
++6 Gigabits per second and is automatically determined by host
++software, this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>Automatic (6 Gigabit)</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeedAutomatic6GigabitKey		"Automatic (6 Gigabit)"
++
++
++/*!
++@defined kIOPropertyPortSpeedAutomatic8GigabitKey
++@discussion This key defines the value of Automatic (8 Gigabit)
++for the key kIOPropertyPortSpeedKey. If the speed of the port is
++8 Gigabits per second and is automatically determined by host
++software, this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>Automatic (8 Gigabit)</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeedAutomatic8GigabitKey		"Automatic (8 Gigabit)"
++
++
++/*!
++@defined kIOPropertyPortSpeedAutomatic10GigabitKey
++@discussion This key defines the value of Automatic (10 Gigabit)
++for the key kIOPropertyPortSpeedKey. If the speed of the port is
++10 Gigabits per second and is automatically determined by host
++software, this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Speed</key>
++		<string>Automatic (10 Gigabit)</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortSpeedAutomatic10GigabitKey		"Automatic (10 Gigabit)"
++
++
++/*!
++@defined kIOPropertyPortTopologyAutomaticKey
++@discussion This key defines the value of Automatic for the key
++kIOPropertyPortTopologyKey. If the topology of the port is automatically
++adjusted by the host/device and a definitive topology is not known,
++this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Topology</key>
++		<string>Automatic</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortTopologyAutomaticKey				"Automatic"
++
++
++/*!
++@defined kIOPropertyPortTopologyNPortKey
++@discussion This key defines the value of N_Port for the key
++kIOPropertyPortTopologyKey. If the topology of the port is an N_Port,
++this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Topology</key>
++		<string>N_Port</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortTopologyNPortKey					"N_Port"
++
++
++/*!
++@defined kIOPropertyPortTopologyNLPortKey
++@discussion This key defines the value of NL_Port for the key
++kIOPropertyPortTopologyKey. If the topology of the port is an NL_Port,
++this key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Topology</key>
++		<string>NL_Port</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortTopologyNLPortKey				"NL_Port"
++
++
++/*!
++@defined kIOPropertyPortTopologyAutomaticNPortKey
++@discussion This key defines the value of Automatic (N_Port) for the key
++kIOPropertyPortTopologyKey. If the topology of the port is
++N_Port and is automatically determined by host software, this
++key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Topology</key>
++		<string>Automatic (N_Port)</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortTopologyAutomaticNPortKey		"Automatic (N_Port)"
++
++
++/*!
++@defined kIOPropertyPortTopologyAutomaticNLPortKey
++@discussion This key defines the value of Automatic (NL_Port) for the key
++kIOPropertyPortTopologyKey. If the topology of the port is
++NL_Port and is automatically determined by host software, this
++key should be used.
++
++Note: This value can change. It is not a static value.
++
++Requirement: Optional for any interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Port Topology</key>
++		<string>Automatic (NL_Port)</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPortTopologyAutomaticNLPortKey		"Automatic (NL_Port)"
++
++
++/*!
++@defined kIOPropertySCSIParallelSignalingTypeHVDKey
++@discussion This key defines the value of High Voltage Differential for the key
++kIOPropertySCSIParallelSignalingTypeKey. If the signaling type of the port is
++High Voltage Differential, this key should be used.
++
++Requirement: Optional for SCSI Parallel Interface interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>SCSI Parallel Signaling Type</key>
++		<string>High Voltage Differential</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertySCSIParallelSignalingTypeHVDKey		"High Voltage Differential"
++
++
++/*!
++@defined kIOPropertySCSIParallelSignalingTypeLVDKey
++@discussion This key defines the value of Low Voltage Differential for the key
++kIOPropertySCSIParallelSignalingTypeKey. If the signaling type of the port is
++Low Voltage Differential, this key should be used.
++
++Requirement: Optional for SCSI Parallel Interface interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>SCSI Parallel Signaling Type</key>
++		<string>Low Voltage Differential</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertySCSIParallelSignalingTypeLVDKey		"Low Voltage Differential"
++
++
++/*!
++@defined kIOPropertySCSIParallelSignalingTypeSEKey
++@discussion This key defines the value of Single Ended for the key
++kIOPropertySCSIParallelSignalingTypeKey. If the signaling type of the port is
++Single Ended, this key should be used.
++
++Requirement: Optional for SCSI Parallel Interface interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>SCSI Parallel Signaling Type</key>
++		<string>Single Ended</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertySCSIParallelSignalingTypeSEKey		"Single Ended"
++
++
++/*!
++@defined kIOPropertyFibreChannelCableDescriptionCopperKey
++@discussion This key defines the value of Copper for the key
++kIOPropertyFibreChannelCableDescriptionKey. If the cabling is
++Copper, this key should be used.
++
++Requirement: Optional for Fibre Channel Interface interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Fibre Channel Cabling Type</key>
++		<string>Copper</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyFibreChannelCableDescriptionCopperKey		"Copper"
++
++
++/*!
++@defined kIOPropertyFibreChannelCableDescriptionFiberOpticKey
++@discussion This key defines the value of Fiber Optic for the key
++kIOPropertyFibreChannelCableDescriptionKey. If the cabling is
++Fiber Optic, this key should be used.
++
++Requirement: Optional for Fibre Channel Interface interconnect.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Fibre Channel Cabling Type</key>
++		<string>Fiber Optic</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyFibreChannelCableDescriptionFiberOpticKey	"Fiber Optic"
++
++
++/*!
++@defined kIOPropertyAESCBCKey
++@discussion This key defines the value of AES-CBC for the key
++kIOPropertyEncryptionTypeKey. If the encryption used is
++AES-CBC, this key should be used.
++
++Requirement: Optional for all storage controllers.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Encryption Type</key>
++		<string>AES-CBC</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyAESCBCKey	"AES-CBC"
++
++
++/*!
++@defined kIOPropertyAESXTSKey
++@discussion This key defines the value of AES-XTS for the key
++kIOPropertyEncryptionTypeKey. If the encryption used is
++AES-XTS, this key should be used.
++
++Requirement: Optional for all storage controllers.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Encryption Type</key>
++		<string>AES-XTS</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyAESXTSKey	"AES-XTS"
++
++
++/*!
++@defined kIOPropertyAESXEXKey
++@discussion This key defines the value of AES-XEX for the key
++kIOPropertyEncryptionTypeKey. If the encryption used is
++AES-XEX, this key should be used.
++
++Requirement: Optional for all storage controllers.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Controller Characteristics</key>
++	<dict>
++		<key>Encryption Type</key>
++		<string>AES-XEX</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyAESXEXKey	"AES-XEX"
++
++
++#endif	/* _IOKIT_IO_STORAGE_CONTROLLER_CHARACTERISTICS_H_ */
+diff --git a/iokit/IOKit/storage/IOStorageDeviceCharacteristics.h b/iokit/IOKit/storage/IOStorageDeviceCharacteristics.h
+new file mode 100644
+index 0000000..86dd1fc
+--- /dev/null
++++ b/iokit/IOKit/storage/IOStorageDeviceCharacteristics.h
+@@ -0,0 +1,695 @@
++/*
++ * KEBAB: vendored from the macOS 14.5 SDK
++ *   System/Library/Frameworks/Kernel.framework/Versions/A/Headers/IOKit/storage/IOStorageDeviceCharacteristics.h
++ * Kept in the tree so the kernel build does not depend on an SDK path that may
++ * move. See docs/BRING-UP-STATE.md section 87 for the list and the reason.
++ */
++/*
++ * Copyright (c) 1998-2014 Apple Inc. All rights reserved.
++ *
++ * @APPLE_LICENSE_HEADER_START@
++ * 
++ * This file contains Original Code and/or Modifications of Original Code
++ * as defined in and that are subject to the Apple Public Source License
++ * Version 2.0 (the 'License'). You may not use this file except in
++ * compliance with the License. Please obtain a copy of the License at
++ * http://www.opensource.apple.com/apsl/ and read it before using this
++ * file.
++ * 
++ * The Original Code and all software distributed under the License are
++ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
++ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
++ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
++ * Please see the License for the specific language governing rights and
++ * limitations under the License.
++ * 
++ * @APPLE_LICENSE_HEADER_END@
++ */
++
++#ifndef _IOKIT_IO_STORAGE_DEVICE_CHARACTERISTICS_H_
++#define _IOKIT_IO_STORAGE_DEVICE_CHARACTERISTICS_H_
++
++/* KEBAB: kernel-only copy. The DriverKit branch needs TargetConditionals.h,
++ * which is not on the kernel include path, so it is dropped here. */
++#include <IOKit/storage/IOStorageProtocolCharacteristics.h>
++
++/*
++ *	Device Characteristics - Characteristics defined for devices.
++ */
++
++/*!
++@defined kIOPropertyDeviceCharacteristicsKey
++@discussion This key is used to define Device Characteristics for a particular
++device and it has an associated dictionary which lists the
++device characteristics. The device characteristics are Command Set specific
++and are listed in the header files for each command set.
++
++Requirement: Mandatory
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>Apple</string>
++		<key>Product Name</key>
++		<string>iPod</string>
++		<key>Product Revision Level</key>
++		<string>1.0</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyDeviceCharacteristicsKey		"Device Characteristics"
++
++
++/*!
++@defined kIOPropertyVendorNameKey
++@discussion This key is used to define the Vendor Name for a particular device
++and it has an associated string.
++
++Requirement: Mandatory
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>Apple</string>
++		<key>Product Name</key>
++		<string>iPod</string>
++		<key>Product Revision Level</key>
++		<string>1.0</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyVendorNameKey				"Vendor Name"
++
++
++/*!
++@defined kIOPropertyProductNameKey
++@discussion This key is used to define the Product Name for a particular device
++and it has an associated string.
++
++Requirement: Mandatory
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>Apple</string>
++		<key>Product Name</key>
++		<string>iPod</string>
++		<key>Product Revision Level</key>
++		<string>1.0</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyProductNameKey				"Product Name"
++
++
++/*!
++@defined kIOPropertyProductRevisionLevelKey
++@discussion This key is used to define the Product Revision Level for a
++particular device and it has an associated string.
++
++Requirement: Mandatory
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>Apple</string>
++		<key>Product Name</key>
++		<string>iPod</string>
++		<key>Product Revision Level</key>
++		<string>1.0</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyProductRevisionLevelKey		"Product Revision Level"
++
++
++/*!
++@defined kIOPropertyProductSerialNumberKey
++@discussion This key is used to define the Product Serial Number for a
++particular device and it has an associated data.
++
++Requirement: Mandatory
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>Apple</string>
++		<key>Product Name</key>
++		<string>iPod</string>
++		<key>Product Revision Level</key>
++		<string>1.0</string>
++		<key>Serial Number</key>
++		<string>123456789</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyProductSerialNumberKey		"Serial Number"
++
++
++/*!
++@defined kIOPropertySupportedCDFeaturesKey
++@discussion This key is used to define the supported CD Features for a
++particular optical device and it has an associated bitfield. See
++<IOKit/scsi/IOSCSIMultimediaCommandsDevice.h> for definitions of the
++bits and associated bitmasks.
++
++Requirement: Mandatory for optical devices (Peripheral Device Type 05h).
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>Apple</string>
++		<key>Product Name</key>
++		<string>SuperDrive</string>
++		<key>Product Revision Level</key>
++		<string>1.0</string>
++		<key>CD Features</key>
++		<integer>1663</integer>
++		<key>DVD Features</key>
++		<integer>103</integer>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertySupportedCDFeaturesKey		"CD Features"
++
++
++/*!
++@defined kIOPropertySupportedDVDFeaturesKey
++@discussion This key is used to define the supported DVD Features for a
++particular optical device and it has an associated bitfield. See
++<IOKit/scsi/IOSCSIMultimediaCommandsDevice.h> for definitions of the
++bits and associated bitmasks.
++
++Requirement: Mandatory for optical devices (Peripheral Device Type 05h).
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>Apple</string>
++		<key>Product Name</key>
++		<string>SuperDrive</string>
++		<key>Product Revision Level</key>
++		<string>1.0</string>
++		<key>CD Features</key>
++		<integer>1663</integer>
++		<key>DVD Features</key>
++		<integer>103</integer>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertySupportedDVDFeaturesKey		"DVD Features"
++
++
++/*!
++@defined kIOPropertySupportedBDFeaturesKey
++@discussion This key is used to define the supported BD Features for a
++particular optical device and it has an associated bitfield. See
++<IOKit/scsi/IOSCSIMultimediaCommandsDevice.h> for definitions of the
++bits and associated bitmasks.
++
++Requirement: Mandatory for optical devices (Peripheral Device Type 05h).
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>Apple</string>
++		<key>Product Name</key>
++		<string>SuperDrive</string>
++		<key>Product Revision Level</key>
++		<string>1.0</string>
++		<key>CD Features</key>
++		<integer>1663</integer>
++		<key>DVD Features</key>
++		<integer>103</integer>
++		<key>BD Features</key>
++		<integer>21</integer>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertySupportedBDFeaturesKey		"BD Features"
++
++
++/*!
++@defined kIOPropertyRigidDiskGeometryKey
++@discussion This key is used to define a dictionary containing
++rigid disk geometry information.
++
++Requirement: Optional. If a device publishes this dictionary, it
++must publish all key/value pairs which are deemed Mandatory.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>Apple</string>
++		<key>Product Name</key>
++		<string>iPod</string>
++		<key>Product Revision Level</key>
++		<string>1.0</string>
++		<key>Rigid Disk Geometry</key>
++		<dict>
++			<key>Sector Count per Track</key>
++			<integer>12345</integer>
++			<key>Head Count</key>
++			<integer>12</integer>
++			<key>Cylinder Count</key>
++			<integer>12345</integer>
++			<key>Bytes per Physical Sector</key>
++			<integer>512</integer>
++		</dict>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyRigidDiskGeometryKey			"Rigid Disk Geometry"
++
++
++/*!
++@defined kIOPropertySectorCountPerTrackKey
++@discussion This key is used to define the number of sectors per
++each track for a particular medium.
++
++Requirement: Mandatory element of the Rigid Disk Geometry dictionary.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>Apple</string>
++		<key>Product Name</key>
++		<string>iPod</string>
++		<key>Product Revision Level</key>
++		<string>1.0</string>
++		<key>Rigid Disk Geometry</key>
++		<dict>
++			<key>Sector Count per Track</key>
++			<integer>12345</integer>
++		</dict>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertySectorCountPerTrackKey		"Sector Count per Track"
++
++
++/*!
++@defined kIOPropertyHeadCountKey
++@discussion This key is used to define the number of heads for
++a particular medium.
++
++Requirement: Mandatory element of the Rigid Disk Geometry dictionary.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>Apple</string>
++		<key>Product Name</key>
++		<string>iPod</string>
++		<key>Product Revision Level</key>
++		<string>1.0</string>
++		<key>Rigid Disk Geometry</key>
++		<dict>
++			<key>Sector Count per Track</key>
++			<integer>12345</integer>
++			<key>Head Count</key>
++			<integer>12</integer>
++			<key>Cylinder Count</key>
++			<integer>12345</integer>
++			<key>Bytes per Physical Sector</key>
++			<integer>512</integer>
++		</dict>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyHeadCountKey					"Head Count"
++
++
++/*!
++@defined kIOPropertyCylinderCountKey
++@discussion This key is used to define the number of heads for
++a particular medium.
++
++Requirement: Mandatory element of the Rigid Disk Geometry dictionary.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>Apple</string>
++		<key>Product Name</key>
++		<string>iPod</string>
++		<key>Product Revision Level</key>
++		<string>1.0</string>
++		<key>Rigid Disk Geometry</key>
++		<dict>
++			<key>Sector Count per Track</key>
++			<integer>12345</integer>
++			<key>Head Count</key>
++			<integer>12</integer>
++			<key>Cylinder Count</key>
++			<integer>12345</integer>
++			<key>Bytes per Physical Sector</key>
++			<integer>512</integer>
++		</dict>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyCylinderCountKey				"Cylinder Count"
++
++
++/*!
++@defined kIOPropertyBytesPerPhysicalSectorKey
++@discussion This key is used to define the number of heads for
++a particular medium.
++
++Requirement: Mandatory element of the Rigid Disk Geometry dictionary.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>Apple</string>
++		<key>Product Name</key>
++		<string>iPod</string>
++		<key>Product Revision Level</key>
++		<string>1.0</string>
++		<key>Rigid Disk Geometry</key>
++		<dict>
++			<key>Sector Count per Track</key>
++			<integer>12345</integer>
++			<key>Head Count</key>
++			<integer>12</integer>
++			<key>Cylinder Count</key>
++			<integer>12345</integer>
++			<key>Bytes per Physical Sector</key>
++			<integer>512</integer>
++		</dict>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyBytesPerPhysicalSectorKey	"Bytes per Physical Sector"
++
++
++/*!
++@defined kIOPropertyPhysicalBlockSizeKey
++@discussion This key is used to define the physical block size of a hard disk drive.
++
++Requirement: Mandatory for hard disk drives with physical block size other than 512 bytes.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>Apple</string>
++		<key>Product Name</key>
++		<string>iPod</string>
++		<key>Product Revision Level</key>
++		<string>1.0</string>
++		<key>Physical Block Size</key>
++		<integer>4096</integer>
++		<key>Logical Block Size</key>
++		<integer>512</integer>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPhysicalBlockSizeKey		"Physical Block Size"
++
++
++/*!
++@defined kIOPropertyLogicalBlockSizeKey
++@discussion This key is used to define the logical block size of a hard disk drive.
++
++Requirement: Mandatory for hard disk drives with logical block size other than 512 bytes
++or that does not match its physical block size.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>Apple</string>
++		<key>Product Name</key>
++		<string>iPod</string>
++		<key>Product Revision Level</key>
++		<string>1.0</string>
++		<key>Physical Block Size</key>
++		<integer>4096</integer>
++		<key>Logical Block Size</key>
++		<integer>512</integer>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyLogicalBlockSizeKey		"Logical Block Size"
++
++
++/*!
++@defined kIOPropertyTargetDiskModeKey
++@discussion This key is used to indicate the device is another computer in Target Disk Mode.
++
++Requirement: Optional.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>AAPL</string>
++		<key>Product Name</key>
++		<string>FireWire Target</string>
++		<key>Product Revision Level</key>
++		<string>0000</string>
++		<key>Target Disk Mode</key>
++		<true/>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyTargetDiskModeKey		"Target Disk Mode"
++
++
++/*!
++@defined kIOPropertyInvalidStartupDiskKey
++@discussion This key is used to denote devices when cannot be used as a startup disk.
++
++Requirement: Optional.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>APPLE</string>
++		<key>Product Name</key>
++		<string>Target Disk Mode</string>
++		<key>Product Revision Level</key>
++		<string>0000</string>
++		<key>Invalid Startup Disk</key>
++		<true/>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyInvalidStartupDiskKey        "Invalid Startup Disk"
++
++
++/*!
++@defined kIOPropertyMediumTypeKey
++@discussion This key is used to indicate the medium type of the device.
++
++Requirement: Optional.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>AAPL</string>
++		<key>Product Name</key>
++		<string>FireWire Target</string>
++		<key>Product Revision Level</key>
++		<string>0000</string>
++		<key>Medium Type</key>
++		<string>Rotational</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyMediumTypeKey		"Medium Type"
++
++
++/*!
++@defined kIOPropertyMediumTypeRotationalKey
++@discussion This key is used to indicate the medium type of the device is rotational.
++
++Requirement: Optional.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>AAPL</string>
++		<key>Product Name</key>
++		<string>FireWire Target</string>
++		<key>Product Revision Level</key>
++		<string>0000</string>
++		<key>Medium Type</key>
++		<string>Rotational</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyMediumTypeRotationalKey		"Rotational"
++
++
++/*!
++@defined kIOPropertyMediumTypeSolidStateKey
++@discussion This key is used to indicate the medium type of the device is solid state.
++
++Requirement: Optional.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>AAPL</string>
++		<key>Product Name</key>
++		<string>FireWire Target</string>
++		<key>Product Revision Level</key>
++		<string>0000</string>
++		<key>Medium Type</key>
++		<string>Solid State</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyMediumTypeSolidStateKey		"Solid State"
++
++
++/*!
++@defined kIOPropertyMediumRotationRateKey
++@discussion This key is used to indicate the medium rotation rate in RPM of the device.
++
++Requirement: Optional.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Device Characteristics</key>
++	<dict>
++		<key>Vendor Name</key>
++		<string>AAPL</string>
++		<key>Product Name</key>
++		<string>FireWire Target</string>
++		<key>Product Revision Level</key>
++		<string>0000</string>
++		<key>Rotation Rate</key>
++		<integer>7200</integer>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyMediumRotationRateKey		"Rotation Rate"
++
++
++#endif	/* _IOKIT_IO_STORAGE_DEVICE_CHARACTERISTICS_H_ */
+diff --git a/iokit/IOKit/storage/IOStorageProtocolCharacteristics.h b/iokit/IOKit/storage/IOStorageProtocolCharacteristics.h
+new file mode 100644
+index 0000000..097ce93
+--- /dev/null
++++ b/iokit/IOKit/storage/IOStorageProtocolCharacteristics.h
+@@ -0,0 +1,697 @@
++/*
++ * KEBAB: vendored from the macOS 14.5 SDK
++ *   System/Library/Frameworks/Kernel.framework/Versions/A/Headers/IOKit/storage/IOStorageProtocolCharacteristics.h
++ * Kept in the tree so the kernel build does not depend on an SDK path that may
++ * move. See docs/BRING-UP-STATE.md section 87 for the list and the reason.
++ */
++/*
++ * Copyright (c) 1998-2014 Apple Inc. All rights reserved.
++ *
++ * @APPLE_LICENSE_HEADER_START@
++ * 
++ * This file contains Original Code and/or Modifications of Original Code
++ * as defined in and that are subject to the Apple Public Source License
++ * Version 2.0 (the 'License'). You may not use this file except in
++ * compliance with the License. Please obtain a copy of the License at
++ * http://www.opensource.apple.com/apsl/ and read it before using this
++ * file.
++ * 
++ * The Original Code and all software distributed under the License are
++ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
++ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
++ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
++ * Please see the License for the specific language governing rights and
++ * limitations under the License.
++ * 
++ * @APPLE_LICENSE_HEADER_END@
++ */
++
++#ifndef _IOKIT_IO_STORAGE_PROTOCOL_CHARACTERISTICS_H_
++#define _IOKIT_IO_STORAGE_PROTOCOL_CHARACTERISTICS_H_
++
++/* KEBAB: kernel-only copy; see IOStorageDeviceCharacteristics.h. */
++#include <IOKit/storage/IOStorageControllerCharacteristics.h>
++
++/*
++ *	Protocol Characteristics - Characteristics defined for protocols.
++ */
++
++/*!
++@defined kIOPropertyProtocolCharacteristicsKey
++@discussion This key is used to define Protocol Characteristics for a particular
++protocol and it has an associated dictionary which lists the
++protocol characteristics.
++
++Requirement: Mandatory
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>ATAPI</string>
++		<key>Physical Interconnect Location</key>
++		<string>Internal</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define	kIOPropertyProtocolCharacteristicsKey		"Protocol Characteristics"
++
++
++/*!
++@defined kIOPropertySCSIInitiatorIdentifierKey
++@discussion An identifier that will uniquely identify this SCSI Initiator for the
++SCSI Domain.
++
++Requirement: Mandatory for SCSI Parallel Interface, SAS,
++and Fibre Channel Interface.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>SCSI Parallel Interface</string>
++		<key>Physical Interconnect Location</key>
++		<string>Internal</string>
++		<key>SCSI Initiator Identifier</key>
++		<integer>7</integer>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertySCSIInitiatorIdentifierKey		"SCSI Initiator Identifier"
++
++
++/*!
++@defined kIOPropertySCSIDomainIdentifierKey
++@discussion An identifier that will uniquely identify this SCSI Domain for the
++Physical Interconnect type. This identifier is only guaranteed to be unique for
++any given Physical Interconnect and is not guaranteed to be the same across
++restarts or shutdowns.
++
++Requirement: Mandatory for SCSI Parallel Interface and Fibre Channel Interface.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>SCSI Parallel Interface</string>
++		<key>Physical Interconnect Location</key>
++		<string>Internal</string>
++		<key>SCSI Domain Identifier</key>
++		<integer>0</integer>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertySCSIDomainIdentifierKey			"SCSI Domain Identifier"
++
++
++/*!
++@defined kIOPropertySCSITargetIdentifierKey
++@discussion This is the SCSI Target Identifier for a given SCSI Target Device.
++
++Requirement: Mandatory for SCSI Parallel Interface and Fibre Channel Interface.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>SCSI Parallel Interface</string>
++		<key>Physical Interconnect Location</key>
++		<string>Internal</string>
++		<key>SCSI Target Identifier</key>
++		<integer>3</integer>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertySCSITargetIdentifierKey			"SCSI Target Identifier"
++
++
++/*!
++@defined kIOPropertySCSILogicalUnitNumberKey
++@discussion This key is the SCSI Logical Unit Number for the device server
++controlled by the driver.
++
++Requirement: Mandatory for SCSI Parallel Interface, SAS, and Fibre Channel Interface.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>SCSI Parallel Interface</string>
++		<key>Physical Interconnect Location</key>
++		<string>Internal</string>
++		<key>SCSI Logical Unit Number</key>
++		<integer>2</integer>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertySCSILogicalUnitNumberKey			"SCSI Logical Unit Number"
++
++
++/*!
++@defined kIOPropertyPhysicalInterconnectTypeKey
++@discussion This key is used to define the Physical Interconnect to which
++a device is attached.
++
++Requirement: Mandatory.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>SCSI Parallel Interface</string>
++		<key>Physical Interconnect Location</key>
++		<string>Internal</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPhysicalInterconnectTypeKey		"Physical Interconnect"
++
++
++/*!
++@defined kIOPropertyPhysicalInterconnectLocationKey
++@discussion This key is used to define the Physical Interconnect
++Location.
++
++Requirement: Mandatory.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>SCSI Parallel Interface</string>
++		<key>Physical Interconnect Location</key>
++		<string>Internal</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPhysicalInterconnectLocationKey	"Physical Interconnect Location"
++
++
++/*!
++@defined kIOPropertySCSIProtocolMultiInitKey
++@discussion This protocol characteristics key is used to inform the system
++that the protocol supports having multiple devices that act as initiators.
++
++Requirement: Optional.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>Fibre Channel Interface</string>
++		<key>Physical Interconnect Location</key>
++		<string>External</string>
++		<key>Multiple Initiators</key>
++		<string>True</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertySCSIProtocolMultiInitKey			"Multiple Initiators"
++
++
++/*
++ *	Values - Values for the characteristics defined above.
++ */
++
++
++/*!
++@defined kIOPropertyInternalKey
++@discussion This key defines the value of Internal for the key
++kIOPropertyPhysicalInterconnectLocationKey. If the device is
++connected to an internal bus, this key should be set.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>ATA</string>
++		<key>Physical Interconnect Location</key>
++		<string>Internal</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyInternalKey						"Internal"
++
++
++/*!
++@defined kIOPropertyExternalKey
++@discussion This key defines the value of External for the key
++kIOPropertyPhysicalInterconnectLocationKey. If the device is
++connected to an external bus, this key should be set.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>Fibre Channel Interface</string>
++		<key>Physical Interconnect Location</key>
++		<string>External</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyExternalKey						"External"
++
++
++/*!
++@defined kIOPropertyInternalExternalKey
++@discussion This key defines the value of Internal/External for the key
++kIOPropertyPhysicalInterconnectLocationKey. If the device is connected
++to a bus and it is indeterminate whether it is internal or external,
++this key should be set.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>SCSI Parallel Interface</string>
++		<key>Physical Interconnect Location</key>
++		<string>Internal/External</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyInternalExternalKey				"Internal/External"
++
++
++/*!
++@defined kIOPropertyInterconnectFileKey
++@discussion This key defines the value of File for the key
++kIOPropertyPhysicalInterconnectLocationKey. If the device is a file
++that is being represented as a storage device, this key should be set.
++
++NOTE: This key should only be used when the Physical Interconnect is set to
++Virtual Interface.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>Virtual Interface</string>
++		<key>Physical Interconnect Location</key>
++		<string>File</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyInterconnectFileKey						"File"
++
++
++/*!
++@defined kIOPropertyInterconnectRAMKey
++@discussion This key defines the value of RAM for the key
++kIOPropertyPhysicalInterconnectLocationKey. If the device is system memory
++that is being represented as a storage device, this key should be set.
++
++NOTE: This key should only be used when the Physical Interconnect is set to
++Virtual Interface.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>Virtual Interface</string>
++		<key>Physical Interconnect Location</key>
++		<string>RAM</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyInterconnectRAMKey						"RAM"
++
++
++/*!
++@defined kIOPropertyPhysicalInterconnectTypeATA
++@discussion This key defines the value of ATA for the key
++kIOPropertyPhysicalInterconnectTypeKey. If the device is connected
++to an ATA bus, this key should be set.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>ATA</string>
++		<key>Physical Interconnect Location</key>
++		<string>Internal</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPhysicalInterconnectTypeATA				"ATA"
++
++
++/*!
++@defined kIOPropertyPhysicalInterconnectTypeSerialATA
++@discussion This key defines the value of SATA for the key
++kIOPropertyPhysicalInterconnectTypeKey. If the device is connected
++to a SATA bus, this key should be set.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>SATA</string>
++		<key>Physical Interconnect Location</key>
++		<string>Internal</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPhysicalInterconnectTypeSerialATA		"SATA"
++
++
++/*!
++@defined kIOPropertyPhysicalInterconnectTypeSerialAttachedSCSI
++@discussion This key defines the value of SAS for the key
++kIOPropertyPhysicalInterconnectTypeKey. If the device is connected
++to a SAS bus, this key should be set.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>SAS</string>
++		<key>Physical Interconnect Location</key>
++		<string>External</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPhysicalInterconnectTypeSerialAttachedSCSI	"SAS"
++
++
++/*!
++@defined kIOPropertyPhysicalInterconnectTypeATAPI
++@discussion This key defines the value of ATAPI for the key
++kIOPropertyPhysicalInterconnectTypeKey. If the device is connected
++to an ATA bus and follows the ATAPI command specification, this key
++should be set.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>ATAPI</string>
++		<key>Physical Interconnect Location</key>
++		<string>Internal</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPhysicalInterconnectTypeATAPI			"ATAPI"
++
++
++/*!
++@defined kIOPropertyPhysicalInterconnectTypeUSB
++@discussion This key defines the value of USB for the key
++kIOPropertyPhysicalInterconnectTypeKey. If the device is connected
++to a USB port, this key should be set.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>USB</string>
++		<key>Physical Interconnect Location</key>
++		<string>External</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPhysicalInterconnectTypeUSB				"USB"
++
++
++/*!
++@defined kIOPropertyPhysicalInterconnectTypeFireWire
++@discussion This key defines the value of USB for the key
++kIOPropertyPhysicalInterconnectTypeKey. If the device is connected
++to a FireWire port, this key should be set.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>FireWire</string>
++		<key>Physical Interconnect Location</key>
++		<string>External</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPhysicalInterconnectTypeFireWire			"FireWire"
++
++
++/*!
++ @defined kIOPropertyPhysicalInterconnectTypeSecureDigital
++ @discussion This key defines the value of Secure Digital for the key
++ kIOPropertyPhysicalInterconnectTypeSecureDigital. If the device is
++ connected to a Secure Digital port and follows the Secure Digital 
++ specification, this key should be set. 
++ 
++ Example:
++ <pre>
++ @textblock
++ <dict>
++    <key>Protocol Characteristics</key>
++    <dict>
++        <key>Physical Interconnect</key>
++        <string>Secure Digital</string>
++        <key>Physical Interconnect Location</key>
++        <string>Internal</string>
++    </dict>
++ </dict>
++ @/textblock
++ </pre>
++ */
++#define kIOPropertyPhysicalInterconnectTypeSecureDigital	"Secure Digital"
++
++
++/*!
++@defined kIOPropertyPhysicalInterconnectTypeSCSIParallel
++@discussion This key defines the value of SCSI Parallel Interface for the key
++kIOPropertyPhysicalInterconnectTypeKey. If the device is connected
++to a SCSI Parallel port, this key should be set.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>SCSI Parallel Interface</string>
++		<key>Physical Interconnect Location</key>
++		<string>External</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPhysicalInterconnectTypeSCSIParallel		"SCSI Parallel Interface"
++
++
++/*!
++@defined kIOPropertyPhysicalInterconnectTypeFibreChannel
++@discussion This key defines the value of Fibre Channel Interface for the key
++kIOPropertyPhysicalInterconnectTypeKey. If the device is connected
++to a Fibre Channel port, this key should be set.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>Fibre Channel Interface</string>
++		<key>Physical Interconnect Location</key>
++		<string>External</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPhysicalInterconnectTypeFibreChannel		"Fibre Channel Interface"
++
++
++/*!
++@defined kIOPropertyPhysicalInterconnectTypeVirtual
++@discussion This key defines the value of Virtual Interface for the key
++kIOPropertyPhysicalInterconnectTypeVirtual. If the device is being made to look
++like a storage device, but is not such in actuality, such as a File or RAM, this
++key should be set.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>Virtual Interface</string>
++		<key>Physical Interconnect Location</key>
++		<string>File</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPhysicalInterconnectTypeVirtual		"Virtual Interface"
++
++
++/*!
++@defined kIOPropertyPhysicalInterconnectTypePCI
++@discussion This key defines the value of PCI for the key
++kIOPropertyPhysicalInterconnectTypePCI. If the device is connected
++via PCI, this key should be set.
++
++Example:
++<pre>
++@textblock
++<dict>
++	<key>Protocol Characteristics</key>
++	<dict>
++		<key>Physical Interconnect</key>
++		<string>PCI</string>
++		<key>Physical Interconnect Location</key>
++		<string>Internal</string>
++	</dict>
++</dict>
++@/textblock
++</pre>
++*/
++#define kIOPropertyPhysicalInterconnectTypePCI		"PCI"
++
++/*!
++ @defined kIOPropertyPhysicalInterconnectTypePCIExpress
++ @discussion This key defines the value of PCI-Express for the key
++ kIOPropertyPhysicalInterconnectTypePCIExpress. If the device is connected
++ via PCI-Express, this key should be set.
++ 
++ Example:
++ <pre>
++ @textblock
++ <dict>
++ 	<key>Protocol Characteristics</key>
++ 	<dict>
++ 		<key>Physical Interconnect</key>
++ 		<string>PCI-Express</string>
++ 		<key>Physical Interconnect Location</key>
++ 		<string>Internal</string>
++ 	</dict>
++ </dict>
++ @/textblock
++ </pre>
++ */
++#define kIOPropertyPhysicalInterconnectTypePCIExpress		"PCI-Express"
++
++/*!
++ @defined kIOPropertyPhysicalInterconnectTypeAppleFabric
++ @discussion This key defines the value of Apple Fabric for the key
++ kIOPropertyPhysicalInterconnectTypeAppleFabric. If the device is connected
++ via Apple Fabric, this key should be set.
++
++ Example:
++ <pre>
++ @textblock
++ <dict>
++ 	<key>Protocol Characteristics</key>
++ 	<dict>
++ 		<key>Physical Interconnect</key>
++ 		<string>Apple Fabric</string>
++ 		<key>Physical Interconnect Location</key>
++ 		<string>Internal</string>
++ 	</dict>
++ </dict>
++ @/textblock
++ </pre>
++ */
++#define kIOPropertyPhysicalInterconnectTypeAppleFabric		"Apple Fabric"
++
++#endif	/* _IOKIT_IO_STORAGE_PROTOCOL_CHARACTERISTICS_H_ */
+diff --git a/iokit/Kernel/arm/KebabBlockStorageDevice.cpp b/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
+new file mode 100644
+index 0000000..7b87041
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
+@@ -0,0 +1,457 @@
++/*
++ * KEBAB block storage: publish the userdata partition as an IOKit block device.
++ *
++ * bsd/dev/kebab_ufs.c owns the Qualcomm UFS host and exposes the partition as
++ * a BSD disk plus a byte-offset raw read/write interface. APFS is an IOKit
++ * driver: it matches IOMedia, which IOStorageFamily creates for a driver that
++ * subclasses IOBlockStorageDevice. This file is that subclass. It does not
++ * touch the UFS hardware itself and does not replace the BSD interface; every
++ * transfer goes through kebab_ufs_raw_read()/kebab_ufs_raw_write().
++ *
++ * Layout of the stack once registered:
++ *
++ *   IOPlatformExpertDevice          (existing provider)
++ *     KebabBlockStorageDevice       (this file: the nub APFS is not aware of)
++ *       IOBlockStorageDriver        (Apple, from the prelinked IOStorageFamily)
++ *         IOMedia                   (whole device, <product string> Media)
++ *
++ * Registration is gated by boot-arg ufsmedia=1 (default off) and is called
++ * from kebab_ufs_rootdev() after the UFS partition has come up. Every failure
++ * is printed and ignored: a boot must not depend on this service.
++ *
++ * ABI note: this class is compiled against a vendored IOBlockStorageDevice.h
++ * shaped to the iOS 16.7.16 IOStorageFamily dispatch table. See the comment at
++ * the top of that header and docs/BRING-UP-STATE.md section 87; the header
++ * mismatch is the main risk of this driver.
++ */
++/*
++ * The prelinked IOStorageFamily is an iOS kext: its IOStorage/IOMedia classes
++ * were built with TARGET_OS_OSX == 0. The vendored storage headers use that
++ * switch to select the class shape, so make the same choice here. It is 0 (not
++ * merely undefined) to keep -Wundef-prefix quiet.
++ */
++#ifndef TARGET_OS_OSX
++#define TARGET_OS_OSX 0
++#endif
++
++/*
++ * Apple's headers use 0 for null defaults and do not spell out every override;
++ * the kernel builds with -Weverything, so keep those diagnostics inside the
++ * include block. They are style warnings in vendored text, not in this driver.
++ */
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wzero-as-null-pointer-constant"
++#pragma clang diagnostic ignored "-Wsuggest-override"
++#pragma clang diagnostic ignored "-Wsuggest-destructor-override"
++#pragma clang diagnostic ignored "-Wshadow-field"
++
++#include <IOKit/IOLib.h>
++#include <IOKit/storage/IOBlockStorageDevice.h>
++#include <pexpert/pexpert.h>
++#include <sys/errno.h>
++
++extern "C" {
++#include "../../../bsd/dev/kebab_ufs.h"
++}
++
++#pragma clang diagnostic pop
++
++/* Defined at the end of this file; the prototype keeps -Wmissing-prototypes quiet. */
++extern "C" int kebab_blockstorage_start(void);
++
++/* Staging buffer for one transfer chunk. A multiple of the 4 KiB UFS block. */
++#define KEBAB_BLOCK_CHUNK	(64 * 1024)
++
++class KebabBlockStorageDevice : public IOBlockStorageDevice
++{
++	OSDeclareDefaultStructors(KebabBlockStorageDevice);
++
++	UInt64	fBlockSize;
++	UInt64	fBlockCount;
++	bool	fWritable;
++	bool	fMediaStateReported;
++	void *	fBounce;
++	IOLock *fLock;
++
++	static IOReturn statusForError(int error);
++
++public:
++	bool init(OSDictionary *properties) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void free(void) APPLE_KEXT_OVERRIDE;
++
++	IOReturn doEjectMedia(void) APPLE_KEXT_OVERRIDE;
++	IOReturn doFormatMedia(UInt64 byteCapacity) APPLE_KEXT_OVERRIDE;
++	UInt32 doGetFormatCapacities(UInt64 *capacities,
++	    UInt32 capacitiesMaxCount) const APPLE_KEXT_OVERRIDE;
++	char * getVendorString(void) APPLE_KEXT_OVERRIDE;
++	char * getProductString(void) APPLE_KEXT_OVERRIDE;
++	char * getRevisionString(void) APPLE_KEXT_OVERRIDE;
++	char * getAdditionalDeviceInfoString(void) APPLE_KEXT_OVERRIDE;
++	IOReturn reportBlockSize(UInt64 *blockSize) APPLE_KEXT_OVERRIDE;
++	IOReturn reportEjectability(bool *isEjectable) APPLE_KEXT_OVERRIDE;
++	IOReturn reportMaxValidBlock(UInt64 *maxBlock) APPLE_KEXT_OVERRIDE;
++	IOReturn reportMediaState(bool *mediaPresent,
++	    bool *changedState = nullptr) APPLE_KEXT_OVERRIDE;
++	IOReturn reportRemovability(bool *isRemovable) APPLE_KEXT_OVERRIDE;
++	IOReturn reportWriteProtection(bool *isWriteProtected) APPLE_KEXT_OVERRIDE;
++	IOReturn doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 block,
++	    UInt64 nblks, IOStorageAttributes *attributes,
++	    IOStorageCompletion *completion) APPLE_KEXT_OVERRIDE;
++	IOReturn doSynchronize(UInt64 block, UInt64 nblks,
++	    IOStorageSynchronizeOptions options) APPLE_KEXT_OVERRIDE;
++	IOReturn doUnmap(IOBlockStorageDeviceExtent *extents,
++	    UInt32 extentsCount, IOStorageUnmapOptions options) APPLE_KEXT_OVERRIDE;
++	IOReturn requestIdle(void) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(KebabBlockStorageDevice, IOBlockStorageDevice);
++
++static char kebabVendorString[] = "KEBAB";
++static char kebabProductString[] = "UFS userdata";
++static char kebabRevisionString[] = "1";
++static char kebabAdditionalString[] = "OnePlus 8T UFS LUN 0";
++
++IOReturn
++KebabBlockStorageDevice::statusForError(int error)
++{
++	switch (error) {
++	case 0:
++		return kIOReturnSuccess;
++	case EROFS:
++		return kIOReturnNotWritable;
++	case ENXIO:
++		return kIOReturnNoDevice;
++	case EINVAL:
++		return kIOReturnBadArgument;
++	case EAGAIN:
++		return kIOReturnBusy;
++	case EIO:
++		return kIOReturnIOError;
++	default:
++		return kIOReturnError;
++	}
++}
++
++bool
++KebabBlockStorageDevice::init(OSDictionary *properties)
++{
++	uint64_t bytes;
++
++	if (!IOBlockStorageDevice::init(properties)) {
++		return false;
++	}
++	fBlockSize = kebab_ufs_block_size();
++	bytes = kebab_ufs_partition_bytes();
++	fWritable = kebab_ufs_writable();
++	if (fBlockSize == 0 || bytes == 0 || (bytes % fBlockSize) != 0) {
++		IOLog("KEBAB BLOCK: no usable UFS geometry (%llu bytes, %llu-byte blocks)\n",
++		    (unsigned long long)bytes, (unsigned long long)fBlockSize);
++		return false;
++	}
++	fBlockCount = bytes / fBlockSize;
++	fBounce = IOMallocAligned(KEBAB_BLOCK_CHUNK, PAGE_SIZE);
++	fLock = IOLockAlloc();
++	if (fBounce == NULL || fLock == NULL) {
++		IOLog("KEBAB BLOCK: no memory for the transfer buffer\n");
++		return false;
++	}
++	return true;
++}
++
++bool
++KebabBlockStorageDevice::start(IOService *provider)
++{
++	if (!IOBlockStorageDevice::start(provider)) {
++		return false;
++	}
++	IOLog("KEBAB BLOCK: block storage up: %llu MiB, %llu-byte blocks, %s\n",
++	    (unsigned long long)(fBlockCount * fBlockSize >> 20),
++	    (unsigned long long)fBlockSize, fWritable ? "read-write" : "read-only");
++	return true;
++}
++
++void
++KebabBlockStorageDevice::free(void)
++{
++	if (fBounce != NULL) {
++		IOFreeAligned(fBounce, KEBAB_BLOCK_CHUNK);
++		fBounce = NULL;
++	}
++	if (fLock != NULL) {
++		IOLockFree(fLock);
++		fLock = NULL;
++	}
++	IOBlockStorageDevice::free();
++}
++
++IOReturn
++KebabBlockStorageDevice::doEjectMedia(void)
++{
++	return kIOReturnUnsupported;
++}
++
++IOReturn
++KebabBlockStorageDevice::doFormatMedia(UInt64 byteCapacity)
++{
++	(void)byteCapacity;
++	return kIOReturnUnsupported;
++}
++
++UInt32
++KebabBlockStorageDevice::doGetFormatCapacities(UInt64 *capacities,
++    UInt32 capacitiesMaxCount) const
++{
++	(void)capacities;
++	(void)capacitiesMaxCount;
++	return 0;
++}
++
++char *
++KebabBlockStorageDevice::getVendorString(void)
++{
++	return kebabVendorString;
++}
++
++char *
++KebabBlockStorageDevice::getProductString(void)
++{
++	return kebabProductString;
++}
++
++char *
++KebabBlockStorageDevice::getRevisionString(void)
++{
++	return kebabRevisionString;
++}
++
++char *
++KebabBlockStorageDevice::getAdditionalDeviceInfoString(void)
++{
++	return kebabAdditionalString;
++}
++
++IOReturn
++KebabBlockStorageDevice::reportBlockSize(UInt64 *blockSize)
++{
++	if (blockSize == NULL) {
++		return kIOReturnBadArgument;
++	}
++	*blockSize = fBlockSize;
++	return kIOReturnSuccess;
++}
++
++IOReturn
++KebabBlockStorageDevice::reportEjectability(bool *isEjectable)
++{
++	if (isEjectable == NULL) {
++		return kIOReturnBadArgument;
++	}
++	*isEjectable = false;
++	return kIOReturnSuccess;
++}
++
++IOReturn
++KebabBlockStorageDevice::reportMaxValidBlock(UInt64 *maxBlock)
++{
++	if (maxBlock == NULL) {
++		return kIOReturnBadArgument;
++	}
++	*maxBlock = fBlockCount - 1;
++	return kIOReturnSuccess;
++}
++
++IOReturn
++KebabBlockStorageDevice::reportMediaState(bool *mediaPresent,
++    bool *changedState)
++{
++	if (mediaPresent == NULL) {
++		return kIOReturnBadArgument;
++	}
++	*mediaPresent = true;
++	if (changedState != NULL) {
++		*changedState = !fMediaStateReported;
++		fMediaStateReported = true;
++	}
++	return kIOReturnSuccess;
++}
++
++IOReturn
++KebabBlockStorageDevice::reportRemovability(bool *isRemovable)
++{
++	if (isRemovable == NULL) {
++		return kIOReturnBadArgument;
++	}
++	*isRemovable = false;
++	return kIOReturnSuccess;
++}
++
++IOReturn
++KebabBlockStorageDevice::reportWriteProtection(bool *isWriteProtected)
++{
++	if (isWriteProtected == NULL) {
++		return kIOReturnBadArgument;
++	}
++	*isWriteProtected = !fWritable;
++	return kIOReturnSuccess;
++}
++
++IOReturn
++KebabBlockStorageDevice::doAsyncReadWrite(IOMemoryDescriptor *buffer,
++    UInt64 block, UInt64 nblks, IOStorageAttributes *attributes,
++    IOStorageCompletion *completion)
++{
++	IOReturn status = kIOReturnSuccess;
++	UInt64 offset, length, done;
++	bool write;
++
++	(void)attributes;
++	if (buffer == NULL || nblks == 0 || block >= fBlockCount ||
++	    nblks > fBlockCount - block) {
++		return kIOReturnBadArgument;
++	}
++	if (buffer->getDirection() == kIODirectionOut) {
++		if (!fWritable) {
++			return kIOReturnNotWritable;
++		}
++		write = true;
++	} else if (buffer->getDirection() == kIODirectionIn) {
++		write = false;
++	} else {
++		return kIOReturnBadArgument;
++	}
++
++	offset = block * fBlockSize;
++	length = nblks * fBlockSize;
++
++	IOLockLock(fLock);
++	for (done = 0; done < length; ) {
++		UInt64 left = length - done;
++		IOByteCount chunk = (IOByteCount)(left < (UInt64)KEBAB_BLOCK_CHUNK ?
++		    left : (UInt64)KEBAB_BLOCK_CHUNK);
++		int error;
++
++		if (write) {
++			if (buffer->readBytes(done, fBounce, chunk) != chunk) {
++				status = kIOReturnUnderrun;
++				break;
++			}
++			error = kebab_ufs_raw_write(offset + done, fBounce,
++			    (uint32_t)chunk);
++		} else {
++			error = kebab_ufs_raw_read(offset + done, fBounce,
++			    (uint32_t)chunk);
++			if (error == 0 &&
++			    buffer->writeBytes(done, fBounce, chunk) != chunk) {
++				status = kIOReturnOverrun;
++				break;
++			}
++		}
++		if (error != 0) {
++			status = statusForError(error);
++			break;
++		}
++		done += chunk;
++	}
++	IOLockUnlock(fLock);
++
++	if (completion != NULL && completion->action != NULL) {
++		completion->action(completion->target, completion->parameter,
++		    status, done);
++		return kIOReturnSuccess;
++	}
++	return status;
++}
++
++IOReturn
++KebabBlockStorageDevice::doSynchronize(UInt64 block, UInt64 nblks,
++    IOStorageSynchronizeOptions options)
++{
++	(void)block;
++	(void)nblks;
++	(void)options;
++	if (!fWritable) {
++		return kIOReturnSuccess;
++	}
++	return statusForError(kebab_ufs_sync());
++}
++
++IOReturn
++KebabBlockStorageDevice::doUnmap(IOBlockStorageDeviceExtent *extents,
++    UInt32 extentsCount, IOStorageUnmapOptions options)
++{
++	(void)extents;
++	(void)extentsCount;
++	(void)options;
++	return kIOReturnUnsupported;
++}
++
++IOReturn
++KebabBlockStorageDevice::requestIdle(void)
++{
++	return kIOReturnSuccess;
++}
++
++/*
++ * Called from kebab_ufs_rootdev(), which owns no locks at this point. Returns
++ * zero when the service is disabled or published, an errno otherwise; callers
++ * ignore the result.
++ */
++extern "C" int
++kebab_blockstorage_start(void)
++{
++	static bool registered;
++	uint32_t enabled = 0;
++	uint64_t bytes;
++	uint64_t block_size;
++	IOService *provider;
++	KebabBlockStorageDevice *device;
++
++	if (!PE_parse_boot_argn("ufsmedia", &enabled, sizeof(enabled)) ||
++	    enabled == 0) {
++		return 0;
++	}
++	if (registered) {
++		return 0;
++	}
++	bytes = kebab_ufs_partition_bytes();
++	block_size = kebab_ufs_block_size();
++	if (bytes == 0 || block_size == 0) {
++		IOLog("KEBAB BLOCK: UFS geometry unavailable; no IOMedia\n");
++		return ENXIO;
++	}
++	provider = IOService::getServiceRoot();
++	if (provider == NULL) {
++		IOLog("KEBAB BLOCK: no IOKit service root; no IOMedia\n");
++		return ENXIO;
++	}
++
++	device = new KebabBlockStorageDevice;
++	if (device == NULL) {
++		IOLog("KEBAB BLOCK: cannot allocate the block device\n");
++		return ENOMEM;
++	}
++	if (!device->init(NULL)) {
++		device->release();
++		return ENXIO;
++	}
++	device->setName("kebab-ufs0");
++	if (!device->attach(provider)) {
++		IOLog("KEBAB BLOCK: cannot attach to the platform expert\n");
++		device->release();
++		return ENXIO;
++	}
++	/*
++	 * Deliberately not released: this is a singleton owned by the registry
++	 * for the life of the boot. IOStorageFamily's generic IOBlockStorageDriver
++	 * matches the service and publishes the IOMedia from our geometry and
++	 * product string ("UFS userdata" -> "UFS userdata Media").
++	 */
++	device->registerService();
++	registered = true;
++	IOLog("KEBAB BLOCK: \"userdata\" %llu MiB, %llu-byte blocks, %s; IOMedia \"%s Media\"\n",
++	    (unsigned long long)(bytes >> 20), (unsigned long long)block_size,
++	    kebab_ufs_writable() ? "read-write" : "read-only",
++	    kebabProductString);
++	return 0;
++}
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index 58c912c..7710072 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -14,3 +14,10 @@ iokit/Kernel/arm/KebabCPU.cpp                                      optional ioki
+ 
+ # KEBAB device-tree platform (empty translation unit on other boards)
+ iokit/Kernel/arm/KebabPlatformExpert.cpp	optional iokitcpp
++
++# KEBAB IOKit block storage for the userdata partition (ufsmedia=1).
++# Not linked by default: a static kernel cannot resolve IOStorageFamily's
++# symbols (it is a prelinked kext, not part of the kernel image).  Enable this
++# together with -DKEBAB_BLOCKSTORAGE once the driver is built as a kext or the
++# family is built from source; see docs/BRING-UP-STATE.md section 87.
++# iokit/Kernel/arm/KebabBlockStorageDevice.cpp	optional iokitcpp

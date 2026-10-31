@@ -1,0 +1,473 @@
+{
+  "dtbo_sha256": "f320296be326aa80453856d3fd3eec1c1ed7e9a145511c68899823db4c8aba51",
+  "partition_bytes": 25165824,
+  "all_entries": 4,
+  "matched_prior_pinned_ota_manifest": true,
+  "pinned_manifest_sha256": "f4e33f5bcf6bacf674c420d6eeada587154b78fd8287a3850d809ad46efecf54",
+  "additional_ota_signature_validation": false,
+  "entries": [
+    {
+      "index": 0,
+      "id": 0,
+      "revision": 0,
+      "custom": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "root": {
+        "model": [
+          "Qualcomm Technologies, Inc. kona MTP 19821 19855"
+        ],
+        "compatible": [
+          "qcom,kona-mtp",
+          "qcom,kona",
+          "qcom,mtp"
+        ],
+        "qcom,board-id": [
+          "0x10008",
+          "0x0"
+        ]
+      },
+      "blob_sha256": "73784a290c6c866c3b536175e57fed20a761697c7da9285023f3eeec659cdda5",
+      "resources": [
+        {
+          "path": "/fragment@33",
+          "target_label": "qupv3_se6_4uart",
+          "properties": {},
+          "references": {}
+        },
+        {
+          "path": "/fragment@33/__overlay__",
+          "target_label": "qupv3_se6_4uart",
+          "properties": {
+            "status": [
+              "ok"
+            ]
+          },
+          "references": {}
+        },
+        {
+          "path": "/fragment@40/__overlay__/bt_qca6390",
+          "target_label": "vendor",
+          "properties": {
+            "compatible": [
+              "qca,qca6390"
+            ],
+            "pinctrl-names": [
+              "default"
+            ],
+            "pinctrl-0": [
+              "0xffffffff"
+            ],
+            "qca,bt-reset-gpio": [
+              "0xffffffff",
+              "0x15",
+              "0x0"
+            ],
+            "qca,bt-sw-ctrl-gpio": [
+              "0xffffffff",
+              "0x7c",
+              "0x0"
+            ],
+            "qca,bt-vdd-aon-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-dig-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-rfa1-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-rfa2-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-asd-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-aon-voltage-level": [
+              "0xe7ef0",
+              "0xe7ef0"
+            ],
+            "qca,bt-vdd-dig-voltage-level": [
+              "0xe7ef0",
+              "0xe86c0"
+            ],
+            "qca,bt-vdd-rfa1-voltage-level": [
+              "0x1cfde0",
+              "0x1f20c0"
+            ],
+            "qca,bt-vdd-rfa2-voltage-level": [
+              "0x149970",
+              "0x149970"
+            ],
+            "qca,bt-vdd-asd-voltage-level": [
+              "0x2e2480",
+              "0x326a40"
+            ],
+            "qca,bt-vdd-asd-current-level": [
+              "0x2710"
+            ]
+          },
+          "references": {
+            "pinctrl-0": "bt_en_sleep",
+            "qca,bt-reset-gpio": "tlmm",
+            "qca,bt-sw-ctrl-gpio": "tlmm",
+            "qca,bt-vdd-aon-supply": "pm8150_s6",
+            "qca,bt-vdd-dig-supply": "pm8009_s2",
+            "qca,bt-vdd-rfa1-supply": "pm8150_s5",
+            "qca,bt-vdd-rfa2-supply": "pm8150a_s8",
+            "qca,bt-vdd-asd-supply": "pm8150_l16"
+          }
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "id": 0,
+      "revision": 0,
+      "custom": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "root": {
+        "model": [
+          "Qualcomm Technologies, Inc. kona MTP 19811"
+        ],
+        "compatible": [
+          "qcom,kona-mtp",
+          "qcom,kona",
+          "qcom,mtp"
+        ],
+        "qcom,board-id": [
+          "0x10008",
+          "0x0"
+        ]
+      },
+      "blob_sha256": "fd9852c7dd400629a3ddf8055d28ce3c706bfe846ca6f80bb4ec9c62fa3878d2",
+      "resources": [
+        {
+          "path": "/fragment@37",
+          "target_label": "qupv3_se6_4uart",
+          "properties": {},
+          "references": {}
+        },
+        {
+          "path": "/fragment@37/__overlay__",
+          "target_label": "qupv3_se6_4uart",
+          "properties": {
+            "status": [
+              "ok"
+            ]
+          },
+          "references": {}
+        },
+        {
+          "path": "/fragment@45/__overlay__/bt_qca6390",
+          "target_label": "vendor",
+          "properties": {
+            "compatible": [
+              "qca,qca6390"
+            ],
+            "pinctrl-names": [
+              "default"
+            ],
+            "pinctrl-0": [
+              "0xffffffff"
+            ],
+            "qca,bt-reset-gpio": [
+              "0xffffffff",
+              "0x15",
+              "0x0"
+            ],
+            "qca,bt-sw-ctrl-gpio": [
+              "0xffffffff",
+              "0x7c",
+              "0x0"
+            ],
+            "qca,bt-vdd-aon-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-dig-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-rfa1-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-rfa2-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-asd-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-aon-voltage-level": [
+              "0xe7ef0",
+              "0xe7ef0"
+            ],
+            "qca,bt-vdd-dig-voltage-level": [
+              "0xe7ef0",
+              "0xe86c0"
+            ],
+            "qca,bt-vdd-rfa1-voltage-level": [
+              "0x1cfde0",
+              "0x1f20c0"
+            ],
+            "qca,bt-vdd-rfa2-voltage-level": [
+              "0x149970",
+              "0x149970"
+            ],
+            "qca,bt-vdd-asd-voltage-level": [
+              "0x2e2480",
+              "0x326a40"
+            ],
+            "qca,bt-vdd-asd-current-level": [
+              "0x2710"
+            ]
+          },
+          "references": {
+            "pinctrl-0": "bt_en_sleep",
+            "qca,bt-reset-gpio": "tlmm",
+            "qca,bt-sw-ctrl-gpio": "tlmm",
+            "qca,bt-vdd-aon-supply": "pm8150_s6",
+            "qca,bt-vdd-dig-supply": "pm8009_s2",
+            "qca,bt-vdd-rfa1-supply": "pm8150_s5",
+            "qca,bt-vdd-rfa2-supply": "pm8150a_s8",
+            "qca,bt-vdd-asd-supply": "pm8150_l16"
+          }
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "id": 0,
+      "revision": 0,
+      "custom": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "root": {
+        "model": [
+          "Qualcomm Technologies, Inc. kona MTP 19805 20809"
+        ],
+        "compatible": [
+          "qcom,kona-mtp",
+          "qcom,kona",
+          "qcom,mtp"
+        ],
+        "qcom,board-id": [
+          "0x10008",
+          "0x0"
+        ]
+      },
+      "blob_sha256": "be4a417e746864763bfbaca9386b9e90a332fa0fefc121e3c58a2b20f80416a0",
+      "resources": [
+        {
+          "path": "/fragment@34",
+          "target_label": "qupv3_se6_4uart",
+          "properties": {},
+          "references": {}
+        },
+        {
+          "path": "/fragment@34/__overlay__",
+          "target_label": "qupv3_se6_4uart",
+          "properties": {
+            "status": [
+              "ok"
+            ]
+          },
+          "references": {}
+        },
+        {
+          "path": "/fragment@41/__overlay__/bt_qca6390",
+          "target_label": "vendor",
+          "properties": {
+            "compatible": [
+              "qca,qca6390"
+            ],
+            "pinctrl-names": [
+              "default"
+            ],
+            "pinctrl-0": [
+              "0xffffffff"
+            ],
+            "qca,bt-reset-gpio": [
+              "0xffffffff",
+              "0x15",
+              "0x0"
+            ],
+            "qca,bt-sw-ctrl-gpio": [
+              "0xffffffff",
+              "0x7c",
+              "0x0"
+            ],
+            "qca,bt-vdd-aon-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-dig-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-rfa1-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-rfa2-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-aon-voltage-level": [
+              "0xe7ef0",
+              "0xe7ef0"
+            ],
+            "qca,bt-vdd-dig-voltage-level": [
+              "0xe7ef0",
+              "0xe7ef0"
+            ],
+            "qca,bt-vdd-rfa1-voltage-level": [
+              "0x1cfde0",
+              "0x1f20c0"
+            ],
+            "qca,bt-vdd-rfa2-voltage-level": [
+              "0x149970",
+              "0x149970"
+            ],
+            "qca,bt-vdd-asd-voltage-level": [
+              "0x2e2480",
+              "0x326a40"
+            ],
+            "qca,bt-vdd-asd-current-level": [
+              "0x2710"
+            ]
+          },
+          "references": {
+            "pinctrl-0": "bt_en_sleep",
+            "qca,bt-reset-gpio": "tlmm",
+            "qca,bt-sw-ctrl-gpio": "tlmm",
+            "qca,bt-vdd-aon-supply": "pm8150_s6",
+            "qca,bt-vdd-dig-supply": "pm8150_s6",
+            "qca,bt-vdd-rfa1-supply": "pm8150_s5",
+            "qca,bt-vdd-rfa2-supply": "pm8150a_s8"
+          }
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "id": 0,
+      "revision": 0,
+      "custom": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "root": {
+        "model": [
+          "Qualcomm Technologies, Inc. kona MTP 20828"
+        ],
+        "compatible": [
+          "qcom,kona-mtp",
+          "qcom,kona",
+          "qcom,mtp"
+        ],
+        "qcom,board-id": [
+          "0x10008",
+          "0x0"
+        ]
+      },
+      "blob_sha256": "e02fb1d1b43d39daa8c18f5142000a97baa376e06daca8e77a008e7a6422abb5",
+      "resources": [
+        {
+          "path": "/fragment@34",
+          "target_label": "qupv3_se6_4uart",
+          "properties": {},
+          "references": {}
+        },
+        {
+          "path": "/fragment@34/__overlay__",
+          "target_label": "qupv3_se6_4uart",
+          "properties": {
+            "status": [
+              "ok"
+            ]
+          },
+          "references": {}
+        },
+        {
+          "path": "/fragment@41/__overlay__/bt_qca6390",
+          "target_label": "vendor",
+          "properties": {
+            "compatible": [
+              "qca,qca6390"
+            ],
+            "pinctrl-names": [
+              "default"
+            ],
+            "pinctrl-0": [
+              "0xffffffff"
+            ],
+            "qca,bt-reset-gpio": [
+              "0xffffffff",
+              "0x15",
+              "0x0"
+            ],
+            "qca,bt-sw-ctrl-gpio": [
+              "0xffffffff",
+              "0x7c",
+              "0x0"
+            ],
+            "qca,bt-vdd-aon-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-dig-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-rfa1-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-rfa2-supply": [
+              "0xffffffff"
+            ],
+            "qca,bt-vdd-aon-voltage-level": [
+              "0xe7ef0",
+              "0xe7ef0"
+            ],
+            "qca,bt-vdd-dig-voltage-level": [
+              "0xe7ef0",
+              "0xe7ef0"
+            ],
+            "qca,bt-vdd-rfa1-voltage-level": [
+              "0x1cfde0",
+              "0x1f20c0"
+            ],
+            "qca,bt-vdd-rfa2-voltage-level": [
+              "0x149970",
+              "0x149970"
+            ],
+            "qca,bt-vdd-asd-voltage-level": [
+              "0x2e2480",
+              "0x326a40"
+            ],
+            "qca,bt-vdd-asd-current-level": [
+              "0x2710"
+            ]
+          },
+          "references": {
+            "pinctrl-0": "bt_en_sleep",
+            "qca,bt-reset-gpio": "tlmm",
+            "qca,bt-sw-ctrl-gpio": "tlmm",
+            "qca,bt-vdd-aon-supply": "pm8150_s6",
+            "qca,bt-vdd-dig-supply": "pm8150_s6",
+            "qca,bt-vdd-rfa1-supply": "pm8150_s5",
+            "qca,bt-vdd-rfa2-supply": "pm8150a_s8"
+          }
+        }
+      ]
+    }
+  ],
+  "selected_on_this_phone_entry_unknown": true,
+  "no_phone_writes": true,
+  "hardware_power_tested": false
+}

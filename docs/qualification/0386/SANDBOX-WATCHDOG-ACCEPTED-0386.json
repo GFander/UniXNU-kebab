@@ -1,0 +1,166 @@
+{
+  "accepted": true,
+  "scope": "Original Sandbox with explicit owner platform class mapping and unchanged original watchdog monitor",
+  "native_sha256": "6b481ac41096d1cb3bc9de11f4edadb7872c33103f1da6a624abef4985bf0051",
+  "native_bytes": 18883416,
+  "source": {
+    "common": 268,
+    "host": 4,
+    "files": 5239,
+    "exact": true
+  },
+  "policy": {
+    "readonly_data_bytes_changed": 21,
+    "original_class": "AppleARMWatchdogTimer",
+    "native_class": "KebabPlatformWatchdog",
+    "original_executable_bytes_unchanged": true,
+    "apple_authenticated_policy": false,
+    "process_name_authorization": false,
+    "original_macf_return_override": false,
+    "unrelated_service_deny_physically_observed": true
+  },
+  "watchdog_hardware_backend": false,
+  "original_watchdog_client_policy_and_heartbeats_preserved": true,
+  "normal_boots": {
+    "0383": {
+      "log_sha256": "10ff102872a348f5ccedc70d64f53a24d3fb515c54d4ec449d9cf66c69c1f103",
+      "real_watchdog_pid": 51,
+      "heartbeat_times": [
+        40.665,
+        40.665,
+        50.657,
+        60.669,
+        70.659,
+        80.64,
+        90.627,
+        100.677,
+        110.643,
+        120.64,
+        130.669,
+        140.676,
+        150.625,
+        160.647,
+        170.656,
+        180.65,
+        190.659,
+        200.654,
+        210.639,
+        220.635
+      ],
+      "original_macf_target_allow": true,
+      "original_macf_unrelated_service_denied": true,
+      "hardware_roots_systembag_c_d_preserved": true,
+      "observed_first_signal_failures": [
+        "SpringBoard"
+      ],
+      "prelink_sha256": "430f1cc69cba70ef9f7c405324829680a4d4fc7c2b7198b4733d39aa325b4015"
+    },
+    "0384": {
+      "log_sha256": "f56b4a7bbe48d2dc427c9961bac090f54ae8c9f6fe243a94250ab80256fd1ead",
+      "real_watchdog_pid": 51,
+      "heartbeat_times": [
+        38.747,
+        38.747,
+        48.756,
+        58.713,
+        68.77,
+        78.755,
+        88.752,
+        98.752,
+        108.769,
+        118.72,
+        128.721,
+        138.716,
+        148.723,
+        158.776,
+        168.767,
+        178.753,
+        188.758,
+        198.762,
+        208.732,
+        218.729
+      ],
+      "original_macf_target_allow": true,
+      "original_macf_unrelated_service_denied": true,
+      "hardware_roots_systembag_c_d_preserved": true,
+      "observed_first_signal_failures": [
+        "SpringBoard"
+      ],
+      "prelink_sha256": "430f1cc69cba70ef9f7c405324829680a4d4fc7c2b7198b4733d39aa325b4015"
+    },
+    "0386": {
+      "log_sha256": "a4bbb899aeb139ab33214bf04c55bcf69d9be20070879155a41af30a52ca949e",
+      "real_watchdog_pid": 51,
+      "heartbeat_times": [
+        49.784,
+        49.784,
+        59.791,
+        69.735,
+        79.751,
+        89.744,
+        99.736,
+        109.737,
+        119.793,
+        129.779,
+        139.8,
+        149.797,
+        159.8,
+        169.797,
+        179.79,
+        189.756
+      ],
+      "original_macf_target_allow": true,
+      "original_macf_unrelated_service_denied": true,
+      "hardware_roots_systembag_c_d_preserved": true,
+      "observed_first_signal_failures": [
+        "SpringBoard"
+      ],
+      "prelink_sha256": "430f1cc69cba70ef9f7c405324829680a4d4fc7c2b7198b4733d39aa325b4015"
+    }
+  },
+  "final_strict_data_fsck": {
+    "version": "0385",
+    "baseline_version": "0343",
+    "full_content_reference_version": "0341",
+    "full_content_reference_log_sha256": "53ac7d3d421f291827fd4b5840ec529842a71d7130c3dd3117c9d38888925639",
+    "original_signed_fsck_exit": 0,
+    "read_only_no_repairs": true,
+    "original_crypto_io_enabled": true,
+    "original_data_volume_ok": true,
+    "warnings": [
+      "container has been mounted by APFS version 2236.141.1, which is newer than 2142.140.9.704.1",
+      "disabling overallocation repairs by default; use -o to override"
+    ],
+    "unexpected_warnings": [],
+    "original_os_build_initialized": true,
+    "complete_original_os": true,
+    "complete_original_systemos": true,
+    "current_boot_development_fast": true,
+    "original_dsc_map_signatures": true,
+    "original_firmware": true,
+    "real_cold_c_d_file_checks": true,
+    "actual_log_sha256": "ac04b95f99e545cbf5dcc62a6acd415df20bc69feee29ef46779c13eb6ac6980",
+    "accepted": true
+  },
+  "all_daemon_functions_qualified": false,
+  "all_goal_complete": false,
+  "gpu_display_input_started": false,
+  "visible_usable_springboard": false,
+  "remaining": [
+    "Real A/B file-key service and original AKS selectors17/35/102/103",
+    "Observe normal/nonzero exits and full active process list: current PROC? truncates64",
+    "Remaining daemon functional verification before updated GPU/display/input guide review and implementation"
+  ],
+  "phone": {
+    "serial": "<device-serial>",
+    "slot": "b",
+    "boot_b": "0386",
+    "mode": "normal userspace; maintenance profile removed"
+  },
+  "github_upload_required": true,
+  "github_upload_completed": true,
+  "public_metadata_redactions": [
+    "phone.serial"
+  ],
+  "source_checkpoint_commit": "801f648594796822d45ef904447dbe37e2fee817"
+}

@@ -1,0 +1,22 @@
+--- a/bsd/kern/kebab_data_files_impl.h
++++ b/bsd/kern/kebab_data_files_impl.h
+@@ -113,12 +113,18 @@
+  if(!error&&create){
+   uint8_t payload[0x150]={0};user64_addr_t spec=scratch+0x160;uint16_t normal=1;uint32_t anonymous=UINT32_MAX;
+   memcpy(payload,&spec,8);memcpy(payload+16,&normal,2);memcpy(payload+0x144,&anonymous,4);memcpy(payload+0x148,&anonymous,4);
+-  struct mount_args request={.type=scratch+0x100,.path=scratch+0x120,.flags=MNT_UPDATE,.data=scratch+0x200};int32_t result=0;
++  /* vfs_syscalls.c rejects update mounts that drop MNT_CPROTECT. Retain
++   * every existing visible option, changing only readonly and UPDATE. */
++  uint32_t update=(uint32_t)((vfs_flags(mounted)&MNT_VISFLAGMASK&~MNT_RDONLY)|MNT_UPDATE);
++  struct mount_args request={.type=scratch+0x100,.path=scratch+0x120,.flags=update,.data=scratch+0x200};int32_t result=0;
++  printf("KEBAB DATA FILE: RW update flags=%x prior=%llx preserve-cprotect=%u\n",update,
++      (unsigned long long)vfs_flags(mounted),(update&MNT_CPROTECT)!=0);
+   if((error=copyout("apfs",request.type,5))||(error=copyout("/private/var",request.path,13))||
+       (error=copyout("/dev/disk1s2",spec,13))||(error=copyout(payload,request.data,sizeof(payload))))goto done;
+   error=mount(p,&request,&result);
+   printf("KEBAB DATA FILE: original Data RW update error=%d\n",error);
+   if(!error&&(vfs_flags(mounted)&MNT_RDONLY))error=EROFS;
++  if(!error&&!(vfs_flags(mounted)&MNT_CPROTECT))error=EAUTH;
+   if(!error&&!(vfs_flags(vnode_mount(rootvnode))&MNT_RDONLY))error=EAUTH;
+  }
+  if(!error)error=kdp_file(mounted,"/private/var/.hios-cp-c-v1",3,create);

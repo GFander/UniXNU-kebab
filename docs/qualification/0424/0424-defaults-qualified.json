@@ -1,0 +1,123 @@
+{
+  "version": "0424",
+  "defaults_matching_complete": true,
+  "actual_log_sha256": "a053e5293cedcc6b86a3069f654cd321e8f72b8ed42a11d66015ce7e37930213",
+  "native_sha256": "bea59aaf413c87356caadad4c3cd8c2fab52c7b91a62b69fb9e4a228eff11366",
+  "real_apple_image4_start_succeeded": true,
+  "actual_busy_reference_released": true,
+  "busy_lifecycle": [
+    [
+      0,
+      0,
+      1,
+      "defaults"
+    ],
+    [
+      11,
+      1,
+      1,
+      "AppleImage4"
+    ],
+    [
+      14,
+      2,
+      -1,
+      "defaults"
+    ],
+    [
+      15,
+      1,
+      -1,
+      "AppleImage4"
+    ]
+  ],
+  "final_busy_state": 0,
+  "actual_waits": [
+    "IOAESAccelerator",
+    "IOResources/IONVRAM",
+    "IODTNVRAM"
+  ],
+  "hardware_nonce_and_data_restored_without_generation": true,
+  "native_nvram_existing_proxy_adopted": true,
+  "nvram_encrypted_data_banks_cold_restored": true,
+  "nvram_restored_bank": 1,
+  "nvram_restored_generation": 238,
+  "nvram_hardware_or_rollback_claim": false,
+  "nvram_durable_write_calls": 2,
+  "watchdog_enabled": true,
+  "original_iokit_monitoring_preserved": true,
+  "watchdog_heartbeat_times": [
+    43.799,
+    43.8,
+    53.774,
+    63.779,
+    73.773,
+    83.813,
+    93.814,
+    103.815,
+    113.795,
+    123.773,
+    133.785,
+    143.771,
+    153.812,
+    163.773,
+    173.774,
+    183.829,
+    193.823,
+    203.812,
+    213.823,
+    223.827,
+    233.821,
+    243.832,
+    253.792,
+    263.801,
+    273.793
+  ],
+  "original_locked_observations": [
+    [
+      60.529,
+      30,
+      3
+    ],
+    [
+      90.564,
+      60,
+      6
+    ],
+    [
+      120.59,
+      90,
+      9
+    ],
+    [
+      150.628,
+      120,
+      12
+    ],
+    [
+      180.648,
+      150,
+      15
+    ],
+    [
+      210.696,
+      180,
+      18
+    ],
+    [
+      240.735,
+      210,
+      21
+    ],
+    [
+      270.728,
+      240,
+      24
+    ]
+  ],
+  "systembag_and_hardware_c_d_preserved": true,
+  "rtc_record_reused": true,
+  "panic": [],
+  "full_ios_or_springboard": false,
+  "gpu_display_input_started": false
+}

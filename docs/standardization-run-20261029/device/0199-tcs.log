@@ -1,0 +1,9 @@
+[2026-10-29T03:44:26] sending 'TCS?' on COM7
+[   0.090] KEBAB TCS: === read-only TCS dump, APPS RSC drv-2 ===
+[   0.090] KEBAB TCS: drv-2 0x18220000, tcs_base = drv + 0xd00 = 0xfffffe48c39ccd00, stride 672
+[   0.090] KEBAB TCS: rsc irq: enable[tcs_base+0x0] 0x00000001 status[+0x4] 0x00000000 clear[+0x8] 0x00000000
+[   0.090] KEBAB TCS: tcs 0 at 0xfffffe48c39ccd00: CONTROL[+0x14] 0x01010000 (AMC_ENABLE 1, AMC_TRIGGER 1) CMD_ENABLE[+0x1c] 0x00000003 CMD_WAIT[+0x10] 0x00000000 CMD_STATUS[+0x3c] 0x00010101 (ISSUED 1, COMPL 1)
+[   0.090] KEBAB TCS: tcs 1 at 0xfffffe48c39ccfa0: CONTROL[+0x14] 0x00010000 (AMC_ENABLE 1, AMC_TRIGGER 0) CMD_ENABLE[+0x1c] 0x00000000 CMD_WAIT[+0x10] 0x00000000 CMD_STATUS[+0x3c] 0x00000000 (ISSUED 0, COMPL 0)
+[   0.100] KEBAB TCS: VERDICT: TCS1 is idle and clean; a kernel-side send is plausible
+[   0.101] KEBAB TCS: done; no register was written, cleared or recovered
+[2026-10-29T03:44:29] done, 786 bytes

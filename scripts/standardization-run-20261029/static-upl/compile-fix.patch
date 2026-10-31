@@ -1,0 +1,5 @@
+--- a/iokit/Kernel/IOMemoryDescriptor.cpp
++++ b/iokit/Kernel/IOMemoryDescriptor.cpp
+@@ -4033,1 +4033,1 @@
+-#define io_kernel_static_start MIN(vm_kernel_stext, vm_kext_base)
++#define io_kernel_static_start ((vm_kernel_stext < vm_kext_base) ? vm_kernel_stext : vm_kext_base)

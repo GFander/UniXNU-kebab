@@ -1,0 +1,152 @@
+--- a/bsd/kern/kebab_qsee_probe.c
++++ b/bsd/kern/kebab_qsee_probe.c
+@@ -80,6 +80,125 @@
+ 	}
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
++
++/* Hardware-wrapped storage-key experiment. No key bytes or hashes are logged.
++ * Fixed legacy commands and tag layout were audited in this board's pinned
++ * libqtikeymaster4.so. FBE_ICE and RAW export match LineageOS vold's path.
++ * This verifies an in-memory prerequisite; it does not provision a device root.
++ */
++static bool
++qsee_pending(struct qsee_result r)
++{
++	return r.status==1 || (!r.status && r.value!=0 && r.value!=UINT32_MAX);
++}
++
++static void
++qsee_erase(vm_offset_t page)
++{
++	volatile uint8_t *p=(volatile uint8_t *)page;
++	for (unsigned i=0; i<PAGE_SIZE; i++) p[i]=0;
++	qsee_cache(page,true);
++}
++
++static struct qsee_result
++qsee_storage_send(vm_offset_t page, uint64_t pa, uint32_t app, unsigned bytes)
++{
++	uint64_t *extended=(uint64_t *)(page+0x80);
++	bzero(extended,7*sizeof(*extended));
++	extended[0]=pa+0x2000; extended[1]=0x1800;
++	qsee_cache(page,true);
++	struct qsee_result r=qsee_call(0x70000001,0x885,app,pa+0x100,bytes,pa+0x80);
++	if (!qsee_pending(r)) qsee_cache(page,false);
++	return r;
++}
++
++static bool
++qsee_blob_bounds(uint32_t offset, uint32_t bytes, uint32_t header, uint32_t maximum)
++{
++	return offset>=header && bytes>0 && bytes<=maximum && offset<=0x1800 && bytes<=0x1800-offset;
++}
++
++static bool
++qsee_storage_probe(vm_offset_t page, uint64_t pa, uint32_t app)
++{
++	int enabled=0;
++	PE_parse_boot_argn("kebab_wrapped_key_probe",&enabled,sizeof(enabled));
++	if (enabled!=1) return true;
++	int available=qsee_available(0x02001007);
++	if (available<0) return false;
++	if (available!=1) return true;
++	printf("KEBAB QSEE: hardware-wrapped key experiment begin; volatile only\n");
++	qsee_erase(page);
++	uint32_t *request=(uint32_t *)(page+0x100);
++	uint32_t *response=(uint32_t *)(page+0x2000);
++	/* Generate header: command, params offset, count. Each scalar is tag+u64.
++	 * No imported key, fixed key material, attestation, or rollback flags.
++	 */
++	const uint32_t params[][3]={
++		{0x10000002,32,0},       /* AES */
++		{0x30000003,256,0},      /* key size */
++		{0x20000001,0,0},        /* encrypt */
++		{0x20000001,1,0},        /* decrypt */
++		{0x70003f49,1,0},        /* Qualcomm FBE_ICE, BOOL|16201 */
++	};
++	request[0]=0x108; request[1]=12; request[2]=sizeof(params)/sizeof(params[0]);
++	memcpy(request+3,params,sizeof(params));
++	memset(response,0xa5,0x1800);
++	struct qsee_result r=qsee_storage_send(page,pa,app,12+sizeof(params));
++	printf("KEBAB QSEE: storage generate transport=%d result=0x%llx\n",r.status,r.value);
++	if (qsee_pending(r)) return false;
++	if (r.status || r.value) goto done;
++	printf("KEBAB QSEE: storage generate reply=%d offset=%u bytes=%u\n",
++	    (int32_t)response[0],response[2],response[3]);
++	if (response[0] || !qsee_blob_bounds(response[2],response[3],16,0x1000)) goto done;
++	uint32_t blob_size=response[3];
++	memcpy((void *)(page+0x1000),(uint8_t *)response+response[2],blob_size);
++	/* Export the same long-term key twice, then derive twice. Only equality
++	 * of the returned software secrets is reported; no raw-key fallback.
++	 */
++	for (unsigned trial=0; trial<2; trial++) {
++		bzero(request,0x1000-0x100);
++		request[0]=0x10c; request[1]=32; request[2]=blob_size; request[3]=3; /* RAW */
++		if (blob_size>0x1000-0x120) goto done;
++		memcpy(request+8,(void *)(page+0x1000),blob_size);
++		memset(response,0xa5,0x1800);
++		response[3]=20; response[4]=0x1800-20; /* Caller output capacity. */
++		r=qsee_storage_send(page,pa,app,32+blob_size);
++		printf("KEBAB QSEE: storage export trial=%u transport=%d result=0x%llx\n",trial,r.status,r.value);
++		if (qsee_pending(r)) return false;
++		if (r.status || r.value) goto done;
++		printf("KEBAB QSEE: storage export reply=%d offset=%u bytes=%u\n",
++		    (int32_t)response[0],response[3],response[4]);
++		if (response[0] || !qsee_blob_bounds(response[3],response[4],20,0x800) || response[4]<=64) goto done;
++		uint32_t wrapped_size=response[4];
++		uint64_t wrapped_pa=pa+0x2000+response[3];
++		vm_offset_t secret=page+0x3800+trial*0x40;
++		memset((void *)secret,0xa5,32);
++		qsee_cache(page,true);
++		r=qsee_call(0x42001007,0x224,wrapped_pa,wrapped_size,pa+0x3800+trial*0x40,32);
++		printf("KEBAB QSEE: storage derive trial=%u transport=%d result=0x%llx\n",trial,r.status,r.value);
++		if (r.status==1) return false;
++		qsee_cache(page,false);
++		if (r.status || r.value) goto done;
++		bool changed=false; unsigned nonzero=0;
++		for (unsigned i=0; i<32; i++) {
++			changed |= ((const uint8_t *)secret)[i]!=0xa5;
++			nonzero |= ((const uint8_t *)secret)[i];
++		}
++		if (!changed || !nonzero) { printf("KEBAB QSEE: rejected unchanged or zero secret output\n"); goto done; }
++	}
++	{
++		unsigned difference=0;
++		for (unsigned i=0; i<32; i++) difference |= ((const uint8_t *)page)[0x3800+i]^((const uint8_t *)page)[0x3840+i];
++		printf("KEBAB QSEE: hardware-wrapped repeated derivation %s; cold-boot identity unqualified\n",
++		    difference ? "FAIL" : "PASS");
++	}
++done:
++	qsee_erase(page);
++	printf("KEBAB QSEE: hardware-wrapped experiment end; volatile key material erased\n");
++	return true;
++}
++
+ 
+ /* Returns false if firmware may still own the shared page. */
+ static bool
+@@ -107,8 +226,12 @@
+ 	const uint32_t *reply=(const uint32_t *)(page+0x200);
+ 	printf("KEBAB QSEE: keymaster reply status=%d protocol=%u.%u app=%u.%u\n",
+ 	    (int32_t)reply[0],reply[1],reply[2],reply[3],reply[4]);
+-	if (!reply[0] && reply[1]>=2 && reply[1]<256 && reply[2]<65536 && reply[3]<65536 && reply[4]<65536)
+-		printf("KEBAB QSEE: keymaster GET_VERSION validated; no key operations\n");
++	if (!reply[0] && reply[1]>=2 && reply[1]<256 && reply[2]<65536 && reply[3]<65536 && reply[4]<65536) {
++		printf("KEBAB QSEE: keymaster GET_VERSION validated\n");
++		/* Pinned board firmware only; do not guess another TA command ABI. */
++		if (reply[1]==4 && reply[2]==1 && reply[3]==4 && reply[4]==558)
++			return qsee_storage_probe(page,pa,app);
++	}
+ 	return true;
+ }
+ 
+@@ -125,7 +248,7 @@
+ 	static bool attempted;
+ 	if (attempted) { printf("KEBAB QSEE: already attempted\n"); return; }
+ 	attempted=true;
+-	printf("KEBAB QSEE: fixed lookup begin; optional GET_VERSION; no app load, key or RPMB operation\n");
++	printf("KEBAB QSEE: fixed lookup begin; experimental key commands require a separate flag\n");
+ 	if (PAGE_SIZE!=0x4000 || qsee_available(0x02000601)!=1 || qsee_available(0x32000103)!=1) return;
+ 
+ 	vm_offset_t page=0;

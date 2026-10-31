@@ -1,0 +1,186 @@
+--- a/bsd/kern/kebab_dyldcache.c
++++ b/bsd/kern/kebab_dyldcache.c
+@@ -59,10 +59,12 @@
+ #include <sys/dirent.h>
+ #include <sys/kauth.h>
+ #include <sys/systm.h>
++#include <sys/stat.h>
+ 
+ #include <mach/boolean.h>
+ #include <mach/vm_prot.h>
+ #include <mach/shared_region.h>
++#include <mach/mach_vm.h>
+ 
+ #include <kern/kalloc.h>
+ #include <kern/task.h>
+@@ -72,6 +74,7 @@
+ #include <pexpert/pexpert.h>
+ 
+ #include <vm/vm_map.h>
++#include <vm/vm_kern.h>
+ #include <vm/vm_shared_region.h>
+ 
+ #include "kebab_dyldcache.h"
+@@ -1223,12 +1226,9 @@
+  * that the kernel pre-mapped without that page therefore faults inside dyld on
+  * its first cache access instead of falling back to the filesystem.
+  *
+- * The port cannot supply the contents (dyld writes them itself, for its own
+- * process), but it must supply the mapping: read-only, anonymous, so it reads
+- * as zeros and dyld takes its "does not contain dynamic config data" branch
+- * and carries on.  On the real cache dynamicDataOffset is 0xaade4000 and
+- * dynamicDataMaxSize 0x4000, i.e. exactly the one-page gap between the plan's
+- * extent (0xaade4000) and sharedRegionSize (0xaade8000).
++ * The plan reserves an anonymous page.  Owner startup replaces this reservation
++ * with a separate fd == -1 mapping containing the target dyld's v0 header and
++ * the main cache's actual fstat identity.  A zero header is fatal in this dyld.
+  */
+ static int
+ kebab_dsc_add_dynamic_config(struct kebab_dsc_plan *plan,
+@@ -1803,16 +1803,77 @@
+  return kebab_cryptex_vnode_recheck(file);
+ }
+ 
++/* Target dyld-1042 v0 ABI; also checked against the shipped dyld. */
++struct kebab_dsc_dynamic_header {
++ char magic[16];
++ uint64_t fs_id;
++ uint64_t fs_object_id;
++};
++_Static_assert(sizeof(struct kebab_dsc_dynamic_header) == 32, "dyld v0 size");
++_Static_assert(offsetof(struct kebab_dsc_dynamic_header, fs_id) == 16, "dyld v0 fsid");
++_Static_assert(offsetof(struct kebab_dsc_dynamic_header, fs_object_id) == 24, "dyld v0 inode");
++
++static int
++kebab_dsc_prepare_dynamic(struct kebab_dsc_plan *plan, vnode_t main_vnode,
++    struct shared_file_mapping_slide_np *mapping, mach_vm_offset_t *scratch)
++{
++ struct kebab_dsc_file *main_file = &plan->files[0];
++ struct kebab_dsc_dynamic_header header = { .magic = "dyld_data    v0" };
++ struct stat64 st;
++ kern_return_t kr;
++ int error;
++
++ *scratch = 0;
++ if (!plan->file_count || main_file->mapping_count < 2 ||
++     main_file->mapping_count > KEBAB_DSC_MAX_MAPPINGS ||
++     plan->dynamic_config_size != KEBAB_DSC_PAGE_SIZE) return EINVAL;
++ *mapping = main_file->mappings[main_file->mapping_count - 1];
++ if (mapping->sms_address != plan->dynamic_config_addr ||
++     (mapping->sms_address & (KEBAB_DSC_PAGE_SIZE - 1)) ||
++     mapping->sms_size != KEBAB_DSC_PAGE_SIZE || mapping->sms_file_offset ||
++     mapping->sms_slide_size || mapping->sms_slide_start ||
++     mapping->sms_max_prot != VM_PROT_READ ||
++     mapping->sms_init_prot != (VM_PROT_READ | VM_PROT_ZF)) return EINVAL;
++ error = kebab_cryptex_vnode_recheck(main_vnode);
++ if (error) return error;
++ memset(&st, 0, sizeof(st));
++ error = vn_stat(main_vnode, &st, NULL, 1, 0, vfs_context_current());
++ if (error) return error;
++ /* dyld stores signed st_dev in uint64_t, not the distinct va_fsid64. */
++ if (!st.st_dev || !st.st_ino) return EINVAL;
++ header.fs_id = (uint64_t)(int64_t)st.st_dev;
++ header.fs_object_id = st.st_ino;
++ error = kebab_cryptex_vnode_recheck(main_vnode);
++ if (error) return error;
++
++ /* Fresh anonymous user pages are zeroed; fd=-1 copies the entire page. */
++ kr = mach_vm_allocate_kernel(current_map(), scratch, KEBAB_DSC_PAGE_SIZE,
++     VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
++ if (kr != KERN_SUCCESS) return ENOMEM;
++ error = copyout(&header, (user_addr_t)*scratch, sizeof(header));
++ if (error) {
++  (void)mach_vm_deallocate(current_map(), *scratch, KEBAB_DSC_PAGE_SIZE);
++  *scratch = 0;
++  return error;
++ }
++ mapping->sms_file_offset = *scratch;
++ mapping->sms_init_prot = VM_PROT_READ;
++ return 0;
++}
++
+ static int
+ kebab_dsc_map_plan(struct kebab_dsc_plan *plan, task_t target, uint32_t platform)
+ {
+ 	vm_shared_region_t shared_region = NULL;
+ 	struct _sr_file_mappings *srm = NULL;
+-	mach_vm_offset_t start = 0;
++	mach_vm_offset_t start = 0, dynamic_scratch = 0;
++	struct shared_file_mapping_slide_np dynamic_mapping;
++	uint32_t file_count = plan->file_count + (kebab_dsc_owner_mode ? 1 : 0);
+ 	kern_return_t kr;
+ 	uint32_t i;
+ 	int error = 0;
+ 
++	if (kebab_dsc_owner_mode && current_map() != get_task_map(target)) return EINVAL;
+ 	shared_region = vm_shared_region_get(target);
+ 	if (shared_region == NULL) {
+ 		printf("KEBAB DSC: map: target task has no shared region (ENODEV)\n");
+@@ -1827,7 +1888,7 @@
+ 		return EEXIST;
+ 	}
+ 
+-	srm = kalloc_data(plan->file_count * sizeof(*srm), Z_WAITOK | Z_ZERO);
++	srm = kalloc_data(file_count * sizeof(*srm), Z_WAITOK | Z_ZERO);
+ 	if (srm == NULL) {
+ 		printf("KEBAB DSC: map: cannot allocate %u file mappings; shared "
+ 		    "cache NOT mapped (ENOMEM)\n", plan->file_count);
+@@ -1889,6 +1950,17 @@
+ 		}
+ 	}
+ 
++	if (kebab_dsc_owner_mode) {
++		error = kebab_dsc_prepare_dynamic(plan, srm[0].vp, &dynamic_mapping, &dynamic_scratch);
++		if (error) goto fail;
++		/* Keep 43 authenticated files; append one anonymous data source last. */
++		srm[0].mappings_count--;
++		srm[plan->file_count].fd = -1;
++		srm[plan->file_count].mappings_count = 1;
++		srm[plan->file_count].mappings = &dynamic_mapping;
++		srm[plan->file_count].slide = (uint32_t)plan->slide;
++	}
++
+ 	if (kebab_dsc_owner_mode) printf("KEBAB DSC: %u original CodeDirectory signatures installed and ranges checked\n", plan->file_count);
+ 
+ 	if (kebab_dsc_verbose) {
+@@ -1897,7 +1969,7 @@
+ 		    plan->file_count, plan->total_mappings,
+ 		    (unsigned long long)(plan->region_start + plan->slide));
+ 	}
+-	kr = vm_shared_region_map_file(shared_region, (int)plan->file_count, srm);
++	kr = vm_shared_region_map_file(shared_region, (int)file_count, srm);
+ 	error = (int)kebab_dsc_mapping_errno(kr);
+ 	if (error != 0) {
+ 		/*
+@@ -1960,24 +2032,24 @@
+ 		printf(", check_np base 0x%llx", (unsigned long long)start);
+ 	}
+ 	if (plan->dynamic_config_size != 0) {
+-		printf(", dynamic config page 0x%llx+0x%llx zero-filled",
++		printf(", dynamic config page 0x%llx+0x%llx %s",
+ 		    (unsigned long long)(plan->dynamic_config_addr + plan->slide),
+-		    (unsigned long long)plan->dynamic_config_size);
++		    (unsigned long long)plan->dynamic_config_size,
++		    kebab_dsc_owner_mode ? "v0 initialized (native fstat)" : "zero-filled");
+ 	}
+ 	printf("\n");
+-	if (kebab_dsc_verbose && plan->dynamic_config_size != 0) {
+-		printf("KEBAB DSC: map: dyld will report \"no dynamic config data\" "
+-		    "and continue\n");
+-	}
+ 
+ fail:
++	if (dynamic_scratch) {
++		(void)mach_vm_deallocate(current_map(), dynamic_scratch, KEBAB_DSC_PAGE_SIZE);
++	}
+ 	for (i = 0; i < plan->file_count; i++) {
+ 		if (srm[i].vp != NULLVP) {
+ 			vnode_put(srm[i].vp);
+ 			srm[i].vp = NULLVP;
+ 		}
+ 	}
+-	kfree_data(srm, plan->file_count * sizeof(*srm));
++	kfree_data(srm, file_count * sizeof(*srm));
+ 	vm_shared_region_deallocate(shared_region);
+ 	return error;
+ }

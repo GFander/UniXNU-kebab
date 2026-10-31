@@ -1906,3 +1906,11871 @@ lldb -o "kdp-remote <bridge-host>:41139" -o "register read" -o "continue" -o "qu
 
 本轮没有真机，本节所有结论都来自源码、`84/84` 的补丁应用和一次内核编译，不能
 替代上面这次握手。
+
+## 十八、控制台的重启命令
+
+本节记录给 CDC-ACM 调试控制台加的两条恢复命令，以及为它们补上的平台重启后端。
+代码是 `patches/xnu-8796-kebab/0105-kebab-console-reboot.patch`；没有重生成
+`0091`，因为 `0104` 已经示范了在 `0091` 创建的 `bsd/dev/kebab_usb.c` 上追加
+补丁的写法。
+
+### 1. 命令与匹配方式
+
+| 命令 | 一次 bulk OUT 里的字节 | 作用 |
+| --- | --- | --- |
+| `REBOOT` | `REBOOT\n`（7 字节） | 走平台重启路径重启机器 |
+| `FASTBOOT` | `FASTBOOT\n`（9 字节） | 写 IMEM 的 `restart_reason`，再走同一条重启路径 |
+
+两条命令都在 `ud_bulk_out_done()` 里匹配，匹配窗口就是**这一次** bulk OUT
+完成的 `received` 字节，命令被拆成两次写入不会触发。普通控制台会扫描整个
+完成窗口（和 `PANIC!` 的写法一致）；`kebabkdp=1` 时字节流属于调试器，只认
+从传输首字节开始的命令，因为 KDP 帧固定以 `0xFA` 开头，不会和 `REBOOT` 的
+首字母 `R` 混淆。
+
+命令只记录在 `ud.reboot_command`，执行点不在匹配函数里：`ud_thread()` 和
+`kebab_usb_panic_spin()` 都在 `ud_leave()` 之后才调用 `ud_run_reboot_command()`。
+这样重启路径里的 `printf` 可以正常冲刷日志，也不会在还握着 `ud.owner` 时
+调用 `PEHaltRestart()`。`EP0?` 和 `PANIC!` 的原有路径没有改动。
+
+### 2. REBOOT：平台入口原来没有后端
+
+`REBOOT` 调用 `PEHaltRestart(kPERestartCPU)`，没有直接写复位寄存器。但检查
+这棵树后发现，平台入口本身是空的：
+
+* `iokit/Kernel/IOPlatformExpert.cpp` 里只有
+  `int (*PE_halt_restart)(unsigned int type) = NULL;`，全树没有任何地方给
+  它赋值；
+* `IOPlatformExpert::haltRestart()` 在 `PE_halt_restart == NULL` 时直接
+  `return -1;`
+* `IODTPlatformExpert::haltRestart()` 只是 `return super::haltRestart(type);`
+* `KebabPlatformExpert` 原来的 `haltRestart()` 只处理 panic 停留，最后仍然
+  落到这条空路径。
+
+也就是说，只加 `PEHaltRestart(kPERestartCPU)` 会返回 -1，机器不会重启。
+`0105` 因此在 `KebabPlatformExpert::haltRestart()` 里补了
+`kPERestartCPU` 的后端：用 `smc #0` 调 PSCI 的 `SYSTEM_RESET`
+（`0x84000009`），和 `KebabCPU.cpp` 里 `PSCI CPU_ON` 用的是同一个固件接口。
+入口仍然是 `PEHaltRestart()`，不是驱动自己的复位寄存器；PSCI 成功时调用
+不返回，返回的值是错误码，由驱动打印。
+
+panic 循环里还有第二个坑：`haltRestart()` 看到 `panic_active()` 且控制台
+ready 时会调用 `kebab_usb_panic_spin()`。如果控制台自己请求重启，这会第二次
+进入 panic 循环；新循环在 `ud.panic_cpu` 的 `cmpxchg` 失败后永远等下去，机器
+仍然不会重启。驱动因此导出 `kebab_usb_restart_armed()`，平台专家在
+`haltRestart()` 的 panic 停留判断里排除“控制台已经请求重启”这一种情况。
+
+### 3. FASTBOOT 的 IMEM 地址与证据
+
+地址不是猜的，来自设备自己的 DTB。本机缓存的
+`/home/albert/tmpwork/uefisheng/Resources/DTBs/kebab.dtb` 解出的节点是：
+
+```text
+/soc/qcom,msm-imem@146bf000
+        compatible = "qcom,msm-imem"
+        reg = <0x146bf000 0x1000>
+        ranges = <0x00 0x146bf000 0x1000>
+
+/soc/qcom,msm-imem@146bf000/restart_reason@65c
+        compatible = "qcom,msm-imem-restart_reason"
+        reg = <0x65c 0x04>
+```
+
+同一代 SM8250 的 `alioth.dts` 里也是同样的 `<0x146bf000 0x1000>` 和
+`<0x65c 0x04>`。驱动在 `kebab_usb_start()` 里用 `ml_io_map()` 把这一页
+**预先映射**好（正常上下文，不在 panic 里分配 VM），`FASTBOOT` 时直接对
+`imem + 0x65c` 做 4 字节读写。这样 panic 循环不需要临时 `kmem_alloc()`，
+也就不会在 panic 上下文里等 VM 锁。
+
+### 4. cookie 值只是假设
+
+* 默认值 `0x77665501` 是社区资料里“bootloader/fastboot”的值，**没有在本机
+  真机上验证过**。
+* 启动参数 `kebab_fastboot_cookie=<hex>` 可以在不重编内核的情况下换值；例如
+  `kebab_fastboot_cookie=0x77665501`。不写这个参数时用默认值。解析用
+  `PE_parse_boot_argn()`，支持 `0x` 前缀。
+* 写之前先读旧值，日志会同时打印旧值、新值和字段地址；写完执行 `dsb sy`，
+  再调用 `PEHaltRestart()`。
+* 如果启动时 IMEM 映射失败，日志会明确打印“cannot map IMEM”，然后回退到
+  普通的 `REBOOT`，不会假装已经写了 cookie。
+* 如果 `PEHaltRestart()` 返回错误（说明没有重启成功），驱动会把旧值写回去并打印，
+  避免下一次手动重启意外进入 fastboot。
+
+**风险要写清楚**：cookie 不对时，机器可能进入 recovery，也可能进入 EDL。进入
+recovery 还可以再重启；进入 EDL 需要 firehose/QFIL 这一类工具，本项目没有，
+恢复成本高。因此在真机上应先只验证 `REBOOT`，确认平台重启路径真的能复位之后，
+再单独试 `FASTBOOT`；测试循环的日常重启应当用 `REBOOT`。
+
+### 5. 启动参数与主机侧用法
+
+控制台仍然需要 `kebabusb=1`；用 `PANIC!` 触发测试 panic 还需要 `kebabpanic=1`，
+真实 panic 不需要它（`kebabpanic` 只控制 `PANIC!` 钩子）。`kebabkdp=1` 时
+字节流是 KDP 的，文本命令只认传输首字节开始的形式；如果要在 panic 后用文本
+命令，建议这一轮不要加 `kebabkdp=1`。
+
+主机一次写入整条命令，例如：
+
+```python
+import serial
+ser = serial.Serial("COM7", 115200, timeout=0.2)
+ser.write(b"REBOOT\n")     # 一次 write，不能逐键敲
+ser.flush()
+```
+
+`FASTBOOT` 同理：
+
+```python
+ser.write(b"FASTBOOT\n")
+```
+
+### 6. 设备落到意外位置时怎么恢复
+
+* 停在 fastboot 界面：主机执行 `fastboot reboot`（或 `fastboot continue`），
+  不要继续刷未知镜像。
+* 停在 recovery：直接重启，或按现有流程回 Android。
+* 停在 EDL（9008）：需要 firehose/QFIL，本项目没有这套工具；这是
+  `FASTBOOT` 最坏的结果，也是先验证 `REBOOT` 的原因。
+* 完全没有 USB 响应：长按电源键约 10 秒强制重启；仍然不行时按 README 的
+  刷机流程处理。`boot_a` 的 Android 镜像在测试期间不要动，这是既有的回退约定。
+
+### 7. 本轮的证明与未验证项
+
+* 在 `xnu-8796.141.3` 的 `1b191cb` 上，独立 worktree 先
+  `git reset --hard 1b191cb`、`git clean -fdx`，再按文件名顺序应用
+  `0000`–`0104` 和 `0105`：**85 / 85 成功，0 失败**。
+* 构建机 `~/kebab-build/build-local.sh`（`MACHINE_CONFIG=KEBAB`、
+  `KERNEL_CONFIG=DEVELOPMENT`、macOS 13.5 + `KDK_13.5_22G74`）产出
+  `build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab`，
+  **17,086,064 字节（16.29 MiB）**，Mach-O 64-bit arm64，SHA-256
+  `77a8e4610009b1b2e21250cd82a6e2dd0f467338f83efff5e2a7485f119a15b1`。
+* 镜像字符串里有 `KEBAB REBOOT: PEHaltRestart(kPERestartCPU)`、
+  `KEBAB FASTBOOT: IMEM restart_reason ...`、`kebab_fastboot_cookie` 等格式串；
+  符号表里有 `_kebab_usb_restart_armed` 和 `_PEHaltRestart`。
+* `kebab_usb.c` 本轮 **45 条 warning，全部是同一类
+  `-Wdeclaration-after-statement`**（这个文件本来就是 C99 风格，构建配置用
+  `-Wno-error=declaration-after-statement` 放行），0 error；
+  `KebabPlatformExpert.cpp` 只有 1 条既有的 `-Wshadow-field`
+  （`processTopLevel` 的 `root` 参数），不是新代码引入的。
+
+没有真机，以下都还没有验证：
+
+* `PEHaltRestart(kPERestartCPU)` → PSCI `SYSTEM_RESET` 是否真的复位；
+  PSCI 的 SMC conduit 和函数号来自同树的 `CPU_ON` 用法，但没有在 kebab 上
+  单独调用过 `SYSTEM_RESET`。
+* ABL 是否真的读取 `restart_reason@65c` 并识别 `0x77665501`；cookie 的语义
+  目前只是假设。
+* IMEM 写入是否在 PSCI 复位后仍然保留（按 IMEM 的定位应当保留，但未实测）。
+* 普通控制台路径和 panic 循环路径都只做了编译与补丁应用验证，没有在硬件上
+  分别发过 `REBOOT\n` / `FASTBOOT\n`。
+* `kebabkdp=1` 时的首字节匹配、以及 PM 关闭通知对 USB 事件线程的影响，都
+  需要真机会话确认。
+
+## 十九、Fastboot 进入条件的诊断
+
+本轮要回答的问题：控制台 `FASTBOOT` 已经把 Qualcomm 的 restart reason 写进 IMEM
+并复位，为什么板子没有进 fastboot。
+
+测量用的镜像是 `XNU-151-FbDiag.img`（`0106-kebab-fastboot-diagnosis.patch`，
+CI run 40449214321），刷 `boot_b`。启动参数与基线一致：
+
+```text
+-v -enable_kprintf_spam startup_debug=1 serial=3 debug=0x14e cpus=1
+rd=ufsroot0 ufsroot=userdata ufsrw=1 rootrw=1 kebabusb=1 kebabpanic=1
+kebabkdp=1 kebab_fastboot_cookie=0x77665500 keepsyms=1
+```
+
+主机侧：Windows，COM7（CDC-ACM，`VID_1209&PID_0001`），
+`D:\TOOL\platform-tools\fastboot.exe`。命令必须一次 bulk OUT 写完，否则内核不匹配。
+
+### 1. PSCI：先测，不猜
+
+`0106` 在 `kebab_usb_start()` 里用 SMC 调 `PSCI_VERSION`，再对
+`SYSTEM_RESET`（`0x84000009`）和 `SYSTEM_RESET2`（`0xC4000012`）各调一次
+`PSCI_FEATURES`（`0x8400000A`）。启动日志被 `-v` 的 16 KiB 环冲掉，
+所以下机后又用 `PSCI?` 复测，结果一致：
+
+```text
+KEBAB PSCI: version 0x00010001; FEATURES(0x84000009)=0 FEATURES(0xc4000012)=0
+KEBAB PSCI: SYSTEM_RESET2 NOT_SUPPORTED
+```
+
+读数是 **0**（PSCI_FEATURES：0 = not supported）。按规则记
+`SYSTEM_RESET2 = NOT_SUPPORTED`，没有换成 vendor 私有的 reset type，
+`FASTBOOT2` 命令因此拒绝执行（`ud.psci_reset2 != 1` 时只打印、不复位），
+也没有强行调用未声明的功能。
+
+**这条读数自相矛盾，是独立的一条发现**：PSCI 版本 1.1 里 `SYSTEM_RESET`
+是强制功能，而且它实测有效（`REBOOT` 和 `FASTBOOT` 都靠它复位），
+`PSCI_FEATURES(0x84000009)` 却返回 0。也就是说这颗固件的
+`PSCI_FEATURES` 是一个对已实现功能也回答 0 的桩：
+`0xC4000012 -> 0` 只能说明"固件没有声明支持"，不能证明 `SYSTEM_RESET2`
+一定不存在。**在这台机器上，任何依赖 PSCI_FEATURES 做能力探测的东西都不可信**，
+包括以后想用 `SYSTEM_RESET2`、`SYSTEM_OFF` 或其它可选功能的代码。
+
+### 2. IMEM 写入路径：写进去了，也确实读得回来
+
+`FASTBOOT` 现在先打印旧值，写 `0x77665500`，`dsb sy` 后回读，再冲刷日志、
+等 300 ms 才复位。实测：
+
+```text
+KEBAB FASTBOOT: cookie 0x77665500 from kebab_fastboot_cookie
+KEBAB FASTBOOT: IMEM restart_reason at 0x146bf000+0x65c is 0x0b39bda4; writing 0x77665500
+KEBAB FASTBOOT: read back 0x77665500 (MATCH)
+KEBAB REBOOT: PEHaltRestart(kPERestartCPU)
+```
+
+回读 **MATCH**，说明 `0x146BF65C` 的映射、写和读都成立，写操作本身没有丢。
+写前值是 `0x0b39bda4`，既不是 0 也不是 cookie。
+
+### 3. 三次复位的实测矩阵
+
+每一次都记录：写前 IMEM、写后回读、PSCI 调用、是否进 fastboot、是否正常启动、
+是否出现 crash dump、下次启动时 IMEM 的值。时间以命令发出为零点。
+
+| # | 命令 | 复位调用 | 写前 IMEM | 回读 | 进 fastboot | 正常启动 | crash dump | 下次启动 IMEM |
+|---|------|----------|-----------|------|-------------|----------|------------|----------------|
+| 0 | 刷机后 `fastboot reboot` | ABL 冷启动 | — | — | 否 | 是 | 无 | `0x0b39bda4` |
+| 1 | `FASTBOOT` | `PEHaltRestart(kPERestartCPU)` → `SYSTEM_RESET` | `0x0b39bda4` | `0x77665500` MATCH | **否** | 是，1.0 s 端口消失 / 19.8 s 回来 | 无 | `0x836999ac` |
+| 2 | `REBOOT`（回归） | 同上，`SYSTEM_RESET` | — | — | 否 | 是，1.0 s / 19.8 s | 无 | `0x532989ac` |
+| 3 | `REBOOT`（收尾再验一次） | 同上，`SYSTEM_RESET` | — | — | 否 | 是，1.0 s / 19.8 s | 无 | `0x616998ac` |
+
+crash dump 的判据是主机上不出现 `VID_05C6&PID_900E`（QUSB_BULK）；
+复位后 USB 上只有 `VID_1209&PID_0001`，没有别的 Qualcomm 设备。
+"下次启动 IMEM" 是板子重新枚举后在控制台上立刻发 `IMEM?` 读到的值。
+启动时的 `KEBAB USB: IMEM mapped ... boot read 0x...` 探针也在，但这段早于
+USB 枚举的日志被 `-v` 的启动刷屏冲掉了；`IMEM?` 在同一启动内读三次值都一样
+（例如 `0x836999ac` ×3），所以它和启动时的读数等价。
+
+**最重要的一条结果在第 2、3 行**：`REBOOT` 根本没有写 IMEM，复位后 `0x65c`
+仍然从 `0x836999ac` 变成 `0x532989ac`、再变成 `0x616998ac`。四次启动四个值，
+没有一个等于 OS 写的 cookie。也就是说，每次启动都有比内核更早的环节
+（XBL / ABL / UEFI 中的一个或多个）在重写这个单元，OS 在复位前写的 cookie
+到不了 ABL 做启动模式判断的那个时刻。
+
+复位调用不是差别：`REBOOT` 和 `FASTBOOT` 走的是同一条 `SYSTEM_RESET`，
+一个能复位，另一个也能复位（端口都在 1.0 s 消失、19.8 s 回来），
+区别只在那个没被保住的 IMEM 值。**所以本机这条启动链上，
+"写 IMEM + `SYSTEM_RESET`" 这条路本身不成立，不是复位方式选错了。**
+
+### 4. vendor 源码核对（为 Stage B 打底）
+
+全部来自 LineageOS `android_kernel_oneplus_sm8250`，分支 `lineage-24.0`，
+不是凭记忆：
+
+* `drivers/power/reset/msm-poweroff.c`，`msm_restart_prepare()`：
+  `cmd = "bootloader"` 时先 `qpnp_pon_set_restart_reason(PON_RESTART_REASON_BOOTLOADER)`，
+  再 `__raw_writel(0x77665500, restart_reason)`。同一个 `else` 分支写的是
+  `0x77665501`。**所以 `0x77665500` 才是 bootloader 值**，启动参数里的
+  `kebab_fastboot_cookie=0x77665500` 是对的，`0105` 原来默认的 `0x77665501`
+  反而是"普通重启"。
+* `arch/arm64/boot/dts/vendor/qcom/pm8150.dtsi`：`qcom,pm8150@0` 的
+  `reg = <0x0 SPMI_USID>`（SID 0），`qcom,power-on@800`（PON base `0x0800`），
+  并且带 `qcom,store-hard-reset-reason`（没有这个属性
+  `qpnp_pon_set_restart_reason()` 直接返回 0，不写）。
+* `drivers/input/misc/qpnp-power-on.c`：
+  `QPNP_PON_PERPH_SUBTYPE(pon) = base + 0x05` → **`0x0805`**；
+  `QPNP_PON_SOFT_RB_SPARE(pon) = base + 0x8F` → **`0x088F`**；
+  `is_pon_gen2()` 是 subtype `0x04`（GEN2_PRIMARY）或 `0x05`（GEN2_SECONDARY）；
+  Gen2 分支 `masked_write(0x088F, GENMASK(7,1)=0xFE, reason << 1)`，
+  `PON_RESTART_REASON_BOOTLOADER = 0x02` → 写进 bit7:1 的值是 **`0x04`**；
+  Gen1 分支才是 `GENMASK(7,2)=0xFC`、`reason << 2`。
+* `arch/arm64/boot/dts/vendor/qcom/kona.dtsi`：
+  `qcom,msm-imem@146bf000` + `restart_reason@65c`（4 字节）；
+  SPMI arbiter 是 `qcom,spmi@c440000`，`reg-names = "core","chnls","obsrvr","intr","cnfg"`，
+  对应 `0xc440000` / `0xc600000` / `0xe600000` / `0xe700000` / `0xc40a000`，
+  `qcom,ee = <0>`。
+
+### 5. Stage B 的判定：BLOCKED（SPMI 不存在）
+
+Stage A 没有成功，所以按计划做 Stage B。Stage B 的第一件事是只读探测 PON 的
+`0x0805`，确认这颗 PMIC 是不是 Gen2；但这个问题在本内核上**无法回答**：
+
+* XNU 树里没有任何 SPMI 控制器驱动。`grep -ri spmi` 只命中
+  `EXTERNAL_HEADERS/acpi/Acpi_v1.h` 里一个无关的词；`bsd/conf/files`、
+  `iokit/conf/files*`、`configs/kebab_defconfig` 里都没有 SPMI 相关项。
+* KDK 里的 `AppleSPMI.kext` 是 Apple Silicon 的 macOS 驱动（二进制），
+  不参与这个内核的构建，也不匹配 kebab 的设备树。
+* `package/BootReset.c` 里确实有一套直接操作 SPMI PMIC-arbiter 的代码，
+  但那是 **sheng（SM8550）** 的，arbiter 地址（`0xc400000` 等）和
+  kona（`0xc440000` 等）不是一套；它也没有编进 kebab 内核。
+  不能把它当成"已经有 SPMI"。
+* 没有任何东西"已经占用"arbiter：XNU 侧没有驱动，也就没有 APID/EE 的
+  ownership 声明。
+
+因此 Stage B 的结论是 **BLOCKED**：没有 SPMI 事务，读不了 `0x0805`，
+确认不了 Gen2；**Stage C 的 `0x088F` 写操作 NOT_RUN**，一个 PMIC 寄存器都没写。
+
+如果将来补上 SPMI，要做的事是明确的（可直接照此实现）：
+
+1. **读 subtype**：SID 0、PON 基址 `0x0800`、寄存器 `0x0805`
+   （`QPNP_PON_PERPH_SUBTYPE`）。只有读到 `0x04` 或 `0x05` 才是 Gen2；
+   `0x01`/`0x02`/`0x03` 是 Gen1/1REG，掩码和移位都不同，必须停下重算。
+2. **写 reason（仅当 Gen2）**：SID 0、寄存器 `0x088F`
+   （`QPNP_PON_SOFT_RB_SPARE`），读改写
+   `new = (old & 0x01) | (0x02 << 1)`，即 mask `0xFE`、值 `0x04`；
+   写完回读，确认 bit7:1 = `0b0000010`。
+3. **缺的基础设施**（这是 BLOCKED 的具体内容）：
+   * 一个 SM8250 `qcom,spmi-pmic-arb` 驱动，映射 core `0xc440000`、
+     chnls `0xc600000`、obsrvr `0xe600000`、intr `0xe700000`、
+     cnfg `0xc40a000`；
+   * EE0 的 APID 映射：在 cnfg 空间里为 SID 0 / PON 外设找到 APID，
+     再核对 ownership 表（`qcom,ee = <0>` 要求 owner 是 EE0）；
+   * 命令编码与超时轮询：`PMIC_ARB_CMD`（core+`0x00`）、
+     `PMIC_ARB_CONFIG`（+`0x04`）、`PMIC_ARB_STATUS`（+`0x08`）、
+     `WDATA0/1`、`RDATA0/1`，单次最多 8 字节，超时按 1000 µs 量级处理；
+   * 没有这些，"读一个 PMIC 寄存器"都不是一条已建立的操作，
+     更不能拿一个猜的地址去写。
+
+### 6. 判定：FASTBOOT 仍然不可用，失败点不在 cookie，也不在写入
+
+| 项 | 结果 | 读数 / 说明 |
+|----|------|-------------|
+| A1 `PSCI_FEATURES(0xC4000012)` | **PASS**（测量完成） | `0` → 记 `NOT_SUPPORTED`；同一次 `SYSTEM_RESET` 也返回 0，故 FEATURES 是桩，0 不等于不存在 |
+| A2 IMEM 写入 + 回读 | **PASS** | `0x0b39bda4` → 写 `0x77665500` → 回读 `0x77665500` MATCH |
+| A3 `SYSTEM_RESET2` 单测 | **NOT_RUN** | 固件未声明支持；按规则不强行调用未声明功能，也不换 vendor reset type |
+| A4 每次尝试的记录 | **PASS** | 见第 3 节矩阵（写前值、回读、PSCI 调用、fastboot、正常启动、crash dump、下次启动值） |
+| A5 启动后最早可观察的 restart reason | **PASS**（有保留） | 探针已加；启动日志被 `-v` 刷屏冲掉，用同一启动内的 `IMEM?` 等价读数；不是 ABL 读它的那一刻 |
+| B1 vendor 源码确认 | **PASS** | SID 0、`0x0800`、`0x088F`、`0x0805`、Gen2=`0x04/0x05`、mask `0xFE`、`0x02<<1`，全部有出处 |
+| B2 只读探测 `0x0805` | **BLOCKED** | 没有 SPMI 控制器驱动，发不出 SPMI 事务 |
+| B3 SPMI 是否可用 | **PASS**（调查完成） | 无驱动、无 owner；`BootReset.c` 是 SM8550 的另一套地址 |
+| B4 读数不一致就停 | **PASS** | 一个 PMIC 寄存器都没写 |
+| C `SOFT_RB_SPARE` 原型 | **NOT_RUN** | B 已 BLOCKED |
+| 回归：`REBOOT` 基线 | **PASS** | 收尾再验一次：1.0 s 端口消失、19.8 s 回来，控制台可用 |
+
+**结论要写清楚**：
+
+* `FASTBOOT` 命令**仍然不可用**——它写 IMEM、复位，但板子正常启动，不进 fastboot。
+* 失败**不是** cookie 值不对：vendor 源码确认 `0x77665500` 就是 bootloader 值，
+  启动参数里的值是对的（`0105` 原来的默认 `0x77665501` 才是普通重启值）。
+* 失败**也不是**写没写进去：回读 MATCH，映射和读写都成立。
+* 失败**也不是**复位方式：`REBOOT` 和 `FASTBOOT` 用同一条 `SYSTEM_RESET`，
+  都能复位。
+* 已证明的失败点是：**OS 写进 `0x65c` 的 cookie 不保留到下一次启动**。
+  四次启动四个不同的值，`REBOOT` 没写它也会变，说明有更早的启动环节在
+  每次启动时重写这个单元；ABL 做判断时看到的不是 OS 写的值。
+* 与 vendor 行为对照，缺的另一半是 **PMIC PON 的 restart reason**
+  （`PON_RESTART_REASON_BOOTLOADER`，Gen2 下写 `0x088F` 的 bit7:1）。
+  本内核没有 SPMI，无法复现 vendor 的完整路径，所以这部分是 BLOCKED，
+  不是"已经排除"。
+
+### 7. 本轮刷机与测试日志
+
+| 镜像 | 启动参数 | 命令 | 板子的反应 |
+|------|----------|------|------------|
+| `XNU-151-FbDiag.img`（96 MiB，payload 来自 CI 40449214321） | 见本节开头 | `fastboot flash boot_b` + `fastboot reboot` | 约 20 s 后 COM7 出现，控制台可用；`IMEM?` = `0x0b39bda4` |
+| 同上 | 同上 | `PSCI?` | `version 0x00010001`，两个 FEATURES 都是 0 |
+| 同上 | 同上 | `FASTBOOT\n`（一次写入） | 旧值/新值/回读 MATCH；1.0 s 端口消失；19.8 s 回来；正常启动；无 fastboot、无 crash dump；`IMEM?` = `0x836999ac` |
+| 同上 | 同上 | `REBOOT\n`（一次写入） | 1.0 s 端口消失；19.8 s 回来；正常启动；`IMEM?` = `0x532989ac` |
+| 同上 | 同上 | `REBOOT\n`（收尾回归） | 1.0 s 端口消失；19.8 s 回来；正常启动；`IMEM?` = `0x616998ac` |
+
+所有命令都是主机侧一次 `write()` 发出的完整一行（`FASTBOOT\n` 9 字节、
+`REBOOT\n` 7 字节、`PSCI?\n` 6 字节、`IMEM?\n` 6 字节），没有逐字符输入。
+整个过程手机没有落入 recovery / fastboot / EDL：每次复位后都回到 XNU 控制台。
+
+## 二十、SYSTEM_RESET2 与 PSCI 特性探测的更正
+
+本节更正第十九节的两处结论：`PSCI_FEATURES` 返回 `0` 的含义，以及 IMEM 证据
+能证明的范围。代码是 `0107-kebab-psci-reset2.patch`（提交 `560b3aa`），
+镜像 `XNU-0107.img` 由 CI run 40452530585 构建；内核 17,119,032 字节，
+SHA-256 `b68bb4bbdf59ddcd893c4c6ce8f6919bb06cc1a9947a5eef4deaa590c1ee7997`。
+
+### 1. 更正的 PSCI_FEATURES 语义
+
+PSCI 规范对 `PSCI_FEATURES`（`0x8400000A`）的返回值规定如下：
+
+| 返回值 | 含义 |
+| --- | --- |
+| `0xFFFFFFFF`（`PSCI_RET_NOT_SUPPORTED`） | 该 FID 不支持 |
+| `0` | 支持，没有 feature flags |
+| 其它非负值 | 支持，返回值是 feature flags |
+
+Linux 的 `drivers/firmware/psci.c` 只判断 `!= PSCI_RET_NOT_SUPPORTED`：
+
+```c
+feature = psci_features(psci_fn_ids[i].fn);
+if (feature == PSCI_RET_NOT_SUPPORTED)
+	continue;
+```
+
+第十九节把 `0` 读成"not supported"，于是把 `SYSTEM_RESET2` 记成
+`NOT_SUPPORTED`；同一节"这颗固件的 `PSCI_FEATURES` 是桩"的结论也来自同一个
+错误：`SYSTEM_RESET` 返回 `0` 不是桩，而是"支持、无 flags"的正常回答，和它
+实测能复位完全一致。
+
+`0107` 因此改了实现：
+
+* `kebab_psci_features()` 返回原始 `uint32_t`，不再转成 `int` 再由调用者猜；
+* 判定统一为 `value != 0xFFFFFFFF`；
+* `PSCI?` / `PSCINEG?` 打印原始值，不在内核里改写语义；
+* `FASTBOOT2` 只在"负控通过 + `FEATURES(0xC4000012) != 0xFFFFFFFF`"时执行。
+
+### 2. 负控与两个真实 FID 的原始读数
+
+`PSCI?` 先调一个不可能存在的 FID `0x8400FFFF` 作负控，再读两个真实 FID。
+负控的作用是证明探针不是"对任何输入都回答 0"的桩：如果负控返回 `0`，后续
+任何"支持"的结论都不成立，`FASTBOOT2` 会拒绝执行。
+
+**负控结果：`PSCI_FEATURES(0x8400FFFF) = 0xFFFFFFFF`，探针可用。**
+
+| FID | 功能 | 原始返回 | 按更正后的规则 |
+| --- | --- | --- | --- |
+| `0x8400FFFF` | 负控（不存在的 FID） | `0xFFFFFFFF` | 必须是 `PSCI_RET_NOT_SUPPORTED` |
+| `0x84000009` | `SYSTEM_RESET` | `0x00000000` | **支持**（无 flags） |
+| `0xC4000012` | `SYSTEM_RESET2` | `0x00000000` | **支持**（无 flags） |
+
+同一次启动的完整控制台记录（`PSCI?` 与 `PSCINEG?` 的读数一致）：
+
+```text
+KEBAB PSCI: version 0x00010001
+KEBAB PSCI: FEATURES(0x8400ffff)=0xffffffff negative control OK
+KEBAB PSCI: FEATURES(0x84000009)=0x00000000 SYSTEM_RESET supported
+KEBAB PSCI: FEATURES(0xc4000012)=0x00000000 SYSTEM_RESET2 supported
+```
+
+这只说明 `SYSTEM_RESET2` 这个 FID 存在，不保证它接受 `reset_type = 0`
+（架构 warm reset）；下一节的实测正好把这两件事分开。
+
+### 3. FASTBOOT2 实验
+
+`FASTBOOT2` 的执行顺序（`0107`）：
+
+1. 打印当前 IMEM `restart_reason`（物理 `0x146BF000 + 0x65C`）；
+2. 写 cookie `0x77665500`（`kebab_fastboot_cookie` 可覆盖）；
+3. 回读并打印 MATCH/MISMATCH；
+4. 执行 `dsb sy`；
+5. 调用 `SYSTEM_RESET2(0xC4000012)`，`x1 = 0`（架构 warm reset），
+   `x2 = 0`（cookie）；
+6. 如果调用返回：打印完整 64 位 `x0`，恢复旧 IMEM 值，然后**停止**，
+   不自动落到 `SYSTEM_RESET`。
+
+门控条件：负控必须为 `0xFFFFFFFF`，且
+`FEATURES(0xC4000012) != 0xFFFFFFFF`；否则只打印原因，不复位。
+
+**实测**：命令发出后端口没有消失，`SYSTEM_RESET2` 返回
+`0xFFFFFFFFFFFFFFFE`，板子仍停在同一个 XNU 启动里。
+
+```text
+KEBAB FASTBOOT: cookie 0x77665500 from kebab_fastboot_cookie
+KEBAB FASTBOOT: IMEM restart_reason at 0x146bf000+0x65c is 0x012999ec; writing 0x77665500
+KEBAB FASTBOOT: read back 0x77665500 (MATCH)
+KEBAB REBOOT: PSCI SYSTEM_RESET2(reset_type=0, cookie=0)
+KEBAB REBOOT: SYSTEM_RESET2 returned 0xfffffffffffffffe, the machine did not reset
+KEBAB FASTBOOT: restored restart_reason to 0x012999ec
+```
+
+| 项 | 读数 |
+| --- | --- |
+| 写前 IMEM | `0x012999ec` |
+| 写入 | `0x77665500`（来自 `kebab_fastboot_cookie`） |
+| 回读 | `0x77665500` MATCH |
+| PSCI 调用 | `SYSTEM_RESET2(0xC4000012, x1=0, x2=0)` |
+| 调用返回 | `0xFFFFFFFFFFFFFFFE` = `PSCI_RET_INVALID_PARAMETERS`（`-2`） |
+| 是否进 fastboot | 否（没有发生复位） |
+| 是否正常启动 | 不适用（同一启动继续，没有重启） |
+| crash dump | 无（没有出现 `VID_05C6` 设备） |
+| 下次启动 IMEM | 不适用；同一启动内恢复后为 `0x012999ec` |
+| 控制台是否回来 | 没有离开（0 s） |
+| 10 s 后板子状态 | XNU 控制台，`/dev/cu.usbmodem00011` |
+
+**解释**：`FEATURES(0xC4000012) = 0` 说明这个 FID 在固件里存在，但
+`reset_type = 0` 被固件以 `PSCI_RET_INVALID_PARAMETERS` 拒绝。也就是说上一节
+的 `NOT_SUPPORTED` 是错的，但"`SYSTEM_RESET2` 能进入 fastboot"同样不成立：
+架构 warm reset 这条路在这颗固件上走不通。按本轮"一次只改一个变量"的约定，
+没有改用 vendor 私有的 `reset_type`（那会再引入一个未经验证的变量），也没有
+在返回后补一次 `SYSTEM_RESET`。
+
+### 4. REBOOT 回归
+
+在 `SYSTEM_RESET2` 返回、IMEM 恢复之后，收尾验证原来的 `REBOOT` 路径：
+
+| 项 | 读数 |
+| --- | --- |
+| 命令 | `REBOOT\n` |
+| 复位调用 | `PEHaltRestart(kPERestartCPU)` → PSCI `SYSTEM_RESET` |
+| 端口消失 | 0.45 s |
+| 控制台回来 | 20.2 s，可继续读写 |
+| 是否进 fastboot | 否 |
+| 是否正常启动 | 是 |
+| crash dump | 无 |
+| 下次启动 IMEM | `0x8929b17c` |
+
+`REBOOT` 仍然工作，说明这次失败的 `SYSTEM_RESET2` 和 IMEM 恢复没有破坏平台
+复位路径。
+
+### 5. IMEM 证据能证明什么、不能证明什么
+
+把本轮和上一轮的所有启动读数放在一起（`REBOOT` 不写 IMEM）：
+
+| 启动 | 触发 | 下一次内核启动读到的 `0x65C` |
+| --- | --- | --- |
+| 1 | 刷机后第一次启动 | `0x0b39bda4` |
+| 2 | `FASTBOOT`（写 cookie + `SYSTEM_RESET`） | `0x836999ac` |
+| 3 | `REBOOT`（未写） | `0x532989ac` |
+| 4 | `REBOOT`（未写） | `0x616998ac` |
+| 5 | 本轮刷机后第一次启动 | `0x012999ec` |
+| 6 | 本轮 `REBOOT` 后 | `0x8929b17c` |
+
+**能证明的**：
+
+1. `0x146BF65C` 的映射、写、回读都成立（`FASTBOOT` 回读 MATCH；本轮
+   `FASTBOOT2` 也回读 MATCH）。
+2. OS 写的 cookie 在**下一次内核启动后**读不到；六次启动六个不同的值。
+3. `REBOOT` 根本不写这个单元，值也会变——每次启动都有比内核更早的环节
+   （XBL / ABL / UEFI 之一或多个）在重写它，而且这发生在下一次内核读它之前。
+
+**不能证明的**：
+
+* 不能证明 ABL 在**做 fastboot 判断的那一刻**没有看到 cookie。下一次内核
+  读到的值晚于 ABL 的判断；ABL 完全可能读到了、消费了或重写了它。
+* 不能证明是复位销毁了 cookie，也不能证明不是复位销毁的。
+* 不能区分下面两个（还可以有第三个）假设。
+
+**仍然开放的假设**：
+
+* **H1（复位破坏）**：`SYSTEM_RESET` 或更早的复位/启动环节在 ABL 读取之前
+  清掉或覆盖了 IMEM，cookie 没有到达判断点。
+* **H2（ABL 消费/重写）**：ABL 读到了（或消费了）cookie，但 vendor 路径还要求
+  PMIC PON 的 `PON_RESTART_REASON_BOOTLOADER`；OS 只写了 IMEM，PMIC 侧没有
+  这个 reason，所以 ABL 仍然正常启动，并在启动过程中重写 `0x65C`。
+* 还可以有 **H3**：这条启动链根本不把 `0x65C` 当作 fastboot 的判断依据，
+  只看 PMIC PON。只要没有读到 ABL 的代码或 PMIC 寄存器，H3 也不能排除。
+
+本轮的 `FASTBOOT2` **没有关闭任何一个假设**：`SYSTEM_RESET2` 在复位发生前
+就返回了 `-2`，所以没有产生"复位后 IMEM 是否保留"的新数据。它只证明了
+架构 warm reset 这条复位路径不可用，不能用来判断 H1/H2。
+
+因此，上一节"ABL 做判断时看到的不是 OS 写的值"应改成：
+**"下一次内核启动时看到的不是 OS 写的值；ABL 判断时看到什么，现有数据不能
+确定。"** 要关闭 H1/H2，需要 (a) PMIC PON 的实际读数/写入，或 (b) 在 ABL
+读取 IMEM 的时刻观察它；两点都不是当前内核能做的。
+
+### 6. PMIC PON 路线的实现规格（本轮不写驱动）
+
+因为 `SYSTEM_RESET2` 没有进入 fastboot，按本轮约定**不开始写 SPMI 驱动**。
+下面是补上这一段所需的精确规格；它是实现清单，不是已完成的代码。
+
+#### 6.1 目标与顺序
+
+vendor 的 fastboot 路径不是只写 IMEM：
+
+1. `qpnp_pon_set_restart_reason(PON_RESTART_REASON_BOOTLOADER)` 写 PMIC PON；
+2. `__raw_writel(0x77665500, restart_reason)` 写 IMEM；
+3. 复位。
+
+本内核只有第 2 步。补第 1 步必须严格按"先只读、再单次写"的顺序：
+
+1. **只读 subtype 探测**：SID 0，PON 基址 `0x0800`，寄存器 `0x0805`；
+   读到 `0x04`/`0x05` 才是 Gen2；
+2. **单次 masked RMW**：仅当 subtype 为 Gen2，读 `0x088F`，写回
+   `(old & 0x01) | 0x04`，回读校验；
+3. 只有在第 1、2 步都成功且回读正确后，才允许 `SYSTEM_RESET`。
+
+#### 6.2 当前缺失的 SPMI 基础设施
+
+* XNU 树里没有 SPMI 控制器驱动：`grep -ri spmi` 只命中
+  `EXTERNAL_HEADERS/acpi/Acpi_v1.h` 的一个无关词；`bsd/conf/files`、
+  `iokit/conf/files*`、`configs/kebab_defconfig` 都没有 SPMI 项。
+* 没有 `qcom,spmi-pmic-arb` 驱动：kona 的 arbiter 是
+  `qcom,spmi@c440000`，`reg-names = "core","chnls","obsrvr","intr","cnfg"`，
+  对应 `0xC440000` / `0xC600000` / `0xE600000` / `0xE700000` / `0xC40A000`，
+  `qcom,ee = <0>`；还需要从 DT 读 `qcom,channel`（Linux 要求该属性）。
+* 没有 APID 映射/ownership 处理、没有命令编码和超时轮询、没有 PMIC 子设备
+  模型，也没有 `qpnp-power-on` 的等价物。
+* KDK 里的 `AppleSPMI.kext` 是 Apple Silicon 的二进制，不参与这棵树的构建，
+  也不匹配 kona 的 DT。
+* `package/BootReset.c` 是 sheng（SM8550）的另一套地址（`0xC400000` 等），
+  没有编进 kebab 内核，不能当作"已经有 SPMI"。
+* 没有任何驱动占用 arbiter，也就没有 APID/EE 的 ownership 声明；反过来说，
+  EE0 是否真的拥有 PON 的 APID，必须靠下面的 ownership 表读出来确认。
+
+#### 6.3 只读 subtype 探测（第一步）
+
+1. `ml_io_map()` 映射 core / chnls / obsrvr / cnfg 五段。
+2. 读 `core + 0x0000`（`PMIC_ARB_VERSION`）。kona 预期是 v5
+   （`0x50000000 <= ver < 0x70000000`）；不是 v5 就停下重新推导，不能套用
+   v5 的偏移。
+3. 读 `core + 0x0004`（`PMIC_ARB_FEATURES`，APID 数量低 11 位），
+   上限 `PMIC_ARB_MAX_PERIPHS`。
+4. 建 APID→PPID 表：v5 的映射表在 `core + 0x900 + 4*apid`，
+   `ppid = (regval >> 8) & 0xFFF`，bit24 是 IRQ owner；
+   ownership 在 `cnfg + 0x700 + 4*apid`，低 3 位是 write EE。
+5. 目标外设：SID 0，PON 的 PPID 是 `(0 << 8) | (0x0800 >> 8) = 0x0008`。
+   找到 `ppid == 0x0008` 且 `write_ee == 0` 的 APID；找不到就停，不猜 APID。
+6. 事务寄存器：v5 的 RW 通道基址是 `chnls + 0x10000*apid`；
+   命令 `+0x00`、状态 `+0x08`、写数据 `+0x10`、读数据 `+0x18`。
+   命令格式（v5/v2）：
+   `cmd = (opc << 27) | ((addr & 0xFF) << 4) | (len - 1)`；
+   读 `opc = 0xF`，写 `opc = 0xE`，1 字节时 `len - 1 = 0`。
+7. 写事务先把数据写到 `WDATA0`，再写 `CMD`；轮询 `STATUS` 的 bit0
+   （DONE），超时按 1000 µs；bit1 = FAIL、bit2 = DENIED、bit3 = DROPPED，
+   任一置位都要中止并打印原始 `STATUS`。读事务在 DONE 后从 `RDATA0`
+   取低字节。
+8. 只读 `addr = 0x0805`（PON base `0x0800` + subtype `0x05`）一次：
+   * `0x04`（GEN2_PRIMARY）或 `0x05`（GEN2_SECONDARY）：Gen2，继续；
+   * `0x01`/`0x02`/`0x03`：Gen1/1REG，掩码和移位不同，**停止**；
+   * 其它值、超时、DENIED：**停止**，不写任何 PMIC 寄存器。
+
+#### 6.4 单次 masked RMW（第二步，仅 Gen2）
+
+1. 读 `addr = 0x088F`（`QPNP_PON_SOFT_RB_SPARE`）1 字节，得到 `old`。
+2. 计算 `new = (old & 0x01) | (0x02 << 1)`，即 `new = (old & 0x01) | 0x04`；
+   只改 bit7:1，bit0 原样保留。
+3. 写 `addr = 0x088F`，值 `new`，长度 1。
+4. 立即回读 `0x088F`，要求 `(readback & 0xFE) == 0x04` 且
+   `(readback & 0x01) == (old & 0x01)`；不满足就报告失败，**不要再写第二次**。
+5. 成功后才调用 `SYSTEM_RESET`（`0x84000009`），仍然走
+   `PEHaltRestart(kPERestartCPU)`，不要用刚被证明不可用的
+   `SYSTEM_RESET2(reset_type=0)`。
+
+#### 6.5 接线、门控与验收
+
+* 建议把 arbiter/PMIC 访问放在新的 `KebabSPMI.cpp`（或
+  `KebabPlatformExpert.cpp` 的独立函数）里，只做轮询、不开中断；不要在 USB
+  驱动里直接碰 PMIC。
+* 用启动参数（例如 `kebabpon=1`）门控写路径；默认只做只读 subtype 探测，
+  日志打印 version、APID、PPID、ownership、subtype 的原始值。
+* 写路径只允许单次；失败后不清零、不重试、不换 reset type，避免把 PMIC
+  带进未知状态。
+* 验收标准：subtype 读到 `0x04`/`0x05`；`0x088F` 回读
+  `(x & 0xFE) == 0x04`；随后 `SYSTEM_RESET` 后板子进入 fastboot（主机
+  `fastboot devices` 能看到序列号），而不是正常启动或 EDL。
+* 如果仍正常启动：记录下一次启动的 IMEM、PON `0x088F` 回读值和 USB 状态，
+  再判断是 ABL 不认这个 reason，还是复位路径又清掉了它。
+
+## 二十一、SPMI Arbiter 只读探测
+
+本节实现并验证第二十节 6.3 的只读部分。补丁 `0108` 增加 `bsd/dev/kebab_spmi.c`
+与两个控制台命令；`0110` 把 `SPMI?` 的输出压回 16 KiB 控制台环；`0109`/`0111`/
+`0112` 是同一轮真机中触屏驱动的三个独立修复（见第 7 节）。**本节没有写任何
+PMIC 寄存器**：`SPMI?`/`PON?` 只读版本、映射表、ownership 表和 observer 数据，
+SPMI-4 的 masked RMW 仍未实现。
+
+### 1. 代码与门控
+
+| 项 | 值 |
+| --- | --- |
+| 内核补丁 | `0108-kebab-spmi-readonly.patch`（只读探测）、`0110-kebab-spmi-report-fit.patch`（输出长度） |
+| 系列 | 92 个补丁，92/92 按文件名顺序应用到 `1b191cb`（`verify-all.sh` PASS） |
+| 文件 | `bsd/dev/kebab_spmi.c`（新）、`bsd/conf/files`、`bsd/dev/kebab_usb.c` |
+| CI | run `40455214113`，`kernel_sha256 d9061e8a2cc7f37f3063089fbeae3d6841a2e4e67ef7fc93f692d181d51dc3d1`，17,103,000 字节 |
+| 映射 | core `0x0C440000+0x1100`、obsrvr `0x0E600000+0x100000`、cnfg `0x0C40A000+0x26000` |
+| 未映射 | chnls `0x0C600000+0x2000000`、intr `0x0E700000+0xA0000` |
+| EE / channel | 0 / 0（`kona.dtsi` 的 `qcom,ee` / `qcom,channel`） |
+| 命令 | `SPMI?\n`（SPMI-1+2）、`PON?\n`（SPMI-3），必须一次 bulk OUT 到达 |
+
+`chnls`/`intr` 不映射的原因见第 5 节：内核 `io_map` 的 submap 只有 8 MiB
+（`osfmk/arm/io_map.c`，`IO_MAP_SIZE`），而 chnls 资源是 32 MiB；只读路径
+不使用读写通道。命令匹配沿用 `ud_bulk_out_done()` 的单次传输规则。
+
+### 2. SPMI-1：arbiter 版本
+
+```text
+KEBAB SPMI: === SPMI-1: arbiter version ===
+KEBAB SPMI: core 0x0c440000+0x1100 mapped; core+0x0000 = 0x50010000
+KEBAB SPMI: version family v5
+KEBAB SPMI: SPMI-1 PASS
+```
+
+| 项 | 原始值 | 结论 |
+| --- | --- | --- |
+| `core + 0x0000` | `0x50010000` | v5（`>= 0x50000000`） |
+| 版本族 | v5 | 与 vendor `spmi-pmic-arb.c` 的 v5 分支一致 |
+
+**SPMI-1：PASS（真实读）。**
+
+`0111` 触屏内核上复测（`SPMI?` 输出 915 字节，不再截断）：
+
+```text
+KEBAB SPMI: core 0x0c440000+0x1100 mapped; core+0x0000 = 0x50010000
+KEBAB SPMI: version family v5
+KEBAB SPMI: SPMI-1 PASS
+```
+
+### 3. SPMI-2：PPID `0x008` 的 APID 映射
+
+PPID 公式是 `(sid << 8) | (addr >> 8)`；PM8150 PON 在 SID 0、peripheral
+`0x08`，所以目标 PPID 是 `0x008`。v5 的映射表在 `core + 0x900 + 4*apid`，
+ownership 表在 `cnfg + 0x700 + 4*apid`，扫描上限由 core 资源大小
+`0x1100` 决定（512 项，APID `0x000..0x1ff`）。
+
+负控：PPID `0xf00`（SID `0x0f`，板上没有这个 PMIC）必须解析不到 APID。
+实测 `0 APID(s) (expected 0)`，说明扫描确实读的是映射表，而不是一个
+"对任何输入都给答案"的桩。
+
+目标 PPID 找到三个 APID：
+
+```text
+KEBAB SPMI: PPID 0x008 APID 0x001 map[core+0x904]=0x00000800 own[cnfg+0x704]=0x00000001 -> write_ee 0x1 irq_owner 0 irq_ee 0xff
+KEBAB SPMI: PPID 0x008 APID 0x00d map[core+0x934]=0x01000800 own[cnfg+0x734]=0x00000000 -> write_ee 0x0 irq_owner 1 irq_ee 0x0 (owned by this EE)
+KEBAB SPMI: PPID 0x008 APID 0x075 map[core+0xad4]=0x00000800 own[cnfg+0x8d4]=0x00000004 -> write_ee 0x4 irq_owner 0 irq_ee 0xff
+```
+
+| APID | mapping 寄存器 | PPID | ownership 寄存器 | `write_ee` | `irq_owner` | `irq_ee` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `0x001` | `0x00000800` | `0x008` | `0x00000001` | 1 | 0 | `0xff` |
+| `0x00d` | `0x01000800` | `0x008` | `0x00000000` | **0** | 1 | **0** |
+| `0x075` | `0x00000800` | `0x008` | `0x00000004` | 4 | 0 | `0xff` |
+
+**SPMI-2：PASS（真实读）。** 关键点是 APID `0x00d` 的 `write_ee = 0`，
+正好是内核运行的 EE 0；`pmic_arb_offset_v5()` 的写权限检查会接受它。
+另外两个 APID 分别属于 EE 1 和 EE 4，不能用来写。
+
+`0111` 内核上的干净输出（915 字节，扫描计数完整）：
+
+```text
+KEBAB SPMI: scan APID 0x000..0x1ff: core+0x900 + 4*apid, 512 entries bounded by core size 0x1100
+KEBAB SPMI: negative control PPID 0xf00 -> 0 APID(s) (expected 0)
+KEBAB SPMI: scanned 512 entries: 352 non-zero mapping(s), 3 map PPID 0x008
+...（三行 APID 明细同上）...
+KEBAB SPMI: SPMI-2 PASS: 3 APID(s) map PPID 0x008
+```
+
+> 说明：`SPMI?` 最初还打印整张非零映射表，输出超过 16 KiB 控制台环，
+> 真机捕获在 16383 字节处被截断，丢掉了 `SPMI-2 PASS` 行和匹配明细；
+> 上表来自同一次扫描的 `PON?` 输出。`0110` 删掉整表打印，只保留扫描上下界、
+> 负控、三个计数（扫描项数、非零映射数、匹配数）、匹配明细和门结果，
+> 使一次报告不可能超过环容量。
+
+### 4. SPMI-3：通过 observer 读 PON 寄存器
+
+v5 的 observer 地址算术与读写通道不同：
+
+```text
+observer = obsrvr + 0x10000 * ee + 0x80 * apid
+         = 0x0E600000 + 0x10000*0 + 0x80*0x00d
+         = 0x0E600680
+```
+
+命令格式 `(opc << 27) | ((addr & 0xff) << 4) | (len - 1)`，读 `opc = 0xF`。
+两次独立读的结果：
+
+```text
+KEBAB SPMI: REG 0x0805 read 1: APID 0x00d obsrvr+0x680 cmd 0x78000050 status 0x00000001 -> 0x04
+KEBAB SPMI: REG 0x0805 read 2: APID 0x00d obsrvr+0x680 cmd 0x78000050 status 0x00000001 -> 0x04
+KEBAB SPMI: PON subtype 0x0805 reads 0x04 / 0x04 -> STABLE
+KEBAB SPMI: REG 0x088f read 1: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x00
+KEBAB SPMI: REG 0x088f read 2: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x00
+KEBAB SPMI: SOFT_RB_SPARE 0x088f reads 0x00 / 0x00 -> STABLE
+KEBAB SPMI: PON generation: Gen2 (subtype 0x04); the Gen2 SOFT_RB_SPARE layout would apply
+KEBAB SPMI: SPMI-3 PASS
+```
+
+| 寄存器 | 读 1 | 读 2 | 稳定性 | 含义 |
+| --- | --- | --- | --- | --- |
+| PON subtype `0x0805` | `0x04` | `0x04` | STABLE | Gen2（Gen2 定义值 `0x04`/`0x05`） |
+| `SOFT_RB_SPARE` `0x088f` | `0x00` | `0x00` | STABLE | 写前旧值；masked 写得到 `0x04`（bit0 保持 0，bit7:1 写 `0x02`） |
+
+两次读的 status 都是 `0x00000001`（DONE，无 FAILURE/DENIED/DROPPED）。
+
+**SPMI-3：PASS（真实读）。**
+
+### 5. 对 SPMI-4 的意义与新约束
+
+1. **写权限已经确认**：PPID `0x008` 存在 `write_ee = 0` 的 APID `0x00d`，
+   所以 vendor 驱动在 `pmic_arb_offset_v5()` 里的 `-EPERM` 检查不会阻止
+   一次 EE 0 的写。这消除了上一节 6.2 中"EE0 是否真的拥有 PON APID"的
+   不确定性。
+2. **Gen2 已直接确认**：subtype `0x04`，`SOFT_RB_SPARE` 旧值 `0x00`。
+   按第二十节 6.4 的规格，`new = (old & 0x01) | (0x02 << 1) = 0x04`。
+3. **写通道不能整块映射**：chnls 是 32 MiB，`io_map` submap 只有 8 MiB，
+   整块 `ml_io_map` 会像触屏驱动的 16 MiB TLMM 一样在 `kmem_alloc` 里
+   panic。SPMI-4 必须只映射目标 APID 的一个 4 KiB 窗口：
+   `chnls + 0x10000 * apid = 0x0C600000 + 0x10000 * 0x00d = 0x0C6D0000`，
+   大小 `0x1000`。寄存器在窗口内：`CMD +0x00`、`STATUS +0x08`、
+   `WDATA0 +0x10`、`RDATA0 +0x18`。
+4. **写命令格式**：`opc = 0xE`（`PMIC_ARB_OP_WRITE`），
+   `cmd = (0xE << 27) | ((0x8f & 0xff) << 4) | 0 = 0x700008F0`；把新值写到
+   `WDATA0`，再写 `CMD`，轮询 `STATUS` 的 DONE，然后通过 observer 回读
+   `0x088F` 校验 `(readback & 0xFE) == 0x04` 且 `(readback & 0x01) == 0`。
+5. **SPMI-4 必须是独立补丁、独立刷机、启动参数默认关闭**。写之前重新确认
+   subtype 与两次读稳定；只写一次，不回读失败后重试，不换 reset 类型；
+   写成功后仍走 `PEHaltRestart(kPERestartCPU)`（PSCI `SYSTEM_RESET`），
+   不用已经被证明不接受 `reset_type=0` 的 `SYSTEM_RESET2`。
+
+### 6. 仍然未知
+
+* ABL 是否真的读取 PMIC PON 的 `PON_RESTART_REASON_BOOTLOADER` 作为
+  fastboot 判断的一部分。本节只证明内核能读到 PON；不能证明 ABL 会看它。
+* 复位路径（XBL/ABL/UEFI）是否在 ABL 读取前清掉或重写 PON reason。
+  `SOFT_RB_SPARE` 现在是 `0x00`，但这是本次启动的读数，不是复位后的读数。
+* 即使 ownership 允许，arbiter 硬件是否接受这次写（status 是否 DENIED）
+  只能在 SPMI-4 真机上回答。
+* `SOFT_RB_SPARE` 其它位的语义没有文档；本节只按第二十节的 mask `0xFE`
+  准备，不改 bit0。
+
+### 7. 组合镜像中的触屏首启与三个独立修复
+
+第一次组合镜像使用 `kebab_touch=1 kebab_touch_dump=1`（内核 `0108`），
+内核在 `kebab_touch_start()` 里 panic：
+
+```text
+panic(cpu 0 caller 0xfffffe0006ab3810): kmem_alloc(..., 16777216, 0x100021): failed with 3 @vm_kern.c:178
+```
+
+符号化后是 `kebab_touch_start -> io_map -> kmem_alloc`：TLMM 节点在
+`kona-pinctrl.dtsi` 里是 `0x0F000000+0x1000000`（16 MiB），但 `ml_io_map()`
+从 8 MiB 的 `io_submap` 分配并带 `KMA_NOFAIL`，超限请求在 `kmem_alloc`
+里直接 panic。`0109` 把 `KT_TLMM_SIZE` 改成 `0x40000` 并在注释里记录原因；
+这个尺寸本身仍是对的，错的是下面的基址。
+
+`0111` 增加一条可选的 bit-banged GPIO I2C 传输（`kebab_touch_bb=1`），
+用同一 TCM 命令层绕开 QUPv3/SE13；QUPv3 仍是默认。bit-bang 路径在改 mux
+之前先打印 GPIO 36/37/38/39 的 `TLMM_CTL`/`TLMM_IO` 原始值，然后把
+SDA/SCL 设为 mux 0（plain GPIO）、pull-up、输出关闭，开漏时序约 5 µs
+半周期。
+
+**第一次 bit-bang 真机启动（`0111`）没有 panic，但也没有碰到任何引脚。**
+四个引脚的读数全部是零，写 mux 也没有粘住：
+
+```text
+KEBAB TOUCH: bit-bang pin 36 ctl 0x00000000 (mux 0 pull 0 drive 0 oe 0) io 0x00000000
+KEBAB TOUCH: bit-bang pin 37 ctl 0x00000000 (mux 0 pull 0 drive 0 oe 0) io 0x00000000
+KEBAB TOUCH: bit-bang pin 38 ctl 0x00000000 (mux 0 pull 0 drive 0 oe 0) io 0x00000000
+KEBAB TOUCH: bit-bang pin 39 ctl 0x00000000 (mux 0 pull 0 drive 0 oe 0) io 0x00000000
+KEBAB TOUCH: bit-bang pin 36 ctl 0x00000000 -> 0x00000000 (mux 0 GPIO, pull-up, released)
+KEBAB TOUCH: bit-bang start failed at phase 0 (SDA 0 SCL 0)
+```
+
+对照 vendor `drivers/pinctrl/qcom/pinctrl-kona.c` 后找到根因：**Kona 的
+TLMM 是分 tile 的**。该文件定义 `NORTH 0x900000`、`SOUTH 0x500000`、
+`WEST 0x100000`、`EAST 0`，每个引脚地址是 `tile + 0x1000 * pin`；
+GPIO 36..39 在 SOUTH tile，所以真实地址是
+`0x0F000000 + 0x500000 + 0x1000*pin`，而驱动原来算的是
+`0x0F000000 + 0x1000*pin`。后者落在 tile 之间的空洞里：读恒为 0，
+写被忽略。`0112` 改为映射 `KT_TLMM_PA + 0x500000`（`0x40000`，仍覆盖
+SOUTH tile 的 pin 0..63），每引脚偏移相对 tile 基址。
+
+这同时解释了 QUPv3 路径：它的 `kt_pins_config()` 和复位脉冲一直在写
+同一批错误地址，所以**两条传输在 0112 之前都没有真正配置过引脚**。
+`0112` 的 SOUTH 窗口是 `0x0F500000..0x0F53FFFF`，四个引脚的绝对寄存器
+地址因此是：GPIO36 CTL `0x0F524000` / IO `0x0F524004`，GPIO37
+`0x0F525000`，reset 38 `0x0F526000`，IRQ 39 `0x0F527000`。CI run
+`40459994589` 构建成功（kernel sha256
+`391d365fdc5854f80a980214bc3afe6ffb53ba3f811744fec9cdfae4fd4f4c42`，
+17,103,048 字节）。截至本节写入时，`0112` 的真机复测（引脚真实读数、
+bit-bang TCM identify）尚未进行；因此本节只记录到"已定位并修复基址"，
+不把触屏写成已打通。
+
+### 8. 工具缺陷记录
+
+* 控制台环固定 16 KiB，单条命令的输出在命令返回前全部入环；超过就会
+  静默丢尾。`SPMI?` 的整表打印正好撞上这一点（捕获 16383 字节），`0110`
+  改为有界报告。
+* `ml_io_map()` 的 `KMA_NOFAIL` 会把"映射太大"变成 panic，而不是返回 0；
+  `bsd/dev/kebab_*.c` 的尺寸常量因此是硬约束。已审计的调用：UFS `0x30000`、
+  USB `0xD000+0x100+0x1000+0x10000`、touch SE `0x4000`+wrap `0x2000`、
+  SPMI `0x1100+0x100000+0x26000`；TLMM 的 16 MiB 是唯一的超限请求。
+* TLMM 的地址不是平坦的：`0109` 只修了尺寸，`0112` 才修 tile 基址。两次
+  都是"地址/尺寸假设"错误，与 PMIC、触屏芯片本身无关；先读后写、把原始
+  值打进日志的做法在这里直接给出了证据。
+
+## 二十二、PMIC PON 重启原因与 fastboot 进入
+
+### 1. 结论
+
+**这块板子的 ABL 认的是 PMIC PON 里的重启原因，不是 IMEM 里的
+`restart_reason`。** 两者一起写入、再用已证明可靠的 PSCI `SYSTEM_RESET`
+复位，控制台命令 `FASTBOOT` 可以在约 2～3.3 秒内把板子带进 bootloader 的
+fastboot 模式（`fastboot devices` 返回 `c073a488`，`getvar product` 为
+`kona`）。这是本轮之前一直缺的那一块：IMEM 的 `0x77665500` 单独写入从未
+生效，因为每次复位后 IMEM 都是新的随机值，ABL 根本读不到它；而 PON 的
+`SOFT_RB_SPARE` 能跨复位存活，ABL 消费后才清零。
+
+最终形态只有一条受支持的入口：`kebab_pon_write=1` 启动参数打开写门控，
+控制台输入 `FASTBOOT`，它先写 PON 原因、再写 IMEM cookie，最后走 PSCI
+复位。门控关闭时 `FASTBOOT` 直接拒绝并提示改用 `REBOOT`，不写任何
+PMIC 寄存器，也不写 IMEM。`REBOOT` 仍然只是普通 PSCI 复位。
+
+本节补的是第二十一节 5.4 计划里的 SPMI-4 写路径；实现与当时的草案有两处
+不同，以代码为准：单字节写用 `PMIC_ARB_OP_EXT_WRITEL`（opcode 0、byte
+count 0，vendor `pmic_arb_fmt_cmd_v2()` 的编码），不是
+`PMIC_ARB_OP_WRITE`（0xE）；命令字因此是 `0x000008F0`，不是
+`0x700008F0`。
+
+### 2. 源码语义（不是猜的）
+
+来自 vendor 树 `drivers/input/misc/qpnp-power-on.c`、
+`drivers/power/reset/msm-poweroff.c`、`include/dt-bindings/input/qcom,qpnp-power-on.h`
+和 `kona.dtsi`：
+
+* `pm8150.dtsi` 的 PON 节点带 `qcom,store-hard-reset-reason`，所以
+  `qpnp_pon_set_restart_reason()` 不会像没有该属性时那样直接返回 0。
+* Gen2（本板 PON subtype `0x04`）写 `SOFT_RB_SPARE`（PON 基址 `0x800`，
+  寄存器 `0x88F`）：mask `GENMASK(7,1)` = `0xFE`，值为 `reason << 1`。
+  `PON_RESTART_REASON_BOOTLOADER` 是 `0x02`，因此字段值是 `0x04`，bit 0
+  不在 mask 内、必须保持不变。
+* `msm_restart_prepare("bootloader")` 的顺序是：
+  1. `qpnp_pon_check_hard_reset_stored()` 为真（本板为真），且命令不是
+     `edl`/dload，所以 `need_warm_reset = false`；
+  2. `qpnp_pon_system_pwr_off(PON_POWER_OFF_HARD_RESET)`；
+  3. `qpnp_pon_set_restart_reason(PON_RESTART_REASON_BOOTLOADER)`；
+  4. `__raw_writel(0x77665500, restart_reason)`（IMEM `+0x65C`）；
+  5. `deassert_ps_hold()`，其兜底路径是向 TCSR `0x0C264000` 写 0。
+* `qpnp_pon_reset_config()`（Gen2）配置的是
+  `PS_HOLD_RST_CTL2`（`0x85B`）的 bit 7 `QPNP_PON_RESET_EN` 和
+  `PS_HOLD_RST_CTL`（`0x85A`）低四位的掉电类型；
+  `PON_POWER_OFF_TYPE_WARM_RESET = 0x01`、
+  `PON_POWER_OFF_TYPE_HARD_RESET = 0x07`。
+* PON 寄存器和 PON subtype 同在 PPID `0x008`；本板映射到 APID `0x00d`，
+  `write_ee = 0`，与本地 EE 0 一致。
+
+本轮没有使用 PMIC 掉电路径。PSCI 复位已经足够把板子带进 fastboot，而
+`deassert_ps_hold()` 一旦触发就没有撤销手段，因此最终补丁只保留原因写入，
+不把未验证的掉电复位路径放进内核。
+
+### 3. SPMI 写路径
+
+只读部分见第二十一节。写路径补的是 v5 的 read/write channel：
+
+* 只映射一个 4 KiB 切片：`chnls + 0x10000*apid`，PON 的 APID `0x00d`
+  对应 `0x0C6D0000`。整个 `chnls` 是 32 MiB，装不进内核 8 MiB 的
+  `io_map` 子映射。
+* 单字节写用 `PMIC_ARB_OP_EXT_WRITEL`（opcode 0）编码成
+  `((addr & 0xff) << 4) | 0`，数据放 `WDATA0`，然后轮询 `STATUS` 的
+  DONE/FAILURE/DENIED/DROPPED，超时 1000 µs。
+* 每次写之前重新读 APID mapping 和 cnfg ownership，要求该 APID 仍映射
+  PPID `0x008` 且 `write_ee == 0`；否则拒绝。这和
+  `pmic_arb_offset_v5()` 对 read/write channel 的检查一致。
+* 写后通过 observer 读回（最多 20 次、每次间隔 1 ms），同时校验目标字段
+  和 mask 之外的 bit 0。
+* 通道切片在 `kebab_spmi_init()` 里、与 IMEM 一起在正常上下文映射；命令
+  可能从 panic 循环执行，那里不能调用 `ml_io_map()`。
+
+真机第一次读-改-写（`PON-RB`，当时还是独立诊断命令）：
+
+```text
+KEBAB SPMI: PON write APID 0x00d, write_ee 0x0 (this EE); chnls slice 0x0c6d0000
+KEBAB SPMI: REG 0x088f read 1: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x00
+KEBAB PON: SOFT_RB_SPARE 0x088f old 0x00; mask 0xfe; reason 0x02 << 1 = 0x04; new 0x04
+KEBAB SPMI: write REG 0x088f: APID 0x00d chnls-slice+0xd0000 cmd 0x000008f0 wdata 0x04
+KEBAB SPMI: write REG 0x088f status 0x00000001 DONE
+KEBAB SPMI: REG 0x088f read 2: APID 0x00d obsrvr+0x680 cmd 0x780008f0 status 0x00000001 -> 0x04
+KEBAB PON: read back 0x04, expected 0x04
+KEBAB PON: PASS: SOFT_RB_SPARE 0x00 -> 0x04, field 0x04, bit 0 unchanged 0x0
+```
+
+旧值 `0x00`，写入 `0x04`，读回 `0x04`，mask 外的 bit 0 保持 `0`。
+最终补丁的输出压缩成摘要行，原始寄存器行由 `kebab_pon_verbose=1` 打开。
+
+### 4. 真机结果
+
+所有尝试都在同一块 kebab（SM8250）上，镜像经 `fastboot flash boot_b`
+写入，固件固定从 `boot_b` 读载荷。门控关闭的镜像用于先证明"不写 PMIC 也
+能正常启动、`REBOOT` 仍工作"；门控打开的镜像用于写原因并复位。
+
+| # | 镜像 / 门控 | PON 原因（写前 → 写后，读回） | IMEM 写入 | 复位方式 | 45 s 内出现 fastboot | 下次启动看到的 PON / IMEM |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | `XNU-pon-off.img`，`kebab_pon_write` 未设置 | 未写；`PON-RB` 输出 `kebab_pon_write is off; refusing to write SOFT_RB_SPARE`，`PON?` 读到 `0x00` | 未写 | `REBOOT`（PSCI） | — | 启动正常；`IMEM?` = `0x0939992c`（随机） |
+| 1 | `XNU-pon-on.img`，`kebab_pon_write=1` | `0x00` → `0x04`，读回 `0x04`，bit 0 不变 | `0x77665500`，读回 MATCH | `FASTBOOT`（PSCI SYSTEM_RESET） | **是，约 2 s**；`c073a488`，`product: kona` | `PON?` = `0x00`；`IMEM?` = `0x836991fc`（随机） |
+| 2 | 同上，从普通启动再来一次 | `0x00` → `0x04`，读回 `0x04` | `0x77665500`，读回 MATCH | `FASTBOOT`（PSCI） | **是，3.33 s** | `PON?` = `0x00`；`IMEM?` = `0x016999fc`（随机） |
+| 3 | 同上，第三次 | `0x00` → `0x04`，读回 `0x04` | `0x77665500`，读回 MATCH | `FASTBOOT`（PSCI） | **是，3.33 s** | — |
+
+关键观察：
+
+* 表 0–3 使用的是中间构建的镜像（95 个补丁文件，含当时的诊断命令 `PON-RB`、
+  `PON-RST`、`FASTBOOT-PMIC`）。最终补丁删除了这些诊断命令，只保留
+  `FASTBOOT`，并把 PON 写入和 IMEM 写入一起放到门控后面；`FASTBOOT`
+  的写入与复位行为与表中完全一致，差异只在日志行数。
+* 每次进入 fastboot 后再 `fastboot reboot` 回内核，PON 原因都已经是
+  `0x00`，IMEM 都是新的随机值。说明 ABL 在消费 fastboot 请求时把 PON
+  原因清掉了；IMEM 的 cookie 在复位/启动过程中没有被保留下来。既然 ABL
+  自己会清，内核启动时不需要、也没有任何代码去清 `SOFT_RB_SPARE`。
+* 因此不存在"`fastboot reboot` 又回到 fastboot"的循环：原因被消费后，
+  下一次普通启动就是正常内核启动。实测两次从 fastboot 回内核分别用了
+  23.6 s 和 21.5 s（含固件与内核启动）。
+* 三条成功路径的差别只有启动次数，PON 旧值都是 `0x00`，写入和校验都
+  一样；fastboot 出现时间在 2～3.33 s。
+* 归因：IMEM 的 `0x77665500` 在每次复位后都不存在（本轮之前六次启动也
+  都是随机值），所以此前"写了 IMEM 却仍然普通启动"不是写失败，而是
+  ABL 根本不使用它。真正起作用的是 PON `SOFT_RB_SPARE` 的
+  `PON_RESTART_REASON_BOOTLOADER`。
+
+### 5. 使用方式
+
+启动参数（payload 的 TOML `args`，实测使用的那一行）：
+
+```text
+-v -enable_kprintf_spam startup_debug=1 serial=3 debug=0x14e cpus=1 rd=ufsroot0 ufsroot=userdata ufsrw=1 rootrw=1 kebabusb=1 kebabpanic=1 kebab_pon_write=1 kebab_fastboot_cookie=0x77665500 keepsyms=1
+```
+
+其中与本节直接相关的是 `kebabusb=1`（USB 控制台）、`kebab_pon_write=1`
+（PMIC 写门控）和 `kebab_fastboot_cookie=0x77665500`（IMEM 值；默认就是
+这个值，可以不写）。最小集是 `kebabusb=1 kebab_pon_write=1`。
+
+可选：`kebab_pon_verbose=1` 打开 SPMI 原始寄存器读写行，默认关闭。
+
+控制台命令：
+
+```text
+FASTBOOT     写 PON 原因（0x00 -> 0x04，读回校验）和 IMEM
+             0x77665500，然后 PSCI SYSTEM_RESET；约 2～3.3 秒进入 fastboot
+REBOOT       普通 PSCI 复位，不写任何原因
+PON?         只读检查：PON subtype、SOFT_RB_SPARE、APID 归属
+```
+
+`FASTBOOT` 在 `kebab_pon_write` 未设置时输出
+`KEBAB FASTBOOT: disabled because kebab_pon_write=0; use REBOOT for a plain restart`
+并直接返回。门控打开时，正常输出是：原因写入行、原因校验行、IMEM 写入行、
+IMEM 回读行、复位行。
+
+### 6. 补丁范围与构建
+
+| 项 | 值 |
+| --- | --- |
+| 内核补丁 | `0114-kebab-pon-reason-write.patch` |
+| 改动文件 | `bsd/dev/kebab_spmi.c`（写路径）、`bsd/dev/kebab_usb.c`（`FASTBOOT` 门控与 PON 调用） |
+| 不需要改动 | `bsd/conf/files` 和 `bsd/kern/bsd_init.c`：`0108` 已把 `kebab_spmi.c` 加进 `files`，并已从 `kebab_usb_start()` 调用 `kebab_spmi_init()`；IMEM 也是在同一函数里映射的 |
+| 系列 | `verify-all.sh`：`94/94` 个补丁文件按文件名顺序应用到 `1b191cb`（`xnu-8796.141.3`）；编号补丁 `0001`–`0114` 共 93 个 |
+| 构建 | 本地 macOS 14.6.1 VM（Xcode 15.4、KDK 13.5）：`kernel.development.kebab` sha256 `54d4a0addcb12b447681796d22b4e7d7959dc3a39350e2acc834a26822f811d1`，17,136,232 字节；0 error。`kebab_spmi.c`/`kebab_usb.c` 共 60 条 warning，其中 4 条是 `0114` 新增的 prototype/格式 warning，均不阻断构建（这 4 条已由 `0115` 清除，见第二十三章） |
+
+### 7. 仍未闭合的部分
+
+* PMIC 的 `PS_HOLD` 掉电复位路径（`0x85A/0x85B` + `0x0C264000`）按
+  vendor 语义实现过，但没有在真机上执行；PSCI 路径已经达成目标，而这条
+  路径一旦触发就没有撤销手段，所以补丁不携带它。若以后 PSCI 路径失效，
+  再按 `qpnp_pon_system_pwr_off()` + `deassert_ps_hold()` 的顺序单独验证。
+* ABL 具体在什么时刻清掉 `SOFT_RB_SPARE` 还没有直接观测：内核只能在
+  fastboot 之后的下一次启动里看到 `0x00`。要看到"ABL 读取后立即清零"的
+  瞬间，需要 ABL/XBL 侧日志或 SPMI 抓包。
+* IMEM 的 `restart_reason` 是否被复位清掉、还是被 ABL 改写，仍无法区分；
+  但已经不影响结论——PON 原因才是 ABL 使用的信号。
+
+## 二十三、0114 的构建警告清理（0115）
+
+### 1. 四条新增警告的来源
+
+0114 引入的警告里有四条此前不存在，全部落在它自己的新代码上：
+
+| 类型 | 位置 | 说明 |
+| --- | --- | --- |
+| `-Wmissing-prototypes` | `kebab_spmi_pon_writes_enabled()` 的定义 | 函数非 static；`kebab_usb.c` 里有 extern 声明，但定义所在文件没有原型 |
+| `-Wmissing-prototypes` | `kebab_spmi_pon_reason_write()` 的定义 | 同上 |
+| `-Wformat` | `kebab_spmi_init()` 里 chnls 切片映射成功的那条打印 | `%08x` 打印 `vm_offset_t`（`unsigned long`） |
+| `-Wformat` | 同一函数里映射失败的那条打印 | 同上 |
+
+### 2. 0115 的改法
+
+- 在 `kebab_spmi.c` 顶部、`extern void kebab_usb_log_flush(void);` 之后补上两个原型，
+  与 `kebab_usb.c` 里的声明一致，定义于是有声明可对照；
+- 两处 `%08x` 改成 `%08lx`，并把 `slice` 显式转换成 `unsigned long`；
+- 行为不变：映射的仍是同一个 4 KiB 切片，门控仍是 `kebab_pon_write`，
+  两个值打印出的数字也相同。
+
+### 3. 实测：A/B 编译
+
+用构建日志里 `kebab_spmi.c` 自己那条 clang 命令，在 `bsd` 的对象目录下
+（`-include meta_features.h` 需要这个 cwd），对同一文件跑两遍：一遍 0114 的代码，
+一遍应用 0115 之后的代码。
+
+| 版本 | 警告总数 | `kebab_spmi.c` 内 | 其中属于本次四条的 |
+| --- | --- | --- | --- |
+| 0114 代码 | 17 | 14 | 4（`181`、`524` 两条缺原型；`637`、`640` 两条格式） |
+| 0115 代码 | 13 | 10 | 0 |
+
+剩下的 13 条与本补丁无关：3 条来自 `kcdata.h`、`vm_param.h`、`KEBAB.h` 三个头文件，
+10 条在文件内（`kebab_spmi_init`、`kebab_spmi_report`、`kebab_spmi_pon_report`
+的缺原型，6 条 `-Wshadow`，1 条 `-Wdeclaration-after-statement`），0108 到 0113
+就一直存在。
+
+### 4. 实测：整树构建
+
+本地 macOS 14.6.1 VM（Xcode 15.4、KDK 13.5），在 0114 的树上应用 0115 后增量构建：
+
+| 项 | 值 |
+| --- | --- |
+| 结果 | 0 error，`XNU Build Done` |
+| 内核 | `kernel.development.kebab` 17,119,848 字节（0114 为 17,136,232 字节） |
+| sha256 | `6d5d436b171ca2176976b5b4d106aa738cf5a59a577e97ec21019a82c81737e5` |
+| 该文件的警告 | 重新编译过，`kebab_spmi.c` 内 10 条，没有本次四条 |
+
+### 5. 验证边界
+
+- 实测：`verify-all.sh` 95/95 个补丁文件按文件名顺序应用到 `1b191cb`，整脚本
+  6 passed、0 failed、4 skipped；A/B 编译的警告清单；整树构建成功。
+- 实测：这个 0115 内核随后刷进了 `boot_b` 做触摸实验，见第二十四章；0115 本身只改
+  函数原型与格式说明符，不碰寄存器访问、映射或门控，没有需要单独验证的新行为。
+- 同时改了 `README.md` 的补丁计数：`93 个` 改为 `95 个文件`。
+
+## 二十四、0115 内核的触摸实测：第一次越过引脚配置
+
+### 1. 为什么不需要“合并 0113”
+
+触屏改动分布在 `0101`、`0108`、`0109`、`0111`、`0112`、`0113` 六个补丁里，按文件名
+顺序应用；`0114` 和 `0115` 都没有再动 `bsd/dev/kebab_touch.c`。所以 0115 的树里就是
+0113 的追踪版，不存在需要合并的分支。要做的只是用 0115 的内核重新打一个载荷：
+
+```text
+python pack-payload.py ci239-payload.img kernel-0115.macho payload-0115-bb.img unixnu-touch-bb.toml
+python pack-boot.py signed.img payload-0115-bb.img XNU-0115-bb.img
+```
+
+启动参数与 `XNU-0113-bb.img` 里的那一条逐字相同（`debug=0x14a`、`kebab_touch=1`、
+`kebab_touch_dump=1`、`kebab_touch_bb=1`）。内核 sha256 以 `6d5d436b171ca2` 开头，
+载荷镜像 100,663,296 字节，sha256 以 `9660101b96e66ea0` 开头。
+
+### 2. 实测结果
+
+`fastboot flash boot_b` 之后从串口发 `REBOOT`，抓完整一次启动（`touch-0115.log`，
+3,228 字节）：
+
+| 阶段 | 日志 | 含义 |
+| --- | --- | --- |
+| 读引脚 | 四条 `bit-bang pin N ctl 0x00000001 ... io 0x00000000` | mux 0、下拉、OE=0，输入读 0 |
+| 写引脚 | `writing pin 36 ctl 0x00000001 -> 0x00000003`，读回一致 | mux 0 加下拉改上拉，写入生效 |
+| 复位 | `reset ctl 0x00000200 io 0x00000003` | 拉高后 OUT=1、IN=1，输入跟随输出 |
+| TCM | `bb write 3 bytes (first 0x02)` 之后 `SCL did not rise within 1000 us (SDA 0)` | 起始条件就失败 |
+| 收尾 | `the controller did not answer TCM` | 0x02、0x10、0x20 三条命令都没写出去 |
+
+0113 补丁说明里预期的“挂起前最后一行是 reading pin 36”没有出现：驱动没有挂起，
+四颗引脚都配置完，复位脉冲也打了出去，停在第一条 I2C 事务上。
+
+### 3. 这说明什么
+
+复位引脚拉高后输入读回 1，说明 TLMM 基址（SOUTH tile `0x0f500000`）、每引脚
+`0x1000` 的步进、CTL 与 IO 的偏移都对，`0x3`（mux 0 加上拉）也能写进去读回来。
+0112 的 tile 修复是有效的。
+
+SDA 和 SCL 在释放后仍读 0。两条线同时为低更像总线被外部拉低：控制器没有供电时，
+其 I/O 上的 ESD 二极管会把线钳在低电平；也可能是控制器自己把总线按住。
+这两种都没有直接测量。
+
+### 4. 下一步
+
+- 查设备树里 `sec-s6sy761@48` 节点的 `vdd`/`vio` 供电与 `reset-gpio` 极性，确认这条
+  路径上是否有内核必须打开的稳压器；
+- 若要一次读数就区分“没供电”和“被拉低”，先只做电源使能加一次 `TLMM_IO` 读取，
+  不碰 I2C。
+
+### 5. 0115 上的 FASTBOOT 复验
+
+把 0115 内核按开门的参数重打成 `XNU-0115-fb.img`（`kebab_pon_write=1`、
+`kebab_pon_verbose=1`，不带触摸参数），刷入 `boot_b` 后从串口发 `FASTBOOT`：
+
+```text
+KEBAB SPMI: write REG 0x088f: APID 0x00d chnls-slice+0xd0000 cmd 0x000008f0 wdata 0x04
+KEBAB PON: restart reason verified: read back 0x04, field 0x04, bit 0 unchanged 0x0
+KEBAB FASTBOOT: IMEM read back 0x77665500 (MATCH)
+KEBAB REBOOT: PEHaltRestart(kPERestartCPU)
+```
+
+- 发出命令到 `fastboot devices` 出现设备：3.35 秒；
+- `fastboot reboot` 到串口重新出现：19.9 秒；
+- 门控关掉时同一条命令只回 `disabled because kebab_pon_write=0`，不写任何寄存器，
+  这一点在换镜像之前先测过。
+
+之后把触摸参数并进同一个镜像（`XNU-0115-touch-fb.img`，`kebab_pon_write=1` 加
+`kebab_touch=1 kebab_touch_dump=1 kebab_touch_bb=1`），刷入后复测：`FASTBOOT` 到
+fastboot 3.37 秒，`fastboot reboot` 回串口 20.0 秒；触摸追踪输出与第 2 节逐行相同。
+`boot_b` 现在是这个镜像。
+
+### 6. 验证边界
+
+- 实测：刷机、串口抓到整段启动、上表每一行日志。
+- 推断：总线被拉低的原因是供电或控制器状态；没有量电压，也没有抓 I2C 波形。
+
+## 二十五、触摸改为只读探针与控制台门控（0116）
+
+### 1. 上一轮真正停在哪
+
+QUPv3 那一轮的日志停在 `reset pulse done`。按 `kebab_touch_start()` 的顺序，之后
+下一步是 `kt_se_init()`，它要写 `SE_GENI_M_IRQ_CLEAR` 等 GENI 寄存器。所以失败点
+在“第一次 GENI 写”，不是 I²C 事务；之前把它说成“卡在第一次 I²C 传输”不准确。
+
+### 2. 0116 的改动
+
+- 启动路径只映射 MMIO，不再自动碰硬件；要跑旧路径需显式 `kebab_touch_boot=1`，
+  要只读探针需 `kebab_touch_probe=1`；
+- 控制台新增 `TOUCH?`（只读探针）与 `TOUCHINIT`（引脚、复位、`kt_se_init`、识别）；
+- 新增只读 GCC 探针：SE13 的三路时钟（`GCC_QUPV3_WRAP1_S5_CLK`、
+  `GCC_QUPV3_WRAP_1_M_AHB_CLK`、`GCC_QUPV3_WRAP_1_S_AHB_CLK`），只映射两个
+  4 KiB 页，不映射 2 MiB 的 GCC 块；
+- 新增 GENI/TLMM 只读转储与 `kt_se_init()` 每组写之前的 trace。
+
+### 3. 实测：TOUCH?
+
+```text
+KEBAB TOUCH: GCC 0x52008 = 0x063c83c0: wrap1_s5 0 m_ahb 1 s_ahb 1
+KEBAB TOUCH: GCC halt m_ahb 0x00000000 s_ahb 0x80000002 wrap1_s5 0x80004220
+KEBAB TOUCH: probe wrapper QUP_HW_VER 0x20050000
+KEBAB TOUCH: probe GENI_FW_REVISION_RO 0x00000303 protocol 3
+KEBAB TOUCH: probe GENI_STATUS 0x00000000 M_IRQ_STATUS 0x00000000 S_IRQ_STATUS 0x00000000
+KEBAB TOUCH: probe DMA_MODE_EN 0x00000000 CGC_CTRL 0x0000007f
+KEBAB TOUCH: probe SER_M_CLK_CFG 0x00000011 SCL_COUNTERS 0x00000000
+KEBAB TOUCH: probe TX_FIFO_STATUS 0x00000000 RX_FIFO_STATUS 0x00000000
+KEBAB TOUCH: probe pin 36 ctl 0x00000001 io 0x00000000
+KEBAB TOUCH: probe pin 37 ctl 0x00000001 io 0x00000000
+KEBAB TOUCH: probe pin 38 ctl 0x00000001 io 0x00000000
+KEBAB TOUCH: probe pin 39 ctl 0x00000001 io 0x00000000
+```
+
+### 4. 结论
+
+SE13 的两路 AHB 时钟是开的，**核心时钟 `WRAP1_S5` 没开**（`0x52008` 的 bit 27 为 0）。
+GENI 寄存器能通过 AHB 读，但 GENI 状态机没有核心时钟就不会推进；这与“读完
+`FW_REVISION_RO` 之后第一次写 GENI 就失去可观测性”相吻合。
+
+`GENI_STATUS`、主从中断状态、`DMA_MODE_EN` 全为 0，`SCL_COUNTERS` 也是 0，
+说明这个 SE 从来没有被配置过 I²C 时序，之前能读到的协议号来自固件寄存器本身。
+
+### 5. 验证边界
+
+- 实测：构建 0 error；`TOUCH?` 的完整输出；启动路径不再碰硬件。
+- 推断：核心时钟缺失是 GENI 写失败的原因；尚未置位验证，也没有量过时钟。
+- 下一步（0117）：先只读 S5 的 RCG（`0x18600` 一带），再单独置位 `0x52008`
+  bit 27，回读 halt 寄存器；确认时钟真的跑起来之后，才用 `TOUCHINIT` 去写 GENI。
+
+## 二十六、SE13 时钟与第一次真正的 GENI 命令（0117）
+
+### 1. 0117 做了什么
+
+- 新增控制台命令 `TOUCHCLK`：只读转储 S5 的 RCG 块（`0x18600` 起八个字），然后
+  只置位 `0x52008` 的 bit 27，回读使能位与 halt 寄存器；
+- `TOUCHINIT` 保持不变，仍是引脚、复位、`kt_se_init`、识别，但它跑在时钟打开之后。
+
+### 2. 实测：打开 S5 时钟
+
+```text
+KEBAB TOUCH:   RCG+0x00 = 0x80000000
+KEBAB TOUCH:   RCG+0x04 = 0x00100000
+KEBAB TOUCH:   RCG+0x14 = 0x00000021
+KEBAB TOUCH: TOUCHCLK: 0x52008 0x063c83c0 -> 0x0e3c83c0
+KEBAB TOUCH: TOUCHCLK: 0x52008 now 0x0e3c83c0 (s5 1), halt 0x00004220
+```
+
+置位前 halt 是 `0x80004220`，置位后变成 `0x00004220`：bit 31 清掉，说明这一路
+分支时钟真的起来了。这一步没有触发任何复位或总线访问，控制台全程正常。
+
+### 3. 实测：时钟打开后的 TOUCHINIT
+
+```text
+KEBAB TOUCH: reset pulse (mode 1), ctl 0x00000200 io 0x00000003
+KEBAB TOUCH: se_init: clear IRQs
+KEBAB TOUCH: se_init: force default, output ctrl
+KEBAB TOUCH: se_init: packing + byte granularity
+KEBAB TOUCH: se_init: clock select + SCL counters
+KEBAB TOUCH: TCM command 0x02, 0 payload byte(s)
+KEBAB TOUCH: write watermark timeout, status 0x00000000
+KEBAB TOUCH: command 0x02 was not written
+```
+
+上一轮在这一步会把 USB 控制台一起带走，这一轮四组 GENI 写全部走完，控制台还在。
+所以上一轮的失联就是**SE 核心时钟没开**：AHB 能读寄存器，GENI 状态机不推进，
+写命令后总线挂住。
+
+之后 `TOUCH?` 读到：
+
+```text
+GENI_STATUS 0x00000041 M_IRQ_STATUS 0x00000000
+SER_M_CLK_CFG 0x00000071 SCL_COUNTERS 0x00a02c1a
+pin 36 ctl 0x00000004  pin 37 ctl 0x00000004
+```
+
+`GENI_STATUS` 的 bit 0 是 master 命令仍在执行：命令发出去了，但总线上的事务永远
+不完成，也没有 NACK 中断。SCL 计数器已经按 100 kHz 写入，引脚也复用到 qup13。
+
+### 4. 这说明什么
+
+- 时钟这一层已经解决：SE13 可以安全地配置，不再需要担心写 GENI 会带走控制台；
+- 现在卡在总线层：命令 active、无中断、无 NACK，最可能是从机不响应（没供电或
+  总线被拉低），而不是 GENI 配置错误；
+- 之前 bit-bang 观察到 SDA/SCL 释放后仍为 0，与“从机侧没电”一致。
+
+### 5. 芯片身份出现矛盾（需要在真机上定）
+
+- 项目早先记录：设备 DTB 里是 `sec-s6sy761@48`，`chip-name = "SY771"`（Samsung）；
+- LineageOS 的 `arch/arm64/boot/dts/vendor/oplus/kebab/kona-mtp.dtsi` 里，
+  `qupv3_se13_i2c` 下是 `synaptics@4B`，`compatible = "synaptics-s3908"`，
+  `reg = <0x4B>`，供电 `vdd_2v8-supply = <&pm8150_l13>`、
+  `vcc_1v8-supply = <&pm8150a_l1>`，reset 仍是 GPIO 38、中断仍是 39。
+
+两者地址和驱动都不同，必须先确认手里这台机器到底是哪一颗，再谈协议。确认方法：
+给触摸供电后，在 0x48 和 0x4B 各做一次只读地址探测（ACK/NACK 就能区分），
+或者从设备的原厂 DTB 里直接读节点。
+
+### 6. 验证边界
+
+- 实测：时钟置位与 halt 变化、`TOUCHINIT` 全程不丢失控制台、`TOUCH?` 的寄存器读数；
+- 推断：命令不完成是因为从机不响应；芯片型号与地址尚未在本机确认；
+- 没有做：供电使能、I2C 实际读写、协议层。
+
+## 二十七、触摸芯片定为 S3908，GENI FIFO 握手修复（0118、0119）
+
+### 1. 身份结论：S3908，地址 0x4B
+
+从本机保留的 kebab 厂商镜像里取出 DTB（`Mu-kebab-debug-6c675501.img`，
+FDT 在偏移 `0x10d191`，长 912,906 字节），用 dtc 反编译后，
+`i2c@a94000` 下有两个互斥的触摸节点：
+
+| 节点 | 地址 | chip-name | project-name | panel 列表 |
+| --- | --- | --- | --- | --- |
+| `sec-s6sy761@48` | `0x48` | `SY771` | `19821` | 0x6b9、0x6ba、0x6bb、0x699 |
+| `synaptics-s3908@4B` | `0x4B` | `S3908` | `19805` | `0x698`、`0x699`、`0x69a` |
+
+panel phandle 解析：
+
+| phandle | 面板 |
+| --- | --- |
+| `0x698` | BOE |
+| `0x699` | Samsung DD305 |
+| `0x69a` | Samsung AMB655X |
+| `0x6b9` | Samsung 通用 |
+| `0x6ba` | Samsung ANA6705 |
+| `0x6bb` | Samsung ANA6706 |
+
+本机面板是 Samsung AMB655X，只出现在 S3908 的列表里；同一份 DTB 的
+bootargs 里还有 `androidboot.project_name=19805`。所以这台机器的触摸芯片是
+**Synaptics S3908，I²C 地址 0x4B**，此前“S6SY761 / 0x48”的记录是错的。
+
+供电两个节点一致：`vdd_2v8 = pm8150_l13`（3,008,000 µV）、
+`vcc_1v8 = pm8150a_l1`（1,800,000 µV），reset 都是 GPIO 38、中断都是 GPIO 39。
+
+### 2. 0118：GENI FIFO 握手与中断位
+
+| 项 | 0117 之前 | Qualcomm Linux | 0118 之后 |
+| --- | --- | --- | --- |
+| TX watermark | 从不在发命令后置位 | 命令后写 1 | 命令后写 1 |
+| NACK 位 | bit 9 | `M_GP_IRQ_1_EN` = bit 10 | bit 10 |
+| 超时后的命令 | 只打印，保持 active | cancel 后 abort | 新增 `kt_se_abort()` |
+| 只读探针 | 无 watermark/IRQ_EN | — | 增加两项 |
+
+`kt_se_abort()` 写 `M_CMD_ABORT_EN` 到 `SE_GENI_M_CMD_CTRL_REG`，有界轮询
+abort/done/failure 状态，然后清中断与 TX watermark，与
+`geni_cancel_m_cmd()`/`geni_abort_m_cmd()` 的顺序一致。
+
+### 3. 0119：地址与命名
+
+`KT_I2C_ADDR` 改为 `0x4b`，驱动标题、启动横幅、两处注释一并改成 S3908；
+TCM 命令族保留（厂商对 S3908 用的就是 Synaptics 自己的 TCM 风格驱动）。
+
+### 4. 验证边界
+
+- 实测：DTB 反编译结果、panel phandle 映射、两份 DTB 供电一致；
+- 编译：整树构建 0 error，`kebab_touch.c` 只剩两条既有警告
+  （`-Wformat-nonliteral`、`-Wdeclaration-after-statement`）；
+- 未做：这一版没有刷机，也没有发送新的 I²C 事务；`TOUCHINIT` 与
+  `TOUCHCLK` 的下一次实机验证要等镜像刷入。
+
+## 二十九、Abort 控制位修正与 Gate B–D（0120）
+
+### 1. 0120 修了什么
+
+0118 的 `kt_se_abort()` 把 `M_CMD_ABORT`（IRQ 状态位 5）写进了
+`SE_GENI_M_CMD_CTRL_REG`，而控制寄存器的位定义是 cancel = bit 2、abort = bit 1
+（`geni-se.h`）。写 0x20 是空操作，超时恢复其实从未生效。
+
+0120 把两类位分开命名（`M_GENI_CMD_CANCEL_REQ`/`M_GENI_CMD_ABORT_REQ` 对
+`M_CMD_CANCEL`/`M_CMD_ABORT`），并把恢复流程改成：
+
+1. 读 `GENI_STATUS`，bit 0 不置位就直接清 watermark/中断返回成功；
+2. 仍 active 时写 cancel，有界等待 cancel/done 或 active 清零；
+3. 仍 active 才写 abort，继续有界等待；
+4. 清 watermark 与中断，再读一次 `GENI_STATUS`；
+5. 只有 active 清零才返回成功，否则置 `kt.se_dead`，本次运行不再发任何 I²C。
+
+`kt_i2c_error()` 也改成先保留原始状态再决定是否恢复；写/读入口在 `se_dead` 时
+直接拒绝。
+
+新增两条控制台命令：`TOUCHSE`（引脚、复位、`se_init`，要求 S5 时钟已开）与
+`TOUCHPING`（向 0x4B 发一个字节的 FIFO 写事务，走修好的 watermark 路径）。
+
+### 2. 实测（Gate A–D）
+
+- Gate A：刷入后串口 20.0 秒回来，启动不自动初始化触摸；
+- Gate B：`TOUCH?` 显示 `GENI_STATUS 0`、`M_IRQ_EN 0x33c0007e`，SE 空闲；
+- Gate C：`TOUCHCLK` 把 `0x52008` 从 `0x063c83c0` 改成 `0x0e3c83c0`，halt 的
+  bit 31 清零；
+- Gate D：`TOUCHSE` 四组 `se_init` 全部完成（此后 `M_IRQ_EN 0x7fc0007f`，
+  FIFO 位已使能），`TOUCHPING` 一个字节写 0x4B：
+
+```text
+KEBAB TOUCH: ping 0x4b: one byte, FIFO path
+KEBAB TOUCH: write did not complete, status 0x00000000
+KEBAB TOUCH: recover (write completion timeout): GENI_STATUS 0x00000041 M_IRQ_STATUS 0x00000000
+KEBAB TOUCH: recovered: GENI_STATUS 0x00000000, last status 0x00000021
+```
+
+`0x21` = `M_CMD_DONE | M_CMD_ABORT`，说明 cancel/abort 这条恢复路径这次真的
+生效了，SE 回到空闲。
+
+### 3. 结论
+
+- watermark 置位与恢复路径都已验证可用；
+- 事务仍然停在 active、没有 watermark、没有 NACK，说明 I²C 根本没有开始；同一次
+  会话里 `TOUCH?` 读到的引脚 36/37 `io = 0`（释放状态仍为低），与“触摸供电没开、
+  外部上拉没有电源”一致；
+- 因此下一步不是继续改 GENI，而是给触摸供电：DTB 里两个节点共用
+  `pm8150_l13`（3,008,000 µV）与 `pm8150a_l1`（1,800,000 µV）。
+
+### 4. 验证边界
+
+- 实测：上述四段日志、恢复路径、`M_IRQ_EN` 前后值；
+- 推断：总线被拉低来自供电；没有量电压，也没有执行任何 PMIC 写。
+
+## 三十、供电只读复核与 RPMh 审核（P1/P2）
+
+### 1. P1 实测：SPMI 与 PON 只读
+
+`SPMI?`：arbiter v5；扫描 512 个 APID，352 个非零映射，其中 3 个映射 PPID
+`0x008`（APID `0x001`/`0x00d`/`0x075`），只有 `0x00d` 的 `write_ee = 0`（本 EE）。
+
+`PON?`：PON subtype `0x0805` 两次读 `0x04`（Gen2），`SOFT_RB_SPARE 0x088f` 两次读
+`0x00`。两条只读通路都正常，用来做后续供电实验前的基线。
+
+### 2. P2 静态：两路触摸电源归 RPMh 管
+
+| 触摸供电 | RPMh 资源 | 目标电压 | DTS 节点 |
+| --- | --- | --- | --- |
+| `pm8150_l13` | `ldoa13` | 3,008,000 µV | `rpmh-regulator-ldoa13` |
+| `pm8150a_l1` | `ldoc1` | 1,800,000 µV | `rpmh-regulator-ldoc1` |
+
+`kona-regulators.dtsi` 里这两路都是 `compatible = "qcom,rpmh-vrm-regulator"`，
+不是 SPMI 寄存器节点。RPMh VRM 的资源内偏移是 VOLTAGE `0x0`、ENABLE `0x4`、
+MODE `0x8`，地址本身来自 SMEM 里的 command DB，不是 PMIC 的 SPMI 地址。
+
+RPMh 的通道是 `/soc/rsc@18200000`（APPS RSC，`drv-id = 2`）的 TCS。也就是说：
+
+- 用 PON 那套 SPMI 写路径直接改 LDO 是错的；
+- 正确做法要么走 RPMh 命令，要么先只读确认状态。
+
+### 3. 对上一轮结论的更正
+
+上一轮把 Gate D 描述成“没有 watermark”，不准确。日志里的
+`write did not complete` 是**第二段等待**（FIFO 写完之后等 CMD_DONE），说明
+watermark 阶段已经通过、数据已经进了 FIFO；之后命令一直 active、没有 NACK、
+没有完成。所以更准确的判断是：FIFO 握手成立，事务卡在总线完成阶段，从机是否
+上电仍未证实。
+
+### 4. P3 的前提（尚未执行）
+
+读 RPMh 状态不是纯 MMIO 读：需要从 SMEM 解析 command DB 得到资源地址，再通过
+TCS 发 READ 命令并等完成，涉及通道所有权与共享状态。开始之前必须先确定哪些
+寄存器读有副作用、驱动的 TCS 占用规则，以及两路 LDO 是否还有别的消费者。
+
+### 5. 0121：门控加固
+
+- 新增独立的 `se_initialized`：只有 `se_init` 成功才置位，`TOUCHPING` 以它为
+  前置条件，不再用“SE 被映射过”当条件；
+- `TOUCHSE` 不再把 `se_dead` 清零：恢复失败的 SE 只能靠重启清除；
+- `TOUCH?` 增加一行 `initialized/dead` 状态。
+
+### 6. 验证边界
+
+- 实测：`SPMI?`、`PON?` 的完整输出；0121 的编译结果见提交说明；
+- 未做：任何 PMIC 或 RPMh 写；0121 未刷机。
+
+## 三十一、PWR? 只读电源探针：两路 LDO 都是 Disabled（0122）
+
+### 1. 实现
+
+新增控制台命令 `PWR?`（`bsd/dev/kebab_spmi.c`），全程只读：
+
+- 按 PPID 查 APID 映射，列出命中的 APID 与 `write_ee`；
+- 先读 `+0x04` type、`+0x05` subtype，各读两次要求一致，空设备（0x00/0xff）即停；
+- 通过后才读 `+0x46` enable、`+0x40` range、`+0x41` set，同样两次一致；
+- 另外做一次只读映射表survey：按 SID 统计映射数量，并检查 `0x4000`/`0x4c00`
+  两个 LDO 页在 SID 0–7 上有没有映射；
+- 不写任何 PMIC 寄存器，observer 命令只写 arbiter 自己的 observer 通道。
+
+### 2. 第一次结果：候选 SID 全落空
+
+按最初假设（SID 0 / SID 4）：两个 PPID（`0x04c`、`0x440`）都没有 APID 映射，
+连 type 都读不到。
+
+### 3. 映射表 survey 纠正了 SID
+
+```text
+KEBAB SPMI: PWR: mappings per SID: 0:66 1:51 2:67 3:5 4:43 5:53 6:5 7:0
+KEBAB SPMI: PWR: mapping present for SID 1 base 0x4000 (PPID 0x140)
+KEBAB SPMI: PWR: mapping present for SID 1 base 0x4c00 (PPID 0x14c)
+KEBAB SPMI: PWR: mapping present for SID 2 base 0x4000 (PPID 0x240)
+KEBAB SPMI: PWR: mapping present for SID 5 base 0x4000 (PPID 0x540)
+```
+
+LDO 页挂在 SID 1 和 SID 5 的 USID 上，而不是 0 和 4；SID 2 的 `0x4000` 是
+PM8150B 自己的 LDO1。把目标改成 SID 1 / SID 5 后读取成功。
+
+### 4. 实测：两路都是 Disabled
+
+```text
+PWR: pm8150_l13: SID 1 base 0x4c00 PPID 0x14c
+PWR: pm8150_l13: APID 0x0c9 write_ee 0x4 irq_owner 1
+PWR: pm8150_l13: type 0x04 subtype 0x7b
+PWR: pm8150_l13: enable 0x00 (bit7 0), range 0xc0, set 0x0b
+
+PWR: pm8150a_l1: SID 5 base 0x4000 PPID 0x540
+PWR: pm8150a_l1: APID 0x11b write_ee 0x4 irq_owner 1
+PWR: pm8150a_l1: type 0x04 subtype 0x71
+PWR: pm8150a_l1: enable 0x00 (bit7 0), range 0x08, set 0x07
+```
+
+两路 `enable` 都是 `0x00`，bit7 为 0：**两路 LDO 当前都是关闭状态**。type `0x04`
+是非空外设，subtype `0x7b`/`0x71` 分属不同 LDO 家族（PM8150 与 PM8150L）。
+
+电压没有解码：`range`/`set` 只是原始值，且 enable 为 0 时输出本来就不成立。
+
+### 5. 两个重要附带结论
+
+- 两个 APID 的 `write_ee` 都是 4：这两路 peripheral 在 SPMI 上归 EE4（RPMh 侧）
+  所有，EE0 的写事务会被 arbiter 拒绝；所以即使将来要写，也不该走 SPMI；
+- 读取能成功是因为 observer 通道只读、不需要所有权。这也说明此前“总线被拉低”
+  的猜测与“两路 LDO 关闭”一致：控制器确实没有供电。
+
+### 6. 验证边界
+
+- 实测：`PWR?` 的完整输出（两次读取一致）、启动与 COM7 正常；
+- 未做：任何 PMIC 写、任何 RPMh 命令、任何 I²C 事务；
+- 未证实：LDO 使能位为 0 只说明控制状态；输出端电压没有测量，也没有 ADC 路径。
+
+## 三十二、RPMh 只读发现：Command DB 与 drv-2 TCS（0123）
+
+### 1. 静态核对
+
+`kona.dtsi` 与实际一致：
+
+| 项 | 值 |
+| --- | --- |
+| Command DB | `0x80860000`，`0x20000`（128 KiB），`compatible = "qcom,cmd-db"`，`no-map` |
+| APPS RSC | `0x18200000`，窗口 `drv-0/1/2` 各 `0x10000`，`drv-id = 2` |
+| drv-2 窗口 | `0x18220000` |
+| TCS | `qcom,tcs-offset = <0xd00>`，ACTIVE 2、SLEEP 3、WAKE 3、CONTROL 1 |
+
+布局取自厂商 `cmd-db.c`（`cmd_db_header` 144 字节、`rsc_hdr` 16 字节、
+`entry_header` 24 字节、魔数 `db 30 03 0c`）与 `rpmh-rsc.c`
+（TCS 步进 672、命令步进 20，`CMD_ENABLE 0x1c`、`MSGID 0x30`、`ADDR 0x34`、
+`DATA 0x38`、`STATUS 0x3c`）。
+
+### 2. `RPMH?` 只读探针
+
+新增命令 `RPMH?`：映射 cmd-db 与 drv-2，先校验魔数，再按 slave 槽遍历条目，
+只打印 `ldoa13`/`ldoc1` 两条；随后打印 drv-2 公共寄存器与两个 active TCS 的
+`enable/msgid/addr/data/status`。全程只读，每个偏移都先做窗口边界检查。
+
+### 3. 实测
+
+```text
+KEBAB RPMH: cmd-db 0x80860000+0x20000: version 0x00000001 magic 0x0c0330db (match)
+KEBAB RPMH: slave 3: 22 entries at +0x0
+KEBAB RPMH: slave 3: 10 entries at +0x350
+KEBAB RPMH: slave 5: 37 entries at +0x458
+KEBAB RPMH: slave 4: 67 entries at +0x8f8
+KEBAB RPMH: ldoa13: addr 0x00040c00 len 4 offset 104
+KEBAB RPMH: ldoc1: addr 0x00042f00 len 4 offset 192
+KEBAB RPMH: drv-2 0x18220000, tcs_base +0xd00
+KEBAB RPMH: common irq_en 0x00000001 irq_status 0x00000000 control 0x01010000 status 0x00000001 cmd_enable 0x00000003
+KEBAB RPMH: tcs 0: enable 0x00000003 msgid 0x00010108 addr 0x00030000 data 0x00000005 status 0x00010101
+KEBAB RPMH: tcs 1: enable 0x00000000 msgid 0x00000000 addr 0x00000000 data 0x00000000 status 0x00000000
+```
+
+### 4. 资源地址怎么读
+
+`addr` 的 bit 19:16 是加速器类型（`ACCL_TYPE`），`4` = VREG；低 16 位是 VRM
+资源基址。所以：
+
+| 资源 | cmd-db addr（完整） | ENABLE（`+0x4`） |
+| --- | --- | --- |
+| `ldoa13` | `0x00040c00` | `0x00040c04` |
+| `ldoc1` | `0x00042f00` | `0x00042f04` |
+
+注意这里的地址必须保留完整 32 位：bit 19:16 是加速器类型（4 = VREG），
+它属于 TCS 命令地址的一部分，不能截断成 `0x0c04`/`0x2f04`。早先版本写成截断值，
+已在 0124 这一轮更正；VRM 资源内偏移仍是 `VOLTAGE 0x0 / ENABLE 0x4 / MODE 0x8`。
+
+### 5. 第一次跑的一个边界 bug
+
+第一次把条目数上限写成 64，而 VREG slave 有 67 条，正好被当成“不可信”跳过，
+所以没打印出两条地址。改成 1024，并保留逐条窗口检查（`offset + 24 > 0x20000`
+即停止），第二次才得到上面的结果。
+
+### 6. TCS 状态
+
+`common irq_en = 1`、`status = 1`、`cmd_enable = 3`（两个 active TCS 均可用）；
+TCS0 里残留一条已完成请求（`msgid 0x00010108`、`addr 0x00030000`、`data 5`，
+type 3 = CLK），TCS1 全零空闲。这条残留不是本内核发的，读它不影响任何状态。
+
+### 7. 验证边界
+
+- 实测：`RPMH?` 的完整输出、cmd-db 魔数与版本、两个资源地址、drv-2 与 TCS 状态；
+- 未做：任何 RSC/TCS 写、任何 VRM 请求、任何 PMIC 写；
+- R4（请求编码与离线测试）尚未实现，等这一步的日志确认后再做。
+
+## 三十三、RPMh VRM 编码与主机测试（R4，未进内核）
+
+### 1. 地址纠正
+
+上一节把 ENABLE 地址写成 `0x0c04`/`0x2f04`，那是截断后的值。cmd-db 返回的 32 位
+地址整体参与命令，bit 19:16 的加速器类型（4 = VREG）不能被去掉；`qcom-rpmh-regulator.c`
+也是把完整 `vreg->addr` 加上寄存器偏移。正确值是 `0x00040c04` 与 `0x00042f04`，
+上一节的表已改。
+
+### 2. 模块
+
+`package/KebabRpmhVrm.{h,c}`：纯逻辑，不访问 MMIO、不依赖内核。
+
+- 固定资源表只有 `ldoa13`（`0x00040c00`，3008 mV）与 `ldoc1`（`0x00042f00`，1800 mV）；
+- 编码只产生 `{msgid 0x00010108, addr, data}`；ENABLE 数据固定 1，电压只接受表里的值；
+- `kebab_rpmh_address_known()` 只认两个完整地址，截断值一律拒绝；
+- cmd-db 快照解析：魔数 `0x0c0330db`、版本 1、8 个 slave 槽、每条 24 字节、
+  越界即错、同名重复即错；
+- TCS 状态机：`FREE → BUSY →(submit)→ INFLIGHT → DONE/TIMEOUT/ERROR`，
+  timeout 与 error 都是终态，`release` 只把 `DONE` 放回 `FREE`；
+- 唯一可能的硬件出口是调用者传入的 `kebab_rpmh_sink` 函数指针，测试里传的是记录器。
+
+### 3. 主机测试
+
+`package/KebabRpmhVrmHostTests.c`，42 项断言，全部 PASS：
+
+```text
+$ TMPDIR=$PWD/tmp gcc -std=c11 -Wall -Wextra -Werror -o t \
+      KebabRpmhVrm.c KebabRpmhVrmHostTests.c && ./t
+...
+42 checks, 0 failure(s)
+```
+
+覆盖面：完整地址保留、截断地址/伪造资源拒绝、只允许两条资源、电压只接受 DTS 值、
+cmd-db 缺失/坏魔数/重复/越界、TCS 占用与重复提交、超时与错误后禁止重试、
+负路径上 sink 一次都不被调用。
+
+### 4. 第一次跑暴露的两个问题
+
+- 模块：`submit` 成功后没有进入 in-flight 状态，同一通道可以连续提交两次。
+  新增 `KEBAB_TCS_INFLIGHT`，`complete/timeout/fail` 只从 in-flight 迁移；
+- 测试：越界用例的长度选错（200 字节仍装得下两条），改成 180 并查 `ldoc1`
+  才真正触发越界检查。
+
+### 5. 验证边界
+
+- 只有主机测试：没有编译进内核、没有刷机、没有 MMIO 访问；
+- 真实 TCS 的所有权判断、完成回收策略和“是否存在可到达的硬件写入口”仍是 R5 的
+  审核内容；本轮没有新增内核侧入口。
+
+## 三十四、R4.1 加固与 R5-A 只读审计（0125）
+
+### 1. R4.1：审核提出的两处修复
+
+- 编码器不再接受调用者构造的资源结构：`kebab_rpmh_encode_enable/voltage` 改为按
+  名字查表，地址与电压都由表决定，伪造结构没有入口；
+- 新增 `kebab_rpmh_cmd_allowed()`：通道只接受编码器可能产出的四条命令
+  （两个资源 × ENABLE/VOLTAGE），伪造地址、错误数据、错误 msgid 一律
+  `KEBAB_RPMH_ERR_NOT_ALLOWED`；
+- `kebab_tcs_submit()` 在调用 sink 之前进入 `INFLIGHT`，sink 返回失败则进入
+  `ERROR`；`complete/timeout/fail` 只从 `INFLIGHT` 迁移，sink 内同步完成不会再被
+  覆盖回 in-flight；
+- cmd-db 解析要求 name→addr 与表一致，且条目必须位于 VREG slave（id 4）；
+  交叉映射（`ldoa13` 条目带 `ldoc1` 的合法地址）与错误 slave 都拒绝。
+
+### 2. R4.1 主机测试
+
+57 项断言全部 PASS，新增覆盖：伪造 3300 mV 命令、enable data=0、错误 msgid、
+交叉映射、错误 slave、重复完成、sink 内同步完成、sink 内失败、拒绝型 sink。
+
+### 3. R5-A：drv-2 全槽只读审计
+
+探针扩展到 common 的 `cmd_wait` 与 TCS 0–8 的
+`enable/msgid/addr/data/status/resp`：
+
+```text
+common irq_en 0x00000001 irq_status 0x00000000 cmd_wait 0x00000000 control 0x01010000 status 0x00000001 cmd_enable 0x00000003
+tcs 0: enable 0x00000003 msgid 0x00010108 addr 0x00030000 data 0x00000005 status 0x00010101 resp 0x00000000
+tcs 1..8: enable 0x00000000 msgid 0x00000000 addr 0x00000000 data 0x00000000 status 0x00000000 resp 0x00000000
+```
+
+- TCS1–8 完全为零，睡眠/唤醒/控制槽没有持有者痕迹；
+- TCS0 还留着一条 CLK 类请求（`addr 0x00030000`、`data 5`、`status 0x010101`），
+  common `control = 0x01010000` 含 AMC 位。这条残留不是本内核发的，但在没有
+  明确回收策略前，TCS0 不能当作可用通道；
+- 因此第一次真实发送若要做，只能考虑 TCS1，并且仍需要所有权与完成回收的判断，
+  这两项是 R5-C 的内容。
+
+### 4. 验证边界
+
+- 实测：上述只读输出、57 项主机测试；
+- 未做：任何 TCS/VRM/PMIC 写、任何 RPMh 命令；没有新增内核侧写入口。
+
+## 三十五、R4.2 返回值语义与 R5-A2 逐槽审计（0126）
+
+### 1. R4.2：submit 的返回值不再等于“成功”
+
+`kebab_tcs_submit()` 现在按 sink 返回后的最终状态返回：
+
+| 最终状态 | 返回值 |
+| --- | --- |
+| `DONE`（sink 内同步完成） | `KEBAB_RPMH_OK` |
+| `ERROR` / `TIMEOUT` | `KEBAB_RPMH_ERR_SINK_FAILED` |
+| `INFLIGHT`（仍在等硬件） | `KEBAB_RPMH_PENDING` |
+
+调用者不能再把 PENDING 当成“电源已就绪”。主机测试 57 项全部通过，其中同步失败的
+用例现在断言返回错误而不是成功。
+
+### 2. R5-A2：逐槽只读审计
+
+探针把 drv 级寄存器（`+0x00/0x04/0x08/0x0C`）与每个 TCS 的
+`wait/control/status/enable` 分开打印，并遍历每条命令槽（步进 20）。
+
+```text
+drv irq_en 0x00020000 irq_status 0x04010100 irq_clear 0x04800414 prnt_chld 0x800c8104
+tcs 0: wait 0x00000000 control 0x01010000 status 0x00000001 enable 0x00000003
+tcs 0 slot 0: msgid 0x00010108 addr 0x00030000 data 0x5 status 0x00010101 resp 0
+tcs 0 slot 1: msgid 0x00010108 addr 0x00030010 data 0x5 status 0x00010101 resp 0
+tcs 1: wait 0x00000000 control 0x00010000 status 0x00000001 enable 0x00000000
+tcs 2..7: wait 0 control 0x00000000 status 0x00000001 enable 0
+tcs 8: 全零
+```
+
+### 3. 解读
+
+- 上一轮打印的 `common control 0x01010000` 其实是 **TCS0 的窗口**（`tcs_base + 0x14`），
+  不是全局寄存器；真正的 drv 级寄存器是 `+0x00/0x04/0x08/0x0C`；
+- `prnt_chld = 0x800c8104`，按 `DRV_NUM_TCS_MASK/SHIFT` 取 drv-2 的
+  `max_tcs = (config >> 12) & 0x3F = 8`：硬件只有 8 个 TCS，TCS8 不存在。
+  设备树里的 `2+3+3+1` 必须按 Linux 的规则把 CONTROL_TCS 排除在连续数组之外理解；
+- TCS0 两个命令槽都被使能，且都留着 CLK 类请求（`0x30000`、`0x30010`），
+  状态 `0x010101`；继续把 TCS0 排除；
+- TCS1 的 `control` 是 `0x00010000`，与 TCS2..7 的 `0` 不同，说明它不是“完全未配置”；
+  `enable = 0`、没有命令残留，但还不能据此认定可以安全触发，需要确认 bit16 的
+  AMC 语义；
+- `irq_en = 0x00020000`：TCS1 的完成中断没有使能，所以第一次真实发送只能用轮询，
+  不能等中断。
+
+### 4. R5-C1 没有在本轮实现
+
+AMC trigger 的 `CONTROL` 位定义还需要对着 `rpmh-rsc.c` 的触发路径逐项确认；
+在把“已触发”和“已完成”分开之前写 sink，风险大于收益。下一轮先补这段静态分析，
+再按批准的条件实现编译期不可达的写路径。
+
+## 三十六、IRQ 寄存器归位与 TCS1 完整状态（0127）
+
+### 1. 修正：IRQ 寄存器在 tcs_base，不在 drv base
+
+`rpmh-rsc.c` 里 `read_tcs_reg(drv, RSC_DRV_IRQ_STATUS, 0, 0)` 的地址是
+`tcs_base + reg + 672*tcs_id`，所以：
+
+| 寄存器 | 物理地址 |
+| --- | --- |
+| `IRQ_ENABLE` | `0x18220d00` |
+| `IRQ_STATUS` | `0x18220d04` |
+| `IRQ_CLEAR` | `0x18220d08` |
+| `DRV_PRNT_CHLD_CONFIG` | `0x1822000c` |
+
+0126 从 `drv+0x00/0x04/0x08` 读到的三个数（`0x00020000` 等）不是 RSC 中断状态，
+0127 已改回 `tcs_base+0x00/0x04/0x08`。实测 `irq_en = 0x00000001`，即只有 TCS0
+的完成中断被使能，TCS1 没有。
+
+### 2. `prnt_chld` 解码
+
+`0x800c8104` → drv-2 `tcs = (config >> 12) & 0x3F = 8`，
+`ncpt = (config >> 27) & 0x1F = 16`。硬件每个 TCS 有 16 个命令槽，而设备树的
+`2+3+3+1` 要把控制 TCS 排除在连续数组之外；探针现在只遍历 TCS0–7。
+
+### 3. TCS 实测
+
+```text
+irq_en 0x00000001 irq_status 0x00000000 irq_clear 0x00000000 prnt_chld 0x800c8104
+prnt_chld decode: drv-2 tcs 8, ncpt 16
+tcs 0: control 0x01010000 (amc_en 1 amc_trig 1) status 0x1 enable 0x3
+tcs 0 slot 0: msgid 0x00010108 addr 0x00030000 data 0x5  status 0x00010101
+tcs 0 slot 1: msgid 0x00010108 addr 0x00030010 data 0x5  status 0x00010101
+tcs 0 slot 2..7: addr 0x00050004/0x000500a4/0x00050044/0x00050028/0x00050074/0x0005007c
+tcs 1: control 0x00010000 (amc_en 1 amc_trig 0) status 0x1 enable 0
+tcs 2..7: control 0x00000000 status 0x1 enable 0
+```
+
+- TCS0 实际有 **8 条**残留命令（不止两条），`0x30000/0x30010` 是 CLK 类，
+  `0x500xx` 是另一类资源；`status` 前两条是 `0x00010101`，其余为 0。TCS0 继续完全排除；
+- TCS1 的 AMC 已使能、Trigger 未置位、使能字为 0、16 个命令槽全空；
+  这比 TCS0 干净得多，但仍不等于“所有权已交给 XNU”；
+- `irq_en` 只有 TCS0 的位，所以第一次真实发送只能用轮询，不能等中断。
+
+### 4. R5-C1：写路径已写成但编译期关闭
+
+`kebab_spmi.c` 里新增了 `kebab_rpmh_tcs_send()`（只针对 TCS1、只接受编码器能产出的
+命令、每次写回都有界等待、完成后立即把通道标记为不可再用），整段包在
+`#if KEBAB_RPMH_WRITES` 里，宏为 0，所以**这一版内核里不存在该函数**：
+没有控制台命令、没有启动参数、没有运行时开关能到达它。
+
+需要说明：因为宏是 0，这段代码没有被编译器检查过，属于待审草案；R5-C2 的离线模拟
+和真正的编译验证要在打开宏之后单独做。
+
+### 5. 验证边界
+
+- 实测：上述逐槽输出、`prnt_chld` 解码、IRQ 寄存器归位；
+- 未做：任何 TCS/RSC 写；写路径未编译进内核。
+
+## 三十七、TCS1 发送状态机的虚拟 MMIO 验证（R5-C2，0128）
+
+### 1. 草案的四个阻塞问题都改了
+
+| 问题 | 处理 |
+| --- | --- |
+| 入口没有命令白名单 | `kebab_rpmh_tcs_send()` 先检查空指针、`kebab_rpmh_cmd_allowed()`，再检查通道必须是 TCS1 |
+| 完成只看 COMPL | 要求 `ISSUED` 与 `COMPL` 同时成立；预检发现残留 COMPL 直接拒绝，旧完成位不能冒充本次完成 |
+| 失败路径无条件清理 | 触发前只撤销本次写入（CONTROL 清 trigger、ENABLE/WAIT 清零）；触发后不清理、保留现场、标记 dead 并返回超时 |
+| 一次性限制被当成完整供电 | 注释与文档明确：单条命令实验模式，不等于两路 LDO 的完整上电序列 |
+
+### 2. 同一套状态机跑虚拟寄存器
+
+`package/KebabRpmhTcsHostTests.c` 用注入的 `kebab_tcs_io` 驱动与内核将要用同一份
+`kebab_rpmh_tcs_send()`，33 项断言全过，覆盖：
+
+- `CONTROL=0x00010000`（AMC 已使能、Trigger 未置位）可以进入；
+- 正常路径的写序列与顺序（msgid→addr→data→wait→enable→control→trigger→回收）；
+- 未授权命令零次 MMIO 写；
+- `ENABLE≠0`、`TRIGGER=1`、残留 `COMPL` 都拒绝且零写；
+- 回读不匹配时有界超时，不无限循环；
+- 只有 COMPL 没有 ISSUED、或只有 ISSUED 没有 COMPL 都不判成功；
+- 触发后超时：不再写任何寄存器，`enable` 保持原值留作证据，通道标记不可用；
+- 一次性门控：第二次调用直接拒绝且零写；
+- TCS0/TCS2 一律拒绝。
+
+### 3. 内核侧
+
+0128 删除了 0127 里那段未编译的 `#if KEBAB_RPMH_WRITES` 草案，改成一条指向
+`package/KebabRpmhVrm.c` 的说明。理由：同一份状态机不应在树里存在两份，一份
+已通过虚拟测试、一份从未被编译器检查过。生产镜像仍然没有任何写路径。
+
+### 4. 验证边界
+
+- 实测：33 项虚拟 MMIO 断言、整树构建 0 error；
+- 未做：没有把启用写路径的镜像刷到设备，没有真实 TCS 写入；
+- 未解决：TCS1 的实际所有权（AMC 已使能、Trigger 未置位只是必要条件）。
+
+## 三十八、R5-C3：隔离编译与故障注入补强
+
+### 1. 四个边界问题都改了
+
+| 问题 | 处理 |
+| --- | --- |
+| 触发前失败无条件回滚 | 用 `staged` 位记录本次真正写成功的阶段（WAIT/ENABLE/CONTROL），`tcs_undo_pre_trigger()` 只撤销这些阶段，且每次回滚都读回确认 |
+| 失败后还能重试 | 任何一次失败（含回滚失败）都把 `lock->dead` 置位，本次启动不再尝试 |
+| 成功后回收失败被忽略 | 回收的三次写改为 `tcs_write_sync()` 并检查结果；失败返回新的 `KEBAB_RPMH_ERR_RECLAIM`，阶段记为 `COMPLETE_UNCLEAN`——“命令完成”和“通道已安全回收”从此是两个结论 |
+| 重新初始化绕过一次性限制 | `dead/used` 移出通道结构，放进调用者持有的 `kebab_rpmh_lock`；`kebab_rpmh_tcs_init()` 不再碰这两个字段 |
+
+### 2. 故障注入测试：40 项
+
+新增/扩展的用例：
+
+- 第一条命令写失败：只尝试一次写，不做任何回滚写；
+- 回读不匹配：有界返回、回滚只覆盖已写入阶段、锁关闭；
+- 状态寄存器读失败：预检阶段拒绝，零次写；
+- 清理阶段写失败：返回 `RECLAIM`、阶段 `COMPLETE_UNCLEAN`、锁永久关闭；
+- 成功后重新 `init`：第二次发送仍被拒绝且零写；
+- 触发后超时：不写任何清理寄存器，`enable` 原样保留作证据。
+
+`40 checks, 0 failure(s)`；加上编码/授权那套 57 项，共 97 项主机断言。
+
+### 3. R5-C3 第一阶段：隔离内核编译
+
+用 XNU 自己的编译命令（从构建日志取 `kebab_spmi.c` 那条，替换源文件）编译
+`package/KebabRpmhVrm.c`，加 `-DKEBAB_RPMH_KERNEL`：
+
+- 头文件切换为 `sys/types.h` + `libkern/libkern.h`，用户态那套 `stdint/stddef/string`
+  在宏打开时不再引入；
+- 结果：0 error、3 warning，全部来自既有头文件（`KEBAB` 宏重定义、`kcdata.h`
+  的 declaration-after-statement 等），没有一条指向本模块；
+- 符号导出正常：`kebab_rpmh_encode_*`、`kebab_rpmh_cmd_db_lookup`、
+  `kebab_rpmh_tcs_send` 等全部生成，未解析符号只有 `_strcmp`/`_strlen`
+  （内核本来提供）。
+
+产物只是目标文件，没有链接进内核，也没有刷机镜像。
+
+### 4. 验证边界
+
+- 实测：97 项主机断言、内核标志编译的告警与符号；
+- 未做：没有把 `kebab_tcs_io` 绑到真实 RSC 寄存器，没有控制台写入口，没有真机写入；
+- 未解决：TCS1 的独占所有权；超时仍是循环次数上限，不是按 XNU 时钟标定的时间上限。
+
+## 三十九、R5-C4 时钟超时与 R5-O1 所有权审计
+
+### 1. C4：五个边界
+
+| 问题 | 处理 |
+| --- | --- |
+| 预检读失败没有关锁 | 任何预检读失败都置 `lock->dead`（fail-closed） |
+| `staged` 只记录确认写入 | 拆成 `attempted` 与 `confirmed`：只要存在“已尝试但未确认”的写，就不假定回滚成功，保留现场并锁死 |
+| 旧 `ISSUED` 未被拒绝 | 预检要求 `ISSUED` 与 `COMPL` 都为零，旧状态不能与新的 Complete 拼成本次完成 |
+| Trigger 依赖读回 | Trigger 改为单次写、不读回；硬件是否接受由 `ISSUED/COMPL` 判定，与厂商 `__tcs_set_trigger()` 一致 |
+| 并发 | `kebab_rpmh_lock` 增加 `busy` 占用位，重入直接拒绝 |
+
+超时也改成两层：每阶段既有单调时钟预算（回读 10 ms、完成 100 ms），也保留轮询次数
+上限；`kebab_tcs_io.now_us` 缺失时只用次数上限，存在时任何时钟停滞或跳变都不会
+造成死循环。
+
+### 2. C4 主机测试：48 项
+
+新增用例：预检读失败即锁死、旧 `ISSUED` 拒绝且零写、Trigger 不回声仍能成功、
+时钟停滞仍能返回超时、`busy` 重入拒绝。加上编码/授权 57 项，共 105 项主机断言。
+
+### 3. O1：谁在写 APPS RSC
+
+已证实：
+
+- 本仓库的 XNU 树里**没有任何 RPMh/RSC 写入路径**。`0x18220000`、`0x18200000`、
+  `0x80860000` 只出现在 `bsd/dev/kebab_spmi.c` 的只读探针里；
+- 该文件里所有对 RSC/TCS 的访问都是 `kebab_spmi_rd()`，`kebab_spmi_wr()` 只用于
+  SPMI arbiter（PON 写路径），不涉及 RSC；
+- 因此“XNU 当前不写 RSC”是可证实的。
+
+尚未证实：
+
+- TCS0 里那 8 条 CLK/BUS 命令是谁留下的（ABL/XBL 或上一次 Android 启动），
+  内核侧看不到写入者；
+- TCS1 为什么是 `AMC_ENABLE=1`、`TRIGGER=0`：看起来是固件初始化过但没有提交；
+- XNU 是否 APPS RSC 的唯一软件管理者：没有交接约定，ABL 可能保留状态跨过 payload 启动。
+
+被阻塞：
+
+- 要回答“谁写的”，需要 UEFI/ABL 侧日志或反汇编证据，当前拿不到；
+- 直接写 TCS1 做实验属于 NO-GO，不能用“写一下看看”代替所有权证据。
+
+### 4. 结论
+
+TCS1 目前只能算“候选通道”，不能声明已获得独占写入权。剩下的选择是：拿到
+ABL/UEFI 侧的 RPMh 初始化与交接证据，或者与固件约定一个明确的交接点；在那之前，
+真实 VRM 请求继续保持 NO-GO。
+
+## 四十、R5-C5 时钟与并发修复、R5-O2 分层审计
+
+### 1. C5：两个真实漏洞
+
+- **完成轮询没有时间预算**：`KEBAB_TCS_CMPL_TIMEOUT_US` 只是定义，循环里只比对了
+  次数。现在完成轮询同时使用 `now_us()` 的 100 ms 预算与 10000 次上限；时钟正常
+  时由时间结束，时钟停滞或倒退时由次数上限结束。
+- **`busy` 不是原子获取**：原来“检查 dead/used/busy，再写 busy=1”是两个普通内存
+  操作，两个线程可以同时通过。现在用 `__atomic_exchange_n(busy, 1, ACQ_REL)` 抢占，
+  抢占后再复核 dead/used，失败则释放。
+
+### 2. C5 测试：56 项
+
+- 正常时钟下完成超时的读次数在 100–3000 之间，证明是时间预算而不是 10000 次上限
+  结束的；
+- 冻结时钟：读次数 ≥1000，仍能返回超时；
+- 倒退时钟：立即结束，不因无符号相减而长时间循环；
+- 无时钟回调：退回次数上限；
+- 两个线程同时调用：恰好一个执行、另一个被抢占拒绝，寄存器只收到一笔事务（10 次写）。
+
+顺带修正：上一轮 C16 用“永不完成 + 时钟每步前进”，实际没有冻结时钟；现在
+`now_mode = 1` 才是真正的冻结。
+
+### 3. O2：三层证据，必须分开
+
+| 层次 | 结论 | 依据 |
+| --- | --- | --- |
+| 软件访问审计 | 已证实：当前 XNU 不写 APPS RSC | 全树 grep：三个地址只出现在 `kebab_spmi.c`，访问全为读；`kebab_spmi_wr()` 只写 SPMI arbiter |
+| 启动链状态 | 受阻：无法归因 | `unixnu` 加载器源码不在本仓库，ABL 闭源；TCS0 的 8 条 CLK/BUS 命令、TCS1 的 `AMC_ENABLE=1` 只能观察 |
+| 所有权交接 | 受阻：没有约定 | 没有任何文档或代码规定 XNU 何时接管 drv-2 的 Active TCS |
+
+已有的只读快照（`RPMH?`）能长期稳定地显示 TCS1 空，但“长期为空”不等于“已获得
+管理权”。要推进，需要 unixnu/ABL 侧的证据或一个明确的交接协议，而不是再加几次
+寄存器快照。
+
+### 4. 验证边界
+
+- 实测：56 项主机断言（含并发）、105 项编码/授权与故障注入断言；
+- 未做：真实 RSC/TCS 写入；`XNU-0127.img` 未变。
+
+## 四十一、C6 全局锁与 O3-A/B 启动链审计
+
+### 1. C6：全局唯一锁与并发压力
+
+- 新增 `kebab_rpmh_tcs_init_global()`：内核端口必须使用模块内的单一
+  `kebab_rpmh_global_lock`，不再允许两个调用点各自建锁绕过“每次启动一次”；
+- 并发测试改为 50 轮、`pthread_barrier` 同步起跑的双线程竞争：每轮恰好一个赢家、
+  一个被拒绝、寄存器只收到一笔事务（10 次写）；另加一条断言确认两个通道拿到的是
+  同一个全局锁对象；
+- 本套 58 项断言全过。
+
+### 2. O3-A：实际镜像对应哪份固件源码
+
+- `signed.img` 前 8 MiB 里保留了固件构建路径
+  `/home/albert/Codex/UEFI/Mu-Silicium/Build/kebabPkg/DEBUG_CLANGPDB/AARCH64/...`；
+- 该源码树在 Ubuntu 上存在：`/home/albert/Codex/UEFI/Mu-Silicium`，HEAD 为
+  `7013966c`，但工作区有未提交修改（`APRIORI.inc`、`DXE.inc`、`DeviceBuild.py`、
+  `BootManager.c` 等），**所以刷入的 UEFI 不等于 7013966c 这个提交**；
+- 结论：能定位到树，但还不能把某个 git 提交声明为设备上运行的那一份；需要构建
+  记录或镜像哈希才能锁定版本。
+
+### 3. O3-B：UEFI/UniXNU/DarwinBoot 是否碰 RSC
+
+| 组件 | 结果 |
+| --- | --- |
+| GFander/UniXNU（公开） | 无 `18200000`/RSC 访问；只有一个 Python 脚本提到 rpmh/GMU votes |
+| UniXNU/DarwinBoot（公开） | 完全没有匹配 |
+| Mu-Silicium kebabPkg | `APRIORI.inc`/`DXE.inc` 都加载 `Binaries/kebab/QcomPkg/Drivers/RpmhDxe/RpmhDxe.inf` |
+
+`RpmhDxe.efi`（65,536 字节）里能读出 53 处 “TCS” 和 6 处 “Rpmh” 字符串，说明
+UEFI 阶段确实带了一个 RPMh 驱动。这解释了 TCS0 的 CLK/BUS 残留与 TCS1 的
+`AMC_ENABLE=1` 可能来自哪里，也说明“XNU 是唯一 RPMh 使用者”不成立。
+
+### 4. 对交接协议的影响
+
+- 最后一个可控阶段（UEFI）既然能访问 RPMh，就必须由它显式声明是否在退出前停止
+  使用 TCS1，并把当时的只读状态写进交接记录；
+- 现有公开的 UniXNU/DarwinBoot 源码没有 RSC 访问，说明交接记录可以放在它们这一层
+  传递，而不必改 ABL；
+- 但 `RpmhDxe` 是二进制、行为未知，交接前还需要知道它是否会留下未完成的请求。
+
+### 5. 验证边界
+
+- 实测：58 项主机断言（含 50 轮并发）、UEFI 源码树与镜像构建路径、RpmhDxe 字符串；
+- 未做：没有解析 `RpmhDxe.efi` 的实际行为，没有改启动链，没有真机 RPMh 写入。
+
+## 四十二、C6 锁身份收紧与 O3-C0/C1 启动链取证
+
+### 1. C6：内核构建只能使用全局锁
+
+- `kebab_rpmh_tcs_init(t, io, lock)` 与 `kebab_rpmh_global_lock_get()` 现在只在
+  非 `KEBAB_RPMH_KERNEL` 构建里可见；
+- 内核构建下 `kebab_rpmh_tcs_send()` 会校验 `t->lock == &kebab_rpmh_global_lock`，
+  调用者自带锁直接返回 `TCS_STATE`；
+- 两套主机测试仍全过（58 + 57）。
+
+### 2. O3-C0：当前源码确实调用 ExitBootServices
+
+- 本机实际用于构建的 DarwinBoot 源码在 `/home/albert/tmpwork/dboot`，与公开仓库
+  版本只差两处打印字符串，**没有绕过分支**；`DarwinBoot.c` 第 686–691 行仍是
+  `GetMemoryMap` → `ExitBootServices(mImage, Key)`，循环最多三次；
+- 历史记录里的“EBS 卡在 CoreTerminateMemoryMap 后绕过”在这次源码里找不到，
+  说明那是另一次构建或另一个分支；
+- 但**镜像级验证受阻**：`signed.img` 里的 FV 是压缩的，搜不到 `DARWINBOOT`
+  的宽字符或 ASCII 字符串，无法直接证明刷入的固件就是这份源码编出来的。
+  要闭环需要：构建产物的哈希与 FV 对照，或在 UEFI 阶段加一条可见输出。
+
+另外 Mu-Silicium 里存在 `KernelErrataPatcherLib`，它会挂钩 `gBS->ExitBootServices`；
+但 kebabPkg 的 dsc/fdf 没有引用它，所以这条 hook 在 kebab 构建里是否生效同样未知。
+
+### 3. O3-C1：RpmhDxe 目前只能静态观察
+
+- `RpmhDxe.efi` 65536 字节，`.depex` 18 字节（无依赖表达式），字符串里有
+  `Rpmh` 与 53 处 `TCS`，没有 `ExitBootServices` 字样；
+- 它是二进制、无源码，无法判断它是否在 EBS 前完成所有 TCS 事务；
+- 若实际启动路径跳过 EBS，那么它的退出回调（如果有）就不会执行，残留状态可能
+  比正常退出更多。
+
+### 4. O3-C2/C3 的结论
+
+- 在拿到“是否调用 EBS”的镜像级证据之前，不能依赖“固件正常退出”作为交接前提；
+- 交接记录（`KebabRscHandoff`）应设计为在**最后一次进入 XNU 之前**由引导器写入，
+  而不是依赖 EBS 通知；
+- 对 TCS0/TCS1 的早期残留统一标记 `PREEXISTING_UNKNOWN`，不声明所有权。
+
+### 5. 验证边界
+
+- 实测：两套主机测试、DarwinBoot 源码对比、RpmhDxe 二进制字符串；
+- 未做：未反汇编 RpmhDxe，未证明镜像中的 DarwinBoot 版本，未做真机 RPMh 写入。
+
+## 四十三、C6-F 私有化与 O3-C2 镜像级闭环
+
+### 1. C6-F
+
+`kebab_rpmh_tcs_init()` 在内核构建里已不存在：实现改为 `static
+kebab_rpmh_tcs_init_impl()`，带自定义锁的包装函数只在非 `KEBAB_RPMH_KERNEL` 构建
+里定义。发送入口的锁身份检查保留。两套主机测试仍全过（58 + 57）。
+
+### 2. O3-C2：把 signed.img 拆开看
+
+- FV 头 `_FVH` 在文件偏移 `0x1098`，FV 从 `0x1070` 开始；
+- 用 `uefi_firmware` 递归解包（FV 是压缩的，原始字节里搜不到 GUID），共 106 个 FFS；
+- 找到 `RpmhDxe`：FFS GUID `cb29f4d1-7f37-4692-a416-93e82e219766`，文件 65,608
+  字节；内部三段：
+  - `0x13` DEPEX 18 字节：`02 42 b9 37 ae 7f 45 91 4c a1 96 d9 66 9f d3 47 a3 08`，
+    即 PUSH GUID `AE37B942-457F-4C91-A196-D9669FD347` + END；
+  - `0x10` PE32 65,536 字节，SHA-256
+    `166f49bdbc6955a74718be9a2907bc1dfbd15c6e2e28c1b7707ede941c17eb67`；
+  - `0x15` UI 16 字节（`RpmhDxe`）。
+
+### 3. 与本地构建产物比对
+
+`Binaries/kebab/QcomPkg/Drivers/RpmhDxe/RpmhDxe.efi` 的 SHA-256 与镜像里的 PE32
+**完全一致**，`.depex` 逐字节相同。这说明镜像里的 RpmhDxe 就是本仓库 `Binaries/`
+下那份二进制，出处确定。
+
+### 4. APRIORI 把 DEPEX 绕过去了
+
+FV 里还有一个 1,284 字节的 FFS，GUID `fc510ee7-ffdc-11d4-bd41-0080c73c8881`
+（UEFI PI 的 APRIORI 文件 GUID），其内容包含 RpmhDxe 的 GUID。按 PI 规范，
+APRIORI 列出的驱动按列表顺序调度，**DEPEX 条件不参与调度判断**。
+
+结论：这个镜像里 RpmhDxe 会被早期调度，不能用“DEPEX 依赖的协议没装”来推断它
+没有运行。UEFI 确实执行了 RPMh 驱动，XNU 不是唯一的 RPMh 使用者，TCS0/TCS1 的
+残留有了明确候选来源。
+
+### 5. 仍未证明
+
+- RpmhDxe 具体写了哪些 TCS、是否在退出前完成事务（需要反汇编或运行时探针）；
+- 引导器是否调用 EBS 仍未在镜像级闭环（FV 里的 DarwinBoot 模块未按名字找到，
+  可能在 payload 或另一个 FV）；
+- 因此 TCS1 所有权仍是 UNKNOWN，真实写入继续 NO-GO。
+
+## 四十四、O3-C3 初步：RpmhDxe 的静态指纹
+
+### 1. 基准
+
+`RpmhDxe.efi`（65,536 字节，SHA-256 `166f49bd…`）与镜像 FV 内的 PE32 逐字节一致，
+本节所有偏移都以这份文件为准。
+
+### 2. PE 结构
+
+| 项 | 值 |
+| --- | --- |
+| Machine | `0xaa64` |
+| EntryPoint RVA | `0x1000` |
+| `.text` | RVA `0x1000`，`0xd000` 字节 |
+| `.data` | RVA `0xe000`，`0x1000` |
+| `.reloc` | RVA `0xf000` |
+
+### 3. 字符串证据（文件偏移 = RVA，均在 .text 内）
+
+| RVA | 字符串 |
+| --- | --- |
+| `0xbe5b` | `configuring TCS (DRV_ID: %d)(TCS_ID: %d)(AMC?: %d)` |
+| `0xbeaa` | `TCS SENT (TCS INDEX: %d) (TCS_ID: %d)` |
+| `0xbe44` | `TCS IDLE (TCS_ID: %d)` |
+| `0xbe31` | `!!!!TCS STUCK!!!!` |
+| `0xbfc4` | `Invalid BaseAdresss/numcmdspertcs for drv, %d, passed to rscHalGetNumC…` |
+| `0xc364` | `Invalid TCS Id, %d, in RscHalTriggerTCS` |
+| `0xc3ff` | `Invalid TCS Id, %d, in RscHalConvertTCStoAMC` |
+| `0xc491` | `Invalid TCS Id, %d, in RscHalConvertAMCtoTCS` |
+| `0xbc01` | `rpmh_exit_sleep, flushing wake AMCs (DRV_ID: 0x%08x)` |
+| `0xbba3` | `flushing sleep AMCs` |
+
+这些名字说明驱动内部有一层 RSC HAL：TCS 触发（`RscHalTriggerTCS`）、TCS 与 AMC
+互转、每 DRV 的基址与每 TCS 命令数配置、以及一个 `rpmh_exit_sleep` 退出路径。
+
+### 4. 基址不是硬编码在指令里
+
+扫描 `.text` 里的 `ADRP+ADD`，没有任何目标落在 `0x18xxxxxx`；而文件偏移 `0xe22c`
+（`.data` 内）出现小端常量 `00 00 20 18`，即 `0x18200000`。也就是说 RSC 基址来自
+数据表/配置结构，代码通过指针访问——这与“只搜 `0x18220000` 找不到写入者”的
+预期一致。
+
+### 5. 当前能回答到什么程度
+
+| 问题 | 结论 | 证据等级 |
+| --- | --- | --- |
+| RpmhDxe 是否初始化 drv-2 | 未知 | 有 HAL 代码与基址表，但没有调用链 |
+| 是否分配/使用 TCS1 | 未知 | 存在 TCS/AMC 转换与触发函数 |
+| 是否有退出时完成/回收 | 存在 `rpmh_exit_sleep` 与 flush 字符串 | 函数存在，可达性未证 |
+| 进入 XNU 前 TCS1 是否已不归固件管理 | 不能证明 | — |
+
+同时修正一处表述：APRIORI 只证明该驱动被列为优先调度、DEPEX 不作为调度阻塞，
+不等于入口已执行、更不等于 RPMh 初始化成功。镜像层面的结论应保持
+“包含指定版本并列入 APRIORI”。
+
+### 6. 下一步的逆向目标（按优先级）
+
+1. 从 `RscHalTriggerTCS` 字符串反向找引用它的函数，建立“初始化 → 配置 TCS →
+   触发 → 等待完成”的调用图；
+2. 找到 `.data` 里基址表的引用者，确认它对应哪个 DRV 与 TCS 数量；
+3. 找到 `rpmh_exit_sleep` 的调用点，判断是否注册了 EBS 或 Exit 事件；
+4. 只有在调用图能连到“进入内核前”这条路径上，才谈得上 TCS1 的交接证据。
+
+真实写入仍 NO-GO。
+
+## 四十五、O3-C4 进展与术语修正
+
+### 1. 术语修正：`rpmh_exit_sleep` 不是驱动退出
+
+`rpmh_exit_sleep`、`flushing sleep AMCs`、`flushing wake AMCs` 这一组字符串属于
+RPMh 的**电源状态转换**（sleep/wake），与 UEFI 的 `ExitBootServices`、驱动 Unload
+不是同一类。之前把它列为“固件退出时完成或回收”的证据是错的，本轮撤回。
+
+要分开两张调用图：
+
+- A：RPMh 初始化与命令执行（配置 TCS → AMC → Trigger → 完成）；
+- B：UEFI 驱动生命周期（DXE 入口 → 事件注册 → EBS/Unload 处理）。
+
+只有 B 的路径能连到 A 的回收动作，才谈得上 EBS 触发 TCS 回收。
+
+### 2. `.data` 里那个基址
+
+文件偏移 `0xe22c` 属于 `.data`（raw `0xe000` ↔ RVA `0xe000`），所以它同时也是
+RVA `0xe22c`。周边是按 4 字节排列的字段：
+
+```text
+... 0x00000000 0x18200000 0x00000002 0x00000000 0x00000001 ...
+```
+
+`0x18200000` 紧邻的值是 `2`，看起来像 `{base, count}` 形式的表项（可能是 DRV 数或
+TCS 组数），但这只是结构猜测，尚未证明代码如何索引它。
+
+### 3. 字符串引用没有走 ADR/ADRP
+
+对 `TCS IDLE`、`configuring TCS`、`TCS STUCK`、`TCS SENT`、`RscHalTriggerTCS`
+错误串、`rpmh_exit_sleep` 等 RVA 做 ADR/ADRP 直接引用扫描，命中数为 0。说明这些
+字符串不是通过 ADR/ADRP 直接取址，更可能是经由指针表、`ldr` 字面量或间接计算。
+这同时也说明：之前“按字符串找函数”的方法需要换成“先找引用表/字面量，再回溯
+函数边界”。
+
+### 4. 本轮没有建立调用图
+
+- C4-A（Trigger 日志的 XREF 与调用者）：未完成；
+- C4-B（基址表引用者与 DRV 索引）：只做到结构旁证；
+- C4-C/D（退出路径与事件注册）：未开始；
+- TCS1 所有权：仍 UNKNOWN。
+
+### 5. 下一步的具体做法
+
+1. 在 `.data` 里找指向字符串的 4/8 字节表项（RVA 或 image-relative），再找引用该
+   表的代码；
+2. 在 `.text` 里扫描 `ldr` 字面量池，匹配字符串或基址结构的地址；
+3. 用函数边界（`pacibsp`/`stp x29,x30` 序言与 `ret`）把命中点归到具体函数，
+   记录 RVA；
+4. 沿调用者向上，直到 DXE 入口，才可能回答“是否存在 TCS 回收”。
+
+真实写入继续 NO-GO；设备保持 `XNU-0127.img`。
+
+## 四十六、O3-C4-A：从配置入参到全局指针的第一条链
+
+### 1. 地址空间
+
+`ImageBase = 0x0`，因此本模块里 RVA 与首选 VA 相同；`.text` 覆盖
+`0x1000–0xe000`，`.data` 在 `0xe000`。下面所有地址都是 RVA。
+
+### 2. `.data` 里的描述符表
+
+```text
+0x0e1d0: 000000000000bf00 0000000200000002
+0x0e200: 000000000000e1d0 00000000000061e8
+0x0e210: 0000000000006268 0000000000006280
+0x0e220: 0000000000006298 1820000000000002
+0x0e230: 0000000000000002 0000000000000001
+0x0e240: 000000000000e228 0000000000000000
+```
+
+- `0xe228` 处 64 位字是 `1820000000000002`：低 32 位 `2`、高 32 位 `0x18200000`；
+  换句话说 `0xe22c` 只是这个字的高半部分，它后面的 `0xe230` 是 `{2, 1}`；
+- `0xe200` 指向 `0xe1d0`，`0xe240` 指向 `0xe228`（自引用指针）；
+- `0x61e8/0x6268/0x6280/0x6298` 都落在 `.text`，是函数指针候选。
+
+目前**没有**任何代码用 `ADRP+ADD/LDR` 直接引用 `0xe228` 或 `0xe200`；这几处只被
+数据互相指向，说明它们可能通过“配置结构指针”间接到达，而不是取静态地址。
+
+### 3. 第一条可验证的链
+
+```text
+0x123c(x0, x1)
+  -> bl 0x1c2c
+       0x1c38  str x0, [x8, #0x258]      ; 全局 0xe258 = x0
+       0x1c44  str x1, [x9, #0x260]      ; 全局 0xe260 = x1
+       0x1c4c  ldr x8, [x1, #0x60]
+       0x1c54  str x8, [x10, #0x268]     ; 全局 0xe268 = x1->0x60
+       0x1cbc  ldr x8, [x1, #0x58]
+       0x1cc4  str x8, [x9, #0x270]      ; 全局 0xe270 = x1->0x58
+```
+
+- `0x1c2c` 是初始化函数：把两个入参和 `x1` 的两个字段存进四个全局指针；
+- 任一入参为空时走 `bl 0x19e0`（断言/日志），字符串地址在 `0xb27c`、`0xb297`、
+  `0xb2b4`、`0xb2c8`；
+- 调用者 `0x123c` 只是转交 `x0/x1`，说明真正的配置结构来自更上一层。
+
+这条链证明了：RpmhDxe 内部**确实**有一个“配置结构 → 全局指针”的初始化步骤，
+`0x18200000` 所在的表很可能就是这类结构的来源之一，但还没有证据把它接到
+`0x1c2c` 的入参上。
+
+### 4. 下一步
+
+1. 找 `0x123c` 的调用者，追到给 `x1` 赋值的指令，确认配置结构来自 `.data`
+   的哪一段（是否就是 `0xe1d0`/`0xe228` 那块）；
+2. 找到之后再沿 `0xe260/0xe268` 的读方（例如 `0x1138` 的 `ldr x1, [x8, #0x260]`）
+   追到 MMIO 访问；
+3. 用 `.reloc` 的 DIR64 记录核对哪些数据指针在加载时被重定位，避免把“文件里的
+   相邻字段”误当成指针。
+
+### 5. 证据等级
+
+| 项 | 等级 |
+| --- | --- |
+| 0x1c2c 把入参写入全局 | DIRECT（指令可见） |
+| 0x123c 调用 0x1c2c | DIRECT |
+| 0xe228 表项与 0x18200000 的关系 | INFERRED（结构旁证） |
+| 该表被 0x123c 使用 | UNRESOLVED |
+| TCS1 初始化/回收 | UNRESOLVED |
+
+真实写入继续 NO-GO。
+
+## 四十七、更正：`0x1c2c` 是 UEFI 服务表初始化，不是 RSC 配置
+
+### 1. 入口证据
+
+`EFI_SYSTEM_TABLE`（64 位）字段偏移：`RuntimeServices` = `0x58`，
+`BootServices` = `0x60`，`NumberOfTableEntries` = `0x68`，`ConfigurationTable` = `0x70`。
+
+`0x1000` 的入口代码：
+
+```text
+0x1000  cmp  x0, #0
+0x1004  b.eq #0x10bc
+0x1018  cmp  x1, #0
+0x1020  ldrb w8, [x1]        ; 检查 x1 开头的三个字节
+0x1024  cmp  w8, #0x49
+0x102c  ldrb w8, [x1, #1]
+0x1030  cmp  w8, #0x42
+0x1038  ldrb w8, [x1, #2]
+0x103c  cmp  w8, #0x49
+0x104c  ldr  x2, [x1, #0x68] ; NumberOfTableEntries
+0x1050  ldr  x3, [x1, #0x70] ; ConfigurationTable
+```
+
+`x1` 被按 `EFI_SYSTEM_TABLE` 的 `0x68`/`0x70` 字段访问，且每个字段都是 64 位，
+与“x1 = SystemTable”吻合。入口处还检查了 `x1` 开头三个字节是否为 `I B I`
+（`0x49 0x42 0x49`），这一步目前无法解释，先记为未解决细节。
+
+### 2. 因此 `0x1c2c` 的语义要改
+
+```text
+0x123c(x0 = ImageHandle, x1 = SystemTable)
+  -> 0x1c2c
+       0xe258 = x0            ; gImageHandle
+       0xe260 = x1            ; gST
+       0xe268 = [x1 + 0x60]   ; gBS   = SystemTable->BootServices
+       0xe270 = [x1 + 0x58]   ; gRT   = SystemTable->RuntimeServices
+```
+
+四个全局的用途与 EDK II 的 `gImageHandle/gST/gBS/gRT` 完全一致。这条链属于
+**UEFI 驱动生命周期（B 图）**，不是 RPMh 配置（A 图）。上一节的“配置结构”判断
+撤回。
+
+### 3. 证据等级重排
+
+| 发现 | 等级 |
+| --- | --- |
+| `0x123c → 0x1c2c` 调用 | DIRECT |
+| `0x1c2c` 四次全局存储 | DIRECT |
+| `x1+0x58/0x60` 对应 RT/BS | HIGH CONFIDENCE（入口按 0x68/0x70 访问同一结构） |
+| `0x1c2c` 为服务表初始化 | HIGH CONFIDENCE |
+| `0xe228` 与 `0x18200000` 的字节关系 | DIRECT |
+| `0xe228` 字段含义 | UNRESOLVED |
+| `0xe228` 被这条链使用 | UNRESOLVED（已证伪为“配置结构”） |
+
+另外说明：`ImageBase = 0` 只说明文件里的首选 VA 等于 RVA，运行时地址仍由加载器
+和重定位决定。
+
+### 4. 下一步（两条并行）
+
+- **C4-B1**：确认 `0x1000 → 0x123c` 的调用关系，并检查 `0xe268/0xe270` 的读方
+  是否通过 `blr` 间接调用 Boot/Runtime Services 函数表；成立即可把四个全局
+  正式命名为 `gImageHandle/gST/gBS/gRT`；
+- **C4-A2**：从 `0xe200` 的函数指针候选 `0x61e8/0x6268/0x6280/0x6298` 出发恢复
+  函数边界与间接调用者，并独立分析 `0xe240 → 0xe228` 的数据关系，找真正形成
+  RSC 基址并访问寄存器的路径。函数地址出现在数据结构里不等于被调用，必须找到
+  `blr` 或结构被传递的证据。
+
+TCS1 所有权仍 UNRESOLVED，真实写入 NO-GO。
+
+## 四十八、O3-C4-B2：入口图闭环与 Boot Services 用法
+
+### 1. 入口到初始化
+
+- `0x1194` 处 `bl 0x123c`，即前一节那个保存 `gImageHandle/gST/gBS/gRT` 的
+  初始化函数；
+- `0x1000` 起是 DXE 入口（检查 `x0 != 0`、`x1` 的 `EFI_SYSTEM_TABLE` 签名
+  `IBI`、读 `+0x68/+0x70`），控制流在入口函数内延伸到 `0x1194`；
+- 因此 `0x1000 → 0x1194 → 0x123c → 0x1c2c` 这条链可以标为 DIRECT。
+
+签名检查只比较了前三个字节（`0x49 0x42 0x49`），不是完整的八字节 `IBI SYST`；
+这不影响语义判断，但严格说这是“部分签名检查”。
+
+### 2. Boot Services 的实际用法（taint 跟踪 gBS）
+
+| 偏移 | UEFI 字段 | 使用点 |
+| --- | --- | --- |
+| `0x30` | `FreePages` | `0x2488` |
+| `0x98` | `HandleProtocol` | `0x11bc`（随后 `blr x9`） |
+| `0x150` | `InstallConfigurationTable` | `0x14d4`（随后 `blr x4`） |
+| `0x170` | `UnloadImage` | `0x1514` |
+
+**没有**出现 `0x178`（`ExitBootServices`），也没有 `0x50`（`CreateEvent`）或
+`0x70`（`CloseEvent`）。
+
+### 3. 这意味着什么
+
+- RpmhDxe 自身既不调用 `ExitBootServices`，也没有通过 `gBS->CreateEvent` 注册
+  EBS 事件；它的 TCS 事务不会在 EBS 回调里被回收；
+- 它在 `0x14d4` 调用了 `InstallConfigurationTable`，参数里的表指针是 `0xe0d8`；
+- `0xe0d0` 一带的数据是：
+  ```text
+  0x0e0d0: a0003f8e 3b7269c9 00010001 00000000
+  0x0e0e0: 000015a4 000015bc 000015f8 00001634
+  ```
+  前 16 字节像 GUID 加版本，后面是四个指向 `.text` 的函数指针
+  （`0x15a4/0x15bc/0x15f8/0x1634`）。这更像一张“发布给 OS 的表”，而不是
+  驱动退出路径。
+
+### 4. 对所有权问题的影响
+
+- “固件在 EBS 时回收 TCS”这一假设，在这个驱动上不成立：它没有 EBS 回调；
+- 因此 TCS0/TCS1 的残留如果要被清理，只可能发生在别处（ABL、其他 DXE 驱动或
+  根本没人清理）；
+- `InstallConfigurationTable` 发布的那张表值得后续分析：它可能是 RPMh 相关状态
+  交给 OS 的通道，也可能是 RSC 配置的来源之一。
+
+### 5. 证据等级
+
+| 项 | 等级 |
+| --- | --- |
+| `0x1194 → 0x123c` | DIRECT |
+| `0x123c` 保存四个 UEFI 全局 | HIGH CONFIDENCE |
+| gBS 偏移 0x30/0x98/0x150/0x170 的使用 | DIRECT |
+| 无 `ExitBootServices`/`CreateEvent` 调用 | HIGH CONFIDENCE（taint 窗口内） |
+| 配置表 `0xe0d0/0xe0d8` 的内容与用途 | UNRESOLVED |
+| TCS1 所有权 | UNKNOWN |
+
+真实写入继续 NO-GO。
+
+## 四十九、更正：RpmhDxe 确实注册了 EBS 事件
+
+### 1. Boot Services 偏移表纠正
+
+| 偏移 | 正确函数 | 上一轮的错误命名 |
+| --- | --- | --- |
+| `0x30` | `FreePages` | 正确 |
+| `0x98` | `HandleProtocol` | 正确 |
+| `0x148` | `InstallMultipleProtocolInterfaces` | 未识别 |
+| `0x150` | `UninstallMultipleProtocolInterfaces` | 误称 `InstallConfigurationTable` |
+| `0x170` | `CreateEventEx` | 误称 `UnloadImage` |
+| `0xC0` | `InstallConfigurationTable` | 没有证据 |
+| `0xE0` | `UnloadImage` | 没有证据 |
+| `0xE8` | `ExitBootServices` | 没有调用 |
+
+`0x178` 是结构体尾部，不是 `ExitBootServices`；上一轮按 `0x178` 搜索是错的。
+
+### 2. `CreateEventEx` 调用现场（0x1514）
+
+```text
+0x14f8  adrp x2, #0x1000
+0x1508  add  x2, x2, #0x49c      ; NotifyFunction = 0x149c
+0x14fc  adrp x4, #0xe000
+0x150c  add  x4, x4, #0x28       ; EventGroup = 0xe028
+0x1504  adrp x5, #0xe000
+0x1510  add  x5, x5, #0x248      ; &Event = 0xe248
+0x1518  mov  w0, #0x200          ; Type = EVT_NOTIFY_SIGNAL
+0x151c  mov  w1, #8              ; NotifyTpl = TPL_CALLBACK
+0x1520  mov  x3, xzr             ; Context = NULL
+0x1524  blr  x9                  ; gBS->CreateEventEx
+```
+
+`0xe028` 的 16 字节是 `55 f0 ab 27 b8 b1 26 4c 80 48 74 8f 37 ba a2 df`，
+即 **`27ABF055-B1B8-4C26-8048-748F37BAA2DF` = `EFI_EVENT_GROUP_EXIT_BOOT_SERVICES`**。
+
+上一轮“RpmhDxe 不注册 EBS 事件、不会在 EBS 回收 TCS”的结论**撤回**。
+
+### 3. EBS 回调做了什么
+
+`0x149c`（NotifyFunction）：
+
+```text
+0x149c  stp  x29, x30, [sp, #-0x10]!
+0x14a4  bl   #0x14b0
+0x14ac  b    #0x3ba4
+```
+
+`0x14b0`：
+
+```text
+x10 = gBS
+x0  = [0xe250]                    ; 镜像句柄
+x1  = 0xe068                      ; 协议 GUID
+x2  = 0xe0d8                      ; 接口实例
+x3  = 0
+x4  = [gBS + 0x150]               ; UninstallMultipleProtocolInterfaces
+br  x4
+```
+
+`0x3ba4`（尾调用）遍历一张表：全局指针 `[0xbef8]`，元素步长 `0x30`，对每个元素
+调用 `0x7fdc` 与 `0x80c4`。
+
+也就是说，EBS 时驱动会注销自己的协议接口，再走一遍“客户端/命令表”的清理。
+这是**真实的 EBS 清理路径**，其内部是否完成或丢弃 TCS 事务，取决于 `0x7fdc`、
+`0x80c4` 两个函数。
+
+### 4. 之前误读的 `0xe0d8`
+
+`0xe0d0` 那 16 字节并不是 UEFI Configuration Table 的 GUID，而是协议接口结构；
+`InstallMultipleProtocolInterfaces` 在 `0x1568`、`UninstallMultipleProtocolInterfaces`
+在 `0x14d4`，配对使用同一个 GUID（`0xe068`）与接口指针（`0xe0d8`）。
+
+### 5. 状态
+
+| 项 | 状态 |
+| --- | --- |
+| EBS 事件注册 | 已证实（GUID 与 CreateEventEx 参数均对齐） |
+| EBS 回调内容 | 注销协议 + 表清理（`0x7fdc`/`0x80c4`） |
+| 回调是否触及 RSC/TCS | UNRESOLVED，下一步 |
+| drv-2 TCS1 所有权 | UNKNOWN |
+| 真实写入 | NO-GO |
+
+下一步只有三件事：反汇编 `0x7fdc` 与 `0x80c4`、解析 `[0xbef8]` 的表结构、
+确认回调清理的是命令队列还是 TCS 硬件状态。
+
+## 五十、O3-C5：EBS 回调的清理内容与内存服务风险
+
+### 1. `0x7fdc` / `0x80c4` 做什么
+
+两者结构几乎相同：
+
+```text
+0x7fec  adrp x22, #0xe000 ; x22 = 0xe850
+0x7ffc  mov  x0, x22
+0x08000  mov  w1, w21     ; w21 = 第一个参数（id）
+0x08004  bl   #0x65f0     ; 查表/查询
+0x08008  mov  w19, w0
+0x0800c  cbz  w19, #0x8044
+0x08018  adrp x3, #0xc000
+0x0801c  add  x3, x3, #0x2c3   ; 出错日志字符串
+0x0802c  bl   #0xa49c          ; 日志输出
+```
+
+查询失败时打印日志返回；成功分支在 `0x8044`/`0x812c` 处用 `id * 0x18` 计算
+表项地址（元素 24 字节）。两条路径都**没有**任何指向 `0x18xxxxxx` 的地址构造，
+也没有写 RSC 寄存器的迹象——它们更像“按 id 清理客户端/命令状态”，不是 TCS 硬件
+回收。
+
+### 2. DXE Core 的 EBS 顺序（Mu 源码）
+
+`Mu_Basecore/MdeModulePkg/Core/Dxe/DxeMain/DxeMain.c`：
+
+```text
+790:  CoreNotifySignalList (&gEfiEventBeforeExitBootServicesGuid);
+802:  Status = CoreTerminateMemoryMap (MapKey);
+807:    CoreNotifySignalList (&gEventExitBootServicesFailedGuid);
+816:  CoreNotifySignalList (&gEfiEventExitBootServicesGuid);
+```
+
+即：先通知 BeforeEBS，再终止内存映射，成功后才通知 EBS。RpmhDxe 注册的正是
+`gEfiEventExitBootServicesGuid`，所以它的回调（`0x149c`）**运行在内存映射已经
+终止之后**。
+
+### 3. 风险链
+
+```text
+CoreTerminateMemoryMap() 成功
+  -> CoreNotifySignalList(ExitBootServicesGuid)
+    -> RpmhDxe 0x149c -> 0x14b0
+      -> UninstallMultipleProtocolInterfaces(gBS+0x150)
+        -> EDK II 可能进入 CoreFreePool / 释放协议或句柄路径
+```
+
+UEFI 规范要求在 EBS 通知回调里不得调用会改变内存映射的服务；EDK II 的协议卸载
+路径在移除最后一个协议时可能释放内存。这与历史上“EBS 卡在
+`CoreTerminateMemoryMap` 之后、`CoreNotifySignalList` 处理中”的位置吻合。
+
+**这仍是假设**：需要证明事件注册在真机上成功、回调确实被触发、且卸载路径进入了
+释放分支。但它是目前最有解释力的线索，优先级高于继续猜测 TCS1 状态。
+
+### 4. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| `0x7fdc/0x80c4` 为软件表清理 | HIGH CONFIDENCE（无 MMIO 地址构造） |
+| EBS 回调运行在内存映射终止之后 | DIRECT（Mu 源码顺序） |
+| 回调可能在 EBS 期间释放内存 | 高风险，待证明 |
+| 与历史 EBS 挂死的因果 | 未证明 |
+| TCS1 是否被释放 | UNKNOWN |
+| 真实写入 | NO-GO |
+
+### 5. 下一步
+
+1. 反汇编 `0x65f0` 与表 `0xe850`，确认 `0x7fdc/0x80c4` 清理的对象；
+2. 在 `0x14b0` 的卸载路径上确认 EDK II 是否会走到 `CoreFreePool`；
+3. 若要验证历史挂死，最省事的是在 UEFI 侧加一条“EBS 前后”的预留内存记录，
+   而不是再改内核。
+
+## 五十一、O3-C6-E1/E2：在真实 Mu 源码里确认释放路径
+
+### 1. 协议卸载必然走到 `CoreFreePool`
+
+`Mu_Basecore/MdeModulePkg/Core/Dxe/Hand/Handle.c`（实际用于构建的树）里，
+`CoreUninstallProtocolInterface()` 的成功分支：
+
+```c
+Prot = CoreRemoveInterfaceFromProtocol (Handle, Protocol, Interface);
+if (Prot != NULL) {
+    gHandleDatabaseKey++;
+    Handle->Key = gHandleDatabaseKey;
+    RemoveEntryList (&Prot->Link);
+    Prot->Signature = 0;
+    CoreFreePool (Prot);          /* line 881 */
+    Status = EFI_SUCCESS;
+}
+```
+
+释放的是 `PROTOCOL_INTERFACE` 本身，**与“是否最后一个协议”无关**；随后才判断
+`IsListEmpty (&Handle->Protocols)` 决定是否释放 Handle。
+
+`Mem/Pool.c` 里还有 `CoreFreePoolPagesI()`（line 630），调用点在 681、813、871，
+说明池释放可能下降到页级释放。
+
+结论：在 RpmhDxe 的 EBS 回调里调用 `UninstallMultipleProtocolInterfaces()`，只要
+接口移除成功，就会进入 `CoreFreePool(Prot)`；这一步发生在
+`CoreTerminateMemoryMap()` 之后，属于规范禁止的“EBS 回调中调用内存服务”形状。
+
+### 2. RpmhDxe 的注册与安装顺序
+
+```text
+0x1514  blr [gBS+0x170]        ; CreateEventEx(EBS group)
+0x1528  x0 = 0x1584, x1 = 0
+0x1534  bl 0x2218              ; 回调注册辅助
+0x153c  失败则 0x18dc 打印 "Rpmh ... callback registration failed"（0xa779）
+0x1554  ldr x4, [gBS+0x148]    ; InstallMultipleProtocolInterfaces
+0x1568  x0 = 0xe250, x1 = 0xe068, x2 = 0xe0d8, x3 = 0
+0x1580  br x4                  ; 尾调用，未检查返回值
+```
+
+即：先注册 EBS 事件，再安装协议接口；安装是尾调用，返回值不在本函数里检查。
+
+### 3. 证据状态
+
+| 项 | 判定 |
+| --- | --- |
+| Mu Handle.c 成功卸载后 `CoreFreePool(Prot)` | DIRECT（源码 line 881） |
+| 池释放可能进入页级释放 | DIRECT（Pool.c 630/681/813/871） |
+| RpmhDxe EBS 回调调用卸载 | DIRECT |
+| 回调运行在内存映射终止之后 | DIRECT（DxeMain.c 790/802/816） |
+| 真机上回调实际到达释放点 | UNKNOWN |
+| 与历史 EBS 挂死的因果 | UNKNOWN |
+| TCS1 硬件回收 | UNKNOWN |
+
+### 4. 边界
+
+- `0x7fdc/0x80c4` 只证明“没有直接 MMIO 地址构造”，不能排除它们调用的函数间接
+  触碰硬件；上一轮的 HIGH CONFIDENCE 只适用于这个局部判断；
+- 这套结论基于当前 Mu_Basecore 工作区（`7013966c` + 本地修改），与刷入固件的
+  对应关系仍是“同一棵树，未锁定提交”。
+
+### 5. 下一步
+
+1. C6-E3：确认卸载时接口移除成功的条件（GUID/接口指针是否与安装一致），
+   以及 Mu 的 Pool 实现在 EBS 后是否直接进入页级路径；
+2. C6-A1：解析 `0x65f0`、`0xe850` 与 `0x3ba4`，把软件清理和间接硬件调用分开；
+3. C6-E4：设计 EBS 阶段探针（预留内存 + 直接写 framebuffer 两条通道），先离线。
+
+## 五十二、O3-C6-E3：卸载成功的三个前提
+
+`Mu_Basecore/.../Hand/Handle.c` 的 `CoreUninstallProtocolInterface()` 顺序：
+
+```c
+if (Protocol == NULL) return EFI_INVALID_PARAMETER;
+CoreAcquireProtocolLock ();
+Status = CoreValidateHandle (UserHandle);              /* 句柄仍有效 */
+if (EFI_ERROR (Status)) goto Done;
+Prot = CoreFindProtocolInterface (UserHandle, Protocol, Interface);
+if (Prot == NULL) { Status = EFI_NOT_FOUND; goto Done; }  /* GUID+接口指针必须匹配 */
+Status = CoreDisconnectControllersUsingProtocolInterface (UserHandle, Prot);
+if (EFI_ERROR (Status)) goto Done;                      /* 有驱动拒绝释放 */
+Prot = CoreRemoveInterfaceFromProtocol (Handle, Protocol, Interface);
+if (Prot != NULL) { ...; CoreFreePool (Prot); }
+```
+
+因此进入 `CoreFreePool(Prot)` 需要同时满足：
+
+1. `[0xe250]` 里的句柄在 EBS 时仍有效；
+2. `0xe068` 的 GUID 与 `0xe0d8` 的接口指针仍登记在该句柄上（与
+   `0x1568` 安装时的参数一致，这一点反汇编已对上）；
+3. `CoreDisconnectControllersUsingProtocolInterface()` 成功——它会调用驱动
+   binding 的 `Stop()`，也就是执行第三方驱动代码，本身就可能分配/释放内存。
+
+第 3 点意味着：即使最终没有走到 `CoreRemoveInterfaceFromProtocol`，卸载过程也
+已经进入了会调用任意驱动 `Stop()` 的路径；错误分支不能当作“没有副作用”。
+
+### 1. 安装侧的返回值
+
+`0x1568` 是 `br x4` 尾调用 `InstallMultipleProtocolInterfaces`，返回值直接交回
+调用者，本函数不检查。也就是说，安装是否成功在这里没有记录；但 `0x14b0` 在 EBS
+时无条件尝试卸载，失败会返回错误给 DXE Core。
+
+### 2. 探针设计（E4，离线）
+
+阶段记录只用预分配的固定内存和已映射的 framebuffer，不在 EBS 期间调用
+`Print()`、分配或动态日志：
+
+| 阶段 | 位置 | 用途 |
+| --- | --- | --- |
+| E1 | `CoreTerminateMemoryMap` 返回 | 证明内存映射终止完成 |
+| E2 | EBS 事件分发前 | 证明进入通知阶段 |
+| E3 | 调用 RpmhDxe 回调前 | 证明回调被执行 |
+| E4 | 进入协议卸载 | 证明风险路径到达 |
+| E5 | `CoreFreePool(Prot)` 前 | 证明即将释放 |
+| E6 | `CoreFreePool(Prot)` 后 | 判断释放是否返回 |
+| E7 | RpmhDxe 回调返回 | 判断是否卡在回调内部 |
+| E8 | EBS 返回 DarwinBoot | 确认整体退出完成 |
+
+E1/E2/E5 需要改 `Mu_Basecore`（可控源码）；E3/E4/E7 可以在 RpmhDxe 里打点，但那是
+二进制，优先级低于 DXE Core。framebuffer 通道用于 EBS 卡死时也能看到最后阶段。
+
+### 3. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| 卸载成功三前提 | DIRECT（源码） |
+| 卸载错误分支仍有驱动 `Stop()` 调用 | DIRECT |
+| 安装返回值未检查 | DIRECT（尾调用） |
+| 真机是否到达 E5 | UNKNOWN |
+| 历史挂死因果 | UNKNOWN |
+| TCS1 所有权 | UNKNOWN |
+
+下一步：C6-E3 的剩余部分（实际协议打开记录与 `Stop()` 行为）与 C6-E4 的离线探针
+实现；真实 RPMh 写入继续 NO-GO。
+
+## 五十三、O3-C6-E3b/E4a：OpenList 也会释放内存，探针设计
+
+### 1. Mu 源码：卸载路径里不止一次内存操作
+
+`CoreDisconnectControllersUsingProtocolInterface()`（Handle.c:727）实际做三件事：
+
+1. 只对 `EFI_OPEN_PROTOCOL_BY_DRIVER` 的记录调用
+   `CoreDisconnectController()`——也就是说，**只有存在驱动使用者时才会执行第三方
+   驱动的 `Stop()`**；
+2. 成功之后，对 `BY_HANDLE_PROTOCOL`/`GET_PROTOCOL`/`TEST_PROTOCOL` 的记录执行
+   `RemoveEntryList` + `CoreFreePool (OpenData)`；
+3. 若仍有未释放的打开记录或断开失败，调用 `CoreConnectController(...)` 重新连接，
+   返回 `EFI_ACCESS_DENIED`。
+
+因此即使最终没有走到 `CoreFreePool(Prot)`，这条路径也可能已经：
+- 执行了第三方驱动的 `Stop()`；
+- 释放了 `OPEN_PROTOCOL_DATA`；
+- 通过 `CoreConnectController` 重新分配/连接。
+
+这三项都发生在 EBS 通知之后，与“EBS 回调不得依赖内存服务”的约束冲突。
+
+### 2. 探针（E4a）设计要点
+
+记录区：
+
+```c
+typedef struct {
+    uint32_t magic;        /* 'KRSC' */
+    uint32_t last_stage;   /* E1..E8 */
+    uint64_t stamp[16];    /* 每次阶段切换的时间戳/序号 */
+    uint64_t arg[8];       /* handle/guid/interface/prot 等 */
+} kebab_ebs_record;
+```
+
+- 在 DXE 早期（`CoreInitializeEventServices` 之后、最后一次 `GetMemoryMap` 之前）
+  用 `AllocatePages` 分配，内存类型 `EfiReservedMemoryType`，并在 `gBS->Exit`
+  之前不再分配；
+- 通过 `InstallConfigurationTable`（在正常 Boot Services 阶段）登记一个 GUID 指向
+  该记录，供 XNU 启动后读取；
+- 阶段写入只做 `volatile` 写，不调用 `Print()`、`Allocate*`、`Free*`、`GOP`。
+
+插桩点（Mu_Basecore，均可控源码）：
+
+| 阶段 | 位置 | 记录内容 |
+| --- | --- | --- |
+| E1 | `CoreExitBootServices` 中 `CoreTerminateMemoryMap` 返回处 | 返回值 |
+| E2 | `CoreNotifySignalList(&gEfiEventExitBootServicesGuid)` 之前 | 事件组 |
+| E3 | 事件分发器调用 NotifyFunction 之前 | 回调地址（重定位后）、Event |
+| E4 | `CoreUninstallProtocolInterface` 入口 | handle、GUID、interface |
+| E4a | `CoreFindProtocolInterface` 之后 | 是否找到 Prot 指针 |
+| E4b | `CoreDisconnectControllersUsingProtocolInterface` 前后 | 返回值、是否进入 Stop |
+| E4c | `CoreFreePool(OpenData)` 前后 | OpenData 指针 |
+| E5/E6 | `CoreFreePool(Prot)` 前后 | Prot 指针 |
+| E7 | 事件分发器返回后 | 回调是否返回 |
+| E8 | DarwinBoot 拿到 EBS 成功返回后 | 完整退出 |
+
+上下文归属：E5/E6 不能只记“调用了 CoreFreePool”，必须记录 `Prot` 指针并与 E4
+的接口指针比对，否则其他驱动的释放会被误判。
+
+显示通道：预取 framebuffer 基址（此前已确认 `0x9C000000` 这条路径存在），在
+EBS 之后直接写像素表示 `last_stage`，不调用 GOP。
+
+### 3. 探针的边界
+
+- 需要修改 Mu_Basecore 并重新构建 UEFI，属于固件改动，必须先离线构建与静态核对，
+  再决定是否刷机；
+- E3/E7 在 DXE Core 的事件分发器里记录，不改闭源 RpmhDxe；
+- 记录区分配必须在最后一次 `GetMemoryMap` 之前完成，EBS 之后只写不分配。
+
+### 4. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| OpenList 清理会 `CoreFreePool(OpenData)` | DIRECT（Mu 源码） |
+| 失败路径会 `CoreConnectController` | DIRECT（Mu 源码） |
+| 只有 BY_DRIVER 才执行 `Stop()` | DIRECT（Mu 源码） |
+| 探针设计 | 已完成离线设计，未实现 |
+| 历史挂死根因 | 仍未证实 |
+| TCS1 所有权 | UNKNOWN |
+
+真实 RPMh 写入继续 NO-GO。
+
+## 五十四、O3-C6-E4b：探针记录模块（主机侧）
+
+### 1. 三处修正已落实
+
+- **身份匹配**：比较的是 `Prot->Interface` 与安装时的接口指针，加上 handle 与
+  GUID；`PROTOCOL_INTERFACE` 对象地址被明确拒绝（测试里单独有一条断言）。
+- **事件序列**：结构改为固定 64 条的事件数组，每条含 `seq/stage/context/
+  object/status`，满后置 `overflow`，不扩容；另保留 `last_stage` 给 framebuffer。
+- **时间戳**：不再设计成 EBS 期间调用 UEFI 时间服务，第一版只用单调递增的
+  `seq`。
+
+### 2. 模块与测试
+
+`package/KebabEbsProbe.{h,c}`：无分配、无 UEFI 服务依赖的纯记录模块；可选
+`kebab_ebs_mirror` 回调把 `stage` 直接写显示通道。`KebabEbsProbeHostTests.c`
+18 项断言，覆盖顺序、嵌套（E4→E4a→E4b→E4c→E4b→E5→E6 全保留）、溢出标记、
+身份匹配与“Prot 对象地址不算匹配”。
+
+```text
+18 checks, 0 failure(s)
+```
+
+### 3. 可见性与交接（待实现部分）
+
+- `volatile` 只约束编译器，不保证 Cache 写回；实现时需要一个 `ProbeWrite()`
+  统一做固定内存写入 + `dsb`/`dmb` 屏障，是否做 Cache 维护取决于记录页的实际
+  内存属性；
+- 记录页在最后一次 `GetMemoryMap` 之前用 `EfiReservedMemoryType` 分配，通过
+  `InstallConfigurationTable` 发布；`EfiReservedMemoryType` 只避免被普通分配
+  复用，不会自动给 XNU 建立映射；
+- 交接链必须显式验证：**UEFI ConfigurationTable → DarwinBoot 取物理地址 →
+  ADT/boot_args 传递 → XNU 映射并读取**，缺一段都不能算可见。
+
+### 4. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| 记录模块（主机侧） | 已实现，18 项断言通过 |
+| 身份匹配修正 | 已实现并测试 |
+| 嵌套/溢出 | 已实现并测试 |
+| Cache 可见性与 ProbeWrite | 未实现 |
+| XNU 交接链 | 未实现 |
+| Mu 树内插桩 | 未开始 |
+| 历史挂死根因 | UNKNOWN |
+| TCS1 所有权 | UNKNOWN |
+
+真实 RPMh 写入继续 NO-GO；本轮没有修改固件或设备镜像。
+
+## 五十五、O3-C6-E4b-F：记录器的六项收紧
+
+### 1. 改动
+
+| 编号 | 问题 | 处理 |
+| --- | --- | --- |
+| F1 | 身份匹配与写入分离 | `kebab_ebs_event_add()` 内部先比较 handle/GUID/接口指针，不匹配直接返回 0，**不碰 `last_attempted_stage`、不调 mirror** |
+| F1b | GUID 只有指针 | 目标结构拆成 `guid_ptr` 与 `guid_lo/hi`，目前比较指针，16 字节值比较留给接入时使用 |
+| F2 | 重入无保护 | 用 `__atomic_fetch_add(&claimed, 1)` 领取槽位，两个线程不会拿到同一槽；越界只置 `lost`，不覆盖 |
+| F3 | 进入与提交不分 | `last_attempted_stage` 在写前设置，`last_committed_stage` 在 `seq` 用 release 存储发布后才设置；未提交槽的 `seq == 0` |
+| F4 | 记录区与 mirror 生命周期不一致 | 单一全局记录区 + 单一 mirror，`g_sealed` 保证一次启动只能 init 一次 |
+| F5 | E4b/E4c 进入返回同码 | 拆成 `E4B_ENTER/E4B_RETURN`、`E4C_ENTER/E4C_RETURN`、`E5_ENTER/E6_RETURN` |
+| F6 | magic 字节序 | 改为 `0x4353524b`（内存里是 `4b 52 53 43` = “KRSC”），结构加 `version`、`record_size`、`capacity` |
+
+### 2. 测试 24 项
+
+新增/改写的用例：
+
+- 错误接口、错误 GUID 指针：返回 0，`committed == 0`，`last_attempted_stage` 不变，
+  `lost == 1`；
+- 全零目标：拒绝一切写入；
+- ENTER/RETURN 顺序、`seq` 从 1 开始、`last_committed_stage` 跟随最后一次成功写入；
+- 未使用槽 `seq == 0`（“进入但未提交”可与“已提交”区分）；
+- **两个线程各写 33 次**：64 条全部唯一序号，第 65 次置 `lost`；
+- init 之后 `sealed`，第二次 init 不触碰别的记录区。
+
+```text
+24 checks, 0 failure(s)
+```
+
+### 3. 仍未做
+
+- `ProbeWrite()` 的屏障与 Cache 维护；
+- ConfigurationTable → DarwinBoot → ADT/boot_args → XNU 的交接验证；
+- Mu_Basecore 内的插桩与隔离编译。
+
+### 4. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| 身份过滤内聚 | 已实现并测试 |
+| 原子槽位与丢失标记 | 已实现并测试 |
+| 进入/提交/返回区分 | 已实现并测试 |
+| 记录区生命周期 | 单实例、一次性初始化 |
+| 固件集成 | 未开始 |
+| 历史挂死根因 | UNKNOWN |
+| TCS1 所有权 | UNKNOWN |
+
+真实 RPMh 写入继续 NO-GO。
+
+## 五十六、O3-C6-E4b-F2：并发计数、阶段一致性与入口拆分
+
+### 1. 修复
+
+| 问题 | 处理 |
+| --- | --- |
+| `committed` 可倒退 | 删除共享计数；槽位以 release 发布的 `seq` 为准，读者逐槽检查 `seq != 0` |
+| 阶段字段数据竞争 | 用一个 64 位原子 `newest = (seq << 32) | stage`，晚提交的旧槽不会让显示回退，阶段与序号不会错配 |
+| 全零目标测试假阳性 | 测试先 `test_reset()` 再以全零目标 init，单独断言 `target_valid() == 0`、`claimed == 0` |
+| GUID 只比指针 | 目标可保存 16 字节 GUID；有值时按内容比较，指针只作快速关联 |
+| 全局/目标事件混用 | 拆成 `event_add_global()`（仅 E1/E2/E7/E8）与 `event_add_target()`（需完整身份） |
+| `lost` 含义混杂 | 拆成 `overflow`（容量耗尽）与 `rejected`（身份不符） |
+
+### 2. 可复现的乱序提交测试
+
+新增测试钩子 `test_delay_slot(slot, spins)`：让先领取 slot 0 的线程在发布前停留，
+另一个线程先提交 slot 1。测试断言：
+
+- `ev[0].seq == 1`、`ev[1].seq == 2`（两者都提交）；
+- `newest >> 32 == 2`（不是 1，说明旧槽晚提交没有让阶段/序号倒退）。
+
+### 3. 测试
+
+```text
+24 checks, 0 failure(s)
+```
+
+覆盖全局/目标入口互斥、全零目标、接口/GUID 指针/GUID 内容三种身份拒绝、
+ENTER/RETURN 顺序、乱序提交、溢出与拒绝分开计数。
+
+### 4. 仍未做
+
+- `ProbeWrite()` 的屏障与 Cache 维护；
+- ConfigurationTable → DarwinBoot → ADT/boot_args → XNU 交接；
+- Mu_Basecore 插桩与隔离编译；
+- `newest` 的读者侧约定要写进 XNU 读取代码（acquire load + 逐槽 `seq`）。
+
+### 5. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| 原子领取唯一槽位 | 通过 |
+| 提交计数并发正确性 | 已改为逐槽 `seq`，乱序测试通过 |
+| 最新阶段一致性 | 单 64 位原子 |
+| 身份（含 GUID 内容） | 已实现并测试 |
+| 全局/目标归属 | 已拆分 |
+| 固件集成 | 未开始 |
+| 历史挂死根因 | UNKNOWN |
+| TCS1 所有权 | UNKNOWN |
+
+真实 RPMh 写入继续 NO-GO。
+
+## 五十七、O3-C6-E4b-F3：mirror 单调性与回调身份
+
+### 1. 修复
+
+| 问题 | 处理 |
+| --- | --- |
+| mirror 可能显示旧阶段 | mirror 回调改收**已发布的 `newest` 值**（`seq<<32|stage`），不再收调用者自己的 stage；旧槽晚提交时显示保持新阶段 |
+| 乱序测试不确定 | 新增 `test_block_slot()/test_release_slot()`：slot 0 在发布 `seq` 前阻塞，slot 1 完整提交后才放行，确定性复现“旧槽晚提交” |
+| E3/E7 无身份 | 新增 `kebab_ebs_set_callback()` 与 `event_add_callback()`：E3/E7 必须匹配注册时的 NotifyFunction 与 Event 对象；E7 从全局白名单移除 |
+| 全局/目标边界 | 全局入口只收 E1/E2/E8；目标入口拒收 E3/E7 |
+
+### 2. 测试 26 项
+
+新增：E7 走全局入口被拒、E3/E7 的错误 NotifyFunction/Event 被拒、E3 走目标入口被拒、
+阻塞式乱序提交（slot 1 先提交、slot 0 后提交）、mirror 从未看到更小值且最终显示
+`seq == 2`。
+
+```text
+26 checks, 0 failure(s)
+```
+
+### 3. 仍未做
+
+- `ProbeWrite()`：屏障与按内存属性决定是否 `dc cvac`，`dsb` 不等于写回缓存；
+- `ConfigurationTable → DarwinBoot → ADT/boot_args → XNU` 交接；
+- 在 Mu_Basecore 内插桩并隔离编译；
+- 目标身份的动态绑定：RpmhDxe 先注册事件再安装协议，Handle 只能在安装后确定。
+
+### 4. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| mirror 单调性 | 已实现并测试 |
+| 确定性乱序提交 | 已实现并测试 |
+| E3/E7 回调身份 | 已实现并测试 |
+| 固件集成 | 未开始 |
+| 历史挂死根因 | UNKNOWN |
+| TCS1 所有权 | UNKNOWN |
+
+真实 RPMh 写入继续 NO-GO。
+
+## 五十八、O3-C6-E4c：一次性身份绑定与接口清理
+
+### 1. 本轮改动
+
+- 新增一次性绑定：`kebab_ebs_bind_callback()` 与 `kebab_ebs_bind_target()`，
+  首次成功后 `g_cb_bound`/`g_target_bound` 置位，后续绑定一律拒绝，防止后来者
+  改写已记录的身份；
+- 绑定目标时同时写入 16 字节 GUID（有则按内容比较）；
+- 清理头文件：删除已无实现的 `kebab_ebs_test_delay_slot()` 声明与重复 `#endif`；
+- 修正注释：E7 是 E3 的返回侧，走回调入口，不属于全局白名单。
+
+### 2. 测试 32 项
+
+新增 6 项：第一次绑定成功、第二次拒绝、身份字段保持不变；目标绑定同样一次性，
+且 GUID 内容被保存。
+
+```text
+32 checks, 0 failure(s)
+```
+
+### 3. framebuffer 的定位
+
+按评审意见，framebuffer 只作 **best-effort 故障显示**：`mirror` 收到的是已发布的
+`newest`，显示端自己再做单调保护；权威证据始终是逐槽 `seq` 的内存记录。真正接入
+Mu 时若事件记录与显示都在同一执行上下文串行完成，就不需要额外的锁。
+
+### 4. 仍未做（E4c 剩余）
+
+- `ProbeWrite()` 的 AArch64 后端：`dsb` 与按内存属性决定的 `dc cvac`；
+- 记录页属性检查（MAIR/页表），不能只看 `EfiReservedMemoryType`；
+- `ConfigurationTable → DarwinBoot → ADT/boot_args → XNU` 交接与读取侧校验；
+- Mu_Basecore 插桩与五类故障注入。
+
+### 5. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| 一次性身份绑定 | 已实现并测试 |
+| 头文件清理 | 完成 |
+| ProbeWrite / Cache 可见性 | 未实现 |
+| 交接链 | 未实现 |
+| 历史挂死根因 | UNKNOWN |
+| TCS1 所有权 | UNKNOWN |
+
+真实 RPMh 写入继续 NO-GO。
+
+## 五十九、固件日志与 RPMh 探针
+
+> 本节原计划编号“二十三”，但任务下发后文档已经扩展到五十八节，编号冲突，故顺延
+> 为五十九。内容对应设备仓库新增的 `firmware/` 目录（两个 DXE 驱动与集成说明）
+> 和内核补丁 `0129-kebab-fwlog-reader.patch`。
+
+### 1. 固件日志环的布局
+
+UEFI 侧在固定物理地址留一个 256 KiB 的环，内核只读地把它映射进来：
+
+| 项 | 值 |
+| --- | --- |
+| 物理地址 | `0xF44C0000` |
+| 大小 | 64 页 = `0x40000`（256 KiB） |
+| 头部 | 16 字节：`u32 magic`、`u32 size`、`u64 head` |
+| magic | `0x474c464b`（小端字节 `'K' 'F' 'L' 'G'`） |
+| size | 数据区字节数，合法范围 `1 .. 0x40000-16`；正常值 `0x3FFF0` |
+| head | 历史累计写入字节数（单调），release store |
+| data | 从 `+0x10` 开始；绝对偏移 `p` 的字节在 `data[p % size]` |
+
+这一页的归属由 `kebabPkg` 的 `MemoryMapLib` 描述符 `{"Kebab FwLog", 0xF44C0000,
+0x00040000, ..., Reserv, ...}` 决定：PEI 阶段就把它标成 `EfiReservedMemoryType`，
+DXE 的 `AllocatePages()` 必然拿不到（`EFI_NOT_FOUND`），`KebabFwLogDxe` 只把失败
+当提示，照常写 `Magic = 0`、`Size`、`Head = 0`、fence、`Magic = 'KFLG'`。描述符
+才是契约。第一次真机测试用的 `0x9FF00000` 恰好是 `SEC Heap`（`0x9FF00000` +
+`0x8C000`，`BsData`），`AllocatePages` 失败后驱动直接返回，magic 从未写入；内核
+读到的是 SEC 堆里的 `0x00380001`，于是报 `no firmware log attached`。
+
+生产者是 `FrameBufferSerialPortLib` 的 `SerialPortWrite()`：它在把字节画到 GOP
+之前调用 `KebabFwLogAppend(Buffer, NumberOfBytes)`，所以屏幕上的固件文本同时进了
+环。`KebabFwLogAppend()` 不分配、不调用 UEFI 服务：magic 未置位时直接返回；写了
+就按 64 位取模推进，最后用 release store 发布 `head`。
+
+`0xF44C0000` 是从原 `DXE Heap`（`0xB0000000 + 0x04500000`）顶部切出的 256 KiB，
+`DXE Heap` 相应缩短为 `0x044C0000`；它在交给内核的 `0xA0000000..0xB0000000` 之外，
+也不与 `SEC Heap`、`CPU Vectors`、`MMU PageTables`、`UEFI Stack`、`Log Buffer`、
+`Info Blk` 重叠。地址在三处必须一致：`KebabFwLog.h` 的 `KEBAB_FWLOG_PA`、串口库
+里的副本、内核 0129 的 `KEBAB_FWLOG_PA`。
+
+### 2. 内核侧：`bsd/dev/kebab_fwlog.c`（0129）
+
+新增 `bsd/dev/kebab_fwlog.c` 并在 `bsd/conf/files` 登记，不再往
+`kebab_spmi.c` 末尾追加代码；SPMI/RPMh 驱动保持原样。
+
+* `kebab_fwlog_attach()`：`ml_io_map(0xf44c0000, 0x40000)` 只做一次，校验 magic
+  和 size 后缓存映射；`io_map` 子图只有 8 MiB，所以即使 header 非法也不第二次
+  映射。缺失、magic 不对、size 不在范围内，各打一行带地址和读到的值的日志。
+* `kebab_fwlog_report(max_bytes)`：从最新处往回取 `max_bytes`，按 oldest-first
+  输出。起点在窗口**前半段**内找 `'\n'` 对齐（`n/2` 的界限保证不会把整段跳
+  过去），跳过 `'\r'`，每约 192 字节批量 `printf` 一次，避免逐字符 flush。头行
+  打印 `ring=` 和 `written=`，尾行打印实际输出的字节数。
+* `kebab_fwlog_boot_summary()`：`bsd_init` 在 `kebab_usb_start()` 之后调用，只打
+  一行 `ring N bytes, written M bytes`；attach 失败时不重复，原因已经由 attach
+  打过。
+* 控制台命令沿用 `SPMI?`/`PON?` 的写法：`FWLOG?` 输出 4096 字节，`FWLOG? all`
+  请求整环。两者都要求在**一次 bulk-OUT 完成**内到达；KDP 接管字节流时按首字节
+  锚定，和 `REBOOT`/`SPMI?` 一致。
+
+整环请求有一个明确的截断：USB 控制台环是 `16384` 字节（可用 `16383`），把
+`0x3FFF0` 字节直接灌进去会静默丢字节。因此 `max_bytes == 0` 在实现里截到
+`12288`，并在头行写 `(whole ring capped at 12288 for the 16384-byte console
+ring)`；尾行仍然是实际输出的字节数。
+
+输出格式示例（数值为占位）：
+
+```text
+KEBAB FWLOG: ring=262128 written=812345 dump=4096
+...固件文本...
+KEBAB FWLOG: ---- end (4096 bytes) ----
+
+KEBAB FWLOG: ring=262128 written=812345 dump=12288 (whole ring capped at 12288 for the 16384-byte console ring)
+...固件文本...
+KEBAB FWLOG: ---- end (12288 bytes) ----
+```
+
+### 3. RPMh 探针：从“问对了问题”到“能回答”
+
+旧探针（`firmware/KebabRpmhProbeDxe.c` 的前身）有三个问题：`LocateProtocol`
+失败时只打一句 `protocol not found`，看不到 status 和 interface；默认 interface
+本身就是函数表；每个指针都重新枚举一遍 loaded image handle。
+
+新的 `firmware/KebabRpmhProbeDxe.c`：
+
+* 每次转储都打印 GUID、`LocateProtocol` 的 status 和 interface 指针，失败也打；
+* 第一次成功定位后解析 interface 所属的 loaded image，缓存 base 和 size，之后
+  所有指针分类只用缓存，不再枚举 handle；
+* 打印 interface 处 8 个原始 64 位字，逐个给 `rva=` 或 `not-code`；
+* 把 interface 当表，最多打印 64 项（靠近镜像末尾时按剩余字节截断）；
+* 对 `raw[0]`、`raw[1]`，只有落在镜像内才继续当候选表打印；
+* 5 秒一次性定时器（`t5`）和 `gEfiEndOfDxeEventGroupGuid`（`eod`）各转储一次，
+  两次输出逐行可比；
+* 只读：除了 `LocateProtocol` 不调用协议函数，不写 RPMh/RSC 寄存器。
+
+输出格式示例（地址为占位）：
+
+```text
+KRP: t5 guid=e1d0b573-f29f-495d-9352-ca0dd42a0a74 status=Success (0x0) iface=0x9f123450
+KRP: t5 image base=0x9f100000 size=0x40000
+KRP: t5 iface rva=0x123450
+KRP: t5 raw words (8)
+KRP: t5 raw[0] 0x9f1a1234 rva=0xa1234
+KRP: t5 raw[1] 0x0 not-code
+...
+KRP: t5 iface as table, 64 entries
+KRP: t5 iface[0] 0x9f1a1234 rva=0xa1234
+...
+KRP: t5 cand[0] table=0x9f1a1234 rva=0xa1234 entries=64
+KRP: t5 cand[0][0] 0x9f1b0000 rva=0xb0000
+...
+KRP: t5 cand[1] 0x0 not-code, skipped
+
+KRP: eod guid=... status=Success (0x0) iface=0x9f123450
+...
+```
+
+读法：如果 `iface` 本身就是函数表，`iface[i]` 应是一串 `rva=`；如果 `raw[0]`
+和 `iface[0]` 相同且是 `rva=`，说明第一层是**指针**，真正的函数表在 `cand[0]`
+里；如果 `raw[0]` 是 `not-code`，它指向镜像外（MMIO、另一个 image，或根本不是
+指针）。旧探针把 interface 直接当表读，这层间接就被淹没了。
+
+`eod` 发生在 BDS 连接控制台之前，可能根本到不了屏/串口；`t5` 在 5 秒后通常会。
+只看到 `t5` 不代表 `eod` 没执行，只代表那次输出没有可用的控制台。
+
+### 4. 固件集成（不在本仓库）
+
+固件源码来自 `board.toml` 的 `{uefi}`（Mu-Silicium），不在设备仓库里。要让
+`KRP:` 和 `KFLG` 真的进镜像，固件树必须做四件事：
+
+1. 拿到两个目录和公共头文件：
+   `Silicon/Silicium/SiliciumPkg/Drivers/KebabFwLogDxe/`、
+   `Silicon/Silicium/SiliciumPkg/Drivers/KebabRpmhProbeDxe/`，以及
+   `Silicon/Silicium/SiliciumPkg/Include/KebabFwLog.h`（串口库用尖括号包含它）；
+2. 在 `kebab.dsc` 的 `[Components]` 里列出两个 `.inf`；
+3. 在 `kebab.fdf` 的 `[FV.FvMain]` 里把两个模块放进 FV；
+4. 构建后 `strings Build/kebabPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd | grep -E
+   "KRP:|KFLG"`；搜不到就说明驱动不在镜像里，任何日志都不会包含它们。
+
+写这份说明时检查到的 Mu-Silicium 检出（`/home/albert/Codex/UEFI/Mu-Silicium`，
+不在本仓库）已经有一部分集成：`KebabFwLogDxe` 的目录、头文件、`.dsc` 和 `.fdf`
+条目都在，`FrameBufferSerialPortLib.c` 也已经在渲染前调用
+`KebabFwLogAppend()`；但探针的目录里还是旧源码，`.dsc`/`.fdf` 里**没有**探针，
+所以当前构建不会包含 `KRP:`。从干净 `{uefi}` 开始时四步都要做；用这个检出时
+只需补探针的两行，并用本仓库的 `KebabRpmhProbeDxe.c/.inf` 覆盖旧文件。
+
+`FvMain` 是 3 MiB（`FD_BASE=0x9fc00000`、`FD_SIZE=0x300000`）。两个模块都很小；
+如果 FV 溢出，要同时改 `FD_SIZE`/`FD_BLOCKS` 和 boot 头，不能让
+`repack-firmware.py` 硬塞一个更大的 FV。
+
+完整的集成说明、环布局、输出读法和“哪些没编译”的边界写在
+`firmware/README.md`（中文）。
+
+### 5. 验证
+
+* **补丁系列**：`scripts/verify-all.sh` 在 pristine `1b191cb`
+  （xnu-8796.141.3）上按文件名顺序应用，结果
+  `108/108 patches apply in filename order to 1b191cb (xnu-8796.141.3)`。
+  0129 的 diff 以当前 `ios16`（含 0128）为基线生成；0128 只改
+  `bsd/dev/kebab_spmi.c`，与 0129 改的四个文件不重叠，所以顺序应用无冲突。
+* **内核构建**：macOS 14.6.1 构建机（Xcode 15.4、KDK 13.5），
+  `MACHINE_CONFIG=KEBAB`、`KERNEL_CONFIG=DEVELOPMENT`，产物
+  `build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab`，
+  17,169,928 字节，sha256
+  `544265fae709a920ef0cb6554c22caa0215fdf9ff010a66d76fcfc9bbdbd2a42`，0 error。
+* **符号与字符串**：`nm` 能看到
+  `_kebab_fwlog_attach`、`_kebab_fwlog_report`、`_kebab_fwlog_boot_summary`
+  （`__TEXT_EXEC,__text`）；`strings` 能看到 `FWLOG?`、`FWLOG? all`、
+  `KEBAB FWLOG: ring %u bytes, written %llu bytes`、`no 'KFLG' magic ...` 等
+  全部新增格式串。
+* **固件源码语法检查（不是构建）**：三个 `.c`（`KebabFwLog.c`、
+  `KebabFwLogDxe.c`、`KebabRpmhProbeDxe.c`）用 Mu_Basecore 的
+  MdePkg/MdeModulePkg 头、aarch64 target 跑过
+  `clang -fsyntax-only -Wall -Wextra`，全部通过；没有链接，没有 `.dsc`/`.fdf`
+  的 EDK2 构建。
+* **未验证**：没有产出 `SILICIUM_UEFI.fd`，没有刷机；环在真机上的内容、`head`
+  回绕、RPMh 协议的真实地址和表布局，都要等固件构建、刷入并在内核里执行
+  `FWLOG?` 后才能确认。
+
+### 6. 状态
+
+| 项 | 判定 |
+| --- | --- |
+| 0129 在 `1b191cb` 上随全集应用 | 108/108，PASS |
+| 内核编译 | 通过，0 error |
+| `kebab_fwlog_*` 符号 / 新增字符串 | 已确认 |
+| 固件驱动源码与集成说明 | 已写入 `firmware/` |
+| 固件源码单文件语法检查 | 通过（非 EDK2 构建） |
+| 固件 EDK2 构建与 `KRP:`/`KFLG` 字符串 | **未做**，需要完整构建 |
+| 真机 `FWLOG?` / RPMh 探针输出 | **未做**，需要刷机 |
+
+## 六十、VRM 上电命令
+
+> 目标：让 QUPv3 SE13 上 I2C `0x4b` 的 Synaptics S3908 可被探测。它由两颗
+> RPMh 拥有的 LDO 供电：`pm8150_l13`（ldoa13，SID1 `0x4c00`）与
+> `pm8150a_l1`（ldoc1，SID5 `0x4000`）。两颗的 `write_ee` 都是 `0x4`，EE0
+> 不能走 SPMI 写，只能按 RPMh VREG 的方式让 RSC 的代发通道（TCS）发一条
+> ENABLE。本节记录三件事：后端到底还剩什么、补丁 0130 补了什么、真机每一步
+> 量到的寄存器值与目标是否应答。
+
+### 1. 后端核查：0128 之后内核里没有写路径
+
+先把“树上已有什么”查清楚，结论是**生产镜像里没有任何 TCS 写路径**：
+
+* `0127` 在 `bsd/dev/kebab_spmi.c` 里加过一版 `#if KEBAB_RPMH_WRITES` 草稿
+  （`kebab_rpmh_tcs_wr_wait()`、`kebab_rpmh_tcs_send()`），编译期关闭。
+* `0128` 把整块草稿删掉，只留下注释“状态机在 `package/KebabRpmhVrm.c`，
+  MMIO 端口等矩阵通过后再做”，并把 `KEBAB_RPMH_WRITES` 一起删除。
+* 在打完 108 个补丁的 xnu 树里 grep `kebab_tcs_io`、`kebab_rpmh_tcs_send`、
+  `kebab_rpmh_encode_enable`、`KEBAB_RPMH_WRITES`，唯一命中就是那条注释
+  （`bsd/dev/kebab_spmi.c:996`）。没有 `kebab_tcs_io` 实现，没有调用者。
+* `bsd/conf/files` 只登记 `kebab_ufs/usb/fwlog/spmi/touch`；`package/` 下的
+  任何模块都不进内核构建（本仓库没有这种机制），`package/KebabRpmhVrm.c`
+  只被两台主机测试驱动。
+
+也就是说：**只剩测试注入**（`KebabRpmhTcsHostTests.c` 里的假寄存器文件），
+真机上没有任何命令能碰到 TCS。要补的是“状态机的内核端口”，不是“再写一版
+状态机”。
+
+### 2. 补丁 0130：把测过的状态机编进内核，并补上 MMIO 绑定
+
+`KebabRpmhVrm.h` 本来就是为这个端口写的（`KEBAB_RPMH_KERNEL` 选内核头文件，
+`kebab_rpmh_tcs_init_global()` 只给内核用），所以 0130 不再手抄一版：
+
+* 新增 `bsd/dev/kebab_rpmh_vrm.{c,h}`，由 `scripts/sync-rpmh-vrm.py` 从
+  `package/KebabRpmhVrm.{c,h}` 生成：除横幅、`#define KEBAB_RPMH_KERNEL 1`
+  和头文件名外**逐字节相同**，脚本的 `--check` 用来证明这一点。这样内核跑的
+  就是 70 条主机断言驱动的那份代码，不会出现“第二版草稿慢慢漂移”。
+* `bsd/conf/files` 登记 `bsd/dev/kebab_rpmh_vrm.c standard`。
+* `bsd/dev/kebab_spmi.c` 补上 `kebab_tcs_io` 的生产绑定，几何全部取自 0127
+  的实测而非记忆：
+
+| 项 | 值 |
+| --- | --- |
+| drv-2 窗口 | `0x18220000`，映射 `0x10000` |
+| tcs_base | `drv + 0xd00` = `0x18220d00` |
+| TCS 间距 | 672 字节 |
+| TCS1 | `tcs_base + 1*672` = `0x18220fa0` |
+| 用到的偏移 | `0x10` CMD_WAIT、`0x14` CONTROL、`0x18` STATUS、`0x1c` CMD_ENABLE、`0x30/0x34/0x38/0x3c` 槽、`0x40` RESP_DATA |
+| IRQ 三件套 | `tcs_base + 0x0/0x4/0x8`（0127 修正后的位置） |
+
+  io 只做三件事：`kebab_spmi_rd/wr()` 加 `mach_absolute_time()` 换算的微秒
+  时钟；任何越过一个 TCS 窗口（`off + 4 > 672`）的访问直接返回失败，坏偏移
+  不可能读到隔壁 TCS。窗口在 `kebab_spmi_init()` 里映射一次（控制台命令可能
+  从 panic 路径跑，那里不能再 `ml_io_map`）。
+
+* **一次性门限从“每次启动一条”改成“每条命令一次”**：两颗 LDO 是两个
+  ENABLE 寄存器，控制台要分两步走，原来的 `dead=1` 会把第二步挡死。现在用
+  `used_mask`（每对 (资源, 寄存器) 一位）记录：ldoa13 ENABLE 是 `0x1`，
+  ldoc1 ENABLE 是 `0x4`，同一颗第二次发送仍然被拒；任何失败仍然把整条通道
+  标死（`dead=1`），失败之后连另一颗也不许发。主机测试从 58 条增到 70 条，
+  新增 C23（两颗按顺序各发一次，重复被拒）与 C24（第一颗失败后第二颗被拒）。
+
+### 3. 命令与启动参数
+
+| 命令 | 作用 | 备注 |
+| --- | --- | --- |
+| `VROMON` | 只给 ldoa13 发 ENABLE | 一次启动只允许一次；重复会打印“…already attempted this boot…” |
+| `VRMON ldoc1` | 只给 ldoc1 发 ENABLE | 要求 ldoa13 已经 COMPLETE，否则拒绝并提示先 `VROMON` + `PWR?` |
+| `TCS?` | 只读转储 TCS0/TCS1 的 CONTROL、CMD_ENABLE、CMD_WAIT、CMD_STATUS 与 IRQ 三件套 | 不写、不清、不恢复 |
+| `PWR?` | 走 SPMI observer 读两颗 LDO 的 `EN`（`base+0x46`） | 0122 已有，本次未改 |
+
+* 启动参数 **`kebab_vrm_write`**，默认 `0`；只有 `kebab_vrm_write=1` 时
+  `kebab_spmi_init()` 才映射 TCS1 窗口，`VROMON` 才可能发出命令。未设置时
+  命令只打印 `kebab_vrm_write is off; refusing to send ldoa13`，无人值守的
+  启动永远不会给任何一颗供电。
+* 命令必须在**一次 bulk-OUT 完成**内到达，匹配方式与 `SPMI?`/`PON?`/`FWLOG?`
+  完全一致；KDP 接管字节流时按首字节锚定。
+* 白名单之外的形式（如 `VRMON ldoa12`）不会静默忽略，会打印白名单并声明
+  没有发送；`VROMON` 只认识 `ldoa13`（裸命令）与 `ldoc1` 两种。
+* 编码器与白名单本身没有改：`kebab_rpmh_encode_enable()` 只从自己的表里取
+  `{"ldoa13", 0x00040c00}`、`{"ldoc1", 0x00042f00}`，`kebab_rpmh_cmd_allowed()`
+  只放行 `WRITE_ACK` 到对应 ENABLE 寄存器（`data == 1`）。
+
+### 4. 真机结果
+
+镜像 `XNU-vrm.img`（0130 + `kebab_vrm_write=1` + `kebab_touch=1`），`boot_b`。
+下列是同一套步骤的两次完整记录（第一次 02:2x、第二次重启后重跑），两次
+数值一致；下面贴第二次的原文。
+
+**第一步：`TCS?`（任何写之前）与 `PWR?` 基线**
+
+```text
+KEBAB TCS: === read-only TCS dump, APPS RSC drv-2 ===
+KEBAB TCS: drv-2 0x18220000, tcs_base = drv + 0xd00 = 0xfffffe8ff76ccd00, stride 672
+KEBAB TCS: rsc irq: enable[tcs_base+0x0] 0x00000001 status[+0x4] 0x00000000 clear[+0x8] 0x00000000
+KEBAB TCS: tcs 0 at 0xfffffe8ff76ccd00: CONTROL[+0x14] 0x01010000 (AMC_ENABLE 1, AMC_TRIGGER 1) CMD_ENABLE[+0x1c] 0x00000003 CMD_WAIT[+0x10] 0x00000000 CMD_STATUS[+0x3c] 0x00010101 (ISSUED 1, COMPL 1)
+KEBAB TCS: tcs 1 at 0xfffffe8ff76ccfa0: CONTROL[+0x14] 0x00010000 (AMC_ENABLE 1, AMC_TRIGGER 0) CMD_ENABLE[+0x1c] 0x00000000 CMD_WAIT[+0x10] 0x00000000 CMD_STATUS[+0x3c] 0x00000000 (ISSUED 0, COMPL 0)
+KEBAB TCS: VERDICT: TCS1 is idle and clean; a kernel-side send is plausible
+KEBAB TCS: done; no register was written, cleared or recovered
+
+KEBAB SPMI: PWR: pm8150_l13: APID 0x0c9 write_ee 0x4 irq_owner 1
+KEBAB SPMI: PWR: pm8150_l13: type 0x04 subtype 0x7b
+KEBAB SPMI: PWR: pm8150_l13: enable 0x00 (bit7 0), range 0xc0, set 0x0b
+KEBAB SPMI: PWR: pm8150a_l1: APID 0x11b write_ee 0x4 irq_owner 1
+KEBAB SPMI: PWR: pm8150a_l1: type 0x04 subtype 0x71
+KEBAB SPMI: PWR: pm8150a_l1: enable 0x00 (bit7 0), range 0x08, set 0x07
+```
+
+`TCS0` 是**别的执行环境留下的残局**（`AMC_TRIGGER=1`、`CMD_ENABLE=0x3`、
+`CMD_STATUS=0x00010101`），与 0127 当时的判断一致；`TCS1` 干净。`TCS?` 只看
+不碰，也不清理 TCS0——它可能承载别的子系统的资源票。
+
+**第二步：`VROMON`（ldoa13），然后 `PWR?`**
+
+```text
+KEBAB VRM: encode ldoa13 ENABLE -> OK msgid 0x00010108 addr 0x00040c04 data 0x00000001
+KEBAB VRM: whitelist: WRITE_ACK to the ENABLE register of ldoa13 only, slot 0x1
+KEBAB VRM: send ldoa13 -> OK (0)
+KEBAB VRM: phase COMPLETE, CMD_STATUS 0x00010101 (ISSUED 1, COMPL 1)
+KEBAB VRM: ldoa13 ENABLE acknowledged by RPMh; confirm the rail with PWR? before the next step
+
+KEBAB SPMI: PWR: pm8150_l13: enable 0x80 (bit7 1), range 0xc0, set 0x0b
+KEBAB SPMI: PWR: pm8150a_l1: enable 0x00 (bit7 0), range 0x08, set 0x07
+```
+
+**第三步：`VROMON ldoc1`，然后 `PWR?`**
+
+```text
+KEBAB VRM: encode ldoc1 ENABLE -> OK msgid 0x00010108 addr 0x00042f04 data 0x00000001
+KEBAB VRM: whitelist: WRITE_ACK to the ENABLE register of ldoc1 only, slot 0x4
+KEBAB VRM: send ldoc1 -> OK (0)
+KEBAB VRM: phase COMPLETE, CMD_STATUS 0x00010101 (ISSUED 1, COMPL 1)
+KEBAB VRM: ldoc1 ENABLE acknowledged by RPMh; confirm the rail with PWR? before the next step
+
+KEBAB SPMI: PWR: pm8150_l13: enable 0x80 (bit7 1), range 0xc0, set 0x0b
+KEBAB SPMI: PWR: pm8150a_l1: enable 0x80 (bit7 1), range 0x08, set 0x07
+```
+
+汇总：
+
+| 步骤 | `pm8150_l13` EN | `pm8150a_l1` EN |
+| --- | --- | --- |
+| 写之前 | `0x00` | `0x00` |
+| `VROMON` 之后 | **`0x80`** | `0x00` |
+| `VROMON ldoc1` 之后 | `0x80` | **`0x80`** |
+
+两颗都按预期变化，且每次只变一颗：命令确实是一步一颗，`PWR?` 的位置就是
+两步之间的验证点。
+
+**第四步：触摸传输**
+
+`TOUCHCLK` → `TOUCHSE` → `TOUCHPING`（这条树里现成的传输命令，目标就是
+`0x4b`）：
+
+```text
+KEBAB TOUCH: ping 0x4b: one byte, FIFO path
+KEBAB TOUCH: ping 0x4b: rc 0 GENI_STATUS 0x00000000
+KEBAB TOUCH: ping: ACK, one-byte write completed
+```
+
+上电之前同一条一字节写在 `0x4b` 上是以 `state 0x21` + `ABORT` 结束、且没有
+NACK 的；现在 `rc 0`、`GENI_STATUS` 全零、打印 `ACK`。**ABORT 变成了 ACK**，
+说明目标已经供电并应答。
+
+### 5. 拒绝路径与运维注意
+
+* 重复 `VROMON`：`KEBAB VRM: ldoa13 was already attempted this boot (it
+  completed); not retried`。
+* 白名单之外：`KEBAB VRM: (no argument) is not a rail this command may power;
+  the whitelist is ldoa13 (VROMON) and ldoc1 (VROMON ldoc1), nothing sent`。
+  括号里的 `(no argument)` 是控制台匹配层传给驱动的哨兵值（它只告诉驱动
+  “这条不在白名单里”，不传用户原文），白名单本身就在同一行里。
+* **`FASTBOOT` 需要 `kebab_pon_write=1`**：本次第一版镜像只带了
+  `kebab_vrm_write=1`，重启后想再刷机时内核回答
+  `KEBAB FASTBOOT: disabled because kebab_pon_write=0; use REBOOT for a plain
+  restart`，于是这块板子只能靠手动进 fastboot 才能换镜像。这条与 VRM 无关，
+  是既有设计的连带后果；下一次做镜像时把 `kebab_pon_write=1` 一起写进 toml。
+* 本节所有写操作都发生在 `kebab_vrm_write=1` 的镜像上；默认镜像里
+  `VROMON` 只打印拒绝，`PWR?`/`TCS?`/`RPMH?` 仍然可用。
+
+### 6. 如果通道被固件占住（本次未发生）与固件侧后备
+
+`TCS?` 的意义是把“通道坏了”和“电没上来”分开。判读规则：全零 = 空闲可发；
+`AMC_TRIGGER=1` 或 `CMD_ENABLE!=0` = 有命令在飞或卡住；`COMPL` 已置位 =
+脏通道（可能是别人留下的完成位），状态机会拒绝而不是把陈旧完成当成自己的。
+本次 `TCS1` 全零，所以内核侧发送是可行的；`TCS0` 的残局属于别的 EE，没有
+清理。
+
+如果将来 `TCS1` 也是卡死/脏的，正确处理是：报告寄存器值、判定这两颗轨从
+内核侧不可达、**停在那里**，不要换地址重试、不要复位 RSC、更不要清别人的
+TCS（它可能承载另一个子系统的资源票）。
+
+那条路上的后备在固件侧：在 `ExitBootServices` 之前用 `RpmhDxe` 协议发 VRM
+请求。该协议的函数表已经拿到：entry `[4]` = `0x1634`（commit），entry
+`[1]` = `0x15A4`（flush）。本节只把这个方向记下来，不启动它——内核侧的路
+已经通了，没有必要再动固件。
+
+
+## 六十一、触摸自动上电与芯片识别
+
+> 目标：让触摸驱动自己在 bring-up 时点亮它自己的两路电源，并在复位之后真正读出
+> 芯片的身份，而不是继续假设。本节记录：启动参数、顺序与顺序的理由、上电前后的
+> 真机输出、芯片回的身份字节，以及它到底在 application 还是 bootloader 模式。
+
+### 1. 启动参数与门限
+
+| 参数 | 默认 | 作用 |
+| --- | --- | --- |
+| `kebab_touch_power` | `0` | 让 `kebab_touch_start()` 在**任何 I2C 传输之前**给 `ldoa13` 与 `ldoc1` 上电 |
+
+* 它**不是**替代 `kebab_vrm_write`，而是在它之上再加一道门：`kebab_vrm_write=0`
+  时 `kebab_spmi_vrm_boot_power()` 直接打印拒绝并返回失败，没有人值守的启动
+  永远不会给任何一颗 LDO 发命令。
+* 两颗 LDO 仍然各只有一次机会（`vrm.ldoa13_done` / `vrm.ldoc1_done`）。开机时
+  已经上过电的那一颗，控制台再 `VRMON` 会被拒；反过来，开机时读到 `EN=0x80`
+  而跳过的轨道**不**占用这次机会（`done` 保持 `false`），只是把 `ldoa13_ok`
+  置真，好让第二步 `ldoc1` 的前置条件成立。
+* 传输、复位、识别仍然要 `kebab_touch_boot=1`；只给 `kebab_touch_power=1` 时
+  驱动只上电、然后停在"hardware untouched"，方便先用 `PWR?` 验证电源。
+
+### 2. 顺序，以及为什么是这个顺序
+
+```
+kebab_touch_start()
+  ├─ 3 s 控制台窗口（原有，给主机打开 CDC-ACM 的时间）
+  ├─ kebab_spmi_vrm_boot_power()          ← 本补丁新增
+  │    ├─ 用 PWR? 的同一条 SPMI observer 路径读 EN
+  │    ├─ EN == 0x80 → 跳过这一颗
+  │    ├─ 编码并发送 ldoa13 的 ENABLE，等 TCS 完成，回读 EN
+  │    ├─ 再对 ldoc1 做同样的一步
+  │    └─ 任一步失败 → 返回 -1，通道按模块既有规则关闭
+  ├─ kt_sleep_ms(15)                       ← 第二颗之后 10–20 ms
+  ├─ TOUCHCLK（使能 SE13 的 S5 分支时钟）   ← 本次实测补上的必要一步
+  ├─ 引脚 mux、复位脉冲（原有）
+  ├─ kt_sleep_ms(20)                       ← 复位释放之后再等一次
+  └─ se_init → identify → boot info
+```
+
+为什么必须先电后复位：两颗 LDO 的 ENABLE 是 RPMh 的 VREG 寄存器，每次重启都回到
+`0x00`；而没有供电的 SE13 目标**不会 NACK**，它让传输以 `GENI_STATUS` 的
+`state 0x21` + `ABORT` 结束。所以上电必须在第一个字节之前，而不是在失败之后。
+
+为什么时钟要单独补：0116 当时就量到"第一次写 GENI 寄存器之后控制台不再回来"，
+那一次和这一次都停在同一行 `se_init: force default, output ctrl`。控制台上
+`TOUCHCLK` → `TOUCHSE` 一直是能跑通的，差别就是时钟。把这一步放进启动路径之后，
+`se_init` 一次通过，识别命令才真正发到 `0x4b`。这一条不是"顺手加的"：没有它，
+自动上电只是把电加上去，永远走不到芯片。
+
+### 3. 真机输出
+
+镜像：0132 + `kebab_touch=1 kebab_touch_boot=1 kebab_touch_power=1
+kebab_vrm_write=1 kebab_pon_write=1`，`boot_b`。
+
+**上电之前**（`PWR?`，与 0130 记录一致）：两颗都是 `enable 0x00`；同一条一字节
+写在 `0x4b` 上以 `state 0x21` 结束——这是"上电前"的基线。
+
+**上电（本次实测，原文）**：
+
+```text
+KEBAB TOUCH: console window over, starting MMIO
+KEBAB VRM: === boot power: touch rails, one ENABLE each ===
+KEBAB VRM: encode ldoa13 ENABLE -> OK msgid 0x00010108 addr 0x00040c04 data 0x00000001
+KEBAB VRM: whitelist: WRITE_ACK to the ENABLE register of ldoa13 only, slot 0x1
+KEBAB VRM: send ldoa13 -> OK (0)
+KEBAB VRM: phase COMPLETE, CMD_STATUS 0x00010101 (ISSUED 1, COMPL 1)
+KEBAB VRM: boot power: ldoa13 COMPL, phase COMPLETE, CMD_STATUS 0x00010101 (ISSUED 1, COMPL 1), EN 0x00 -> 0x80
+KEBAB VRM: encode ldoc1 ENABLE -> OK msgid 0x00010108 addr 0x00042f04 data 0x00000001
+KEBAB VRM: whitelist: WRITE_ACK to the ENABLE register of ldoc1 only, slot 0x4
+KEBAB VRM: send ldoc1 -> OK (0)
+KEBAB VRM: phase COMPLETE, CMD_STATUS 0x00010101 (ISSUED 1, COMPL 1)
+KEBAB VRM: boot power: ldoc1 COMPL, phase COMPLETE, CMD_STATUS 0x00010101 (ISSUED 1, COMPL 1), EN 0x00 -> 0x80
+KEBAB VRM: boot power: ldoa13 and ldoc1 both read 0x80
+KEBAB TOUCH: both rails up, waited 15 ms before the reset
+```
+
+**时钟、复位、SE 初始化**：
+
+```text
+KEBAB TOUCH: TOUCHCLK: 0x52008 0x063c83c0 -> 0x0e3c83c0
+KEBAB TOUCH: TOUCHCLK: 0x52008 now 0x0e3c83c0 (s5 1), halt 0x00004220
+KEBAB TOUCH: reset pulse (mode 1), ctl 0x00000200 io 0x00000003
+KEBAB TOUCH: reset pulse done, waited 20 ms
+KEBAB TOUCH: se_init: clear IRQs
+KEBAB TOUCH: se_init: force default, output ctrl
+KEBAB TOUCH: se_init: packing + byte granularity
+KEBAB TOUCH: se_init: clock select + SCL counters
+KEBAB TOUCH: TCM identify begin
+```
+
+上电之前这一段是停不住的：写 `GENI_OUTPUT_CTRL` 之后控制台就没了。现在它继续走
+到识别。
+
+**身份读取（原文）**：
+
+```text
+KEBAB TOUCH: TCM command 0x02, 0 payload byte(s)
+KEBAB TOUCH: command 0x02: trailing byte 0x00, vendor padding is 0x5a
+KEBAB TOUCH: identify: message 0x10, 24 payload byte(s)
+KEBAB TOUCH: identify payload[0] a5 03 01 01 73 33 39 30 38 2d 31 35 2e 30 2e 30
+KEBAB TOUCH: identify payload[16] 00 00 00 00 b9 ba 3c 00
+KEBAB TOUCH: identify: part "s3908-15.0.0...." at payload offset 4
+KEBAB TOUCH: identify: version 0x01 mode 0x01 (application), the two bytes in front of the part number
+KEBAB TOUCH: identify: 2 byte(s) in front of those are left uninterpreted
+KEBAB TOUCH: identify prefix[0] a5 03
+KEBAB TOUCH: identify: build 0x003cbab9
+KEBAB TOUCH: boot info: message 0x0e, 0 payload byte(s)
+KEBAB TOUCH: boot info: code 0x0e (not implemented), 0 payload byte(s): this firmware does not report boot status
+KEBAB TOUCH: identity: APPLICATION MODE (mode 0x01), the touch firmware is running
+```
+
+### 4. 身份字节与判定
+
+identify 的 24 字节 payload：
+
+| 偏移 | 字节 | 含义 |
+| --- | --- | --- |
+| 0–1 | `a5 03` | 固件在结构前多带的两个字节，**不解释**，原样打印 |
+| 2 | `01` | version |
+| 3 | `01` | **mode = MODE_APPLICATION** |
+| 4–19 | `73 33 39 30 38 2d 31 35 2e 30 2e 30 00 00 00 00` | `"s3908-15.0.0"`，NUL 补齐 |
+| 20–23 | `b9 ba 3c 00` | build（packrat）`0x003cbab9` |
+
+判定方法刻意不是"按下标取"：part number 是这份 payload 里唯一位置自明的字段
+（可打印 ASCII），而厂商 `syna_tcm_identification` 里 version/mode 正好在它前面
+两个字节。所以先找 part 串，再取它前面两字节，并把更前面的字节原样打印成
+"未解释前缀"。这样固件多带两个字节时，part 名不会被整体错位，模式也不会被读成
+`0xa5`。
+
+**结论：application mode。** 旁证是 `GET_BOOT_INFO`（0x10）回 `0x0e`
+`not implemented`——boot info 是 bootloader 才会答的命令，application 固件不实现
+它。也就是说这颗芯片**不需要下载固件**，它已经在跑触摸固件（15.0.0）。
+
+反过来说，如果 mode 不是 `0x01`（`0x02` host download、`0x0b`/`0x0c`
+bootloader、`0x0e` production test），驱动会打印
+`touch unavailable: ... needs a firmware download, which this driver does not
+implement` 并 `return -1`：不建线程、不建设备节点、不假装已经能出数据。
+0120 里那一步"发 `CMD_RUN_APPLICATION_FIRMWARE` 再重新 identify"已经删掉，因为
+那是一个本驱动从未验证过的模式切换。
+
+### 5. 失败路径
+
+* 读 EN 失败、编码/白名单拒绝、TCS 没有 COMPLETE、回读不是 `0x80`：每一种都
+  打印是哪一颗、哪一步、`phase` 与 `CMD_STATUS`，然后
+  `touch unavailable: a rail did not come up, so no transfer is attempted; the
+  boot continues without touch`，`kebab_touch_start()` 返回 `-1`。
+* `kebab_touch_start()` 由 `void` 改为 `int`，`bsd_init()` 仍然忽略返回值：
+  这条路径不 panic、不重试、不循环。失败的命令本身已经把通道关掉，重试正是
+  那道一次性门限要防的事。
+* 识别阶段失败同样只影响触摸：没有 TCM 应答，或 mode 不是 application，都
+  只打印 verdict 并返回，启动继续。
+
+### 6. 边界
+
+* **没有加 HID**：事件路径一行没动，`/dev/kebab_touch` 的记录格式与队列不变。
+* 这颗固件的报文尾部不是厂商的 `0x5a` padding，`GET_APP_INFO`（0x20）与
+  `SET_TOUCH_REPORT_CONFIG`（0x26）会因此错位：本次输出里
+  `command 0x20: payload 23040 too large` 与 `report config answered 0x0d` 就是
+  这个原因。识别与模式判定不受影响。既然没有解析出报文的布局，驱动就不启动
+  轮询线程：这一次先看到的是相反的情况——线程起来了，每 200 ms 打一条
+  `report padding 0xa5, not 0x5a`，把这唯一的可读通道刷掉——所以最终版本把
+  "有没有解码器"作为起线程的条件。事件路径本身保持原样。
+* `launchd` 在启动末尾仍然会 panic（`unexpected SIGKILL of launchd (CS_KILLED)`），
+  那是 AMFI/签名那条线的问题，发生在触摸驱动返回之后，与本补丁无关。
+
+## 六十二、用户态安装通道
+
+> 目标：把 3.3 GB 的用户态放到手机的可写根卷上。这一步只造通道，不消费它：
+> `/sbin/launchd`、`/usr/lib/dyld`、44 个拆分 dyld 缓存、静态信任缓存和一组
+> `LaunchDaemons` 都要落到 `KebabRoot`，而现实是——64 MiB 的 payload 卷装不下，
+> 主机也没有通往 HFS+ 卷的块级路径。内核手上只有三样东西：可用的 UFS 块访问、
+> 可读写的 HFS+ 根、以及一条已经在跑命令的 USB CDC-ACM bulk-OUT。
+
+这一节记录五件事：流的格式、控制台协议与它的流控、允许清单、恢复规则、实测
+吞吐，最后是"真正装进 3.3 GB 之前还差什么"。
+
+### 1. 主机侧打包器 `scripts/pack-userland.py`
+
+输入是一棵目录树（`--root`）或一份显式的"源路径 → 卷内目的路径"清单
+（`--spec` 文件，每行 `SRC<TAB>DEST[<TAB>MODE]`；`--map SRC:DEST` 是同一件事的
+单条形式）。输出是**一个**自描述流文件，格式叫 KIST v1，全部小端：
+
+```
+流头 32 字节
+  0   4  magic 'KIST'        4   2  version 1
+  6   2  flags（bit0：流里有 deflate 条目）
+  8   4  entry_count         12  4  header_size = 32
+  16  8  total_usize         24  8  total_wire（流头之后的全部字节，含填充）
+条目头 192 字节 + 载荷，重复 entry_count 次
+  0   4  magic 'KENT'        4   2  path_len（1..127）
+  6   2  mode                8   2  flags（bit0：载荷是 zlib 流）
+  10  2  reserved            12  8  wire_size（线上字节）
+  20  8  file_size           28  32 SHA-256（**未压缩**内容的哈希）
+  60  128 path（UTF-8）      188 4  reserved
+尾部：0 填充到 --chunk（默认 65536）的整数倍
+```
+
+三个设计约束直接来自传输本身：
+
+* **接收端不能 seek。** 解析器只向前走：先把 32 字节流头读完，再一条条读
+  192 字节条目头，然后按 `wire_size` 吃掉载荷。文件多长、下一个条目是什么，
+  都不需要预先知道。填充保证最后一个 bulk-OUT 传输也是满缓冲区，否则
+  "正好 512 的整数倍" 的短包不会让 TRB 完成。
+* **条目可以整条跳过。** 条目头自带 `file_size` 和 SHA-256，接收端先算目的
+  文件的这两个值；一致就打印 `SKIP` 并把载荷丢掉（见第 5 节）。
+* **压缩是可选的、按条目的。** `--compress none|zlib|auto`：`auto`（默认）
+  先压一遍，只有省下至少 `--min-gain`（默认 12.5%）才保留 deflate，否则原样
+  存。实测 64 MiB 的 `.01` 分片压到 **35.1%**（100 MB/s 左右），`launchd`
+  36.3%、`dyld` 33.8%——缓存分片并不像预想的那样"内部已经压过"，所以这条
+  链路值得压。内核侧按条目增量 inflate，不需要把整条载荷放进内存。
+
+`--verify` 只读流文件本身，不碰源树：重算每条载荷的 SHA-256（deflate 条目
+先解压）、核对声明的总数和填充字节，逐条打印 `OK/FAIL`。
+
+`--write-manifest` 输出 `path<TAB>size<TAB>sha256`，给下面的 `--probe` 用。
+
+### 2. 内核侧安装器：`bsd/dev/kebab_install.c`（补丁 0131）
+
+新增 `bsd/dev/kebab_install.{c,h}`，在 `bsd/conf/files` 里登记。它只做流状态机
+和文件系统，**不碰控制器**：DMA 缓冲区和 ACK 行仍然由 `kebab_usb.c` 独占。
+装一个条目要做的事：
+
+1. 校验条目头：magic、`path_len`、路径规则（见第 4 节）、`wire_size` 不超过
+   流里剩余字节、store 条目必须 `wire_size == file_size`。
+2. **恢复检查**：目的路径存在、大小等于 `file_size`、SHA-256 等于条目头，
+   就打印 `SKIP <path> <size>` 并丢弃载荷。
+3. **空间检查**：`file_size > 空闲字节 + 旧文件占用的字节` 就拒绝这一条并打印
+   两个数字。旧文件会被 `O_TRUNC` 释放，所以覆盖安装只会算差额；这一步是为了
+   不把"卷满了"伪装成"传输失败"。
+4. 逐级 `namei(CREATE)+vn_create` 建父目录（`vn_create` 对 `VDIR` 走的就是
+   `mkdir1at` 那条路），然后 `vnode_open(O_CREAT|O_TRUNC|FWRITE, mode)`。
+   `vnode_open` 只在**新建**时用 cmode，所以再用 `vnode_setattr` 把 mode 落一次。
+5. 载荷边到边写：store 条目直接 `vn_rdwr(UIO_WRITE, …)`；deflate 条目先喂
+   `inflate()`，输出进 64 KiB 缓冲再写。两种都同时喂 SHA-256。
+6. 写完关文件，**重新打开读一遍**再算一次 SHA-256：载荷哈希证明的是链路，
+   回读哈希证明的是卷。一致才打印 `OK <path> <size> mode <octal>`。
+
+**fail soft**：短读、写失败、哈希不符、inflate 出错、块比流剩下的还长、60 秒
+没有新块——任何一条都打印 `FAIL …` 或 `INST ABORT …`、结束本次流、把已经写下去
+的东西留在原地，然后把控制台还给命令模式。这里没有 `panic`，也没有一处相信
+线上的长度而不做上界检查。
+
+### 3. 控制台协议与流控
+
+命令族沿用 `FWLOG?` / `SPMI?` 的匹配方式（一次 bulk-OUT 传输里匹配完整命令），
+但 INST 的参数必须从**同一次**传输里读出来，所以它有自己的扫描器
+`ud_inst_command()`，两个匹配分支（`kebabkdp=0` 的扫描分支和 `kebabkdp=1` 的
+锚定分支）都要调用它——这个坑真的踩到了：第一次刷进去的镜像只挂在前一个分支，
+`kebabkdp=1` 一开，`INST?` 就完全没反应，而 `IMEM?`/`PSCI?` 照常工作。
+
+| 命令 | 作用 |
+| --- | --- |
+| `INST BEGIN <wire_bytes>\n` | 接下整条流，写文件 |
+| `INST DRY <wire_bytes>\n` | 接下整条流，只校验和打印计划，不建目录、不写一个字节 |
+| `INST?\n` | 门禁、是否在跑、根卷 ro/rw、块大小、进度、空闲空间 |
+| `INST CHECK <path>\n` | 目的路径当前的大小和 SHA-256（或 `MISSING`） |
+
+一次传输一块，块大小 `KEBAB_INST_CHUNK = 65536`：
+
+```
+主机                                   设备
+INST BEGIN 1507328\n   ───────────────▶  取流、校验流头
+                       ◀───────────────  INST BEGIN 1507328 write chunk 65536
+                       ◀───────────────  INST STREAM v1 entries 2 bytes 1464512 wire 1507328
+<65536 字节>           ───────────────▶  写/校验这一块
+                       ◀───────────────  INST ACK 65536
+<65536 字节>           ───────────────▶  …
+                       ◀───────────────  OK/SKIP/PLAN 每条一行
+                       ◀───────────────  INST ACK 1507328
+                       ◀───────────────  INST DONE entries 2 ok 2 skipped 0 bytes … wire … ms 183
+```
+
+流控就是"发一块、等 `INST ACK <n>`、再发下一块"，`n` 是**累计**字节数：
+
+* ACK 在字节真正写完或丢掉之后才打印，所以主机永远不会跑到设备前面；
+* 设备侧一次只挂一个 TRB，未挂的时候控制器直接 NAK，主机想抢跑也写不进来；
+* 块还没处理完（`inst_pending`）以及"可能改变模式"的命令还在排队时，端点不
+  重新挂载，下一次挂载一定用对的缓冲区和长度；
+* 收流时 bulk-OUT 的字节**不进** 4096 字节的输入环、也不进命令匹配器，
+  所以"不冲垮输入环"在这里是"根本不走那条路"，命令模式照旧喂环；
+* 60 秒没有新块就 `INST TIMEOUT`，把控制台还回来，主机崩了不用整机重启。
+
+DMA 池从一页 4 KiB 变成连续的 68 KiB（`UD_SIZE 0x11000`），新增
+`UD_INST 0x1000` 的 64 KiB 块缓冲区。`kmem_alloc_contig` 之后逐页用
+`pmap_find_phys` 验证物理连续，因为块路径用**一个** TRB 描述整块，跨页不连续
+会让控制器按一个地址写进别人的页。命令模式仍然用原来的 512 字节
+`UD_BULKOUT`；一次完成属于哪种模式，由**它挂载时用的缓冲区**（`ud.out_off`）
+决定，而不是由当前模式决定——模式可以在传输在途时改变，按模式解释会把命令
+读成载荷。
+
+这套东西不是可选项：按实测 2.4 ms 的控制台往返，512 字节一块只有
+**200 KB/s**，3.3 GB 要五个小时；64 KiB 一块把同一往返摊到 128 个包上，
+实测 **10.6 MiB/s**（DRY），三分钟量级。
+
+### 4. 允许清单与路径规则
+
+目的路径必须是绝对的、可打印 ASCII、没有空组件、没有 `..` 组件、长度小于
+128 字节，并且以这六个前缀之一开头：
+
+```
+/sbin/
+/usr/lib/
+/usr/standalone/
+/System/Library/Caches/com.apple.dyld/
+/System/Library/Caches/com.apple.kernelcaches/
+/System/Library/LaunchDaemons/
+```
+
+不在清单里的条目在**建目录之前**就被拒绝（`FAIL <path> rejected`），整条流
+随即结束。加上启动参数门禁 `kebab_install=1`（默认关闭），一次普通启动既不能
+写文件，也不能建目录。`rootrw=1` 不是门禁的一部分，但没有它根卷是只读的，
+`INST?` 会直接说明这一点。
+
+### 5. 恢复规则
+
+两级，都不需要重传已经对的内容：
+
+* **流内**：条目开始时先算目的文件的大小和 SHA-256，与条目头一致就 `SKIP`，
+  载荷照常收下但不写、不校验（目的已经是好的）。这一级保证"重发同一条流"是
+  安全的，代价是载荷仍然占用链路。
+* **流外**：`INST CHECK <path>` 逐条问设备现在的大小和哈希，
+  `send-userland.py --probe plan.txt --skip-list have.txt` 把已经正确的路径写成
+  跳过清单，`pack-userland.py --skip-list have.txt` 重新打包时**根本不把这些
+  条目放进流**。这一级才是省带宽的那一级。
+
+### 6. 实测吞吐（boot_b，`kebab_install=1 rootrw=1 kebab_pon_write=1`）
+
+硬件：kebab（SM8250），控制台 COM7（CDC-ACM），块大小 65536 字节。
+
+块大小不是随便定的。先用现有控制台量了一次往返：写一条命令、等到它的回应，
+40 次的中位数是 **2.4 ms**。按 512 字节一块算，512 B / 2.4 ms = **200 KB/s**，
+3.3 GB 要五个小时；一块 64 KiB 把同一次往返摊到 128 个包上，才有下面这些数字。
+
+| 场景 | 数据量 | 结果 |
+| --- | --- | --- |
+| `INST?` | — | `gated 1 active 0 dry 0 root rw chunk 65536` |
+| DRY，2 条目 | 1.4 MiB | `PLAN` 两条全对，**10.62 MiB/s**（11.13 MB/s） |
+| 真写，`launchd`+`dyld` | 1.4 MiB | `OK` 两条、回读哈希一致，**7.84 MiB/s**，`INST DONE … ms 183` |
+| 再发同一条流 | 1.4 MiB | `SKIP` 两条，`INST DONE … skipped 2`，10.96 MiB/s |
+| 真写，592 MiB 的 `.symbols` | 592 MB | **失败：ENOSPC**，见第 7 节 |
+
+7.84 MiB/s 意味着 3.3 GB（3,331,890,097 字节）大约 **7 分钟**——这条通道本身
+不是瓶颈。
+
+### 7. `KebabRoot` 只有 64 MiB：P1 的真正前置条件
+
+这是这一轮更重要的结果，比吞吐重要得多。
+
+592 MB 的分片写到 **64,028,672 字节** 时 `vn_rdwr` 返回 `ENOSPC`（错误 28）。
+两次重试都停在同一个字节、同一段内容上（两次 `INST CHECK` 的哈希相同：
+`ca8d64b1e6d88d28ee442d953be4ca1c700e0f37ddac9763dd994edbd90ca694`），说明
+前 64 MB 写得完全正确，失败点是卷的容量，不是链路。紧接着往 `/usr/standalone/`
+写一个 1 MiB 的小文件，立刻 `ENOSPC`——卷上已经没有空闲块。
+
+把这些数字合起来，卷的参数是：
+
+| 项 | 值 | 来源 |
+| --- | --- | --- |
+| 失败时已写入的单文件 | 64,028,672 B | `INST CHECK`（两次相同） |
+| 卷上此前已有 | 541,600（launchd）+ 922,912（dyld）= 1,464,512 B | 前面的 `OK` |
+| 写入总量 | 65,493,184 B | 上两项之和 |
+| 推断卷容量 | 64 MiB = 67,108,864 B | 65,493,184 + 约 1.6 MB HFS+ 元数据 |
+| 块大小 / 总块数 | 4,096 B / 16,384 | 同上（非日志卷，元数据很小） |
+| 空闲块（失败后） | ≈ 0 | 1 MiB 写入立即 `ENOSPC` |
+
+补丁 0131 的 `INST?` 现在直接打印这三个数，下一次刷机就能把它们从内核侧记下来
+（`INST? space <free> of <total> bytes` 与 `INST? bsize <n> blocks <total> free <n>`）；
+本节的容量是**推断值**，块级数字等下一次启动核对。没有对卷做任何格式化或重建。
+
+结论很直接：**3.3 GB 根本装不进 64 MiB，P1 的下一个前置条件不是 dyld，而是一块
+装得下共享缓存的根卷。** 两条路都可以，但都要在镜像这一侧解决：
+
+1. 在同一块 `userdata` 分区上建一个更大的 HFS+ 卷——内核直接挂这个卷，卷头里的
+   总块数决定容量，所以尺寸必须在 `newfs_hfs` 那一步就给足。按 47 条计划
+   3,331,890,097 字节算，留一倍余量至少 **8 GiB**，最好直接把整个分区
+   （229,843 MiB）给它。
+2. 或者单独建一个缓存卷挂在 `/System/Library/Caches` 下；允许清单已经按路径前缀
+   工作，多挂一个卷不需要改安装器。
+
+在这一条解决之前，`pack-userland.py` 打出来的 3.3 GB 流只能跑 `INST DRY`
+（它不写一个字节，只校验和打印计划），真装一定会在某一条上被空间检查挡住并
+打印"这一条要多少、卷上还有多少"。
+
+### 8. 这一次还没做到的
+
+1. **一次完整的 3.3 GB 真装**：被上面的容量挡住。DRY 和单文件真写都通过了，
+   完整真装要等新卷。
+2. **`LaunchDaemons` 这一组的内容**：允许清单里留了
+   `/System/Library/LaunchDaemons/`，但真正要哪几个 plist 属于下一阶段的事，
+   现在放什么都消费不了。
+3. **大文件在正常上下文下的复测**：这一次的会话跑在 `load_init_program` 失败
+   之后的 panic 自旋里（根卷上没有能 exec 的 init），panic 路径会关中断，
+   文件 I/O 的可靠性没有保证。等新卷能放下 `launchd`+`dyld`+缓存之后，应该在
+   正常上下文里复测一次吞吐。
+4. **压缩默认值的真机复核**：35.1% 是主机 zlib 量的；设备侧 inflate 的 CPU
+   开销和 HFS+ 写谁先到瓶颈，要等卷够大跑完整流才知道。
+
+### 9. 已知缺陷：`CS_KILLED` 的 panic 会把控制台留在死状态
+
+这一轮踩到一个和安装通道无关、但会挡住所有真机实验的缺陷，记在这里。
+
+**现象。**
+
+* `kebab_cs=0` 的启动：`load_init_program` 之后 panic，控制台在 panic 之后仍然
+  应答 `IMEM?` / `PSCI?` / `INST?` 数分钟——本节的 1.4 MiB 真写、`SKIP` 复验、
+  592 MB 尝试全都是在 panic 自旋里跑完的。
+* `kebab_cs=15` 的启动：panic 文本是
+  `unexpected SIGKILL of launchd (CS_KILLED) … namespace 9 code 0x6`
+  （0087 在 `kern_sig.c` 里把 pid 1 的意外 SIGKILL 变成 `panic_plain`）。
+  此后 CDC-ACM **仍然枚举**（`VID 0x1209 / PID 0x0001`），但：
+
+  - bulk-OUT 的每一次写都超时（`Write timeout`），`IMEM?` / `PSCI?` / `INST?`
+    全部没有回应；
+  - `fastboot devices` 看不到设备，20 分钟没有看门狗复位；
+  - 主机的 PnP 禁用/启用（需要管理员）拿不到权限，做不到 USB 重新枚举；
+  - 只能物理断电。
+
+**代码位置与推断。** `ud_panic_takeover()` 只有在
+
+```c
+	uint32_t old = os_atomic_load(&ud.owner, acquire);
+	if (old) {
+		bool stopped = old == cpu;
+		if (!stopped && old <= MAX_CPUS)
+			stopped = ml_dbgwrap_cpu_is_halted((int)old - 1);
+		if (!stopped) return false;      /* 不抢，永远不抢 */
+		...
+	}
+```
+
+时才接管发送门：owner 是自己，或者 `ml_dbgwrap_cpu_is_halted()` 认为那个 CPU
+已经停了。后者是**调试器语义**的"CPU 已停"，而 panic 路径停其它 CPU 用的是
+另一套机制，两者不重合时，只要 console 事件线程在 panic 那一刻正好持有发送门
+（它在每 1 ms 的循环里都会短暂持有一会儿），panic 自旋就永远拿不到门，
+`panic_spin_forever()` 的循环里也就不会再服务控制器——端口从此静默。
+
+`kebab_cs=0` 那几次"能用"是运气：panic 恰好发生在门空闲的时候。所以这不是
+"cs=15 引入的 bug"，而是一个一直在的竞态，只是 CS 杀 pid 1 的 panic 更容易
+撞上（panic 前一刻内核正在密集打印 CS/exec 相关的日志，事件线程更可能在泵）。
+
+**规避（本轮采用）。** 把 `/sbin/launchd` 换成一个 16,419 字节的静态桩：
+写一行 `kebab: idle init, console stays up`，然后 `b .` 自旋。pid 1 永不退出，
+也就不会有 `CS_KILLED` 的 panic，控制台一直可用。桩由
+`scripts/make-init.py` 生成，只把 `write(2)` 之后的三条指令（`x0=0`、
+`x16=1`、`svc`）换成 `b .; nop; nop`。
+
+**正确修法（未做）。** panic 路径在 owner 是"本机已被 panic 停掉的 CPU"时
+强制 `ud_controller_restart()` 再接管；或者 `ud_enter` 在 `panic_active()` 时
+直接放弃门、让 panic 自旋无条件接管。两条都需要真机验证，属于下一轮。
+
+## 六十三、把 userdata 做成真正的根卷
+
+> 目标：把 `userdata` 上那个 64 MiB 的玩具 `KebabRoot` 换成一个装得下 3.3 GB
+> 用户态的 HFS+ 卷。容量由卷头里的 `totalBlocks` 决定，不是分区大小，所以必须
+> 重建卷本身。内核里不实现 HFS+：卷在主机上用 Apple 的 `newfs_hfs` 造好，只有
+> 新卷实际分配的块被打包成一条流，内核通过 UFS 块路径原样写进 `userdata`。
+
+这一节记八件事：尺寸怎么定、主机工具与 extent 格式、内核侧写卷路径、控制台协议
+与安全门、真机上的旧/新卷参数、销毁与恢复、大于 64 MiB 的文件，以及装共享缓存
+之前还差什么。
+
+### 1. 尺寸：16 GiB
+
+先把计划里的数字加起来：
+
+| 载荷 | 字节 |
+| --- | ---: |
+| 44 个拆分 dyld 共享缓存 | 3,331,890,097 |
+| `dyld_shared_cache_arm64.symbols`（592 MB 分片） | 592,101,376 |
+| `launchd` + `dyld` | 1,464,512 |
+| 合计 | 约 3.93 GB |
+
+8 GiB 的卷装得下，但只剩约 4.1 GiB 余量（约 1.04 倍计划），共享缓存以后长一点
+就会再次撞墙；16 GiB 留 12 GiB 余量（约 4.9 倍计划），同时仍然只占 `userdata`
+分区（约 229 GiB；确切字节数以内核 `VOL?` 为准，见第 5 节）的 **7%**。
+再大没有意义：卷越大，HFS+ 的分配位图越大（16 GiB 只要 512 KiB），而块级写入
+和挂载路径并不因为卷大而变快。
+
+于是选 **16 GiB = 17,179,869,184 字节**，卷名 `KebabRoot`，分配块 4096 字节，
+共 **4,194,304 块**。三个选择都是被现有路径约束出来的：
+
+* **4096 字节分配块**：UFS 设备的块就是 4096，内核页是 16 KiB；4 KiB 分配块
+  让每一笔 UFS 写都是整数个设备块，不触发 `kebab_ufs_strategy()` 的
+  "读-改-写" 分支。旧卷也是 4096，挂载路径一行不用改。
+* **非日志（non-journaled）**：旧卷就是非日志，补丁 0086 已经允许脏的非日志
+  根卷；日志会多出至少 8 MiB 元数据和一个回放路径，bring-up 阶段不需要。
+* **无分区表**：镜像从字节 0 就是 HFS+，和设备上 `userdata` 的布局一致；
+  `hdiutil` 用 `diskimage-class=CRawDiskImage` 把普通文件当裸盘挂上，再跑
+  `newfs_hfs`，不会写 GPT。
+
+`newfs_hfs` 在 16 GiB 卷上默认会把 catalog 预分配到 32 MiB、attributes 到
+64 MiB；这些块全都置零但被位图标记为已分配。主机工具用
+`-c c=256,e=32,a=8 -I c=256,e=32,a=8` 把 clump/初始大小钉小，把已分配块压到
+**426 块（1.7 MiB）**，这才让"只送已分配块"这件事真正便宜。
+
+### 2. 主机侧：`scripts/make-root-volume.py` 与 VEXT v1
+
+用法（macOS，需要 `hdiutil` / `newfs_hfs`）：
+
+```sh
+scripts/make-root-volume.py --size 16g \
+    --image /tmp/KebabRoot.img --stream /tmp/KebabRoot.vext
+```
+
+它做四步：
+
+1. `mkfile -n 16g` 造一个稀疏文件（逻辑 16 GiB，实际只占元数据块）；
+2. `hdiutil attach -nomount -noverify -imagekey diskimage-class=CRawDiskImage`
+   把它挂成 `/dev/diskN`；
+3. `newfs_hfs -v KebabRoot -b 4096 -c c=256,e=32,a=8 -I c=256,e=32,a=8
+   /dev/rdiskN`，然后 detach。`hdiutil` 和 `newfs_hfs` 都是 Apple 自己的实现，
+   卷的每一个字节都由它们产生，内核不参与格式决策；
+4. 读新卷头里的 allocation file fork，取分配位图，按位图把**已分配块**合并成
+   extent，写出 VEXT v1 流。
+
+只送"非零字节"是不够的：实测 426 个已分配块里只有 11 个块含非零字节（45,056
+字节），其余 415 个是 catalog / extents / attributes 的预分配零块。这些块在
+HFS+ 眼里是已分配的 B-tree 节点区，如果跳过它们，旧卷的字节会留在新卷的
+metadata 文件里；虽然未使用的节点不会被读，但"新卷"就不干净了。所以工具送的是
+**位图标记为已分配的全部块**，零块也送。代价是 1.7 MiB，按 7.8 MiB/s 不到
+0.3 秒；收益是新卷的每一个已分配块都等于镜像。
+
+VEXT v1 的格式（全部小端）：
+
+```
+流头 32 字节
+  0   4  magic 'VEXT'          4   2  version 1
+  6   2  header_size 32        8   8  volume_bytes（整个卷的字节数）
+  16  4  block_size 4096       20  4  extent_count
+  24  8  data_bytes（所有 extent 长度之和）
+extent 头 16 字节 + 数据，重复 extent_count 次
+  0   8  offset（卷内字节偏移，4096 对齐）
+  8   4  length（4096 对齐，非零）
+  12  4  reserved = 0
+尾部：0 填充到 65536 字节的整数倍
+```
+
+4096 对齐是内核侧的硬要求：写入路径只接受整块，半块会被
+`kebab_ufs_raw_write()` 直接拒绝。填充保证最后一个 bulk-OUT 传输是满 64 KiB，
+否则"正好 512 整数倍"的短包不会让 TRB 完成——这条约束和 KIST 流完全一样。
+
+实测的主机输出（macOS 14.6.1，2026-10-28）：
+
+```
+volume size 17179869184 bytes (16384 MiB), block size 4096, total blocks 4194304
+free blocks 4193878 (16382 MiB), allocated blocks 426
+extents     3, data 1744896 bytes (1704 KiB), non-zero 45056 bytes, allocated-but-zero blocks 415
+stream      KebabRoot.vext, 1769472 bytes (27 chunks), padding 24496,
+            sha256 e37713002c463d99635ec790263eb21b7799c18388768a45b3910ace53f920eb
+```
+
+三个 extent 是：`0x0 + 0xa9000`（块 0..168，含卷头和 catalog 等）、
+`0xf9000 + 0x100000`（块 249..504）、`0x3fffff000 + 0x1000`（最后一个块里的
+备用卷头）。总线上 27 个 64 KiB 块，1.77 MB。
+
+工具自己会把写出的流再读一遍：核对每个 extent 头和载荷、总长度、填充字节，任何
+不一致都直接失败，不会把一个坏流交给内核。
+
+### 3. 内核侧：`bsd/dev/kebab_vol.c`（补丁 0133）
+
+新增 `bsd/dev/kebab_vol.{c,h}` 和 `bsd/dev/kebab_ufs.h`，并在 `bsd/conf/files`
+登记。代码分三层：
+
+**（1）流状态机。** 和安装器一样只向前读：流头 → extent 头 → extent 数据 →
+填充。每读一个字段先验上界，绝不相信线上的长度：
+
+* `volume_bytes` 必须等于命令参数、必须是 4096 的倍数、必须不超过
+  `userdata` 分区字节数；
+* 每个 extent 的 offset/length 必须 4096 对齐、非零、按 offset 递增不重叠、
+  完全落在声明的卷内；第一个 extent 必须从 0 开始；
+* 所有 extent 数据之和必须等于流头声明的 `data_bytes`，加上头部后必须正好等于
+  `VOL BEGIN` 的 wire 字节数，填充必须全零；
+* **卷头在写第一个块之前校验**：从流里截住偏移 1024 的 512 字节，核对
+  `sig == 0x482b`、`version == 4`、`blockSize == 4096`、
+  `totalBlocks * blockSize == volume_bytes`。不一致就 `VOL ABORT`，块 0 一个
+  字节都没动。
+
+**（2）块写入。** 64 KiB 暂存缓冲按 extent 顺序累积，满了就调
+`kebab_ufs_raw_write()`；extent 末尾的余数也必须是整块。这个函数在
+`kebab_ufs.c` 里，绕过 buffer cache，且每次都在 UFS 锁内把
+`offset + length` 和 `userdata` 分区重新比一遍——不信任解析器传来的任何范围。
+写路径就是原有的 `ufs_write_blocks()`，和 HFS+ 读写走同一套 WRITE(10)。
+
+**（3）写后验证。** 流结束后从设备重新读 512 字节卷头，和流里截住的 512 字节
+逐字节比较；一致才打印 `VOL NEW` 和 `VOL DONE`。旧卷头在开始前同样读一遍，
+字段和 512 字节原始十六进制都打印到控制台——不依赖主机保存文件。
+
+`kebab_vol=1` 还会在 `bsd/vfs/vfs_subr.c` 里压过 `rootrw=1`，让旧根卷以只读
+方式挂载。这不是洁癖：旧 HFS+ 如果带着脏 buffer 在写完之后回写一个缓存的卷头，
+新卷头会被悄悄盖掉，故障要等到下一次启动才出现。新卷下一次普通启动
+（不带 `kebab_vol`）仍然按 `rootrw=1` 读写挂载。
+
+另外给测试加了一个默认关闭的启动参数 `kebab_noinit=1`：init 线程在
+`load_init_program()` 之前看到它就打印一行并阻塞在核内（不返回用户态，因为那是
+init task 的 BSD AST，返回会回到不存在的用户上下文），USB 事件线程、控制台和
+文件系统路径继续工作。
+当前镜像的 `launchd` 会以 `CS_KILLED` panic，panic 会把正在写卷或正在装 565 MB
+文件的控制台打断；这个参数让 bring-up 测试有一个稳定的内核控制台。普通启动
+不带它，行为不变。
+
+HFS+ 挂载日志在补丁里加了一行，卷的大小不再需要推断：
+
+```
+KEBAB HFS: KebabRoot: block size 4096, total blocks 4194304 (16384 MiB),
+           free blocks 4193878 (16382 MiB)
+```
+
+### 4. 控制台协议与安全门
+
+命令族沿用 INST 的匹配方式：一次 bulk-OUT 传输里匹配完整命令行，参数从同一次
+传输里读出来。所有数字都做上界检查。
+
+| 命令 | 作用 |
+| --- | --- |
+| `VOL?` | 门禁、分区字节数、磁盘上的卷头字段、当前根卷的空闲空间 |
+| `VOL DRY <wire_bytes>` | 接下整条流、完整校验、打印计划，不写一个字节 |
+| `VOL BEGIN <wire_bytes> <volume_bytes> CONFIRM` | 接下整条流并写 `userdata` |
+
+一次一块，块大小 65536：
+
+```
+主机                                     设备
+VOL BEGIN 1769472 17179869184 CONFIRM ──▶ 读旧卷头、打印、校验命令
+                     ◀──────────────────  VOL OLD vh …（字段 + 512 字节）
+                     ◀──────────────────  VOL BEGIN 1769472 volume … chunk 65536
+<65536 字节>         ──────────────────▶  校验流头，开始写第一个 extent
+                     ◀──────────────────  VOL ACK 65536
+<65536 字节>         ──────────────────▶  …
+                     ◀──────────────────  VOL EXTENT 3/3 off … len …
+                     ◀──────────────────  VOL ACK 1769472
+                     ◀──────────────────  VOL NEW vh …（读回的字段 + 512 字节）
+                     ◀──────────────────  VOL DONE extents 3 bytes … wire … ms …
+```
+
+ACK 在块真正写完（`ufs_write_blocks()` 返回）之后才打印，`n` 是累计字节数；
+设备一次只挂一个 TRB，块没写完不重新挂载，主机想抢跑也写不进来。60 秒没有
+新块就 `VOL TIMEOUT`，把控制台还回来。
+
+安全门有六层，任何一层不满足都只打印拒绝，不 panic：
+
+1. 启动参数 `kebab_vol=1`（默认关）；
+2. `ufsrw=1` 且 UFS 盘确实可写，否则 `VOL refused: userdata is read-only`；
+3. 真写必须带字面量 `CONFIRM`，且 `volume_bytes` 必须与流头一致；
+4. `volume_bytes` 必须不超过 `userdata` 分区（`kebab_ufs_partition_bytes()`），
+   超过就打印两个数字并拒绝；
+5. 卷头/流/分区三者必须自洽，见上一节；
+6. `kebab_vol=1` 强制旧根只读，避免旧 HFS+ 回写。
+
+所有写都经过 `kebab_ufs_raw_write()`，它只认 `su.first_block..first_block+
+su.nblocks` 这一段；代码里没有任何直接写 UFS 寄存器或别的分区的路径。
+
+### 5. 真机验收（待真机）
+
+> 到这份文档提交时，板子仍卡在另一个 worker 留下的 panic 里：COM7 能枚举，但
+> 任何写入都超时，`fastboot devices` 为空，只有用户物理断电才能恢复。因此这一节
+> 是**尚未执行的验收步骤和预期输出**，不是实测记录。已经证明的是第 3.1 节的主机
+> 重建（同一份 `kebab_vol.c` 跑真实流）、`verify-all.sh` 的 112/112、从零构建，
+> 以及两个已打包的镜像。
+
+#### 5.1 写卷镜像 `boot-vol.img`
+
+完整命令行见第 5 节开头的表。刷入 `boot_b` 后预期看到（关键行）：
+
+```
+KEBAB UFS: "userdata" on LUN 0: first block 0x2c7420, ... MiB, read-write
+BSD root: ufsroot0, major 1, minor 0
+hfs: mounted KebabRoot on device b(1, 0)
+KEBAB HFS: KebabRoot: block size 4096, total blocks 16384 (64 MiB), free blocks <n> (<n> MiB)
+KEBAB VOL: kebab_vol=1 keeps the old root read-only
+KEBAB: kebab_noinit=1: staying in the kernel, no init program
+```
+
+`KEBAB HFS:` 这一行是补丁 0133 新加的；旧卷的实际块数和空闲块以真机日志为准，
+如果与第 5.6 节的 16,384 / 0 不同，按日志更新表格。`VOL?` 的预期输出：
+
+```
+VOL? gated 1 active 0 dry 0 chunk 65536 writable 1
+VOL? partition <bytes> bytes (<MiB> MiB)
+VOL? DISK vh sig 0x482b version 4 attributes 0x... ... bsize 4096 blocks 16384 free <n> ...
+```
+
+> **更正（2026-10-28，见第七十九节）：** 内核的实际输出没有 `VOL?` 前缀，
+> 而是 `VOL DISK vh ...`（`kv_print_vh("DISK", ...)`，`kebab_vol.c:179-201`），
+> 并且 sig、created、bsize 是**三行**，不是一行。上面这条是当时的记录，保留
+> 原文；现在的预期见第七十九节。
+
+#### 5.2 `VOL DRY`：校验整条流，不写
+
+```sh
+python work/vol/send-volume.py --dry work/vol/KebabRoot.vext
+```
+
+预期最后一行：
+
+```
+VOL PLAN extents 3 bytes 1744896 wire 1769472 volume 17179869184
+```
+
+#### 5.3 `VOL BEGIN`：旧卷头的 512 字节先落日志
+
+```sh
+python work/vol/send-volume.py --yes work/vol/KebabRoot.vext
+```
+
+预期的顺序是：`VOL partition …`、`VOL OLD vh …` 三行字段、32 行
+`VOL OLD bytes <off> <32 字节十六进制>`、然后才是 `VOL BEGIN …`。**这 32 行旧
+卷头字节要在本节抄录一份，再继续**。随后是：
+
+```
+VOL STREAM volume 17179869184 bytes (16384 MiB), block 4096, extents 3, data 1744896 bytes, wire 1769472
+VOL EXTENT 1/3 off 0x0 len 0xa9000
+VOL EXTENT 2/3 off 0xf9000 len 0x100000
+VOL EXTENT 3/3 off 0x3fffff000 len 0x1000
+VOL NEW vh sig 0x482b version 4 attributes 0x80000100 ... bsize 4096 blocks 4194304 free 4193878 ...
+VOL DONE extents 3 bytes 1744896 wire 1769472 ms <n>
+```
+
+`VOL NEW` 的 512 字节是从设备重新读回来、和流里那 512 字节逐字节比较通过之后才
+打印的。旧的 512 字节在写入之前打印，新的 512 字节在写入之后打印，两者都在同一
+份控制台日志里。
+
+#### 5.4 重启：HFS+ 挂载新卷
+
+写完后发 `REBOOT`（`boot-vol.img` 的 `kebab_vol=1` 仍然在，所以新卷先只读
+挂载一次），预期：
+
+```
+hfs: mounted KebabRoot on device b(1, 0)
+KEBAB HFS: KebabRoot: block size 4096, total blocks 4194304 (16384 MiB), free blocks 4193878 (16382 MiB)
+```
+
+这一行 `total blocks 4194304` 就是"内核的 HFS+ 挂载成功并报告更大卷"的验收点。
+
+#### 5.5 `INST?`：新卷的空闲空间
+
+刷 `boot-inst.img`（去掉 `kebab_vol=1`，保留 `rootrw=1` 和 `kebab_noinit=1`）
+之后：
+
+```sh
+python send-userland.py --status
+```
+
+预期：
+
+```
+INST? gated 1 active 0 dry 0 root rw chunk 65536
+INST? wire 0/0 entries 0/0 ok 0 skip 0 fail 0
+INST? space 17178124288 free of 17179869184 bytes
+INST? bsize 4096 blocks 4194304 free 4193878
+```
+
+（`space` 的数字以 `f_bavail × f_bsize` 为准，可能因 HFS+ 的保留块与
+4,193,878 略有出入，报告两个数。）
+
+#### 5.6 前后对比（旧卷数字来自第 5.1 节的真实日志）
+
+| 项 | 旧卷 | 新卷 |
+| --- | ---: | ---: |
+| 卷大小 | 64 MiB = 67,108,864 B | 16 GiB = 17,179,869,184 B |
+| 分配块大小 | 4096 | 4096 |
+| 总块数 | 16,384（待真机确认） | 4,194,304 |
+| 空闲块 | 0（待真机确认） | 4,193,878 |
+| 空闲空间 | 0 | 16,382 MiB |
+| 文件系统 | HFS+，非日志，`KebabRoot` | HFS+，非日志，`KebabRoot` |
+
+旧卷的 512 字节卷头以真机日志为准；本节不会用推断值代替它。
+
+### 6. 销毁了什么，怎么恢复
+
+`userdata` 上原来只有三样东西，全部在写卷时被覆盖：
+
+| 路径 | 大小 | 说明 |
+| --- | ---: | --- |
+| `/sbin/launchd` | 541,600 B | 手写静态 arm64 Mach-O |
+| `/usr/lib/dyld` | 922,912 B | 用户态 dyld |
+| `/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.symbols` | 64,028,672 B | 592 MB 分片的**前 64 MiB**，两次都在这里 ENOSPC |
+
+旧卷头的 512 字节在写之前由 `VOL BEGIN` 打印到控制台（第 5.3 节），不依赖主机
+保存的二进制文件。主机上的原件都在，且哈希可查：
+
+| 主机文件 | 大小 | SHA-256 |
+| --- | ---: | --- |
+| `ios-userland/extracted/sbin/launchd` | 541,600 | `12370e5e…18cac61c` |
+| `ios-userland/extracted/usr/lib/dyld` | 922,912 | `58068345…254933757` |
+| `ios-userland/cryptex-cache/dyld_shared_cache_arm64.symbols` | 592,101,376 | `e763b0ea…5126b308` |
+| `ios-userland/static.trustcache` | 66,289 | `63e01c03…c6100ef4b` |
+
+恢复路径就是安装器本身，不需要新工具：
+
+```sh
+# 三个小文件（launchd、dyld、静态信任缓存），576 KiB 流
+python send-userland.py work/vol/restore.kist
+
+# 592 MB 的 symbols，565 MB 流
+python send-userland.py big.kist
+```
+
+`restore.kist` 的第三条目的地是
+`/System/Library/Caches/com.apple.kernelcaches/static.trustcache`，正好是补丁
+0100 的 `KEBAB_TC_DEFAULT_PATH` 默认读取路径；`kebab_cs=15` 的下一次启动会把它
+当作平台信任缓存加载。按第 62 节在 64 MiB 卷上实测的 7.84 MiB/s，1.4 MB 的
+launchd+dyld 不到一秒，565 MB 的 symbols 约 72 秒；等 3.3 GB 的 44 个缓存分片
+就位，整卷恢复约 7 分钟。恢复只还原文件，不解决 `launchd` 的 `CS_KILLED`——那
+是签名/AMFI 那条线，见第 8 节。
+
+### 7. 大于 64 MiB 的文件（待真机）
+
+这是旧卷上不可能的写入：两次都停在 64,028,672 字节并返回 ENOSPC。新卷上同一
+条流完整跑完，安装器写完后重新打开文件、再算一次 SHA-256：
+
+```sh
+python send-userland.py big.kist
+```
+
+预期（`big.kist` 已在主机上 `--verify` 通过：1 条 entry、592,101,376 字节、
+store、SHA-256 `e763b0ea…5126b308`）：
+
+```
+OK   /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.symbols 592101376 mode 0644
+INST DONE entries 1 ok 1 skipped 0 bytes 592101376 wire 592117760 ms <n>
+```
+
+再单独复核：
+
+```sh
+python send-userland.py --probe big.manifest --skip-list work/vol/logs/have.txt
+```
+
+预期 `SAME    /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.symbols`。
+旧卷的失败点 64,028,672 B 正好是 64 MiB（67,108,864 B）减去 HFS+ 元数据后的
+可用空间；新卷 16 GiB 上，同一个文件只占 3.4% 的卷。
+
+### 8. 装共享缓存之前还差什么
+
+1. **完整的 3.3 GB 真装**：本节只准备了最大的单个文件（592 MB symbols）。44 个
+   分片的 KIST 流总量 3,331,890,097 字节，按 7.84 MiB/s 约 7 分钟；卷的空闲
+   空间足够，剩下的只是把整条流跑完并核对 44 条 `OK`。
+2. **`LaunchDaemons` 的内容**：允许清单里留了
+   `/System/Library/LaunchDaemons/`，但真正要哪几个 plist 还没有定；现在放进去
+   也没有东西消费它们。
+3. **共享缓存的消费路径**：0133 只保证卷能装下缓存；`kebab_dsc` 的映射、
+   slide、UUID 校验是另一条线，和卷大小无关。
+4. **真 `launchd` 的签名**：当前 `launchd` 仍然 `CS_KILLED`。这是 AMFI/codesign
+   的问题，与根卷无关；`kebab_noinit=1` 只是让 bring-up 测试不被这个 panic
+   打断。普通启动不带 `kebab_noinit`，行为和以前一样。
+5. **恢复后不带 `kebab_noinit` 的一次启动**：`restore.kist` 把 launchd、dyld 和
+   静态信任缓存放回新卷之后，再启动一次**不带** `kebab_noinit` 的镜像，就能直接
+   回答签名问题：如果 `launchd` 不再 `CS_KILLED`，它应该死在缺少共享缓存
+   （`libSystem`）的更后面一步；如果仍然 `CS_KILLED`，说明信任缓存路径或
+   `kebab_cs` 的策略位和预期不符，下一步要对比期望/实际 cdhash。
+6. **恢复**：写卷之后先跑 `restore.kist`，再跑 44 个缓存分片；主机上的原件和
+   哈希见第 6 节。
+
+## 六十四、panic 不再需要按电源键
+
+> 目标：panic 之后板子要么还有一条能用的控制台，要么自己重启。不能停在
+> `Waiting for remote debugger connection` 里，也不能停在永远拿不到发送门的自旋里
+> 等人按电源键。这一节记三件事：两条死路分别是怎么形成的、补丁 0134 改了什么、
+> 下次在日志里怎么区分"控制台活下来 / 重启了 / 仍然卡住"。
+
+### 1. 两条独立的死路
+
+现场看到的"CDC-ACM 还枚举、每次 bulk-OUT 都超时、没有 fastboot、20 分钟没有
+看门狗复位"可以由两条互不依赖的路径产生。补丁 0134 对两条都做了处理。
+
+**第一条：KDP 等待。** `debug=0x14e` 在 arm64 上带 `DB_NMI`（0x4），
+`panic_init()` 因此把 `panicDebugging` 置为 `TRUE`。panic 走到
+`handle_debugger_trap()` 时，只要 `kdp_explicitly_requested` 为真
+（本板由 `kebabkdp=1` 置位），就会在 `panic_spin_forever()` 之前调用
+`kdp_raise_exception()`；`kdp_connection_wait()` 打印
+
+```
+Using serial KDP.
+Waiting for remote debugger connection.
+```
+
+然后在同一个 CDC-ACM 端口上轮询 KDP 包，直到调试器连上。没有 LLDB 的时候这个
+循环不会退出：端口被 KDP 收走，主机的 `IMEM?` / `PSCI?` / `INST?` 不是控制台
+命令而是被当成 KDP 输入，所以全部没有回应。这是**确定性**的，不需要任何竞态。
+
+**第二条：发送门被 panic 停住的 CPU 留住。** 控制台自己有一套发送门：
+
+* `ud_enter()` 在真正发数据前用 `os_atomic_cmpxchg(&ud.owner, 0, cpu+1)` 记录
+  "哪个 CPU 持有发送门"，并把 IRQ 关掉；`ud_leave()` 在退出时清 `ud.owner`。
+* console 事件线程 `ud_thread()` 没有绑定 CPU，每 1 ms 醒来一次，
+  `ud_enter()` → `ud_poll_locked()` → `ud_leave()`；普通 `printf`、EP0 dump、
+  KDP 回包也都走同一道门。
+* panic 路径用 `DebuggerHaltOtherCores()` → `DebuggerXCallEnter()` 停其它 CPU：
+  先发 `SIGPdebug` IPI，等 `debug_ack_timeout`，超时后再尝试
+  `ml_dbgwrap_halt_cpu()`。如果 panic 恰好撞上事件线程在 `ud_enter()` 里
+  （IRQ 已关，IPI 送不到），那个 CPU 既没有 ack，也没有被正常停住，而
+  `ud.owner` 仍然是它的编号 + 1。
+
+`ud_panic_takeover()` 原来的判据是：
+
+```c
+uint32_t old = os_atomic_load(&ud.owner, acquire);
+if (old) {
+        bool stopped = old == cpu;
+        if (!stopped && old <= MAX_CPUS)
+                stopped = ml_dbgwrap_cpu_is_halted((int)old - 1);
+        if (!stopped) return false;      /* 不抢，永远不抢 */
+        ...
+}
+```
+
+这个判据在本板上不可能为真：
+
+* `ml_dbgwrap_cpu_is_halted()` 只读 Apple CoreSight UTT 窗口里的
+  `DBGWRAP.DBGACK`。KEBAB 的 ADT 由 `scripts/make-kebab-adt.py` 生成，CPU 节点
+  只有 `state` / `reg` / `device_type` / `compatible` / `timebase-frequency` /
+  `bus-frequency`，没有 `coresight-reg` 或 `cpu-IMPL`；于是
+  `configure_coresight_registers()` 不映射 `CORESIGHT_UTT`，
+  `ml_dbgwrap_cpu_is_halted()` 在 `coresight_base[CORESIGHT_UTT] == 0`
+  这一句就返回 `FALSE`。
+* 即使映射了 CoreSight，被 `SIGPdebug` 停住的 CPU 停在 debugger 的等待循环里，
+  也不会置 `DBGACK`；这个 API 表达的是"外部调试器 halt 过"，不是"panic 已经
+  把调度器停了"，两者本来就不重合。
+
+于是接管永远被拒绝，`kebab_usb_panic_spin()` 的旧循环是：
+
+```c
+taken = ud_panic_takeover();
+if (!taken) { delay(1000); continue; }
+```
+
+它既不轮询控制器，也不重启，就停在这两行上。DWC3 的 pull-up 和已经完成的
+枚举还在，所以主机仍然看得到 ttyACM；但没有任何代码再服务端点，每次写都超时。
+这块板没有能把它踢醒的看门狗，于是一停就是几十分钟。
+
+这两条路里，第一条是 `kebabkdp=1` 时必然发生的；第二条是竞态，panic 撞不上
+持有发送门的 CPU 时不会发生（第 62 节里 `kebab_cs=0` 那几次 panic 之后控制台
+还能用，就是门恰好空闲）。所以修复也必须分成两半：**KDP 默认策略**和
+**panic 接管**，缺一不可。
+
+### 2. 修复一：panic 期间无条件接管发送门
+
+`ud_panic_takeover()` 现在先看 `panic_active()`：
+
+* `TRUE`：跳过 `ml_dbgwrap_cpu_is_halted()`。只要 `ud.owner` 或 `ud.rx_owner`
+  非零，就调用 `ud_controller_restart()` 做一次 core reset，把在途的 endpoint
+  command / DMA 全部收回，然后清 `owner` / `owner_depth` / `rx_owner` /
+  `rx_depth`。`ud.log_busy` 也直接清掉（生产者在 panic 里不可能还活着）。
+* `FALSE`：保留原来的"必须证明对方已停"的检查；这条路径不会被 panic 循环
+  调用，只是防御性的。拒绝时打印一行
+  `KEBAB USB: console takeover refused: owner ... is not halted`。
+
+core reset 是必要的：被停住的 CPU 可能留下了未完成的 TRB 或 endpoint command，
+只清软件锁会复用一块所有权还不知道的 DMA 内存。reset 完成后 EP0 重新初始化，
+主机会看到一次断开/重连，重新打开 `/dev/ttyACM0` 即可；panic 日志在 ring 里，
+重连后由 EP0 dump 和 log pump 一起送出。
+
+### 3. 修复二：服务不了就重启
+
+`kebab_usb_panic_spin()` 不再是"接管失败就永远等"：
+
+* 接管失败累计 1000 次（每次 1 ms，约 1 秒）后，打印
+  `KEBAB USB: panic console cannot be serviced (transport takeover refused); rebooting instead of parking`
+  然后走 `ud_platform_restart()` → `PEHaltRestart(kPERestartCPU)` →
+  PSCI `SYSTEM_RESET`。
+* 接管成功但 `ud.dead` 或 `ud.running == 0`（控制器已经 reset 失败 / 端口从未
+  起来）时，同样打印一行，原因分别为 `controller dead` / `console not running`，
+  然后重启。
+* `PEHaltRestart()` 真的返回（固件拒绝 reset）时再打印
+  `KEBAB USB: panic reboot returned; the machine did not reset` 并停在原地；
+  这是唯一还允许"停住"的分支，因为已经没有别的复位手段了。
+
+平台层也补了一个缺口：`KebabPlatformExpert::haltRestart()` 原来只对
+`kPERestartCPU` 做 PSCI reset。panic 的 `kPEPanicRestartCPU` /
+`kPEPanicRestartCPUNoCallouts` 如果没进控制台泵（console 没起来），会落到
+`IODTPlatformExpert::haltRestart()` 返回 -1，随后 `halt_all_cpus()` 把板子
+停死。现在这两个 panic 重启类型也会走 PSCI reset，并打印
+`KEBAB PANIC: no console to service; rebooting via PSCI SYSTEM_RESET`。
+
+### 4. 修复三：默认不再等调试器
+
+`osfmk/kern/debug.c` 的 `panic_init()` 里，KEBAB 现在做：
+
+```c
+if (!kdp_explicitly_requested) {
+        panicDebugging = FALSE;
+}
+```
+
+`kdp_explicitly_requested` 只由两个显式请求置位：`kdp_match_name` 或
+`kebabkdp=1`。因此：
+
+* 普通启动（`debug=0x14e` 但没有 `kebabkdp=1`）：`DB_NMI` 不再把 panic 变成
+  "停在调试器等 KDP"。panic 会正常走到重启决策；如果 USB 控制台可用，
+  平台层把它接成 panic 控制台泵（panic 报告、EP0 dump、端口重开都保留），
+  如果控制台不可用就直接 PSCI 复位。
+* `kebabkdp=1`：`panicDebugging` 保持 `TRUE`，panic 仍然先 trap 到 KDP，
+  `Waiting for remote debugger connection` 和 LLDB attach 的行为不变。
+  这是显式请求，等待调试器是预期行为。
+* `halt_in_debugger` 没有动：`debug=0x14f` 的 `DB_HALT` 仍然在显式
+  `Debugger()` 入口停住；`DB_REBOOT_ALWAYS` 也仍然优先于 KDP。
+
+启动参数与 panic 行为对照：
+
+| 启动参数 | `panicDebugging` | panic 之后 |
+| --- | --- | --- |
+| `debug=0x14e kebabusb=1`（默认） | FALSE | 控制台可用则进 panic 泵；发送门被留住时 reset + 重连；控制台不可用则 PSCI 复位 |
+| 默认 + `kebabkdp=1` | TRUE | 先 trap KDP，打印 `Waiting for remote debugger connection`，等 LLDB；不自动重启（显式请求） |
+| `debug=0x14e` 但无 `kebabusb=1` | FALSE | 没有控制台可服务，panic 重启类型直接 PSCI reset |
+| `debug=0x14f ...` | FALSE（但 `halt_in_debugger=1`） | `DB_HALT` 路径未改；配合 `kebabkdp=1` 时启动/显式 `Debugger()` 仍停在调试器 |
+| 任意 + `DB_REBOOT_ALWAYS` | 不变 | 在 KDP 之前就重启 |
+
+### 5. 日志判据
+
+**A. 控制台活下来，发送门本来是空的。** panic 报告照常从原来的 ttyACM 出来；
+之后 EP0 dump 里：
+
+```
+KEBAB EP0 PROBE: progress 0x........ seq ... req ... phase ... status ...
+KEBAB EP0 STATE: resets=... disconnects=... fences=<不变> ... takeover=0 ...
+KEBAB KDP STATE: host_in=... in_drop=... kdp_in=... kdp_frames=... kdp_out=...
+                 tx_bytes=... owners=0/0/<panic cpu+1> depths=0/0
+```
+
+`fences` 不变（没有 core reset），`owners=0/0/...` 说明发送门和接收锁都已经
+在 panic CPU 手里。端口不用重开，`IMEM?` / `PSCI?` / `INST?` / `REBOOT` 直接
+有回应。
+
+**B. 控制台活下来，但发送门被留住过。** 主机会看到一次 USB 断开/重连
+（同一个 VID/PID，`/dev/ttyACM0` 可能改名）；重新打开端口后，同一组 EP0 dump
+里 `fences` 比 panic 前多 1，`takeover=<非零位图>`（panic 时还 busy 的端点），
+`owners=0/0/<panic cpu+1>`。panic 文本可能在重连后才到，因为它在 ring 里等
+log pump。之后的 `IMEM?` / `REBOOT` 正常。
+
+**C. 重启了（控制台不可服务）。** 如果主机在复位前还读得到，会先看到下列之一：
+
+```
+KEBAB USB: panic console cannot be serviced (transport takeover refused); rebooting instead of parking
+KEBAB USB: panic console cannot be serviced (controller dead); rebooting instead of parking
+KEBAB PANIC: no console to service; rebooting via PSCI SYSTEM_RESET
+```
+
+随后是 `KEBAB REBOOT: PEHaltRestart(kPERestartCPU)`，板子从 boot 重新开始
+（boot 日志、`KEBAB USB: ... running ...` 全部重来）。如果控制器已经 dead，
+上面那行可能根本发不出去；**"没有新日志 + 几秒内重新枚举并从头启动"本身就是
+重启成功的证据**。
+
+**D. 仍然卡住（只应在固件拒绝复位时出现）。** 会看到
+
+```
+KEBAB REBOOT: PEHaltRestart returned <err>, the machine did not reset
+KEBAB USB: panic reboot returned; the machine did not reset
+```
+
+这时才需要物理断电；普通 panic 不应该再走到这里。
+
+**E. `kebabkdp=1` 的预期日志。** `Using serial KDP.` +
+`Waiting for remote debugger connection.`，然后 LLDB attach。没有 attach 时
+停在这里是显式请求的结果，不是本缺陷复发；判断方法是看启动参数里有没有
+`kebabkdp=1`。
+
+### 6. 验证状态与下一步
+
+补丁 0134 只做了代码和编译验证：`kernel.development.kebab` 在
+`MACOS_VERSION=13.5 / KEBAB / DEVELOPMENT` 下构建通过，改动文件没有引入新的
+编译告警（原有的 `-Wdeclaration-after-statement` 误报仍在，属本文件既有风格）。
+板子当前处于 stranded 状态，真机验证要等下一次上电：
+
+1. 默认参数（不带 `kebabkdp`）启动，带 `kebabpanic=1`，在控制台敲 `PANIC!`；
+   预期 A 或 B。重复多次以覆盖发送门竞态。
+2. 带 `kebabkdp=1` 启动再 `PANIC!`；预期 E，LLDB 能 attach，`continue` 后
+   按 KDP 的语义走。
+3. 不带 `kebabusb=1` 启动并制造一次 panic（需要另一个 panic 触发点，或临时
+   把 `kebab_usb_start()` 的入口关掉）；预期 C 的
+   `KEBAB PANIC: no console to service; ...` + 从头启动。
+4. 只有看到 D 才说明固件复位也失败了，需要另行处理 PSCI 路径。
+
+## 六十五、触摸报告解码
+
+> 目标：把 S3908 从"读得出身份"推到"解得出触点"。这一节记录五件事：应用的 TCM
+> 命令序列与每一步的理由、报告程序与报告布局、位域抽取（用一条合成报告逐位走
+> 一遍）、主机测试清单，以及真机日志里到底看哪几行才能判断解码是对的。
+> 补丁 0135。
+
+### 1. 为什么先读 application info，再写报告程序
+
+应用信息（`CMD_GET_APPLICATION_INFO`，0x20）的 payload 是厂商的
+`struct syna_tcm_app_info`，46 字节，全部是 16 位小端：
+
+| 偏移 | 字段 | 本驱动怎么用 |
+| --- | --- | --- |
+| 0 | version | 打印 |
+| 2 | status | 非 0 只警告（可能还在启动） |
+| 4 / 6 | static / dynamic config 大小 | 打印 |
+| 8 / 10 | app config 起始块 / 大小 | 打印 |
+| **12** | **max_touch_report_config_size** | **报告程序缓冲区多大**：决定 `SET_TOUCH_REPORT_CONFIG` 发多少字节 |
+| **14** | **max_touch_report_payload_size** | **一条报告最大多少字节**：打印，并用来判断 128 字节的接收上限够不够 |
+| 16 | customer_config_id[16] | 打印 |
+| **32 / 34** | **max_x / max_y** | **传感器几何**，三空间变换的输入 |
+| **36** | **max_objects** | 解码时最多解几个触点 |
+| 38 / 40 / 42 / 44 | buttons / rows / cols / hybrid | 打印 |
+
+关键在顺序：报告程序的**长度**由 12 号字段决定，报告里 x/y 的**量程**由 32/34 号
+字段决定。厂商驱动也是先读 app info 再设报告程序，并且把
+`max_touch_report_config_size < 128` 当成错误——那 128 是它自己的缓冲区大小，不是
+协议常量。本驱动没有 128 的硬要求：app info 给出的值在 13..128 之间就按厂商的做法
+把程序零填充到那么长（程序解析器读到 `TOUCH_END`=0 就停，所以零填充是给终止符留
+位置）；给不出（没读到、为 0、大于 128）就只发程序本身，并打印原因。
+
+app info 读不到不是致命错误：`max_x/max_y` 回退到设备树的 1079/2399，`max_objects`
+回退到 10，报告程序按未填充发送。**但报告程序本身必须被接受**，否则没有布局可解，
+驱动不启动轮询线程，也不建 `/dev/kebab_touch`。
+
+### 2. TCM 命令序列
+
+```text
+identify            0x02  -> 报告 0x10（24 字节）   读 part/version/mode/build
+get-boot-info       0x10  -> 状态（本固件 0x0e）     application 模式不实现，正常
+get-app-info        0x20  -> 状态 0x01 + 46 字节    几何、对象数、两个报告尺寸
+set-report-config   0x26  -> 状态 0x01              报告程序（带 z，13 字节）
+```
+
+报文格式是厂商的：`0xa5, code, len_lo, len_hi` + payload + `0x5a`。两条规则决定了
+这次能和不能信什么：
+
+* **代码范围**。命令应答的 code < 0x10（`STATUS_OK` 是 0x01）；报告 code >= 0x10
+  （identify 是 0x10，触摸是 0x11，status report 是 0x1b）。identify 要的是报告
+  0x10，不是状态；其它命令要的是状态。等错东西的消息会被读出来、打印、继续等，
+  不会被当成答案解。
+* **长度必须先校验再读**。header 里的长度大于 128 就不是本驱动能读的报文，四个
+  字节原样打印后**逐字节滑窗重同步**（最多 4 字节）。这不是防御性编程，是实测：
+  0132 那次 bring-up 里，identify 的 payload 后面跟了一个 `0x00`，接着读到的四个
+  字节是 `a5 01 00 5a`，被当成"长度 0x5a00 = 23040"的报文，于是 app info 报
+  `payload 23040 too large`，后面的 report config 收到 0x0d（上一条命令未完成）。
+  新代码对这四个字节的回答是
+  `header a5 01 00 5a rejected (bad length), sliding`，然后继续找真正的报文头。
+
+**每个应答都原样打印**，不只 `kebab_touch_raw=1` 时：命令号、code、payload 长度、
+尾字节、payload 的十六进制。这样"布局不对"和"框架不对"在日志里是两种不同的
+现象，而不是一个静默的错误解析。
+
+### 3. 报告程序与报告布局
+
+`SET_TOUCH_REPORT_CONFIG`（0x26）的 payload 就是一段小程序，本驱动发的是：
+
+```text
+01 06 04 07 04 08 0c 09 0c 0a 08 03 00
+```
+
+| 字节 | 值 | 含义 |
+| --- | --- | --- |
+| 0 | 0x01 | `TOUCH_FOREACH_ACTIVE_OBJECT` |
+| 1,2 | 0x06, 4 | `TOUCH_OBJECT_N_INDEX`，4 位 |
+| 3,4 | 0x07, 4 | `TOUCH_OBJECT_N_CLASSIFICATION`，4 位 |
+| 5,6 | 0x08, 12 | `TOUCH_OBJECT_N_X_POSITION`，12 位 |
+| 7,8 | 0x09, 12 | `TOUCH_OBJECT_N_Y_POSITION`，12 位 |
+| 9,10 | 0x0a, 8 | `TOUCH_OBJECT_N_Z`，8 位 |
+| 11 | 0x03 | `TOUCH_FOREACH_END` |
+| 12 | 0x00 | `TOUCH_END` |
+
+每个活动触点 4+4+12+12+8 = **40 位 = 5 字节**，触点之间没有填充，所以一条报告
+的 payload 长度是 5 的整数倍（一根手指 5，两根 10，全抬起 0）。厂商默认程序没有
+z（32 位，4 字节）；如果固件拒绝带 z 的程序，驱动会退回那个默认程序，解码器读
+哪个程序就按哪个布局解——z 字段不存在时压力恒为 0，其它字段一位不差。
+
+程序不是写死在解码器里的：`kebab_tcm_decode_report()` 先扫程序，找
+`FOREACH_ACTIVE_OBJECT` 的循环体、累加循环体里每个字段的宽度（得到"每个触点多少
+位"），再按同一段程序逐字段解码。报告程序被接受，等于布局被协商过；解码器读的
+就是这份协商结果。
+
+### 4. 位域抽取
+
+规则与厂商 `touch_get_report_data()` 一致：**字节内从 bit 0 开始，跨字节时先读到
+的是低位**（小端位序）。合成样例（测试里用的那条）：
+
+```text
+payload: 13 c4 02 5a 7f      触点 3，class 1，x 708，y 1440，z 127
+```
+
+逐字段走一遍：
+
+| 字段 | 位区间 | 宽度 | 取自 | 计算 | 结果 |
+| --- | --- | --- | --- | --- | --- |
+| index | 0..3 | 4 | byte0 低半字节 | 0x13 & 0xf | **3** |
+| classification | 4..7 | 4 | byte0 高半字节 | 0x13 >> 4 | **1** |
+| x 低 8 位 | 8..15 | 8 | byte1 | 0xc4 = 196 | |
+| x 高 4 位 | 16..19 | 4 | byte2 低半字节 | 0x02 & 0xf = 2 | x = 196 + 2×256 = **708** |
+| y 低 4 位 | 20..23 | 4 | byte2 高半字节 | 0x02 >> 4 = 0 | |
+| y 高 8 位 | 24..31 | 8 | byte3 | 0x5a = 90 | y = 0 + 90×16 = **1440** |
+| z | 32..39 | 8 | byte4 | 0x7f | **127** |
+
+两个最容易错的地方正好都在这条样例里：
+
+* **x 跨字节**：x 的 12 位横跨 byte1 和 byte2 的低半字节。把 x 当成 8 位，或者从
+  bit 9 开始读，得到的是 0x162 = 354（正好是 708 >> 1）——测试里两个值都断言了。
+* **y 从半字节中间开始**：y 的 12 位从 byte2 的**高**半字节开始，先取 4 位再取
+  byte3 的 8 位。少读一位、多读一位都不会得到 1440：把 y 的宽度改成 13 位，会
+  把 z 的最低位并进来，得到 1440 + 4096 = 5536（测试断言了这个值）。
+
+解码器对报告长度也是保守的：只有当一个触点的 40 位全都还在 payload 里才解它；
+剩下的位不够一个触点时，算作 `truncated_bits`，**不**解成触点。全零的尾巴是字节
+填充（解出来对象数不变，不产生 up）；非零的尾巴说明报告被截断，整条丢弃并计数
+打印。这样"手指还按着但报告被截断"不会变成"所有手指抬起"。
+
+### 5. 触点状态机与事件
+
+`kebab_tcm_track()` 拿上一条报告的活动掩码比较：
+
+* 这一条里有、上一条没有 → **down**；
+* 这一条里有、上一条也有 → **move**（记录每条都进队列，打印受 `kebab_touch_move_ms`
+  限速，默认 200 ms）；
+* 上一条有、这一条没有 → **up**，坐标用该槽位最后一次的 x/y，压力 0。
+
+class 1（finger）和 class 2（gloved finger）算触点；class 0（lift）不算，它所在的
+槽位会按"消失了"产生 up；index 超过 10 的对象被忽略。压力就是 z 字段（0..255），
+这是这颗固件在报告里给出的唯一压力代理。
+
+事件进 `/dev/kebab_touch` 的 48 字节记录不变（raw / panel / logical 三套坐标 +
+z + phase + slot + timestamp），三空间变换仍然只有一处
+（`kebab_tcm_transform()`）：
+
+```c
+panel_x   = (raw_x * (1080 - 1) + max_x / 2) / max_x;
+panel_y   = (raw_y * (2400 - 1) + max_y / 2) / max_y;
+logical_x = panel_x + 22;
+logical_y = panel_y + 18;
+```
+
+`max` 取 app info 的 32/34 号字段；为 0 或大于 0xfff 时用设备树的 1079/2399（12 位
+字段的 0xfff 是手指抬起时的常见值，先夹到面板边缘并置 `KT_EVENT_FLAG_CLAMPED`，
+不向面板外推算）。启动时的队列自检（64 槽、推 192 条、丢 128 条、收 64 条）没有改。
+
+### 6. 主机测试
+
+`package/KebabTouchTcmHostTests.c` 驱动 `package/KebabTouchTcm.c`，不碰 I2C、不碰
+内核、不碰板子，16 组合成报文流共 **193 项断言全部 PASS**：
+
+```text
+$ gcc -std=c11 -Wall -Wextra -Werror -o t KebabTouchTcm.c KebabTouchTcmHostTests.c && ./t
+KebabTouchTcm host tests: framing, payloads, program, decode, tracking, transform
+...
+193 checks, 0 failure(s)
+```
+
+| 组 | 覆盖 |
+| --- | --- |
+| C1 | 命令写入 `{cmd, len_lo, len_hi, payload}`；缓冲区不够时拒绝而不是截断 |
+| C2 | 报文 = 头 + payload + 一个 0x5a；长度、消费字节数、padding 错、截断、空指针 |
+| C3 | **实测的 23040**：`a5 01 00 5a` 被 `bad length` 拒绝且四个字节不被改写；缺 marker 是另一种错误；前导杂字节能被滑窗跳过 |
+| C4 | **实测的 identify 应答**：`a5 03 01 01 "s3908-15.0.0" b9 ba 3c 00` → mode 0x01 application、version 1、build 0x003cbab9、前缀 2 字节原样保留 |
+| C5 | 厂商布局（无前缀）的 identify；无位置放 version/mode、无 part 串、part 提前结束 |
+| C6 | app info 46 字节**逐字段**偏移（每字段值不同，错一位就失败）；45 字节拒绝 |
+| C7 | 报告程序字节逐一比对（带 z / 厂商默认）；每触点 40 / 32 位；未知字段码、缺 `FOREACH_END` 拒绝 |
+| C8 | 报告配置 payload 零填充到固件尺寸；固件尺寸为 0 发程序本身；小于程序时拒绝 |
+| C9 | 单触点解码：五个字段 + 直接调位读取器的 5 个断言；**从 bit 9 读 x 得 0x162**；跨半字节的触点 |
+| C10 | 一条手指的 down → move（x 709）→ up（用最后坐标、压力 0）；重复空报告不再产生事件 |
+| C11 | 两触点：两个 down、活跃掩码 0x3；下一帧只有第二个 → move(slot1) 在前、up(slot0) 在后 |
+| C12 | **截断**：32 位载荷解出 0 个触点、尾巴 32 位非零；1 个触点 + 32 位尾巴；8 位零尾巴算填充；报文层截断是 `short` |
+| C13 | **命令回显**：code=0x02 不是 identify 报告；0x26 既不是状态也不是报告；0x11 在状态槽被拒；0x01 不是触摸报告 |
+| C14 | 布局由程序决定：x 宽 11 位 → y 变 2880；y 宽 13 位 → y 变 5536；整条流错 1 位一定解出不同触点；无 z 程序解出的 z 恒 0 |
+| C15 | tracker：class 2 算按下、class 0 触发 up、index 12 被忽略、事件数组不够时状态仍然更新 |
+| C16 | 三空间变换：0→(0,0)/(22,18)、1079/2399→(1079,2399)/(1101,2417)、中间点、0xfff 夹紧、max=0 回退、2000 量程按比例缩放、16 位量程不被采用 |
+
+测试第一次跑就抓到两个真问题，都是"在板子上很难看出来"的那种：
+
+1. `kebab_tcm_parse_identify()` 把 part 串里 NUL 填充的字节替换成了 `.`，于是
+   `s3908-15.0.0` 打印成 `s3908-15.0.0....`——字符串比较立刻失败。改为遇到 NUL
+   结束。
+2. y 宽度 13 位的用例一开始只有 5 字节载荷：40 位装不下 41 位的触点，解出 0 个
+   对象，断言"y == 5536"失败。这条失败本身证明"载荷不够就不解触点"是对的；测试
+   改成 6 字节载荷后通过。
+
+### 7. 真机上要看什么
+
+镜像带 `kebab_touch=1 kebab_touch_boot=1 kebab_touch_power=1
+kebab_vrm_write=1 kebab_pon_write=1`，正常启动后按顺序看这几段：
+
+**(1) 四个命令都有应答，且 app info 有 46 字节：**
+
+```text
+KEBAB TOUCH: command 0x20 answer: code 0x01, 46 payload byte(s), trailing byte 0x5a
+KEBAB TOUCH: app info payload[0] ...
+KEBAB TOUCH: app info: version 0x.... status 0x0000, max_x 1079 max_y 2399 objects 10 ...
+KEBAB TOUCH: app info: max touch report config 128 bytes, max touch report payload 50 bytes
+```
+
+判据：`max touch report config` 至少 13（程序长度），`max touch report payload` 至少
+5×max_objects；`max_x`/`max_y` 与设备树的 `touchpanel,panel-coords = <0x437 0x95f>`
+（1079/2399）一致。对不上就先记下实际值，不要改代码去迁就。
+
+**(2) 报告程序被接受：**
+
+```text
+KEBAB TOUCH: report program: 13 bytes, 40 bits per contact, 128 bytes sent
+KEBAB TOUCH: report program[0] 01 06 04 07 04 08 0c 09 0c 0a 08 03 00
+KEBAB TOUCH: command 0x26 answer: code 0x01, 0 payload byte(s), trailing byte 0x5a
+KEBAB TOUCH: report config accepted: 40 bits per contact, z included
+```
+
+如果这里是 `answered code 0x0d (previous command pending)` 或 `0x0e`，看第 (1) 步
+是否也失败：0x0d 通常是上一条命令的应答没读干净，新框架会把四个字节和 code 打进
+日志。若退回 `vendor program without z`，说明带 z 的程序被拒，功能仍然可用但压力
+恒为 0。
+
+**(3) 第一条报告的长度是 5 的倍数：**
+
+```text
+KEBAB TOUCH: message code 0x11 len 5
+KEBAB TOUCH: down obj 0 raw 540 1200 panel 540 1200 logical 562 1218 z 41
+```
+
+判据（这就是"数字对不对"）：
+
+* `raw` 与 `panel` 完全相等（因为 max_x/max_y = 1079/2399，比例是 1:1）；如果是
+  `1079 -> 540` 这种一半的关系，说明 app info 的 max 是 2158 之类，不是错；
+* `logical = panel + (22,18)`，永远；
+* 手指向右移动时 `raw x` 增大、`raw y` 基本不变；上下移动相反。**若左右移动改变
+  的是 y，就是 x/y 的位偏移错了**；
+* `z` 随按压力度变化（轻按小、重按大），抬起时 up 行 `z 0`；
+* 两指时 `len 10`、两行 down；抬起一根时先 move 后 up，up 的坐标是它最后的坐标；
+* 若出现 `report of N byte(s) discarded: ... too short for another`，说明实际布局
+  与程序不符（常见：固件按 4 字节触点发、或 max_objects 比实际小）；若出现
+  `report discarded: the payload and the program disagree`，是报文本身坏了（长度不是
+  5 的倍数）。
+
+**(4) 没有持续的错误行。** 正常触摸时不应反复出现 `padding ... not the vendor
+0x5a`（偶尔一次说明固件用 0x00 填充，无害；每条都打印说明确实如此，把它记下来）、
+`message header ... rejected`（流错位）、`no usable answer`（命令无应答）。
+
+### 8. 边界与没有做的事
+
+* **传输和电源序列一行没改**：`kebab_spmi_vrm_boot_power()`、TCS 状态机、时钟、
+  复位、GENI 初始化、I2C 读写全部原样。补丁只改 TCM 层、报告解码和两条记录路径，
+  因为那两处是实测过的。
+* **没有 HID**。事件仍然只进 `/dev/kebab_touch` 的 48 字节记录，队列与自检不变。
+* identify 的 payload 里那两个字节（`a5 03`）仍然不解释；解码器只保证 part 串不被
+  错位。
+* 本节的所有数字（193 项断言、合成样例、程序字节）都是主机上的结果。**板子上的
+  验收还没做**：stranded，无法烧写。第 (1)–(4) 步就是板子回来后的验收清单。
+
+## 六十六、exec 失败的两个真实原因
+
+这一节纠正第 63 节末尾和第 8 节把 `launchd` 的死亡笼统归给 `CS_KILLED` 的说法。
+日志里的 namespace 9 有两个完全不同的 code，它们来自两条互不相干的代码路径；
+把 9/e 当成签名问题会一直查错方向。
+
+### 1. 9/6：`exec_copyout_strings()` 失败
+
+调用链在 `bsd/kern/kern_exec.c`：
+
+- `exec_mach_imgact()` 在切换进目标 map 后调用
+  `exec_copyout_strings(imgp, &ap)`（打上本补丁后第 1756 行；函数本体在第 5416 行）。
+- 失败后创建 `os_reason_create(OS_REASON_EXEC,
+  EXEC_EXIT_REASON_COPYOUT_STRINGS)`（第 1774 行），然后 `goto badtoolate`
+  （第 1779 行）。
+- `EXEC_EXIT_REASON_COPYOUT_STRINGS` 的值是 **6**，见
+  `bsd/sys/reason.h:249`。
+- pid 1 在 `badtoolate` 之后被 `SIGKILL`，`psignal_internal()` 对
+  `initproc` 的 SIGKILL 直接 panic，见 `bsd/kern/kern_sig.c:2069` 起；
+  本移植的 KEBAB 分支还会把 `kebab_loader_trace` 一起打出来。
+
+这条路径只说明“往新用户栈拷贝字符串/指针/argc 时某一步失败了”。它既没有查
+CodeDirectory，也没有查信任缓存；`CS_HARD`/`CS_KILL` 在这里不参与。之前把
+它和签名混为一谈，是因为两条路径最后都以 pid 1 的 SIGKILL panic 收场。
+
+### 2. 9/e：`process_signature()` 的 `PLATFORM_IOS` 门
+
+另一条在 `bsd/kern/kern_exec.c:process_signature()`（第 7425 行）：
+
+- 第 1385 行 `proc_setplatformdata(p, load_result.ip_platform, ...)` 把
+  Mach-O `LC_BUILD_VERSION` 里的 platform 写进 proc。真 `launchd` 是
+  `PLATFORM_IOS`，所以 `proc_platform(p) == PLATFORM_IOS` 成立。
+- `#if XNU_TARGET_OS_OSX` 下第 7485–7516 行检查 spawn platform：`execve`
+  路径没有 `imgp->ip_px_sa`（`psa == NULL`），于是要求
+  `unentitled_ios_sim_launch` 或 `com.apple.private.security.no-sandbox`
+  entitlement。
+- 两者都不满足时创建 `os_reason_create(OS_REASON_EXEC,
+  EXEC_EXIT_REASON_WRONG_PLATFORM)`（第 7505 行）。这个 code 是 **0xe**，
+  见 `bsd/sys/reason.h:257`。
+- 这个判断**不看** `CS_PLATFORM_BINARY`。即使 `kebab_cs=2` 已经按信任缓存
+  把 blob 标成 platform，`process_signature()` 仍然会走到 9/e。
+- `kebab_cs` 的 `0x4`（`KEBAB_CS_GRANT_ENTITLEMENTS`）也救不了：这个门调用
+  `IOVnodeHasEntitlement()`（`iokit/bsddev/IOKitBSDInit.cpp:1602`），后者经
+  `IOUserClient::copyClientEntitlementVnode()`
+  （`iokit/Kernel/IOUserClient.cpp:1521`）和
+  `copyClientEntitlementsVnode()`（同文件第 1481 行）去读 vnode 的签名
+  entitlement 字典，走的是 `cs_entitlements_dictionary_copy_vnode()`，不是
+  `kebab_amfi_query_*` 那几个回调。因此 0x4 只影响 AMFI 查询接口，不影响
+  这里。
+
+结论：9/e 是“宿主 macOS 内核不愿意在没有 spawn platform 的情况下启动 iOS
+二进制”，不是签名校验失败，也不是信任缓存没装。
+
+### 3. 这次改了什么
+
+**平台门（唯一的真实行为改动）**：`bsd/kern/kern_exec.c` 顶部第 198 行起（补丁后第 210 行），
+`unentitled_ios_sim_launch` 这个 `TUNABLE` 在 `KEBAB` 下默认值改为 `true`：
+
+```c
+#if defined(KEBAB)
+static TUNABLE(bool, unentitled_ios_sim_launch, "unentitled_ios_sim_launch", true);
+#else
+static TUNABLE(bool, unentitled_ios_sim_launch, "unentitled_ios_sim_launch", false);
+#endif
+```
+
+理由和边界：
+
+- 这个开关本来就在 `XNU_TARGET_OS_OSX && (DEBUG || DEVELOPMENT)` 内编译；
+  本内核的编译命令确实带 `-DXNU_TARGET_OS_OSX` 和 `-DDEVELOPMENT`（构造
+  `build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/.../*.json` 的 `arguments` 可见）。
+- `TUNABLE` 由 `kernel_startup_tunable_init()`（`osfmk/kern/startup.c:289`）
+  在启动时调用 `PE_parse_boot_argn()`；本板没有可靠的 boot-args 通道，且
+  板子已 stranded，不能再改命令行，所以只能让默认值生效。若以后命令行里
+  明确写 `unentitled_ios_sim_launch=0`，`PE_parse_boot_argn()` 仍会把它改回
+  `false`，开关没有被废掉。
+- 它只影响 `process_signature()` 里上面那一个 `PLATFORM_IOS` 判断。没有
+  全局签名豁免，没有清 `CS_HARD`/`CS_KILL`，没有改 `CS_PLATFORM_BINARY`
+  的判定，也没有改信任缓存策略。
+
+**copyout 路径**：`exec_copyout_strings()` 现在记录失败阶段（`alignment`、
+`strings`、`pointers`、`argc`），失败时打印：
+
+```
+KEBAB EXEC: copyout stage=strings error=14 ptr_size=8 strspace_mod=0 string_size=280 string=0x16fdffe8 ptr=0x16fdff80 argc=0x16fdff78
+```
+
+各字段含义：
+
+| 字段 | 含义 |
+| --- | --- |
+| `stage` | `alignment` = `ip_strspace % ptr_size != 0`；`strings` = 字符串区 `copyout`；`pointers` = 指针数组 `copyout`；`argc` = 最后的 `copyoutptr` |
+| `error` | 该次 `copyout`/`copyoutptr` 的 errno（常见 `EFAULT=14`、`EINVAL=22`） |
+| `ptr_size` | 本次 exec 的用户指针宽度，4 或 8 |
+| `strspace_mod` | `imgp->ip_strspace % ptr_size`；非 0 说明对齐检查先失败，后面的地址都没有意义 |
+| `string_size` | `ip_strendp - ip_strings`，字符串区字节数 |
+| `string`/`ptr`/`argc` | 三个目标地址：字符串区、指针数组区、argc 槽 |
+
+`exec_mach_imgact()` 在 copyout 前后各打一行状态：
+
+```
+KEBAB EXEC: pid 1 pre-copyout cs=0x0 imgp_cs=0x0 load_cs=0x0 stack=0x16fe0000
+KEBAB EXEC: pid 1 copyout-failed error=14 cs=0x0 imgp_cs=0x0 load_cs=0x0 ap=0x16fdff78
+```
+
+`cs` 是 `proc_getcsflags(current_proc())`，`imgp_cs` 是 `imgp->ip_csflags`，
+`load_cs` 是 `load_result.csflags`。三者在失败前后都不变，说明这不是签名
+状态在 exec 中途被改写；如果 `load_cs` 带 `CS_HARD`/`CS_KILL` 而
+`imgp_cs` 没有，才需要回到签名线。
+
+**用户栈**：`create_unix_stack()`（`bsd/kern/kern_exec.c:6737`）在返回前打印：
+
+```
+KEBAB EXEC: stack map=0xfffffe... shift=14 custom=0 user=0x16fe0000 alloc=0x16fd0000+0x10000 guard=0x16fd0000+0xc000 kr=0
+```
+
+依次是 map 指针、`vm_map_page_shift()`（16 KiB 页时为 14）、
+`load_result->custom_stack`、最终 `user_stack`、分配基址和长度、guard 区
+基址和长度、返回值。默认栈（`user_stack_alloc_size == 0`）会打出
+`alloc=0x0+0x0 guard=0x0+0x0`，表示没有单独分配，栈由
+`vm_initial_limit_stack` 的默认布局提供。成功路径最多打 8 行，失败路径
+不受限制，避免刷爆 16 KiB 的 console ring。
+
+### 4. 分类可观测性
+
+信任缓存加载后的一行现在包含版本、条目数、每条大小、已用/残余字节：
+
+```
+KEBAB CS: static trust cache v2: 2760 entries x 24 bytes (66264 used, residual 0 bytes), hash types sha1=2 sha256=2758 sha256-trunc=0 sha384=0, sorted
+```
+
+- `v2` / `24 bytes`：模块版本 2，条目固定 24 字节（20 字节 cdhash +
+  hashType + flags + constraintCategory + reserved）。
+- `66264 used, residual 0`：24 字节头 + 2760×24；`residual` 不是 0 说明
+  文件在条目表后面还有多余字节，解析或文件本身有问题。
+- `hash types`：这个 20H392 缓存里 2758 条是 SHA-256（type 2），另有 2 条
+  历史 SHA-1 条目；内核查找只看 20 字节 cdhash，不看条目里的 hashType，
+  所以这 2 条不影响 launchd/dyld。
+- `sorted`：内核的 `kebab_tc_lookup()` 对有序表做二分，无序时退化为线性。
+
+每次 exec 的 `load_code_signature()` 成功后打一行（最多 32 行）：
+
+```
+KEBAB CS: exec cdhash b65c36c9f5b287a6a8f5ca83d9427fb55ef04f4e cd=0x7e124+4398 hash=2 slice=0x0 tc=hit platform=1
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `cdhash` | 内核用 `SHA256_*` 对选中的整个 CodeDirectory 求 SHA-256，取前 20 字节 |
+| `cd=0x7e124+4398` | CodeDirectory 在文件里的绝对偏移和 blob 长度；`cached` 表示该 vnode 的 blob 已经存在，无法从原始签名再算文件偏移 |
+| `hash=2` | CodeDirectory 的 `hashType`：1=SHA-1，2=SHA-256，3=SHA-256-truncated，4=SHA-384 |
+| `slice=0x0` | Mach-O 在 fat 文件里的切片偏移；thin 文件为 0 |
+| `tc=hit/miss` | 上述 cdhash 是否在已加载的静态信任缓存里 |
+| `platform=1/0` | `blob->csb_platform_binary` 最终值，也就是 `kebab_cs` 分类有没有把它标成平台二进制 |
+
+选择 CodeDirectory 的规则与 `cs_validate_csblob()` 一致：只看 slot 0 和
+0x1000–0x1004，按 `hashPriorities[]`（SHA-1 < SHA-256-truncated < SHA-256
+< SHA-384）取最高 rank；同 rank 重复会像内核一样拒绝。不是取第一个
+CodeDirectory。
+
+### 5. 主机侧复核
+
+新工具 `scripts/verify-trustcache-cdhash.py` 直接读真实的
+`/sbin/launchd`、`/usr/lib/dyld` 和 IPSW 的 `static.trustcache`，按内核
+规则选 CodeDirectory、用 SHA-256 算 cdhash、逐页核对 code slot，再在缓存里
+查找。它和以前的 `check_cdhash.py` 不是一套解析：后者把文件当成裸 `trst`
+模块（`tc[:4] == b"trst"`、version 在 offset 8、20 字节条目），而实际 IPSW
+成员是 25 字节 DER/IM4P 包装 + 24 字节 v2 条目。
+
+在 `ubuntualbert` 上对真实文件运行：
+
+```sh
+python3 scripts/verify-trustcache-cdhash.py
+```
+
+输出：
+
+```
+trust cache  /home/albert/ios-userland/static.trustcache (66289 bytes)
+  IM4P       25-byte DER wrapper, 66264-byte payload
+  module     v2, 2760 entries x 24 bytes, 66264 used, 0 residual, sorted
+  hash types sha1=2, sha256=2758
+
+binary        slice  cd off    cd len  hash          page  slots     trust cache
+launchd       0x0    0x7e124   4398    sha256(2)     12    127/127   hit
+              cdhash b65c36c9f5b287a6a8f5ca83d9427fb55ef04f4e
+dyld          0x0    0xdb284   7218    sha256(2)     12    220/220   hit
+              cdhash 684d847c40e6e873eeaec693011d4d997a869d2a
+
+PASS launchd  cdhash, CodeDirectory, 127/127 slots and trust cache all match
+PASS dyld     cdhash, CodeDirectory, 220/220 slots and trust cache all match
+OK: the kernel's cdhash and Apple's cache agree for both binaries
+```
+
+对应表格：
+
+| 二进制 | cdhash | CD 偏移 | CD 长度 | hash type | page shift | code slots | 信任缓存 |
+| --- | --- | ---: | ---: | --- | ---: | ---: | --- |
+| `/sbin/launchd` | `b65c36c9f5b287a6a8f5ca83d9427fb55ef04f4e` | `0x7e124` | 4398 | 2 (SHA-256) | 12 | 127/127 | hit |
+| `/usr/lib/dyld` | `684d847c40e6e873eeaec693011d4d997a869d2a` | `0xdb284` | 7218 | 2 (SHA-256) | 12 | 220/220 | hit |
+
+工具退出码为 0 才表示“内核会算出的 cdhash”和“缓存里存的 cdhash”一致；
+退出码非 0 时，未来日志里的 `tc=miss` 就是真 miss，而不是主机工具解析错。
+
+### 6. 下一次启动应该看到什么
+
+如果 9/e 已经消失、copyout 也成功，exec 会继续到 dyld。此时 dyld 找不到
+`libSystem.B.dylib`（它只在尚未映射的 split shared cache 里），会调用
+`abort_with_payload()`（`libsyscall/wrappers/terminate_with_reason.c:120`），
+走 syscall 521 到内核的 `abort_with_payload_internal()`
+（`bsd/kern/kern_exit.c:1333`），namespace 是 **6**
+（`OS_REASON_DYLD`，`bsd/sys/reason.h:93`），code 是 **1**。pid 1 的退出
+由 `proc_handle_critical_exit()`（`bsd/kern/kern_exit.c:1776`）处理，panic
+文本类似：
+
+```
+initproc exited -- exit reason namespace 6 subcode 0x1 description: ...
+```
+
+这是**预期的下一步**，不是签名失败。判读顺序：
+
+1. 先看有没有 `KEBAB CS: exec cdhash ... platform=1`。有，说明分类和信任
+   缓存都对了。
+2. 如果接着出现 namespace **6** code **1**，说明 exec 已经过了 9/e 和 9/6，
+   问题在共享缓存映射，不在签名。
+3. 如果仍然是 namespace **9** code **0x6**，看紧邻的
+   `KEBAB EXEC: copyout stage=...` 行，按 stage 定位。
+4. 如果仍然是 namespace **9** code **0xe**，说明平台门没有生效，检查
+   `unentitled_ios_sim_launch` 是否被命令行显式置 0，以及
+   `proc_platform(p)` 的值。
+5. 只有 panic 文本里出现 `CS_KILLED`，或者 `load_cs`/`imgp_cs` 带
+   `CS_HARD`/`CS_KILL`，才回到签名线。
+
+## 六十七、共享缓存映射的算术验证
+
+本节回答一个问题：当 `exec` 真正走到 `kebab_dsc_map_plan()` 时，内核算出来的地址会不会落在磁盘上这 44 个文件说它们该在的地方？结论先写在这里：
+
+* **44 个真实文件上的地址算术是正确的**：`base + cacheVMOffset`、每条 mapping 的 `address/size`、以及 slide 后的地址，全部落在 16 KiB 对齐、互不重叠、且被 `SHARED_REGION_SIZE_ARM64` 覆盖的范围内。
+* **发现并修复了一个 slide 交接 bug**：`kebab_dsc_read_mappings()` 记录了 `sms_slide_start`，却没有记录 `sms_slide_size`；`kebab_dsc_apply_slide()` 又用 `sms_slide_size` 决定是否设置 `VM_PROT_SLIDE`。结果非零 slide 时四条数据 mapping 都不会被 rebase pager 接管。补丁 `0137-kebab-dsc-slide-size.patch` 补上这一行（详见第 4 小节）。这不是地址算术错误，而是把算好的地址交给 VM 时少交了一个长度。
+* 本节所有数字来自 `scripts/verify-shared-cache-plan.py` 对 `/home/albert/ios-userland/cryptex-cache` 的实跑，以及 `bsd/kern/kebab_dyldcache.c`、`osfmk/vm/vm_shared_region.c` 的源码对照。**没有真机启动日志**。
+
+### 1. 窗口：实际需要多少，内核保留多少
+
+先把几个容易混淆的量分开：
+
+| 量 | 值 | 含义 |
+| --- | ---: | --- |
+| `SHARED_REGION_BASE_ARM64` | `0x180000000` | 共享区固定基址；cache 头的 `sharedRegionStart` 也是这个值 |
+| `SHARED_REGION_SIZE_ARM64` | `0x100000000`（4 GiB） | 内核在 `vm_shared_region_lookup()` 里实际保留/创建的窗口 |
+| cache 头 `sharedRegionSize` | `0xaade8000` | 缓存自己声明的 unslid 窗口，不是 slide 的硬边界 |
+| 最高 mapping 结束 - 基址（extent） | `0xaade4000` | 本计划实际需要的 VA 跨度 |
+| 51 条 mapping 的 size 总和 | `0xa2de4000` | 真正有文件内容的 payload |
+| `maxSlide` | `0x55214000` | 缓存允许的最大 slide（严格小于） |
+
+换算成字节：
+
+* 实际需要：`0xaade4000` = 2,866,692,096 B（约 2.67 GiB）。
+* 内核保留：`0x100000000` = 4,294,967,296 B（4 GiB）。
+* 文件 payload：`0xa2de4000` = 2,732,474,368 B。
+* 两者相差 `0x8000000`（128 MiB），不是碎片，而是 **4 个 32 MiB 的洞**：两个 `.dylddata` 文件各在 `__DATA_CONST` 与 `__DATA` 之间、`__DATA` 与尾部 slide-info 页之间留了 32 MiB；具体是 `.27` 和 `.41` 各两个洞。`highest_end - base` 仍然是 `0xaade4000`，因为最后一个洞之后还有 `.27`/`.41` 的尾部 r-- 页。
+
+因此：
+
+* **需要的窗口**（unslid）：`0xaade4000`。
+* **缓存头声明的窗口**：`0xaade8000`，比 extent 多 `0x4000`（一页）。
+* **内核保留的窗口**：`0x100000000`，比 extent 多 `0x5521c000`。
+* 如果只看“文件 payload 总和”，会得到 `0xa2de4000`；它比 extent 少 128 MiB，不能拿它当窗口大小。
+
+`mappingOffset` 这里要特别说明：44 个文件的头里都是 `0x200`，但它是 **mapping 表在文件内的字节偏移**，不是 VA。VA 的基址来自 main 缓存 `subCacheArray` 里的 `cacheVMOffset`，且必须同时等于子缓存头的 `sharedRegionStart` 和该子缓存第一条 mapping 的 `address`。42/42 个子缓存三者全部相等；表里的 `cacheVMOffset` 就是这个值。`.symbols` 不在 `subCacheArray` 里，表中给的是它自己头的 `sharedRegionStart - base`，仅用于说明它落在计划之外。
+
+#### 44 个文件的完整表
+
+`holes` 列 = 文件第一条 mapping 到最后一个 mapping 结束的跨度减去 `mapped bytes`；它只对 `.27`/`.41` 非零（各 `0x4000000`，即两个 32 MiB 洞）。`gap after` 是到下一条**被映射**地址的距离；`.42` 后面的 `0x4000` 是到 `.symbols` 头页的空隙，而 `.symbols` 本身不映射。`overlap` 列由排序后的 51 条 mapping 两两比较得出。
+
+| # | file | cacheVMOffset | first mapping | mapped bytes | holes | maps | end | gap after | overlap |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---|
+| 0 | `dyld_shared_cache_arm64` | 0x0 | 0x180000000 | 0x5c000 | 0x0 | 1 | 0x18005c000 | 0x0 | no |
+| 1 | `dyld_shared_cache_arm64.01` | 0x5c000 | 0x18005c000 | 0x6d1c000 | 0x0 | 1 | 0x186d78000 | 0x0 | no |
+| 2 | `dyld_shared_cache_arm64.02` | 0x6d78000 | 0x186d78000 | 0x14000 | 0x0 | 1 | 0x186d8c000 | 0x0 | no |
+| 3 | `dyld_shared_cache_arm64.03` | 0x6d8c000 | 0x186d8c000 | 0x6e30000 | 0x0 | 1 | 0x18dbbc000 | 0x0 | no |
+| 4 | `dyld_shared_cache_arm64.04` | 0xdbbc000 | 0x18dbbc000 | 0x28000 | 0x0 | 1 | 0x18dbe4000 | 0x0 | no |
+| 5 | `dyld_shared_cache_arm64.05` | 0xdbe4000 | 0x18dbe4000 | 0x6d04000 | 0x0 | 1 | 0x1948e8000 | 0x0 | no |
+| 6 | `dyld_shared_cache_arm64.06` | 0x148e8000 | 0x1948e8000 | 0x58000 | 0x0 | 1 | 0x194940000 | 0x0 | no |
+| 7 | `dyld_shared_cache_arm64.07` | 0x14940000 | 0x194940000 | 0x6dd8000 | 0x0 | 1 | 0x19b718000 | 0x0 | no |
+| 8 | `dyld_shared_cache_arm64.08` | 0x1b718000 | 0x19b718000 | 0x40000 | 0x0 | 1 | 0x19b758000 | 0x0 | no |
+| 9 | `dyld_shared_cache_arm64.09` | 0x1b758000 | 0x19b758000 | 0x6e2c000 | 0x0 | 1 | 0x1a2584000 | 0x0 | no |
+| 10 | `dyld_shared_cache_arm64.10` | 0x22584000 | 0x1a2584000 | 0x60000 | 0x0 | 1 | 0x1a25e4000 | 0x0 | no |
+| 11 | `dyld_shared_cache_arm64.11` | 0x225e4000 | 0x1a25e4000 | 0x6e3c000 | 0x0 | 1 | 0x1a9420000 | 0x0 | no |
+| 12 | `dyld_shared_cache_arm64.12` | 0x29420000 | 0x1a9420000 | 0x5c000 | 0x0 | 1 | 0x1a947c000 | 0x0 | no |
+| 13 | `dyld_shared_cache_arm64.13` | 0x2947c000 | 0x1a947c000 | 0x66c4000 | 0x0 | 1 | 0x1afb40000 | 0x0 | no |
+| 14 | `dyld_shared_cache_arm64.14` | 0x2fb40000 | 0x1afb40000 | 0x60000 | 0x0 | 1 | 0x1afba0000 | 0x0 | no |
+| 15 | `dyld_shared_cache_arm64.15` | 0x2fba0000 | 0x1afba0000 | 0x6d8c000 | 0x0 | 1 | 0x1b692c000 | 0x0 | no |
+| 16 | `dyld_shared_cache_arm64.16` | 0x3692c000 | 0x1b692c000 | 0x6c000 | 0x0 | 1 | 0x1b6998000 | 0x0 | no |
+| 17 | `dyld_shared_cache_arm64.17` | 0x36998000 | 0x1b6998000 | 0x5cb8000 | 0x0 | 1 | 0x1bc650000 | 0x0 | no |
+| 18 | `dyld_shared_cache_arm64.18` | 0x3c650000 | 0x1bc650000 | 0x58000 | 0x0 | 1 | 0x1bc6a8000 | 0x0 | no |
+| 19 | `dyld_shared_cache_arm64.19` | 0x3c6a8000 | 0x1bc6a8000 | 0x666c000 | 0x0 | 1 | 0x1c2d14000 | 0x0 | no |
+| 20 | `dyld_shared_cache_arm64.20` | 0x42d14000 | 0x1c2d14000 | 0x3c000 | 0x0 | 1 | 0x1c2d50000 | 0x0 | no |
+| 21 | `dyld_shared_cache_arm64.21` | 0x42d50000 | 0x1c2d50000 | 0x6d94000 | 0x0 | 1 | 0x1c9ae4000 | 0x0 | no |
+| 22 | `dyld_shared_cache_arm64.22` | 0x49ae4000 | 0x1c9ae4000 | 0x68000 | 0x0 | 1 | 0x1c9b4c000 | 0x0 | no |
+| 23 | `dyld_shared_cache_arm64.23` | 0x49b4c000 | 0x1c9b4c000 | 0x6d78000 | 0x0 | 1 | 0x1d08c4000 | 0x0 | no |
+| 24 | `dyld_shared_cache_arm64.24` | 0x508c4000 | 0x1d08c4000 | 0x78000 | 0x0 | 1 | 0x1d093c000 | 0x0 | no |
+| 25 | `dyld_shared_cache_arm64.25` | 0x5093c000 | 0x1d093c000 | 0x4f94000 | 0x0 | 1 | 0x1d58d0000 | 0x0 | no |
+| 26 | `dyld_shared_cache_arm64.26` | 0x558d0000 | 0x1d58d0000 | 0x38000 | 0x0 | 1 | 0x1d5908000 | 0x0 | no |
+| 27 | `dyld_shared_cache_arm64.27.dylddata` | 0x55908000 | 0x1d5908000 | 0xb214000 | 0x4000000 | 4 | 0x1e4b1c000 | 0x0 | no |
+| 28 | `dyld_shared_cache_arm64.28.dyldlinkedit` | 0x64b1c000 | 0x1e4b1c000 | 0x12f4000 | 0x0 | 2 | 0x1e5e10000 | 0x0 | no |
+| 29 | `dyld_shared_cache_arm64.29` | 0x65e10000 | 0x1e5e10000 | 0x6df8000 | 0x0 | 1 | 0x1ecc08000 | 0x0 | no |
+| 30 | `dyld_shared_cache_arm64.30` | 0x6cc08000 | 0x1ecc08000 | 0x78000 | 0x0 | 1 | 0x1ecc80000 | 0x0 | no |
+| 31 | `dyld_shared_cache_arm64.31` | 0x6cc80000 | 0x1ecc80000 | 0x62ac000 | 0x0 | 1 | 0x1f2f2c000 | 0x0 | no |
+| 32 | `dyld_shared_cache_arm64.32` | 0x72f2c000 | 0x1f2f2c000 | 0x88000 | 0x0 | 1 | 0x1f2fb4000 | 0x0 | no |
+| 33 | `dyld_shared_cache_arm64.33` | 0x72fb4000 | 0x1f2fb4000 | 0x6e34000 | 0x0 | 1 | 0x1f9de8000 | 0x0 | no |
+| 34 | `dyld_shared_cache_arm64.34` | 0x79de8000 | 0x1f9de8000 | 0x98000 | 0x0 | 1 | 0x1f9e80000 | 0x0 | no |
+| 35 | `dyld_shared_cache_arm64.35` | 0x79e80000 | 0x1f9e80000 | 0x6e30000 | 0x0 | 1 | 0x200cb0000 | 0x0 | no |
+| 36 | `dyld_shared_cache_arm64.36` | 0x80cb0000 | 0x200cb0000 | 0x74000 | 0x0 | 1 | 0x200d24000 | 0x0 | no |
+| 37 | `dyld_shared_cache_arm64.37` | 0x80d24000 | 0x200d24000 | 0x6d60000 | 0x0 | 1 | 0x207a84000 | 0x0 | no |
+| 38 | `dyld_shared_cache_arm64.38` | 0x87a84000 | 0x207a84000 | 0x88000 | 0x0 | 1 | 0x207b0c000 | 0x0 | no |
+| 39 | `dyld_shared_cache_arm64.39` | 0x87b0c000 | 0x207b0c000 | 0x52bc000 | 0x0 | 1 | 0x20cdc8000 | 0x0 | no |
+| 40 | `dyld_shared_cache_arm64.40` | 0x8cdc8000 | 0x20cdc8000 | 0x84000 | 0x0 | 1 | 0x20ce4c000 | 0x0 | no |
+| 41 | `dyld_shared_cache_arm64.41.dylddata` | 0x8ce4c000 | 0x20ce4c000 | 0x6198000 | 0x4000000 | 4 | 0x216fe4000 | 0x0 | no |
+| 42 | `dyld_shared_cache_arm64.42.dyldlinkedit` | 0x96fe4000 | 0x216fe4000 | 0x13e00000 | 0x0 | 2 | 0x22ade4000 | 0x4000 | no |
+| 43 | `dyld_shared_cache_arm64.symbols` | 0xaade8000 | 0x22ade8000 | 0 | 0 | 0 | — | — | no (excluded) |
+
+把 51 条 mapping 按地址排序后，前一条的 `end` 都小于等于后一条的 `address`，没有 overlap；只有 4 个 32 MiB 洞和 `.42` 到 `.symbols` 的 `0x4000` 空隙。最低地址是 `0x180000000`（主缓存），最高结束是 `0x22ade4000`（`.42` 的最后一条 `__LINKEDIT`）。
+
+### 2. slide：16 KiB 对齐是硬要求，不是保守选择
+
+`kebab_dsc_apply_slide()` 的顺序是：
+
+1. `slide == 0` 直接返回；
+2. `slide & (KEBAB_DSC_PAGE_SIZE - 1)` 非零 → 拒绝；`KEBAB_DSC_PAGE_SIZE` 是 `0x4000`；
+3. `maxSlide == 0 || slide >= maxSlide` → 拒绝；
+4. `slide > 0xffffffff` → 拒绝（`srfmp->slide` 是 32 位）；
+5. 没有 mapping 带 slide info → 拒绝；
+6. 逐条 mapping 检查 `slide` 后仍在 `[SHARED_REGION_BASE_ARM64, SHARED_REGION_END)` 内，slide-info 地址也不越界。
+
+这里第 2 条和 `vm_shared_region_map_file()` 是重复的：后者在 arm64 上还有
+
+```text
+FOURK_COMPAT: rejecting mis-aligned slide 0x...
+```
+
+因为 `shared_file_mapping_slide_np.sms_address/sms_size` 和 cache 的 mapping 都是 16 KiB 对齐的；加一个 4 KiB 或 8 KiB 的 slide 会让固定地址 `vm_map_enter(..., vmkf_already=TRUE)` 落在非 16 KiB 边界上，必然失败或与相邻 mapping 重叠。**所以 4 KiB/8 KiB slide 必须拒绝，不能“容忍”**。slide-info blob 自己的页是 4 KiB（`PAGE_SIZE_FOR_SR_SLIDE`），但 16 KiB 是 4 KiB 的整数倍，16 KiB slide 同时保持 slide-info 页对齐；两者不矛盾。
+
+实跑结果：
+
+| slide | 结果 | slide 后 extent 结束 | 距 4 GiB 末尾 |
+| ---: | --- | ---: | ---: |
+| `0x0` | ALLOW | `0x22ade4000` | `0x5521c000` |
+| `0x4000` | ALLOW | `0x22ade8000` | `0x55218000` |
+| `0x100000` | ALLOW | `0x22aee4000` | `0x5511c000` |
+| `0x400000` | ALLOW | `0x22b1e4000` | `0x54e1c000` |
+| `0x1000000` | ALLOW | `0x22bde4000` | `0x5421c000` |
+| `0x40000000` | ALLOW（1 GiB 级 ASLR） | `0x26ade4000` | `0x1521c000` |
+| `0x55210000` | ALLOW（`maxSlide - 16 KiB`，最大接受值） | `0x27fff4000` | `0xc000` |
+| `0x55214000` | REJECT（`slide >= maxSlide`） | — | — |
+| `0x55218000` | REJECT（`slide >= maxSlide`） | — | — |
+| `0x1000` / `0x2000` / `0x1234` / `0x1000001` | REJECT（非 16 KiB 对齐） | — | — |
+| `0x100000000` | REJECT（先被 `maxSlide` 拒绝，也不进 32 位字段） | — | — |
+
+对所有 ALLOW 的 slide，验证器还检查了：
+
+* 每个 `address` 都变成 `address + slide`，且仍 16 KiB 对齐；
+* 任意两条 mapping 的相对差不变（顺序也不变）；
+* 4 个 slide-info 地址也统一加 `slide`，不越出 4 GiB；
+* 需要窗口 = `extent + slide`，最大接受 slide 时为 `0xffff4000`，仍比 4 GiB 少 `0xc000`。
+
+注意 `sharedRegionSize` 不能拿来当 slide 的边界：slide `0x4000` 时 mapping 结束正好等于头窗口 `0x22ade8000`，更大的 slide 会超过 `sharedRegionSize`，但仍在 4 GiB 内核窗口内。内核检查的是 `SHARED_REGION_END` 和 `maxSlide`，不是 `sharedRegionSize`。`maxSlide = 0x55214000` 本身也正好等于 `0x100000000 - 0xaade8000 - 0x4000`。
+
+### 3. 跨文件引用：load command 和 plan 的逐段对照
+
+验证器对全部 2,710 个 image 做了下面的检查，而不只是抽两个 dylib：
+
+1. 从 image record 的 `address` 找到包含它的 mapping，计算它在 cache 文件里的偏移：`mapping.fileOffset + (address - mapping.address)`，读 32 字节 `mach_header_64`，检查 magic `0xfeedfacf`、`cputype == CPU_TYPE_ARM64`。
+2. 解析全部 12,603 个 `LC_SEGMENT_64`。对每个非 `__PAGEZERO` 段，要求：
+   * `segment.vmaddr` 在某个 mapping 内；
+   * `segment.vmaddr + segment.vmsize` 不越过该 mapping；
+   * **`segment.fileoff == mapping.fileOffset + (segment.vmaddr - mapping.address)`**；
+   * `segment.fileoff + segment.filesize` 在该文件内，且 `filesize <= vmsize`。
+3. 每个 image 的 `__TEXT.vmaddr` 必须等于 image record 的 `address`；`LC_ID_DYLIB`（dylib 才有）必须等于 image record 的路径。
+4. `imagesText` 的 2,710 项逐项和 image record 对照：`loadAddress`、`pathOffset`、`textSegmentSize` 全部一致。
+5. 全部 46,959 条 `LC_LOAD_DYLIB` / `LC_LOAD_WEAK_DYLIB` / `LC_REEXPORT_DYLIB` / `LC_LAZY_LOAD_DYLIB` / `LC_LOAD_UPWARD_DYLIB` 引用：目标路径必须能在这个 cache 的 image 表里找到，且目标 `address` 在某个 mapping 内。其中 22 条是 weak/lazy 且目标不在 cache 里（例如 libobjc 的 `/usr/local/lib/libobjc-env.dylib`），这是合法的；**required 引用 0 条缺失**。
+
+第 2 条的等式是这次验证里最强的 off-by-one 检查：mapping 的 `fileOffset` 或 `address` 只要错一页，`segment.fileoff` 就对不上，2,710 个 image 里必然有一批立刻报错。实际结果是 **12,603/12,603 全部相等，0 个不匹配**。
+
+抽取两个 dylib 和 dyld 的结果：
+
+| image | 段 | `vmaddr` | `fileoff` | plan |
+| --- | --- | ---: | ---: | --- |
+| `libobjc.A.dylib` | `__TEXT` | `0x1800b8000` | `0x5c000` | `.01[0] + 0x5c000` |
+| `libobjc.A.dylib` | `__DATA_CONST` | `0x1d5964000` | `0x5c000` | `.27[1] + 0x0` |
+| `libobjc.A.dylib` | `__DATA` | `0x1dcd14000` | `0x540c000` | `.27[2] + 0x0` |
+| `libobjc.A.dylib` | `__OBJC_RO` | `0x181db5000` | `0x1d59000` | `.01[0] + 0x1d59000` |
+| `libobjc.A.dylib` | `__LINKEDIT` | `0x217040000` | `0x5c000` | `.42[1] + 0x0` |
+| `libSystem.B.dylib` | `__TEXT` | `0x1d1c2c000` | `0x12f0000` | `.25[0] + 0x12f0000` |
+| `libSystem.B.dylib` | `__DATA_CONST` | `0x1dab664a0` | `0x525e4a0` | `.27[1] + 0x52024a0` |
+| `libSystem.B.dylib` | `__DATA` | `0x1dee7c668` | `0x7574668` | `.27[2] + 0x2168668` |
+| `libSystem.B.dylib` | `__LINKEDIT` | `0x217040000` | `0x5c000` | `.42[1] + 0x0` |
+| `dyld` | `__TEXT` | `0x1a4610000` | `0x202c000` | `.11[0] + 0x202c000` |
+
+子框架的例子（全部目标地址都在 plan 内）：
+
+| 父 image | load | 目标地址 |
+| --- | --- | ---: |
+| `libobjc.A.dylib` | `/usr/lib/libc++abi.dylib` | `0x1d1acb000` |
+| `libobjc.A.dylib` | `/usr/lib/libc++.1.dylib` | `0x1946fe000` |
+| `libobjc.A.dylib` | `/usr/lib/libSystem.B.dylib` | `0x1d1c2c000` |
+| `libSystem.B.dylib` | `/usr/lib/system/libdispatch.dylib` | `0x18db34000` |
+| `libSystem.B.dylib` | `/usr/lib/system/libdyld.dylib` | `0x1a6c80000` |
+| `libSystem.B.dylib` | `/usr/lib/system/libsystem_kernel.dylib` | 已解析并在 plan 内 |
+
+`libSystem.B.dylib` 自己的 32 条 required load 全部解析；`libobjc.A.dylib` 的 4 条 load 里 3 条 required 全部解析，1 条 weak（`libobjc-env.dylib`）不在 cache 里。`dyld` 是 `MH_DYLINKER`，没有 `LC_ID_DYLIB`，也没有 load。
+
+### 4. local symbols、optimization/data 和 slide-info
+
+**local symbols。** `.symbols` 文件 592,101,376 B，头里 `localSymbolsOffset=0x4000`、`localSymbolsSize=0x233891cd`。从 0x4000 读 `dyld_cache_local_symbols_info`：
+
+* `nlistOffset=0xa980`，`nlistCount=8,705,811`；
+* `stringsOffset=0x84e1ab0`，`stringsSize=0x1aea771d`；
+* `entriesOffset=0x18`，`entriesCount=2710`（64 位 `dyld_cache_local_symbols_entry_64`，16 B/项）。
+
+验证结果：
+
+* 2,710 个 entry 的 `dylibOffset + base` 全部等于某个 image 的 `address`，nlist 范围全部合法；
+* 8,705,811 个 nlist 的 `n_value` 非零值全部落在 51 条 mapping 的并集内，**0 个在 plan 外**；最小 `0x1800b9c00`，最大 `0x214fd1d90`；所有 `n_strx` 都在 string table 内；
+* entry 区结束于 `0xe978`，nlist 从 `0xe980` 开始，nlist 结束正好是 string table 起点 `0x84e5ab0`，三段没有重叠。
+
+`.symbols` **不在 plan 里**：它的 `symbolFileUUID=51ccba45...` 被主头识别，但内核只打印名字/大小/UUID，不映射。它自己的头声明的 `sharedRegionStart=0x22ade8000`（正好是 cache 头窗口的末尾），第一条 mapping 是 `0x22ade8000+0x4000`，在 plan 窗口之外。这个排除是正确的：`.symbols` 只用于符号化，dyld 运行时不需要它；如果把它塞进 plan，反而会让映射越过 `sharedRegionSize`。
+
+**optimization/data 区。** 主头里非零的元数据地址都在 plan 内：
+
+| 字段 | 范围 | 所在 mapping |
+| --- | --- | --- |
+| `patchInfoAddr/Size` | `[0x21705d510, 0x21bfee4bf)` | `.42[1]` |
+| `dylibsTrieAddr/Size` | `[0x217040000, 0x21705d510)` | `.42[1]` |
+| `programsPblSetPoolAddr/Size` | `[0x21c100518, 0x21dba9518)` | `.42[1]` |
+| `dylibsPblSetAddr` | `0x21bfee4c0` | `.42[1]` |
+| `programTrieAddr` | `0x21dba9518` | `.42[1]` |
+| `dyldInCacheMH` | `0x1a4610000` | `.11[0]` |
+| `dyldInCacheEntry` | `0x1a46251b0` | `.11[0]` |
+
+`progClosures*`、`dylibsImageArray`、`other*`、`rosetta*` 全为 0；`swiftOptsSize=0`。两个 `.dylddata` 的 `__DATA_CONST`/`__DATA` 都在 `.27`/`.41` 的 mapping 1/2，两个 `.dyldlinkedit` 的 `__LINKEDIT` 在 `.28`/`.42` 的 mapping 1；这些 mapping 的保护位也符合预期（`__DATA_CONST` init r--/max rw-，`__DATA` rw-/rw-，`__LINKEDIT` r--/r--）。所以“优化数据 + 可写数据 + linkedit”都已经在 plan 里，内核不需要额外构造数据区。
+
+**slide-info。** 四条数据 mapping 的 `mappingWithSlide` 项各带一个 v2 blob：
+
+| mapping | blob 地址 | 大小 | 页数 |
+| --- | ---: | ---: | ---: |
+| `.27[1]` `__DATA_CONST` | `0x1e4b0fc08` | `0xa788` | 21,424 |
+| `.27[2]` `__DATA` | `0x1e4b04000` | `0xbc08` | 24,048 |
+| `.41[1]` `__DATA_CONST` | `0x216fdaf58` | `0x5350` | 10,644 |
+| `.41[2]` `__DATA` | `0x216fd4000` | `0x6f58` | 14,232 |
+
+四个 blob 都是 `version=2`、`page_size=0x1000`、`page_starts_count * 0x1000 == mapping.size`、`extras=0`、`deltaMask=0xffff0000000000`、`valueAdd=0`，并且都完整落在同文件尾部那条 r-- mapping 内。内核不需要“生成”slide-info：`vm_shared_region_map_file()` 把 `sms_slide_start/sms_slide_size` 传给 `vm_shared_region_slide()`，后者 `copyin()` 的就是这四个盘上 blob；patch 0103 只是把 `mappingWithSlide` 里的文件偏移换算成映射后的地址。
+
+**这里就是发现的 bug。** `kebab_dsc_read_mappings()` 在 0103 里只写了：
+
+```c
+file->mappings[i].sms_slide_start =
+    file->mappings[found].sms_address +
+    (offset - file->mappings[found].sms_file_offset);
+```
+
+没有写 `file->mappings[i].sms_slide_size = size;`。而 `kebab_dsc_apply_slide()` 的两处关键逻辑都以 `sms_slide_size != 0` 为前提：
+
+```c
+if (m->sms_slide_size != 0 &&
+    (m->sms_slide_start + slide + m->sms_slide_size > KEBAB_DSC_REGION_END)) { ... }
+...
+if (m->sms_slide_size != 0) {
+    m->sms_slide_start += slide;
+    m->sms_max_prot |= VM_PROT_SLIDE;
+}
+```
+
+所以非零 slide 时，四条数据 mapping 的 `VM_PROT_SLIDE` 永远不会被设置；`vm_shared_region_map_file()` 的 `vmsr_num_slides` 是 0，不会安装 lazy rebase pager，但 `srfmp->slide` 仍然把 `sr_slide` 设成非零。dyld 会看到一个已经 slid 的基址，而 __DATA 里的指针从未 rebase。patch `0137-kebab-dsc-slide-size.patch` 在 `sms_slide_start` 赋值之后补上 `sms_slide_size = size`，字段来自同一个 `mappingWithSlide` 项；修改后 4 条 mapping 都会带 `VM_PROT_SLIDE`，`vm_shared_region_map_file()` 的计数和 `mappings_to_slide_cnt` 都是 4，`vm_shared_region_slide()` 才会拿到非零的 blob 长度。
+
+### 5. harness：它是什么、证明了什么、不能证明什么
+
+`scripts/verify-shared-cache-plan.py` 是这次新增的独立验证器。**它不是内核 C 代码的编译产物，也不是 `kebab_dsc_build_plan()` 的拷贝**：内核的 plan builder 依赖 `vnode_t`、UBC、`vm_map_t` 和 `vm_shared_region_map_file()`，没有内核 shim 无法在 host 链接；脚本是按 `bsd/kern/kebab_dyldcache.c` 的规则逐条重写的独立实现，再拿真实 cache 的 Mach-O / nlist 数据反过来交叉验证。因此它不能证明“内核 C 一定按这个规则执行”——`sms_slide_size` 的漏填就是读 C 才发现的，脚本本身看不见这个字段。这一点必须说清楚。
+
+它做的检查：
+
+* 44 个文件、42 个 subcache、UUID 唯一性、`sharedRegionStart == base + cacheVMOffset`、第一条 mapping 地址一致；
+* 每条 mapping 的 16 KiB 对齐、文件范围、保护位、region 内、全局排序后无 overlap；
+* 14 个 slide 组合（0、16 KiB、1/4/16 MiB、1 GiB、`maxSlide` 边界、4 KiB/8 KiB/非对齐、32 位溢出）；
+* 2,710 个 Mach-O、12,603 个段、46,959 条 load、2,710 个 `imagesText`；
+* 8,705,811 个 local symbol 值；
+* `.symbols` 的排除和四条 slide-info blob 的格式/位置。
+
+它只读每个文件的前 4 KiB、mapping 表、slide-info blob、Mach-O 头和 `.symbols` 的 nlist 区，不读 3.3 GB 正文；完整跑一次约 9 秒。`--table` 输出上面的 44 行表，`--json` 输出机器可读摘要；`--selftest` 是 8 条纯算术断言。`scripts/verify-all.sh` 里新增了 `shared-cache-plan` 一项，要求 44/44 文件齐全；`--fast` 下实测 PASS。
+
+内核侧的编译验证：补丁 0136 应用后，在 `~/kebab-build/dxb` 的 KEBAB arm64 树上强制重编 `kebab_dyldcache.o` 并链接，日志出现 `CC kebab_dyldcache.o`，最终 `kernel.development.kebab` 17,174,704 B、`XNU Build Done!`；源码已恢复原状。这是编译验证，不是运行验证。
+
+### 6. 到真机之前仍然未知的部分
+
+算术和磁盘结构已经不是未知项；下面这些仍然只能在板子上回答：
+
+1. `vm_shared_region_map_file()` 对 43 个文件 / 51 条 mapping 的实际返回值；`vmkf_already=TRUE` 下是否会因为某个 mapping 已存在而走 `KERN_MEMORY_PRESENT` 分支。
+2. `kebab_dsc_exec_hook()` 在 pid 1 第一次 `exec` 时，shared region 是否确实为空、`vm_shared_region_start_address()` 是否返回 `0x180000000 + slide`。
+3. `vm_shared_region_slide()` 的 `copyin()` 能否从新任务的 shared region 读到四个 blob（地址在 plan 内，但“用户 map 里可读”是运行时事实）。
+4. 4 GiB 共享区在这块板子的 pmap 上能否完整保留；`vm_shared_region_trim_and_get()` 的 trim 是否会切掉尾部。
+5. 43 个文件在 HFS+ 根卷上的 `VNOP_READDIR`/`vn_rdwr` 行为、root 拥有/SF_RESTRICTED 检查、以及 3.3 GB 读取的耗时和内存压力。
+6. `.symbols` 不映射是否影响 dyld 的崩溃符号化路径（预期不影响运行时，但没有真机）。
+7. 非零 slide 的 ASLR 值是否落在 `maxSlide` 内、以及 dyld 是否接受内核已经 slid 的 shared region；这依赖 dyld 自己的启动参数，不在本移植的控制范围内。
+8. 任何 `exec` 之后的用户态崩溃是否来自 dyld、launchd 或签名策略，而不是映射地址。
+
+### 7. 复现
+
+```sh
+# 纯 host，不碰板子
+python3 scripts/verify-shared-cache-plan.py ~/ios-userland/cryptex-cache --table
+python3 scripts/verify-shared-cache-plan.py --selftest
+
+# 和现有轻量 checker 一起跑
+python3 scripts/check-shared-cache.py ~/ios-userland/cryptex-cache
+./scripts/verify-all.sh --fast
+```
+
+## 六十八、最小用户态树
+
+> 目标：把"内核能 exec `/sbin/launchd`"推进到"launchd 能加载一个 plist 并真的
+> 跑起一个进程"。这一步只做主机侧：确定最小集合、逐条核对 Mach-O 依赖、把流打
+> 出来并在主机上 `--verify`。板子仍然不可用，所以所有"应该看到什么"都写成可
+> 对照的日志，而不是"应该能启动"。
+
+结论先写在这里：
+
+* `base.kist` 现在有 **11 条**（0151 起）：`/sbin/launchd`、`/usr/lib/dyld`、
+  静态信任缓存、`/usr/libexec/xpcproxy`、一个只依赖共享缓存的 `zprint`、它的
+  LaunchDaemon plist，以及五个 boot task 可执行文件（`/sbin/mount`、
+  `/sbin/fsck`、`/usr/libexec/cc_fips_test`、`/usr/libexec/dirs_cleaner`、
+  `/usr/libexec/launchd_cache_loader`）。**655,360 字节**线上字节（10 chunks），
+  装完 2,057,682 字节。
+* `cache.kist` 是 **44 条**：43 个被内核映射的分片加 `.symbols`（内核只报告、
+  不映射）。**1018.44 MiB** 线上字节，装完 3.10 GiB。
+* `base.kist` 里没有 `/dev`、`/var`、`/tmp`，也不应该有：安装器的允许清单只有
+  七个前缀、只能写普通文件，`/tmp` 的 01777 还超出 KIST 头里的 0777 模式字段。
+  这三样由**根卷骨架**提供；内核在 `/dev` 上挂 devfs，节点由 devfs 创建，既不是
+  安装文件，也不是 launchd 创建。
+* 本轮唯一的硬 blocker 是**卷的先后顺序**：如果 16 GiB 卷已经用旧版
+  `make-root-volume.py` 写过而没有骨架，`base.kist` 补不回来，必须重建卷（破坏
+  性）或改内核允许清单。本轮把骨架写进了卷生成器，但板子不在，无法验证 macOS
+  那一步。
+* 依赖层面没有 blocker；但第 66 节记录的 **9/6 `exec_copyout_strings()` 失败**
+  仍可能挡在 launchd main 之前，0136 只加了诊断，没有修它。换文件解决不了这一
+  条，判读时不要把它误认成缓存或签名问题。
+
+### 1. 最小集合：每一条为什么在
+
+`base.kist`（`scripts/make-minimal-userland.py` 生成，KIST v2）：
+
+| 目的路径 | 字节 | 模式 | 来源 | 为什么必须在 |
+| --- | ---: | ---: | --- | --- |
+| `/sbin/launchd` | 541,600 | 0755 | `extracted/sbin/launchd` | `load_init_program()` 无条件 exec 这个路径；它是 PID 1，没有替代品 |
+| `/usr/lib/dyld` | 922,912 | 0755 | `extracted/usr/lib/dyld` | exec 的解释器；内核把共享缓存映射到 shared region 之后由它接管 |
+| `/System/Library/Caches/com.apple.kernelcaches/static.trustcache` | 66,289 | 0644 | `~/ios-userland/static.trustcache` | `kebab_cs=15` 时 `kebab_cs_trustcache_load()` 的默认路径；launchd/dyld/zprint/xpcproxy 的 cdhash 都在里面，缺了它们不会被标成 platform binary（0136 的 9/e 平台门是另一条独立判断） |
+| `/usr/lib/zprint` | 88,352 | 0755 | `extracted/usr/bin/zprint` | 证明 launchd 真能 spawn 的载荷；五个依赖全在共享缓存里，且会往 stdout 打一张 zone 表 |
+| `/usr/libexec/xpcproxy` | 96,352 | 0755 | `extracted/usr/libexec/xpcproxy` | launchd 每个 job 的唯一 spawn 入口（`posix_spawnp` at `0x100024abc`）；三条依赖全在共享缓存，cdhash 命中静态 TC（0144）|
+| `/System/Library/LaunchDaemons/com.kebab.zprint.plist` | 529 | 0644 | 生成 | 唯一一个 boot-time LaunchDaemon；`RunAtLoad` + `zprint -L`，把输出送到 `/dev/console` |
+
+`cache.kist`：`/System/Library/Caches/com.apple.dyld/` 下 44 个文件，模式 0644，
+来源 `~/ios-userland/cryptex-cache/`。逐条大小见该目录的 `MANIFEST.txt`；这 44 个
+不是"可选库"，是内核 `kebab_dsc` 计划要解析的整个拆分缓存：
+
+* `dyld_shared_cache_arm64`（393,216 B）是主缓存，只有头和 2,710 条 image 记录；
+* `.01`–`.40`（去掉 `.27`/`.28`/`.41`/`.42` 的特殊后缀）是 text/rodata 分片；
+* `.27.dylddata`、`.41.dylddata` 是两个 `__DATA_CONST`/`__DATA`；
+* `.28.dyldlinkedit`、`.42.dyldlinkedit` 是两个 `__LINKEDIT`；
+* `.symbols`（592,101,376 B）**不被内核映射**，只用于符号化。为了满足"44 个
+  缓存文件"的要求仍在流里；`--no-symbols` 可以打成 43 条的最小版本。
+
+没有进 `base.kist` 的，以及为什么：
+
+| 东西 | 不进的 reason |
+| --- | --- |
+| `/System/Library/CoreServices/SystemVersion.plist` | launchd 不靠它启动；574 B 也不能证明任何东西 |
+| `fileproviderctl`（259,248 B） | 16 个依赖也全在缓存里，但它比 zprint 大、会碰 MobileKeyBag/FileProvider，作为第一个 job 只会引入噪声 |
+| `/usr/libexec/launchd_cache_loader` | **必需**（`RequireRun`）：普通首启也会执行；旧结论说它被 `PerformAfterUserspaceReboot` 过滤掉是错的（见 2.1）。0151 起进 `base.kist` |
+| `/sbin/mount`、`/sbin/fsck`、`/usr/libexec/cc_fips_test`、`/usr/libexec/dirs_cleaner` 等 boot task | **必需或条件必需**：`mount-phase-1/2`、`fsck`、`fips`、`dirs_cleaner`、`launchd_cache_loader` 都带 `RequireRun`；旧结论说普通首启不执行是错的。0151 起全部进 `base.kist` |
+| `/bin/sh`、`/usr/bin/*` 工具 | 第一个 job 不需要 shell；需要时再按同一方法核对依赖 |
+| `/dev` 节点 | 不能作为普通文件安装，见第 3 节 |
+
+### 2. 依赖判定：逐条读 load command
+
+方法：`scripts/ios-deps.py` 读每个 Mach-O 的 `LC_LOAD_DYLIB` / weak / reexport /
+upward，拿主缓存 `imagesText` 的 2,710 条路径做名字解析。判定只有三种：
+**in-cache**（在共享缓存里）、**must-install**（必须是卷上的文件）、**blocker**
+（两边都没有）。
+
+| 可执行文件 | `LC_LOAD_DYLIB` | 判定 |
+| --- | --- | --- |
+| `/sbin/launchd` | `/usr/lib/libSystem.B.dylib` @0x1d1c2c000；`/usr/lib/libobjc.A.dylib` @0x1800b8000 | 两条都 **in-cache**；launchd 本身 **must-install** |
+| `/usr/lib/dyld` | 无任何 `LC_LOAD_DYLIB` | 自包含；**must-install**，不能从缓存取 |
+| `/usr/lib/zprint` | IOKit @0x18e550000；CoreSymbolication @0x1ae49e000；CoreFoundation @0x186de8000；libutil @0x1d1fe1000；libSystem.B @0x1d1c2c000 | 五条都 **in-cache**；zprint 本身 **must-install** |
+| `/usr/libexec/xpcproxy` | libSystem.B @0x1d1c2c000；libobjc.A @0x1800b8000；weak libcryptex_trampoline @0x20cd82000；`LC_LOAD_DYLINKER` `/usr/lib/dyld` | 三条 dylib 都 **in-cache**；dylinker 由 `base.kist` 提供；xpcproxy 本身 **must-install** |
+| 静态信任缓存 / plist | 不是 Mach-O | 无依赖 |
+
+直接依赖之外，`libSystem.B` 和 `libobjc.A` 自己的依赖闭包也必须在缓存里。本轮
+逐条核对的是上表的直接 `LC_LOAD_DYLIB`；缓存内 dylib 的再导出链没有递归解析
+（那需要把子缓存映射进来读 Mach-O），但主缓存的 `imagesText` 里能找到常用的
+`/usr/lib/system/libsystem_kernel.dylib`、`libsystem_platform.dylib`、
+`libsystem_c.dylib`、`libdispatch.dylib`、`libxpc.dylib` 等条目，且
+`libSystem.B`/`libobjc.A` 两条本身就在 2,710 条 image 记录里。**上表的直接依赖
+没有一条 NOWHERE。**
+
+#### 2.1 boot task：普通首启会全部执行，缺可执行文件就是 panic
+
+**这一节原来的结论是错的，2026-10-28 的真机日志已经推翻它。** 旧说法是
+“普通首启只跑 `PerformAlways` 的 Block 项，`mount-phase-1/2`、`fsck` 被跳过，
+所以最小树不需要这些可执行文件”。真实的过滤函数在 launchd 内 `0x10003f868`：
+
+1. `PerformAlways` → 直接运行；
+2. `getenv("XPC_USERSPACE_REBOOTED")` 非空（userspace reboot）时，只运行带
+   `PerformAfterUserspaceReboot` 的项；
+3. restore / lean / BaseSystem 三种模式下，同样只运行对应 `PerformIn*` 的项；
+4. **普通首启（以上四个标志都为假）不套用任何 `Perform*` 过滤，每一项都运行。**
+
+所以 `PerformAfterUserspaceReboot` 的语义是“userspace reboot 之后还要再跑
+一次”，不是“只在 userspace reboot 跑”。`launchd_cache_loader`、`dirs_cleaner`、
+`keybag`、`usermanagerd` 在普通首启也会执行。
+
+执行顺序也不是 plist 的字典顺序，而是 launchd 在 `0x100040138` 里硬编码的
+调用序列（`fsck` 之前还有一个 `statfs("/")` 判断）：
+
+| # | boot task | Program | 标志 | 普通首启 |
+| ---: | --- | --- | --- | --- |
+| 1 | `fsck` | `/sbin/fsck -qL` | RequireRun + RequireSuccess | 仅当 `statfs("/").f_flags & MNT_RDONLY`；**必需** |
+| 2 | `mount-phase-1` | `/sbin/mount -P 1` | RequireRun + RequireSuccess | **必需** |
+| 3 | `data-protection` | `/usr/libexec/init_data_protection` | RequireSuccess | 可选 |
+| 4 | `finish-obliteration` | `/usr/libexec/mobile_obliterator --init` | RequireSuccess | 可选 |
+| 5 | `detect-installed-roots` | Block | — | 进程内 |
+| 6 | `commit-boot-mode` | Block | PerformAlways | 进程内 |
+| 7 | `restore-datapartition` | `/usr/libexec/HorizonSetup` | PerformInRestore + RequireSuccess | 可选 |
+| 8 | `mount-phase-2` | `/sbin/mount -P 2` | RequireRun + RequireSuccess | **必需** |
+| 9 | `init-with-data-volume` | Block | PerformAlways | 进程内 |
+| 10 | `MSUEarlyBootTask` | `/usr/libexec/MSUEarlyBootTask` | AllowCrash | 可选 |
+| 11 | `fips` | `/usr/libexec/cc_fips_test` | RequireRun + RequireSuccess | **必需** |
+| 12 | `darwinos-boot-task` | `/usr/libexec/darwinos-boot-task` | RequireSuccess | 仅 darwinos |
+| 13 | `keybag` | `/usr/libexec/keybagd --init` | PerformAfterUserspaceReboot + AllowCrash | 可选 |
+| 14 | `usermanagerd` | `/usr/libexec/usermanagerd --init` | PerformAfterUserspaceReboot + AllowCrash | 可选 |
+| 15 | `dirs_cleaner` | `/usr/libexec/dirs_cleaner /tmp /var/run` | PerformAfterUserspaceReboot + RequireRun + RequireSuccess | **必需** |
+| 16 | `xpcroleaccountd` | `/usr/libexec/xpcroleaccountd -boot` | — | 可选 |
+| 17 | `init_featureflags` | `/usr/libexec/init_featureflags --boot` | PerformAfterUserspaceReboot | 可选 |
+| 18 | `auearlyboot` | `…/MobileAccessoryUpdater.framework/Support/auearlyboot --early-boot` | — | 可选 |
+| 19 | `tzinit` | `/usr/libexec/tzinit` | RequireSuccess | 可选 |
+| 20 | `finish-restore` | `/usr/libexec/FinishRestoreFromBackup` | PerformAfterUserspaceReboot + RequireSuccess | 可选 |
+| 21 | `finish-demo-restore` | `/usr/libexec/finish_demo_restore` | RequireSuccess | 可选 |
+| 22 | `sysstatuscheck` | `/usr/libexec/sysstatuscheck` | PerformAfterUserspaceReboot + RebootOnSuccess + AllowCrash | 可选 |
+| 23 | `prng_seedctl` | `/usr/libexec/prng_seedctl` | AllowCrash | 可选 |
+| 24 | `launchd_cache_loader` | `/usr/libexec/launchd_cache_loader` | PerformAfterUserspaceReboot + RequireRun + RequireSuccess | **必需** |
+
+“必需”就是带 `RequireRun`：`posix_spawnp` 返回 ENOENT 时 launchd 打
+`<name> boot task not present`，随后
+`boot task failure: <name> - required boot task executable not found` 并
+panic；带 `RequireSuccess` 的项还会在子进程非 0 退出或崩溃时 panic。
+最小 `base.kist` 第一次上真机撞到的正是
+`userspace panic: boot task failure: mount-phase-1 - required boot task
+executable not found`（2026-10-28）。因此最小树必须带 `/sbin/mount`、
+`/sbin/fsck`、`/usr/libexec/cc_fips_test`、`/usr/libexec/dirs_cleaner`、
+`/usr/libexec/launchd_cache_loader`；0144 之后 `/sbin/` 和 `/usr/libexec/`
+都已在安装器允许清单里，装这些文件不需要改内核。
+
+`/System/Library/xpc/launchd.plist` 仍然不是“缺了就 panic”的文件：launchd
+`open()` 失败只打一行 `Unable to open /System/Library/xpc/launchd.plist
+[2:No such file or directory]`，然后跳过给 cache loader 准备共享内存那一步。
+但 0144 之后的 `launchd_cache_loader` 是必需项，它需要那个 plist 和 `.sig`；
+缺文件时它会在自己的错误路径上 abort（不是“可选”）。要让它真正跑通，得把
+`/System/Library/xpc/` 加进允许清单并装这两个文件——本轮没有做，实测停在它
+之前的 `mount-phase-1`（见第八十二节）。
+
+### 3. `/dev`：不是安装文件，也不是 launchd 创建
+
+先看三条硬约束：
+
+1. **安装器不能造设备节点。** `kebab_install.c` 的落盘路径是
+   `namei(CREATE)+vn_create` 建目录、`vnode_open(O_CREAT|O_TRUNC)` 建文件，
+   类型只有 `VREG`。没有 `mknod`，也没有 `VCHR`/`VBLK` 分支。
+2. **`/dev` 不在允许清单里。** 七个前缀是 `/sbin/`、`/usr/lib/`、
+   `/usr/libexec/`（0144 起）、`/usr/standalone/`、
+   `/System/Library/Caches/com.apple.dyld/`、
+   `/System/Library/Caches/com.apple.kernelcaches/`、`/System/Library/LaunchDaemons/`。
+   在 `/dev/null` 下写一个普通文件也会被在建目录之前拒绝。
+3. **launchd 不创建 `/dev`。** 它的导入表里没有 `mknod`，也没有 `mount`；整个
+   二进制只有一处 `_mkdir` 调用，参数是 `/var/run`、模式 0700。它只假设
+   `/dev/null` 和 `/dev/console` 已经存在。
+
+真正提供节点的是内核：`bsd_init()` 在 root mount 之后调用
+`devfs_kernel_mount("/dev")`；`kernel_mount()` 对 `/dev` 做 `namei`，所以
+**`/dev` 这个目录必须已经在根卷上**。存在时 devfs 自动创建：
+
+| 节点 | 主/次 | 模式 | 谁创建 | 作用 |
+| --- | --- | ---: | --- | --- |
+| `/dev/console` | 0,0 | 0622 | devfs_init | launchd 的日志 fd；job 的 `StandardOutPath` |
+| `/dev/tty` | 2,0 | 0666 | devfs_init | 终端语义 |
+| `/dev/null` | 3,2 | 0666 | devfs_init | launchd 的 `posix_spawn` 文件动作；缺了每个 job 都 spawn 失败 |
+| `/dev/zero` | 3,3 | 0666 | devfs_init | libc/框架的零页 |
+| `/dev/random`、`/dev/urandom` | randomdev | 0666 | random_init | 随机数；dyld/CF 可能用 |
+| `/dev/klog` | 6,0 | 0600 | devfs_init | 内核日志 |
+| `/dev/oslog`、`/dev/oslog_stream` | 7,0 / 8,0 | 0600 | devfs_init | 日志系统；没有 logd 时不用 |
+| `/dev/kebabcon` | UFS 驱动 | 0666 | kebab_ufs_init | 面板控制台的直写通道（备用） |
+| `/dev/ufsroot0`、`/dev/rufsroot0` | UFS 驱动 | 0440 | kebab_ufs_init | 根块设备/字符设备 |
+
+结论：**不要把任何节点当文件装进去**；只在卷上建一个 0755 的 `/dev` 目录，让
+devfs 覆盖它。普通文件即使写进 `/dev/null`，也会遮住 devfs 的节点，语义完全错。
+
+如果 `/dev` 缺失，首启日志会先出现：
+
+```
+devfs_kernel_mount: kernel_mount failed: 2
+```
+
+之后 launchd 仍可能被 exec（它不依赖 `/dev` 才能加载），但它打不开
+`/dev/console`，每个 job 的 `posix_spawn` 都会因为 `/dev/null` 的 `open` 失败而
+失败；见第 8.2 节。
+
+### 4. 权限与所有权
+
+**模式**：KIST 条目头的 `mode` 是 16 位，但打包器和内核都只取 `& 0777`。这意味着
+setuid、setgid、sticky 位**根本进不了这条流**。因此：
+
+| 路径 | 模式 | 理由 |
+| --- | ---: | --- |
+| `/sbin/launchd` | 0755 | Apple 的 root:wheel 可执行文件；PID 1 要可执行 |
+| `/usr/lib/dyld` | 0755 | 同上；解释器必须可执行 |
+| `/usr/lib/zprint` | 0755 | job 的 `Program`；launchd 以 root 执行 |
+| 静态信任缓存 | 0644 | 内核只读；不能是 0600 之外的花样 |
+| LaunchDaemon plist | 0644 | launchd 读；Apple 的 daemon plist 就是 0644 |
+| 44 个缓存文件 | 0644 | 内核/dyld 只读 |
+
+安装器给父目录固定 0755（`ki_mkdirs()` 里写死）。`/tmp` 的 01777 和
+`/private/var/tmp` 的 01777 不可能由 KIST 表达，这也是它们必须在卷骨架里的原因
+之一。
+
+**所有权**：安装器没有 `chown` 路径，条目头也没有 uid/gid 字段。文件由内核里的
+安装器用当前 `vfs_context` 创建，当前路径是 USB 事件线程（内核线程，uid/gid
+0:0），所以最终是 **root:wheel**，恰好与 Apple 的这几个路径一致。但这是"恰好"，
+不是"可指定"：
+
+* 需要 501:501 的 `/var/mobile`、需要其他组的文件，安装器做不了；
+* 需要 setuid 的二进制，模式位被 0777 掩掉，也做不了；
+* 如果安装器将来在非 root 进程上下文里跑，文件会属于那个用户，launchd 对
+  plist 的 root 所有权检查就可能拒绝它。
+
+**plist 要 root 时 launchd 做什么**：如果 plist 写 `UserName=root`，launchd 会
+走 `getpwnam_r("root")`；如果写 `UserName=mobile` 就走 `getpwnam_r("mobile")`。
+这条路径要求 `/etc/passwd`（或目录服务）里有对应条目。没有条目时 job 不 spawn，
+日志是：
+
+```
+Could not find user/group associated with service: ... root/...
+```
+
+即使 plist **不写** `UserName`，launchd 在给 job 建凭据/环境时仍会调用
+`getpwuid_r(0)`；没有 `/etc/passwd` 时同样会失败，日志是：
+
+```
+Could not find uid associated with service: 0: ... 0
+```
+
+所以最小树不能只靠"省略 UserName 就默认 root"：卷骨架里必须有一个 root 的
+passwd 条目。本轮在卷骨架里放：
+
+```
+/etc/passwd       root:*:0:0:System Administrator:/var/root:/bin/sh
+/etc/master.passwd root:*:0:0::0:0:System Administrator:/var/root:/bin/sh
+/etc/group        wheel:*:0:root
+```
+
+（`/etc` 是指向 `private/etc` 的符号链接。）plist 本身不写 `UserName`，这样
+launchd 用自己已解析的 uid 0，不再依赖目录服务里的其他用户；如果写
+`UserName=mobile`，既没有 passwd 条目，安装器也不能把文件 chown 成 501，必然
+失败。
+
+**恢复（SKIP）不会重设模式**：`kebab_install.c` 的 SKIP 判据只有大小和 SHA-256；
+模式不对但内容对的文件会被跳过，旧模式留着。第一次装到空卷没有这个问题；如果
+曾经用错模式装过，先删掉那个文件再重发，或者重建卷。
+
+### 5. 卷骨架：为什么必须改 `make-root-volume.py`
+
+> **更正（第七十节）：本节 1-5 步的“主机侧骨架”已放弃。** 该方案需要 root，
+> 而 macOS VM 和 Linux 主机都没有免密 sudo，脚本从未跑过。现在
+> `make-root-volume.py` 只生成裸卷；骨架是 `skel.kist`（KIST v2，16 条），
+> 由内核在写卷之后创建。下面的步骤仅作为旧方案存档，不要再执行。
+
+安装器能到的地方只有七个前缀（0144 起新增 `/usr/libexec/`），`/dev`、`/var`、`/tmp`、`/private/etc` 都不在
+里面；它也不能建 sticky 目录、不能建符号链接、不能 mknod。因此这些必须在
+**卷生成**时写进去。`scripts/make-root-volume.py` 现在在 `newfs_hfs` 之后：
+
+1. 以 `hdiutil attach -owners on -mountpoint <tmp>` 挂上新卷；
+2. 建目录：`/dev`、`/private`、`/private/etc`、`/private/tmp`(01777)、
+   `/private/var`、`/private/var/db`、`/private/var/db/com.apple.xpc.launchd`、
+   `.../config`、`/private/var/log`、`/private/var/log/com.apple.xpc.launchd`、
+   `/private/var/root`(0700)、`/private/var/run`、`/private/var/tmp`(01777)；
+3. 写 `/private/etc/passwd`、`/private/etc/master.passwd`、`/private/etc/group`；
+4. 建 `/etc -> private/etc`、`/tmp -> private/tmp`、`/var -> private/var`；
+5. 全部 `chown 0:0`（符号链接用 `lchown`），然后 detach。
+
+这一步曾需要 root（`hdiutil -owners on` 和 chown），旧脚本在非 root 时直接
+拒绝并提示 `--skip-skeleton`；该选项和整段骨架代码已在第七十节删除。
+VEXT 流只送位图标记为已分配的块，因此骨架的 catalog 记录会自然进入流，增量
+是几 KiB 量级。**如果卷已经按旧脚本写过，骨架不在卷上，base.kist 补不了**；
+第七十节改为由 `skel.kist` 补，见该节。
+
+### 6. 两条流与离线校验
+
+生成命令：
+
+```sh
+scripts/make-minimal-userland.py \
+    --out /path/with/2.2GiB/free
+```
+
+它先做三组检查，再调用 `pack-userland.py`，最后调用 `--verify`：
+
+* 每个可执行文件的 `LC_LOAD_DYLIB` 闭包必须在主缓存的 `imagesText` 里；
+* 每个可执行文件的 cdhash 必须在 `static.trustcache` 里；
+* 44 个缓存文件的 size/SHA-256 必须与 `MANIFEST.txt` 一致。
+
+实测（KIST v2，`--compress auto`，64 KiB chunk）：
+
+| 流 | 条目 | 安装字节 | 线上字节 | 压缩比 | 填充 | 最大条目（安装/线上） |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `base.kist` | 6 | 1,716,034 | 655,360（640.0 KiB，10 chunk） | 38.2% | 53,517 B | `/usr/lib/dyld` 922,912 / `/sbin/launchd` 196,822 |
+| `cache.kist` | 44 | 3,330,359,296（3.10 GiB） | 1,067,909,120（1018.44 MiB，16,295 chunk） | 32.1% | 42,289 B | `.symbols` 592,101,376 / 96,448,609 |
+
+两条流合计线上 **1,068,564,480 B**，安装 **3,332,075,330 B**。16 GiB 根卷是
+17,179,869,184 B：装完还剩约 **12.9 GiB**，最大的单个文件 592,101,376 B 只占
+卷的 3.4%，没有任何一条接近 16 GiB。`--verify` 的结论分别是：
+
+```
+base.kist: v2, 6 entries, 1.6 MiB installed, 640.0 KiB on the wire
+verify: 6 entries (6 files, 0 dirs, 0 symlinks), all digests match
+
+cache.kist: v2, 44 entries, 3.10 GiB installed, 1018.44 MiB on the wire
+verify: 44 entries, all digests match
+```
+
+`base.kist` 的 SHA-256 是
+`eec6cbefbb52a671275fef924f088c5ffded10dbeda829438d98e53bb28aa5dc`。
+
+`check-shared-cache.py` 对同一目录的主机侧计划：**43 个映射文件、51 条映射、
+0xa2de4000（2,732,474,368）字节**，42/42 个子缓存按 UUID 找到，dylddata=2、
+dyldlinkedit=2，`.symbols` 只报告不映射，区域
+`0x180000000 + 0xaade8000`，最高映射末端 `0x22ade4000`，slack `0x4000`。这些
+数字是**主机侧**的 51 条计划；`0142` 之后内核会在主缓存里追加 dynamic-config
+一页，所以内核行是 52 条 / `0xa2de8000` / extent `0xaade8000`（end
+`0x22ade8000`），不要拿主机侧的 51 去对内核的 52，见 7.1。
+
+发送顺序建议：先 `base.kist`（先有 launchd/dyld/trustcache），再 `cache.kist`；
+两者都只写文件，顺序不影响最终内容，但先 base 可以在 cache 传到一半时仍然保留
+一个可诊断的 launchd。每条流都可以先 `INST DRY` 过一遍，真写按
+`send-userland.py` 的 ACK 流控走。
+
+### 7. 成功时控制台应该看到什么
+
+> **2026-10-28 更正：本节下面的清单是 `0142`/`0143` 之前的输出，已被取代。**
+> 当前默认启动（`kebab_dsc_verbose=0`）只打一行计划摘要，数字是
+> `52 mappings` / `0xa2de8000 mapped` / `extent 0xaade8000 (end 0x22ade8000)`；
+> 逐文件明细要 `kebab_dsc_verbose=1`。旧清单保留在下面，作为当时的记录，不删除；
+> 现在该看什么见 7.1，检查点字符串的逐条审计见第七十九节。
+
+启动参数（首启验证）：
+
+```
+debug=0x14e serial=3 kebabusb=1 rootrw=1 kebab_cs=15 \
+kebab_dsc=1 kebab_dsc_map=1
+```
+
+安装那一轮额外带 `kebab_install=1`，并且为了不在传输中 panic 带
+`kebab_noinit=1`；装完重启时**去掉** `kebab_noinit`。卷写入那一轮另带
+`kebab_vol=1` 和 `CONFIRM`。
+
+成功路径的内核日志按顺序应包含（同一行里的数字应与上面一致）：
+
+```
+KEBAB CS: policy 0xf unsigned trustcache-platform entitlements unsealed-shared-cache
+KEBAB CS: static trust cache v2: 2760 entries x 24 bytes (66264 used, residual 0 bytes), hash types sha1=2 sha256=2758 sha256-trunc=0 sha384=0, sorted
+KEBAB DSC: enabled for "/System/Library/Caches/com.apple.dyld"; kebab_dsc_map=1
+KEBAB DSC: main dyld_shared_cache_arm64: 393216 bytes, uuid 8f970452c9e33e88b114feb1864bc9e0
+KEBAB DSC: region start=0x180000000 size=0xaade8000 end=0x22ade8000 maxSlide=0x55214000
+KEBAB DSC: resolved 42/42 subcaches by uuid; dylddata=2 dyldlinkedit=2
+KEBAB DSC: symbols dyld_shared_cache_arm64.symbols: 592101376 bytes, uuid 51ccba451fc23f19aed047050bdf009a, NOT mapped
+KEBAB DSC: plan 43 files / 51 mappings / 0xa2de4000 bytes (2732474368)
+KEBAB DSC: highest mapped end 0x22ade4000, region slack 0x4000
+KEBAB DSC: map: no shared region at boot (kernel task); deferred to first exec (ENODEV)
+load_init_program: attempting to load /sbin/launchd
+KEBAB CS: exec cdhash b65c36c9f5b287a6a8f5ca83d9427fb55ef04f4e cd=0x7e124+4398 hash=2 slice=0x0 tc=hit platform=1
+KEBAB DSC: first exec (pid 1): attempting the deferred mapping
+KEBAB DSC: map: mapping 43 files / 51 mappings into shared region at 0x180000000
+KEBAB DSC: map: mapped 0xa2de4000 bytes at 0x180000000
+KEBAB DSC: mapping complete; dyld will find the cache already in the shared region
+```
+
+`plan` 之前还有 `validate magic/formatVersion/cacheType/platform`、`validate images
+... == imagesTextOffset`、`validate subcache array ... <= codeSignatureOffset` 等
+校验行；`plan` 之后还有每个文件的 `file NN ...`/`map ...` 行（43 个文件约 100
+行）。它们都应当出现，且最后不能出现 `rejected`、`NO FILE WITH THIS UUID`、
+`NOT mapped`（`.symbols` 那行除外）。
+
+`exec cdhash` 和 `first exec` 之间还会出现几行 `KEBAB EXEC: pid 1
+pre-copyout ...`、`KEBAB EXEC: stack map=...`（0136 加的状态行）；只要没有
+`KEBAB EXEC: copyout-failed` / `copyout stage=...`，它们就是正常的。注意
+`exec cdhash` 在 `first exec` **之前**：CodeDirectory 是装载 launchd 时读的，
+共享缓存映射是 exec 末尾的 hook 才做的。dyld 自己也会有一行
+`KEBAB CS: exec cdhash 684d847c... tc=hit platform=1`，它先于或紧邻 launchd
+那行出现，同样正常。
+
+之后如果 `/dev/console` 的 tty 路径在这块板子上可用，应看到 launchd 自己的一行：
+
+```
+launchd logging initialized. name: launchd pid: 1
+```
+
+再之后是 zprint 的 zone 表（由 launchd 的 `StandardOutPath` 重定向到
+`/dev/console`）。可对照的标志行是表头 `zone name` 和表尾 `ZONE TOTALS`，中间是
+内核 zone 名字和数字。**这张表是"launchd 真的 spawn 了一个 job"的最硬证据**；
+launchd 自己的成功日志可能是 info 级、不一定上控制台，zone 表则一定来自 zprint
+的 stdout。
+
+如果 `/System/Library/xpc/launchd.plist` 不在卷上，成功路径里还会多一行良性的：
+
+```
+Unable to open /System/Library/xpc/launchd.plist [2:No such file or directory]
+```
+
+它不影响首启；要消掉就把该文件放进卷骨架。
+
+#### 7.1 当前默认输出（`0142`/`0143` 之后）
+
+默认启动只带 `kebab_dsc=1 kebab_dsc_map=1`（没有 `kebab_dsc_verbose`）。
+`0143` 把计划明细和成功侧的校验行全部移到 `kebab_dsc_verbose=1`，`0142`
+又给计划追加了 dynamic-config 页，所以 USB 上应看到的 DSC 行是（`<…>` 是变量）：
+
+```text
+KEBAB DSC: enabled for "<dir>"; kebab_dsc_map=1 kebab_dsc_slide=0x0 (default) kebab_dsc_verbose=0
+KEBAB DSC: plan 43 files / 52 mappings, 0xa2de8000 mapped, extent 0xaade8000 (end 0x22ade8000), base 0x180000000, slide 0x0, dynamic config page appended
+KEBAB DSC: map: no shared region at boot (kernel task); deferred to first exec (ENODEV)
+load_init_program: attempting to load /sbin/launchd
+KEBAB DSC: first exec (pid 1): attempting the deferred mapping
+KEBAB DSC: map: mapped 0xa2de8000 bytes at 0x180000000
+KEBAB DSC: map: dynamic config page 0x22ade4000+0x4000 is zero-filled; dyld will report "no dynamic config data" and continue
+KEBAB DSC: map: shared_region_check_np base 0x180000000 (slide 0x0)
+KEBAB DSC: mapping complete; dyld will find the cache already in the shared region
+```
+
+与旧清单的三处差别，以及各自的原因：
+
+1. **数字**：`51 mappings` → `52 mappings`，`0xa2de4000` → `0xa2de8000`，
+   `highest mapped end 0x22ade4000` → `extent 0xaade8000 (end 0x22ade8000)`。
+   `0142` 在主缓存里追加了 `sharedRegionStart + dynamicDataOffset` 那一页，
+   所以映射数和 mapped 字节都多一页、extent 正好落在 `sharedRegionSize` 上。
+   主机侧 `check-shared-cache.py` 仍是 51 条 / `0xaade4000`，因为它不模拟这
+   一页；**内核的数字比主机侧多一页是正常的。**
+2. **行数**：旧清单里的 `main`、`region`、`resolved`、`symbols`、`validate`、
+   `file NN`、`map NN` 以及 `highest mapped end … region slack …` 默认都不再
+   打印。`0143` 后默认只有上面这一行摘要；要看 43 个文件约 100 行明细，加
+   `kebab_dsc_verbose=1`（约 102 行 / 11,560 B，占 16 KiB 环的 70%，这正是
+   把它关掉的原因）。失败路径会自动补打明细，不需要 verbose。
+3. **`KEBAB CS: policy 0xf …` 不在 USB 上**。这一行由
+   `STARTUP(CODESIGNING, …)` 在 `kernel_bootstrap_thread()` 的
+   `STARTUP_SUB_EARLY_BOOT` 阶段打印，早于 `bsd_init()` 里的
+   `kebab_usb_start()`；`kebab_usb_log()` 在 `!ud.running` 时丢字节，所以它
+   只上面板。USB 日志的第一行是
+   `KEBAB USB: event thread started, waiting for the host`。同理，`KEBAB USB:
+   SMMU …`、`reset … after … ms`、`step 1..7` 也只在面板上。
+
+`KEBAB CS: static trust cache v2: …` 与 `KEBAB CS: exec cdhash …` 仍然在
+`bsd_init`/exec 里打印，晚于 `kebab_usb_start()`，所以它们在 USB 上是正常的。
+
+### 8. 三种失败：用日志区分
+
+#### 8.1 launchd 找不到缓存
+
+前提是 `kebab_dsc=1 kebab_dsc_map=1` 已给，但缓存目录缺文件/坏文件。首启会在
+`bsd_init` 阶段打印以下之一：
+
+```
+KEBAB DSC: directory /System/Library/Caches/com.apple.dyld has no dyld_shared_cache_arm64* files
+KEBAB DSC: subcache 07 suffix ".06" uuid ...: NO FILE WITH THIS UUID
+KEBAB DSC: plan rejected (error 2); shared cache NOT mapped
+```
+
+因为 `kebab_dsc_plan == NULL`，`kebab_dsc_exec_hook()` 直接返回，**不会**出现
+`first exec (pid 1): attempting the deferred mapping`，也不会出现
+`map: mapped ...`。接着 dyld 起来但找不到 `libSystem`，用户态打印：
+
+```
+dyld[1]: Library not loaded: /usr/lib/libSystem.B.dylib
+  Referenced from: <...> /sbin/launchd
+  Reason: image not found
+```
+
+dyld 走 `abort_with_payload()`，退出原因是 **namespace 6（`OS_REASON_DYLD`）
+code 1**，不是签名；内核 panic 的稳定前缀是：
+
+```
+initproc failed to start -- exit reason namespace 6 subcode 0x1 description: ...
+```
+
+注意这里是 `failed to start` 而不是 `initproc exited`：launchd 在 `LC_MAIN`
+入口（`entryoff=0x169b4`）的第一段代码才写 `kern.initproc_spawned`，dyld 在
+那之前就 abort 了，`initproc_spawned` 仍然是 0，`kern_exit.c` 选
+`prefix_str = "initproc failed to start"`。第 66 节把它写成 `initproc exited`
+是笔误；以 `kern.initproc_spawned` 的置位时机为准。
+
+（如果 exec 在装载 dyld/launchd 时就失败，则是 `Process 1 exec of
+/sbin/launchd failed, errno N`。如果日志停在 9/6 的 `copyout stage=...`，那是
+0136 记录的另一条路径，exec 根本没到 dyld，不要把它读成"缓存缺失"；如果停在
+9/e，是平台门，见 8.3。）**区分点：DSC 的 `NOT mapped` + dyld 的
+`Library not loaded` + namespace 6，且没有 `mapped 0xa2de8000`。**
+
+#### 8.2 launchd 起来了，但每个 job 都 spawn 失败
+
+内核已经打印 `load_init_program: attempting to load /sbin/launchd`，DSC 的
+`mapping complete` 也在；没有 PID 1 的 panic，但 zprint 的 `zone name` 表永远不
+出现。常见子原因和对应的 launchd 行：
+
+| 子原因 | 日志 |
+| --- | --- |
+| `/dev` 缺失，devfs 没挂上 | 首启先有 `devfs_kernel_mount: kernel_mount failed: 2`；launchd 侧是 `Could not spawn process com.kebab.zprint: ...`（`posix_spawn` 打不开 `/dev/null`） |
+| `/etc/passwd` 缺失 | `Could not find uid associated with service: 0: ... 0`，job 不 spawn |
+| plist 解析失败 | `Could not parse plist: path = /System/Library/LaunchDaemons/com.kebab.zprint.plist, error = ...` |
+| plist 权限/所有权不对 | `Caller specified a plist with bad ownership/permissions: path = ...` |
+| `Program` 不存在或不可执行 | `Could not find and/or execute program specified by service: ...` |
+| `StandardOutPath` 打不开 | `Could not spawn process com.kebab.zprint: ...` |
+
+这些是 launchd 的日志，走它打开的 `/dev/console`；如果 `/dev/console` 本身打不开
+（8.2 的第一行），它们也不会出现在 USB 控制台上，只能看到
+`kernel_mount failed: 2` 和此后的沉默。**区分点：没有 `initproc` panic，也没有
+`zone name` 表；如果有 `kernel_mount failed: 2`，先修 `/dev` 骨架，不要怀疑
+launchd。**
+
+#### 8.3 launchd 退出
+
+这里的"退出"要分三种，日志完全不同；**不要一看到 `CS_KILLED` 就归到签名**。
+第 66 节已经纠正过这个误判：
+
+**(a) 9/6：`exec_copyout_strings()` 失败。** 它发生在 exec 已经装载完
+launchd/dyld、正在往新用户栈拷贝字符串/指针/argc 的时候，和 CodeDirectory 无
+关。日志先有 0136 的：
+
+```
+KEBAB EXEC: copyout stage=strings error=14 ptr_size=8 strspace_mod=0 string_size=280 string=0x... ptr=0x... argc=0x...
+```
+
+然后 `kern_sig.c` 对 PID 1 的 SIGKILL 打印：
+
+```
+unexpected SIGKILL of launchd with reason -- namespace 9 code 0x6 description ... (exec L...)
+```
+
+（`(CS_KILLED)` 只有在 `CS_KILLED` 标志真的置位时才会出现；9/6 本身不是签名
+失败。）这一条**不是本树能修的**：0136 只加了诊断，没有改 copyout 逻辑；看到
+它就先按 stage/字段查 exec 的字符串区，而不是怀疑缓存或 plist。
+
+**(b) 9/e：`process_signature()` 的 `PLATFORM_IOS` 平台门。** 0136 把
+`unentitled_ios_sim_launch` 在 KEBAB 下的默认值改成 `true`，这条门应当消失；
+如果还出现 `namespace 9 code 0xe`，检查命令行是否显式写了
+`unentitled_ios_sim_launch=0`，以及 `proc_platform(p)`。它同样不是缓存/签名
+问题。
+
+**(c) 正常/异常退出。** launchd 跑到 main 之后退出，内核先打印 `pid 1 exited`，
+再 panic：
+
+```
+pid 1 exited -- exit reason namespace ... subcode 0x... description ...
+initproc exited -- exit reason namespace ... subcode 0x... description: ...
+```
+
+如果它在到达 main 之前就死（例如 dyld 的 namespace 6），前缀是
+`initproc failed to start`。**区分点：9/6 看 `copyout stage`，9/e 看平台门，
+namespace 6 看共享缓存；三者都有 `pid 1 exited`/`initproc ...` 但原因不同。**
+`CS_KILLED` 只是标志，不是原因分类。
+
+把三种失败并排看：
+
+| 失败 | 首启最早的不同行 | PID 1 panic | zprint 表 |
+| --- | --- | --- | --- |
+| 缓存缺失 | `KEBAB DSC: ... NOT mapped` / `dyld[1]: Library not loaded` | `initproc failed to start -- ... namespace 6 subcode 0x1` | 无 |
+| job 全失败 | `devfs_kernel_mount: kernel_mount failed: 2` 或 launchd 的 `Could not ...` | 无 | 无 |
+| launchd 退出（9/6） | `KEBAB EXEC: copyout stage=...` | `unexpected SIGKILL ... namespace 9 code 0x6` | 无 |
+| launchd 退出（9/e） | 平台门 | `... namespace 9 code 0xe` | 无 |
+| 成功 | `mapping complete` + `exec cdhash ... tc=hit platform=1` | 无 | 有 `zone name`/`ZONE TOTALS` |
+
+### 9. 还没有做的事与边界
+
+1. **卷骨架未在真机/真 macOS 上跑过。** 本节只改了
+   `scripts/make-root-volume.py` 并在 Linux 上做了语法检查；`hdiutil` 那一步
+   需要 macOS + root，板子不在，无法验收。卷生成后应当用
+   `send-volume.py --dry` 和 `VOL?` 先确认大小/空闲块，再真写。
+2. **`/dev/console` 的 tty 输出路径未在板子上验证。** `kmopen -> kmstart ->
+   kmputc -> console_write_char` 这条链在源码上会把字节送进 `_cnputc` 的 USB
+   tee；但补丁 0070 的注释曾说过这条路径"does not complete here yet"。如果实测
+   看不到 launchd/zprint 的输出，把 plist 的 `StandardOutPath`/`StandardErrorPath`
+   改成 `/dev/kebabcon`（只画面板，不走 USB），或者先修 tty 层；这不影响
+   launchd 是否真的 spawn（用 `INST?`/内核日志仍可判断）。
+3. **9/6 的 `exec_copyout_strings()` 失败不是本树能修的。** 0136 只加了
+   `copyout stage=...` 诊断，没有改 copyout 逻辑；如果日志停在那行，先查 exec
+   的字符串区/用户栈，不是缓存、plist 或签名。它和 9/e 的平台门是两条独立的
+   路径（第 66 节）。
+4. **9/e 平台门与信任缓存是两条线，都未在板子上验收。** 0136 把
+   `unentitled_ios_sim_launch` 在 KEBAB 下默认置真；信任缓存则让
+   launchd/dyld/zprint 的 `exec cdhash ... tc=hit platform=1`（cdhash 分别
+   `b65c36c9…`、`684d847c…`、`24c351a1…`）。两者都不该再被概括成
+   `CS_KILLED`。
+5. **`.symbols` 不是启动必需。** 它占 592 MB 安装、96 MB 线上，只用于符号化；
+   最小启动可以 `--no-symbols`。本轮为了"44 个缓存文件"仍保留。
+6. **没有 mobile 用户。** 卷骨架只放 root/wheel；`/var/mobile`、用户域、
+   LaunchAgents 都不在最小树里。任何 `UserName=mobile` 的 plist 都会按 4 节的
+   原因失败。
+7. **本轮提交没有内核补丁。** 改动只有主机脚本和文档；允许清单、devfs、
+   codesign 一行没动（0136/0137 是 origin 上已有的内核补丁，不是这次加的）。
+   如果最终决定不走卷骨架，就必须加 `/dev/`、`/var/`、`/tmp/`、`/private/`
+   到允许清单，并让安装器支持目录 sticky 位/设备节点——那是另一条内核补丁
+   路线。**第七十节已经走了这条路线**：0138 加 KIST v2 的 DIR/LINK 条目和
+   `skel.kist`，仍然不需要设备节点（devfs 自己创建）。
+
+### 10. blocker：已经写过的 16 GiB 卷
+
+> **更正（第七十节）：下面的“必须重建带骨架的卷”已作废。** 新顺序是
+> 写裸卷 → 重启 → 安装镜像 → `skel.kist` → `base.kist` → `cache.kist` →
+> 去 `kebab_noinit` 重启。裸卷不需要重建；骨架由 `skel.kist` 创建。
+> 下面的旧顺序仅存档。
+
+这是本轮唯一会让"流都 verify 通过、但 launchd 仍然起不来"的问题：
+
+* `base.kist` 的 6 条都在七个允许前缀内，能装；
+* 但它**装不出** `/dev`（devfs 的挂载点）、`/private/var`、`/tmp`、
+  `/private/etc/passwd`；
+* 没有 `/dev`，`devfs_kernel_mount` 在 `bsd_init` 就失败，launchd 的每个 job
+  都打不开 `/dev/null`；
+* 没有 `/etc/passwd`，launchd 的 `getpwuid_r(0)` 失败，job 连 uid 都建不起来。
+
+旧方案下的顺序（已作废）：
+
+1. 在 macOS 上用**新版** `scripts/make-root-volume.py` 重建 16 GiB 卷（带骨架），
+   用 `send-volume.py` 写入 `userdata`；写卷时旧根是只读的，写完必须重启，让新
+   卷成为根；
+2. 再发 `base.kist`、`cache.kist`（这一轮带 `kebab_install=1 rootrw=1
+   kebab_noinit=1`）；
+3. 去掉 `kebab_noinit` 重启，按第 7 节观察。
+
+如果板子上的 16 GiB 卷已经用旧脚本写过（没有骨架），`base.kist` 无法补救；
+要么重建卷（会销毁卷上已有内容，`VOL BEGIN` 需要 `CONFIRM`），要么改内核允许
+清单并让安装器支持目录/设备节点。**在卷骨架就位之前，不要用"launchd 起不来"
+去判断签名或共享缓存的问题**——那会是 8.2 的 `/dev` 失败，不是 8.1 或 8.3。
+
+## 六十九、P1 一键序列
+
+> 目标：把“刷写卷镜像 → 写 16 GiB 根卷 → 刷安装镜像 → 发 base/cache →
+> 不带 `kebab_noinit` 启动并看 launchd”收成一条命令。每个检查点只断言一个
+> 可观察的事实，第一个不符合预期的观察就停止；失败输出必须让刚睡醒的人只看
+> 日志尾部就知道停在哪。
+>
+> 状态：**脚本、离线验证和文档完成，真机未执行**。板子仍处于 stranded 状态，
+> 需要用户物理断电一次；本节所有“预期日志”都来自内核源码、已有真机日志和
+> fake-device 回环，不是这次 P1 的实测记录。
+>
+> **更正（见第七十节，2026-10-28）：** 主机侧骨架方案已放弃。`KebabRoot.vext`
+> 重新是**裸卷**（1,769,472 B、3 extents、426 块），骨架改由 KIST v2 的
+> `skel.kist` 在写卷之后、`base.kist` 之前由内核创建。本节中“VEXT 必须带
+> 骨架”的说法、产物表和已知缺口 3/5 均已按第七十节更正；
+> `send-volume.py --dry` 的超时 bug 也已修。阶段顺序应改为
+> vol → install → **skel** → base → cache → final。
+
+### 1. 入口、产物与默认路径
+
+```sh
+python scripts/bring-up.py --from vol
+```
+
+默认工作目录是 `work/p1/`，全部路径都可以用参数覆盖：
+
+| 默认文件 | 作用 | 关键要求 |
+| --- | --- | --- |
+| `boot-vol.img` | 写卷镜像 | 100,663,296 B；payload TOML 的 `args` 含 `kebab_vol=1` |
+| `boot-inst.img` | 安装镜像 | 同上，但**不含** `kebab_vol=1` |
+| `boot-final.img` | 最终启动镜像 | 不含 `kebab_vol=1`、不含 `kebab_noinit=1`，含 `kebab_dsc=1 kebab_dsc_map=1` |
+| `KebabRoot.vext` | VEXT v1 写卷流 | 1,769,472 B，3 个 extent，内嵌 HFS+ 头 4,194,304 块；**裸卷**（骨架见 `skel.kist`，第七十节） |
+| `skel.kist` | 根卷骨架 | 16 条（10 dir + 3 link + 3 file），KIST v2，64 KiB；写卷后、`base.kist` 前发送 |
+| `base.kist` | 最小用户态 | 6 条，`make-minimal-userland.py` 生成；内核接受 v1/v2 |
+| `cache.kist` | 共享缓存 | 44 条，同一工具生成；内核接受 v1/v2 |
+
+`KebabRoot.vext` 的 1,769,472 B / 3 extents / 426 allocated blocks 是**裸卷**的
+主机实测值（2026-10-28 在 macOS VM 上以 `albertlee` 无 root 重跑，sha256
+`1a31c5b67864f643351d29fb89d64c2150f86b9061101354ab9082cd3fc917f8`）。
+骨架不再进入 VEXT，所以这三个数字不会因骨架而变。`newfs_hfs` 的时间戳会让
+每次生成的 SHA-256 不同，尺寸、extent 数和 data 字节是稳定的。脚本仍把大小、
+extent 数和 data 字节做成可覆盖参数（`--expected-vol-stream`、
+`--expected-vol-extents`、`--expected-vol-data`）；真机前先跑 dry-run，若与
+生成器输出不同，按生成器输出更新，不要拿旧数字硬套。
+
+**三张镜像不是可选项。** 启动参数不在 Android boot 头的 `cmdline` 里（那里
+是空的），而是在镜像偏移 `0x800000` 的 payload TOML 的 `args = "..."` 中；
+`fastboot flash boot_b` 只能整张替换，不能改命令行。因此写卷、安装、最终
+启动必须各有一张镜像。脚本在刷写前会读出这张镜像的 `args` 并核对，避免把
+“安装镜像”刷成“写卷镜像”这种一晚回到解放前的事故。
+
+`boot-final.img` 还必须有 `kebab_dsc=1 kebab_dsc_map=1`：没有这两个参数，
+`kebab_dsc_plan` 不会建立，launchd 在 `first exec` 时找不到共享缓存，看到的是
+`KEBAB DSC: ... NOT mapped` 和 `dyld[1]: Library not loaded`，不是签名问题。
+`kebabkdp=1` 默认被拒绝：它是唯一会恢复“panic 停在 KDP 等 LLDB”的参数，
+会破坏 0134 的自动重启语义；确实要调试时加 `--allow-kdp`。
+
+### 2. 检查点清单
+
+| ID | 名字 | 预期观察（失败时就是 expected 字段） |
+| --- | --- | --- |
+| C01 | `precondition.fastboot` | `fastboot devices` 列出板子；否则控制台 `IMEM?` 有回答后发 `FASTBOOT`，40 s 内重新枚举 |
+| C02 | `precondition.slot` | `fastboot getvar current-slot` 为 `b` |
+| C-ARGS | `precondition.args` | 镜像 payload 的 `args` 含本阶段参数、不含禁止参数 |
+| C-BOOT-BANNER | `boot.banner` | 重启后出现 `KEBAB USB: event thread started, waiting for the host`（`running (DSTS ...)` 在 `ud.running` 之前打印，只上面板，见第七十九节） |
+| C-BOOT-NOINIT-* | `boot.noinit` | `KEBAB: kebab_noinit=1: staying in the kernel, no init program` |
+| C-VOL-STREAM | `vol.stream` | VEXT 大小/3 extents/内嵌卷头 `sig 0x482b version 4 bsize 4096 blocks 4194304` |
+| C-VOL-STATUS | `vol.status` | `VOL? gated 1 ... writable 1`，partition 与磁盘卷头 |
+| C-VOL-OLD | `vol.old-header` | 3 行 `VOL OLD vh` + 32 行 `VOL OLD bytes`（512 B 旧卷头） |
+| C-VOL-DRY | `vol.dry` | `VOL PLAN extents 3 bytes 1744896 wire 1769472 volume 17179869184` |
+| C-VOL-WRITE | `vol.write` | `VOL NEW ... bsize 4096 blocks 4194304` 和 `VOL DONE extents 3 ...` |
+| C-VOL-REBOOT | `vol.reboot` | `KEBAB REBOOT: PEHaltRestart(kPERestartCPU)` |
+| C-VOL-MOUNT | `vol.mount` | `KEBAB HFS: KebabRoot: ... total blocks 4194304` |
+| C-INST-GEOM | `install.geometry` | `INST? root rw`，`space ... of 17179869184`，`bsize 4096 blocks 4194304 free > 0` |
+| C-BASE-PRECHECK | `precheck.base` | 6 条 `INST CHECK` 全部 same，或列出 missing/different |
+| C-SEND-BASE | `send.base` | `INST BEGIN ... write`、`INST ACK`、`INST DONE entries 6 ...`（不能出现 `INST DONE with ... failure(s)`） |
+| C-VERIFY-BASE | `verify.base` | 抽样 `INST CHECK` 的大小和 SHA-256 与 KIST 头一致 |
+| C-CACHE-PRECHECK | `precheck.cache` | 44 条 `INST CHECK` 全部 same，或列出 missing/different |
+| C-SEND-CACHE | `send.cache` | `INST DONE entries 44 ...`（无 failure 行），并记录耗时 |
+| C-VERIFY-CACHE | `verify.cache` | 抽样（含最大 `.symbols`）大小和 SHA-256 一致 |
+| C-FINAL | `final.launchd` | 无 CS_KILLED/initproc/DSC 失败；出现 `launchd logging initialized` 或 zprint 的 `zone name`/`ZONE TOTALS` |
+
+脚本的 `checkpoint` 行、`[ OK ]`/`[FAIL]` 行和最终 summary 都带 ID；失败时
+`checkpoint:` 字段就是这里的一行。注意 `C-VOL-OLD` 会出现两次（`VOL DRY` 和
+`VOL BEGIN` 各打印一次旧卷头），这是内核行为，不是重复执行。
+
+> **2026-10-28 更正（见第七十九节）：** 上表的 `C-BOOT-BANNER` 原先写的是
+> `KEBAB USB: running (DSTS ...)` 且随后 `event thread started`；前者到不了
+> USB。同轮审计还改了 `C-VOL-STATUS` 的磁盘卷头行（`VOL DISK vh`，不是
+> `VOL? DISK`）、`C-VOL-MOUNT` 的匹配方式（直接匹配几何行，避开 HFS 注册行和
+> 脏卷提示行）和 `C-VOL-REBOOT` 的匹配（不再接受 `PEHaltRestart returned`）。
+
+### 3. 每阶段的启动参数
+
+基础参数沿用 `board.toml` 的 `[payload]`：`-v -enable_kprintf_spam
+startup_debug=1 serial=3 debug=0x14e cpus=1 rd=ufsroot0 ufsroot=userdata
+ufsrw=1 rootrw=1 kebabusb=1 keepsyms=1`。P1 真正关心的是下面这些：
+
+| 阶段 | 相对基础集的增删 | 为什么 |
+| --- | --- | --- |
+| 写卷 | `+ kebab_vol=1 + kebab_noinit=1 + kebab_install=1 + kebab_pon_write=1 + kebab_cs=15` | 打开 VOL 写门、把 init 停在核内、允许 INST 诊断、写 PON/IMEM、信任缓存策略 |
+| 安装 | `- kebab_vol`，其余同上 | 新卷按 `rootrw=1` 读写挂载；不能带 `kebab_vol`，否则新根又被强制只读 |
+| 最终 | `- kebab_vol - kebab_noinit`，`+ kebab_dsc=1 + kebab_dsc_map=1` | 让 init 真正 exec launchd，并让 DSC 在 first exec 时映射共享缓存 |
+
+两个容易漏掉的点：
+
+1. **`ufsrw=1` 是写路径的门，不是可选项。** 题目里的短参数表只写了
+   `rootrw=1`；实际 `kebab_vol_begin()` 先检查 `kebab_ufs_writable()`，没有
+   `ufsrw=1` 会直接打印 `VOL refused: userdata is read-only; boot with
+   ufsrw=1`，一个字节都不写。安装路径同理。脚本把 `ufsrw=1` 和
+   `kebabusb=1` 一起作为基础要求检查。
+2. **`kebab_cs=15` 不等于签名问题已解决。** 它只打开 trustcache/platform、
+   entitlement 和 unsealed shared cache 四位；launchd 是否 `CS_KILLED` 仍要看
+   cdhash 是否命中静态信任缓存。最终启动把它当失败信号，而不是成功保证。
+
+### 4. 每个阶段具体断言什么
+
+#### 4.1 前置：只信 `fastboot devices`
+
+COM7 的 PnP 项可以在内核 halted 时继续存在，因此“端口能打开”不代表板子活着。
+前置阶段先跑 `fastboot devices`：
+
+* 有设备：直接用，记录 `current-slot`，要求 `b`。
+* 没有设备：用控制台发 `IMEM?`；有回答才发 `FASTBOOT`。`FASTBOOT` 需要
+  `kebab_pon_write=1`，会写 PON 原因和 IMEM cookie，然后 PSCI reset；看到
+  `KEBAB FASTBOOT: IMEM read back ... MATCH` 后 40 s 内轮询 `fastboot devices`。
+* 两者都没有：前置失败，提示需要物理断电；不会去猜端口状态。
+
+如果控制台还能回答，脚本会顺手读一次 `INST?`（失败再读 `VOL?`）记录当前根卷
+几何，供 resume 判断。
+
+#### 4.2 写卷：旧卷头、DRY、BEGIN、重启挂载
+
+1. 刷 `boot-vol.img`，重启，等 `KEBAB USB` 启动行和
+   `KEBAB: kebab_noinit=1`，再发一次 `IMEM?` 证明命令通道真的能收发。
+2. `VOL?`：要求 `gated 1`、`writable 1`、`chunk 65536`，并看到 partition 和
+   磁盘卷头。`writable 0` 就是 `ufsrw=1` 缺失。
+3. `VOL DRY 1769472`：内核先读旧卷头并打印 3 行字段 + 32 行十六进制，然后
+   打印 `VOL BEGIN 1769472 volume 0 dry chunk 65536`。**注意 dry 的 volume 字段
+   是 0**：`ud.vol_size` 在 `VOL DRY` 时没有值，真正的 16 GiB 要等流头解析后
+   才出现在 `VOL PLAN ... volume 17179869184`。把这两个数字混为一谈会让
+   检查点在真机上误报。
+4. 发 27 个 64 KiB 块，每块等 `VOL ACK <累计字节>`；最后要求
+   `VOL PLAN extents 3 bytes 1744896 wire 1769472 volume 17179869184`。
+   dry 的结束行是 **`VOL PLAN`，不是 `VOL DONE`**。
+5. `VOL BEGIN 1769472 17179869184 CONFIRM`：命令必须是两个数字在前、字面量
+   `CONFIRM` 在后，**没有卷名**。KebabRoot 这个名字只在流里的 HFS+ 头中。
+   内核重新打印旧卷头；脚本要求恰好 3 + 32 行，然后发同样的 27 块。
+6. 结束时要求 `VOL NEW vh ... bsize 4096 blocks 4194304` 和
+   `VOL DONE extents 3 ...`。`VOL NEW` 的 512 B 是从设备读回并和流逐字节
+   比较通过后才打印的；这是写卷真正的提交点。
+7. 发 `REBOOT`，要求 `KEBAB REBOOT: PEHaltRestart(kPERestartCPU)`；同一张
+   `boot-vol.img` 再次启动后要求
+   `KEBAB HFS: KebabRoot: block size 4096, total blocks 4194304`。这一行才是
+   “新卷已经替代旧卷”的挂载证据。
+8. **卷里必须有骨架。** 新版 `make-root-volume.py` 会在 `newfs_hfs` 之后写入
+   `/dev`、`/private/var` 及其子目录、`/private/tmp`、`/etc`/`/tmp`/`/var`
+   符号链接和 `root` 的 passwd/group 条目。安装器只能写六个允许前缀下的普通
+   文件，`base.kist` 补不了这些路径；如果用了旧脚本的流，最终启动会在
+   `devfs_kernel_mount: kernel_mount failed: 2` 处失败，而不是 launchd 的
+   签名问题。P1 目前**没有控制台命令能直接检查骨架**（`INST CHECK` 只接受
+   文件且路径必须在允许清单内），所以这条只能靠生成卷时使用新脚本保证；
+   这是本节明确记录的一个可观察性缺口。
+
+#### 4.3 安装镜像：几何与空闲空间
+
+刷 `boot-inst.img` 并重启，等 noinit 行，发 `INST?`，要求：
+
+```
+INST? gated 1 active 0 dry 0 root rw chunk 65536
+INST? space <free> free of 17179869184 bytes
+INST? bsize 4096 blocks 4194304 free <n>
+```
+
+`root ro` 说明 `rootrw=1` 或 `ufsrw=1` 没生效；`blocks 16384` 说明卷还是
+64 MiB 旧卷，脚本会提示先 `--from vol`。`space` 的数字按 `f_bavail × f_bsize`
+报告，允许与卷头 free 略有差异，但必须大于 0 且不超过总字节数。
+
+#### 4.4 base.kist：先查再发，发完抽样复核
+
+* 对 6 条目标逐一 `INST CHECK <path>`；全部 same 则整个流不发，打印
+  `complete; skipped`。
+* 有缺失/不同才发 `INST BEGIN <size>`；每条 64 KiB 块等 `INST ACK`，内核按
+  KIST 头逐条写、逐条回读并打印 `OK <path> ...` 或 `SKIP <path> ...`。
+* 结束要求 `INST DONE entries 6 ok ... skipped ... bytes 1716034 wire ...`；
+  `ok + skipped == 6`。
+* 再抽 6 条（base 全查）`INST CHECK`，大小和 SHA-256 必须与流头一致。
+
+#### 4.5 cache.kist：44 条、同样的预查、记录耗时
+
+与 base 相同的协议；默认要求 44 条（43 个映射分片 + `.symbols`）。44 条
+`INST CHECK` 会真的把 3.3 GB 读一遍，但这是“不重发已完成的流”的唯一可靠
+依据；全部 same 时脚本不会发一个字节。部分完成时仍发完整流，内核用
+`SKIP` 逐条跳过。抽样固定包含第一条、最后一条、最大文件（`.symbols`）和
+均匀间隔的若干条，避免只验证小文件。
+
+发送结束打印 `INST DONE ... ms <内核耗时>` 和主机侧
+`elapsed / MiB/s`；这就是任务要求的 cache 耗时。
+
+#### 4.6 最终启动：读到第一个失败或 launchd
+
+刷 `boot-final.img`，重启，脚本把 panic 检测器 arm 起来，然后一直读到：
+
+* 成功：`launchd logging initialized. name: launchd pid: 1`，或 zprint 的
+  `zone name` / `ZONE TOTALS` 表。后者是“launchd 真的 spawn 了一个 job”的
+  最硬证据。
+* 失败：`unexpected SIGKILL of launchd (CS_KILLED)`、`initproc failed to
+  start`、`initproc exited`、`pid 1 exited`、`dyld[1]: Library not loaded`、
+  `devfs_kernel_mount: kernel_mount failed`、`KEBAB DSC: ... NOT mapped`。
+* 超时/重启：180 s 内两者都没有，或期间出现新的启动 banner / 重新枚举。
+
+无论成功失败，最后都打印最后 100 行控制台和 verdict；失败时退出码 3。
+
+### 5. 失败输出与退出码
+
+失败输出固定四段：
+
+```
+checkpoint: vol.dry
+expected:   VOL PLAN extents 3 bytes 1744896 wire 1769472 volume 17179869184
+seen:       VOL PLAN extents 3 bytes 1744896 wire 1769472 volume 67108864
+hint:       ...
+last 30 console lines:
+  | ...
+run log:     work/p1/logs/run-.../run.log
+console log: work/p1/logs/run-.../console.log
+```
+
+同样的内容写进 `failure.txt`；`--json-summary` 还会写出机器可读的
+checkpoint/phase 记录。退出码：0 完成，2 前置失败，3 检查点/设备拒绝，
+4 panic/重启，5 控制台丢失，6 dry-run 失败，130 中断。
+
+常见“seen”对应的含义：
+
+| seen | 含义 | 下一步 |
+| --- | --- | --- |
+| `VOL disabled: boot with kebab_vol=1` | 刷错镜像 / 参数丢了 | 用 `boot-vol.img` |
+| `VOL refused: userdata is read-only` | `ufsrw=1` 缺失 | 补参数重打镜像 |
+| `VOL refused: a real write needs the confirmation` | 命令不是 `<wire> <volume> CONFIRM` | 检查命令串 |
+| `VOL OLD` 行数不足 3+32 | 旧卷头读不到或被截断 | 先 `VOL?` 看磁盘卷头 |
+| `VOL ABORT ...` | 流头/卷头/分区不一致 | 不要重试同一条流 |
+| `VOL TIMEOUT ...` | 60 s 没有新块 | 传输停了；看是否 panic/重启 |
+| `INST? ... root ro` | `rootrw=1` 或 `ufsrw=1` 没生效 | 重打 install 镜像 |
+| `INST? bsize ... blocks 16384` | 卷还是 64 MiB | `--from vol` |
+| `INST ABORT ...` / `FAIL ...` | 流/文件系统/空间错误 | 保留卷，重跑同阶段 |
+| `INST TIMEOUT ...` | 60 s 没有新块 | 传输停了 |
+| `panic(cpu ...)` | 内核 panic | 0134 会重启；修复首个 panic |
+| 新 `KEBAB USB: event thread started` | 阶段中途重启（panic 恢复） | 按 panic 处理，不是 ACK 慢 |
+| `CS_KILLED` | launchd 被签名策略杀 | 信任缓存/cdhash 问题 |
+| `initproc ...` / `pid 1 exited` | PID 1 没起来或退出 | 看更早的 exec/DSC 行 |
+| `KEBAB DSC: ... NOT mapped` | 共享缓存计划失败 | 先修 44 条缓存 |
+| `devfs_kernel_mount ... failed` | 根卷没有 `/dev` 骨架 | 重建卷，base.kist 补不了 |
+
+### 6. panic 行为与检测
+
+补丁 0134 之后，服务不了控制台的 panic 不再停在
+`Waiting for remote debugger connection`，而是走 PSCI reset。于是“阶段中途
+控制台消失、几秒后同一个 VID/PID 又出现并从头启动”本身就是 panic 的证据，
+不是 `INST ACK` 慢。脚本在阶段进入 ready 之后 arm 检测器，任一条件成立即
+报 `PanicDetected`（退出码 4）：
+
+* 出现新的 `KEBAB USB: event thread started, waiting for the host`
+  （`KEBAB USB: running (DSTS ...)` 与 `Darwin Kernel Version` 在
+  `kebab_usb_start()` 之前打印，到不了 USB，不能当判据；见第七十九节）；
+* 出现 `panic(cpu ...)`、`KEBAB USB: panic console cannot be serviced`；
+* 控制台重新枚举（`console reopened`），或消失超过 10 s；
+* `KEBAB REBOOT: PEHaltRestart returned ...`（复位失败，仍是 panic）。
+
+失败输出里的 checkpoint 会被细化到 `vol.dry`、`send.cache`、`final.launchd`
+等，而不是只写 `vol`；最后 30 行里通常能看到 panic 文本和重启后的新 banner。
+带 `kebabkdp=1` 的镜像不进入这条路径（panic 会等 LLDB），所以默认禁止；
+这正是 0134 的边界，不是脚本的遗漏。
+
+### 7. resume 的规则
+
+| 已知状态 | `--from auto` | `--from vol` | `--from install` |
+| --- | --- | --- | --- |
+| 控制台 `INST?`/`VOL?` 报 4,194,304 块 | 跳过 vol，从 install 开始 | 跳过 vol（除非 `--force-vol`） | 从 install 开始 |
+| 报 16,384 块 | 从 vol 开始 | 从 vol 开始 | 直接失败，提示先写卷 |
+| 已在 fastboot，几何未知 | 先刷 install 探测；若仍是小卷则回 vol 再重试 install | 默认执行 vol（破坏性） | 从 install 开始，小卷则失败 |
+| `INST CHECK` 全部 same | 不发送该流 | 同左 | 同左 |
+| 部分 same | 发送完整流，内核逐条 `SKIP` | 同左 | 同左 |
+
+**完整流绝不重发。** precheck 是逐条的，不是抽样：base 6 条、cache 44 条。
+只有全部 same 才跳过；部分完成发完整流是刻意的，因为 KIST 的逐条 SKIP 已经
+在设备侧实现了 resume，主机侧重新打包反而会引入新流。若确实要强制重发，
+用 `--no-precheck`（不推荐）。
+
+`--force-vol` 用于“卷明明是 16 GiB，但我要重新写一遍”的场景；它会跳过
+“已 imprint 则跳过 vol”的保护，执行 `VOL BEGIN`。这是破坏性操作，脚本仍会
+要求 `CONFIRM` 和 512 B 旧卷头先落日志。
+
+### 8. 命令匹配表（对照 `bsd/dev/kebab_usb.c`）
+
+内核的匹配规则是：**一条命令的全部字节必须出现在同一次 bulk-OUT 完成里**；
+`INST`/`VOL` 带参数的命令由各自的扫描器从同一个完成缓冲区里解析参数。
+`ud_command_seen()` 在非 KDP 分支扫描整个完成，KDP 分支只认第一个字节
+（`memcmp(buf, ...)`）。本脚本从不在启动参数里放 `kebabkdp=1`，所以走非 KDP
+分支，但每条命令仍按“一行一次 write”发送。
+
+| 主机实际发送 | 内核匹配代码 | 精确要求 / 备注 |
+| --- | --- | --- |
+| `FASTBOOT\n` | `ud_command_seen(..., "FASTBOOT\n", ...)`；KDP 分支 `memcmp(buf, ...)` | 非 KDP 时可在完成的任意位置；FASTBOOT2 先匹配，避免前缀吞掉；需要 `kebab_pon_write=1` 和 IMEM |
+| `REBOOT\n` | `ud_command_seen(..., "REBOOT\n", ...)`；KDP 分支 `memcmp` | 纯 PSCI reset，不写 PON/IMEM |
+| `IMEM?\n` | `ud_command_seen(..., "IMEM?\n", ...)` | 只读探针；用于证明控制台真的在处理命令 |
+| `INST?\n` | `ud_inst_command()`：`n >= sizeof("INST?\n")-1` 且 `memcmp(p, "INST?\n", ...)` | 必须带换行；`INST?` 与 `INST ...` 共享扫描器 |
+| `INST BEGIN <wire>\n` | `ud_inst_command()`：前缀 `"INST BEGIN "` + `ud_inst_u64()` | `ud_inst_u64()` 只接受十进制数字，且数字后**必须紧跟 `\n`**；`<wire>` 是整个 KIST 文件字节数（含 32 B 头和 padding） |
+| `INST CHECK <path>\n` | `ud_inst_command()`：前缀 `"INST CHECK "`，路径取到 `\n` | 路径长度 `1..127`；必须是绝对路径、无空段/`..`、六个允许前缀之一；`INST CHECK` 命令本身可无参数尾，但路径后要有换行 |
+| `VOL?\n` | `ud_vol_command()`：`n >= sizeof("VOL?\n")-1` 且 `memcmp` | 必须带换行 |
+| `VOL DRY <wire>\n` | `ud_vol_command()`：前缀 `"VOL DRY "` + `ud_u64_span()` + 紧跟 `\n` | 数字后**必须**是 `\n`；不能跟空格或别的字 |
+| `VOL BEGIN <wire> <volume> CONFIRM\n` | `ud_vol_command()`：`"VOL BEGIN "` + wire + `' '` + volume + `' '` + `"CONFIRM\n"` | **没有卷名参数**；KebabRoot 只在流里的 HFS+ 头；`CONFIRM` 是字面量且必须带换行；缺它只打印 refused，不取流 |
+| `<64 KiB 数据块>` | `ud_bulk_out_done()` 根据 `ud.out_stream` 分派 `kebab_inst_bytes()` / `kebab_vol_bytes()` | 一次一块，等 `INST ACK <n>` / `VOL ACK <n>` 等于累计值再发下一块；设备不重新 arm 端点就是流控 |
+
+核对结果：脚本发送的 9 类命令全部能在 `kebab_usb.c` 的
+`ud_command_seen()`、`ud_inst_command()`、`ud_vol_command()` 中找到精确匹配；
+`INST BEGIN`/`VOL BEGIN` 的参数顺序、空格和结尾换行都一致。`INST?`、`VOL?`
+也带换行，不是裸命令。
+
+#### 8.1 这次对照发现的三处“文档/辅助脚本不一致”
+
+1. **`VOL DRY` 的 `VOL BEGIN` 行打印 `volume 0`。** `kebab_vol_begin()` 在
+   `ud.vol_size == 0`（dry 路径）时先打印命令行参数，之后解析流头才把真正的
+   16 GiB 放进 `VOL PLAN ... volume 17179869184`。因此 dry 阶段不能断言
+   `VOL BEGIN ... volume 17179869184`；脚本只对写路径断言这个字段。
+2. **`VOL DRY` 的结束行是 `VOL PLAN`，不是 `VOL DONE`。**
+   `scripts/send-volume.py` 的 `--dry` 路径在发完流后仍然
+   `con.wait(DONE_RE, 60)`（`DONE_RE` 只匹配 `VOL DONE`），按代码会在 dry
+   时等 60 s 后超时；`send-volume.py --status`/真写不受影响。P1 编排器不使用
+   该辅助脚本，自己等 `VOL PLAN`，并把这条列为已知主机侧 bug。
+3. **`VOL?` 的磁盘几何在 `VOL DISK vh bsize` 行，不是 `VOL? DISK`。**
+   第一行是 `gated/active/dry/chunk/writable`，第二行是 `partition`，接着
+   是三条 `VOL DISK vh`（sig、created、bsize），几何在第三条。`kv_print_vh("DISK")`
+   不会重复 `VOL?` 命令前缀，所以 `^VOL\? DISK` 的正则会永远不匹配；脚本现在
+   直接匹配 `^VOL DISK vh bsize`。
+
+另外确认：`VOL BEGIN` 要的是 `<wire> <volume> CONFIRM`，不是卷名在前；
+`INST CHECK` 的参数是目的路径，不是流里的偏移；`INST?` 在 vol 镜像上会打印
+`INST disabled`，此时只能用 `VOL?` 读几何。
+
+### 9. dry-run 与离线验证
+
+`--dry-run` 不碰板子，执行所有能离线做的检查：
+
+* 三张镜像：存在、恰好 100,663,296 B、`ANDROID!` 魔数、payload 偏移；
+* 从镜像的 TOML 抽出 `args`，逐 token 核对本阶段必需/禁止参数（包括
+  `kebab_vol`、`kebab_noinit`、`kebab_dsc*` 和 `kebabkdp`）；
+* VEXT：大小、魔数、3 个 extent、offset/length 对齐/递增、data_bytes、
+  零 padding、内嵌 HFS+ 头（sig/version/bsize/blocks/journal）；
+* KIST：32 B 流头、每条 192 B 头、路径、模式、store/deflate、逐条
+  SHA-256、总字节、padding、文件大小；
+* 打印完整阶段计划和 resume 提示，不写任何字节。
+
+离线验证结果（本机，非板子）：
+
+```
+$ python3 scripts/test-bring-up.py --kernel-source .../kebab_usb.c
+PASS kist-compressed-size
+PASS dry-run            rc=0 expected=0
+PASS happy-path         rc=0 expected=0
+PASS resume             rc=0 expected=0
+PASS segment            rc=0 expected=0
+PASS partial-base       rc=0 expected=0
+PASS from-vol-resume    rc=0 expected=0
+PASS install-small      rc=3 expected=3
+PASS bad-install-args   rc=6 expected=6
+PASS corrupt-stream     rc=6 expected=6
+PASS slot-a             rc=2 expected=2
+PASS cs-killed          rc=3 expected=3
+PASS dsc-missing        rc=3 expected=3
+PASS panic-mid-cache    rc=4 expected=4
+PASS silent-panic       rc=4 expected=4
+PASS command-lint       9 commands in kebab_usb.c
+```
+
+另外用主机上的真实产物跑过同一 dry-run：`/home/albert/tmp/KebabRoot.vext`
+（1,769,472 B，sha256 `e37713002c463d99635ec790263eb21b7799c18388768a45b3910ace53f920eb`）
+的 D-04 通过；`make-minimal-userland.py --only base` 生成的 `base.kist`
+（589,824 B，sha256 `f4a1e2e07ede7cbd145c356421e9f54db9cc402d9249c34807b1aee512819bf0`）
+的 D-05 通过。`cache.kist` 的 1.0 GB 真流没有在本机重打，避免占满
+1.7 GB 的剩余磁盘；44 条路径由 fake stream 覆盖。
+
+fake board 会真的解析 KIST/VEXT、每块回 ACK、模拟 `VOL DRY/BEGIN`、
+`INST CHECK`、`SKIP`、中途 panic（带/不带 panic 文本）以及错槽位/错参数；
+因此阶段顺序、流控和停止条件是经过代码路径验证的。**没有验证的是真实
+USB 时序、真 HFS+ 卷、真 launchd 和真 3.3 GB 传输**——那要等板子物理上电。
+
+### 10. 已知缺口与下一次真机
+
+1. **三张镜像**：参数在 payload TOML 里，不能像 cmdline 那样一张镜像改参数；
+   需要按第 3 节打 `boot-vol.img`、`boot-inst.img`、`boot-final.img`。
+2. **`boot-final.img` 的 DSC 参数**：没有 `kebab_dsc=1 kebab_dsc_map=1` 时
+   最终启动会停在 launchd 找不到共享缓存，而不是签名失败。
+3. **卷骨架**：不再要求 `KebabRoot.vext` 带骨架。骨架由 `skel.kist` 在写卷
+   之后、`base.kist` 之前创建；VEXT 只验 HFS+ 几何。`skel.kist` 是 64 KiB、
+   16 条 KIST v2；内核 DIR/LINK 路径尚未在真机执行。详见第七十节。
+4. **`ufsrw=1`**：题目的短参数表没写，但 VOL/INST 写路径都必须有；dry-run
+   会在刷写前拒绝缺少它的镜像。
+5. **`send-volume.py --dry` 的超时 bug**：已修（第七十节）；dry run 现在等
+   `VOL PLAN` 并核对 extents/bytes/wire/volume，不再等 `VOL DONE`。
+6. **真机未跑**：板子 stranded，需要一次物理断电。下一次上电后的第一条命令
+   仍是 `python scripts/bring-up.py --from vol`；若卡住，先看 `failure.txt`
+   的 checkpoint，再决定物理断电还是重跑。
+
+## 七十、根卷骨架的真机前验证
+
+> 目标：回答第六十三/六十八/六十九节留下的问题——根卷里到底有没有 launchd
+> 需要的那套目录，以及 `make-root-volume.py` 到底能不能做出来。
+>
+> 结论：**主机侧 root 骨架方案放弃**。根卷骨架改为 KIST v2 的 `skel.kist`，
+> 由内核在写卷之后、`base.kist` 之前以 uid 0 创建；裸卷 `KebabRoot.vext`
+> 重新变成 1,769,472 B / 3 extents / 426 块的纯 HFS+ 卷。主机侧做了裸卷
+> 生成、`fsck_hfs`、KIST v2 打包/校验、`base.kist` 重打和内核
+> `-fsyntax-only` 编译检查；**真机仍未执行**。
+>
+> 状态：**主机验证完成，真机未执行**。板子 stranded，无刷写、无 USB 传输、
+> 无 launchd。
+
+### 1. 为什么放弃主机侧骨架
+
+上一版 `make-root-volume.py` 在 `newfs_hfs` 之后 mount 镜像、`mkdir`/`write`/
+`symlink`，再 `chown(0,0)` 并用 `hdiutil attach -owners on` 保留属主。这条路
+在现有两台主机上都无法执行：
+
+| 检查 | 实测结果 |
+| --- | --- |
+| `ssh albertlee@192.168.30.165`（Windows 侧） | 通，macOS 14.6.1 23G93 |
+| `ssh albertlee@192.168.30.165`（从 `ssh ubuntualbert`） | 拒绝：该主机的 key 不在 VM 的 `authorized_keys` |
+| `hdiutil` / `newfs_hfs` / `fsck_hfs` | 都在 |
+| `sudo -n true` | `sudo: a password is required` |
+| NOPASSWD 规则（`/bin/true`、`hdiutil`、`newfs_hfs`、`fsck_hfs`、`chown`、`chmod`） | 全部要求密码；`/etc/sudoers.d/` 为空 |
+| `root@192.168.30.165` publickey | `Permission denied (publickey,password,...)` |
+| 空密码 | 拒绝（只做了一次非交互测试，没有猜密码） |
+| 无 root `newfs_hfs` | **可以**：`hdiutil attach -nomount` 后设备属主就是 `albertlee`，`newfs_hfs -b 4096` 成功 |
+| 无 root `chown 0:0` | **EPERM**：默认 mount 和 `hdiutil attach -owners on` 都一样 |
+| Linux 主机 | 也没有免密 sudo；没有 `mkfs.hfsplus` / `fsck.hfsplus`；根分区只剩 1.7 GB |
+
+关键点：`newfs_hfs` 以 `albertlee` 运行时，卷根目录的属主是 `501:20`，不是
+`0:0`；而 `chown(0,0)` 在无 root 时一定失败。因此即使把 `populate_skeleton`
+的 `geteuid()!=0` 检查删掉，得到的也只是 `501:20` 的假骨架，不能交给 launchd。
+**本轮没有伪造这个结果**：`make-root-volume.py` 的主机骨架代码已删除，脚本
+只做不需要 root 的裸卷创建和 VEXT 导出。
+
+### 2. 新设计：KIST v2 + skel.kist + 内核创建
+
+KIST 从 v1 升到 **v2**，只增加“安装器原先表达不了”的两类条目；v1 仍然被
+内核接受，所以已有的 `base.kist`/`cache.kist` 不必为了格式重打。
+
+流头（32 B）的 `version` 改为 2，`flags` 增加 bit1：
+
+| 位 | 含义 |
+| --- | --- |
+| bit0 `F_STREAM_DEFLATE` | 至少一个文件条目是 deflate |
+| bit1 `F_STREAM_SKELETON` | 骨架流；内核只允许精确的骨架路径 |
+
+条目头（192 B）的 `flags` 增加 bit1/bit2，`mode` 的解释从 `& 0777` 改为
+`& 07777`：
+
+| 位/字段 | 含义 |
+| --- | --- |
+| bit0 `F_ENTRY_DEFLATE` | 载荷是 zlib；只允许普通文件 |
+| bit1 `F_ENTRY_DIR` | 目录条目；`wire=0`、`size=0`、sha256 全零，`mode` 是精确权限 |
+| bit2 `F_ENTRY_SYMLINK` | 符号链接；载荷就是 target，`wire=size=len(target)`，sha256 是 target 的摘要，不允许 deflate |
+| `mode` | 0..07777；`01777` 的 sticky 位不再被 `0777` 掩掉 |
+
+`scripts/make-minimal-userland.py` 现在先构建 **`skel.kist`**（16 条，
+`--only skel` 可在没有任何 iOS 用户态源码的机器上单独跑），然后再构建
+`base.kist`/`cache.kist`。`skel.kist` 的完整表：
+
+| 路径 | 类型 | 模式 | 内容 / 目标 |
+| --- | --- | --- | --- |
+| `/dev` | dir | 0755 | devfs 的挂载点；`console/tty/null/zero/klog` 由 devfs 创建 |
+| `/private` | dir | 0755 | |
+| `/private/etc` | dir | 0755 | |
+| `/private/tmp` | dir | **01777** | 旧 KIST 的 `0777` 掩码丢掉的正是这个 sticky 位 |
+| `/private/var` | dir | 0755 | |
+| `/private/var/db` | dir | 0755 | |
+| `/private/var/log` | dir | 0755 | |
+| `/private/var/root` | dir | 0700 | |
+| `/private/var/run` | dir | 0755 | |
+| `/private/var/tmp` | dir | **01777** | |
+| `/etc` | symlink | 0777 | `private/etc` |
+| `/tmp` | symlink | 0777 | `private/tmp` |
+| `/var` | symlink | 0777 | `private/var` |
+| `/private/etc/passwd` | file | 0644 | `root:*:0:0:System Administrator:/var/root:/bin/sh\n` |
+| `/private/etc/master.passwd` | file | 0644 | `root:*:0:0::0:0:System Administrator:/var/root:/bin/sh\n` |
+| `/private/etc/group` | file | 0644 | `wheel:*:0:root\n` |
+
+passwd 的决定不变：launchd 在没有 `UserName` 的 plist 上也会
+`getpwuid_r(0)`，没有 root 条目就报
+`Could not find uid associated with service`。这里只放 root；`daemon`/`nobody`
+等条目等第一个 job 真正需要时再加。`/var/root` 通过 `/var -> private/var`
+解析到 `/private/var/root`，所以 home 字段可以保留 iOS 的写法。
+
+内核侧（`patches/xnu-8796-kebab/0138-kebab-kernel-skeleton.patch`）：
+
+- `KI_VERSION 2`，接受 1..2；v1 条目不允许 DIR/LINK；
+- `KI_F_DIR`/`KI_F_SYMLINK`，两者互斥且不允许 deflate；
+- `ki_path_ok()` 对骨架流使用精确路径表（和上面的 16 条一一对应），普通流
+  仍只允许七个前缀（0144 起新增 `/usr/libexec/`）；
+- 目录用 `vn_create` 创建后立刻 `vnode_setattr`，显式设 `uid=0/gid=0` 和
+  精确 mode（所以 `01777` 不会被 umask 或父目录属主改掉）；
+- 符号链接用 `nameiat(CREATE, OP_SYMLINK)` + `VNOP_SYMLINK` 创建，target
+  来自载荷，不用格式化字符串；`lchown` 语义用 vnode 属主设置完成；
+- 每个条目创建后 `vnode_getattr` 读回，打印
+  `OK <path> ... mode 0%o uid %u gid %u`；uid/gid 不是 0:0 或目录/文件 mode
+  不符就 `INST ABORT`。符号链接只强制 uid/gid，不强制 mode（symlink 的
+  mode 本来就不参与访问判断）；
+- 重跑语义：目录会重新设精确 mode/属主；骨架文件总是重写（不做 SKIP），
+  以保证属主正确；已存在的符号链接打印 `SKIP ... link exists`，不重复创建。
+
+### 3. 裸卷实测（macOS VM，无 root）
+
+在 `albertlee@192.168.30.165` 上直接跑（**没有 sudo**）：
+
+```sh
+python3 scripts/make-root-volume.py --size 16g \
+    --image /tmp/KebabRoot.img --stream /tmp/KebabRoot.vext
+```
+
+输出：
+
+```
+volume      /tmp/KebabRoot.img
+volume size 17179869184 bytes (16384 MiB), block size 4096, total blocks 4194304
+free blocks 4193878 (16382 MiB), allocated blocks 426
+extents     3, data 1744896 bytes (1704 KiB), non-zero 45056 bytes, allocated-but-zero blocks 415
+stream      /tmp/KebabRoot.vext, 1769472 bytes (27 chunks), padding 24496, sha256 1a31c5b67864f643351d29fb89d64c2150f86b9061101354ab9082cd3fc917f8
+```
+
+三个 extent（字节偏移 / 长度 / 块数）：
+
+| # | offset | length | blocks |
+| --- | --- | --- | --- |
+| 0 | 0x0 | 692,224 | 169 |
+| 1 | 0xF9000 | 1,048,576 | 256 |
+| 2 | 0x3FFFFF000 | 4,096 | 1 |
+| 合计 | | 1,744,896 | **426** |
+
+和旧值对比：
+
+| 项 | 旧值 | 本次 | 说明 |
+| --- | --- | --- | --- |
+| 卷大小 | 16 GiB | 16 GiB | 不变 |
+| block size | 4096 | 4096 | 不变 |
+| total blocks | 4,194,304 | 4,194,304 | 不变 |
+| allocated blocks | 426 | **426** | 不变；骨架已不在 VEXT |
+| extents | 3 | **3** | 不变 |
+| stream bytes | 1,769,472 | **1,769,472** | 不变 |
+| SHA-256 | 旧 run 的 `e3771300...` | `1a31c5b6...` | `newfs_hfs` 的时间戳使每次 run 不同；尺寸/extents 稳定 |
+
+`fsck_hfs -n`（Apple hfs-650.140.2，只读检查）：
+
+```
+** Checking non-journaled HFS Plus Volume.
+   The volume name is KebabRoot
+** Checking extents overflow file.
+** Checking catalog file.
+** Checking multi-linked files.
+** Checking catalog hierarchy.
+** Checking extended attributes file.
+** Checking volume bitmap.
+** Checking volume information.
+** The volume KebabRoot appears to be OK.
+```
+
+第一次以读写方式打开 `/dev/rdisk4` 被拒（无 root），fsck 随即按 `(NO WRITE)`
+只读检查并通过；上面的判定来自这次只读检查。
+
+裸卷 read-only mount 的 `ls -la` 只有 `.`（`..` 是宿主的 `/Volumes`，不属于
+这个卷）：
+
+```
+drwxr-xr-x  2 501  20   68 ... .
+drwxr-xr-x  4 0    0  128 ... ..
+```
+
+这是**预期**的：骨架不再由主机写进卷里，所以裸卷上没有 `/dev` 等目录。
+卷根 `501:20` 是 `newfs_hfs` 以无 root 运行留下的；每个由内核创建的骨架
+条目都会显式 chown 到 0:0，但 `/` 本身不会。若真机上 launchd 还要求 `/`
+是 `0:0`，需要再加一条内核侧的根目录 chown；这是目前唯一已知的属主缺口。
+
+### 4. KIST v2 主机侧验证
+
+构建 `skel.kist`（Linux 主机，无 root）：
+
+```
++ pack-userland.py --spec .../skel.spec --compress none -o .../skel.kist --chunk 65536 --skeleton
++ pack-userland.py --verify .../skel.kist
+skel.kist: v2 skeleton, 16 entries, 153 B installed, 64.0 KiB on the wire
+verify: 16 entries (3 files, 10 dirs, 3 symlinks), all digests match
+```
+
+`scripts/verify-skel-kist.py` 按语义再查一遍（路径、类型、mode、target、
+passwd 内容、旧 `0777` 掩码算术）：
+
+```
+OK   /dev                         dir   mode 0755
+OK   /etc                         link  -> private/etc
+OK   /private                     dir   mode 0755
+OK   /private/etc                 dir   mode 0755
+OK   /private/etc/group           file  mode 0644  wheel:*:0:root
+OK   /private/etc/master.passwd   file  mode 0644  root:*:0:0::0:0:System Administrator:/var/root:/bin/sh
+OK   /private/etc/passwd          file  mode 0644  root:*:0:0:System Administrator:/var/root:/bin/sh
+OK   /private/tmp                 dir   mode 01777
+OK   /private/var                 dir   mode 0755
+OK   /private/var/db              dir   mode 0755
+OK   /private/var/log             dir   mode 0755
+OK   /private/var/root            dir   mode 0700
+OK   /private/var/run             dir   mode 0755
+OK   /private/var/tmp             dir   mode 01777
+OK   /tmp                         link  -> private/tmp
+OK   /var                         link  -> private/var
+mode mask: 01777 & 07777 = 01777 (old 0777 mask = 0777)
+verify-skel-kist: 16 entries match the skeleton table
+```
+
+产物：
+
+| 流 | 版本 | 条目 | installed | wire | SHA-256 |
+| --- | --- | --- | --- | --- | --- |
+| `skel.kist` | v2 skeleton | 16（10 dir + 3 link + 3 file） | 153 B | 65,536 B | `b0b22fad2086de1f3d7eb3c054822c4746633ebd2439dad384f73aee9dad2bc2` |
+| `base-v2.kist`（重打） | v2 | 5 | 1,619,682 B | 589,824 B | `d8691e5869f54affd0a64515332e1f61ab2059fb81f628f62c6821273debf1d9` |
+| 旧 `real/base.kist` | v1 | 5 | 1,619,682 B | 589,824 B | `f4a1e2e07ede7cbd145c356421e9f54db9cc402d9249c34807b1aee512819bf0` |
+
+旧 v1 `base.kist` 用新 `pack-userland.py --verify` 仍通过（5 条，digest 全对），
+说明**内核接受 v1**的兼容路径是必要的。真实 1.0 GB `cache.kist` 没有在 1.7 GB
+剩余磁盘上重打；只用一个 44 条 v1 fake 流验证了格式兼容，真 cache 的
+1,067,909,120 B wire / 3,330,359,296 B installed 未在本轮重新校验。
+
+内核 `kebab_install.c` 用 macOS VM 上 `build-0131.log` 里的真实 XNU 编译命令
+做 `-fsyntax-only`（同样的 `-DKEBAB`、`-I` 和 SDK）：
+
+```
+compile rc: 0
+```
+
+只出现系统头文件原有的 warning；我们修改的文件没有再产生 warning，也没有
+error。**这不是完整内核链接/构建**，只是编译级验证；完整构建要等下一次
+不占用别人构建树的窗口。
+
+### 5. 空间算术
+
+裸卷 free blocks 来自卷头：`4,193,878`；block 4096：
+
+```
+free = 4,193,878 × 4096 = 17,178,124,288 B
+base  = ceil(1,619,682 / 4096) = 396 blocks
+cache = 3,330,359,296 / 4096  = 813,076 blocks（整除）
+合计  = 813,472 blocks
+free after both = 4,193,878 - 813,472 = 3,380,406 blocks
+                = 13,846,142,976 B = 12.895 GiB
+```
+
+再给 HFS+ catalog/extents/属性留 4 MiB（1,024 块）余量：约 **12.891 GiB**。
+骨架本身只有 3 个文件的数据块（120 B）加 10 个目录的 catalog 记录，远小于
+这个余量；真正的 3.3 GB 安装不受影响。
+
+### 6. 编排器（`scripts/bring-up.py`）必须改什么
+
+`bring-up.py`（`7b07627`）仍是旧顺序，按新设计需要改：
+
+1. **阶段顺序**：`vol → install → skel → base → cache → final`。`skel.kist`
+   在写卷并重启进安装镜像之后、`base.kist` 之前发送；它只有 64 KiB。
+2. **VEXT 不再验骨架**：`KebabRoot.vext` 是裸卷，仍验
+   `1,769,472 B / 3 extents / 1,744,896 data bytes / HFS+ 4,194,304 blocks`。
+   删除“VEXT 必须带 `/dev`、`/private/...`”之类的检查；骨架只能从
+   `skel.kist` 的条目表验证，不能在写卷阶段从 VEXT 里看。
+3. **新增 `skel.kist` 产物**：路径、16 条、KIST v2；`INST CHECK`/`SKIP`
+   对骨架不适用（骨架流小，整条重发；内核重跑语义见第 2 节）。注意
+   `bring-up.py` 的 `read_kist()` 目前硬编码 `version == 1` 和 `mode & 0777`，
+   并假设每条都有文件 payload；要扩成 v2：接受 `F_STREAM_SKELETON`，
+   `DIR` 条目 `wire=size=0`，`LINK` 条目的 payload 是 target，且 `total_usize`
+   把 target 长度算进去。
+4. **不要改的协议细节**：`VOL BEGIN <wire> <volume> CONFIRM` 没有卷名；
+   `VOL?` 的磁盘几何在 `VOL DISK vh bsize` 行（`kv_print_vh("DISK")` 的三行
+   之一，没有 `VOL?` 前缀）；任何写路径都要 `ufsrw=1`；
+   最终启动必须有 `kebab_dsc=1 kebab_dsc_map=1`；每阶段一张镜像，因为启动
+   参数在 payload TOML（镜像偏移 `0x800000`）里，不在 Android boot 头。
+5. **`send-volume.py --dry` 已修**：旧版等 `VOL DONE`，dry run 实际以
+   `VOL PLAN` 结束，会白等 60 s。现在 dry 分支等
+   `VOL PLAN extents <n> bytes <data> wire <wire> volume <vol>`，并对照
+   stream header 校验四个字段；`VOL DONE` 仍只用于真实写。
+
+### 7. 真机前仍未验证
+
+- 内核的 `DIR`/`SYMLINK` 创建路径**没有在真实 HFS+ 上跑过**：
+  `vn_create`+`vnode_setattr` 的 uid/gid 0、`01777` 的持久化、
+  `VNOP_SYMLINK` 的 target、`vnode_getattr` 的读回，都只有编译检查。
+- 裸卷 `/` 仍是 `501:20`；内核创建的 16 个条目会 chown 到 0:0，但 `/` 不会。
+- `skel.kist` 没有经过 USB 发送；`INST STREAM v2 skeleton`、
+  `OK ... uid 0 gid 0`、`SKIP ... link exists` 都还没有真机日志。
+- 没有 launchd、没有最终启动、没有 3.3 GB 传输；板子 stranded。
+- 本节写于完整构建之前；0138 的完整内核链接结果见第 8 节。
+- 真实 `cache.kist`（1.0 GB）没有重打；v1 兼容性只用 fake 流验证过。
+
+下一次真机的入口仍是 `python scripts/bring-up.py --from vol`；顺序已按第 6
+节改为 `vol -> install -> skel -> base -> cache -> final`（见第 8 节）。如果
+`skel` 阶段失败，先看 `INST STREAM` 的版本/骨架标志和第一条 `FAIL`，再决定
+是否重发 `skel.kist`。
+
+### 8. 0138 完整构建与编排器更新（2026-10-28）
+
+`0138-kebab-kernel-skeleton.patch` 不再只是 `-fsyntax-only`。在
+`albertlee@192.168.30.165` 上删除 `build/xnu.obj/kernel.development.kebab`
+符号链接后，用 `build-local.sh` 做了一次完整构建：117 个 kebab patch 加 8 个
+上游辅助 patch（共 125 个）全部重新 staged，`kebab_install.o` 重新编译并参与
+链接。结果：
+
+| 项 | 结果 |
+| --- | --- |
+| 构建 | `XNU Build Done`；961 次 clang 编译；0 个编译错误 |
+| patch | 6 个被 `build.sh` 跳过（`0001`、`0002` 和 4 个上游 helper），与 `build-0134-final.log` / `build-exec-clean.log` 的基线逐项相同；`0138` 已应用并重新编译 |
+| 内核 | `kernel.development.kebab`，17,175,000 B（16.38 MiB），Mach-O arm64 |
+| `kebab_install.c` warning | 0 条带 `kebab_install.c:<行>` 的 warning；只有其 include 的系统头文件产生基线 warning |
+| 新格式串 | `OK %s 0 dir mode 0%o uid %u gid %u`、`OK %s %llu link -> %s mode 0%o uid %u gid %u`、`INST STREAM v%u%s entries %u bytes %llu wire %llu`、`FAIL %s attrs ...` 都已在二进制中（`strings` 命中） |
+
+构建没有暴露需要修正的代码问题，因此**没有新增 corrective patch**，内核
+patch 集与 `dfa7d6f` 相同。
+
+`scripts/bring-up.py` 已按第 6 节改完：
+
+1. 阶段顺序为 `vol -> install -> skel -> base -> cache -> final`；`skel.kist`
+   在安装镜像启动后、`base.kist` 前发送，且始终整条重发（一个 64 KiB chunk）。
+2. VEXT 仍是裸卷口径：校验 `1,769,472 B / 3 extents / 1,744,896 data /
+   4,194,304 blocks`，不再要求 VEXT 里带 `/dev`、`/private/...`。
+3. `read_kist()` 接受 v1/v2：stream flag bit1 = 骨架流；entry flag bit1 =
+   目录（`wire=size=0`、sha 全零），bit2 = 符号链接（payload 是 target，
+   长度进 `size` 并计入 `total_usize`）；mode 掩码从 `0777` 放宽到 `07777`，
+   `01777` 得以保留。v1 流仍按 `0777` 解析。
+4. 新增 `skel.kist` 产物：16 条（3 files / 10 dirs / 3 links）、153 B
+   installed、65,536 B wire；校验 `INST STREAM v2 skeleton entries 16 bytes
+   153 wire 65536` 和每条 `OK ... uid 0 gid 0`（链接允许
+   `SKIP ... link exists`）。uid/gid 不是 0:0 时 phase 直接失败。
+5. `scripts/test-bring-up.py` 的假板增加 v2 骨架流、`01777` 目录、三个符号
+   链接，以及一个读回 uid 501/gid 20 的失败用例（退出码 3，命中
+   `skel.attrs`）。全套离线测试与 `--dry-run` 重跑通过，
+   `scripts/bring-up-dryrun.log` 已更新。
+
+仍未验证的仍是真机部分：`vn_create` + `vnode_setattr`、`VNOP_SYMLINK` 和
+`vnode_getattr` 读回没有在真实 HFS+ 上执行，`skel.kist` 没有走过 USB，卷根
+仍是 `501:20`。0138 现在是“完整链接且二进制含新格式串”的状态，但板子
+stranded，不能把它当作真机通过。
+
+## 七十一、按键驱动
+
+> 目标：把 P2 输入的最后一项——硬件按键——做成内核里的数据，为后续的用户态
+> 消费者准备好。不做 HID 接线，不碰触摸传输、VRM 轨和 panic 路径。
+>
+> 结论：电源键来自 PM8150 PON 的 KPDPWR；两个音量键来自 **PM8150 GPIO6 /
+> GPIO7**，不是 TLMM，也不是 PMIC RESIN。vendor device tree 同时把 PON RESIN
+> 映射成 `KEY_VOLUMEDOWN`，所以驱动把 RESIN 并入音量减、但把原始 PON 字节和
+> `(via PON RESIN)` 标记写进日志和记录，真机上哪条路真的动了会直接看出来。
+>
+> 状态：**主机测试 + 完整内核构建通过，真机未执行**。板子 stranded，无刷写、
+> 无 USB 传输、无按键实测。
+
+### 1. 按键到底接在哪：vendor 证据
+
+这一节的结论全部来自这台机器的 vendor 材料，不是从别的 Qualcomm 板子推的。
+
+| 材料 | 位置 | 说明 |
+| --- | --- | --- |
+| PON 节点 | `arch/arm64/boot/dts/vendor/qcom/pm8150.dtsi`，`qcom,pm8150@0/qcom,power-on@800` | `reg = <0x800 0x100>`；`qcom,pon_1` = `PON_POWER_ON_TYPE_KPDPWR` + `linux,code = <KEY_POWER>`；`qcom,pon_2` = `PON_POWER_ON_TYPE_RESIN` + `linux,code = <KEY_VOLUMEDOWN>` |
+| 音量上 pinctrl | `kona-pmic-overlay.dtsi`，`&pm8150_gpios/key_vol_up` | `pins = "gpio6"; input-enable; bias-pull-up; power-source = <1>` |
+| 音量上 gpio-keys | `kona-mtp.dtsi`，`&soc/gpio_keys/vol_up` | `gpios = <&pm8150_gpios 6 GPIO_ACTIVE_LOW>`；`linux,code = <KEY_VOLUMEUP>`；`debounce-interval = <15>` |
+| 音量下 pinctrl | `kebab-oem.dtsi`，`&pm8150_gpios/key_vol_down` | `pins = "gpio7"; input-enable; bias-pull-up; power-source = <1>` |
+| 音量下 gpio-keys | `kebab-oem.dtsi`，`&soc/gpio_keys/vol_down` | `gpios = <&pm8150_gpios 7 GPIO_ACTIVE_LOW>`；`linux,code = <KEY_VOLUMEDOWN>` |
+| 最终 DT | `kebab-vendor.dts` 的 `gpio_keys` 节点 | `vol_up` phandle `0x625`（= `qcom,pm8150@0/pinctrl@c000`）gpio6，code `0x73`；`vol_down` 同 phandle gpio7，code `0x72`；PON `pon_1` code `0x74`，`pon_2` code `0x72` |
+| PON 驱动 | `drivers/input/misc/qpnp-power-on.c` | `QPNP_PON_RT_STS(pon) = base + 0x10`；`QPNP_PON_KPDPWR_N_SET = BIT(0)`，`QPNP_PON_RESIN_N_SET = BIT(1)`；`qpnp_pon_input_dispatch()` 把 RT_STS 掩码后的值直接作为按键状态 |
+| PMIC GPIO 驱动 | `drivers/pinctrl/qcom/pinctrl-spmi-gpio.c` | `PMIC_GPIO_ADDRESS_RANGE = 0x100`；`pad->base = start + i * 0x100`，`pmic_gpio_get()` 返回 `RT_STS & 1`；`GPIO_REG_MODE_CTL = 0x40`、`DIG_PULL_CTL = 0x42`、`EN_CTL = 0x46`、`REG_TYPE = 0x04`、`REG_SUBTYPE = 0x05`、`PMIC_GPIO_TYPE = 0x10` |
+| gpio-keys 驱动 | `drivers/input/keyboard/gpio_keys.c` | `gpiod_get_value_cansleep()` 返回已经按 `GPIO_ACTIVE_LOW` 取反后的逻辑值；`input_event()` 用这个值 |
+
+`pmic-vibrator` 在这个 vendor 树里**不存在**：`drivers/oneplus/vibrator/`
+只有 `aw8697.c`（I2C 触觉芯片），没有 PON 按键处理。PON 的按键路径就是
+`qpnp-power-on.c` 的 `qpnp_pon_input_dispatch()`。
+
+#### 1.1 地址算术
+
+PM8150 在 SID 0（`qcom,pm8150@0 { reg = <0x0 SPMI_USID>; }`）。SPMI 的 PPID
+是 `(sid << 8) | (addr >> 8)`，所以每个 256 B 页是一个 PPID：
+
+| 外设 | 基址 / 页 | PPID | 用到的寄存器 |
+| --- | --- | --- | --- |
+| PON | `0x0800` | `0x008` | RT_STS `0x0810` |
+| PM8150 GPIO6 | `0x0c000 + 5*0x100 = 0x0c500` | `0x0c5` | RT_STS `0x0c510`、type `0x0c504`、mode `0x0c540`、pull `0x0c542`、enable `0x0c546` |
+| PM8150 GPIO7 | `0x0c000 + 6*0x100 = 0x0c600` | `0x0c6` | RT_STS `0x0c610`、type `0x0c604`、mode `0x0c640`、pull `0x0c642`、enable `0x0c646` |
+
+`pinctrl@c000` 的 `reg = <0xc000 0xa00>` 说明这个 GPIO 块有 10 个 0x100 B 的
+页；vendor 驱动用 `start + i * 0x100`（`i` 从 0 开始）算每一页的基址，所以
+GPIO6 是 `0x0c500`、GPIO7 是 `0x0c600`，不是 `0xc000+6` 或 `0xc000+7`。
+
+#### 1.2 每个键的结论
+
+| 键 | 来源 | 寄存器 | 位 | 极性 | vendor 键码 |
+| --- | --- | --- | --- | --- | --- |
+| 电源 | PM8150 PON KPDPWR | `0x0810` | bit0 `KPDPWR_N_SET` | 1 = 按住 | `KEY_POWER` = 116 (`0x74`) |
+| 音量上 | PM8150 GPIO6 | `0x0c510` | bit0 = 引脚电平 | 0 = 按住（`GPIO_ACTIVE_LOW`） | `KEY_VOLUMEUP` = 115 (`0x73`) |
+| 音量下 | PM8150 GPIO7 | `0x0c610` | bit0 = 引脚电平 | 0 = 按住（`GPIO_ACTIVE_LOW`） | `KEY_VOLUMEDOWN` = 114 (`0x72`) |
+| 音量下（备用路径） | PM8150 PON RESIN | `0x0810` | bit1 `RESIN_N_SET` | 1 = 按住 | 同一个 `KEY_VOLUMEDOWN` |
+
+**不是 TLMM。** `gpio_keys` 的两个 `gpios` 都指向 `&pm8150_gpios`，最终 DT 的
+phandle `0x625` 也落在 `qcom,pm8150@0/pinctrl@c000`。TLMM 上唯一的按键类节点是
+`oneplus,hall_tri_state_key`（三段式静音拨杆），和音量键无关。
+
+**RESIN 的歧义是故意保留的。** vendor DT 的 `qcom,pon_2` 把 RESIN 也映射成
+`KEY_VOLUMEDOWN`，但同一块板又把音量下放在 GPIO7。两种可能都存在：RESIN 和
+GPIO7 并到同一个物理键，或者 RESIN 根本没接、`pon_2` 只是 Qualcomm 参考设计
+的遗留。驱动不猜：音量减 = GPIO7 低 **或** RESIN 置位，事件里保留
+`raw_pon`，并且 RESIN 参与时带 `(via PON RESIN)`。真机上按一下音量下，日志会
+直接回答“RESIN 是否也动”。
+
+### 2. 解码和去抖
+
+#### 2.1 每次采样四个字节
+
+```text
+raw[0] = 0x0810  PON RT_STS
+raw[1] = 0x0c510 PM8150 GPIO6 RT_STS
+raw[2] = 0x0c610 PM8150 GPIO7 RT_STS
+raw[3] = 0x0c504 PM8150 GPIO6 type
+```
+
+第四个字节不是按键状态，是**身份字节**。PM8150 GPIO 页的 type 固定是 `0x10`；
+四个字节全零时，总线/APID 已经不可信，而不是“两个 active-low 音量键都按住”。
+没有这个字节，`0x00` 的去抖结果就是“两个音量键一直按住”，这是这一项最容易
+写错的地方。`kebab_keys_classify()` 的判定顺序是：
+
+1. `read_ok == 0` → `READ_ERROR`，不改状态；
+2. 四字节全零 → `ZERO`，不改状态；
+3. `ident != 0x10` → `BAD_IDENTITY`，不改状态；
+4. 否则 `OK`，进入解码。
+
+读失败、全零、身份不对都只增加 `invalid` 计数，**不产生 release**。总线短暂
+静音时按住的键仍然保持按住；总线恢复后如果键已经松开，去抖会正常给出 release。
+
+#### 2.2 逻辑值和 RESIN
+
+```text
+power      = (pon_rt & 0x01) != 0
+volume_up  = (gpio6_rt & 0x01) == 0
+volume_down = ((gpio7_rt & 0x01) == 0) || ((pon_rt & 0x02) != 0)
+```
+
+PON 的 RT_STS 位是“已断言”，GPIO 的 bit0 是引脚电平，所以只有 GPIO 需要取反。
+RESIN 位只并入音量减；`power` 不会被 RESIN 影响。
+
+#### 2.3 去抖、stuck 和初始状态
+
+* **去抖**：同一个逻辑值连续 **2 次**采样才接受。默认轮询 16 ms，所以
+  32 ms 的去抖窗口比 vendor `gpio-keys` 的 15 ms 和 PON 的 15.6 ms 硬件去抖
+  都长；抖动线不会产生事件。
+* **每个键独立**：电源在抖、音量上稳定时，音量上仍然能正常出事件。
+* **初始按住**：第一个相信的采样如果是按住，经过同样的 2 次去抖后报一次
+  press；之后只在松开时报 release，不会每个 poll 重复。
+* **stuck**：连续按住 10 s（`KEBAB_KEYS_STUCK_NS`，与轮询周期无关）置
+  `stuck`，内核日志打一行 `STUCK held for 10 s`，但**不重复发 press**；松开
+  后清掉，再按住可以重新计时。这样既能看见“键卡住了”，又不会刷屏。
+* **release 一定来自一次有效采样**：读失败/全零/身份错都不会伪造 release。
+
+### 3. 设备：为什么新开 `/dev/kebab_keys`
+
+选了**新设备**，没有扩展 `/dev/kebab_touch` 的 48 字节记录：
+
+1. 任务明确要求不碰触摸传输。触摸的 48 字节记录、64 槽队列、三套坐标和
+   `KT_EVENT_MAGIC` 都是已经工作、被用户态依赖的 ABI；往里加一个“记录类型”
+   会让触摸的消费者必须理解按键，也会把两个无关的采样率绑在一个队列上。
+2. 触摸的队列/read 语义已经验证过；新设备**照抄**这套语义，不引入第二种
+   队列行为：单生产者/单消费者、64 槽、无读者时覆盖最旧并计数、`read(2)`
+   返回整条记录、默认阻塞、`O_NONBLOCK` 返回 `EAGAIN`、多个读者共享一个
+   tail、`0440 root:operator`。
+3. 两个设备可以独立开关：`kebab_touch=1` 不自动打开按键，`kebab_keys=1` 也
+   不依赖触摸是否 probe 成功。按键驱动只依赖 `kebab_spmi_init()` 已经映射
+   arbiter，而它在 `kebab_usb_start()` 里比触摸更早执行。
+
+记录格式（24 B，`_Static_assert` 固定）：
+
+| 偏移 | 字段 | 含义 |
+| --- | --- | --- |
+| 0 | `magic` | `'KKEV'` = `0x4b4b4556`，拒绝没填过的缓冲 |
+| 4 | `seq` | 事件序号，从 0 开始 |
+| 8 | `timestamp_ns` | 开机以来的纳秒数（`mach_absolute_time` 转换） |
+| 16 | `key` | 0 电源、1 音量上、2 音量下 |
+| 17 | `pressed` | 1 press、0 release |
+| 18 | `flags` | bit0 = 这次音量减来自 PON RESIN |
+| 19 | `raw_pon` | 触发这次转换的 `0x0810` 原值 |
+| 20 | `raw_gpio_up` | `0x0c510` 原值 |
+| 21 | `raw_gpio_down` | `0x0c610` 原值 |
+| 22 | `raw_ident` | `0x0c504` 原值 |
+| 23 | `pad` | 0 |
+
+队列在创建线程和 `/dev` 节点之前先做一次自检（填满三圈、验证只保留 64 条、
+丢最旧、按序 drain），日志里的 `queue selftest: ... ok` 就是它。
+
+### 4. 主机测试
+
+`package/KebabKeys.c` 和 `.h` 是纯解码/去抖模块，没有 MMIO、SPMI 或内核对象；
+`package/KebabKeysHostTests.c` 直接驱动它。内核里的
+`bsd/dev/kebab_keys_core.c/.h` 是 `scripts/sync-keys.py` 生成的逐字节副本，
+和触摸的 `KebabTouchTcm` + `sync-touch-tcm.py` 是同一个模式。
+
+编译/运行：
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -O2 \
+    -o /tmp/kebab-keys-test package/KebabKeys.c package/KebabKeysHostTests.c
+/tmp/kebab-keys-test
+```
+
+用例和断言点：
+
+| 组 | 场景 | 关键断言 |
+| --- | --- | --- |
+| K1 | classify | 正常采样 OK；四字节全零 = ZERO；`ident != 0x10` = BAD_IDENTITY；`read_ok=0` = READ_ERROR |
+| K2 | 电源 clean press/release | 一次 press、一次 release；raw 四字节、seq 0/1、无重复 |
+| K3 | 音量上 clean press/release | GPIO6 `0x01 → 0x00` 是 press，`0x00 → 0x01` 是 release |
+| K4 | 音量下 clean press/release | GPIO7 同上；单独 GPIO7 不带 RESIN 标记 |
+| K5 | 抖动 | 20 次交替采样 0 事件；稳定 2 次后 1 次 press；按住时再抖 20 次无 release；稳定 2 次后 1 次 release |
+| K6 | 两个音量键同时按住 | 键字节全零但 `ident=0x10`：同一采样返回 2 个 press（音量上、音量下），seq 连续；同时松开返回 2 个 release |
+| K7 | 全零采样 | 5 次全零 0 事件、`samples=0`、`invalid=5`，不是“每个键都按住”；按住时全零不产生 release；之后真实 release 仍能解码 |
+| K8 | 卡住不松 | 700 次按住只产生 1 个 press；10 s 后 `stuck=1`；松开 1 个 release 并清 stuck |
+| K9 | 读失败/错页 | 10 次 `read_ok=0` + 10 次 `ident=0x11` 都不改状态；之后正常 press 仍能解码 |
+| K10 | RESIN | PON bit1 两次 → 音量减 press，带 RESIN flag，raw_pon 可见 bit1；GPIO7 单独仍能工作 |
+| K11 | 启动前已按住 | 第一次有效采样就按住，2 次后报一次 press，松开报一次 release |
+| K12 | 不可用源 | `kebab_keys_enable(..., 0)` 后该键永不报；重新 enable 后恢复 |
+
+实跑输出（`-std=c11 -Wall -Wextra -Werror`，0 warning）：
+
+```text
+K1 classify: live, all-zero, wrong identity and failed reads
+  PASS  a released PM8150 page is a valid sample
+  PASS  all four bytes zero is ZERO, not both volume keys held
+  ...
+K7 all-zero: no key, and no state change
+  PASS  five all-zero samples: no event
+  PASS  all-zero samples are invalid, not five held keys
+  PASS  all-zero is no key rather than every key
+  ...
+K8 stuck: one press, no repeats, flagged after ten seconds
+  PASS  700 held samples produce exactly one press
+  PASS  the stuck flag is set after ten seconds
+  ...
+K12 an unusable source never reports and can be turned back on
+  PASS  a disabled volume-up produces no event
+  PASS  re-enabled volume-up decodes again
+
+89 checks, 0 failure(s)
+```
+
+（`...` 是省略的中间 PASS 行，不是跳过；完整输出见本轮会话记录和
+`package/KebabKeysHostTests.c`。）
+
+同一套用例在 `-fsanitize=address,undefined`（不传 `-O2`）下也跑出 89/0，
+没有越界、未定义行为或泄漏报告。
+
+### 5. 内核构建
+
+补丁：`patches/xnu-8796-kebab/0139-kebab-keys.patch`。它只做四件事：
+
+1. 新增 `bsd/dev/kebab_keys.c`（线程、SPMI 采样入口、队列、`/dev/kebab_keys`）；
+2. 新增 `bsd/dev/kebab_keys_core.c/.h`（`sync-keys.py` 生成的测试模块副本）；
+3. 在 `bsd/dev/kebab_spmi.c` 增加只读的 `kebab_spmi_keys_sample()` /
+   `kebab_spmi_keys_config()` 和 PPID→APID 缓存；现有 PON/PWR/VROMON 路径不变；
+4. 在 `bsd/conf/files` 加两行、在 `bsd/kern/bsd_init.c` 的 `kebab_touch_start()`
+   之后加一个 `kebab_keys_start()` 调用。
+
+在 `albertlee@192.168.30.165:~/kebab-build` 上用 `./build-local.sh` 完整构建
+（没有 sudo）：
+
+| 项 | 结果 |
+| --- | --- |
+| 仓库 patch 序列 | **118** 个（117 + 0139） |
+| `build.sh` staged | 126 个 = 118 仓库 patch + 8 个上游 helper |
+| 跳过 | 6 个，和 0138 基线逐项相同（`0001`、`0002`、`TrustCache`、`iobuffermemd`、`skywalk_sonoma`、`syntax_checker_sonoma`） |
+| 编译/链接 | `XNU Build Done`；`kebab_keys.o`、`kebab_keys_core.o`、`kebab_spmi.o`、`bsd_init.o` 都重新编译并参与链接 |
+| 新文件 warning | 0 条（`kebab_keys.c`、`kebab_keys_core.c/.h` 没有 `文件:行:列: warning`） |
+| `kebab_spmi.c` | warning 集合与 0138 基线相同（7 shadow / 3 format / 2 declaration-after-statement / 6 missing-prototype），没有新增 |
+| 内核 | `kernel.development.kebab`，Mach-O 64-bit arm64，17,191,928 B |
+| 符号/字符串 | `_kebab_keys_start`、`_kebab_spmi_keys_sample`、`_kebab_keys_feed` 在 `nm` 里；`strings` 命中 `/dev/kebab_keys`、`KEBAB KEYS: first sample ...`、`KEBAB SPMI: key source PPID ...` |
+
+`scripts/sync-keys.py --check` 在生成目录上通过（构建树里的
+`kebab_keys_core.c/.h` 和重新生成的逐字节一致）。
+
+没有改触摸传输、VRM 轨、panic 路径，也没有改 P1 依赖的文件；`kebab_spmi.c`
+的现有函数只增加了 `quiet` 参数（见下），`PON?`/`PWR?`/`VROMON`/FASTBOOT
+的行为不变。
+
+### 6. 真机上怎么确认每个键
+
+启动参数：
+
+```text
+kebab_keys=1            # 总开关，默认关
+kebab_keys_ms=16        # 可选，轮询周期 4..1000 ms
+kebab_keys_raw=1        # 可选，四个原始字节变化时打一行
+```
+
+启动后先看这几行（数值是示例）：
+
+```text
+KEBAB SPMI: key source PPID 0x008 -> observer APID 0x...
+KEBAB SPMI: key source PPID 0x0c5 -> observer APID 0x...
+KEBAB SPMI: key source PPID 0x0c6 -> observer APID 0x...
+KEBAB KEYS: GPIO6 mode=0x00 pull=0x01 en=0x80 -> enabled input with pull-up; GPIO7 ...
+KEBAB KEYS: sources: PON RT_STS 0x0810, PM8150 GPIO6 RT_STS 0x0c510, GPIO7 RT_STS 0x0c610, GPIO type 0x0c504 (expected 0x10)
+KEBAB KEYS: first sample pon=0x00 gpio6=0x01 gpio7=0x01 ident=0x10 -> power released, volume-up released, volume-down released
+KEBAB KEYS: queue selftest: 64 slots, 192 pushed, 128 dropped without a reader, 64 drained: ok
+KEBAB KEYS: /dev/kebab_keys major N, 24-byte records, 64 slots
+KEBAB KEYS: polling every 16 ms
+```
+
+逐个键：
+
+| 操作 | 期望日志 | 期望 raw |
+| --- | --- | --- |
+| 按电源 | `power PRESSED` | `pon` bit0 `0 → 1` |
+| 松电源 | `power released` | `pon` bit0 `1 → 0` |
+| 按音量上 | `volume-up PRESSED` | `gpio6` bit0 `1 → 0`（`0x01 → 0x00`） |
+| 松音量上 | `volume-up released` | `gpio6` bit0 `0 → 1` |
+| 按音量下 | `volume-down PRESSED`，如果 RESIN 也动会带 `(via PON RESIN)` | `gpio7` bit0 `1 → 0`；`pon` bit1 可能同时 `0 → 1` |
+| 松音量下 | `volume-down released` | 相反方向 |
+| 两个音量键一起按 | 同一行/相邻两行两个 `PRESSED`，各自 raw 可见 | `gpio6=0x00 gpio7=0x00`，`ident=0x10` |
+
+**电源键**：`pon=0x01` 表示 KPDPWR 按住；如果 `pon=0x03`，说明 RESIN 也断言，
+但电源只看 bit0。
+
+**音量上的位布局**：如果按音量上时变的是 `gpio7` 而不是 `gpio6`，或者
+`gpio6` 的 bit 除了 0 以外在动，日志里的 `raw` 会直接暴露；这时对照第 1 节的
+页地址检查 PPID/页偏移，而不是改掩码。
+
+**音量下和 RESIN**：如果按音量下只看到 `gpio7` 变、`pon` bit1 不动，说明
+RESIN 没有并到这个键；如果两者一起动，`(via PON RESIN)` 会打出来，说明
+vendor DT 的 `pon_2` 是实际接线。两种都不影响逻辑音量减，因为驱动是 OR。
+
+**全零**：第一次采样如果四字节全零，驱动直接打印
+`first sample ... is all zero (silent bus); no keys` 并且不建 `/dev`；运行中
+全零会打印 `four zero bytes read ... treated as no key`，但不会产生 release
+或“全键按住”。如果 `ident` 不是 `0x10`，会打印 `GPIO type 0x.. at 0x0c504
+is not 0x10 ... sample ignored`，说明读到的是别的页/别的外设。
+
+**读 `/dev/kebab_keys`**：等用户态有 shell 之后，root 可以按 24 B 读：
+
+```sh
+dd if=/dev/kebab_keys bs=24 count=8 2>/dev/null | hexdump -Cv
+```
+
+每条记录的 `magic` 是 `56 45 4b 4b`（小端 `'KKEV'`），`seq` 连续；`raw_pon`
+字节在偏移 19，`raw_gpio_up` 在 20，`raw_gpio_down` 在 21，`raw_ident` 在 22。
+读之前先看内核日志里的 `queue selftest ... ok` 和 `/dev/kebab_keys major N`。
+
+**没有事件时先看什么**：
+
+1. `KEBAB KEYS: GPIO6 ... -> NOT an enabled input with pull-up`：说明 boot
+   firmware 没有把 vendor pinctrl 的 `key_vol_up_default`/`key_vol_down_default`
+   应用到 PM8150 GPIO6/7。这个驱动是只读的，不会写 PMIC GPIO 配置；需要时
+   另开一项做 gated 的 GPIO 配置写（本轮不做）。
+2. `volume-up withheld` / `volume-down withheld`：同上，驱动主动压住了这个键，
+   避免把未使能的输入当成永久按住。
+3. `SPMI read error`：加 `kebab_pon_verbose=1` 看 observer 的原始
+   CMD/STATUS/RDATA；先确认 APID 映射和 PON? 的读数。
+4. 全零/身份错：按上面的 `raw` 行对照第 1 节的地址。
+
+### 7. 仍未验证 / 风险
+
+* **真机没跑**：板子 stranded，本轮只有主机测试和完整构建。所有“按一下会
+  打印什么”都是代码路径的预期，不是实测。
+* **RESIN 接线未知**：驱动按 vendor DT 把 RESIN 并入音量减，并保留原始位和
+  标记；真机日志会第一次给出答案。如果 RESIN 实际是独立复位线而不是音量键，
+  需要把 `kebab_keys_feed()` 里的 OR 拆开（主机测试 K10 已覆盖当前语义）。
+* **GPIO 引脚配置依赖 boot firmware**：vendor pinctrl 状态由 Linux 驱动在
+  probe 时写入；本内核没有 pinctrl 驱动，也不写 PMIC。启动日志会打印
+  `mode/pull/en` 并压住配置不对的键，但不会修复。若真机上两个音量键都被
+  withheld，下一步是加一个 gated 的 PM8150 GPIO 配置写，而不是改解码。
+* **没有 HID、没有用户态消费者**：`/dev/kebab_keys` 只是数据出口；没有
+  `IOHIDEvent`，也没有进程在读它。这与 P2 的“先把数据做出来”目标一致。
+* **PON? 与轮询共享 PON observer 通道**：两个上下文同时读同一个 APID 时，
+  arbiter 可能丢掉一次传输。按键驱动把这次采样当作无效（不改状态），下一
+  个周期重试；没有 PMIC 写，也不会把一次丢弃变成按键事件。正常启动下
+  `PON?` 是人工命令，碰撞窗口远小于 1%。
+* **队列语义只有内核自检**：64 槽覆盖最旧、丢计数、阻塞读、`O_NONBLOCK`
+  都和 `/dev/kebab_touch` 同构，但还没有用户态 reader 实测。
+* **默认关**：不传 `kebab_keys=1` 时 `kebab_keys_start()` 在解析参数后直接
+  返回，不读 PMIC、不建线程、不建 `/dev`；普通启动的行为和 0138 一致。
+
+## 七十二、exec 拷贝失败的取页诊断
+
+> 目标：9/6（`EXEC_EXIT_REASON_COPYOUT_STRINGS`）现在只能说明“往新用户栈拷
+> 字符串/指针/argc 时失败了”。第 66 节加的字段能定位到 stage 和三个目标地址，
+> 但回答不了“目标页在当前 map 里到底有没有翻译、是谁把它弄没的”。本节补上
+> 取页层面的四个事实：copyout 跑在哪个 map、失败访问的 FAR/ESR、该页的页表项、
+> 以及审计定义的三条包含关系；另外修掉审计顺手查出的一个 `status.c` 类型 bug。
+>
+> 状态：**完整内核构建通过（DEVELOPMENT_ARM64_KEBAB），真机未执行**。板子
+> stranded，本轮没有刷写、没有硬件日志；下面所有“会看到什么”都是代码路径的
+> 推断。诊断拆成补丁 `0140-kebab-copyout-fault-diag.patch`，`status.c` 的修复
+> 单独放在 `0141-kebab-userstack-sp.patch`（两者无关，回滚/复用互不牵连）。
+
+### 1. 审计结论：几何是对的
+
+第 66 节留下的问题本来有两种可能：栈布局算错，或者布局对但映射/取页不对。
+审计把第一种排除了。
+
+- `USRSTACK64` 在 `bsd/arm/vmparam.h:17` 是 `0x16FE0000`，对 16 KiB 页是对齐
+  的（`0x16FE0000 % 0x4000 == 0`）。默认栈走
+  `thread_userstackdefault()` → `USRSTACK64`，`custom_stack = 0`。
+- `create_unix_stack()`（`bsd/kern/kern_exec.c`）在这条路径上只做两处页运算：
+  `mach_vm_round_page_overflow(load_result->user_stack_alloc_size, &size)` 得到
+  分配长度；`vm_map_trunc_page(load_result->user_stack - size,
+  vm_map_page_mask(map))` 得到分配基址。guard 是
+  `vm_map_trunc_page(size - load_result->user_stack_size,
+  vm_map_page_mask(map))`（`user_stack_size == 0` 时退回 `PAGE_SIZE`），再
+  `mach_vm_protect(map, addr, prot_size, FALSE, VM_PROT_NONE)`。
+- 这里用到的页大小全部来自 map 本身（`vm_map_page_shift(map)` 在 16 KiB 页上
+  是 14），没有残留的 4 KiB 常量：`PAGE_SIZE` 在 `__ARM_16K_PG__` 下是
+  `1 << ARM_PGSHIFT` = `1 << 14`（`osfmk/mach/arm/vm_param.h:72`、
+  `osfmk/arm64/proc_reg.h:1158`）。
+- `exec_copyout_strings()` 的三个目标区间是**纯减法**，不做任何页取整：
+  `string_area = *stackp - string_size`、
+  `ptr_area = string_area - ptr_area_size`、`argc_area = ptr_area - ptr_size`。
+  只要 `*stackp` 等于栈顶，`string_area + string_size == *stackp` 就恒成立。
+
+所以 0136 已经打印的 `stage`、`error`、`ptr_size`、`strspace_mod`、
+`string_size` 和三个目标地址，加上 `create_unix_stack()` 的
+`map/shift/custom/user/alloc/guard`，足以证明算术本身。真正缺的是“这些地址在
+**当前线程的 map** 里有没有翻译”：`copyout()` 的 `copy_validate()`
+（`osfmk/arm64/copyio.c`）只检查 `current_thread()->map` 的
+`vm_map_min()/vm_map_max()`；真正的取页发生在 `_bcopyout` 的
+`COPYIO_RECOVER_RANGE` 触发的 kernel data abort 里，由
+`handle_kernel_abort()`（`osfmk/arm64/sleh.c`）调 `arm_fast_fault()` 或
+`vm_fault()`。这段路径原来什么状态都不留。
+
+### 2. 新增的四个字段（只在失败时打印）
+
+失败时的日志仍以 0136 的 `KEBAB EXEC: copyout stage=...` 开头，后面最多再 4 行。
+下面是一组示意值（`far`/`esr`/`tte` 以真机为准）：
+
+```
+KEBAB EXEC: copyout map cur=0xfffffe9a12345000 alloc=0xfffffe9a12345000 same=1 pid=1 recpid=1
+KEBAB EXEC: copyout fault far=0x16fdfee8 esr=0x96000047 dfsc=0x7 wnr=1 fast=-1 vm=1
+KEBAB EXEC: copyout pmap va=0x16fdfee8 tte=0x0 lvl=3 valid=0 af=0 ap=0 uxn=0 pxn=0
+KEBAB EXEC: copyout checks user_eq_alloc=1 str_eq_user=1 argc_ge_guard=1
+```
+
+四行分别来自：
+
+- **map**：`cur` 是 `current_map()`，也就是 copyio 读的
+  `current_thread()->map`；`alloc` 是 `create_unix_stack()` 记录下来的
+  `map` 参数（调用点是 `get_task_map(task)`）；`same` 是两者指针相等；
+  `pid`/`recpid` 是当前进程和记录里的进程。记录只有一格，**`recpid != pid`
+  时 map 行和 checks 行里的几何字段属于另一次 exec**，此时 `same` 没有意义；
+  fault 行和 pmap 行仍然描述本次失败（它们按线程/地址取，不来自那个记录）。
+- **fault**：由 `handle_kernel_abort()` 在“有 copyio 恢复点、且
+  `arm_fast_fault()`/`vm_fault()` 没解决”时写入。`far`/`esr` 就是该异常的
+  `FAR_EL1`/`ESR_EL1`；`dfsc = esr & 0x3f`；`wnr = (esr >> 6) & 1`（1 = 写）。
+  `fast` 是 `arm_fast_fault()` 的返回值，`vm` 是 `vm_fault()` 的返回值，`-1`
+  表示该函数没有被调用。translation fault 不进 `arm_fast_fault()`，所以
+  `fast=-1`；access flag / permission fault 会进，pmap 层不处理时返回
+  `KERN_FAILURE=5`。`vm` 只在 `fast` 返回 `KERN_PROTECTION_FAILURE` 时才不赋值，
+  而本机 `XNU_MONITOR=0`，`arm_fast_fault()` 不会返回 2，所以 `vm` 总会是
+  `vm_fault()` 的真实结果。没记录到 fault 时打印 `copyout fault none`。
+- **pmap**：新增的 `kebab_pmap_probe_log()`（`osfmk/arm/pmap/pmap.c`），沿
+  `pmap_ttne()` 从 root 走到 leaf，不取锁、不触发 fault，并自己打印这一行。
+  解码放在 pmap.c 里，是因为 bsd 看不到 `osfmk/arm/pmap/pmap.h`：`vm/pmap.h`
+  只在 `MACH_KERNEL_PRIVATE` 下包含 `<machine/pmap.h>`，所以结构体不跨这层
+  边界。`tte` 是叶级表项原值；`valid` 是表项 bit0（`ARM_TTE_VALID`）；`af`
+  是 `ARM_PTE_AF`（bit 10）；`ap` 是 `ARM_PTE_AP`（bit 6–7，取值见判定表）；
+  `uxn` 是 `ARM_PTE_NX`，`pxn` 是 `ARM_PTE_PNX`；`lvl` 是给出该表项的层级
+  （用户 pmap 是 L1–L3，见 `osfmk/arm/pmap/pmap.c:254`，数字表示走到哪一层
+  就断了）。压缩页会显示成 `tte=0x8000...` 且 `valid=0`。
+  不复用 `pmap_get_arm64_prot()` 的原因：它对“没有翻译”和“有翻译但
+  protection 位恰好为 0”都返回 0，并且丢掉 AF——而 AF 正好是区分
+  access flag fault 和缺页的那一位。也不用 `pmap_query_page_info()`：它只给
+  present/compressed 位。
+- **checks**：审计的三条包含关系，直接打印布尔值，读日志的人不用做算术。
+  `user` 是 `p->user_stack`；`alloc_base/alloc_size` 是
+  `create_unix_stack()` 记录的 `addr` 和取整后的 `size`；`guard_base/
+  guard_size` 是 `prot_addr/prot_size`；`string_area`、`string_size`、
+  `argc_area` 是本次 copyout 的实际值。
+
+行数预算：失败路径 1（0136 原有）+ 4 = 5 行，约 400 B；成功路径 0 行。16 KiB
+的 console ring 不会被这个诊断刷爆。
+
+### 3. 字段 → 原因的判定表
+
+先看 `checks`，再看 `same`，最后看 `fault`/`pmap`。三列里任何一列已经能定性
+时，后面的列只用于确认。
+
+| `checks` | `same` / `fault` | `valid` / `af` / `ap` | `dfsc` | `fast` / `vm` | 结论 |
+| --- | --- | --- | --- | --- | --- |
+| 有 0 | — | — | — | — | **几何错**：先修 `USRSTACK64` 对齐、ANYWHERE 回退或 guard 长度，地址都可能没有意义 |
+| 全 1 | `same=0` | — | — | — | **map 不对**：copyout 跑在别的 map 上，栈的分配不在这里 |
+| 全 1 | `fault none` | — | — | — | **没碰到页表**：`EFAULT` 来自 `copy_validate()` 的范围检查（目标不在 `current_thread()->map` 的 `[min,max]` 内，或该 map 是 kernel map 走了 `is_kernel_to_kernel_copy()`）。通常伴随 `same=0`；先查 map，不要查页表 |
+| 全 1 | `same=1` | `valid=0` | `0x4`–`0x7` | `vm=1` | **翻译缺失**：map 里有分配，但这个 pmap 没建表项（`mach_vm_allocate_kernel()` → `pmap_enter()` 这一段） |
+| 全 1 | `same=1` | `valid=1, af=0` | `0x9`–`0xB` | `fast=5`，`vm=1/2` | **AF 没置**：表项在，但 access flag 是 0。属于“权限”一类，不是缺页；`vm_fault()` 也没能把它补上 |
+| 全 1 | `same=1` | `valid=1, af=1, ap=0/2/3` | `0xD`–`0xF` | `fast=5`，`vm=2` | **权限**：`ap` 的 bit0=0 表示 EL0 不可访问（0/2），`ap=3` 是 EL0 只读而本路径是写。guard 区（`VM_PROT_NONE`）或写保护映射是典型 |
+| 全 1 | `same=1` | `valid=1, af=1, ap=1` | 任意 | `vm=1/3/5/9` | **取页失败**：表项看起来允许 EL0 读写，但 VM 层没解决。`1` = `KERN_INVALID_ADDRESS`（map 里没有覆盖该地址的 entry），`3` = `KERN_NO_SPACE`，`5` = `KERN_FAILURE`，`9` = `KERN_MEMORY_FAILURE` |
+
+`ap` 的取值按 `osfmk/arm64/proc_reg.h:1137`：`0` = EL1 读写、EL0 不可访问，
+`1` = EL1/EL0 读写，`2` = EL1 只读、EL0 不可访问，`3` = EL1/EL0 只读。用户
+可写页必须是 `1`；本路径是写，所以 `3` 也会 fault。`dfsc` 的区间同理：
+`0x4`–`0x7` 是 L0–L3 translation fault，`0x9`–`0xB` 是 L1–L3 access flag
+fault，`0xD`–`0xF` 是 L1–L3 permission fault。
+
+### 4. status.c：用 32 位结构体读 64 位线程状态
+
+`osfmk/arm64/status.c` 的 `thread_userstack()` 在
+`ARM_THREAD_STATE64` 分支里用了 32 位的结构体：
+
+```c
+/* 之前（第 1854 行） */
+sp = ((arm_thread_state32_t *)tstate)->sp;
+```
+
+```c
+/* 之后 */
+sp = ((arm_thread_state64_t *)tstate)->sp;
+```
+
+偏移错在哪里：
+
+| 结构体 | 字段布局 | `sp` 偏移 |
+| --- | --- | --- |
+| `arm_thread_state32_t` | `r[13]`, `sp`, `lr`, `pc`, `cpsr` | `13*4 = 52` (`0x34`) |
+| `arm_thread_state64_t` | `x[29]`, `fp`, `lr`, `sp`, `pc`, `cpsr`, `pad`, `flags` | `31*8 = 248` (`0xF8`) |
+
+所以旧代码读到的是 **x6 的高 32 位**（x6 占 48–55，52 正好是它的上半），再按
+`register_t` 零扩展。真正的 SP 在 248，旧代码从来没读过它。
+
+可见行为：
+
+- `thread_userstack()` 只被 `load_threadstack()`（`bsd/kern/mach_loader.c:2927`）
+  调用，也就是只处理 **`LC_UNIXTHREAD`**；结果决定 `user_stack` 和
+  `custom_stack`，随后交给 `create_unix_stack()`。
+- 正常链接器产出的 `LC_UNIXTHREAD` 里 x6 = 0，旧代码得到 `sp = 0`，走
+  `if (sp)` 的 else 分支 → `USRSTACK64` + `custom_stack = 0`。也就是说这个
+  bug 对典型二进制是**潜伏**的；只有 x6 高半非零时才会把垃圾地址当成用户栈，
+  并把进程标成 custom stack。
+- 一旦命中，进程从错误 SP 起步，调试器随后用 `thread_get_state`/ptrace 读到的
+  SP 就是这个错误值——修复改变的是这条“`LC_UNIXTHREAD` 二进制的初始 SP”，
+  不是运行中线程的状态读取路径。
+- **不影响 launchd**：`/sbin/launchd` 用 `LC_MAIN`，没有 `LC_UNIXTHREAD`，
+  `load_threadstack()` 根本不会被调用，走
+  `thread_userstackdefault()` → `USRSTACK64`。所以 9/6 的症状和这个修复无关，
+  两者是同一轮审计里各自独立的两件事。
+- 这个 bug 来自上游 `xnu-8796.141.3` 本身（`git blame 1b191cb` 指向 Apple
+  的原始提交），不是本移植系列引入的。
+
+同一开关里邻居分支的检查结果：
+
+| 位置 | 检查 | 结论 |
+| --- | --- | --- |
+| `thread_userstack()` `ARM_THREAD_STATE` | 统一结构体按 `is_64bit_data` 取 `ts_64.sp` / `ts_32.sp` | 正确，未改 |
+| `thread_userstack()` `ARM_THREAD_STATE32` | 用 `arm_thread_state32_t`，并拒绝 `is_64bit_data` | 正确，未改 |
+| `thread_entrypoint()` `ARM_THREAD_STATE64` | 用 `struct arm_thread_state64` | 正确，未改 |
+| `machine_thread_get_state/set_state`、`*_to_saved_state`、`thread_set_wq_state32/64` | 32 位路径用 32 位类型，64 位路径用 64 位类型 | 一致，未改 |
+
+即：同一个 switch 里只有 1854 这一处是“32 位类型读 64 位状态”，别的都没有
+这个错误，因此只改这一行，没有顺手改任何其它分支。
+
+### 5. 下一次启动能定什么
+
+按日志自上而下读：
+
+1. `checks` 有 0 → 先回到几何，不要看页表。最可能是 `USRSTACK64` 没对齐、
+   ANYWHERE 回退没更新 `user_stack`，或 guard 长度算错。
+2. `fault none` 或 `same=0` → `EFAULT` 来自 map 选错/地址越界，下一步查
+   `vm_map_switch(get_task_map(task))` 与 `get_task_map()`，不是 pmap。
+3. `same=1` + `valid=0` + `vm=1` → 分配在 VM map 里、pmap 里没有表项。下一步
+   查 `mach_vm_allocate_kernel()` → `vm_map_enter()` → `pmap_enter()` 这条链，
+   以及 16 KiB pmap 的叶级表项是否真的写进了任务的 pmap。
+4. `valid=1` + `af=0` → 表项在但 AF 没置，查 `pmap_enter()` 的 AF 路径。
+5. `valid=1` + `af=1` + `ap=1` + `vm=5/9` → 表项没问题，问题在 VM/pager 更深
+   的一层，按 `vm` 的返回值继续。
+6. 如果 copyout 这次成功了：按第 66 节的推断，接下来应该是 namespace **6**
+   code **1**（dyld 的 `abort_with_payload()`），9/6 这一页就此翻过去，下一个
+   问题是共享缓存映射。
+7. `status.c` 的修复不会改变这次启动的任何一行日志（launchd 走 `LC_MAIN`）。
+   它只在将来 exec 一个带 `LC_UNIXTHREAD` 的用户态二进制时生效，届时应看到
+   正确的初始 SP。
+
+真机没跑之前，这一节的所有“应该”都是代码路径的推断；`far`/`esr`/`tte` 的
+真实值正是下一次启动要补上的证据。
+
+## 七十三、共享区映射的代码审查
+
+第六十七节验的是**算术**：`base + cacheVMOffset`、每条 mapping 的 `address/size`、slide 之后的地址，全部对得上磁盘上的 44 个文件。本节看算术**之下**那一层：这些算好的数字怎么交给 VM，内核据此造出来的共享区长什么样，以及 dyld 到底要求在那里看到什么。
+
+结论先写：
+
+* **发现并修了一个真 bug**：计划少了 dyld 无条件要读的一页 —— `sharedRegionStart + dynamicDataOffset` 上的 `dyld_cache_dynamic_data_header` 页。51 条 mapping 的跨度是 `0xaade4000`，缓存头声明的 `sharedRegionSize` 是 `0xaade8000`，差的正好是这一页。缺了它，dyld 在 `shared_region_check_np()` 成功之后**第一次**碰缓存就会落在空页上。补丁 `0142`。
+* 顺手拆掉一处**永远为真的检查**。`kebab_dsc_validate_header()` 的 `is_main` 分支拿 `sharedRegionStart` 和刚从它复制出来的 `plan->region_start` 比较，不可能失败；默认 slide 为 0 时 `kebab_dsc_apply_slide()` 又提前返回，于是"缓存基址必须是内核共享区基址"这条前提**从来没有被验过**。改成与 `SHARED_REGION_BASE_ARM64` 比。
+* 其余部分**是对的**：51 条 mapping 的 fileOffset / size / prot 逐条成立；四条 slide mapping 的 blob 地址、大小、页数全部对上，`0137` 补的 `sms_slide_size` 正是内核 `vm_shared_region_slide_sanity_check_v2()` 要求的最小值；16 KiB 页与 4 KiB slide info 的配合在内核侧成立；部分失败由内核自己回滚，移植层不需要再补。
+* 增加了 5 处日志，正常路径只多 2 行（约 180 字节），失败路径每处 1 行。
+* 仍然**没有真机日志**。本节全部来自：源码对照（xnu-8796.141.3）、44 个真实文件的头、`scripts/verify-shared-cache-plan.py` 的实跑，以及缓存里 `dyld-1067` 二进制中的字符串。
+
+### 1. 映射循环：一条 mapping 交出去的是什么
+
+`kebab_dsc_map_plan()`（`bsd/kern/kebab_dyldcache.c`）做的事只有三件：把计划里的 43 个 `kebab_dsc_file` 变成 43 个 `struct _sr_file_mappings`，每个指向计划里那几条已经算好、并且已经 slide 过的 `shared_file_mapping_slide_np`，然后**一次**调用
+
+```c
+vm_shared_region_map_file(shared_region, plan->file_count, srm);
+```
+
+也就是说 51 条 mapping 是**一次**系统调用语义交出去的，不是 51 次。这一点很关键：内核的 `vm_shared_region_map_file_setup()` 在同一把 `sr_mapping_in_progress` 锁下把 43 个文件的映射全部建好，第二遍才回到需要 rebase 的 mapping 上装 pager；分多次调用会每次都想重新抢 `sr_first_mapping`，而它一旦不是 `-1` 就直接返回 `KERN_FAILURE`（`vm_shared_region.c:1460`）。
+
+按类别把这 51 条摊开（数字来自 `verify-shared-cache-plan.py` 的实跑）：
+
+| 类别 | 条数 | init / max | fileOffset | 大小 |
+| --- | ---: | --- | --- | --- |
+| 主缓存 text（头 + 2710 条镜像记录 + subCacheArray） | 1 | r-x / r-x | `0x0` | `0x5c000` |
+| 子缓存 text（`.01`–`.26`、`.29`–`.40`，每个 1 条） | 38 | r-x / r-x | `0x0` | `0x14000`–`0x6e3c000` |
+| `.dyldlinkedit` 头页（`.28`、`.42`） | 2 | r-x / r-x | `0x0` | `0x5c000` |
+| `.dyldlinkedit` `__LINKEDIT` | 2 | r-- / r-- | `0x5c000` | `0x1298000`、`0x13da4000` |
+| `.dylddata` 头页（`.27`、`.41`） | 2 | r-x / r-x | `0x0` | `0x5c000` |
+| `.dylddata` `__DATA_CONST`（带 slide） | 2 | r-- / rw- | `0x5c000` | `0x53b0000`、`0x2994000` |
+| `.dylddata` `__DATA`（带 slide） | 2 | rw- / rw- | `0x540c000`、`0x29f0000` | `0x5df0000`、`0x3798000` |
+| `.dylddata` 尾部 slide-info 页 | 2 | r-- / r-- | `0xb1fc000`、`0x6188000` | `0x18000`、`0x10000` |
+| **动态配置页（本次新增）** | 1 | r-- / r--（`VM_PROT_ZF`） | — | `0x4000` |
+
+合计 1+38+2+2+2+2+2+2+1 = **52 条**，分布在 43 个文件里。逐条核对的结果：
+
+* **fileOffset 全部是"相对该文件自己的偏移"**。这一点在移植里最容易错：51 条 mapping 落在 43 个不同的 vnode / UBC object 上，`sms_file_offset` 是每个文件各自的偏移，`vm_map_enter_mem_object()` 用的也是每个文件自己的 `file_control`。计划里没有把任何一条 mapping 的偏移折算成"全局文件偏移"，这是对的；内核的 `assert(VME_OFFSET(tmp_entry) == start)`（`vm_shared_region_slide_mapping()`）也正是靠这个相等关系成立。
+* **size 全部是 16 KiB 的整数倍**，`kebab_dsc_read_mappings()` 逐条验过（`info[i].size & 0x3fff`），内核 `vm_map_round_page()` 因此不会改变任何一条的长度，slid mapping 的 `assert(tmp_entry->vme_end - tmp_entry->vme_start == size)` 才成立。
+* **prot 逐条取自缓存自己的 mapping 表**，`max_prot` 只在四条 slid mapping 上或进 `VM_PROT_SLIDE`。`vm_map_enter` 只取 `& VM_PROT_ALL`，所以 `VM_PROT_SLIDE`（`0x20`）和 `VM_PROT_ZF`（`0x10`）都不会污染映射的保护位。
+* **四个 32 MiB 的洞不需要特殊处理**。它们不是"缺失的映射"，而是两个 `.dylddata` 文件内部 `__DATA_CONST → __DATA`、`__DATA → 尾部页` 之间故意留的 VA 空洞（每个文件 2 个 ×32 MiB，共 `0x4000000`）。循环逐条按绝对地址 `vm_map_enter(..., VMAP_KERNEL_FLAGS_FIXED, vmkf_already)`，洞就自然留空，这正是缓存要的。`pmap_trim()` 只按 `[sfm_min, sfm_max]` 保留页表，洞不额外付任何物理页。
+* **最后那 `0x4000` 不是洞，是 dyld 要读的一页** —— 见第 5 小节，这是本次唯一的真 bug。
+* `.symbols` 不映射是对的：它的 `sharedRegionStart` 是 `0x22ade8000`，正好等于 `sharedRegionStart + sharedRegionSize`，在窗口之外；dyld 只在 `dladdr` 这类本地符号路径上才需要它。
+
+移植层**没有**做的事情，需要写清楚：`shared_region_map_and_slide_setup()`（`bsd/vm/vm_unix.c:2233`）里那一串闸门 —— 文件必须 root 所有、SIP/`SF_RESTRICTED`（KEBAB 已经用 `kebab_cs_shared_cache_allowed()` 局部放松）、信任缓存、`ubc_cs_is_range_codesigned()` 覆盖检查、`mac_file_check_mmap()` —— 全部被绕过，因为 `kebab_dsc_map_plan()` 直接调用 `vm_shared_region_map_file()`，走的不是 syscall 入口。这是 bring-up 的既有决定（`0085`/`0088`/`0100` 已在别处放松代码签名），但含义要说白：真机上这份计划只按"文件在、头对、UUID 对"被接受，没有任何签名闸门。反过来，`vnode` 的 `VSHARED_DYLD` 标记移植层补上了（`kebab_dsc_map_plan()` 成功后逐个 `v_flag |= VSHARED_DYLD`），和内核 cleanup 的行为一致；漏掉的是 atime 更新和 `NAMEDSTREAMS` 的伴随 vnode —— 对这个缓存都没有影响（`.dylddata`/`.dyldlinkedit` 没有命名流）。
+
+### 2. 四条 slid mapping 与四块 v2 blob
+
+`0137` 的标题是"给 pager 一个 blob 大小"，本小节把它落到具体地址上。四个 blob 的原始数据（直接读文件头得到）：
+
+| 文件 | mapping | mapping 地址（unslid） | mapping 大小 | blob 文件偏移 | blob 大小 | blob 地址（unslid） | page_size | page_starts | page_extras |
+| --- | ---: | --- | --- | --- | --- | --- | ---: | ---: | ---: |
+| `.27.dylddata` | 1 | `0x1d5964000` | `0x53b0000` | `0xb207c08` | `0xa788` | `0x1e4b0fc08` | `0x1000` | 21424 | 0 |
+| `.27.dylddata` | 2 | `0x1dcd14000` | `0x5df0000` | `0xb1fc000` | `0xbc08` | `0x1e4b04000` | `0x1000` | 24048 | 0 |
+| `.41.dylddata` | 1 | `0x20cea8000` | `0x2994000` | `0x618ef58` | `0x5350` | `0x216fdaf58` | `0x1000` | 10644 | 0 |
+| `.41.dylddata` | 2 | `0x21183c000` | `0x3798000` | `0x6188000` | `0x6f58` | `0x216fd4000` | `0x1000` | 14232 | 0 |
+
+四块的 `delta_mask` 都是 `0xffff0000000000`、`value_add` 都是 `0`，`page_extras_count` 都是 0，`page_starts_offset` 都是 `0x28`（= 40，紧跟头）。
+
+**每个 blob 都在同一个文件的第三条 mapping 里**（尾部那条 `r--`），不是在被 slide 的那条 mapping 里：
+
+* `.27` 尾部页 `[0x1e4b04000, 0x1e4b1c000)`，文件 `[0xb1fc000, 0xb214000)`；两块 blob 分别占 `[0xb1fc000, 0xb207c08)`（`0xbc08` 字节）和 `[0xb207c08, 0xb208390)`（`0xa788` 字节）—— 首尾相接，都在尾部页的前 `0x16390` 字节里。
+* `.41` 尾部页 `[0x216fd4000, 0x216fe4000)`，文件 `[0x6188000, 0x6198000)`；两块占 `[0x6188000, 0x618ef58)` 与 `[0x618ef58, 0x61942a8)`。
+
+`kebab_dsc_read_mappings()` 算 `sms_slide_start` 的办法是"找哪条 mapping 的文件区间盖住 blob 偏移，然后 `该 mapping 的地址 + (blob 偏移 - 该 mapping 的文件偏移)`"。dyld 自己的办法是 `linkeditMapping->address + (slideInfoFileOffset - linkeditMapping->fileOffset)`（`dyld/SharedCacheRuntime.cpp:492`）；对这个缓存两者给出**同一个地址**（尾部页就是 dyld 认定的 linkedit mapping）。移植的写法更一般，结果一致。
+
+内核侧的消费路径（全部照原样用缓存的 v2 blob，不重建任何东西）：
+
+1. `vm_shared_region_map_file()` 先数一遍有几条 mapping 带 `VM_PROT_SLIDE`，得 4（`vm_shared_region.c:1956`）。
+2. 第一遍把 52 条 mapping 全部 `vm_map_enter_mem_object()` 建好，顺手记下这 4 条的 region 内地址（`slid_mappings[]`）和 `file_control`。
+3. 第二遍对每条调 `vm_shared_region_slide(sr_slide, sms_file_offset, sms_size, sms_slide_start, sms_slide_size, ...)`（`vm_shared_region.c:2012`）。
+4. `vm_shared_region_slide_mapping()` 用 `copyin(slide_info_addr, ..., slide_info_size)` 把整块 blob 拷进内核（`:2593`），过 `vm_shared_region_slide_sanity_check_v2()`，建 pager，再把那条 mapping 覆盖成 pager 的映射。
+5. pager 的 `shared_region_pager_data_request()` 在缺页时按 4 KiB 一段 rebase，写进 16 KiB 的页。
+
+`0137` 补的 `sms_slide_size` 必须**等于** blob 大小，因为：
+
+* 太大 → `copyin()` 从 `sms_slide_start` 读 `slide_info_size` 字节，越界就是 `KERN_INVALID_ADDRESS`（会打 "copyin of slide_info failed"）；
+* 太小 → `sanity_check_v2()` 要求 `40 + (starts+extras)*2 <= slide_info_size`，四块的真实大小恰好等于这个下界：`0xa788 = 40 + 21424*2`、`0xbc08 = 40 + 24048*2`、`0x5350 = 40 + 10644*2`、`0x6f58 = 40 + 14232*2`。少一个字节就 `Sanity Check failed`。
+
+顺带说清 0137 到底修的是什么：`vm_shared_region_map_file()` 只按 `sms_max_prot & VM_PROT_SLIDE` 数数，而 `kebab_dsc_apply_slide()` 只在 `sms_slide_size != 0` 时才或这一位。0137 之前 `sms_slide_size` 恒为 0，于是非零 slide 时四条数据 mapping 都是**普通文件映射**：地址滑了、`sr_slide` 也滑了、pager 没装。`value_add` 全为 0，所以 slide 为 0 时"装 pager"与"不装"内容完全等价 —— 这也是移植层在 slide==0 时干脆不设 `VM_PROT_SLIDE` 的依据，不算偷懒。
+
+### 3. 16 KiB 页与 4 KiB slide info
+
+结论：**成立**，而且不是碰巧成立。四条事实互相咬合：
+
+1. **内核只接受 4096**。`PAGE_SIZE_FOR_SR_SLIDE` 是编译期常量 4096（`osfmk/vm/vm_shared_region.h:98`），`vm_shared_region_slide_sanity_check_v2()` 第一件事就是 `s_info->page_size != PAGE_SIZE_FOR_SR_SLIDE` 直接 `KERN_FAILURE`（`vm_shared_region.c:2790`）。注意它**不**看 VM 页大小 —— 16 KiB 内核也要求 blob 里写 4096。
+2. **页数必须精确等于 mapping 大小 / 4096**。四块都满足：`21424*0x1000 = 0x53b0000`、`24048*0x1000 = 0x5df0000`、`10644*0x1000 = 0x2994000`、`14232*0x1000 = 0x3798000`。移植层把这条当成硬校验（`si.page_starts_count * si.page_size != mapping_size` 即拒），这就是"mapping 大小 16 KiB 对齐"够用的理由：对齐 ⇒ 页数是 4 的倍数 ⇒ 最后一条 4 KiB 链不会跨出 `si_end`。
+3. **pager 按 4 KiB 切 16 KiB 页**。`vm_shared_region_pager.c:683` 的 `for (offset_in_page = 0; offset_in_page < PAGE_SIZE; offset_in_page += PAGE_SIZE_FOR_SR_SLIDE)` 就是给 16 KiB 页准备的：一页切成 4 段，每段各自查 `si_start`/`si_end`、各自用 `(offset_in_backing_object - si_start)/4096` 当 `pageIndex`。`si_start`（= 该 mapping 的 `sms_file_offset`：`0x5c000`、`0x540c000`、`0x5c000`、`0x29f0000`）和 `si_end` 都是 16 KiB 对齐，所以没有任何一段会跨过滑动的边界。
+4. **跨 4 KiB 边界的指针有专门处理**。`rebase_chain_64()` 里 `page_offset + 4 == PAGE_SIZE_FOR_SR_SLIDE` 的分支（`vm_shared_region.c:3050`）处理"链上最后一个指针一半在下一页"的情况 —— 在 16 KiB 页里这仍然是同一页，所以那个分支写的是同一块内存，语义正确。
+
+**slide 必须是 16 KiB 的倍数**，这道约束在两个独立的地方：`kebab_dsc_apply_slide()` 的 `slide & 0x3fff`，以及内核 `vm_shared_region_map_file_setup()` 的 `FOURK_COMPAT` 检查（`vm_shared_region.c:1519`，`SIXTEENK_PAGE_MASK`）。两边都拒，所以非 16 KiB 对齐的 slide 不会被"一方接受另一方拒绝"地漏进来。
+
+唯一没有验证的消费者是**别的东西读这块 blob**：dyld 自己在 `forEachSlideInMappedCache()` 里也用同一份 v2 数据做 `forEachPatchableUseOfExport`（rebasing 之外的 patchable 引用），那条路径同样以 `page_size` 为步长；本节只审了内核侧，dyld 侧按源码读是一致的，但没有真机日志。
+
+### 4. dyld 会检查什么，内核给出什么
+
+dyld 侧的结论来自 `dyld-1066.8`（公开源码，与缓存里的 `dyld-1067` 相邻）以及缓存里那个真正的 `dyld-1067` 二进制。后者的字符串直接印证了代码路径存在：
+
+```
+[@(#)PROGRAM:dyld  PROJECT:dyld-1067
+dyld_v1   arm64
+mapped cache does not contain dynamic config data
+existing shared cache in memory is not compatible
+syscall to map cache into shared region failed
+Could not vm_allocate fixed range for dynamic config data
+```
+
+`loadDyldCache()`（`dyld/SharedCacheRuntime.cpp:1166`）的第一条路是 `reuseExistingCache()`：只要 `__shared_region_check_np()` 成功，它就认为"共享区里已经有缓存"，然后：
+
+```c
+const DyldSharedCache* existingCache = (DyldSharedCache*)cacheBaseAddress;
+if ( !validMagic(options, existingCache) ) { ... "not compatible" ... }
+results->slide = (long)existingCache->slide();
+dyld_cache_dynamic_data_header* dynamicData =
+    (dyld_cache_dynamic_data_header*)((uintptr_t)results->loadAddress + existingCache->header.dynamicDataOffset);
+if (strncmp((char*)dynamicData, DYLD_SHARED_CACHE_DYNAMIC_DATA_MAGIC, 16) == 0) { ... }
+```
+
+另外 `SyscallDelegate::hasExistingDyldCache()`（`dyld/DyldDelegates.cpp:268`）在 `dyldMain` 最前面就已经做过一次 `check_np` + 同一处 `dynamicDataOffset` 解引用（它用来判断"这个 dyld 是不是缓存里那个"，好把自己从缓存里重启）。
+
+对齐起来，进程里必须成立的条件是这五条：
+
+| dyld 读什么 | 在哪 | 要求 | 内核实际给出 |
+| --- | --- | --- | --- |
+| `shared_region_check_np()` 返回值 | `DyldDelegates.cpp:270`、`SharedCacheRuntime.cpp:790` | 0（非空区） | 0；区为空时返回 `ENOMEM` |
+| 缓存基址 `cacheBaseAddress` | 同上 | `0x180000000 + slide` | `sr_base_address + sr_first_mapping` = `0x180000000 + slide` |
+| `DyldSharedCache::slide()` | `common/DyldSharedCache.cpp:822` | `base - mapping[0].address` | `(0x180000000+slide) - 0x180000000 = slide` |
+| `Atlas::SharedCache::_slide` | `common/ProcessAtlas.cpp:889` | `base - sharedRegionStart` | 同上，`sharedRegionStart` 也是 `0x180000000` |
+| `base + dynamicDataOffset` 可读 | `DyldDelegates.cpp:275`、`SharedCacheRuntime.cpp:799` | 必须已映射 | **改前缺**，改后是零页 |
+| `strcmp(magic, ARCH_CACHE_MAGIC)` | `SharedCacheRuntime.cpp:247` | `"dyld_v1   arm64"` | 缓存文件原样映射，magic 就在第一页 |
+| `header.cacheType` | `SharedCacheRuntime.cpp:795` | 2（multi-cache）不拒绝 | 2 |
+
+两个"slide"的算法不一样（一个减 `mapping[0].address`，一个减 `sharedRegionStart`），要同时等于真 slide，等价于要求 `mapping[0].address == sharedRegionStart`。这个恒等式在真实文件上成立：主缓存只有一条 mapping，地址就是 `0x180000000`，而头的 `sharedRegionStart` 也是 `0x180000000`。**这就是"计划基址必须等于头声明"的具体形式** —— 它不是美观问题，两个独立的 dyld 计算都依赖它。
+
+`cacheBaseAddress` 又是由内核的 `sr_first_mapping` 决定的：`vm_shared_region_map_file_setup()` 把"第一条成功建立的 mapping"记成 `sr_first_mapping = sms_address - sr_base_address`（`vm_shared_region.c:1815`），`vm_shared_region_start_address()` 再加回 `sr_base_address`（`:1027`）。计划里 `files[0]` 是主缓存、它的第一条 mapping 就是 `0x180000000`，所以 `sr_first_mapping` 正好等于 slide。**如果顺序反了**（比如把动态配置页放到主缓存 text 前面），`sr_first_mapping` 会变成 `0xaade4000 + slide`，dyld 算出来的 slide 就会是 `0xaade4000 + slide`，一切都错 —— 这也是把新页追加在主缓存 mapping 数组的**第二条**、而不是第 0 条的原因。
+
+匹配失败时 dyld 的行为值得写下来，因为症状会骗人：`validMagic()` 失败 → `reuseExistingCache()` 返回 false 并带 `"existing shared cache in memory is not compatible"` → `loadDyldCache()` 转去 `mapSplitCacheSystemWide()` → 那个 syscall 因为共享区已经被占而失败（内核 `sr_first_mapping != -1` → `KERN_FAILURE`）→ 再 `reuseExistingCache()` 还是失败 → dyld 放弃共享缓存、回到"逐个 dylib 从文件系统加载"。在 kebab 的根卷上那就是**一堆 file not found**，看上去像缺文件，其实是映射没人认。
+
+### 5. 改的是什么：`0142`
+
+**缺的那一页。** dyld 的 `mapSplitCacheSystemWide()` 不止映射 43 个文件，它还会追加一个 `fd == -1` 的"文件"：
+
+```c
+files[numFiles] = { -1, 1, 0 };
+...
+mappings[totalMappings] = {
+    firstFileInfo.dynamicConfigAddress,   // sharedRegionStart + dynamicDataOffset
+    dynamicConfigSize,                    // round_page(sizeof(dyld_cache_dynamic_data_header)) = 0x4000
+    (mach_vm_offset_t)dynamicConfigData,  // 用户态源地址
+    0, 0, VM_PROT_READ, VM_PROT_READ
+};
+```
+
+内核的 `fd == -1` 分支（`vm_shared_region.c:1530`）从用户态 `copyin` 到一块匿名 object，再映射到共享区。也就是说**真机上的共享区里这一页一定存在**，内容由 dyld 自己写（magic + fsId + fsObjId）。
+
+真实缓存头里的数字：
+
+| 字段 | 值 |
+| --- | --- |
+| `dynamicDataOffset` | `0xaade4000` |
+| `dynamicDataMaxSize` | `0x4000` |
+| `sharedRegionSize` | `0xaade8000` |
+| 51 条 mapping 的 extent | `0xaade4000` |
+| 缺的页 | `0x180000000 + 0xaade4000 = 0x22ade4000`，`0x4000` 字节 |
+
+`0xaade4000 + 0x4000 = 0xaade8000` —— 加回这一页，extent 正好等于 `sharedRegionSize`；之前少的正是它。它紧贴 `.42.dyldlinkedit` 最后一条 mapping 的末尾（`0x22ade4000`），落在 4 GiB 窗口内（`< 0x280000000`），也落在 `pmap_trim()` 允许的 `[nested_region_addr, +nested_region_size)` 内。
+
+为什么缺了会**崩**而不是"退回文件系统"：那一页在共享区里没有映射，进程页表里也没有；`pmap_fault` 落空 → `vm_fault()` 对 sub-map entry 直接 `return KERN_FAILURE`（`osfmk/vm/vm_fault.c:6689`）→ 用户态收到 bad access。dyld 在 `hasExistingDyldCache()` 里读它的时候还没有任何"容错"分支可走。
+
+**修法**：在计划里补一条 mapping —— 追加到主缓存 `files[0]` 的 mapping 数组第二条，`init = READ|VM_PROT_ZF`、`max = READ`、无 slide。`VM_PROT_ZF` 让内核走 `vm_map_enter()` + `vm_object_allocate()` 的匿名零页分支（`vm_shared_region.c:1764`），而不是文件映射。内容保持全零，于是 dyld 的 `strncmp` 不匹配、打印 `mapped cache does not contain dynamic config data`、继续跑；内核没有也不该伪造 dyld 的 fsId/fsObjId。这一页跟着其它 mapping 一起被 slide，和真机上 dyld 的 `mappings[totalMappings]` 同步。
+
+顺带的三处收紧：
+
+* `struct kebab_dsc_header` 从 456 字节长到 512 字节（mapping 表就从 512 开始），把 `cacheSubType`(456)、`objcOptsOffset/Size`(464/472)、`cacheAtlasOffset/Size`(480/488)、`dynamicDataOffset/Size`(496/504) 都摆进去并用 `static_assert` 钉住偏移 —— 否则读 `dynamicDataOffset` 只能靠魔数偏移。
+* 新增页的落点要做完整校验：16 KiB 对齐、`addr + size <= region_start + region_size`、与 52 条里已有的任何一条不重叠、主缓存的 mapping 数组还有空位（`KEBAB_DSC_MAX_MAPPINGS` 是 8，用了 2）。任何一条不成立就拒绝整份计划并打印原因。
+* `is_main` 的基址检查改成与 `SHARED_REGION_BASE_ARM64` 比较（原来比较的是自己）。
+
+`sharedRegionSize` 也从此自洽：计划里 `highest_end - region_start == region_size == 0xaade8000`，最大可用 slide `0x55210000` 之后仍有 `0x8000` 余量。
+
+### 6. 新增的日志（每处一行）
+
+| 行 | 触发 |
+| --- | --- |
+| `KEBAB DSC: dynamic config page 0x%llx+0x%llx (offset 0x%llx), zero-filled read-only` | 计划日志，成功加上这一页时（1 行） |
+| `KEBAB DSC: dynamicDataOffset is 0; no dynamic config page to map` | 缓存头没有动态区（正常缓存不会有） |
+| `KEBAB DSC: dynamic config page [...] is outside the declared region [...]` | `dynamicDataOffset + size` 越出 `sharedRegionSize` |
+| `KEBAB DSC: dynamic config page [...] overlaps %s mapping %u` | 与已有 mapping 重叠 |
+| `KEBAB DSC: dynamicDataOffset 0x%llx is not 0x%x-byte aligned` / `no room for the dynamic config page ...` | 对齐 / 数组满 |
+| `KEBAB DSC: %s: sharedRegionStart 0x%llx is not the kernel shared region base 0x%llx` | 缓存声明了别的基址（以前是永远为真的比较，现在才会出现） |
+| `KEBAB DSC: map: ... dynamic config page 0x%llx+0x%llx zero-filled` | 默认映射成功行的后缀（1 行）；`kebab_dsc_verbose=1` 时另加一行说明 dyld 会报告 "no dynamic config data" 并继续 |
+| `KEBAB DSC: map: vm_shared_region_map_file failed 0x%x (error %d); region is empty again, shared cache NOT mapped` | 映射失败，且内核自己的回滚把区清空了 |
+| `KEBAB DSC: map: vm_shared_region_map_file failed 0x%x (error %d) but the region still maps 0x%llx; shared cache is HALF MAPPED` | 映射失败但区里还有映射（半映射，dyld 会接受然后踩空） |
+| `KEBAB DSC: cannot allocate %u subcache entries; ...` / `cannot allocate %u directory candidates; ...` / `map: cannot allocate %u file mappings; ...` | 三处 `kalloc_data` 失败（以前静默返回 `ENOMEM`） |
+
+正常路径总共多 2 行（约 180 字节）；失败路径每处 1 行，最坏情况不超过 10 行。**注意**：0142 时完整的计划日志在真实缓存上是 102 行 / 11,560 字节（43 个文件行 + 52 条 mapping 行 + 7 行摘要；这里原先写的“~103 行 / 约 7 KiB”是估算，偏低），控制台 ring 是 16 KiB，一次 `kebab_dsc_map=1` 启动会占掉约 70%。`0143` 已把逐条打印改成 `kebab_dsc_verbose=1` 才输出，默认只留一行摘要，详见第 10 小节；真机第一次仍建议先 dry run 看摘要，再开 `kebab_dsc_map=1`。
+
+### 7. 真机启动会先告诉我们什么（按出现顺序）
+
+> `0143` 之后默认启动只打印第 10 小节列出的摘要和生命周期行（`kebab_dsc_map=1` 共 6 行，dry run 3 行）。下面第 1、2、4 条里的逐条行需要 **`kebab_dsc_verbose=1`** 才会出现；第 3 条是默认摘要行，第 6 条的 check_np 值合并在默认的 `map: mapped ...` 行里。
+
+1. `KEBAB DSC: main dyld_shared_cache_arm64: ...` + 42 个子缓存的解析行 —— 证明内核在真机上真的按 UUID 找到了 42/42，而不是只在主机脚本里成立。
+2. `KEBAB DSC: region start=0x180000000 size=0xaade8000 ... maxSlide=0x55214000` 与 `dynamic config page 0x22ade4000+0x4000` —— 证明窗口、动态页、slide 上界都是计划里的数。
+3. `KEBAB DSC: plan 43 files / 52 mappings, 0xa2de8000 mapped, extent 0xaade8000 (end 0x22ade8000), base 0x180000000, slide 0x0, dynamic config page appended` —— 默认摘要行，一次 syscall 交出去的量；出现 52 和 `appended` 就说明 0142 生效了。
+4. `KEBAB DSC: map: slide 0x0; mapping 43 files / 52 mappings into shared region at 0x180000000` —— 真正开始调 `vm_shared_region_map_file()`（详细模式）。
+5. 失败时：`... failed 0x%x` + `region is empty again`（干净回滚，dyld 会自己去映射）或 `HALF MAPPED`（内核的 undo 没清干净，这是必须先修的内核问题，不是移植层的）。`kr` 到 errno 的映射与 syscall 一致：`KERN_INVALID_ADDRESS→EFAULT`、`KERN_PROTECTION_FAILURE→EPERM`、`KERN_NO_SPACE→ENOMEM`、其余→`EINVAL`。
+6. 默认 `map: mapped 0xa2de8000 bytes at 0x180000000, check_np base 0x180000000, dynamic config page ... zero-filled` 行尾的 `check_np base` —— dyld 会拿到的基址；带了 `kebab_dsc_slide=` 时这里的 slide 必须与 boot arg 相等，不等就说明 `sr_first_mapping` 不是主缓存那条 mapping。不匹配时单独打印 `does not match` 行。
+7. **dyld 自己打印的 `mapped cache does not contain dynamic config data`** —— 这是最强的一条：它证明 dyld 已经越过 `shared_region_check_np()`、读到了 `base + 0xaade4000` 这一页、并且没有崩。看到这一行，映射整体就算成立。
+8. 若出现 `existing shared cache in memory is not compatible` → magic 或基址不对；若进程直接 bad access，异常地址在 `0x22ade4000` 附近 → 0142 没生效；在 `0x180000000` 附近 → 主缓存第一页没映射上。
+9. 再往后才是 launchd 的第一个 syscall（对照第六十六、七十二节）。中间任何一步断掉，日志都能指到上面某一行。
+
+### 8. 构建与补丁序列
+
+* `0143` 之后序列共 **122 个补丁**。在 pristine `1b191cb` 上按 `build.sh` 的顺序应用：120 个由 `git apply` 打上；`0001-kernel-sdk-root.patch` 与 `0002-local-availability.patch` 显示 "already applied"，因为 `build.sh` 的 `patches()` 在循环之前就用 `sed` 做了同样的两处修改（`makedefs/MakeInc.def` 的 `LDFLAGS_KERNEL_SDK`、`bsd/sys/make_symbol_aliasing.sh` 的 `AVAILABILITY_PL`），不是失败。kebab 系列 122/122 全部到位。
+* `build-local.sh` 从重置后的树完整构建 `DEVELOPMENT/ARM64/KEBAB`：`🎉 XNU Build Done!`，`kernel.development.kebab` 17,208,944 字节，`kebab_dyldcache.c` **0 warning / 0 error**。这个"0 警告"是和改动前的基线比对过的：用构建自己记录的同一行 `clang` 命令单独编译新旧两个文件，两次都是 4 条警告且逐条相同 —— 那 4 条来自 `vm_param.h`、`mpsc_queue.h` 等被包含的头文件，不在本文件里。
+* 真机仍然没有。板子 stranded，本节没有任何真机启动日志。
+
+### 9. 仍未验证 / 风险
+
+* **真机零验证**：板子 stranded。本节所有"会打印什么"都是代码路径的预期。`0142` 能证明的只有：真实文件的 `dynamicDataOffset`/`dynamicDataMaxSize` 与 `sharedRegionSize` 自洽、新页不与 52 条 mapping 重叠、每个可接受的 slide 之后仍在窗口内。
+* **动态页内容是零**：每个用这份共享区的进程都会打印一次 `mapped cache does not contain dynamic config data`（dyld 的 `dyld4::console`）。这是预期行为，不是错误；但也意味着 `fsgetpath` 那类依赖 fsId/fsObjId 的日志会是空的。
+* **`VM_PROT_NOAUTH` 没设**：non-PAC 的 arm64 构建里这一位无效，四条 slid mapping 走普通 pager，正确。若将来改用 arm64e 构建，`vm_shared_region_slide_mapping()` 会把没有 `VM_PROT_NOAUTH` 的 mapping 当成 auth 段、不装 pager 而走 `vm_shared_region_auth_remap()`；那时必须按 `flags & DYLD_CACHE_MAPPING_AUTH_DATA` 补这一位（本缓存的四条都是非 AUTH，dyld 会给它们都设 `VM_PROT_NOAUTH`）。
+* **`value_add` 全为 0 这个前提没被检查**：移植层靠它得出"slide==0 时不用装 pager"。如果将来某版缓存的 `value_add != 0`，slide==0 也必须设 `VM_PROT_SLIDE`，否则内容会错。值得后续在 `kebab_dsc_validate_slide_info()` 里加一句：slide 为 0 时要求 `value_add == 0`。
+* **代码签名闸门整体绕过**：见第 1 小节末。真机上这意味着缓存只按"文件在、头对"被映射；这与 bring-up 的其它放松一致，但不是最终形态。
+* **计划日志**：默认已压到一行摘要（`0143`），逐条表由 `kebab_dsc_verbose=1` 打开；失败时仍会打印完整 detail，见第 10 小节。
+* **`.symbols` 与 `dladdr`**：不映射是对的，但"dyld 之后 `dladdr` 拿不到本地符号"这条没有验证。
+* **4 GiB 的 pmap 保留**：`vm_shared_region_create()` 固定 `SHARED_REGION_SIZE_ARM64 = 4 GiB`，`pmap_trim()` 只保留实际用到的 `0xaade8000`（约 2.67 GiB）这一段页表。物理页只在真正缺页时才分配，洞和未用到的 1.33 GiB 都不占内存；每进程的固定开销是覆盖 2.67 GiB 的 L2/L3 页表（共享区 pmap 是嵌套共享的，不是每进程一份）。这一块没有真机内存数字，只有代码依据。
+
+### 10. 日志预算（`0143`）
+
+`0142` 的计划日志是逐文件、逐 mapping 打印的。用真实 44 个缓存文件和内核自己的格式串在主机上重放（没有真机），一份默认 `kebab_dsc_map=1` 启动在映射层要打印 **118 行 / 13,294 字节**，其中计划段本身 **102 行 / 11,560 字节**，已经超过 16 KiB console ring 的 70%。
+
+`0143` 之后默认只打印一行计划摘要：
+
+```
+KEBAB DSC: plan 43 files / 52 mappings, 0xa2de8000 mapped, extent 0xaade8000 (end 0x22ade8000), base 0x180000000, slide 0x0, dynamic config page appended
+```
+
+这一行包含 mapping 数（52）、mapped 总量、计划 extent、基址、slide，以及动态配置页是否追加。逐文件 / 逐 mapping 表、成功侧的 header 校验行、slide-info 解析行、mapping 前的 slide 行和 `shared_region_check_np` 的成功行都移到 **`kebab_dsc_verbose=1`** 之下，默认 `0`；`enabled` 行会带出这个值。check_np 的返回值没有丢：成功时合并在 `map: mapped ...` 行尾，不匹配 / 不可用时仍单独打印。
+
+预算（主机重放真实缓存；`kebab_dsc_map=1` 的完整 happy path，包含 `enabled`、摘要、boot 延迟、first exec、map 结果、complete）：
+
+| 输出 | `0143` 前 | `0143` 后 |
+| --- | ---: | ---: |
+| 计划段 | 102 行 / 11,560 B | 1 行 / 154 B |
+| `kebab_dsc_map=1` happy path | 118 行 / 13,294 B | 6 行 / 652 B |
+| dry run happy path | 112 行 / 12,795 B | 3 行 / 360 B |
+
+计划段减少 98.7%，整条 happy path 减少 95.1%。第 6 小节原先写的“~103 行 / 约 7 KiB”是估算，按真实格式串重放后实际是 102 行 / 11,560 B；16 KiB ring 没有改。
+
+失败路径不省：计划被拒时仍然先打失败原因，再把当时已经建好的部分计划完整 dump 出来；映射失败时仍然打 `vm_shared_region_map_file failed ... region is empty again` / `HALF MAPPED` 探针，并在非 verbose 模式下补一份完整计划 detail。`shared_region_check_np` 的失败分支（不匹配 / 不可用）保持原样。因此失败诊断信息不比 `0142` 少。
+
+
+## 七十四、launchd 起步所需的支持
+
+> 2026-10-28 更新：本节排在第 1、2 位的两个硬 blocker（xpcproxy 缺失、
+> `/dev/console` 打不开）已由 `0144`、`0145` 修掉；下面的排位和“下一次启动
+> 最小改动”保留为当时的审计记录，当前状态见第七十五节。
+
+> 目标：把“exec 成功之后 launchd 会走到哪里、还需要什么”变成一张可以在下一次
+> 启动日志里逐行核对的表，而不是等真机一个门一个门地撞。
+>
+> 方法：读真实的 `/sbin/launchd`（541,600 字节，iOS 16.7.16 / 20H392，
+> `libxpc_executables-2462.140.4.702.1`）的 `LC_MAIN`、导入表、`__TEXT,__config`
+> 和调用点；对照 `xnu-8796.141.3` 加 122 个补丁后的源码树
+> （`~/xnu-0139`，`DEVELOPMENT/ARM64/KEBAB`）。板子仍然 stranded，本节没有
+> 任何真机日志。
+>
+> 边界：二进制能证明“它调用什么”，不能证明“这块板子上那条路径真的通”。
+> 凡是后者，都单列在第 6 节，不混进“已具备”。
+
+结论先写在这里：
+
+1. **这个 launchd 的 job 只有一个 spawn 入口：`posix_spawnp("/usr/libexec/xpcproxy", …)`。**
+   整个二进制的 `posix_spawn*` 调用只有三处：job 走 xpcproxy
+   （`posix_spawnp`，`0x100024abc`）、boot task 直跑（`posix_spawnp`，
+   `0x10003fe1c`）、以及 launchd **自我 re-exec**（`posix_spawn("/sbin/launchd",
+   …)`，flags `0x4040` = `SETEXEC|CLOEXEC_DEFAULT`，`0x100040ab8`，不是 job）。
+   因此卷上没有 `/usr/libexec/xpcproxy` 时，`com.kebab.zprint.plist` 一定起不来。
+   `launchd_proxyless_spawn=` 的默认值是 **1**（尝试 elide），它只改变 xpcproxy
+   内部的 elision；设成 `=0` 只会关掉 elision，**不会**把 xpcproxy 从路径里去掉。
+2. **job 的 stdio 在 launchd 里硬编码为 `/dev/console`**（xpcproxy 的 fd 0/1/2，
+   `0x1000249c4`），不是从 plist 的 `StandardOutPath` 推出来的。`/dev/console`
+   打不开时任何 job 都 spawn 不了；launchd 自己的日志 fallback 也是
+   `open("/dev/console")`，所以那一次启动会“看起来什么都没发生”。
+3. **main 的早期硬门在 xnu-8796 + kebab 上都不缺**：`kern.initproc_spawned`、
+   `task_set_special_port(TASK_BOOTSTRAP_PORT)`、`mach_ports_register`、
+   `host_set_special_port(HOST_COALITION_PORT)`、`proc_pidinfo(18)`、
+   `proc_rlimit_control`、`setlogin`、`setsid`、`chdir("/")` 都有实现，权限也对
+   （launchd 是 `initproc`）。唯一会因“非 Apple 配置”失败的是 `hw.targettype`
+   整个 sysctl 不存在（本树有，见 2.2）和 `kern.bootargs` 为空（本树有）。
+4. 卷上缺的东西里，`/usr/libexec/xpcproxy` 和 boot task 的可执行文件
+   （`/sbin/mount`、`/sbin/fsck`、`/usr/libexec/cc_fips_test`、
+   `/usr/libexec/dirs_cleaner`、`/usr/libexec/launchd_cache_loader`）都是
+   **硬 blocker**；旧结论漏掉了后者，真机已用 `mount-phase-1` panic 证明。
+   `/private/var/db/com.apple.xpc.launchd`、`/System/Library/xpc/launchd.plist`、
+   jetsam/limits/personas plist 缺失本身只影响某一项功能或产生一行日志。
+5. 只有真机能定的关键三条：`/dev/console` 的 `cnopen → km_tty[0] → kmopen` 是否
+   真的通；xpcproxy 的 cdhash 是否在静态信任缓存里；xpcproxy 的
+   `POSIX_SPAWN_SETEXEC` 第二次 exec 是否和 launchd 的第一次 exec 一样过关。
+
+### 1. 真实二进制：launchd 的第一秒
+
+#### 1.1 版本与控制流
+
+`LC_MAIN entryoff = 92596 (0x169b4)`，入口 `0x1000169b4`；`LC_UUID =
+5C15DB07-B3BC-3DF3-B62F-3E498B993B8E`，`LC_BUILD_VERSION platform ios, sdk
+16.7.3, minos 16.7`。导入 537 个符号，直接依赖只有 `libSystem.B` 和
+`libobjc.A`，两条都在 43 个缓存分片里。
+
+main 的顺序（地址都是二进制 vaddr）：
+
+| 顺序 | 地址 | 做什么 | 失败行为 |
+| ---: | --- | --- | --- |
+| 1 | `0x1000169cc` | `getenv("LAUNCH_DID_REEXEC")` / `getenv("XPC_USERSPACE_REBOOTED")`；都没有才写 `sysctl kern.initproc_spawned=1` | 写失败只记日志，不退出（`0x10003e0ac` 忽略 ENOENT） |
+| 2 | `0x100016a10` | `isatty(1)`；若 fd 1 是 tty 且内部标志为假，`launchd_fatal("launchd cannot be run directly (stdout: %d)")` | `__os_crash`（`brk #1`），PID 1 死，内核 `pid 1 exited` |
+| 3 | `0x100016a68` | `getpid() != 1` 同上，`"(pid = %d)"` | 同上 |
+| 4 | `0x100016ab8` | `mach_host_self()`、`panic_init()` | — |
+| 5 | `0x100016ac0` | `launchd_runtime_init`：建 5 个 dispatch queue（`eventq/spawn/ioq/bgioq/bglogq`，`0x100014fac`） | 内存不足才失败 |
+| 6 | `0x100016af0` | PGM（Probabilistic Guard Malloc）配置 | 非致命 |
+| 7 | `0x100016b18` | 日志 `"hello"` | — |
+| 8 | `0x100016ba4` | `memorystatus_control(6, getpid(), highwater, 0, 0)` | 失败只打 `Could not opt into %d MB Jetsam high watermark` |
+| 9 | `0x100016c18` | 读 `kern.bootargs` 并打 `boot-args = %s` | 读不到只少一行 |
+| 10 | `0x100016c48` | `proc_disable_wakemon(getpid())` | 返回 `-1` 则 `__os_crash` |
+| 11 | `0x100016c54`…`0x100016ce0` | 判 lean / restore / BaseSystem / darwinos / PGM 环境变量 | — |
+| 12 | `0x100016cfc` | `setsid()`；只允许成功或 `EPERM`（已是 session leader） | 其它 errno `__os_crash` |
+| 13 | `0x100016d3c` | `chdir("/")` | `__os_crash` |
+| 14 | `0x100016d50` | `setlogin("root")` | `__os_crash` |
+| 15 | `0x100016d64` | 对约 21 个信号 `signal(sig, SIG_IGN)` | — |
+| 16 | `0x100016dcc` | `task_set_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT=4, MACH_PORT_NULL)`，把内核给的 bootstrap port 清空 | 打 `Could not neuter bootstrap port: 0x%x` 并 `exit(1)` |
+| 17 | `0x100016dfc` | 建自己的 bootstrap port（`0x1000168c4`，内部用 `0x433`/`0x7507` 两个常量） | — |
+| 18 | `0x100016e14` | `mach_ports_register(mach_task_self(), &port, 1)` | `launchd_fatal("could not set up inheritance port")` |
+| 19 | `0x100016e40`…`0x100016ec4` | 缓存 `mach_absolute_time`、UUID、uid/euid/egid/pid，`proc_pidinfo(getpid(), 18, 1, buf, 192)` | 返回 0 或 45（EOPNOTSUPP）之外 → `launchd_fatal("could not get unique pid")` |
+| 20 | `0x100016ed8`…`0x100016f18` | 注册一批 xpc 事件 handler，最后取 main queue | — |
+| 21 | `0x100016f1c` | `dispatch_activate(main_q)`；`dispatch_main()` | 之后全部异步 |
+
+`isatty(1)` 这一条在本移植上应当通过：内核 `load_init_program_at_path()`
+（`bsd/kern/kern_exec.c:6958`）用 `execve(..., envp=NULL)` 装载 launchd，
+init 进程的 fd 表是空的，fd 1 没有打开，`isatty(1)` 返回 0。**如果哪天内核给
+PID 1 预开了 `/dev/console`，这里反而会 abort**，因为 `cdevsw[0]` 的
+`d_type = D_TTY`。
+
+#### 1.2 `__TEXT,__config`：boot task 表
+
+`__TEXT,__config` 在文件偏移 `0x6485f`，2,056 字节，是一份 XML plist。和
+job 相关的键：
+
+* `Bootstrap.Paths`（按顺序）：`/System/Library/LaunchDaemons`、
+  `/System/Library/LaunchAngels`、`/AppleInternal/Library/LaunchDaemons`、
+  `/AppleInternal/Library/LaunchAngels`、`/System/Library/NanoLaunchDaemons`、
+  `/System/Library/NanoLaunchDaemonsAltAccount`、
+  `/System/Library/DeveloperModeLaunchDaemons`。**本卷只有第一个存在。**
+* `Bootstrap.UserPaths`：`/System/Library/LaunchAgents`、
+  `/AppleInternal/Library/LaunchAgents`，本卷都没有。
+* `Bootstrap.ChildDefaults.PATH`：`/usr/bin:/bin:/usr/sbin:/sbin`。
+* `SystemRoots`：`/System/Library`、`/AppleInternal/Library`、
+  `/System/Cryptexes/{OS,App}/System/Library`、`/private/preboot/Cryptexes/...`；
+  后四个本卷没有，缺失只是少几个候选根。
+* `Boot`：29 项。**旧结论“普通首启只跑 `PerformAlways`”已被真机推翻，
+  2026-10-28 起以第六十八节 2.1 为准。** 过滤函数 `0x10003f868` 对普通首启
+  （`XPC_USERSPACE_REBOOTED` 为空、restore/lean/BaseSystem 都为假）不套用任何
+  `Perform*` 过滤：每一项都执行。`PerformAfterUserspaceReboot` 的意思是
+  “userspace reboot 之后再跑一次”，不是“只在 userspace reboot 跑”。执行顺序
+  是 `0x100040138` 里的硬编码序列，不是字典顺序；带 `RequireRun` 的必需项为
+  `fsck`（仅 `/` 为 `MNT_RDONLY` 时）、`mount-phase-1`、`mount-phase-2`、
+  `fips`、`dirs_cleaner`、`launchd_cache_loader`。
+* `HighWatermark = 50`、`SIGTERMTimeout = 3`、`ExtensionWatchdog = true`。
+
+**修正一个容易误解的点**：`init-with-data-volume` 的 block handler 是
+`0x100027df8`，它只做三件事：`os_variant_init_4launchd()`、
+`__os_trace_update_with_datavolume_4launchd()`，然后跳到 `0x100045fb0`
+（读 `/private/etc/com.apple.xpc.launchd.limits.plist`、
+`/System/Library/UserManagement/com.apple.xpc.launchd.personas.plist`、
+`hw.targettype`，再装 jetsam 属性）。**它不是扫描 LaunchDaemons 的那一步**；
+job plist 的扫描/解析属于 system domain 初始化，和这个 block 是两件事。
+
+#### 1.3 job 的唯一 spawn 入口
+
+`0x100024398..0x100024c74` 是 job 的 spawn 函数。它最终在 `0x100024958`
+无条件加载全局 `0x100071778`，这个槽在 `__DATA` 里由 chained fixup 指向
+`"/usr/libexec/xpcproxy"`；随后：
+
+```
+argv = { "xpcproxy", <job->service_name>, … }
+fa   = addopen(0, "/dev/console", O_RDONLY, 0)
+       addopen(1, "/dev/console", O_WRONLY, 0)
+       addopen(2, "/dev/console", O_WRONLY, 0)
+attr = posix_spawnattr_set_registered_ports_np(&attr, {bootstrap_port, pid, …}, 2)
+posix_spawnp("/usr/libexec/xpcproxy", argv, fa, attr, envp)   // 0x100024abc
+```
+
+整个二进制里 `posix_spawn*` 只有三处：这一处、boot task 直跑
+（`0x10003fe1c`，`posix_spawnp(program, …)`，同样把 0/1/2 指向
+`/dev/console`，并用 `csops(pid, CS_OPS_STATUS)` 检查 bit 26
+`CS_PLATFORM_BINARY`），以及 launchd 自我 re-exec（`0x100040ab8`，
+`posix_spawn("/sbin/launchd", …, flags=0x4040)`；`0x100040a60` 先
+`setenv("LAUNCH_DID_REEXEC", …)`，成功后 `__os_crash` 不返回）。第三处不是 job，
+但说明 `POSIX_SPAWN_SETEXEC` 这条路径在 launchd 里本身也被用到。
+
+`0x1000454a0` 读 `launchd_proxyless_spawn=`，调用 `0x10003e108` 时第三个参数
+（默认值）是 **1**；所以：
+
+* 不写这个 boot-arg → `0x1000717bc = 1` → `0x100008618` 走
+  `"service will attempt to elide xpcproxy"`；
+* 写 `launchd_proxyless_spawn=0` → 走
+  `"service will always use xpcproxy, elision was disabled by boot-arg"`。
+
+两种情况下 `0x100024958` 都仍然 spawn `xpcproxy`。elide 的具体效果发生在
+xpcproxy 内部（它可以选择 `SETEXEC` 目标，省掉一次 fork）；无论哪种，
+**launchd 这一步都要 spawn `xpcproxy`，这个文件必须在卷上**。
+
+### 2. 需求表：设施/路径 → 现状 → 证据 → 症状
+
+“现状”只有三种：**具备**（源码/二进制能指到实现）、**具备但真机未验**
+（实现存在，但这条板级路径没跑过）、**缺失**（卷上没有或内核没有）。
+
+#### 2.1 Mach / BSD 设施
+
+| 设施 | 谁需要 | 现状 | 证据 | 缺失/失败时的症状 |
+| --- | --- | --- | --- | --- |
+| `task_set_special_port(TASK_BOOTSTRAP_PORT=4)` | main 清空内核给的 bootstrap port | 具备 | `osfmk/kern/ipc_tt.c:2142`；`case TASK_BOOTSTRAP_PORT` 在 `:2231`；MACF 默认无策略 | `Could not neuter bootstrap port: 0x%x` + `exit(1)` |
+| `mach_ports_register` | 把 bootstrap port 存进 task，子进程继承 | 具备 | `osfmk/kern/ipc_tt.c:2295`；只检查 `ipc_active` 和 immovable right | `could not set up inheritance port`（`__os_crash`） |
+| `host_set_special_port(HOST_COALITION_PORT=22)` | 把 main 建的 port 发布到 host special port 22 | 具备 | `osfmk/kern/host.c:1253`；`id=22` 在 `HOST_COALITION_PORT` 范围；`get_bsdtask_info(current_task()) == initproc` 时放行 | 只记 `__os_assumes_log_ctx`（`0x10004eb9c`），不退出 |
+| `mach_host_self` / `host_get_special_port` | 取 host 端口 | 具备 | `osfmk/kern/host.c`；`host_priv` 转换要求 `port == current_task()->itk_host` | 取不到只影响对应功能 |
+| `proc_pidinfo(PROC_PIDT_BSDINFOWITHUNIQID=18)` | main 缓存自己的 unique pid/start time | 具备 | flavor 18 在 `bsd/sys/proc_info.h:848`，实现于 `bsd/kern/proc_info.c:1981/2124`；size 0xc0 | 非 0/45 → `could not get unique pid`（`__os_crash`） |
+| `proc_rlimit_control`（`proc_disable_wakemon`） | main 关掉自己的 wakeups monitor | 具备 | `bsd/kern/syscalls.master:446`；`bsd/kern/kern_resource.c` `RLIMIT_WAKEUPS_MONITOR`；`osfmk/kern/task.c:7361` 对 `WAKEMON_DISABLE` 返回 `KERN_SUCCESS` | 返回 `-1` → `__os_crash`（无消息，只剩内核 `pid 1 exited`） |
+| `memorystatus_control(6, …)` | 设 Jetsam high watermark | 具备 | `bsd/kern/syscalls.master:440`；`CONFIG_MEMORYSTATUS` 在 `config/MASTER:365` | 只打 `Could not opt into %d MB Jetsam high watermark` |
+| `setlogin` | 设 session login name | 具备 | `bsd/kern/kern_prot.c:1656`；`proc_suser` + `proc_pgrp` | `__os_crash` |
+| `setsid` / `chdir` | 建 session、切到 `/` | 具备 | 标准 syscall；`chdir` 需要 root vnode | 非 `EPERM` 的 `setsid` 失败 / `chdir` 失败 → `__os_crash` |
+| `kqueue` / `kevent` / `kevent_qos` | libdispatch 的 timer、read source、throttle | 具备 | `bsd/kern/syscalls.master:362/363/374/375`；`bsd/conf/files:403` `kern_event.c standard` | `dispatch_source_create(TIMER)` 失败；job 的 penalty-box/throttle 计时不生效，**首次 spawn 仍可立即发生** |
+| `posix_spawn` / `posix_spawnp` | xpcproxy 的 `SETEXEC`、boot task 直跑 | 具备 | `bsd/kern/kern_exec.c:3423`；`SETEXEC` 分支在 `:3722`；special-port file action 在 `:2612` | 返回 errno；launchd 打 `posix_spawn(%s) failed` / `%s spawn failed: %d: %s` |
+| `csops` / `csops_audittoken` | boot task 的平台位检查；launchd 判断子进程是否 platform | 具备 | `bsd/kern/kern_proc.c:3078`；`CS_OPS_STATUS` 在 `:3146/:3205`；`CS_PLATFORM_BINARY` 来自 `csproc_get_platform_binary()` | `csops returned %d` / `unexpected exec of non-platform binary: %s: %s [%d]` |
+| `coalition`（create/terminate/reap/info） | xpcproxy/job 的 coalition 归属 | 具备 | `bsd/kern/sys_coalition.c`；`osfmk/kern/coalition.c:2023` 把 `init_coalition` 建成 `privileged=TRUE`，PID 1 在其中 | 非 privileged 会 EPERM；`coalition_find_and_activate_by_id` 找不到 → `ESRCH`，`posix_spawn` 失败 |
+| `persona` | 用户域 job 的 persona；root daemon 通常不用 | 具备 | `bsd/kern/sys_persona.c`；`CONFIG_PERSONAS` 在 `config/MASTER:543` | `spawn_persona_adopt` 失败 → `posix_spawn` 失败；本 job 不触发 |
+| `proc_pid_rusage` / `proc_pidinfo` / `task_name_for_pid` / `proc_terminate` | launchd 管理子进程 | 具备 | `bsd/kern/proc_info.c`；syscall 336 | 打 `proc_pid_rusage() failed for PID…` 等，通常不致命 |
+| `kern.proc.all`（`sysctl`） | launchd 枚举进程/回收 | 具备 | `bsd/kern/kern_sysctl.c:958` | 枚举失败只影响孤儿回收 |
+
+#### 2.2 sysctl
+
+| sysctl | 谁需要 | 现状 | 证据 | 缺失时的症状 |
+| --- | --- | --- | --- | --- |
+| `kern.initproc_spawned` | main 通知内核 PID 1 已到 main | 具备 | `bsd/kern/kern_exit.c:1306-1318`，仅 PID 1 可写一次 | 写失败被 `0x10003e0ac` 忽略；不改启动 |
+| `kern.bootargs` | 解析 `-v`、`launchd_proxyless_spawn=` 等 | 具备，且必须非空 | `bsd/kern/kern_sysctl.c:2174`；kebab 的 `board.toml [payload] kernel_args` 会填它 | 读不到或为空会走到 `launchd_fatal("no bootargs string")` 的 fatal 路径 |
+| `hw.targettype` | jetsam 属性文件名的 `%s.%s.plist` | 具备（可为空串） | `iokit/Kernel/IOPMrootDomain.cpp:1387`；`sysctl_targettype` 返回 `""` 而不是错误 | 整个 sysctl 不存在 → `sysctl hw.targettype was not set`（`launchd_fatal`）；空串只导致找不到 plist |
+| `kern.osversion` / `kern.osproductversion` / `kern.osreleasetype` | 版本/变体判断 | 具备 | `bsd/kern/kern_sysctl.c:1897/2015/2039` | 打 `Unable to reload kern.osversion: %d` 等，不致命 |
+| `kern.willshutdown` | 关机路径 | 具备，但只在 `IOPMrootDomain::start` 之后注册 | `iokit/Kernel/IOPMrootDomain.cpp:1235`，`gWillShutdownSysctlRegistered=true` 在 `:1801` | 启动早期读会得到 `ENOENT`；launchd 当作“未关机”，不致命 |
+| `kern.willuserspacereboot` | userspace reboot 判断 | 具备 | `bsd/kern/kern_xxx.c` | 只影响 reboot 模式 |
+| `kern.proc.all` | 进程枚举 | 具备 | `bsd/kern/kern_sysctl.c:958` | 回收/枚举少几条 |
+| `kern.maxfiles` / `maxfilesperproc` / `maxproc` / `maxprocperuid` | 设 rlimit | 具备 | `bsd/kern/kern_mib.c` 的 `KERN_MAXFILES` 等 | 读不到只少一次 `setrlimit` |
+| `kern.roots_installed` | `detect-installed-roots` block | 具备，但读需要 entitlement | `bsd/kern/kern_sysctl.c:1921`；`kRootsInstalled*Entitlement` | 无 entitlement → `EPERM`；`detect-installed-roots` 只打日志/继续（`Found roots installed cookie` 不出现） |
+| `kern.syscall_rejection_masks` | launchd 的可选安全配置 | 具备（DEVELOPMENT/DEBUG） | `bsd/kern/kern_debug.c:468`；`config_debug_syscall_rejection` 只在 DEV/DEBUG | 读失败只打 `sysctl failed with error (%i)` |
+| `kern.workload_config` / `kern.bootobjectspath` / `kern.minimalboot` / `kern.hostname` | 启动模式/主机名 | 具备 | `bsd/kern/kern_sysctl.c:555/2964/4052`；`kern.hostname` 在 `kern_mib.c` | 分别只影响对应功能 |
+
+#### 2.3 文件与目录
+
+| 路径 | 谁需要 | 现状 | 证据 | 缺失时的症状 |
+| --- | --- | --- | --- | --- |
+| `/sbin/launchd` | `load_init_program()` | 具备 | `base.kist` 第一条；`bsd/kern/kern_exec.c:6958` | 内核 `load_init_program: failed loading /sbin/launchd` |
+| `/usr/lib/dyld` | exec 的解释器 | 具备 | `base.kist`；`LC_LOAD_DYLINKER` | `initproc failed to start`（namespace 6） |
+| `/usr/lib/zprint` | 唯一 job 的 Program | 具备 | `base.kist`；依赖 5 条全在缓存 | `Could not find and/or execute program specified by service: 2: …` |
+| `/System/Library/LaunchDaemons/com.kebab.zprint.plist` | 唯一 LaunchDaemon | 具备 | `base.kist`；`RunAtLoad`，无 `UserName` | 目录空 → 没有 job，日志无 spawn 行 |
+| `/System/Library/xpc/launchd.plist` | 追加 boot task；普通首启可缺 | **缺失** | 二进制 `0x100019964` 读它；缺失只打 `Unable to open … [2:No such file or directory]` | 继续；但也就不能用“boot task 直跑”这条备用路线 |
+| `/usr/libexec/xpcproxy` | **所有 job 的 spawn 入口** | **缺失** | `0x100071778` → 字符串；`0x100024abc` 唯一 job spawn 调用 | `service spawn failed: 2: No such file or directory`（也可能是 `xpcproxy spawn failed`，取决于 `job->flags & 0x80`）；console 不正常时先报 errno 6 |
+| `/private/etc/passwd` + `master.passwd` + `group` | `getpwuid_r(0)` / `getpwnam_r("root")` | 具备 | `skel.kist`；`libsystem_info` 的缓存分片 `.05` 里有 `/etc/master.passwd`、`/etc/passwd`、`/etc/group` 字符串 | `Could not find uid associated with service: 0: … 0`，job 不 spawn |
+| `/private/var/tmp`（01777） | job 的 `mkdtemp("/private/var/tmp/com.apple.launchd.XXXXXXXXXX")` | 具备 | `skel.kist`；`0x10001be88` `_mkdtemp` | `Unable to create stdout/stderr directory (%s)`；带 `StandardOutPath` 的 job 失败 |
+| `/private/var/log/com.apple.xpc.launchd` | launchd 的日志目录 | 自动创建 | `0x10003e904` `_mkdir(path, 0700)`，path 是 `0x100071768` 指向的该字符串 | `mkdir` 失败只忽略；日志 fallback 到 console |
+| `/private/var/db/com.apple.xpc.launchd` | `disabled.plist` / `overrides.plist` / 迁移状态 | **缺失** | `0x100045dd4`/`0x100045ed4` 读该目录；卷骨架没有它 | `fts`/`stat` 失败，打 `Unable to stat/open`，单 job 仍可 spawn；建议补 |
+| `/private/var/run` + `/var` 符号链接 | `/var/run/syslog` 的父目录；`mkdir` 只发生在日志目录 | 具备 | `skel.kist`；launchd 唯一的 `_mkdir` 是日志目录（见上一行） | `/var/run` 缺失时 syslog 路径解析失败，fallback 到 console |
+| `/var/run/syslog` | launchd 的 syslog sink | **缺失** | `0x10003e9a0` 用 `/private/%s` + `/var/run/syslog` 拼路径 | 连不上 → 日志走 `open("/dev/console")` 的 fallback；若 console 也打不开则日志全丢 |
+| `/dev/console` | launchd 日志 fallback + 每个 job 的 fd 0/1/2 | **节点具备，open 未验证** | `devfs_vfsops.c:116` 建 `makedev(0,0)` 0622；`cnopen → cndev → km_tty[0] → kmopen`（`bsd/dev/arm/cons.c:52`、`bsd/dev/arm/km.c:69`）；`bsd/dev/kebab_ufs.c:813` 注释明确说这条路径“does not complete here yet” | `xpcproxy spawn failed: 6: Device not configured`；`launchd logging initialized …` 不出现；没有任何 launchd 日志 |
+| `/dev/null` | 无 `StandardOutPath` 的 job 的 stdio | 具备 | `devfs_vfsops.c` 建 `makedev(3,2)` 0666 | 对应 job 的 spawn 失败；本 job 用 console，不受影响 |
+| `/dev/kebabcon` | 面板直写备用通道 | 具备 | `bsd/dev/kebab_ufs.c:819`，0666，只写 | launchd 不认这个路径；只能人工改 plist，且**不能**替代 xpcproxy 的硬编码 console fd |
+| `/System/Library/CoreServices/SystemVersion.plist` | `os_variant_*` | **缺失** | launchd 的 `os_variant` 依赖它 | `os_variant_has_internal_diagnostics` 等返回 false；不致命，但 `os_variant_init_4launchd` 后行为按非 internal 走 |
+| `/System/Library/.../com.apple.jetsamproperties*.plist` | jetsam 属性 | 缺失 | `0x10000fd38` 依次试 NonUI、target 专属、System 路径 | 都打不开时安静返回；不致命 |
+| `/private/etc/com.apple.xpc.launchd.limits.plist` | 全局资源限制 | 缺失 | `0x100045fb0` 读它 | 读不到跳过；不致命 |
+| `/System/Library/UserManagement/com.apple.xpc.launchd.personas.plist` | persona 服务列表 | 缺失 | `0x100045ff4` 读它 | 读不到跳过；不致命 |
+| `/private/preboot` | cryptex 根 | 缺失 | `SystemRoots` 里的候选 | 只少几个候选根；不致命 |
+| `/etc/nologin` | 拒绝登录 | 缺失 | 二进制里有该字符串检查 | 不存在就是允许；不致命 |
+
+#### 2.4 代码签名
+
+| 项 | 现状 | 证据 | 缺失时的症状 |
+| --- | --- | --- | --- |
+| 静态信任缓存 `/System/Library/Caches/com.apple.kernelcaches/static.trustcache` | 具备 | `base.kist`；`kebab_cs_trustcache_load()` 默认路径 | `kebab_cs=15` 下没有 TC → 没有 `CS_PLATFORM_BINARY` |
+| `kebab_cs=15` | 需要 | `KEBAB_CS_TRUSTCACHE_PLATFORM`（bit 1）+ `KEBAB_CS_GRANT_ENTITLEMENTS`（bit 2）+ 其余两位；`kebab_cs_classify_blob()` | 无 platform 位、所有 entitlement 查询 deny；launchd 会拒绝/boot task 报 `not a platform binary` |
+| launchd/dyld/zprint 的 cdhash 在 TC 里 | 主机脚本已核对 | `make-minimal-userland.py` 的 `check_trustcache()` | `exec cdhash … tc=miss platform=0`，随后 `CS_KILLED` 或 `unexpected exec of non-platform binary` |
+| xpcproxy 的 cdhash 在 TC 里 | **无法核对（文件不在卷/提取树里）** | mtree 有 `/usr/libexec/xpcproxy`，但本地没提取 | 若不在 TC：xpcproxy 自己 exec 时被当成非 platform，`unexpected exec of non-platform binary: /usr/libexec/xpcproxy …` |
+
+**没有 entitlement 会挡路。** `IOTaskHasEntitlement()` 的实现是
+`iokit/bsddev/IOKitBSDInit.cpp:1534` → `amfi->OSEntitlements.queryEntitlementBooleanWithProc`；
+kebab 的 provider（`bsd/kern/kebab_amfi.c:114`）在 `kebab_cs` 有
+`KEBAB_CS_GRANT_ENTITLEMENTS`（`0xf` 的 bit 2）时对**任何** entitlement 返回
+`KERN_SUCCESS`。所以 `kebab_cs=15` 下，launchd 的
+`com.apple.private.roots-installed-read-write`、coalition spawn、
+`com.apple.private.spawn-subsystem-root` 等等都不会是 blocker；反过来说，
+如果启动参数写成别的值（比如 `kebab_cs=3`），这些门会一起变回 deny，症状是
+`EPERM`/“not permitted”，而不是 launchd 的某一行。
+
+### 3. zprint job 的路径逐段
+
+1. **扫描**：system domain 初始化时按 `Bootstrap.Paths` 扫
+   `/System/Library/LaunchDaemons`（本卷唯一存在的路径），`xpc_create_from_plist`
+   读 `com.kebab.zprint.plist`。plist 必须是 root 所有、不可被他人写；内核
+   installer 建的文件是 root:wheel 0644，满足。
+2. **建 job**：`Label=com.kebab.zprint`，没有 `Program`，所以 `ProgramArguments[0]`
+   `/usr/lib/zprint` 就是 Program；`RunAtLoad=true`，`KeepAlive=false`，
+   `StandardOutPath/StandardErrorPath=/dev/console`。
+3. **凭据**：没有 `UserName`，launchd 用 uid 0，调 `getpwuid_r(0, …)`
+   （`0x10001ad08`）。找不到 entry 时返回 114，打
+   `Could not find uid associated with service: 0: … 0`，job 不 spawn。
+4. **stdio**：job 的 `StandardOutPath` 是 console，但**即使不是**，launchd 给
+   xpcproxy 的 fd 0/1/2 也硬编码为 `/dev/console`（`0x1000249c4`）。所以
+   `/dev/console` 是“每个 job 都要”的条件，不是“只有日志要”。
+5. **bootstrap/attr**：`posix_spawnattr_set_registered_ports_np(&attr,
+   {bootstrap_port, pid, …}, 2)`（`0x100024a80`）；attr 里还有 coalition、
+   jetsam、launch type、role、信号掩码等，都是 xnu-8796 的 stock 路径。
+6. **spawn**：`posix_spawnp("/usr/libexec/xpcproxy", {"xpcproxy", <service>, …},
+   fa, attr, envp)`。xpcproxy 再通过 bootstrap port 拿到 launchd 的 spawn
+   请求，最后 `posix_spawn`（`SETEXEC`）到 `/usr/lib/zprint`。
+7. **throttle/timer**：job 的 penalty box/`dispatch_after` 用 libdispatch 的
+   timer（kqueue `EVFILT_TIMER`）。kqueue 坏了只会让 throttle 计时不准，不会
+   阻止第一次 `RunAtLoad` spawn；但 `dispatch_source_set_timer` 失败会在
+   launchd 日志里留下 `__os_assumes_log` 行。
+8. **平台检查**：launchd 在子进程 exec 之后用 `csops` 看 `CS_PLATFORM_BINARY`；
+   zprint 在 TC 里，正常应命中。boot task 的那条路径则是**在 spawn 后立刻**
+   `csops`，不命中就直接 `boot task is not a platform binary (%s, %s)`。
+
+### 4. 排序：下一次启动最可能先坏什么
+
+排名按“当前卷 + 当前内核”的实际可能性，不按修复难度。
+
+| # | 失败 | 第一行/关键行 | 随后 | 判读 | 修法 |
+| ---: | --- | --- | --- | --- | --- |
+| 1 | **`/usr/libexec/xpcproxy` 不在卷上** | （console 正常时）`service spawn failed: 2: No such file or directory` 或 `xpcproxy spawn failed: 2: …` 或 `Could not spawn process com.kebab.zprint: 2: …` | job 进 penalty box，`service throttled by %llu seconds`；zprint 表永远不出现；launchd 本身不退出 | 这是**确定的**，与硬件无关；不是 plist/签名/console 的问题 | 把 `/usr/libexec/` 加进 installer 允许清单并装 xpcproxy（+ 核对 TC/依赖）；或改用 boot task 直跑（见 5/7） |
+| 2 | **`/dev/console` open 失败** | `service spawn failed: 6: Device not configured`（errno 6 来自 file action，先于 xpcproxy 的 ENOENT） | 连 `launchd logging initialized. name: com.apple.xpc.launchd pid: 1` 都没有；USB 面板上看不到任何 launchd 行 | 这不是 launchd 坏了，是 `cnopen → km_tty[0] → kmopen` 这条 tty 路径没通；它同时吃掉日志和 job | 修 tty 层（`kmopen/kmstart/kmputc/console_write_char`），或让 `cnopen` 对 console 走 `/dev/kebabcon` 的直写；只改 job plist 的 `StandardOutPath` **无效**，因为 xpcproxy 的 0/1/2 是硬编码 |
+| 3 | **xpcproxy 的第二次 exec / 平台位** | `xpcproxy could not exec: 85: Bad executable` 或 `unexpected SIGKILL … namespace 9 code 0x6`；或 `unexpected exec of non-platform binary: /usr/lib/zprint: …` | 若有 9/6，内核先打 `KEBAB EXEC: copyout stage=strings …`；若是平台位，`exec cdhash … tc=miss platform=0` | 第一次 exec（launchd）修好后，`SETEXEC` 是**另一种形状**的 exec；`posix_spawn` 的 argv/envp 非空、走 `:3722` 的 `SETEXEC` 分支，不能假设和 init exec 完全等价 | 用同一个 copyout 修法覆盖 `posix_spawn` 入口；先 `verify-trustcache-cdhash.py` 核 xpcproxy/zprint 的 cdhash |
+| 4 | **`getpwuid_r(0)` 无 entry** | `Could not find uid associated with service: 0: … 0` | 没有 xpcproxy spawn 行 | 卷上有 `/etc/passwd`/`master.passwd`，且 `libsystem_info` 分片里有 `/etc/master.passwd` 字符串；但“没有 opendirectoryd 时是否回退到文件”只有真机能证 | 保留 root entry；如仍失败，先确认 `getpwuid_r(0)` 的返回值，而不是怀疑 launchd |
+| 5 | **`init-with-data-volume` / 启动模式块失败** | `boot-mode …` / `init-with-data-volume` 相关行；或 `launchd built improperly` / `no boot tasks` | 没有 plist 扫描行，直接没有 job | 这个块本身只做 os_variant/trace/limits/personas/jetsam，**不扫 job**；但它失败是否连带影响 system domain 初始化，只有真机能定 | 先看有没有 `Could not parse plist` 或 `Unable to stat/open`；没有就说明还没走到 job 扫描 |
+| 6 | **kqueue / timer 失败** | `__os_assumes_log`（`dispatch_source_set_timer`）/ `dispatch_source_create` 失败行 | 首次 `RunAtLoad` 仍可能成功；throttle 重试计时不准 | 不要把“10 秒后没重试”误判成 launchd 死了 | 单独测 `kqueue()`/`kevent(EVFILT_TIMER)`；不影响首轮 spawn |
+
+#### 4.1 读日志的顺序（决策表）
+
+| 最早看到 | 说明 | 下一步 |
+| --- | --- | --- |
+| `pid 1 exited -- exit reason …` / `initproc exited` | launchd 在 main 之前或 main 早期死了；先看 `KEBAB EXEC: copyout stage=…` / namespace 9 的 code | 回到第 66/72 节的 exec 诊断，不要看 plist |
+| `launchd cannot be run directly (stdout: %d)` | fd 1 被内核预开成了 tty | 不要给 PID 1 预开 console；保持 fd 表为空 |
+| `no bootargs string` / `no boot tasks` / `launchd built improperly` | `kern.bootargs` 空、`__config` 的 `Boot` 空/不是 dict | 检查 loader 是否把 `kernel_args` 传进 `kern.bootargs` |
+| `sysctl hw.targettype was not set` | `IOPMrootDomain` 的 `hw.targettype` 节点整个不存在 | 检查 IOKit/IOPMrootDomain 是否编进内核并 start |
+| `Could not neuter bootstrap port` / `could not set up inheritance port` / `could not get unique pid` | main 的 Mach/端口硬门 | 看对应的 `task_set_special_port`/`mach_ports_register`/`proc_pidinfo(18)` errno |
+| `launchd logging initialized. name: com.apple.xpc.launchd pid: 1` | main 和 boot task 都过了，日志 sink 也建立了 | 说明 `/dev/console` 至少能 open；继续看 job |
+| `service spawn failed: 6: …` / `xpcproxy spawn failed: 6: …` | `/dev/console` 打不开（file action 先失败） | 修 tty/console，先别看 xpcproxy |
+| `service spawn failed: 2: …` / `xpcproxy spawn failed: 2: …` | console 正常，xpcproxy 不存在 | 装 xpcproxy 或改 boot task |
+| `Could not find uid associated with service: 0: …` | passwd 没被 libinfo 读到 | 查 `/etc/passwd`/`master.passwd` 与 `getpwuid_r(0)` |
+| `unexpected exec of non-platform binary: …` | TC 没覆盖该二进制，或 `kebab_cs` 没给 platform 位 | 核 cdhash/TC/`kebab_cs=15` |
+| `zone name` / `ZONE TOTALS` | zprint 真的跑了 | 目标达成；之后才是 zprint 自身 `mach_memory_info` 的权限问题 |
+
+### 5. 卷还缺什么
+
+按“下一版 `base.kist` / `skel.kist` 要不要加”排列：
+
+| 路径 | 缺失后果 | 建议 |
+| --- | --- | --- |
+| `/usr/libexec/xpcproxy` | **所有 job 无法 spawn**（硬 blocker） | 必须加；同时把 `/usr/libexec/` 加进 `kebab_install.c` 的 `ki_allow[]` 前缀表，或改走 boot task |
+| `/private/var/db/com.apple.xpc.launchd` | `disabled.plist`/`overrides.plist` 迁移读不到；单 job 仍可跑 | 加进 `SKELETON_DIRS`（0755）；`config` 子目录可选 |
+| `/private/var/log/com.apple.xpc.launchd` | launchd 自己会 `mkdir` | 可不加；加了少一次 `mkdir` |
+| `/System/Library/xpc/launchd.plist` | 普通首启只多一行 `Unable to open` | 若要“boot task 直跑”这条备用路线，必须加（且要加 `/System/Library/xpc/` 前缀或 skel 允许清单） |
+| `/var/run/syslog` | 连不上 syslogd；日志 fallback 到 console | 不加；但 console 必须通，否则日志全丢 |
+| `/System/Library/CoreServices/SystemVersion.plist` | `os_variant_*` 走非 internal 分支 | 可选；不影响 spawn |
+| jetsam/limits/personas 三个 plist | 对应功能缺席，均非致命 | 可选；先保证 job 能跑 |
+| `/private/var/tmp`（01777） | `mkdtemp` 失败，带 `StandardOutPath` 的 job 失败 | 已在 `skel.kist`，保留 |
+| `/dev` 目录 | `devfs_kernel_mount: kernel_mount failed: 2`，所有 `/dev/*` 没有 | 已在 `skel.kist`，保留 |
+| `/etc`、`/tmp`、`/var` 符号链接 | `/etc/passwd`、`/var/run/syslog`、`mkdtemp` 全部走错 | 已在 `skel.kist`，保留 |
+
+**更正第 68 节的一处**：第 68 节 3 写“整个二进制只有一处 `_mkdir` 调用，
+参数是 `/var/run`、模式 0700”。按真实二进制复核，`_mkdir` 只有一处
+（`0x10003e904`），但参数是 `0x100071768` 指向的
+`/private/var/log/com.apple.xpc.launchd`，不是 `/var/run`。`/var/run` 由
+`skel.kist` 提供即可；`/private/var/log/com.apple.xpc.launchd` 则由 launchd
+自己按 0700 建。这个更正不影响第 68 节的结论（`/dev`、`/var`、`/tmp` 仍必须
+由卷骨架提供）。
+
+**不要**把 `/dev/console`、`/dev/null` 当普通文件装进去：devfs 的节点是
+`devfs_init` 在挂载时创建的，普通文件会遮住它们，语义完全错（第 68 节 3 已写）。
+
+### 6. 只有真机能定的
+
+1. **`/dev/console` 的 open 是否成功。** 源码链是
+   `devfs(0,0) → cnopen → cndev() → km_tty[0]->t_dev(12,0) → kmopen →
+   ttyopen/PE_current_console`，`kminit()` 在 `bsd_autoconf` 里跑过；但
+   `bsd/dev/kebab_ufs.c:813` 的注释明确说这条路径“does not complete here yet”。
+   USB 面板上看不到 `launchd logging initialized` 时，先怀疑它，不要先怀疑
+   launchd。
+2. **xpcproxy 的 cdhash 是否在静态信任缓存里。** 文件不在当前提取树里；
+   mtree 只证明它在 OS 里存在。加进卷之前必须用
+   `scripts/verify-trustcache-cdhash.py` 核；否则 `unexpected exec of
+   non-platform binary` 会把“缺文件”换成“签名不对”。
+3. **xpcproxy 的 `POSIX_SPAWN_SETEXEC` 第二次 exec。** launchd 的 exec 是
+   `load_init_program_at_path()` 的 `execve(envp=NULL)`；xpcproxy 的是
+   `posix_spawn` 的 `SETEXEC` 分支（`kern_exec.c:3722`），argv/envp 都非空。
+   9/6 的修法是否覆盖这条，只有真机能证。
+4. **`getpwuid_r(0)` 在没有 opendirectoryd 时是否回退到 `/etc/master.passwd`。**
+   缓存分片 `.05` 里确实有 `/etc/master.passwd`/`/etc/passwd`/`/etc/group`
+   字符串，但“先 mach lookup 失败、再 files 回退”的实际路径没跑过。
+5. **`init-with-data-volume` 与 system domain 初始化的先后。** 这个 block
+   本身只碰 os_variant/trace/limits/personas/jetsam；job 扫描是否在它之前完成，
+   决定“它失败会不会连带没有 job”。
+6. **kqueue/`EVFILT_TIMER` 在这块板子上的行为。** 内核源码在，但 libdispatch
+   的 timer 是 16 KiB 页 + 新 kqueue 的第一批真实用户；首次 spawn 不依赖它，
+   重试/throttle 依赖它。
+7. **os_log 的可见性。** launchd 的日志 fallback 是 `open("/dev/console")`；
+   如果 console 通，日志应该上面板；如果不通，即使 oslog 设备在，也没有
+   logd 消费，不能用“没有日志”推断“launchd 没跑”。
+
+### 7. 下一次启动的最小改动（建议，不含真机验证）
+
+按“先让 zprint 出来”的目标，有两条路，二选一：
+
+**A. 装 xpcproxy（推荐，走原设计）**
+
+1. 从 SystemOS cryptex 提取 `/usr/libexec/xpcproxy`（mtree 已确认存在）。
+2. `verify-trustcache-cdhash.py` 核它的 cdhash；不在 TC 就先解决 TC，不要指望
+   `kebab_cs` 能给它 platform 位。
+3. 在 `kebab_install.c` 的允许前缀里加 `/usr/libexec/`（这是内核改动，需重编）。
+4. 把它放进 `base.kist`；依赖应该只有 `libSystem`/`libxpc`，都在缓存里。
+5. 保留 `launchd_proxyless_spawn` 默认值（elide），不要设 `=0`。
+
+**B. 用 boot task 直跑（最小绕过，不改 launchd）**
+
+1. 写一份 `/System/Library/xpc/launchd.plist`，`Boot` 字典里加一个
+   `PerformAlways` 的任务：
+   `Program=/usr/lib/zprint`、`ProgramArguments=[/usr/lib/zprint, -L]`。
+2. 该文件不在 installer 的六个前缀里：要么加 `/System/Library/xpc/`，要么把
+   这个精确路径加进 `ki_skel_allow[]` 并用 `skel.kist` 送。
+3. boot task 的 runner 也是 `posix_spawnp` 直跑，stdio 同样硬编码
+   `/dev/console`，并会 `csops` 检查 platform 位；所以它绕开 xpcproxy，但**绕不开
+   console 和 TC**。
+4. 这条路的输出在 launchd 日志初始化之前，仍然走 `/dev/console`；若 console
+   不通，一样看不到。
+
+两条路都要求 console 先通；如果下一次启动没有
+`launchd logging initialized`，先修 console，不要先动 xpcproxy。
+
+## 七十五、让 launchd 能真正启动作业
+
+> 写于 2026-10-28。第七十四节列出的两个“与硬件无关、但一定挡在 spawn 前面”的
+> blocker 在这一节修掉。板子仍然 stranded，所以下面区分“离线已证”和“只有真机能定”。
+
+结论先写在这里：
+
+* **Blocker 1 已修（`0144`）**：`/usr/libexec/` 进入安装器允许清单，
+  `base.kist` 增加 `/usr/libexec/xpcproxy`（96,352 字节）。它的三条 dylib 依赖
+  全部在拆分共享缓存里，cdhash `f7f090b0…` 命中 OS 卷的 2,760 条静态 TC。
+* **Blocker 2 已修（`0145`）**：`/dev/console` 在 UFS 设备起来后直接路由到已有的
+  kebab 字符设备；open/close 不碰 tty，write 走 `console_write()`（USB + 面板），
+  read 返回 EOF。这是第七十四节第 5 小节的选项 (b)。
+* **位置纠正**：`xpcproxy` **不在** `Cryptex1,SystemOS`，在 OS 根卷。cryptex 的
+  `/usr` 下只有 `lib/`，`--apfs-find /usr/libexec/xpcproxy` 返回
+  `ABSENT (resolved /usr, no entry 'libexec')`。
+* 系列从 122 个补丁变成 **124 个**，在 pristine `1b191cb` 上按文件名顺序
+  `124/124` 应用。全量构建通过，见第 5 小节。
+
+### 1. 为什么拆成两个补丁
+
+两个 blocker 位于不同子系统，失败方式也不同：一个在安装器的路径白名单和
+`base.kist` 内容，一个在 VFS/设备层。拆开的好处是：
+
+* `0144` 只改安装器和用户态清单，可以单独 revert，不会把 console 的行为一起
+  回退；
+* `0145` 只改 `bsd/dev/arm/cons.c`、`bsd/dev/kebab_ufs.c` 和它的头文件，失败时
+  能直接判断是“console 路由”还是“xpcproxy 没装”；
+* 两个补丁都各自带主机侧验证，提交历史读起来就是“先让 launchd 找得到 spawn
+  入口，再让它有 stdio”。
+
+第七十四节的排位表保留为当时的审计记录；本节是它之后的状态。
+
+### 2. Blocker 1：xpcproxy
+
+#### 2.1 位置：不在 cryptex，在 OS 卷
+
+先把 `Cryptex1,SystemOS` 解到磁盘（`087-86593-047.dmg`，deflate，解开
+2,743,074,816 字节，裸 APFS 容器，块大小 4096、669,696 块）。用现有的
+`extract-ios-userland.py --dmg-file` 直接查：
+
+```
+container superblock at offset 0: block size 4096, 669,696 blocks
+  uuid 07490cba83ee4f50a4153de222723455
+volume superblock ...: 'SydneyUpdate20H392.D22D221SystemCryptex',
+  1,094 files, 634 dirs, 2 symlinks
+/usr/libexec/xpcproxy: ABSENT (resolved /usr, no entry 'libexec')
+```
+
+再遍历整卷：`/usr` 下只有一个 `lib`，没有 `libexec`；全卷也没有一个叫
+`xpcproxy` 的文件。它实际在 **OS 根卷** 的 mtree 清单里：
+
+```
+307672:file  -  -  1152921500312217273  authapfs.1152921500312217274  /usr/libexec/xpcproxy
+```
+
+所以“从 Cryptex1,SystemOS 提取 xpcproxy”这个前提是错的；改的是 OS 卷这一份。
+提取仍然用现有工具：
+
+```sh
+~/ios-userland/venv/bin/python scripts/apfs-get.py \
+    --ipsw ~/ios-work/iPhoneX-16.7.16.ipsw \
+    --get /usr/libexec/xpcproxy --out ~/ios-userland/extracted
+```
+
+结果（`apfs-get.py` 的原始输出）：
+
+```
+/usr/libexec/xpcproxy
+  inode=1152921500312217273 mode=0100755 bsd=0x20 compressed=True type=4
+  size=96352 declared=96352 ok=True
+  sha256=a97bc59d024c3b7fcf293aa6ef2fa75b60ef7220b2546ab4382adcbe78ddbfec
+  Mach-O 64-bit arm64 filetype=executable ncmds=20
+  uuid=24bf6465-21ba-30a3-a438-a7534c81ee16
+  LC_BUILD_VERSION platform=2 minos=16.7.0 sdk=16.7.3
+```
+
+| 项 | 值 |
+| --- | --- |
+| 来源 | OS 卷 `/usr/libexec/xpcproxy`，inode `1152921500312217273` |
+| 安装大小 | 96,352 字节 |
+| SHA-256 | `a97bc59d024c3b7fcf293aa6ef2fa75b60ef7220b2546ab4382adcbe78ddbfec` |
+| Mach-O | thin arm64 executable，20 条 load command，platform 2（iOS），minos 16.7.0，sdk 16.7.3 |
+| 代码签名 | `LC_CODE_SIGNATURE` 19,904 字节；`LC_DYLD_CHAINED_FIXUPS` 3,856 字节；无 `LC_ENCRYPTION_INFO_64` |
+| 入口 | `LC_MAIN` entryoff `0x4ffc`；无 `LC_RPATH` |
+| 信任缓存 | OS 卷 `static.trustcache` 命中（见 2.3） |
+
+#### 2.2 依赖表：3/3 在缓存，0 个在卷，0 个 NOWHERE
+
+`scripts/ios-deps.py` 用主缓存的 2,710 条 `imagesText` 做名字解析：
+
+| `LC_LOAD_DYLIB` / weak | 类型 | 解析结果 |
+| --- | --- | --- |
+| `/usr/lib/libSystem.B.dylib` | load | shared cache @ `0x1d1c2c000` |
+| `/usr/lib/libobjc.A.dylib` | load | shared cache @ `0x1800b8000` |
+| `/usr/lib/libcryptex_trampoline.dylib` | **weak** | shared cache @ `0x20cd82000` |
+| `/usr/lib/dyld`（`LC_LOAD_DYLINKER`，不是 dylib）| dylinker | `base.kist` 的 `/usr/lib/dyld`（922,912 字节）|
+
+`ios-deps.py` 的结论行：
+
+```
+closure: 3 dependencies -- 3 from cache, 0 from volume, 0 NOWHERE
+```
+
+`libcryptex_trampoline` 虽然是 weak，但名字在缓存里，不需要额外装文件。
+**没有一条依赖落到卷上，也没有一条是 NOWHERE**，所以 xpcproxy 本身是
+`must-install`，依赖侧不是 blocker。
+
+#### 2.3 cdhash 与静态信任缓存
+
+用 `scripts/verify-trustcache-cdhash.py` 按内核 `cs_validate_csblob()` 的规则重算
+（`hash_rank()` 选 SHA-256，CodeDirectory 整体 SHA-256 取前 20 字节）：
+
+```
+trust cache  /home/albert/ios-userland/static.trustcache (66289 bytes)
+  IM4P       25-byte DER wrapper, 66264-byte payload
+  module     v2, 2760 entries x 24 bytes, 66264 used, 0 residual, sorted
+  hash types sha1=2, sha256=2758
+
+binary        slice  cd off    cd len  hash          page  slots     trust cache
+xpcproxy      0x0    0x12ad4   940     sha256(2)     12     19/19    hit
+              cdhash f7f090b0a9b94dc944026136fc6154372763c846
+PASS xpcproxy cdhash, CodeDirectory, 19/19 slots and trust cache all match
+```
+
+逐项：
+
+| 项 | 值 |
+| --- | --- |
+| cdhash | `f7f090b0a9b94dc944026136fc6154372763c846` |
+| CodeDirectory | 文件偏移 `0x12ad4`，940 字节，hash type 2（SHA-256），page shift 12 |
+| 代码页 | 19/19 槽全部匹配（`check_slots()` 逐页 SHA-256） |
+| TC 条目 | v2，24 字节条目，hash type 2，flags 0，constraint category 3 |
+| 结论 | **命中**；内核的 `kebab_tc_lookup()` 会把它标成 platform |
+
+`static.trustcache` 的 2,760 条与 IPSW 的 `087-86698-044.dmg.trustcache` 一致，
+不是重新生成的。xpcproxy 的 cdhash 不在 cryptex 的 TC 里是预期行为——它是 OS
+卷的二进制，用 OS 卷的 TC。
+
+#### 2.4 安装侧改了什么
+
+* `bsd/dev/kebab_install.c` 的 `ki_allow[]` 从 6 个前缀变成 7 个，新增
+  `"/usr/libexec/"`；这是普通流（`base.kist`）的检查，`ki_skel_allow[]` 不动。
+* `scripts/make-minimal-userland.py` 的 `ALLOW` 表同步新增；`base` 列表增加
+  `(/usr/libexec/xpcproxy, 0o755)`，并把它加进 trust-cache 与 dependency 检查。
+* `scripts/bring-up.py` 的 `BASE_ENTRIES` 从 5 改成 6；`scripts/test-bring-up.py`
+  的假板 fixture 也增加一条 1,600 字节的 xpcproxy，保持 6 条。
+* `scripts/verify-trustcache-cdhash.py` 新增 `--xpcproxy`（默认
+  `~/ios-userland/extracted/usr/libexec/xpcproxy`）和它的 EXPECTED 表；现在一次
+  检查 launchd、dyld、xpcproxy 三个。
+* `docs/IOS-USERLAND.md` 的 SystemOS 一节增加“xpcproxy 不在 cryptex”的更正和
+  上面的提取命令；`README.md` 的用户态清单补上 96,352 这一行。
+
+`/usr/libexec/` 是后缀带斜杠的前缀，不会误匹配 `/usr/libexec2/...` 这种路径；
+安装器原有的 `..`/绝对路径检查不变。
+
+### 3. 新的 base.kist
+
+`scripts/make-minimal-userland.py --only base` 重新生成，`--verify` 重读：
+
+```
+base.kist: v2, 6 entries, 1.6 MiB installed, 640.0 KiB on the wire
+verify: 6 entries (6 files, 0 dirs, 0 symlinks), all digests match
+```
+
+| 条 | 字节 | 线上字节 | 压缩 |
+| --- | ---: | ---: | --- |
+| `/sbin/launchd` | 541,600 | 196,822 | deflate |
+| `/usr/lib/dyld` | 922,912 | 311,520 | deflate |
+| `/System/Library/Caches/com.apple.kernelcaches/static.trustcache` | 66,289 | 66,289 | store |
+| `/usr/lib/zprint` | 88,352 | 10,899 | deflate |
+| `/usr/libexec/xpcproxy` | 96,352 | 14,834 | deflate |
+| `/System/Library/LaunchDaemons/com.kebab.zprint.plist` | 529 | 295 | deflate |
+| **合计** | **1,716,034** | **601,811**（payload+头）| |
+
+流级数字：
+
+| 项 | 值 |
+| --- | --- |
+| 文件大小 | 655,360 字节（640.0 KiB，10 个 64 KiB chunk）|
+| 安装字节 | 1,716,034 字节（1.64 MiB）|
+| 线上字节（含头）| 655,328 字节；加 32 字节 stream header 为 655,360 |
+| 填充 | 53,517 字节 |
+| 压缩比 | 38.2% |
+| 条目 | 6（6 file，0 dir，0 link；KIST v2）|
+| SHA-256 | `eec6cbefbb52a671275fef924f088c5ffded10dbeda829438d98e53bb28aa5dc` |
+
+`skel.kist` 没有变（16 条：10 dir + 3 link + 3 file，153 字节安装，64 KiB
+线上，SHA-256 `b0b22fad2086de1f3d7eb3c054822c4746633ebd2439dad384f73aee9dad2bc2`）；
+`cache.kist` 的 44 个文件也没有变，所以本轮没有重建 cache 流。硬件上安装
+`base.kist` 后应看到 `INST DONE entries 6 ok 6 skipped 0 ...`，而不是 5。
+
+### 4. Blocker 2：/dev/console
+
+#### 4.1 选择：选项 (b)
+
+选 **(b) 把 console 路由到已有的 kebabcon 字符设备**，理由是它最贴合现有代码，
+而且不依赖任何未经验证的 tty 初始化：
+
+* 现有 `bsd/dev/kebab_ufs.c` 已经在 `kebab_ufs_init()` 里注册了
+  `kebabcon_cdevsw` 和 `/dev/kebabcon` 节点，`kebab_ufs_init()` 在 root mount
+  阶段就跑过；console 的 open 发生在 PID 1，设备一定已经存在。
+* 选项 (a) 要证明 `kmopen()` 会返回。它要拿 `tty_lock`、进 `linesw[0].l_open`、
+  调 `PE_current_console`，任何一步阻塞都发生在 VFS 的 open 里面；当前没有任何
+  真机证据表明它在 kebab 上完成过。板子 stranded，无法补这个证据。
+* 选项 (c) 只是“返回一个能用的设备并打印一行说这是替代品”，除了多一行日志，
+  和 (b) 的实际行为一样，没有额外价值。
+
+因此 `0145` 让 `cnopen/cnclose/cnread/cnwrite/cnioctl/cnselect` 在 UFS 设备可用
+时变成 `kebab_console_*` 的薄封装；generic arm 路径保留，`cndev()` 也不再
+无条件解引用 `km_tty[0]`。
+
+#### 4.2 从 open 到 USB 的完整路径
+
+```
+open("/dev/console")
+  -> devfs vnode (0,0)
+  -> spec_open() -> cdevsw[0].d_open = cnopen()          bsd/dev/arm/cons.c
+  -> kebab_console_route():
+       constty == NULL && kebab_console_available()
+  -> kebab_console_open() -> 0                            bsd/dev/kebab_ufs.c
+
+write(fd, buf, n)
+  -> cnwrite() -> kebab_console_write()
+  -> uiomove() 64 B 一块
+  -> console_write(buf, n)                                 osfmk/console/serial_console.c
+  -> _cnputc() 逐字符
+       -> kebab_usb_log(&c, 1)                             bsd/dev/kebab_usb.c
+            -> bulk IN 环 -> 主机 USB console
+       -> cons_ops[VC_CONS_OPS].putc = kebab_console_putc
+            -> kebab_early_putc() -> 面板
+
+read(fd, buf, n)
+  -> cnread() -> kebab_console_read() -> 0（EOF）
+
+ioctl(fd, TIOCGETA, ...) -> ENOTTY
+select()/poll() -> seltrue()（可写，不报告可读）
+```
+
+关键点：
+
+* **没有 `tty_lock`、没有 `linesw`、没有 `kmopen`、没有 `PE_current_console`。**
+  open/close 直接返回 0，所以不可能在这条路径上睡眠或等锁。
+* 写走内核自己的 `console_write()`，也就是 `kprintf` 的那条路。`_cnputc()` 先
+  `kebab_usb_log()` 再 `kebab_early_putc()`，所以用户态字节同时到 USB 和面板；
+  不需要在 console 驱动里再复制一份 USB 逻辑。
+* `cndev()` 在 `km_tty[0] == NULL` 时返回 `NODEV`，每个 `cn*` 在 fallback 前检查
+  `NODEV` 并返回 `ENXIO`。这样即使 UFS 还没起来、又没有 km tty，也只会得到
+  `ENXIO`，不会空指针 panic。
+* `/dev/kebabcon` 和 `/dev/console` 现在共用同一组函数；`/dev/kebabcon` 的写也
+  从原来的“只画面板”升级为“USB + 面板”。
+
+#### 4.3 语义边界
+
+* `/dev/console` **不是 tty**：`isatty()` 为假，`tcgetattr()`/`TIOCGETA` 返回
+  `ENOTTY`，`select()` 只报告可写。launchd 在已分析的路径里只用它做日志 fallback
+  和子进程的 fd 0/1/2，不要求 tty 语义；如果真机日志显示 launchd 在这里要求
+  termios，那才是下一步要补的 shim。
+* `read()` 返回 0（EOF），不阻塞。PID 1 或子进程如果循环读 console，会立即拿到
+  EOF 而不是挂住；这是有意的，和“没有键盘输入”一致。
+* `console_write()` 会在 `\n` 前补 `\r`（`_cnputc` 的既有行为），所以用户态写
+  `\n` 在串口终端上表现为 CRLF；不要在两个方向各补一次。
+* `cdevsw[0].d_type` 仍然是 `D_TTY`。本轮没有改它，因为 open/read/write 不走
+  tty 分支；唯一的残余是 `kevent(EVFILT_READ)` 会落到 tty filter。launchd 的
+  已分析路径没有对 console 做 kqueue；真机若出现 tty filter 相关 panic，再把
+  `cdevsw[0].d_type` 在 KEBAB 下改成 0 即可（这是一行改动，不影响本次的
+  open/write 结论）。
+
+### 5. 离线验证
+
+1. **补丁系列**：124 个补丁按文件名顺序应用到 pristine `1b191cb`
+   （`xnu-8796.141.3`）；`scripts/verify-all.sh` 的 patches 项为 `124/124`。
+2. **语法检查**：用真实构建命令（`-DKEBAB`、同样的 `-I` 和 SDK）对
+   `bsd/dev/kebab_ufs.c`、`bsd/dev/arm/cons.c`、`bsd/dev/kebab_install.c` 做
+   `-fsyntax-only`。`kebab_ufs.c` 的 13 条 `-Wdeclaration-after-statement` 与
+   改动前同文件逐条相同（都是既有函数），新加的 `kebab_console_*` 块 0 条；
+   `cons.c`、`kebab_install.c` 0 条。
+3. **主机测试**：`scripts/test-bring-up.py` 18 PASS + 1 SKIP（`command-lint`
+   需要内核源文件，本机没有），KIST v2、6 条 base、dry-run、resume、skel、
+   坏流、panic 等路径都过。
+4. **流校验**：`pack-userland.py --verify` 重读 6 条，SHA-256 全对；
+   `verify-trustcache-cdhash.py` 三个二进制全 PASS。
+5. **全量构建**：`DEVELOPMENT/ARM64/KEBAB`，从 reset 后的干净树重新应用全部
+   124 个补丁，链接出 `kernel.development.kebab`，大小 17,209,120 字节，
+   SHA-256 `231a577f66834dfbde1d3f34212aae50cc140d8cdb7e10b242def83a857f5302`。
+   构建日志里 `cons.c`/`kebab_install.c` 0 warning，`kebab_ufs.c` 13 条既有
+   warning，没有新增。**没有链接错误，没有 `.dsc`/`.fdf` 之外的产物变化。**
+6. **没有真机**：板子 stranded，以上全部是 host 侧证据；下面第 6 小节列的
+   项目仍然只能上板确认。
+
+### 6. 真机必须回答的问题
+
+按应该在 USB console 上出现的顺序：
+
+1. `launchd logging initialized. name: com.apple.xpc.launchd pid: 1` 是否出现。
+   这是 `/dev/console` open 成功的最直接证据；如果不出现，先看 `open1` 是否
+   还有别的 errno，而不是怀疑 launchd。
+2. `service spawn failed` 的 errno 是否从 6 变成 2。6 是 console，2 是
+   `/usr/libexec/xpcproxy`；`0144` 之后应该不再有 2，理想情况是这一行完全不出现。
+3. xpcproxy 是否真的起来，以及它的第二次 exec（`POSIX_SPAWN_SETEXEC`，
+   `kern_exec.c:3722`）是否过。失败特征：`xpcproxy could not exec: 85: Bad
+   executable`、namespace 9 code 0x6、`unexpected exec of non-platform binary`。
+   cdhash/TC 已经在 host 侧验过；这条只剩内核的 `SETEXEC` 路径和 `kebab_cs`
+   平台位。
+4. `getpwuid_r(0)` 在没有 opendirectoryd 时是否回退到 `/etc/master.passwd`。
+   失败行是 `Could not find uid associated with service: 0`。
+5. `kqueue`/`EVFILT_TIMER` 是否工作。首次 `RunAtLoad` 不依赖它，但 throttle 重试
+   依赖；失败会以 `__os_assumes_log` 出现，不要把“10 秒没重试”当成 launchd 死了。
+6. `os_log` 在没有 logd 时是否可见；不可见是正常的，console 上的
+   `launchd logging initialized` 和 job 输出才是判据。
+7. `/dev/console` 的写是否在 USB 和面板上都出现、CRLF 是否只补一次；以及
+   `read()` 的 EOF 是否让任何子进程空转（如果出现，再决定是否给 console 加
+   一个阻塞读的输入环）。
+8. 如果 launchd 对 console 调 `tcgetattr`/`isatty` 并在失败后降级或退出，日志会
+   直接告诉我们；必要时再把 `cdevsw[0].d_type` 改成 0，或补一个最小的 termios
+   shim。
+
+## 七十六、控制台写路径的并发审计
+
+> 写于 2026-10-28。`0145` 把 `/dev/console` 接到 kebab 字符设备之后，用户态第一次
+> 可以通过 `write(2)` 走进内核自己的 `console_write()` → `_cnputc()` 路径。这一节
+> 回答一个问题：这条路径会不会死锁或饿死，从而在真正出事的时候把唯一的观察通道
+> 一起带走。板子仍然 stranded，所以下面只区分“读代码/构建可证”和“必须真机才能定”。
+
+结论先写在这里：
+
+* **没有发现死锁、重入或饥饿路径。** 用户态写入只是增加了一个可睡眠的进程上下文
+  去占用 `console_write()` 的环形缓冲；它拿不到任何 USB 或 panic 路径需要的锁。
+  `kebab_usb_log()` 是**有界、非阻塞**的交接，拿不到就丢字节，只有
+  `panic_active()` 时才同步 drain；`ud_enter()`/`ud_rx_enter()` 都是关中断的
+  try-lock；`_cnputc()` 里的面板输出 `kebab_early_putc()` 根本不取锁。
+* **panic 的头和尾不经过控制台环。** `paniclog_append_noflush()`（panic 头、
+  结尾的 “Please go to …”）走 `consdebug_putc_unbuffered()` →
+  `console_write_unbuffered()` → `_cnputc()`，不碰 `console_ring` 的
+  `flush_lock`/`write_lock`。panic 字符串主体仍走 `consdebug_putc()` →
+  `console_write_char()`（和 printf 同一条路），所以它可能被正在写的用户态进程
+  推迟一个有界的临界区（≤16 字符 + 一次由 `panic_active()` 触发的 USB flush），
+  但不会死锁：持有者一定会跑完（见 2.2）。
+* **唯一真实的缺口是“不变量没有写在代码里”。** 如果将来有人在关中断的上下文里
+  进入 `kebab_console_write()`，`console_write()` 会
+  `panic("Console I/O from interrupt-disabled context")`（`serial_console.c:194`
+  的 `console_io_allowed()`）——正好在需要日志的时候把日志打死。`0146` 改成返回
+  `EDEADLK`，并把这个上下文约束写成注释和检查。
+* **`0145` 的注释“writable and never readable”是错的。** `seltrue()` 两个方向都
+  报；而且 readable 才是对的：`read()` 返回 0，EOF 就是可读条件，和 `/dev/null`
+  一致。`0146` 只改注释和说明，**不改 select 语义**（理由见第 5 小节）。
+* **内核 `printf` 的机制没有变。** `0146` 不碰 `osfmk/console/serial_console.c`、
+  `osfmk/kern/printf.c`、`bsd/kern/subr_prf.c`；构建后这三个目标文件、以及
+  `cons.o`、`kebab_usb.o` 全部与 `0145` 构建逐字节相同（第 6 小节），新的守护
+  分支也能在链接后的内核里看到。
+* 系列 124 → **125** 个补丁，在 pristine `1b191cb` 上按文件名顺序 **125/125**
+  应用（`scripts/verify-all.sh`，新增的 `consolepath` 检查 PASS）。全量构建通过，
+  `kernel.development.kebab` 17,209,120 字节，SHA-256
+  `087e951635130c12e185026b92200523ad5af2006b6ab26c665c72331bf299f2`。
+
+### 1. 两条路径：谁走 `cons.c`，谁走 `_cnputc`
+
+先把“控制台”拆成两个不同的东西，否则很容易把 `cons.c` 当成 printf 的出口：
+
+| 路径 | 入口 | 经过 | 出口 |
+| --- | --- | --- | --- |
+| 内核日志 | `printf()` → `console_printbuf_putc()` → `cons_putc_locked()`/`conslog_putc()` → `console_write_char()` | `console_write()` → 控制台环 → `console_ring_try_empty()` → `_cnputs()` → `_cnputc()` | `kebab_usb_log()` + `kebab_early_putc()` |
+| panic 头/尾 | `paniclog_append_noflush()` → `consdebug_putc_unbuffered()` → `console_write_unbuffered()` | 直接 `_cnputc()`，**不经过控制台环** | 同上 |
+| panic 字符串主体 | `_doprnt(panic_str, …, consdebug_putc)` → `console_write_char()` | 与内核日志同一条环（`console_suspend()` 之后改走 unbuffered） | 同上 |
+| 用户态 `/dev/console` | `write(2)` → `cnwrite()` → `kebab_console_write()` | `console_write()`（与内核日志同一条环） | 同上 |
+
+要点：
+
+* `bsd/dev/arm/cons.c` 里**没有** `cnputc`/`_cnputc`。这个树的 `cnputc` 只有 i386
+  的 `bsd/dev/i386/cons.c` 有；arm64 的字符输出在
+  `osfmk/console/serial_console.c`。所以 `0145`/`0146` 改的 `cnopen`/`cnclose`/
+  `cnread`/`cnwrite`/`cnioctl`/`cnselect` 从来不在 printf 的调用图上。
+* 两边唯一共享的全局量是 `constty`，而 `cons.c` 只读它（`kebab_console_route()`
+  用 `constty == NULL` 判断是否接管）。`printf` 侧读 `constty` 决定是否把字符送到
+  一个 tty；kebab 上没有任何代码把它设成非 NULL（`TIOCCONS` 在路由之后只会得到
+  `ENOTTY`），所以 printf 一直走 `console_write_char()`。
+* `_cnputc()` 里的 KEBAB tee 是 `0094`（console mute）加的，`0145` 没有碰它；
+  `0146` 也没有。用户态写入之所以能到 USB 和面板，是因为它和 printf 共用
+  `console_write()`，不是因为改写了 printf。
+
+### 2. 五个风险逐条
+
+| # | 风险 | 结论 | 依据 |
+| --- | --- | --- | --- |
+| 1 | 改坏了内核 printf 的机制 | **没有** | `0146` 的 diff 只有 `bsd/dev/kebab_ufs.c`；printf 三个核心目标文件逐字节相同（第 6 小节）；`cons.c` 的 `cn*` 不在 printf 调用图上 |
+| 2 | 重入 / 锁序 / USB 事件线程持锁 | **没有死锁** | `kebab_usb_log()` 只做关中断的 `log_busy` cmpxchg，抢不到就丢；`ud_enter()`/`ud_rx_enter()` 是不阻塞的 try-lock；控制台侧只取控制台环的锁，USB 侧只取 `ud.owner`/`ud.rx_owner`，没有反向获取 |
+| 3 | 在错误上下文阻塞 | **不会** | 唯一的阻塞点是控制台环的 mutex，只在进程上下文；`console_write()` 在抢占关闭/中断关闭时自己会 drop 或 panic，不会睡；panic 路径绕开环 |
+| 4 | `kebab_early_putc()` 撞显示路径 / 拆机后还调用 | **不会死锁** | 它不取任何锁；帧缓冲是 `arm_vm_init` 建的常驻内核 VA；即使 `early_disabled` 置位也只是返回，不会 fault |
+| 5 | `read()` 返回 EOF 让轮询进程 100% 空转并饿死 USB 线程 | **不会饿死内核线程** | `kebab_console_read()` 是 8 字节的 `mov w0,#0; ret`，不取锁不等待；空转只发生在用户态，拿不到任何内核锁；USB 事件线程是内核线程 |
+
+#### 2.1 风险 2 的细账：锁到底有几个
+
+控制台写路径上只有四个同步点：
+
+1. `console_ring.write_lock`（ticket spin）——`console_ring_reserve_space()`
+   在关抢占的窗口里加 `nreserved`，然后放锁；持有时间以百纳秒计。
+2. `console_ring.flush_lock`（mutex）——`console_ring_try_empty()` 持它做
+   `_cnputs()`。这是用户态唯一可能**睡**的地方（环形缓冲满时
+   `console_write()` 会 `lck_mtx_lock(false)` 等它）。
+3. `ud.log_busy`（`os_atomic_cmpxchg`，关中断）——`kebab_usb_log()` 的 16 KB
+   USB 环生产者锁，抢不到直接丢字节。
+4. `ud.owner` / `ud.rx_owner`（关中断的 try-lock，按 CPU 可重入）——只有
+   `panic_active()` 时 `kebab_usb_log()` 走 `kebab_usb_log_flush()` 才会碰，
+   抢不到就返回。
+
+锁序是单向的：控制台环的锁 → （仅 panic）`ud.owner` → `ud.rx_owner`。USB 侧没有
+任何路径反过来去取控制台环的锁，因为 `ud_poll_locked()`/`ud_event()`/
+`ud_bulk_*_done()` 里没有一句 `printf`/`kebab_usb_log`（`kebab_usb.c` 的
+`printf` 全部在 probe/init/takeover 这些不持传输门的函数里；`ud_bulk_out_done()`
+的注释明确写了“把 printf 挡在传输路径之外”）。所以不存在环。
+
+#### 2.2 风险 2 的细账：panic 时谁会等谁
+
+* `kebab_usb_log()` 里只有 `if (panic_active()) kebab_usb_log_flush();` 这一句会
+  同步 drain；drain 本身是 `ud_flush_from_panic()`，最多轮询
+  300 × `delay(100)`（约 30 s），**只在 panic/KDP 路径**。
+* panic 头和结尾走 `paniclog_append_noflush()` → unbuffered，完全不取控制台环的
+  锁，所以“机器出了什么事”这一行不依赖任何控制台锁。
+* panic 字符串主体走 `consdebug_putc()` → `console_write_char()`，也就是控制台环
+  （`handle_debugger_trap()` 里的 `console_suspend()` 在这一步之后，见
+  `debug.c:1346` 与 `debug.c:1561` 的先后）。最坏交错是：一个用户态进程在
+  `_cnputs()` 里被抢占、持有 `flush_lock`；panic 线程打印字符串时环满，在
+  `lck_mtx_lock()` 上睡。调度器会继续跑那个用户态进程，它的临界区是“≤16 字节 +
+  面板绘制 + 一次 `kebab_usb_log()`”，不等待任何东西，所以一定会跑完并放锁。
+  **这是有界延迟，不是死锁。** 唯一的放大项是它正好停在 `kebab_usb_log()` 里、
+  因为 `panic_active()` 为真而做一次最多 30 s 的 drain；那仍然是有限的。
+* panic 期间其它 CPU 已经被 `DebuggerHaltOtherCores()` 停住；`cpus=1` 的 boot-arg
+  意味着根本没有“其它 CPU 持有 flush_lock”这回事。
+* 即使一个已经停住的 CPU 留下了 `log_busy`，`ud_panic_takeover()`
+  （`kebab_usb.c:2240`）也会在 `panic_active()` 时直接清掉它；如果还遗留了传输门/
+  接收锁的 owner，它先重启控制器再接管。这是 `0091` 起就有、`0134` 扩展过的
+  “panic 必须能抢回端口”的保底。
+* panic 之后用户态不会再被调度去写 console：panic 循环占住本 CPU，其它 CPU 已
+  停。所以“用户态一直写、panic 永远排不上”这种交错不存在。
+
+#### 2.3 考虑过的交错，以及为什么都不成立
+
+| 交错 | 会发生什么 |
+| --- | --- |
+| 用户态 A 在 `_cnputs()` 里被抢占，持有 `flush_lock`；内核线程 B `printf()` | B 在 `console_ring_try_empty(true)` 里 try-lock 失败就返回，字节留在环里；B 只有在环满时才 `lck_mtx_lock(false)` 睡，而 A 的临界区是“≤16 字节 + 面板绘制”，不等待任何东西，必定前进 |
+| 用户态 A 写满 16 KB 控制台环；中断上下文 `printf()` | `console_write()` 在 `get_preemption_level() != 0` 时不会睡：环里有空间就只入环、不 flush，环满就返回（丢字节）。不死锁 |
+| 用户态 A 在 `kebab_usb_log()` 的 1 字节窗口里被抢占；中断/其它 CPU 也要 `kebab_usb_log()` | 窗口内中断是关的；其它 CPU 的 cmpxchg 失败 → 丢字节。**生产者永远不阻塞** |
+| 用户态 A 在 `console_write()` 里被抢占；同一 CPU 上 panic | A 的临界区有界且不等待任何锁，panic 线程在 `flush_lock`/环空间上的等待会由 A 跑完解除；panic 头本身走 unbuffered，不依赖 A。最坏是延迟一个临界区（A 正好停在 panic flush 里时以 30 s 为上限），不是死锁 |
+| 用户态 A 在 `console_write()` 里；USB 事件线程 `ud_thread` 在 `ud_poll_locked()`（持 `ud.owner`+`ud.rx_owner`） | A 不取 `ud.*`（非 panic 不走 flush）；事件线程也不取环锁（不打印）。互不相干 |
+| 用户态 A 写 `/dev/console`；显示 vsync 在 `AppleCLCD::present()` 里 memcpy 同一块物理帧缓冲 | 两个都是普通内存写，不共享锁；最坏是某个字符被下一帧盖掉（显示问题，不是死锁） |
+| 用户态 A 写 `/dev/console`；宿主通过 USB 触发 `kebab usb console test` → `ud_thread` 调 `panic()` | panic 在事件线程里、`ud_leave()` 之后才调用；panic 打印不取环锁。A 的写入最多是把 16 字节留在环里 |
+| 两个用户态进程同时写 `/dev/console` | 环和 `flush_lock` 串行化；两条 write 的输出可以交错，但不会互相等死 |
+
+### 3. 写路径会阻塞吗？写到什么程度
+
+会，但只在**进程上下文**、并且是“等控制台环腾出空间”这种有界等待：
+
+* 每次 `write(2)` 最多把 `uio` 里的数据按 64 字节分块，`kebab_console_write()`
+  先 `uiomove()` 再 `console_write()`。`uiomove()` 可能缺页/睡眠，但那时**没有
+  持有任何控制台锁**，所以不会把控制台锁带进缺页路径。
+* `console_write()` 在环满时用 `lck_mtx_lock()` 睡在 `flush_lock` 上；持有者每
+  16 个字符放一次锁，且持锁期间只做 `kebab_usb_log()`（非阻塞）和
+  `kebab_early_putc()`（纯内存写），所以等待是有界的。
+* 最坏情况：一个不停写 stderr 的程序会被面板绘制速度限流。`kebab_early_putc()`
+  每个字符要写 16×2×8×2 = 512 个 32 位像素到 Normal Non-Cacheable 内存，16 个
+  字符就是 8192 次写；换算下来控制台吞吐大约几十 KB/s，写几 MB 的程序会慢，但
+  **不会卡死**，也不会丢它自己的字节（`console_write()` 会一直重试到全部入环）。
+* USB 环（16 KB）是另一回事：它满了就丢（`kebab_usb_log()` 的设计），所以大量
+  输出在 USB 侧会截断，面板侧仍然完整。这不是 `0145` 引入的（`kebab_usb_log()` 从 `0091` 起就是丢字节语义）。
+* 唯一会 panic 的上下文是“关中断 + 非 suspend”：`console_io_allowed()`
+  （`serial_console.c:194`）会 `panic("Console I/O from interrupt-disabled
+  context")`。这正是 `0146` 用 `EDEADLK` 提前挡掉的情况。
+
+### 4. `kebab_early_putc()` 与面板
+
+* 它不取任何锁（`osfmk/arm64/kebab_early.c`），只读写静态的
+  `early_row/early_col` 和帧缓冲；`kebab_early_clear_row()`/`clear_screen()`
+  也是纯内存循环。所以它不可能和显示驱动形成锁环。
+* 帧缓冲地址：`arm_vm_init.c:2193` 调 `kebab_early_relocate(KEBAB_EARLY_FB_VA)`，
+  把 `0x9C000000` 的 splash 帧缓冲映射成常驻内核 VA。这个映射没有拆除路径。
+* “显示拆掉”在代码里只有两种形态，都不会 fault：
+  * `kebab_early_disable()` 只在 `serial_init()` 返回真（有 UART）时调用
+    （`osfmk/arm/arm_init.c:567`）。kebab 没有 UART，所以它一直是 0；即便置位，
+    `kebab_early_putc()` 也只是立刻返回。
+  * `kebabfb_noconsole=1` 时 `AppleCLCD::present()` 把 `kebab_console_muted`
+    置 1（`KebabFramebuffer.cpp:428`），`_cnputc()` 在 tee 之后跳过面板绘制
+    （`serial_console.c:302`）。USB 照旧，panic 照旧（`!panic_active()` 才 muting）。
+* 显示驱动 `AppleCLCD` 只在自己的 workloop 里用 `IOLock fLock`，从不调用
+  `kebab_early_putc()`；两边唯一的交互是“同一块物理内存的像素”，最多互相覆盖，
+  不会死锁。
+
+### 5. 读语义、EOF 与 `cpus=1`
+
+* `kebab_console_read()` 是 `return 0;`——链接后的代码就是 `mov w0, #0; ret`
+  两个指令（第 6 小节）。它不取锁、不等待、不循环，所以**内核里没有自旋**。
+* `kebab_console_select()` 用 `seltrue()`，两个方向都报就绪。readable 不是疏忽：
+  `read()` 立刻返回 0，EOF 本身就是可读条件，`/dev/null` 就是这个语义。改成
+  “只报 writable”会让 `select()` 在一个 `read()` 立刻完成的 fd 上永久阻塞——
+  对 launchd 的 job 来说，“永远等不到输入”比“看到 EOF”更糟。
+* 一个**忽略 EOF** 的程序（`while (read(fd, ...) == 0);` 或 select 循环）会在
+  用户态 100% 空转。但它：
+  1. 不持有任何内核锁（`cnread()` 甚至没有加锁路径）；
+  2. 用户态是可抢占的，`cpus=1` 上定时器中断照样调度；
+  3. USB 事件线程是内核线程（`ud_thread`，`kebab_usb.c:2106`），优先级高于
+     用户态，它自己的 1 ms 轮询（`delay(1000)`，睡眠或内核态 spin）不受用户态
+     空转影响。
+  所以这个空转是“费电/占 CPU”，不是“饿死 USB”。真正会饿死的是内核态关中断
+  自旋，而这条路径上不存在。
+* 真机上要观察的是：有没有**内核**线程被 console 拖住（例如 USB 事件线程的
+  `ud_poll_locked()` 周期变长）。判据见第 9 小节。
+
+### 6. 内核 printf 未变：读代码 + 构建级证据
+
+**读代码**：`0146` 的 diff 只有 `bsd/dev/kebab_ufs.c` 一个文件。`printf` 的调用图
+（第 1 小节）里没有任何 `cn*` 函数；`_cnputc()` 的 KEBAB tee 一行没动。
+
+**构建级证据**（同一棵 `dxb/xnu`，`0145` 构建 vs `0145+0146` 构建，同一 KDK、
+同一 clang、同一 flags）：
+
+| 目标文件 | 0145 构建 | 0145+0146 构建 | 结论 |
+| --- | --- | --- | --- |
+| `osfmk/DEVELOPMENT/serial_console.o` | `ddaf5f37…` | `ddaf5f37…` | 逐字节相同 |
+| `osfmk/DEVELOPMENT/printf.o` | `ada5038a…` | `ada5038a…` | 逐字节相同 |
+| `bsd/DEVELOPMENT/subr_prf.o` | `60d4a026…` | `60d4a026…` | 逐字节相同 |
+| `bsd/DEVELOPMENT/cons.o` | `384ba360…` | `384ba360…` | 逐字节相同（`0146` 不碰 cons.c） |
+| `bsd/DEVELOPMENT/kebab_usb.o` | `84447f86…` | `84447f86…` | 逐字节相同（`0146` 不碰 kebab_usb.c） |
+| `bsd/DEVELOPMENT/kebab_ufs.o` | `3c64cfe5…` | `6fe98af8…` | 只有这里变了 |
+
+这些 `.o` 在两次构建里都被重新编译过（mtime 都是新构建时间），不是“make 跳过了
+所以相同”。链接后的内核里也能直接看到改动生效：
+
+```
+fffffe00064e7538 <_kebab_console_write>:
+  ...
+  bl   _ml_get_interrupts_enabled
+  cbz  w0, 0xfffffe00064e75dc        ; 中断关着 -> 走拒绝分支
+  ...
+fffffe00064e75dc: mov w0, #11        ; EDEADLK
+```
+
+```
+fffffe00064e7530 <_kebab_console_read>:
+  mov w0, #0                         ; return 0 (EOF)
+  ret
+fffffe00064e7614 <_kebab_console_select>:
+  b   _seltrue
+```
+
+**警告**：用构建日志里那条原始 clang 命令行（`-DKEBAB`、同一套 `-I`、同样从
+`build/xnu.obj/.../bsd/DEVELOPMENT` 目录跑）对 `bsd/dev/kebab_ufs.c` 做
+`-fsyntax-only`，打补丁前后都是 16 条警告，其中 13 条是那个文件里原有的
+`-Wdeclaration-after-statement`；`cons.c` 0 条，`kebab_usb.c` 45 条（未改动）。
+全量构建日志里 `kebab_ufs.c` 也正好是这 13 条，没有新增。
+
+**构建结果**：
+
+| 项 | 值 |
+| --- | --- |
+| 配置 | `DEVELOPMENT ARM64 KEBAB`，macOS 13.5，KDK `KDK_13.5_22G74.kdk` |
+| 源码树 | `dxb/xnu` 重置到 `1b191cb` 后按文件名顺序应用 125 个 kebab 补丁 |
+| 产物 | `build/xnu.obj/DEVELOPMENT_ARM64_KEBAB/kernel.development.kebab` |
+| 大小 | 17,209,120 字节（与 `0145` 相同，守护分支落在对齐填充里） |
+| SHA-256 | `087e951635130c12e185026b92200523ad5af2006b6ab26c665c72331bf299f2` |
+| 对照（`0145`） | 17,209,120 字节，`231a577f66834dfbde1d3f34212aae50cc140d8cdb7e10b242def83a857f5302` |
+
+### 7. `0146` 改了什么（只改 `bsd/dev/kebab_ufs.c`）
+
+1. `kebab_console_write()` 开头加一个上下文守护：
+
+   ```c
+   if (!ml_get_interrupts_enabled()) {
+           return EDEADLK;
+   }
+   ```
+
+   注释里写明它是 `docs/BRING-UP-STATE.md` 第 76 节的不变量：用户态字节进入内核
+   控制台的唯一入口必须是可睡眠的线程上下文。关中断意味着 USB 传输门
+   （`ud_enter()` 会关中断整个临界区）或中断处理程序——前者会让 drain 卡在 USB
+   端口后面，后者会让 `console_io_allowed()` 直接 panic。今天唯一的调用者是
+   `write(2)`，这条分支不可达；将来谁把它接进别的上下文，会得到一个可诊断的
+   `EDEADLK`，而不是在需要日志时丢掉日志。
+2. 修正 `0145` 的错误注释（“Select reports the device writable and never
+   readable”），并在 `kebab_console_select()` 上写清楚为什么 `seltrue()` 两个
+   方向都报是对的（第 5 小节）。
+3. 加 `#include <arm/machine_routines.h>`（`ml_get_interrupts_enabled()` 的声明；
+   `kebab_usb.c` 一直这么包含）。
+
+**没有改**：`bsd/dev/arm/cons.c`、`osfmk/console/serial_console.c`、
+`osfmk/kern/printf.c`、`bsd/kern/subr_prf.c`、`kebab_usb.c`、`kebab_ufs.h`。
+
+### 8. 未来回归怎么抓
+
+两条互补的防线：
+
+1. **运行时守护（`0146`，内核里）**：`kebab_console_write()` 的 `EDEADLK`。只要
+   有人把这条路径接进关中断的上下文（USB 传输门、中断处理程序），第一次写就会
+   失败并留下 errno，而不是把控制台锁死在 USB 端口后面。
+2. **离线架构检查（`0146`，`scripts/check-console-path.py`，接进
+   `scripts/verify-all.sh` 的 `consolepath` 项）**：在“整串补丁应用后的树”上检查
+   六个结构性不变量，板子不在也能跑：
+
+   | 检查 | 断言 |
+   | --- | --- |
+   | `printf-path` | `printf.c`/`serial_console.c`/`subr_prf.c` 不得出现 `cn*` 或 `kebab_console_*` |
+   | `console-device` | `cons.c` 里不得有 `console_write()`/`_cnputc()`/`kebab_usb_log()` 这类 sink，且必须仍然路由到 `kebab_console_write()` |
+   | `console-write` | `kebab_console_write()` 必须调用 `console_write()`，且不得调用 `kebab_usb_log()`/`kebab_usb_log_flush()` |
+   | `console-guard` | `kebab_console_write()` 必须保留 `ml_get_interrupts_enabled()` + `EDEADLK` |
+   | `console-read` | `kebab_console_read()` 的函数体必须就是 `return 0;`，不得有 `while`/`for`/`thread_block`/`delay` 之类 |
+   | `console-select` | `kebab_console_select()` 必须仍然用 `seltrue()` |
+
+   检查器自己做过反向验证：把守护删掉、往写路径塞一句
+   `kebab_usb_log_flush()`、往 `printf.c` 里塞 `cnwrite(`、往 `cons.c` 里塞
+   `console_write(`，四种改动都会让对应项 FAIL。它读的是去掉注释和字符串之后的
+   代码，所以注释里提到这些符号不会误报。
+
+`verify-all.sh` 的实际输出（本机，2026-10-28）：
+
+```
+patches            PASS    125/125 patches apply in filename order to 1b191cb (xnu-8796.141.3)
+consolepath        PASS    6 console write-path invariants hold
+panel              PASS    committed table and header match the pinned source
+...
+verdict: PASS  (8 passed, 0 failed, 4 skipped)
+```
+
+### 9. 真机上才能定的
+
+这一节只能证明“读代码和构建层面没有死锁”，下面这些仍然要等板子：
+
+1. launchd 及子进程写 `/dev/console` 时，USB 口上的输出是否完整、CRLF 是否只补
+   一次；`kebab_early_putc()` 的面板绘制是否跟得上（观察 USB 是否被面板拖慢）。
+2. 有没有**内核**线程被 console 拖住：最直接的判据是 `kebab_usb_panic_spin()`
+   之前的 USB 心跳（host 侧 CDC 是否持续收到字节），以及
+   `KEBAB KDP STATE: ... owners=.../.../...` 这行里的 `owner`/`rx_owner` 是否
+   长期非 0。用户态空转不会出现在这里。
+3. 大量 stderr 输出时，`write(2)` 的实际吞吐和延迟（面板绘制是主要成本）。如果
+   慢到影响 launchd，可选项是给用户态写加一个“只进 USB 环、不画面板”的开关，
+   但那是性能问题，不是死锁问题。
+4. 如果确有子进程忽略 EOF 空转（第七十五节第 7 条），再决定是否给 console 加
+   一个阻塞读的输入环；在那之前，`read()` 返回 EOF 是正确语义。
+
+## 七十七、大文件写入的 HFS+ 边界
+
+> 结论先说：这条路径**不是**移植层自己写的简化 writer，而是 Apple 完整的
+> HFS+（`hfs-627.100.6`）；8 个 inline extent 用满之后，第 9 个 extent 会走
+> extents overflow B-tree 的 `CreateExtentRecord()`/`UpdateExtentRecord()`，
+> 这条路径在源码里存在且被编译进内核。按 16 GiB 卷的几何和安装器的写粒度，
+> 最大的 592,101,376 B 文件应当只有 1 个 extent；8 个 inline extent 有极大
+> 余量。**不需要改 HFS+ 写路径**。本节把证据、边界和只有真机能定的部分分开
+> 写清楚；新增的 0147 只是把本节依赖的格式常量钉成编译期断言，不改行为。
+>
+> 板子仍然 stranded：下面是代码审计、卷格式实测和构建结果，不是 592 MB
+> 真机写入结果。真机上完整创建过的最大文件目前仍是 `dyld` 的 922,912 B；
+> 64,028,672 B 是 64 MiB 旧卷写满后的部分写入，不是完整文件。
+
+### 1. 用的是哪套 HFS+ 写路径
+
+`bsd/kebab_hfs/` 是 Apple OSS `hfs-627.100.6` 的源码，由
+`0080-kebab-hfs-sources.patch` 整体加入，`0081-kebab-hfs-build.patch` 把它
+编进内核。写路径的 vnode 操作表在 `hfs_vnops.c`：
+
+```
+bsd/kebab_hfs/core/hfs_vnops.c:7379
+    { &vnop_write_desc, (VOPFUNC)hfs_vnop_write },   /* write */
+```
+
+`hfs_vnop_write()` 在 `hfs_readwrite.c:336`；它调用的 `ExtendFileC()` 在
+`FileExtentMapping.c:836`；块分配在 `VolumeAllocation.c:982` 的
+`BlockAllocate()`；B-tree 在 `BTree*.c` 和 `hfs_btreeio.c`。这一整条链
+都不是 KEBAB 新写的。
+
+**逐文件对照。** 2026-10-28 把 `bsd/kebab_hfs/core/` 与
+`apple-oss-distributions/hfs` 的 tag `hfs-627.100.6` 做了 SHA-256 对照：
+两边都有 66 个 `.c`/`.h`，**62 个逐字节相同**；只有 4 个不同：
+
+| 文件 | 差异 | 是否写路径 |
+| --- | --- | --- |
+| `hfs_readwrite.c` | 只有 `iotypeflag = (uint32_t)(uintptr_t)ap->a_data;` 一处 64 位指针 cast（`hfs_readwrite.c:2382`，ioctl） | 否 |
+| `hfs_vfsops.c` | KEBAB 的脏根卷挂载策略、低磁盘通知常量、`KEBAB HFS:` 挂载日志 | 否 |
+| `hfs_vfsutils.c` | KEBAB 的脏非日志根卷放行、日志 replay 检查 | 否 |
+| `hfs_iokit.h` | `CONFIG_PROTECT` 的 `#if` 包住 AppleKeyStore 声明 | 否 |
+
+`FileExtentMapping.c`、`VolumeAllocation.c`、`BTree.c`、`BTreeAllocate.c`、
+`BTreeTreeOps.c`、`BTreeWrapper.c`、`hfs_btreeio.c`、`hfs_vnops.c`、
+`hfs_extents.c` 全部与 Apple 原版逐字节相同。也就是说，extent 溢出、位图分配、
+B-tree 增长这些逻辑没有被移植层替换或裁剪。
+
+`hfs_extents.c` 里另有一套 `hfs_ext_find()`/`hfs_ext_replace()` iterator API，
+但本 build 没有任何调用者（`grep` 全树只命中定义和头文件）；真正给普通文件
+写 extent 的是 `FileExtentMapping.c`。不要因为看到 `hfs_extents.c` 就以为
+那是写路径。
+
+`kebab_hfs_compat.h` 把 `CONFIG_HFS_RBTREE` 清掉，但这份 Apple 源码的
+`hfs_isrbtree_active()` 本来就固定返回 0（`VolumeAllocation.c:4105`），分配走
+bitmap + free-extent cache；这个开关不影响 extent overflow。
+
+### 2. Extent overflow：8 个 inline extent 之后到底发生什么
+
+HFS+ 的 catalog 文件记录里，每个 fork 内联 8 个 `HFSPlusExtentDescriptor`
+（`kHFSPlusExtentDensity = 8`，`hfs_format.h:166`；descriptor 8 字节，
+key 10 字节）。第 9 个不连续的 extent 必须写进 extents overflow B-tree。
+
+写路径里这条分支是明确实现的：
+
+- `ExtendFileC()` 先 `SearchExtentFile()`（`FileExtentMapping.c:1680`）；
+- 当前记录未满，直接改 `foundData[foundIndex]`，走
+  `UpdateExtentRecord()`（`FileExtentMapping.c:1805`），B-tree 记录用
+  `BTReplaceRecord()`（`1858`）回写；
+- 满 8 个时，`foundIndex == numExtentsPerRecord`（`1133`），构造新 key
+  （`fileID`、fork type、`startBlock = nextBlock`），清零 8 个 slot，然后
+  `CreateExtentRecord()`（`1162`）；后者在 `FileExtentMapping.c:273`，最终
+  `BTInsertRecord()`（`310`）插入 `vcb->extentsRefNum` 指向的 extents B-tree；
+- 如果 B-tree 自己长不动，`BTInsertRecord()` 返回 `btNoSpaceAvail`
+  （`fsBTFullErr`）；`ExtendFileC()` 也把 `fxOvFlErr` 转成 `dskFulErr`，
+  并把刚分配的 extent 退掉（`1163`-`1170`）。
+
+**如果这条路径不存在，失败点会在哪里？** 不是“文件到 64 MB”，而是
+**第 9 个不连续 extent 的那次分配**：
+
+1. `ExtendFileC()` 发现当前记录 8 个 slot 已满；
+2. 没有可写的 overflow record，插入失败；
+3. `ExtendFileC()` 返回 `dskFulErr`（`-34`）；
+4. `hfs_readwrite.c:563` 的 `MacToVFSError()` 把它映射成 **ENOSPC**；
+5. `hfs_vnop_write()` 若已有部分进展，会按 POSIX 返回 short write，
+   `vn_rdwr()` 的 `resid != 0` 让安装器得到 **EIO**；若一点也没写进去，
+   安装器直接看到 **ENOSPC**。
+
+安装器会把这条错误打印成
+`FAIL <path> write failed (error 28)` 或 `(error 5)`（`kebab_install.c:1044`），
+然后 `ki_abort("write failed", error)`。这就是“看起来像磁盘满或 I/O 错误”的
+来源。
+
+但这条路径**存在**，所以不会在第 9 个 extent 停。更直接的旁证是 64 MiB
+旧卷上的实测：那个卷写了 64,028,672 B 才 ENOSPC。如果每个 64 KiB 写都变成
+一个独立 extent，8 个 extent 只能覆盖 512 KiB，早在第 9 个 extent 就失败了；
+它没有，说明 allocator 至少把相邻分配合并了（下面的第 3 节），或者 overflow
+record 已经在工作。两种解释都排除了“第 9 个 extent 必死”。
+
+### 3. 分配策略与碎片：为什么 592 MB 应该是 1 个 extent
+
+`hfs_vnop_write()` 默认带 `kEFDeferMask`（`hfs_readwrite.c:422`），只有单次
+请求 ≥ 1 MiB（`HFS_MAX_DEFERED_ALLOC`，`hfs.h:92`）才立即分配；安装器每次
+`vn_rdwr()` 是 64 KiB，所以 9,035 次写（9,034 个 64 KiB 加一个 48 KiB）都只记在
+`ff_unallocblocks`（别名 `ff_data.cf_vblocks`）里。
+
+真正落盘发生在 UBC 把脏页推下去的时候：`hfs_vnop_blockmap()` 看到
+`VNODE_WRITE` 且 `ff_unallocblocks != 0`，调用
+`ExtendFileC(hfsmp, fp, 0, 0, kEFAllMask | kEFNoClumpMask, ...)`
+（`hfs_readwrite.c:3483`），把**所有** deferred 块一次性变成真实 extent。
+`ExtendFileC()` 的策略是：
+
+1. 先按 `wantContig = true` 要一整段连续空间（`HFS_ALLOC_FORCECONTIG`，
+   `VolumeAllocation.c:1072`）；
+2. 失败才退化成“有多少拿多少”，并可能分多次 `BlockAllocate()`；
+3. 每次拿到的 `actualStartBlock` 如果正好等于上一个 extent 的末尾
+   （`startBlock`），就直接把上一个 extent 的 `blockCount` 加大
+   （`FileExtentMapping.c:1117`-`1125`），不会新建 extent。
+
+所以顺序写、空卷的场景下，一整个文件就是一个 extent。即使 deferred 分配被
+分几批 materialize，只要下一批的起点接在上一个 extent 末尾，仍然合并。
+
+**这个 16 GiB 卷的实测几何**（`/tmp/KebabRoot.img`，`newfs_hfs -b 4096
+-c c=256,e=32,a=8 -I c=256,e=32,a=8`）：
+
+| 项 | 值 |
+| --- | ---: |
+| block size | 4096 |
+| total blocks | 4,194,304 |
+| free blocks | 4,193,878（16,382 MiB） |
+| allocated blocks | 426 |
+| `nextAllocation` | 23,545（约 92 MiB） |
+| allocation bitmap | 128 blocks（512 KiB） |
+| extents B-tree | 32 blocks，4096 B/node，1 extent（block 129..160） |
+| catalog B-tree | 256 blocks，8192 B/node，1 extent（block 249..504） |
+| attributes B-tree | 8 blocks（block 161..168） |
+
+位图里只有三段已分配：`0..168`、`249..504`、`4,194,303`。从
+`nextAllocation = 23,545` 到卷尾 `4,194,302` 是**连续的 4,170,759 个空闲块**
+（约 15.9 GiB）。安装器的最大文件 592,101,376 B 正好是
+**144,556 个 4096 B 块**，只占这段连续空间的 3.47%，也占全部空闲块的 3.45%。
+
+具体到安装序列：
+
+- 44 个文件合计 3,330,359,296 B = **813,076 块**，占空闲块的 19.39%；
+- 安装完（cache 流）还剩 **3,380,802 块**（12.895 GiB），再加 `base.kist`
+  的 396 块也够；
+- 每个文件按 64 KiB 顺序写，文件之间由安装器串行执行；本卷元数据区尚有
+  余量，正常情况下不会插进正在写的文件的连续数据段。
+
+**最坏现实碎片**：catalog 叶节点在 44 条记录之间偶尔分裂，可能在某个文件
+的数据段之前或之后插一个 8 KiB 元数据块。那最多让一个文件变成 2 个 extent；
+extents B-tree 自己的增长也可能占一个 extent 级别的块，但都在数据段之外。
+**8 个 inline extent 对 592 MB 仍然足够。**
+
+**真正的上界**：即使极端到每 64 KiB 一个 extent，592 MB 也只有
+`ceil(9,034.99) = 9,035` 个 extent；每个 overflow record 装 8 个，需要
+**1,130 条记录**。extents B-tree 初始 32 个 4 KiB node、31 个空闲，并且自己
+还能再长出最多 7 个 extent（每个 clump 32 块，合计约 1 MiB、约 256 个 node），
+大约能放 1.3 万条记录，装得下。只有 4 KiB 级碎片（144,556 个 extent、18,070 条记录）按最小的 32 块 clump
+估算才会超过这棵树；本卷 81% 空闲、写粒度 64 KiB，不会出现这种碎片。
+
+### 4. 尺寸与偏移：592 MB 离所有 32 位边界都很远
+
+| 量 | 类型/位置 | 本安装的值 | 边界 |
+| --- | --- | ---: | ---: |
+| 文件逻辑大小 | `HFSPlusForkData.logicalSize`，u64 | 592,101,376 | 2^63-1 |
+| 写调用偏移/长度 | `hfs_vnop_write()` 的 `off_t`、`int64_t bytesToAdd` | < 2^31 | 2^63-1 |
+| extent 查找块号 | `SearchExtentFile()`：`(u_int32_t)(filePosition / blockSize)` | 144,556 | 2^32 块 = 16 TiB @4K |
+| extent 起点/长度 | `HFSPlusExtentDescriptor.startBlock/blockCount`，u32 | 144,556 块以内 | 2^32-1 块 |
+| fork 块计数 | `ff_blocks`/`c_blocks`，u32 | 144,556 | 2^32-1 |
+| 单次 `vn_rdwr` | `resid`/`n`，int，最多 64 KiB | 65,536 | 2^31-1 |
+| 安装器偏移 | `ki_entry.offset` u64，传给 `off_t` | < 2^31 | 2^63-1 |
+
+`SearchExtentFile()` 的 `u_int32_t` 块号是数据路径上最明显的一个 32 位截断
+点（`MapFileBlockC()` 里的 `firstFABN`/`nextFABN` 同样是 u32 块号），但单位是
+allocation block，4 KiB 块下能表示 16 TiB；592 MB 只用了 144,556，离上限有
+约 4.5 个数量级的余量。文件字节偏移本身一路是
+`off_t`/`int64_t`，不存在 2 GiB 或 4 GiB 的截断。
+
+chunked write 的 signed/unsigned 也检查过：`hfs_vnop_write()` 里
+`writelimit`、`bytesToAdd`、`actualBytesAdded` 都是 `off_t`/`int64_t`；
+`uio_resid()` 是 `ssize_t`，每块 64 KiB；`hfs_vnop_read()` 的 `offset`、
+`filesize` 也是 `off_t`。没有“4 GiB 以上变负”的路径。即使某个辅助函数
+误用 32 位有符号 `int`，592 MB < 2^31，也不会在本次安装里暴露；但实际数据
+路径没有这种误用。
+
+### 5. 空闲空间记账与卷尾行为
+
+- 挂载时 `vcb->freeBlocks = SWAP_BE32(vhp->freeBlocks)`（`hfs_vfsutils.c:284`），
+  本卷为 4,193,878；`allocLimit = totalBlocks`（`hfs_vfsutils.c:283`）。
+- 每次分配在 `hfs_block_alloc_int()` 里 `hfsmp->freeBlocks -= extent->blockCount`
+  （`VolumeAllocation.c` 的 mark-allocated 段），同时
+  `BlockMarkAllocatedInternal()`（`2784`）在 allocation bitmap 里置位；
+  bitmap 块通过 `ReleaseBitmapBlock(..., true)` → `buf_bdwrite()`（`2030`）
+  延迟写回。
+- `hfs_freeblks(hfsmp, wantreserve)`（`hfs_vfsutils.c:2054`）返回
+  `freeBlocks - reserveBlocks - loanedBlocks/lockedBlocks`；root 卷的
+  `reserveBlocks` 是 1% 且不超过 250 MiB（`hfs_vfsops.c:512`，
+  `hfs.h:133`-`134`），本卷约 167 MiB。`statfs` 的 `f_bavail` 走这个值
+  （`hfs_vfsops.c:2260`），安装器的 `ki_space()` 也用它做预检。
+- 44 个文件 813,076 块分配完，`freeBlocks` 从 4,193,878 降到 3,380,802；
+  这些数都远小于 2^32，没有 32 位回绕。
+- **卷尾**：`BlockAllocate()` 在 `freeBlocks == 0` 或找不到连续段时返回
+  `dskFulErr`；`ExtendFileC()` 把 `dskFulErr` 交给
+  `MacToVFSError()` → **ENOSPC**。如果只分配到最后一段的一部分，
+  `hfs_vnop_write()` 会返回 short write，`vn_rdwr()` 的 resid 让安装器看到
+  **EIO**。两条路都会在越界前停下，不会把卷写穿。本安装只用 19.4% 的空闲
+  空间，离卷尾还有 12.9 GiB，不会触发。
+- 非日志卷的 `hfs_volupdate()` 不会立刻把 `freeBlocks` 刷回 volume header
+  （`hfs_vfsops.c:3482`，只有 journaled 才 flush header）；内存里的计数和
+  bitmap 是准的，崩溃后旧 header 的 freeBlocks 可能偏大，但 bitmap 仍是
+  权威，`fsck_hfs` 可修。这不是本次 44 文件安装的失败点。
+
+### 6. 读回：close 会先把数据真正推下去
+
+安装器写完一个文件后 `vnode_close()`，然后按路径重新 lookup、读回、算
+SHA-256（`kebab_install.c:1184`-`1196`）。这条读回不是只读 UBC 缓存：
+
+- `vnode_close()` 丢掉最后一个 usecount 后触发 `hfs_vnop_inactive()`
+  （`hfs_cnode.c:579`）；
+- `hfs_vnop_inactive()` → `hfs_cnode_teardown()`，后者在
+  `hfs_cnode.c:229` 调 `hfs_filedone()`；
+- `hfs_filedone()` 调 `cluster_push(vp, IO_CLOSE)`（`hfs_cnode.c:703`），
+  把脏页推给 `hfs_vnop_pageout()`；pageout 的 `hfs_vnop_blockmap()` 以
+  `VNODE_WRITE` materialize 所有 deferred 块，然后 `hfs_update()`（`711`）
+  把正确的 size/blocks/extents 写回 catalog。
+
+读回本身走 `hfs_vnop_read()`（`hfs_readwrite.c:103`）→ `cluster_read()`；
+`hfs_vnop_blockmap()` 对读请求调用 `MapFileBlockC()`
+（`FileExtentMapping.c:367`），后者用 `SearchExtentFile()` 找 FCB 或
+extents B-tree 里的记录，并把 `availableBytes` 限制到当前 extent 的末尾。
+跨 extent 的读会由 cluster code 再调一次 blockmap，所以在 extent 边界上
+不会把相邻 extent 的数据混在一起。
+
+`ki_hash_file()` 用 64 位 `off` 和 64 KiB `vn_rdwr()` 逐块读
+（`kebab_install.c:556`），`ubc_getsize()` 给出 592,101,376，循环 9,035 次，
+SHA-256 覆盖全部字节。只要能写成功，这条读回路径在 592 MB 上没有额外上限。
+
+### 7. 离线能证明到什么程度
+
+**没有**可以直接跑内核 writer 的 host harness。树里与 HFS 有关的 host 工具
+只有：
+
+- `scripts/build-newfs-hfs.sh`：编译 `newfs_hfs`/`fsck_hfs`，只能造卷/查卷，
+  不能往卷里写文件；
+- `scripts/make-root-volume.py`：造 16 GiB 镜像和 VEXT 流，只写/读卷格式，
+  不调用内核 HFS+ writer；
+- `scripts/check-shared-cache.py`、`verify-shared-cache-plan.py`：解析
+  用户态缓存文件，和 HFS 写路径无关。
+
+Apple 源码里有 `HFS_ALLOC_TEST` / `HFS_EXTENTS_TEST` 的编译开关，但 vendored
+树里没有 `main`、没有测试向量、没有 Makefile，按任务要求没有从零搭 harness。
+
+本次实际做的离线检查是：
+
+1. 用现成的 16 GiB `/tmp/KebabRoot.img` 解析 volume header、allocation bitmap
+   和两个 B-tree 头，得到上面的 4,193,878 空闲块、1 extent 的 extents 文件、
+   32 个 4 KiB node 等几何；
+2. 把 `bsd/kebab_hfs/core/` 的 66 个 `.c`/`.h` 与 Apple tag `hfs-627.100.6`
+   做 SHA-256 对照，确认 62 个逐字节相同、4 个差异都在写路径之外；
+3. 在 `FileExtentMapping.o` 里确认 `_ExtendFileC`、`_SearchExtentFile` 等符号
+   被编进内核，而不是只存在于源码；
+4. 0147 在 `kebab_hfs_compat.h` 里把 `kHFSPlusExtentDensity == 8`、
+   `sizeof(HFSPlusExtentDescriptor) == 8`、`kHFSPlusExtentKeyMaximumLength == 10`
+   钉成编译期断言：以后若有人换成另一套 HFS 源，构建会先失败，而不是让本节
+   的算术悄悄失效。
+5. `scripts/verify-all.sh` 把 126 个 kebab patch 按文件名顺序应用到
+   `1b191cb` 并 PASS；同一套 patch 的 `KEBAB`/`DEVELOPMENT` clean full
+   build 通过，产出 `kernel.development.kebab`，SHA-256
+   `6e77347680b0766f61a8aeff3399bdfa5d62bc91e5651a9eaf1168ec9d84326c`
+   （2026-10-28，`build-0147-full.log`）。`kebab_hfs_compat.h` 本身没有
+   产生任何 warning。
+
+这些能证明“实现是完整的、卷几何足够、代码被编进内核”，**不能**证明
+“592 MB 在这块板子的内存压力/供电/中断环境下一定跑完”。后者只能上真机。
+
+### 8. 只有真机能定的
+
+1. **592 MB 完整写入 + 读回 SHA-256**。预期 `big.kist` 的
+   `INST DONE entries 1 ok 1 skipped 0 bytes 592101376` 和随后的
+   `SAME ...symbols`；这是第一个 >64 MiB 的完整文件。
+2. **实际 extent 数**。当前没有 debug 计数器；真机上可以通过在
+   `CreateExtentRecord()` 首次命中时加临时打印，或 dump catalog 记录的
+   8 个 extent + extents B-tree 来确认。按本节分析预期是 1 个，最多 2-3 个。
+3. **44 文件全量安装**。3.3 GB 总量、44 条 `OK`、安装后剩余约 12.9 GiB；
+   同时观察 UBC 脏页压力下是否出现长时间 pageout。
+4. **掉电/重启后的持久性**。非日志卷 + 脏根卷放行意味着没有 fsck 兜底；
+   `hfs_filedone()` 在 close 时 flush，但整个安装结束后没有显式
+   `vfs_sync`/unmount。真机上应在 `INST DONE` 后等一次 sync 或重启验证
+   44 个文件仍在。
+5. **反复安装/删除后的碎片**。本节的 8-extent 余量基于空卷；如果以后在
+   已经碎片化的卷上重装，extents B-tree 的余量需要重新算。
+6. **卷写满时的错误形态**。卷尾可能是 ENOSPC，也可能是 short write 导致的
+   EIO；本次 16 GiB 安装不会到卷尾，但错误注入测试可以确认安装器打印的是
+   `write failed (error 28)` 还是 `(error 5)`。
+
+### 9. 一句话边界
+
+- **实现**：Apple 完整 HFS+ `hfs-627.100.6`，extents overflow B-tree 在写路径里。
+- **extent 判决**：第 9 个不连续 extent 才需要 overflow record；本卷 592 MB
+  预期 1 个 extent，8 个 inline extent 足够；overflow 路径存在，真要有碎片也
+  能接住 64 KiB 级的 9,035 个 extent。
+- **最大可证明文件**：按卷几何和代码，592,101,376 B（144,556 块）可创建；
+  格式上限是该卷的 4,193,878 个空闲块（约 16.0 GiB，扣元数据）。
+- **已实测最大完整文件**：922,912 B（`dyld`）；64,028,672 B 是旧 64 MiB 卷
+  写满的部分写入。
+- **需要改的代码**：无。0147 只加编译期格式断言，不改写路径。
+
+## 七十八、未上真机改动的风险清单
+
+> 目的：板子下一次上电时，读控制台的人要能回答两个问题——"这一行是谁打的"和
+> "先怀疑哪一个"。本节给 `0131` 之后的全部改动做分类，只把**普通启动上会执行**的
+> 那一类写成"可能弄坏启动"的风险，其余按"需要启动参数"和"只是日志"分开写。
+>
+> 状态：**本节没有真机日志**。板子从本轮开始一直停在 panic 自旋里（需要一次物理
+> 断电），因此所有"应该看到什么"都来自**当前代码里的格式串**（用 `0132`–`0147`
+> 打到 `xnu-0139` 树上逐条读出来的），不是来自记忆，也不是来自第六十八节那份
+> 早期的期望日志——那份已经过期，见第 8 节。
+>
+> 范围：`patches/xnu-8796-kebab/0132` … `0147`，共 16 个补丁。按"一次改动一个
+> 判据"拆成 **20 个原子改动**（`0133`、`0136`、`0146` 各拆成两/三个）。
+
+### 1. 四个分类的定义，以及"普通启动"到底指什么
+
+| 类 | 含义 | 能否弄坏一次普通启动 |
+| --- | --- | --- |
+| **(a)** | 只有启动参数（或某个同样显式的开关）才启用的新功能 | 不能 |
+| **(b)** | 普通启动上就会走到的**行为改动** | **能** |
+| **(c)** | 只增加/减少日志，不改变内核决策 | 不能 |
+| **(d)** | 文档，或只在编译期生效的断言 | 不能 |
+
+"普通启动"在本文里固定指 **P1 最终镜像**的参数集，也就是
+`board.toml [payload] kernel_args` 再加上 `scripts/bring-up.py` 的
+`FINAL_ARGS`：
+
+```
+-v -enable_kprintf_spam startup_debug=1 serial=3 debug=0x14e cpus=1
+rd=ufsroot0 ufsroot=userdata ufsrw=1 rootrw=1 kebabusb=1 keepsyms=1
+kebab_pon_write=1 kebab_cs=15 kebab_dsc=1 kebab_dsc_map=1
+```
+
+不带 `kebab_vol`、`kebab_install`、`kebab_noinit`、`kebab_touch*`、`kebab_keys`、
+`kebabkdp`、`kebab_dsc_verbose`、`kebab_dsc_slide`。任何**会**在这套参数下执行的
+代码路径都算"普通启动"，包括 `kebab_dsc` 的计划与 first-exec 映射——它虽然叫
+`kebab_dsc=1`，但已经在最终镜像里，所以按普通启动对待。
+
+证据等级：**H** = 有真机日志（本文件此前各节）；**B** = 完整内核构建 + 主机侧
+校验/测试；**R** = 只读过代码，连构建记录都没有。
+
+### 2. 分类表
+
+| # | 补丁 | 改动 | 类 | 门 / 触发条件 | 证据 |
+| ---: | --- | --- | --- | --- | --- |
+| 1 | `0132` | 触摸两路 LDO 自动上电、SE13 时钟进启动路径、identify 重写 | (a) | `kebab_touch=1`（+`_boot`/`_power`/`kebab_vrm_write=1`） | **H**（部分） |
+| 2 | `0133` | `kebab_vol.c` + UFS 裸块路径 + `VOL` 命令族 | (a) | `kebab_vol=1` + `ufsrw=1` + `CONFIRM` | B |
+| 3 | `0133` | `kebab_noinit=1`：init 停在核内 | (a) | `kebab_noinit=1` | B |
+| 4 | `0133` | `KEBAB HFS:` 挂载几何日志 | (c) | 每次挂载 | B |
+| 5 | `0133` | `kebab_vol=1` 强制旧根只读 | (a) | `kebab_vol=1`（压过 `rootrw=1`） | B |
+| 6 | `0134` | panic 策略：不再默认等 KDP；panic 失败即 PSCI 复位 | **(b)** | 任何 panic | B |
+| 7 | `0135` | TCM 报告解码：app info / 报告程序 / 触点解码 / 轮询线程 | (a) | `kebab_touch=1 kebab_touch_boot=1` | B |
+| 8 | `0136` | `unentitled_ios_sim_launch` 在 KEBAB 下默认 `true` | **(b)** | 每次 exec | B |
+| 9 | `0136` | exec/CS 诊断行（cdhash、pre-copyout、stack）与信任缓存行改格式 | (c) | 每次启动/exec | B |
+| 10 | `0137` | `sms_slide_size` 赋值（slide 路径） | (a) | `kebab_dsc_slide=<非零>` | R |
+| 11 | `0138` | KIST v2 的 DIR/LINK、每次创建后 chown+读回属性 | (a) | `kebab_install=1` | B |
+| 12 | `0139` | PM8150 按键轮询 + `/dev/kebab_keys` | (a) | `kebab_keys=1` | B |
+| 13 | `0140` | copyout 失败时的 map/fault/PTE/包含关系四行 | (c) | 只在失败路径 | B |
+| 14 | `0141` | `thread_userstack()` 用 64 位结构体读 sp | **(b)** | 只有 `LC_UNIXTHREAD` 的 exec | B |
+| 15 | `0142` | 共享缓存计划追加 dynamic-config 页；基址检查收紧 | **(b)** | 每次 `kebab_dsc=1` | B |
+| 16 | `0143` | 计划日志改为一行摘要，明细转 `kebab_dsc_verbose=1` | (c) | 每次 `kebab_dsc=1` | B |
+| 17 | `0144` | 安装器允许清单加 `/usr/libexec/` | (a) | `kebab_install=1` | B |
+| 18 | `0145` | `/dev/console` 路由到 kebab 字符设备 | **(b)** | 每次启动（UFS 起来之后） | B |
+| 19 | `0146` | 控制台写路径的 `EDEADLK` 守护 + 注释更正 | (c) | 每次 `write(2)`，守护不可达 | B |
+| 20 | `0147` | HFS+ extent 格式常量的编译期断言 | (d) | 只在编译期 | B |
+
+计数：**(a) 9 个，(b) 5 个，(c) 5 个，(d) 1 个**，共 20 个原子改动 / 16 个补丁。
+
+有两处归类需要说明：`0142`/`0143` 的开关是 `kebab_dsc`，而
+`kebab_dsc` 已经在最终镜像里，所以它们是 (b)/(c)，不是 (a)；反过来
+`0138`/`0144` 改的是既有安装器而不是"新函数"，但只有 `kebab_install=1`
+才会走到，因此按门归到 (a)，并在第 4 节注明它们是"既有路径的行为改动"。
+
+### 3. 分类 (b)：普通启动上的行为改动
+
+按"坏起来最贵"排序，编号与第 2 节一致。每一条都给出：改了什么、走哪些路径、
+最可能怎么坏、**控制台判据**。
+
+#### 3.1 `0145` `/dev/console` 路由到 kebab 字符设备
+
+**改了什么。** `cnopen/cnclose/cnread/cnwrite/cnioctl/cnselect` 在
+`constty == NULL && kebab_console_available()`（即 `su.ready && su.conmajor >= 0`）
+时全部转成 `kebab_console_*`：
+
+* open/close 直接返回 0，不碰 tty 锁、不碰 `kmopen`；
+* write 走 `console_write()`（和 `kprintf` 同一条控制台环），因此 `_cnputc()` 的
+  USB tee 和面板绘制都还在；
+* read 返回 0（EOF）；ioctl 返回 `ENOTTY`；select 用 `seltrue()`；
+* `cndev()` 在 `km_tty[0] == NULL` 时返回 `NODEV`，每个 `cn*` 在 fallback 前
+  检查 `NODEV` 并返回 `ENXIO`（以前是直接解引用）。
+
+**跑在哪些路径。** 所有 `open("/dev/console")`：launchd 自己的日志 fallback、
+xpcproxy 给每个 job 硬编码的 fd 0/1/2（第七十四节 §1.3）、以及任何写
+`/dev/kebabcon` 的代码（同一组函数——所以面板直写通道也被这条改动改掉了）。
+
+**最可能怎么坏。**
+
+1. **路由根本没生效，然后掉进未验证的 tty 路径。** 条件是
+   `kebab_console_available()` 为假：`su.ready` 为假，或 `su.conmajor < 0`
+   （`cdevsw_add()` / `devfs_make_node()` 失败）。此时 `cnopen` 走 `cndev()`：若
+   `km_tty[0] != NULL`，就进 `kmopen()`——**这条路径在本移植上从未被观测到返回**。
+   后果是 PID 1 卡在 `open("/dev/console")` 里：没有 launchd 日志、没有 panic、
+   没有新的启动 banner，板子看起来"启动到一半就不动了"，而且不会自己复位（连
+   panic 路径都没进）。
+2. **写路径在错误上下文里 panic，或者 USB 侧丢字节。** 前者是
+   `console_write()` → `console_io_allowed()` 在"关中断且未 suspend"时
+   `panic("Console I/O from interrupt-disabled context")`；`0146` 的守护挡的就是
+   这个，但它只在 `kebab_console_write()` 入口挡，而且 `write(2)` 走不到那个分支。
+   后者是 `kebab_usb_log()` 的 16 KiB 环满即丢（从 `0091` 起就是丢字节语义）：
+   大量 stderr 在 USB 上会截断，面板上仍然完整。**USB 上少了几行不等于内核没打印。**
+3. **`d_type` 仍是 `D_TTY`。** 对 console 做 `EVFILT_READ` 的进程会落到 tty
+   filter（第七十五节 §4.3 已把它记为残余风险，不是本次新发现）。
+4. 环满时 `console_write()` 会睡眠等 `flush_lock`；持有者一定能前进（第七十六节
+   逐条论证过），所以这是延迟而不是死锁。
+
+**控制台判据。**
+
+| 观察 | 含义 | 先怀疑谁 |
+| --- | --- | --- |
+| `KEBAB UFS: /dev/kebabcon ready` | 路由的前置条件成立 | — |
+| `KEBAB UFS: /dev/kebabcon unavailable` | `cdevsw_add`/`devfs_make_node` 失败，**路由一定不生效** | `0145` + UFS 初始化 |
+| `launchd logging initialized. name: launchd pid: 1` | `open("/dev/console")` 成功的最直接证据 | — |
+| `service spawn failed: 6: Device not configured` / `xpcproxy spawn failed: 6` | file action 的 `open` 失败，errno 6 = `ENXIO` | `0145`（路由没生效且 `km_tty[0] == NULL`）或 `kmopen` 返回 ENXIO |
+| 完全没有 launchd 行，也没有 panic / 复位 | PID 1 卡在 open 里（情形 1 的第二半） | `0145` 的 fallback 路径 |
+| 有 `launchd logging initialized`，但 job 的输出永远不出现 | 写路径丢字节（情形 2）或 job 没 spawn | 先看有没有 `service spawn failed`；没有就是写路径 |
+
+#### 3.2 `0134` panic 不再停在 KDP，服务不了就复位
+
+**改了什么。**
+
+1. `osfmk/kern/debug.c` 的 `panic_init()`：KEBAB 下若没有 `kebabkdp=1` 也没有
+   `kdp_match_name`，把 `panicDebugging` 清成 `FALSE`。于是 `panic()` 走
+   `if (!panicDebugging) kdp_machine_reboot_type(kPEPanicRestartCPU, …)`，
+   即 `PEHaltRestart()` → `KebabPlatformExpert::haltRestart()`。
+2. `haltRestart()` 把 `kPERestartCPU`、`kPEPanicRestartCPU`、
+   `kPEPanicRestartCPUNoCallouts` 都接到 `kebab_psci_system_reset()`；控制台可用
+   时先被 panic 泵接走（`kebab_usb_panic_spin()`，不返回）。
+3. `ud_panic_takeover()` 在 `panic_active()` 时不再要求
+   `ml_dbgwrap_cpu_is_halted()`：直接 `ud_controller_restart()` 做所有权栅栏，
+   清 `owner`/`rx_owner`/`log_busy`。
+4. 接管 1000 次（约 1 s）失败，或接管后 `ud.dead || !ud.running`，打印一行然后
+   `ud_platform_restart()` → `PEHaltRestart(kPERestartCPU)` → PSCI 复位。
+
+注意第 4 步的复位**不会**再进 panic 泵：`ud_platform_restart()` 先把
+`ud.restart_armed = true`，`haltRestart()` 的第一个分支要求
+`!kebab_usb_restart_armed()`。这一条是这段代码能成立的关键，读代码时容易漏。
+
+**跑在哪些路径。** 任何 panic（任何启动参数组合）；`REBOOT` 命令的
+`kPERestartCPU` 行为没变。`kebabkdp=1` 时第 1 步不生效，行为与旧版一致。
+
+**最可能怎么坏。**
+
+1. **启动早期 panic 变成重启循环。** 例如根卷挂不上时的
+   `panic("KEBAB: cannot mount root, …")`：以前板子停在 panic 文本上，现在
+   panic 报告打完就走 PSCI 复位。主机看到的是"`KEBAB USB: event thread started`
+   反复出现、每次只多几行"，而不是一条完整的 panic。**这是本节最容易被误读的
+   症状**：它不是"启动很慢"，是 panic 重启循环。
+2. **panic 文本送不出去。** 复位前只有 `ud_platform_restart()` 里的一次
+   `kebab_usb_log_flush()` 加 300 ms 延迟；若控制器已经 dead，那行
+   `panic console cannot be serviced (…)` 本身也可能发不出去。判据变成"没有新
+   日志 + 几秒内重新枚举 + 从头启动"。
+3. **panic 泵接管成功但端口其实不工作。** 板子会停在泵里等主机，`panic_cpu`
+   拦住第二个 spinner，于是既不复位也不响应——仍然要断电。这是"接管成功"与
+   "端口真的能发"之间的缝，代码无法自证，只有主机能看到。
+
+**控制台判据。**
+
+| 行 | 含义 |
+| --- | --- |
+| `KEBAB USB: panic console cannot be serviced (transport takeover refused); rebooting instead of parking` | 1 s 内没抢到发送门/接收锁，走了复位 |
+| `KEBAB USB: panic console cannot be serviced (controller dead); …` | 控制器已死 |
+| `KEBAB USB: panic console cannot be serviced (console not running); …` | 端口从未起来 |
+| `KEBAB PANIC: no console to service; rebooting via PSCI SYSTEM_RESET` | 控制台根本没起来（`kebabusb=0` 或启动太早） |
+| `KEBAB USB: panic reboot returned; the machine did not reset` / `KEBAB REBOOT: PEHaltRestart returned <n>, the machine did not reset` | 固件拒绝复位——**这是唯一还允许停住的分支**，此时才需要断电 |
+| 重复的 `KEBAB USB: event thread started, waiting for the host` 或重复的 `Darwin Kernel Version` | panic 重启循环，不是启动慢 |
+| `Using serial KDP.` + `Waiting for remote debugger connection.` | 镜像带了 `kebabkdp=1`，停在 KDP 是显式请求，不是本缺陷复发 |
+
+#### 3.3 `0142` 共享缓存加一页 dynamic-config，并收紧基址检查
+
+**改了什么。**
+
+* `kebab_dsc_add_dynamic_config()`：在计划里给主缓存追加一条
+  `sharedRegionStart + header.dynamicDataOffset`、`dynamicDataMaxSize` 大小、
+  `init = READ|VM_PROT_ZF`、`max = READ`、无 slide 的映射。`VM_PROT_ZF` 让
+  `vm_shared_region_map_file()` 走匿名零页分支（`vm_shared_region.c` 里按
+  `sms_init_prot & VM_PROT_ZF` 选 `map_port = MACH_PORT_NULL`）。
+* `kebab_dsc_validate_header()` 的 `is_main` 基址检查从"和刚从同一个字段复制
+  出来的 `plan->region_start` 比"改成"和 `SHARED_REGION_BASE_ARM64` 比"——这是
+  **新增的拒绝点**。
+* 四类新拒绝：`dynamicDataOffset == 0`（只告警）、未 16 KiB 对齐、越出
+  `sharedRegionSize`、与已有 mapping 重叠、主缓存 mapping 数组满。
+
+**跑在哪些路径。** 计划在 `bsd_init` 构建（每次 `kebab_dsc=1`），映射在
+`kebab_dsc_exec_hook()`（pid 1 的第一次 exec）。所以它同时挂在"启动"和
+"PID 1 起来"两条路径上：计划被拒 → 根本没有映射；映射失败 → PID 1 的 dyld
+找不到 `libSystem`。
+
+**最可能怎么坏。**
+
+1. **多出来的这一页让一次 `vm_shared_region_map_file()` 失败，整份计划不映射。**
+   `vm_shared_region_map_file()` 对 43 个文件 / 52 条 mapping 是**一次**调用，
+   任何一条失败都可能让整份计划回滚（`region is empty again`）或留下半份
+   （`HALF MAPPED`）。后者更坏：dyld 会接受这个半成品然后踩空。
+2. **这一页映射到了错误的地方。** 例如 `dynamicDataOffset` 与真实缓存不一致，
+   dyld 在 `hasExistingDyldCache()` 里读到的不是零页：它会报
+   `existing shared cache in memory is not compatible`，退回
+   `mapSplitCacheSystemWide()`，而那个 syscall 因为 `sr_first_mapping != -1`
+   失败，最后 dyld 逐个 dylib 从卷上找——表现是**一堆 file not found**，看起来
+   像卷里缺文件。
+3. **基址检查收紧后拒绝了一份以前能过的缓存。** 只有当缓存的
+   `sharedRegionStart != 0x180000000` 时才会发生；真实 20H392 缓存是
+   `0x180000000`，所以这是"换缓存"才会踩到的门。
+
+**控制台判据。**
+
+| 行 | 含义 |
+| --- | --- |
+| `KEBAB DSC: plan 43 files / 52 mappings, 0xa2de8000 mapped, extent 0xaade8000 (end 0x22ade8000), base 0x180000000, slide 0x0, dynamic config page appended` | `0142` + `0143` 都生效（**这是默认启动唯一的一行计划日志**） |
+| `… 51 mappings … dynamic config page absent` | `0142` 没生效：镜像不是最新的，或缓存头 `dynamicDataOffset == 0`（此时另有一行 `KEBAB DSC: dynamicDataOffset is 0; no dynamic config page to map`） |
+| `KEBAB DSC: <main>: sharedRegionStart 0x… is not the kernel shared region base 0x180000000; the cache cannot be placed` | 新的基址拒绝点触发 |
+| `KEBAB DSC: plan rejected (error <n>); shared cache NOT mapped` + `plan detail follows (failure path):` | 计划被拒；明细随后自动打印 |
+| `KEBAB DSC: map: vm_shared_region_map_file failed 0x… (error <n>); region is empty again, shared cache NOT mapped` | 干净回滚，dyld 会试着自己映射 |
+| `… but the region still maps 0x…; shared cache is HALF MAPPED` | 半映射，**必须先修内核**，dyld 会接受它然后踩空 |
+| `KEBAB DSC: mapping complete; dyld will find the cache already in the shared region` | 映射成功 |
+| dyld 自己打 `mapped cache does not contain dynamic config data` | **最强的正向证据**：它证明 `base + 0xaade4000` 这一页可读、没有 crash |
+
+#### 3.4 `0136` `unentitled_ios_sim_launch` 在 KEBAB 下默认打开
+
+**改了什么。** `bsd/kern/kern_exec.c` 顶部那个 `TUNABLE(bool,
+unentitled_ios_sim_launch, …)` 在 `#if defined(KEBAB)` 下默认值从 `false` 改成
+`true`（`#else` 分支保持 `false`）。它只影响 `process_signature()` 里
+`proc_platform(p) == PLATFORM_IOS && imgp->ip_px_sa == NULL` 的那**一个**判断；
+不放宽签名校验，不动 `CS_HARD`/`CS_KILL`，不动 `CS_PLATFORM_BINARY`。
+
+**跑在哪些路径。** 每次 exec：pid 1 的 `/sbin/launchd`、xpcproxy 的
+`POSIX_SPAWN_SETEXEC`、每个 job。命令行里显式写
+`unentitled_ios_sim_launch=0` 仍能把它关回去（`PE_parse_boot_argn()` 在
+`TUNABLE` 之后执行）。
+
+**最可能怎么坏。**
+
+1. **默认值没生效**（镜像没带这个补丁、或参数被显式写成 0）：PID 1 在 9/e 被杀，
+   `kern_sig.c` 对 initproc 的 SIGKILL 直接 panic → 与 `0134` 组合成重启循环。
+2. **它生效了，问题被推到更后面。** 这是**放松**，不是修复：9/e 消失之后，
+   launchd 会死在共享缓存（namespace 6）或签名（`CS_KILLED`）上。读日志的人必须
+   知道"9/e 不见了"不等于"签名没问题"。
+
+**控制台判据。**
+
+| 观察 | 含义 |
+| --- | --- |
+| `unexpected SIGKILL of launchd … namespace 9 code 0xe` | 平台门**没**生效（9/e = `EXEC_EXIT_REASON_WRONG_PLATFORM`） |
+| `initproc failed to start -- exit reason namespace 6 subcode 0x1` | 过了平台门，死在 dyld 的 `abort_with_payload()`（共享缓存） |
+| `… namespace 9 code 0x6` + `KEBAB EXEC: copyout stage=…` | 过了平台门，死在 copyout（另一条线） |
+| `CS_KILLED` | 签名线；与这个开关无关 |
+
+#### 3.5 `0141` `thread_userstack()` 的 sp 偏移
+
+**改了什么。** `osfmk/arm64/status.c` 的 `thread_userstack()` 在
+`ARM_THREAD_STATE64` 分支里把 `((arm_thread_state32_t *)tstate)->sp` 改成
+`((arm_thread_state64_t *)tstate)->sp`。旧代码读的是偏移 52（x6 的高 32 位，
+零扩展），新代码读 248（真正的 SP）。
+
+**跑在哪些路径。** 只被 `load_threadstack()` 调用，也就是只处理
+`LC_UNIXTHREAD`。`/sbin/launchd`、`/usr/lib/dyld`、`zprint`、`xpcproxy` 都是
+`LC_MAIN`，**普通启动的 pid 1 路径根本不会走到**。旧 bug 对典型二进制是潜伏的
+（x6 高半为 0 → `sp = 0` → 走 `USRSTACK64` 默认栈）。
+
+**最可能怎么坏。** 对真的带 `LC_UNIXTHREAD` 的二进制，初始 SP 从"碰巧 0 →
+默认栈"变成"文件里写的值"。如果那个值是垃圾，进程会以 custom stack 起步并立刻
+bad access；如果它是合法的，行为才变正确。
+
+**控制台判据。** 成功路径没有日志。能看到的是 `create_unix_stack()` 那一行
+`KEBAB EXEC: stack map=… shift=14 custom=<0|1> user=0x… alloc=0x…+0x… guard=…`：
+pid 1 的 `custom` 必须是 `0`、`alloc=0x0+0x0`。若某次 exec 出现
+`custom=1` 且 `user` 不像栈地址，就是这条改动在那个二进制上生效了（并且那个
+二进制里写的 sp 就是现在这个值）。
+
+### 4. 分类 (a)：需要启动参数才跑的新功能
+
+每一条给出：启动参数、打开后应出现的行、**缺失的两种含义**（没启用 vs 启用了但
+失败）。这是本节最实用的部分：板子回来时，"没有这一行"必须先分清是哪种。
+
+#### 4.1 `0132` 触摸上电 / SE13 时钟 / identify
+
+* **参数**：`kebab_touch=1`（总开关）；`kebab_touch_boot=1` 才做传输/复位/识别；
+  `kebab_touch_power=1` 才自动上电，且**还需要** `kebab_vrm_write=1`。
+* **应出现**（顺序即代码顺序）：
+  `KEBAB VRM: === boot power: touch rails, one ENABLE each ===` →
+  每轨一行 `KEBAB VRM: boot power: <ldoa13|ldoc1> COMPL, phase COMPLETE, CMD_STATUS 0x… (ISSUED 1, COMPL 1), EN 0x00 -> 0x80` →
+  `KEBAB VRM: boot power: ldoa13 and ldoc1 both read 0x80` →
+  `KEBAB TOUCH: both rails up, waited 15 ms before the reset` →
+  `KEBAB TOUCH: TOUCHCLK: 0x52008 0x… -> 0x…` → `reset pulse (mode 1), …` →
+  `se_init: …` → `identify: part "s3908-15.0.0", version 0x01, mode 0x01 (application)`。
+  最后这一行的格式是 `0135` 重写 TCM 层之后的（`0132` 当时打的是
+  `identify: part "…" at payload offset 4`）。
+* **缺失含义**：
+
+| 观察 | 未启用还是失败 |
+| --- | --- |
+| 一行 `KEBAB TOUCH:` 都没有 | 没启用（`kebab_touch` 不是 1） |
+| `KEBAB TOUCH: MMIO mapped, hardware untouched; …` | 启用了，但没给 `kebab_touch_boot=1` |
+| `KEBAB TOUCH: kebab_touch_power is off; assuming the rails are already powered` | 启用了 boot，没启用 power |
+| `KEBAB VRM: boot power: kebab_vrm_write=0, so no rail may be commanded; touch stays unpowered` | 启用了，被第二道门拒绝，**一个寄存器都没写** |
+| `… <rail> enable unreadable; nothing sent` / `… <rail> is not up; stopping here, the boot continues without touch` | 启用且真失败 |
+| `KEBAB TOUCH: touch unavailable: a rail did not come up, …` | 失败，本次启动触摸不可用（不重试、不 panic） |
+
+* **证据**：这一条**有真机日志**（第六十一节 §3，`boot_b`）。也就是说"0131 之后
+  全部没有上过真机"这个前提对它不成立，见第 8.1 节。它被真机**拒绝**的那一半是
+  `GET_APP_INFO`/`SET_TOUCH_REPORT_CONFIG`（`payload 23040 too large`、
+  `report config answered 0x0d`），`0135` 已经把这一层整体换掉。
+
+#### 4.2 `0133` `VOL` 卷写入（`kebab_vol.c` + UFS 裸块路径）
+
+* **参数**：`kebab_vol=1`（默认关）+ `ufsrw=1`（盘可写）+ 真写还要
+  `VOL BEGIN <wire> <volume> CONFIRM`；只校验收流用 `VOL DRY <wire>`；读几何用 `VOL?`。
+* **应出现**：`VOL? gated 1 active 0 dry 0 chunk 65536 writable 1`；
+  `VOL OLD vh …` 三行字段 + 32 行 `VOL OLD bytes …`；
+  `VOL STREAM volume 17179869184 bytes (16384 MiB), block 4096, extents 3, data 1744896 bytes, wire 1769472`；
+  `VOL EXTENT 1/3 …` …；`VOL NEW vh … bsize 4096 blocks 4194304 …`；
+  `VOL DONE extents 3 …`。dry 的结束行是 **`VOL PLAN`**，不是 `VOL DONE`。
+* **缺失含义**：`VOL disabled: boot with kebab_vol=1 to enable the volume writer`
+  = 没启用；`VOL refused: userdata is read-only` = 启用了但 `ufsrw=1` 缺失/盘只读；
+  `VOL refused: a real write needs the confirmation` = 命令串不对；
+  `VOL ABORT …` = 流被拒（**此时块 0 一个字节都没动**）；
+  `VOL TIMEOUT …` = 60 s 没有新块（传输停了，可能已经 panic/复位）。
+
+#### 4.3 `0133` `kebab_noinit=1`
+
+* **参数**：`kebab_noinit=1`。
+* **应出现**：`KEBAB: kebab_noinit=1: staying in the kernel, no init program`，
+  之后不再有 `load_init_program` 行、也没有 launchd。
+* **缺失含义**：没启用（普通启动本来就不带）；启用了但没这行 → 参数没进命令行
+  （镜像 args 不对）。
+
+#### 4.4 `0133` `kebab_vol=1` 压过 `rootrw=1`
+
+* **参数**：`kebab_vol=1`（同时有 `rootrw=1`）。
+* **应出现**：`KEBAB VOL: kebab_vol=1 keeps the old root read-only`
+  （在 `vfs_mountroot()` 里，HFS 挂载之前）。
+* **缺失含义**：没启用（普通启动不带 `kebab_vol`）；或带了 `kebab_vol=1` 但没有
+  `rootrw=1`（这时旧根本来就只读，这行不打印——不是失败）。这条改动的意义是
+  **防止旧 HFS+ 用缓存的卷头盖掉刚写进去的新卷头**；如果它没生效而卷写又跑了，
+  故障要到下一次启动才出现（新卷头是旧的）。
+
+#### 4.5 `0135` TCM 报告解码
+
+* **参数**：`kebab_touch=1 kebab_touch_boot=1`（power 可选）。
+* **应出现**（第六十五节 §7 的完整清单）：`KEBAB TOUCH: command 0x20 answer: code 0x01, 46 payload byte(s), trailing byte 0x5a`；
+  `KEBAB TOUCH: app info: max touch report config … bytes, max touch report payload … bytes`；
+  `KEBAB TOUCH: report program: … bytes, 40 bits per contact, … bytes sent`；
+  `KEBAB TOUCH: report config accepted: 40 bits per contact, z included`；
+  之后才有 `KEBAB TOUCH: message code 0x11 len 5` 与
+  `KEBAB TOUCH: down obj 0 raw … panel … logical … z …`。
+* **缺失含义**：无 `KEBAB TOUCH:` = 没启用；有 `command 0x20 did not answer` /
+  `app info: … is short of the 46` / `report config: answered code 0x0d` =
+  启用了但 TCM 层失败（**这时不建轮询线程、不建 `/dev/kebab_touch`**，
+  第六十五节 §1 写明了这个条件）；`report config accepted` 之后没有任何
+  `message code 0x11` = 参数对了、程序被接受了，但固件没有报告（摸屏幕也不出）——
+  先看 `report of N byte(s) discarded` / `report discarded: …` 这类解码行。
+
+#### 4.6 `0137` slide 的 `sms_slide_size`
+
+* **参数**：`kebab_dsc_slide=<非零、16 KiB 倍数>`。默认 `slide == 0` 时
+  `kebab_dsc_apply_slide()` 第一步就返回，这行赋值不参与任何决策，因此
+  **默认启动与 0137 之前逐字节等价**。
+* **应出现**：给了 slide 时 `KEBAB DSC: slide 0x…; N mapping(s) carry slide info; …`；
+  非法 slide 会打印 `slide 0x… is not 0x4000-aligned` / `slide >= maxSlide` /
+  `no mapping carries slide info` 之类的拒绝行。
+* **缺失含义**：slide 为 0 = 未启用（不是失败）；给了 slide 却看到
+  `no mapping carries slide info` = 计划里四条数据 mapping 的 slide-info 没读到，
+  这时退回 slide 0 是安全的，但 ASLR 没开。
+
+#### 4.7 `0138` KIST v2 骨架 + 每次创建后 chown/读回
+
+* **参数**：`kebab_install=1`，然后发一条 KIST 流（v1 或 v2；骨架流要 v2 +
+  `F_STREAM_SKELETON`）。`INST DRY <wire>` 可以只走 PLAN。
+* **应出现**：`INST STREAM v2 skeleton entries 16 bytes 153 wire 65536`（骨架）
+  或 `INST STREAM v2 entries 6 bytes … wire …`（base）；每条
+  `OK <path> <bytes> mode 0%o uid 0 gid 0`；目录
+  `OK /dev 0 dir mode 0755 uid 0 gid 0`；链接
+  `OK /etc <n> link -> private/etc mode 0777 uid 0 gid 0`；结束 `INST DONE entries …`。
+* **缺失含义**：`INST disabled: boot with kebab_install=1 …` = 没启用；
+  `INST ABORT …` = 启用了但被拒。**这次新增了两个硬失败点**：
+  `FAIL <path> cannot set attributes (error <n>)`（以前 `vnode_setattr` 的错误被
+  丢弃，现在直接 abort）和 `FAIL <path> attrs uid … gid … mode 0…, wanted 0:0 mode 0…`
+  （读回不一致，`01777` 目录也会被这条卡住）。
+  另外 **`SKIP <path>` 仍然不会重设属主/模式**：内容已对就不再改写，所以
+  一次用错属性装上去的文件，重发同一条流不会修好。
+
+#### 4.8 `0139` 按键驱动
+
+* **参数**：`kebab_keys=1`（可选 `kebab_keys_ms=16`、`kebab_keys_raw=1`）。
+* **应出现**：`KEBAB SPMI: key source PPID 0x008 -> observer APID 0x…`（三条）；
+  `KEBAB KEYS: sources: PON RT_STS 0x0810, …`；`KEBAB KEYS: first sample …`；
+  `KEBAB KEYS: queue selftest: … ok`；`KEBAB KEYS: /dev/kebab_keys major N, …`；
+  `KEBAB KEYS: polling every 16 ms`。
+* **缺失含义**：无 `KEBAB KEYS:` = 没启用（普通启动就是没有）；启用了但
+  `first sample … is all zero (silent bus); no keys` = 总线静默、**不建 `/dev`**；
+  `GPIO6 … NOT an enabled input with pull-up` / `volume-up withheld` = 引脚没被
+  boot firmware 配置成输入上拉（驱动只读，不写 PMIC）。
+
+#### 4.9 `0144` `/usr/libexec/` 进安装器允许清单
+
+* **参数**：`kebab_install=1`；`INST CHECK /usr/libexec/xpcproxy` 现在会被接受
+  （以前打印 `INST CHECK … refused`）。
+* **应出现**：`base.kist` 的第 6 条 `OK /usr/libexec/xpcproxy 96352 mode 0755 uid 0 gid 0`，
+  `INST DONE entries 6 …`。
+* **缺失含义**：`6` 条变成 `5` 条、或 `INST CHECK … refused` = 允许清单没生效；
+  launchd 侧仍然 `service spawn failed: 2: No such file or directory` = 允许了但
+  文件没装上（不是 launchd 的问题）。
+
+### 5. 分类 (c) / (d)：只影响日志，或者根本不进内核
+
+| 改动 | 新增/改变的可见输出 | 读日志时要注意 |
+| --- | --- | --- |
+| `0133` HFS 挂载行 (c) | `KEBAB HFS: KebabRoot: block size 4096, total blocks 4194304 (16384 MiB), free blocks …` | 每次挂载都打；`total blocks` 是"新卷是否生效"的唯一免工具证据。缺失说明没挂上（此时另有 `hfs_mount: hfs_mountfs returned error=` 或 `KEBAB: cannot mount root` panic） |
+| `0136` exec/CS 诊断 (c) | `KEBAB CS: static trust cache v2: 2760 entries x 24 bytes (66264 used, residual 0 bytes), hash types …`、`KEBAB CS: exec cdhash <40 hex> cd=0x…+… hash=2 slice=0x0 tc=hit platform=1`、`KEBAB EXEC: pid N pre-copyout …`、`KEBAB EXEC: stack …`，失败时 `KEBAB EXEC: copyout …` | 旧的 `KEBAB CS: cdhash … is in Apple's static trust cache: platform binary` 已经**不再打印**；`platform=1` 现在是唯一判据。exec 行最多 32 条，之后有一行 `further exec classification lines suppressed` |
+| `0140` copyout 取页诊断 (c) | 失败时 4 行：`copyout map cur=… alloc=… same=…`、`copyout fault far=… esr=…`、`copyout pmap va=… tte=…`、`copyout checks …`；成功时 0 行 | 成功路径没有输出，所以"没看到这四行"**不能**说明 copyout 没问题，只能说明这次没失败 |
+| `0143` 计划日志预算 (c) | 默认 1 行摘要替代 102 行明细；明细、成功侧校验行、slide-info 行、`map: slide …; mapping …` 行全部移到 `kebab_dsc_verbose=1` | 失败时明细**仍会自动打印**（`plan detail follows (failure path):`）。读第六十八节那份旧清单会找不到 43 行 `file NN`，那是 `0143` 的正常结果，不是映射失败 |
+| `0146` 控制台 `EDEADLK` 守护 (c) | 无新日志；`kebab_console_write()` 在关中断时返回 `EDEADLK` 而不是让 `console_write()` panic | `write(2)` 走不到这个分支；如果真看到 `EDEADLK` 从 write 回到用户态，说明有人把 console 写接进了关中断上下文 |
+| `0147` HFS+ 格式断言 (d) | 无运行时输出；`kHFSPlusExtentDensity == 8`、`sizeof(HFSPlusExtentDescriptor) == 8`、`kHFSPlusExtentKeyMaximumLength == 10` 编译期成立 | 它唯一的作用是"换 HFS 源码时构建先失败"，不影响任何启动行为 |
+
+### 6. 风险排序
+
+排序规则：**先能阻止启动的，再能废掉控制台的，最后才是"只是让功能不工作"的**。
+"代价"一列是坏掉之后要不要再断电一次。
+
+| 排名 | 改动 | 为什么排在这里 | 第一证据（控制台） | 代价 |
+| ---: | --- | --- | --- | --- |
+| 1 | `0145` console 路由 | 它是**唯一的观察通道**：launchd 的日志和每个 job 的 0/1/2 都从它走。最坏的形态是 `open` 掉进未验证的 `kmopen()` 挂住——没有日志、没有 panic、也不会复位 | `KEBAB UFS: /dev/kebabcon unavailable`，或 `service spawn failed: 6`，或"什么都没有" | 断电 |
+| 2 | `0134` panic 策略 | 它改的是**所有 panic**的行为，而且把"停住"变成"复位"。启动早期 panic 现在表现为**重启循环**；读错这一条会把 panic 当作启动慢。另一个坏形态是接管成功但端口不工作→停在泵里 | `panic console cannot be serviced (…)` / `no console to service` / 反复的 `event thread started` | 断电（停在泵里时） |
+| 3 | `0142` dynamic-config 页 | 每次 `kebab_dsc_map=1` 的启动都多映射一页，并新增一条拒绝路径；失败会打断 plan→map→dyld 这条链，把 PID 1 送到 namespace 6，再被 `0134` 变成重启循环 | `plan … 52 mappings … appended` 缺失，或 `HALF MAPPED` / `NOT mapped` | 通常不用（会自动重启），但定位要一轮启动 |
+| 4 | `0136` 平台门 | 每个 exec 都过；没生效就是 9/e → PID 1 panic。它是一条**放松**，生效后问题会推到共享缓存/签名，读日志的人容易把"9/e 消失"当成"都好了" | `namespace 9 code 0xe` | 通常不用 |
+| 5 | `0141` user stack sp | 只影响 `LC_UNIXTHREAD`，P1 的 pid 1 路径不经过；坏也只坏一个进程，不会挡启动 | `KEBAB EXEC: stack … custom=1 …` | 不用 |
+
+不进这张表的原因：9 个 (a) 改动全部需要显式参数，普通启动根本不会执行；
+5 个 (c) 和 1 个 (d) 不改变内核决策。
+
+### 7. 首次启动检查清单（按控制台出现顺序）
+
+**先读这一条，否则会找错地方**：`kebab_usb_log()` 在 `!ud.running` 时**直接丢弃**，
+而 `ud.running = true` 是在 `kebab_usb_start()` 的后半段才置的。所以
+
+* 主机 USB 上的**第一行不可能是** `KEBAB USB: running (DSTS …)`——那一行打印时
+  `ud.running` 还是 false，它只上面板。同理 `KEBAB USB: SMMU …`、`reset … after …
+  ms`、`step 1..7`、以及 `KEBAB CS: policy 0xf …`（它在 `kernel_bootstrap_thread()`
+  的 `STARTUP_SUB_EARLY_BOOT` 阶段打印，早于 `bsd_init()`）都只在面板上。
+* USB 上第一行应当是 `KEBAB USB: event thread started, waiting for the host`。
+  如果连它都没有，先查 `kebabusb=1` 与控制器（此时面板上会有
+  `KEBAB USB: cannot map the controller` / `controller did not start` 之类）。
+
+下面每一行都是**当前代码里的格式串**；`<…>` 是变量部分。
+
+| # | 期望行（USB 顺序） | 不符合时先怀疑 |
+| ---: | --- | --- |
+| 1 | `KEBAB USB: event thread started, waiting for the host` | `kebabusb=1` 缺失；控制器没起来（看面板） |
+| 2 | `KEBAB UFS: "userdata" on LUN 0: first block 0x…, <n> MiB, read-write` | UFS 没起来；`ufsrw=1` 缺失则末尾是 `read-only` |
+| 3 | `KEBAB UFS: /dev/kebabcon ready` | **`unavailable` → `0145` 的路由不生效**，此时 PID 1 的 console 会掉进 tty 路径 |
+| 4 | `hfs: mounted KebabRoot on device b(1, 0)` | 根卷没挂上；紧跟其后会有 `KEBAB: cannot mount root, errno = …` panic |
+| 5 | `KEBAB HFS: KebabRoot: block size 4096, total blocks 4194304 (16384 MiB), free blocks …` | `blocks 16384` = 还是 64 MiB 旧卷（P1 没写卷）；这行缺失 = 没走 HFS 挂载 |
+| 6 | `KEBAB DSC: enabled for "/System/Library/Caches/com.apple.dyld"; kebab_dsc_map=1 kebab_dsc_slide=0x0 (default) kebab_dsc_verbose=0` | `kebab_dsc=1` 没进 args；`map=0` 说明 `kebab_dsc_map` 丢了 |
+| 7 | `KEBAB DSC: plan 43 files / 52 mappings, 0xa2de8000 mapped, extent 0xaade8000 (end 0x22ade8000), base 0x180000000, slide 0x0, dynamic config page appended` | `51 mappings` / `absent` = `0142` 没生效；`rejected` = 计划被拒，下一行是 `plan detail follows` |
+| 8 | `KEBAB DSC: map: no shared region at boot (kernel task); deferred to first exec (ENODEV)` | 这行缺失且没有 `map: mapped …` = `kebab_dsc_map=1` 没生效 |
+| 9 | `load_init_program: attempting to load /sbin/launchd` | `/sbin/launchd` 不在卷上，或 init 被 `kebab_noinit` 停住了 |
+| 10 | `KEBAB CS: exec cdhash b65c36c9f5b287a6a8f5ca83d9427fb55ef04f4e cd=0x7e124+4398 hash=2 slice=0x0 tc=hit platform=1` | `tc=miss`/`platform=0` = 信任缓存或 `kebab_cs=15`；这一行缺失 = 根本没到 exec |
+| 11 | `KEBAB EXEC: stack map=0x… shift=14 custom=0 user=0x16fe0000 alloc=0x0+0x0 guard=0x0+0x0 kr=0` | `custom=1`/`kr≠0` = 用户栈这条线（`0141` 或 HFS/USRSTACK64）；`shift=14` 不是 14 = 页大小不对 |
+| 12 | `KEBAB EXEC: pid 1 pre-copyout cs=0x… imgp_cs=0x… load_cs=0x… stack=0x16fe0000` | 这行之后紧跟 `copyout-failed error=…` = 9/6，按 `stage=` 查；没有失败行就是正常 |
+| 13 | `KEBAB DSC: first exec (pid 1): attempting the deferred mapping` | 缺失 = `kebab_dsc_plan` 为空或已经被标记 attempt 过（第一次就缺说明第 7 步已经拒了） |
+| 14 | `KEBAB DSC: map: mapped 0xa2de8000 bytes at 0x180000000`<br>`KEBAB DSC: map: dynamic config page 0x22ade4000+0x4000 is zero-filled; dyld will report "no dynamic config data" and continue`<br>`KEBAB DSC: map: shared_region_check_np base 0x180000000 (slide 0x0)` | `check_np base` ≠ `0x180000000` = `sr_first_mapping` 不是主缓存那条；`HALF MAPPED` = 半映射；这三行默认都打印（`dynamic config page` 行只在 `0142` 加页时出现） |
+| 15 | `KEBAB DSC: mapping complete; dyld will find the cache already in the shared region` | `mapping failed (error …)` = 共享缓存没映射，后面必然是 namespace 6 |
+| 16 | （dyld 自己）`mapped cache does not contain dynamic config data` | **这一行是 `0142` 的正向证据**：它说明那一页可读且 dyld 没有 crash。没有这一行而进程还在跑 = dyld 没走 `reuseExistingCache()` |
+| 17 | `launchd logging initialized. name: launchd pid: 1`（launchd 自己的字符串；第六十八节记作 `launchd`，第七十四/七十五节记作 `com.apple.xpc.launchd`，以实际为准） | 缺失 = `/dev/console` 打不开（`service spawn failed: 6`）或 launchd 没到 main（看第 12/13 步或 9/e/9/6） |
+| 18 | `zone name` / `ZONE TOTALS`（zprint 的表） | 目标达成；缺失说明 job 没 spawn（先看 launchd 的 `Could not …` 行，第六十八节 §8.2 有对照表） |
+
+停下来的规则：**在第一个不符合预期的行停下**，不要继续往下读；每一行已经把
+"下一个该查什么"写在表里。两条例外：第 16 行的 dyld 文本可能因为 dyld 版本措辞
+不同而变（它是 dyld 自己的字符串，不在本树里）；第 18 行的表可能很大，只看
+表头与 `ZONE TOTALS` 就够。
+
+### 8. 这次读代码发现的缺陷与需要更正的地方
+
+**都没有修**：本任务只读不写代码，补丁一个字没动；下面第 8.2、8.3 是文档缺陷，
+更正留给下一次文档提交（或由本节取代）。
+
+#### 8.1 前提更正：`0132` 已经在真机上跑过
+
+任务前提是"`0131` 之后的改动全部没有上过真机"。这对 **`0132` 不成立**：第六十一节
+§3 记录了 `boot_b` 上带 `kebab_touch=1 kebab_touch_boot=1 kebab_touch_power=1
+kebab_vrm_write=1 kebab_pon_write=1` 的真实输出——两路 LDO 的 `EN 0x00 -> 0x80`、
+`TOUCHCLK` 的 `0x063c83c0 -> 0x0e3c83c0`、`identify: … mode 0x01 (application)`，
+都是原样抄下来的日志行，不是推断。所以：
+
+* `0132` 的**上电、时钟、identify** 这一半有真机证据，可以按"已验证"对待；
+* `0132` 的**报告程序 / app info** 那一半被固件拒绝了（`payload 23040 too large`、
+  `report config answered 0x0d`），`0135` 把整层换掉——**`0135` 才是完全没上过
+  真机的那一个**。
+
+这不改变第 2 节的分类（`0132` 仍然是 (a)），但改变了"先怀疑谁"：`0132` 的
+上电/时钟路径比 `0135` **更不可疑**，怀疑顺序应当排在 `0135` 之后。
+
+#### 8.2 文档缺陷：第六十八节 §7 的期望日志已经过期，照它读会误判
+
+第六十八节 §7 列出的"成功路径应包含"是 `0142`/`0143` 之前的形态，现在有三处
+会让人在第 7 步就停下：
+
+1. 它期望 `KEBAB DSC: plan 43 files / 51 mappings / 0xa2de4000 bytes`、
+   `highest mapped end 0x22ade4000, region slack 0x4000`，以及"43 个文件约 100 行"
+   的 `file NN …`/`map …`。当前代码只打**一行**摘要，数字是
+   `52 mappings` / `0xa2de8000` / `extent 0xaade8000 (end 0x22ade8000)`，
+   逐条明细要 `kebab_dsc_verbose=1`。
+2. 它期望 `KEBAB DSC: map: mapped 0xa2de4000 bytes …`。当前是 `0xa2de8000`。
+3. 它把 `KEBAB CS: policy 0xf unsigned trustcache-platform entitlements
+   unsealed-shared-cache` 列在成功日志的第一行。这一行由
+   `STARTUP(CODESIGNING, …)` 在 `kernel_bootstrap_thread()` 的
+   `STARTUP_SUB_EARLY_BOOT` 阶段打印，**早于 `bsd_init()` 里的
+   `kebab_usb_start()`**，而 `kebab_usb_log()` 在 `!ud.running` 时丢字节——所以
+   它只出现在面板上，永远不会出现在 USB 日志里（除非镜像带 `kebabkdp=1`，
+   那时 `kebab_usb_kdp_start()` 会更早把端口带起来）。
+
+结论：第六十八节 §7 那份清单不能直接当作上板检查表；本节第 7 节是它的替代品
+（同样是代码推导，但按 `0143` 之后的实际输出）。
+
+#### 8.3 文档缺陷：第九节的 `C-BOOT-BANNER` 期望一行不可能出现在 USB 上
+
+> **2026-10-28 复核（见第七十九节）：下面的"会在第一个 checkpoint 失败"不成立。**
+> `scripts/bring-up.py` 里的谓词是 `event thread started OR running (DSTS …)`，
+> 所以默认启动会靠前者通过，不会因为 `running` 只在面板上而超时。但这一条仍然
+> 是真实缺陷：期望/文档把不可能的行写成主判据，fake board 又同时喂两行，没有任何
+> 测试能证明"可以不要它"。第七十九节已把检查点固定为
+> `KEBAB USB: event thread started, waiting for the host`，并补了
+> `no-panel-banner`、`panel-banner-noise`、`console-markers` 三个测试。同一轮
+> 审计还发现 `C-VOL-MOUNT` 在真机上**每次**都会失败（HFS 注册行先到），以及
+> `C-VOL-STATUS` 的 `VOL? DISK` 拼写错误——它们比 8.3 严重。以下保留当时的
+> 记录原文。
+
+`scripts/bring-up.py` 的 `C-BOOT-BANNER` 期望"`KEBAB USB: running (DSTS ...)` 且随后
+`event thread started`"。按 `kebab_usb.c` 的顺序，`printf("KEBAB USB: running
+(DSTS ...)")` 在 `ud.running = true` **之前**，所以这一行只到面板；USB 上只有
+`event thread started`。这一条只影响主机的自动检查（fake board 不模拟这个细节），
+不影响内核行为；但如果真拿 `bring-up.py` 跑 vol 阶段，`boot.banner` 检查会在第一
+个 checkpoint 就失败，并给出"没有 banner"的错误提示。
+
+#### 8.4 没有发现（也就没有修的）代码缺陷
+
+读 `0132`–`0147` 时逐条核对过下面这些"看起来可疑但实际成立"的点，记下来是为了
+避免下一个人重复读：
+
+* `0142` 依赖 `VM_PROT_ZF` 来选"匿名零页"分支。本树
+  `vm_shared_region.c` 确实是按 `sms_init_prot & VM_PROT_ZF` 选
+  `map_port = MACH_PORT_NULL`，**不是**按 `fd == -1`；所以把这一页放进主缓存的
+  mapping 数组（`srm[0].fd = 0`）也能得到零页映射，这样写是对的。
+* `0142` 的追加发生在 `build_plan()` 里 `total_mappings` 统计**之前**，所以摘要的
+  52 是准的；`kebab_dsc_apply_slide()` 对**所有** mapping 加 slide，dynamic 页
+  也一起滑，和 dyld 的 `mappings[totalMappings]` 同步。
+* `0143` 在成功路径里用 `kr` 复用了 `vm_shared_region_start_address()` 的返回值。
+  这不会污染返回值（函数返回的是 `error`，早就算好了），但让"`kr` 是
+  map_file 的结果"这个读法变得不成立——读这段代码时容易误会。
+* `0146` 的 `ml_get_interrupts_enabled()` 守护对 `write(2)` 不可达；而
+  panic 路径里 `ud_panic_reboot()` 的 `printf` 不会因此踩到
+  `console_io_allowed()` 的 panic：panic 走
+  `handle_debugger_trap()` → `console_suspend()` 之后才进
+  `debugger_collect_diagnostics()`，此时 `console_write()` 走的是
+  `console_suspended` 的 unbuffered 分支。
+* `0134` 的 `ud_platform_restart()` 在 `PEHaltRestart()` 之前先置
+  `ud.restart_armed = true`，否则 `haltRestart()` 会再把控制台交给
+  `kebab_usb_panic_spin()`，而第二个 spinner 会被 `panic_cpu` 挡成永久等待——
+  这一条是整段 panic 策略能成立的关键，改动它时要一起改。
+
+### 9. 本节不覆盖的部分：`0131` 之前
+
+本文的前提是：`0131` 及之前的改动在项目早期已经上过真机，所以不再重排它们的
+风险。但"验证过"不等于"全部验证过"，所以把**证据边界**写清楚，免得下一次
+出问题时把早期改动也当成嫌疑，或者反过来把从未验证过的东西当成基线：
+
+**有真机日志、仍按"已验证"对待的**：
+
+| 范围 | 证据 |
+| --- | --- |
+| 引导链到 `bsd_init`、USB CDC-ACM 控制台、EP0 探测、控制台命令（`IMEM?`/`REBOOT`/`FASTBOOT`/`PSCI?`） | 第一节（引导路径，已验证）、第六之二、十五～二十节；`KEBAB REBOOT: PEHaltRestart(kPERestartCPU)` 在多次会话里都出现过 |
+| UFS 块设备与 HFS+ 读写路径、64 MiB 旧卷的挂载 | 第六十二节：64 MiB 卷上实测 7.84 MiB/s、`INST DONE`、最大 922,912 B 文件（`dyld`） |
+| SPMI 只读探针、`PWR?`/`PON?`/`VROMON` 的寄存器语义 | 第三十、三十一节：两路 LDO 上电前都读 `enable 0x00`，与 `0132` 真机输出一致 |
+| 触摸到 GENI/SE 初始化、`TOUCHCLK`/`TOUCHSE` 的控制台路径、identify 的报文框架 | 第二十四、二十六、二十七、二十九节，以及第六十一节（`0132`） |
+
+**从那时起就只有主机侧证据、不能算"已验证"的**：
+
+| 范围 | 一直缺的是什么 |
+| --- | --- |
+| RPMh TCS 状态机（`0125`–`0128`） | 只有虚拟 MMIO/模拟器验证（第三十六、三十七节）；真机上只跑过只读发现，没跑过真正的 ENABLE 之外的写 |
+| 固件（O3-C*）一系列分析（第四十四～五十八节） | 全是主机侧源码/镜像分析，没有一条在板子上执行过 |
+| 共享缓存计划、slide、`vm_shared_region_map_file()` 的返回值 | 第六十七、七十三节：只有脚本与源码对照，真机零次 |
+| HFS+ 大文件写入（> 64 MiB） | 第七十七节：最大完整文件仍是 922,912 B；592 MB 只是算术上可行 |
+| `kebab_cs` / 静态信任缓存 / `CS_PLATFORM_BINARY` 的判定 | 主机侧 cdhash 校验（第六十六节 §5），真机没有 `tc=hit platform=1` 的日志 |
+
+换句话说：**下一轮启动如果出现"根卷挂载失败""SPMI 读不到""触摸没有应答"，
+不要先怀疑本节这 20 个改动**——先按第 9 节的证据边界判断它属于哪一层；只有当
+失败点落在第 3 节那五条 (b) 的判断点上时，本节才是第一嫌疑人。
+
+## 七十九、P1 检查点字符串审计：每个期望行的出处与可见性
+
+> 2026-10-28。范围：`scripts/bring-up.py` 里所有 `self.wait()` 谓词、所有
+> `*_RE` 正则，以及 `PanicDetector` 的 `BOOT_BANNER_RE`。方法：对每条字符串
+> 在补丁系列 `0000`–`0147` 的最终源码里找到 `printf`/`kprintf` 调用点，再按
+> `kebab_usb_log()` 的 `!ud.running` 门（`bsd/dev/kebab_usb.c:898`）和调用点
+> 的先后，判断它能否到达 USB。板子仍然 stranded，**本节没有真机日志**；证据是
+> 内核源码（`xnu-8796.141.3` + `patches/xnu-8796-kebab`）和 fake board 测试。
+>
+> 结论：**4 个检查点的期望/匹配写错了**：
+>
+> | # | 检查点 | 错误类型 | 真机后果 |
+> | ---: | --- | --- | --- |
+> | 1 | `C-BOOT-BANNER` | 把只上面板的 `running (DSTS ...)` 当成判据 | 代码里的 OR 谓词让它侥幸通过；但期望、文档和 fake board 都以错行为准，没有任何测试证明可以不要它 |
+> | 2 | `C-VOL-STATUS` | `VOL? DISK` 拼错，内核打的是 `VOL DISK` | `VOL?` 的磁盘几何永远解析不到；`query_vol()` 总返回 unknown，`--from auto` 的 resume 判断退化 |
+> | 3 | `C-VOL-MOUNT` | 先等任意 `KEBAB HFS: `，再套几何正则 | **每次真机启动都会失败**：HFS 注册行先到，脏卷时还有 dirty 行 |
+> | 4 | `C-VOL-REBOOT` | 前缀也匹配 `PEHaltRestart returned ...` | 复位被固件拒绝时仍记 OK，下一步 mount 才报错，误导定位 |
+>
+> 另有 1 个非检查点：`BOOT_BANNER_RE`（panic 重启检测）含两条到不了 USB 的行。
+> 第七十八节 §8.3 说"第一个 checkpoint 会超时"只对了一半：`86e2b94` 的代码
+> 谓词是 `event thread started OR running (DSTS ...)`，所以不会因为 `running`
+> 超时；但那一行确实不该出现在期望里，已按本节改正并补测试。
+
+### 1. 判据：一行能不能到 USB
+
+`kebab_usb_start()` 在 `bsd/dev/kebab_usb.c` 里的顺序是：
+
+```c
+printf("KEBAB USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n", ...);  /* :2582 */
+...
+ud.running = true;                                                           /* :2597 */
+kernel_thread_start((thread_continue_t)ud_thread, NULL, &thread);
+printf("KEBAB USB: event thread started, waiting for the host\n");           /* :2605 */
+```
+
+而控制台 tee 在 `_cnputc()` 里：
+
+```c
+kebab_usb_log(&c, 1);        /* osfmk/console/serial_console.c */
+...
+void kebab_usb_log(const char *buf, size_t len) {
+    if (!ud.running || !buf || !len) return;   /* bsd/dev/kebab_usb.c:898 */
+```
+
+所以 `:2582` 之前的每一行都只上面板（`printf` 仍然会画面板）。第一条能到
+USB 的启动行是 `:2605` 的 `event thread started`。同理，
+`bsd_init()` 在 `bsd/kern/bsd_init.c:508` 才调用 `kebab_usb_start()`，所以
+`Darwin Kernel Version`、`KEBAB USB: SMMU ...`、`reset ... after ... ms`、
+`step 1..7`、`KEBAB CS: policy 0xf ...` 都到不了 USB（`policy` 行由
+`STARTUP(CODESIGNING)` 在 `_EARLY_BOOT` 阶段打印，早于 `bsd_init()`）。
+例外只有 `kebabkdp=1`：`kebab_usb_kdp_start()` 会更早把端口带起来，而 P1
+默认拒绝这个参数（`require_args()` 把 `kebabkdp=1` 放进 forbidden 集合）。
+
+### 2. 逐条对照
+
+下表的"内核来源"是最终补丁树里的文件与行号（行号取
+`xnu-8796.141.3` 基线的当前补丁状态；`kebab_usb.c` 在 `0142`–`0147` 里没有
+改动，行号稳定）。
+
+| 检查点 | 旧期望 | 新期望 | 内核来源 | 说明 |
+| --- | --- | --- | --- | --- |
+| `C-BOOT-BANNER` | `KEBAB USB: running (DSTS ...)`，随后 `event thread started` | 只接受 `KEBAB USB: event thread started, waiting for the host` | `bsd/dev/kebab_usb.c:2582`（running）、`:2597`（`ud.running = true`）、`:2605`（event thread）、`:898`（门） | 旧主判据在门之前，只上面板。OR 谓词让默认启动侥幸通过；现改为 `is_console_boot_banner()`，`running`/`Darwin` 只作为"不可用"记录在 `PANEL_ONLY_BOOT_MARKERS` 里，测试会拒绝它们。 |
+| `C-VOL-STATUS` | `^VOL\? DISK vh bsize ...` | `^VOL DISK vh bsize ...` | `bsd/dev/kebab_vol.c:179-201`（`kv_print_vh()` 打 `VOL %s vh ...`），`:795` 以 tag `"DISK"` 调用 | 内核不在 `DISK` 前加 `?`；旧 regex 从不匹配，磁盘几何丢失，`query_vol()` 因 `"blocks" not in info` 总返回 `None`。现在缺 `VOL DISK vh bsize/blocks` 会让 C-VOL-STATUS 直接失败。 |
+| `C-VOL-MOUNT` | 先等任意 `l.startswith("KEBAB HFS: ")`，再 `HFS_RE.match()` | 直接等 `HFS_RE.match(l)` 的几何行 | 几何行 `bsd/kebab_hfs/core/hfs_vfsops.c:1866`；注册行 `bsd/kebab_hfs/kebab_hfs_iokit.c:108`；脏卷行 `bsd/kebab_hfs/core/hfs_vfsutils.c:211` | 每次 `bsd_init` 都先打 `KEBAB HFS: hfs-627.100.6 registered`，所以旧代码的"第一行 KEBAB HFS"必然不是几何行，`HFS_RE` 必然失败。**这是真机上每次都会停住的地方。** |
+| `C-VOL-REBOOT` | `startswith("KEBAB REBOOT: PEHaltRestart")` | 精确匹配 `KEBAB REBOOT: PEHaltRestart(kPERestartCPU)` | 成功行 `bsd/dev/kebab_usb.c:1592`；失败行 `:1602`（`PEHaltRestart returned %d, the machine did not reset`） | 旧前缀也接受失败行，会把"固件拒绝复位"记成 OK，然后在 C-VOL-MOUNT 以"没有 HFS 行"报错。 |
+| （非检查点）`BOOT_BANNER_RE` | 含 `running (DSTS`、`event thread started`、`Darwin Kernel Version`、`kebab_noinit=1` | 只含 `event thread started`、`kebab_noinit=1` | 同 `kebab_usb.c:2582/2597/2605`；`Darwin` 早于 `bsd_init.c:508` | `running` 与 `Darwin` 到不了 USB；保留它们会让 panic 检测器把"永远等不到的 reboot 证据"写进逻辑。实际 reboot 证据是 event-thread 行与 `console reopened`。 |
+
+逐条核对过、**没有改**的（避免下一个人重查）：
+
+| 检查点 | 期望行 | 内核来源 | 为什么能到 USB |
+| --- | --- | --- | --- |
+| `C-BOOT-NOINIT-*` | `KEBAB: kebab_noinit=1: staying in the kernel, no init program` | `bsd/kern/bsd_init.c:1201` | `bsdinit_task()` 在 `bsd_init()` 之后运行，而 `kebab_usb_start()` 在 `bsd_init.c:508` 已经返回 |
+| `C-VOL-OLD` / `C-VOL-DRY` / `C-VOL-WRITE` | `VOL OLD vh/bytes`、`VOL BEGIN ...`、`VOL PLAN ...`、`VOL NEW vh/bytes`、`VOL DONE ...` | `bsd/dev/kebab_vol.c:173-203`（`kv_print_vh`）、`:371`、`:634`、`:658`、`:754` | 全部由 USB 命令触发，命令能到就说明 `ud.running` 为真 |
+| `C-INST-GEOM` / `C-*-PRECHECK` / `C-SEND-*` / `C-VERIFY-*` | `INST? ...`、`INST CHECK ...`、`INST BEGIN/ACK/STREAM/DONE`、`OK`/`SKIP` | `bsd/dev/kebab_install.c:1275/1301/1400/1457/1494/1563` | 同上，都是命令应答 |
+| `C-FINAL` | `launchd logging initialized` / `zone name` / `ZONE TOTALS` | 用户态 launchd 与 zprint，不在内核树里 | 依赖 `0145` 的 `/dev/console` 路由；本节无法用源码证明，仍是真机待验证项 |
+
+### 3. 为什么不是"第一个检查点就 abort"
+
+`86e2b94` 的 `boot()` 原本是：
+
+```python
+banner = self.wait(lambda l: "KEBAB USB: event thread started" in l
+                   or "KEBAB USB: running (DSTS" in l, timeout, ...)
+if "KEBAB USB: running (DSTS" in banner:
+    banner = self.wait(lambda l: "KEBAB USB: event thread started" in l, ...)
+```
+
+只要 `event thread started` 到达，第一行匹配后 `if` 不成立，检查点就以它通过。
+所以第七十八节 §8.3 的"第一个 checkpoint 会超时"在当前代码上**不成立**；
+fake board 也一直同时喂两行，测试不可能发现这个期望是错的。真正会在真机上
+**每次**失败的是 `C-VOL-MOUNT`（见上表），它发生在 vol 阶段写完之后，不是
+第一个检查点。把 `running` 去掉、只留 console 行，仍然是对的：它让"期望"与
+"可达"一致，也让测试第一次能证明这一点。
+
+### 4. 测试
+
+`scripts/test-bring-up.py` 新增：
+
+| 测试 | 做什么 | 失败意味着 |
+| --- | --- | --- |
+| `console-markers` | 单元测试：`is_console_boot_banner()` 接受 event-thread 行、拒绝 `running (DSTS`；`BOOT_BANNER_RE` 不再匹配 `running`/`Darwin`，但仍匹配 event-thread 与 `kebab_noinit` | 有人把只上面板的行重新加回判据 |
+| `no-panel-banner` | 完整 `--from vol --to vol`，fake transcript **不含** `running (DSTS` 与 `Darwin`；要求 rc=0，且 `[ OK ] C-BOOT-BANNER` 的 seen 是 event-thread 行 | 检查点又依赖面板行 |
+| `panel-banner-noise` | 同样的流程，但 transcript 故意带上两条面板行；要求检查点仍用 event-thread 行 | 面板行被误当成证据 |
+| `missing-mount-line` | 保留 `KEBAB HFS: hfs-627.100.6 registered`，删掉几何行，`--boot-timeout 3`；要求 rc=3 且失败报告出现 `vol.reboot`/`KEBAB HFS` | 缺了 mandatory 行仍然通过（测试变成空转） |
+
+fake board 同时改成更像内核：`VOL DISK vh`（不再 `VOL? DISK`）、每次启动先打
+HFS 注册行、`running`/`Darwin` 变成可选噪声。原有 18 个测试全部保留并通过；
+新增后共 **22 个测试**（3 个单元 + 19 个 fake-board 用例），加
+`--kernel-source` 时再跑命令 lint（23 项）。命令：
+
+```sh
+python3 scripts/test-bring-up.py \
+  --kernel-source /home/albert/xnu-0139/bsd/dev/kebab_usb.c
+```
+
+### 5. 本轮改了什么、没改什么
+
+* **内核一个字节没改。** 所有问题都在主机侧期望与测试里；不需要新补丁。
+* 文档：本节；第六十八节 §7 顶部加"已被取代"，并新增 7.1 的当前输出；
+  第六十九节 §2 的 `C-BOOT-BANNER` 行、§5 的"新 banner"行、§6 的 reboot
+  判据；第七十八节 §8.3 顶部加复核结论（原文保留）；第六十三、六十九、七十
+  节里把 `VOL? DISK` 当成实际输出的三处也已更正（历史记录处加注，当前指引
+  直接改）。
+* `scripts/bring-up-README.md` 与 `MIGRATION.md` 的 `C-BOOT-BANNER` 行同步。
+* `scripts/bring-up-dryrun.log` 重新生成，PLAN 末尾新增一行说明
+  `C-BOOT-BANNER` 等的是哪一条 USB 行。
+* 仍未验证：`C-FINAL` 的 launchd/zprint 行、`0145` 的路由，以及所有真机
+  时序。板子回来时，先按第七十八节 §7 的 18 步读，再用本节表格核对这些
+  检查点是否与日志一致。
+
+## 八十、P1 执行计划的独立复核
+
+> 2026-10-28。范围：`9a4fcb4` 上的 `scripts/bring-up.py`（2,921 行）、
+> `scripts/bring-up-README.md`、`scripts/pack-userland.py`、`scripts/make-root-volume.py`、
+> `scripts/make-minimal-userland.py`、`scripts/test-bring-up.py`，以及内核侧
+> `bsd/dev/kebab_usb.c`、`kebab_install.c`、`kebab_vol.c`、`kebab_ufs.c`
+> （`xnu-0139` 树 + `0132`–`0147`，即当前 126 个补丁的终态）。
+>
+> 板子仍然 stranded：**本节没有一条真机日志**。唯一引用的实测数字来自第六十二节
+> （命令往返中位数 **2.4 ms**、写入 **7.84 MiB/s**、64 MiB 卷在第 64,028,672 字节
+> ENOSPC），其余全部是代码推导。
+>
+> 复核方法：把计划当成状态机，对每一步问三个问题——① 这一步的前置条件是谁建立的；
+> ② 这一步的证据下一步还能不能看见；③ 失败之后下一次能不能从同一处继续。
+> 下面按**代价**分组，不按代码顺序。
+
+### 1. 结论
+
+| # | 发现 | 分组 | 代价 |
+| --- | --- | --- | --- |
+| A1 | 装完 `cache.kist` 后没有任何"已落到介质"的保证，而进最终镜像要过一次 PSCI 复位 | 会白跑本次 | 最终启动失败无法归因，下一轮查错方向 |
+| A2 | `VOL? root ro` 与 `KEBAB VOL:` 两行都打印，主机一条都不检查 | 会白跑本次（下一次启动才发作） | 卷被旧 HFS+ 盖回去，且不知道为什么 |
+| A3 | 镜像参数检查只覆盖"本相位增量"，`-v`/`rd=`/`cpus=1` 不在任何 required 集合里 | 会白跑本次 | 静默控制台 / 复位循环 / SMP 抖动，三种都像别的问题 |
+| A4 | 第一步依赖"**已经刷进去那张镜像**"的 `kebab_pon_write=1`，计划无法预检 | 会白跑本次 | 卡在 `precondition.fastboot`，只能按键 |
+| A5 | `INST busy` / `INST refused` / `VOL busy` 不在 `FAIL_RE` 里 | 会白跑本次 | 180 s 静默，提示指向参数（参数其实是对的） |
+| B1 | 卷挂不上时没有回头路：压卷本身要求根能挂上 | 会白跑第二次 | 要按键或另做一张不挂根的镜像 |
+| B2 | 恢复要重发整条 1.04 GB 流，并且无条件重刷 install 镜像 | 会白跑第二次 | 第二轮成本≈第一轮 |
+| B3 | `skel.kist` 的符号链接在重跑时只核对长度、不核对目标 | 会白跑第二次 | 修不好，只能重建卷 |
+
+另有 **12 条已经正确防护**（第 5 节，请不要重复改）、**4 条可以删的步骤**（第 6 节）、
+**5 个 fake board 覆盖不到的盲区**（第 7 节）。
+
+### 2. 会白跑本次
+
+#### A1. 装完 cache 没有落盘保证，进最终镜像却是 PSCI 复位
+
+**事实。**
+
+* `kebab_install.c` 全文没有 `VOP_FSYNC`、没有 `fsync`、没有 `kebab_ufs_sync`。
+  `ki_finish_entry()` 的读回（`kebab_install.c:1193`–`1207`）走 `vnode_lookup` +
+  `vn_rdwr`，`INST CHECK`（`:1550`）走 `ki_hash_file()`，两者都读 **UBC 里的同一份
+  页**；`hfs_vnop_close()`（`bsd/kebab_hfs/core/hfs_vnops.c:650`）不 msync 也不
+  fsync（只对 ejectable 卷调 `hfs_sync_ejectable()`）。
+  那句注释——"Read the file back: the payload hash proved the wire, this proves the
+  volume"（`:1193`）——说的比它做到的多了"介质"这一层。
+* 对照 `kebab_vol.c:641`：写完先 `kebab_ufs_sync()`（`kebab_ufs.c:685`，注释就是
+  `SYNCHRONIZE CACHE(10)`），再 `kebab_ufs_raw_read()` 从**设备**读回卷头并 memcmp
+  （`:646`–`657`）。同一条总线、同一个驱动，压卷是"落盘 + 复核"，装流是"读回就算"。
+* 进最终镜像的路径：`phase_userland("cache")` → `phase_final()` → `boot()` →
+  `ensure_fastboot()`（`bring-up.py:1386`）→ 控制台 `FASTBOOT` →
+  `ud_fastboot_restart()`（`kebab_usb.c:1634`）→ `ud_platform_restart()`
+  （`:1587`–`1602`）→ `PEHaltRestart(kPERestartCPU)`。这条路径上没有 vfs sync，
+  也没有 unmount；
+  它不是"干净重启"，是**掉电**。
+
+**机制。** 最终镜像启动时，`/System/Library/Caches/com.apple.dyld/` 下 44 个分片里
+最后写入的那一段可能还留在 UBC 或 UFS 设备缓存里，重启后不存在。按实测 7.84 MiB/s，
+一个 30 s 的回写窗口就是约 **235 MiB**；最大的分片是 592 MB 的 `.symbols`，尾部少
+一块 dyld 就映射不了。
+
+**为什么"白跑"。** `C-FINAL` 的判定表（`bring-up.py:2724`–`2737`）把
+`Library not loaded` 指向 dyld、把 `CS_KILLED` 指向签名、把
+`KEBAB DSC: … NOT mapped` 指向共享缓存。这一次它们会是同一个原因：**盘上没有**。
+而三个子系统都刚被改过、都没有上过真机（第七十八节 §3.3、§9），下一轮必然先去查
+DSC。
+
+**这一轮怎么办。** 把"最终启动失败"的结论**降级为未定**：复跑时先让 install 镜像
+重启一次（任何一次重启都会清空 UBC），再对同样的 8 条 `INST CHECK`，让 cache 与
+介质对齐。真正要修的是内核侧——在 `ki_finish_stream()` 里对每个写完的文件
+`VOP_FSYNC`，末尾再 `kebab_ufs_sync()`，三行以内，值得在下次上板前做掉。
+
+#### A2. 强制只读这件事，内核打印了两次，主机一次都不看
+
+**事实。**
+
+* `kebab_vol_status()` 打印 `VOL? root %s space … bsize …`（`kebab_vol.c:800`–`808`），
+  `%s` 就是 `ro`/`rw`。
+* `vfs_mountroot()` 在 HFS 挂载前打印
+  `KEBAB VOL: kebab_vol=1 keeps the old root read-only`（`bsd/vfs/vfs_subr.c:1286`）。
+* `vol_status()`（`bring-up.py:1929`–`1964`）只解析 `gated/writable/chunk/partition/
+  VOL DISK`，`got` 字典里**没有 root**；`bring-up-README.md` 的 C-VOL-STATUS 行也没有它。
+
+**为什么这是最贵的一条。** 整个"先写卷、再重启"的安全性论证就压在这一条上：
+README 写"`kebab_vol=1` forces the old root read-only so a stale HFS+ mount cannot
+flush over the new volume metadata"，第七十八节 §4.4 写"如果它没生效而卷写又跑了，
+故障要到下一次启动才出现"。**唯一没有判据的，恰好就是这一条。**
+
+`kv_finish()` 的设备读回只能证明"读完那一刻"块 0 是新的；写完 `VOL DONE` 之后到
+`REBOOT` 之间，旧 HFS+ 若还持有可写挂载（或周期性 sync），仍可能把旧卷头盖回去，
+而症状出现在**下一次启动**的 `C-VOL-MOUNT` / `C-INST-GEOM`：你会看到几何不对或挂
+载失败，却没有任何证据指向"只读没生效"。
+
+**改法（主机侧两行）。** `vol_status()` 里加 `root` 的解析，要求 `ro`；
+`phase_vol()` 在 DRY 之前断言 `KEBAB VOL:` 那行。两条证据互相独立，任一条缺失都停。
+
+#### A3. 参数检查只覆盖"本相位增量"，不覆盖"能不能启动"
+
+**事实。** `BASE_ARGS`（`bring-up.py:115`–`121`）只有
+`kebabusb/ufsrw/rootrw/kebab_pon_write/kebab_cs`，各相位再加自己的 delta。
+而真正让这台机器启动的是 `board.toml` 的 `kernel_args` 前缀：
+
+```
+-v -enable_kprintf_spam startup_debug=1 serial=3 debug=0x14e cpus=1
+rd=ufsroot0 ufsroot=userdata ufsrw=1 rootrw=1
+```
+
+这七项**一项都不在 required 集合里**，`require_args()`（`bring-up.py:2478`）不会看
+它们。README 说"All images are checked for … the required/forbidden boot arguments
+before a flash"——这里的 "required" 只是 delta，不是完整命令行。
+
+**四种缺失各自伪装成什么：**
+
+| 缺 / 拼错 | 现场 | 会被误当成 |
+| --- | --- | --- |
+| `-v` 或 `-enable_kprintf_spam` | USB 上一行都没有（面板上其实有输出） | 控制器没起来 / `kebabusb=1` 丢了 |
+| `rd=ufsroot0` 或 `ufsroot=userdata` | `KEBAB: cannot mount root` → panic → 0134 复位 → 反复 `event thread started` | 板子在阶段中重启 / 电源不稳 |
+| `cpus=1` | 8 核 SMP：`ud.log_busy` 的串行化、`in_ring`、安装器的时序假设全部按单核写的；症状位置随机 | "时序问题" / USB 丢包 |
+| `kebab_cs=15` / `kebab_dsc=1`（这两项**在** required 里，能查出来） | 查不出来时会像签名/缓存问题 | 已经防护，列在这里只为对照 |
+
+另外 `cpus=1` 还有一个隐性作用：本节的整套时序论证（2.4 ms 往返、一个事件线程服务
+所有事）都**假设**单核。计划里没有任何检查点证明这个前提成立。
+
+**建议。** 把 `rd=`、`ufsroot=`、`cpus=1`、`-v`、`-enable_kprintf_spam` 加进每相位
+的 required 集合；这不需要改内核，只需要改 `BASE_ARGS`（它们在三个相位里都应该在）。
+
+#### A4. 第一步依赖"上电时正在跑的那张镜像"，而计划只能检查"即将刷的镜像"
+
+`precondition()`（`bring-up.py:1785`）的顺序是：`fastboot devices` → 没有就
+`IMEM?` 探活 → `FASTBOOT`。而 `FASTBOOT` 在 `kebab_pon_write=0` 时**只打印一行然后
+什么都不做**（`kebab_usb.c:1648`–`1651`）：
+
+```
+KEBAB FASTBOOT: disabled because kebab_pon_write=0; use REBOOT for a plain restart
+```
+
+计划对此的提示是"if the line says disabled, this kernel cannot enter fastboot"——准确，
+但是**终点**：按键之外没有第二条路，因为进入 fastboot 的命令本身也要走这张镜像。
+任务描述里的场景是"板子停在 panic 自旋、人按一次电源"：按下去之后跑的就是**上一次
+刷进去的那张**，计划在它启动之前无法知道它带了什么参数。
+
+三条 P1 镜像都带 `kebab_pon_write=1`，所以只要上一次刷的是它们之一就没事。风险在
+"上一次不是"。**建议**：运行手册里把"确认 boot_b 上最后刷的是三张 P1 镜像之一"
+写成上电前的第一条；代码侧可以在 `FASTBOOT` 被拒时直接打印 vol-up+power 的按键序列，
+而不是让人去读第 78 节。
+
+#### A5. 设备"忙"，主机看到的是参数错误
+
+`kebab_install_begin()` 有三种拒绝：`INST busy`（上一次流还活着，`:1238`）、
+`INST refused`（长度为零，`:1244`）、`INST disabled`（gate 关）。
+`FAIL_RE`（`bring-up.py:167`–`171`）只认 `INST ABORT` / `INST TIMEOUT` / `VOL ABORT` /
+`VOL FAIL` / `VOL TIMEOUT` / `FAIL ` / panic 行；`send_stream()` 等 `INST BEGIN` 时
+只用 `INST_BEGIN_RE`。于是：
+
+* 上一次流因为主机侧放弃而残留（内核侧还有最多 60 s 才超时清掉），这一轮立刻重跑
+  → `INST busy` 不匹配任何判据 → **静默 180 s** → 报 `send.begin`，提示
+  "check that kebab_install=1 and rootrw=1 are on the running image"。这两项都是对的。
+* `VOL busy` 同理（`kebab_vol.c:278`），`vol_send()` 的等待谓词里没有它。
+
+这是"控制台协议在真实时序下会在哪里停"的一个具体答案：**不是链路停，是会话没清干净**。
+把 `INST busy` / `INST refused` / `VOL busy` 加进 `FAIL_RE` 是一行的事，而且能把
+180 s 的误判变成一条明确的"等 60 s 再试"。
+
+### 3. 会白跑第二次
+
+#### B1. 卷挂不上时没有回头路——压卷本身要求根能挂上
+
+这是"如果 imprint 成功但 mount 检查失败，能不能不重新上电"的直接答案：**不能保证。**
+
+* `kebab_vol` 的写路径是 raw 块（`kebab_ufs_raw_write`），确实不需要文件系统；但要跑
+  到 `VOL BEGIN`，这次启动必须先过 `vfs_mountroot()`。挂不上就是
+  `panic("KEBAB: cannot mount root")`，0134 把 panic 变成 PSCI 复位
+  （第七十八节 §3.2），于是**重启循环**，控制台每次只活几秒。
+* 主机侧这次启动的入口是 `console_answers()`（`bring-up.py:1852`）：**一次** 3 s 的
+  `IMEM?`。撞不上就报"a physical power cycle is required"。`probe_imem(attempts=30)`
+  只在 `boot()` 里用，不在 `precondition()` 里。
+* 就算撞上了，`FASTBOOT` 也只有 15 s 的确认窗口（`:1811`），重启循环里未必够。
+
+所以"卷写坏了"这一类失败，恢复手段是**手按 vol-up+power**，或者做一张不挂根、
+只跑 `kebab_vol` 的镜像。计划里两者都没有。**这是唯一一类"这一轮之后板子回不来"的
+失败**，优先级应该高于任何性能问题。建议：`precondition()` 的 `IMEM?` 改成
+`probe_imem(attempts=30, timeout=2.0)`（`boot()` 已经这么做了），并在失败报告里写明
+按键序列。
+
+#### B2. 恢复一次的成本接近重跑一次
+
+* 内核侧有 per-entry SKIP（`kebab_install.c:888`–`899`），但主机侧只要有一条不同就
+  `send_stream()` **整条**流（`bring-up.py:2351`–`2353`）；README 也明说
+  "A partial stream is sent in full"。1.04 GB 要重发一遍。
+* `run()` 在 skel/base/cache 之前**无条件**走 `phase_install()`（`:1760`–`1761`），
+  即使板子已经跑着 install 镜像——一次 `--from cache` 的恢复要付一次 96 MiB 刷写 +
+  一次复位 + 一整条流。
+* 实测 7.84 MiB/s 下，写 3.33 GB 约 7 分钟，而 `ki_finish_entry()` 每条还要**整文件
+  读回**一次（`:1195`），实际 I/O 是 3.33 GB 写 + 3.33 GB 读 ≈ **14 分钟**；再加
+  16,295 × 2.4 ms ≈ 39 s 的往返。预算要按"每轮 20 分钟"算，恢复轮也一样。
+
+**建议**：`phase_install()` 之前先用 `INST?` 探一次（`gated 1 / root rw /
+blocks 4194304` 就说明已经跑在 install 镜像上），成立就不刷不重启；`pack-userland.py`
+已经有 `--skip-list`，把 precheck 的 `same` 列表直接喂给它，就能只发缺的那几条。
+
+#### B3. `skel.kist` 的符号链接：重跑只核长度，不核目标
+
+* 内核侧 EEXIST 分支只做 `vnode_islnk()`（`kebab_install.c:1152`），打印
+  `SKIP <path> <n> link exists`；目标字符串根本不读。
+* 主机侧 SKIP 分支只比对 `entry.size`（`bring-up.py:2293`–`2300`），而 `size` 就是
+  目标长度。
+* 首次创建时 OK 行会带 `-> target`，所以第一次是对的；但只要卷上存在一个**同长度的
+  错误目标**（构建错误、手改、上一版 skel），之后每一轮都 SKIP 通过，最后表现为
+  launchd 找不到 `/etc/passwd`——`C-FINAL` 会把它记成 init 进程失败。
+
+影响面小（新卷第一次就对），但它是"重跑修不好"的那一类，和第七十八节 §4.7 记的
+"`SKIP` 不会重设属主/模式"是同一个形状。**建议**：`check_skel_console()` 对 SKIP 的
+链接要求内核打印目标，或至少在 OK 行存在过的前提下才接受 SKIP。
+
+### 4. 计划里已经做对、且**不要**再改的部分
+
+这一节是为了避免下一轮把已经防护好的东西重新改一遍。
+
+| # | 已经防护的事 | 证据 |
+| --- | --- | --- |
+| 1 | **迟到 ACK 不会打乱流**：主机从不重传（超时直接失败），ACK 是累计值，只有 `acked >= target` 才前进 | `bring-up.py:1671`–`1684`；`kebab_install.c:1457` |
+| 2 | **短包/分片 ACK 也被容忍**：一个 64 KiB 块被拆成多次 completion 时，多个小于 target 的 ACK 只会让主机继续等同一个 target | 同上（这条没有测试覆盖，但逻辑成立） |
+| 3 | **设备在写完之前不重新 arm OUT**：`ud_service()` 的 arm 条件是 `!inst_pending && !vol_pending && reboot_command == 0`，缓冲区由 arm 时记录，不由当前模式推断 | `kebab_usb.c:1176`–`1193`、`:1852`–`1880` |
+| 4 | **压卷是真的落盘**：`SYNCHRONIZE CACHE(10)` + 设备 raw read + memcmp，之后才打印 `VOL DONE` | `kebab_vol.c:641`–`657`；`kebab_ufs.c:685` |
+| 5 | **phase B 的挂载是新的**：install 镜像是新一次启动，`INST?` 读的是 `rootvnode->v_mount` | `kebab_install.c:1491`；`bring-up.py:2158` |
+| 6 | **空闲空间检查读的就是新卷**：`ki_space()` → `vfs_statfs(rootvnode->v_mount)`，不是旧卷、不是宿主机推算 | `kebab_install.c:607`–`621` |
+| 7 | **skel 失败不会被 base 掩盖**：16 条逐条读回、mode/uid/gid（含 01777）全对才继续 | `bring-up.py:2239`–`2316`；`kebab_install.c:379`–`405` |
+| 8 | **每张镜像刷之前都查参数**：install 禁 `kebab_vol=1`、final 禁 `kebab_vol/kebab_noinit`、默认禁 `kebabkdp=1` | `bring-up.py:2478`–`2509` |
+| 9 | **`kebab_noinit` 缺失会被点名**：`boot()` 等 `KEBAB: kebab_noinit=1:`，超时提示"the image was built without kebab_noinit=1" | `bring-up.py:1478`–`1488` |
+| 10 | **panic / 重启可判定**：console epoch、`console reopened`、新 banner、`panic(cpu` 都能触发 `PanicDetected`，不会变成"慢 ACK" | `bring-up.py:973`–`1047` |
+| 11 | **写块 0 之前就把旧卷头和流头验完**：`VOL OLD` 三行 + 32 行原字节、流头 block size/volume/边界都在第一次 flush 之前 | `kebab_vol.c:336`–`340`、`:413`–`433` |
+| 12 | **第七十九节那四处检查点字符串错误已在 HEAD 修掉**（`C-BOOT-BANNER` / `VOL DISK` / `C-VOL-MOUNT` / `C-VOL-REBOOT`） | `9053d4e`、`9a4fcb4` |
+
+### 5. 可以删、或者可以合的步骤
+
+1. **vol 镜像上的 `kebab_install=1`**（`VOL_ARGS`，`bring-up.py:122`）。这一相位用不到
+   INST，而它让**唯一一次破坏性写盘的启动**上多了一个写者。INST 需要 root rw，根被压成
+   只读所以是惰性的——但删掉零成本，收益是那一跑只剩一个写者。
+2. **恢复时无条件重刷 install 镜像**（见 B2）。先用 `INST?` 探，成立就不刷。
+3. **`reboot_and_check_new_volume()` 的额外一次启动**。`C-INST-GEOM`（blocks 4194304 +
+   `root rw` + `free > 0`）已经**更强地**证明了同一件事。省一次启动就省一次复位风险；
+   代价是丢掉"卷挂不上 vs install 镜像有问题"的归因。**建议保留，但在 run book 里写明
+   它是为归因、不是为正确性**——这样下次有人想删时知道删掉什么。
+4. **`VOL DRY` 保留，但别把它当写能力的证据**。`kebab_vol_begin()` 的
+   `kebab_ufs_writable()` 检查只在 `!dry` 分支（`kebab_vol.c:284`），所以
+   `ufsrw=0` 时 DRY 照样通过。真正的 writable 判据是 `VOL? … writable 1`，计划已经查了。
+
+### 6. fake board 覆盖不到的五个点
+
+| # | 测试里怎么过 | 真机上为什么不一样 |
+| --- | --- | --- |
+| 1 | `FakeConsole.send()` 同步调 `device.receive()`，一个 chunk 立刻回 ACK | 真机是 2.4 ms 往返；控制台排出是 `ud_pump_log()` 每次 poll 发 `mps-1` 字节、`ud_thread` 每轮 sleep 1 ms（`kebab_usb.c:2055`–`2066`、`:2154`），即约 63 KB/s 的上限 |
+| 2 | `INST CHECK` 和 SKIP 读的是内存里的 `files` 字典 | 真机读的是 UBC；A1 那类"读回一致、盘上没有"在测试里**不可能**出现 |
+| 3 | `reboot()` 保留 `files` 与 `volume_blocks`，panic 中途重启后卷一定一致、可续 | 真机可能挂不上（B1），也可能丢尾部（A1） |
+| 4 | `chunk()` 每个 chunk 必回一条精确累计 ACK | 没有短传输、没有重复、没有丢行；`LOG_RING_SIZE` 只有 16 KiB（`kebab_usb.c:243`），环满按字节丢弃，可能把一个 ACK 行截断 |
+| 5 | 不模拟 `mps` 边界 | `ud_inst_command()` 只在**单次 completion** 内匹配（`kebab_usb.c:1246`–`1287`），而控制台 arm 长度是 `ud.mps`。HS 下是 512 B，最长命令（`INST CHECK` 一条 65 字符路径 = 77 B）安全；一旦链路掉到 FS，长路径会被**静默截断**成 53 字符并对错路径回 `MISSING`。第七十八节 §2 的 7.84 MiB/s 已经证明当前是 HS，所以这条现在不发作——但没有任何判据保证它 |
+
+第 1、4 两条建议各加一个 fake board 用例：ACK 分两次给（32 KiB + 32 KiB）、
+以及一次 ACK 行被截断后主机应有的反应（60 s 内看到 `INST TIMEOUT`，而不是 180 s）。
+
+### 7. 如果只改一处
+
+**在 `ki_finish_stream()` 里加一次 flush**（`VOP_FSYNC` + `kebab_ufs_sync()`），
+或者退一步：在 `phase_userland("cache")` 之后插一次"重启 → 重新 `INST CHECK` 同样的
+8 条 → 再进最终镜像"。前者三行、后者一次启动。理由是 A1 是唯一一条**会让本轮结论
+反过来**的发现：其余问题最多让你停在某一步，A1 让你在最后一步拿到一个看起来像
+DSC/签名问题、实际是丢失写入的结果——而 DSC 和签名正是这一轮改动最多、最没上过
+真机的两个子系统。
+
+> 本节只读不改：内核与 `scripts/` 一个字节没动。
+
+## 八十一、安装数据的落盘保证
+
+本节回应第八十节复核的 A1：安装路径在报告 `INST DONE` 之前没有任何一次
+`VNOP_FSYNC`，没有带 `IO_SYNC` 的写，也没有 `kebab_ufs_sync()`；`ki_finish_entry()`
+的读回和 `INST CHECK` 都走 UBC，而 `hfs_vnop_close()` 不做 `msync`；最后从
+`FASTBOOT` 到 `ud_fastboot_restart()` 再到 `PEHaltRestart()` 的转换同样没有 VFS
+同步。这一段现在补上了，并且在真机跑 P1 之前先把"哪一段已经落盘、哪一段仍是缓存"
+写清楚。
+
+### 1. 复核指出的缺口
+
+`kebab_vol.c` 的写路径是对的：写完最后一个 extent 后先 `kebab_ufs_sync()`
+（`SYNCHRONIZE CACHE(10)`），再从设备原样读回 512 字节卷头并 memcmp，只有一致才打印
+`VOL DONE`。安装路径此前没有对应的动作：
+
+* `ki_write_bytes()` 用 `vn_rdwr(UIO_WRITE, ..., UIO_SYSSPACE, 0, ...)` 写文件，
+  `ioflag` 是 0，不是 `IO_SYNC`；
+* `ki_finish_entry()` 在 `vnode_close()` 之后用 `ki_hash_file()` 整文件读回，
+  这次读命中的是刚写进去的 UBC 页，证明的是"内核看到的内容"，不是"介质上的内容"；
+* `INST CHECK` 同样调用 `ki_hash_file()`，没有任何逐出或设备级读；
+* `hfs_vnop_close()` 只做 close 语义，不把脏页推下去；
+* `FASTBOOT` 命令直接进 `ud_fastboot_restart()`，写 PON reason 和 IMEM cookie 后
+  调 `PEHaltRestart()` / `PSCI SYSTEM_RESET`，中间没有 `VFS_SYNC`。
+
+量级上这不是理论问题：实测 7.84 MiB/s 时，30 秒写回窗口约 235 MB，足以截断
+592,101,376 字节的 `.symbols` 或一个共享缓存分片。这样的失败在最终阶段会表现成
+dyld、codesign 或 shared cache 错误，而不是"少写了文件"，正好会把这一轮改动最多、
+最没上过真机的两个子系统当成嫌疑人。
+
+### 1.1 2026-10-28 的真机结果：连 64 KiB 都丢
+
+真机在 126 个补丁的内核上（没有本节补丁）给出了比"大传输丢尾部"更糟的结果：
+
+* `skel.kist` 安装 `16/16 OK`，每条属性都对（`/private/tmp` 回读 `01777`，
+  所有 entry `uid 0 gid 0`，符号链接目标正确）；
+* `base.kist` 安装 `6/6 OK`，六条 `INST CHECK` 的 size 和 SHA-256 全部一致；
+* 普通 `REBOOT` 之后，`INST CHECK /private/etc/passwd` 返回 **MISSING**；
+* `INST?` 报的自由块数与安装前完全相同（4,151,935 blocks），卷头仍是
+  4,193,878 free。
+
+也就是说，`INST DONE ok=16` 证明的是 UBC 里的内容，不是卷上的分配：分配位图、
+catalog、extents B-tree 和卷头都还只在内存里，复位就全没了；连 64 KiB 的单 chunk
+安装也 100% 丢失。这正是 `VFS_SYNC` 缺失的直接后果，也说明只对文件数据做 fsync 不够。
+本节的 0148 补上了流末的 `VFS_SYNC` + `SYNCHRONIZE CACHE`，0149 再把"分配到底有没有
+到卷上"变成可观测、可断言的数字。
+
+### 2. 现在每次流的落盘顺序
+
+普通文件在 `ki_finish_entry()` 里、vnode 还持有的时候先做一次
+`VNOP_FSYNC(MNT_WAIT)`，通过后才 `vnode_close()`。HFS+ 的
+`hfs_vnop_fsync()` 会进 `hfs_fsync()`：对普通文件 `cluster_push(vp, IO_SYNC)`
+推数据簇，`buf_flushdirtyblks()` 推元数据缓冲，`hfs_update()` 与
+`hfs_metasync()` 更新目录记录。非日志卷的默认 fsync 不会走
+`hfs_flush(HFS_FLUSH_CACHE)`，所以设备写缓存仍然要单独刷，这一步不能省。
+
+流结束时 `ki_finish_stream()` 按下面的顺序执行，全部成功才打印 `INST DONE`：
+
+1. `VFS_SYNC(rootvnode->v_mount, MNT_WAIT, ...)`：把 HFS+ 目录项、extent 记录和
+   UBC 里剩余的数据推到设备。这里同步的是根挂载，不是全局 `sync()`；本移植只有
+   根卷是可写的，所以两者等价。根是只读时跳过。
+2. `kebab_ufs_sync()`：与 `kebab_vol.c` 完全相同的 `SYNCHRONIZE CACHE(10)`，刷
+   UFS 设备自己的写缓存。`ufsrw=0` 时它返回 `EROFS`，安装路径本来就走不到这里，
+   reset 路径把 `EROFS` 当成"没有可刷的写"。
+3. 冷读抽样：从本次流写过的普通文件里取四个样本——第一个文件、最大的文件、流中间
+   那个 entry、最后一个文件（重复路径只算一次）。对每个样本先
+   `ubc_msync(vp, 0, size, NULL, UBC_PUSHALL | UBC_INVALIDATE | UBC_SYNC)` 丢掉
+   UBC 里的页，再重新 `vnode_lookup()` + `vn_rdwr()` 读：
+
+   * 文件不超过 4 MiB：整文件重新算 SHA-256，与 entry 头里的摘要比较，打印
+     `INST VERIFY <path> <size> cold full ok`；
+   * 更大的文件：核对 `ubc_getsize()` 与写入长度，再读最后 4096 字节，与写入时
+     滚动保留的尾部摘要比较，打印
+     `INST VERIFY <path> <size> cold tail 4096 ok`。
+
+   大文件用"长度 + 尾部"而不是整文件重读，是为了不在 600 秒的 `INST DONE` 等待
+   里再花一分钟读 `.symbols`。截断会同时改变长度和尾部，所以这个检查对 A1 的失败
+   模式是有效的；它不是全文件摘要。
+
+成功时新增一行：
+
+```
+INST SYNC stream end vfs ok device ok ms <n>
+```
+
+失败时打印 `FAIL install data: VFS_SYNC ...` 或
+`FAIL install data: SYNCHRONIZE CACHE ...`，然后走
+`INST DONE with <n> failure(s), ...`，不会出现成功的 `INST DONE`。冷读失败同样是
+`FAIL` 行加失败计数。
+
+### 2.1 让"分配是否到卷上"可观测
+
+VFS 同步是机制，肉眼和主机还需要数字。0149 加了三处观测点：
+
+1. **`SYNC` 控制台命令。** 这个命令和复位路径用同一套 `VFS_SYNC` +
+   `kebab_ufs_sync()`，然后在**同步前后各从设备 raw 读一次 HFS+ 卷头**，打印：
+
+```
+SYNC BEGIN
+SYNC VFS vfs 0 device 0
+SYNC VH before 4151935 after 4151919 delta 16 bsize 4096 blocks 4194304
+SYNC DONE vfs 0 device 0 ms 12
+```
+
+   `before` 是同步前介质上的 `freeBlocks`，`after` 是同步后的值。旧内核上两者
+   相同（因为分配位图根本没写下去）；修复后 `after` 应该比 `before` 少，减少量
+   约等于这次安装占用的块数。命令只依赖 USB 事件线程，不需要 init，所以
+   `kebab_noinit=1` 的安装镜像可以直接用；正常启动也能用。
+2. **`INST FREE` 行。** 每条非 dry 流在 `INST DONE` 之前打印：
+
+```
+INST FREE before 4151935 after 4151919 delta 16 expected 16 bsize 4096 written 65536 replaced 0
+```
+
+   `before` 是 `INST BEGIN` 时从设备卷头读的，`after` 是流末 `VFS_SYNC` +
+   `SYNCHRONIZE CACHE` 之后从同一卷头读的；`delta = before - after`；
+   `expected` 是本次实际写入字节减去被覆盖文件旧大小后，按 `bsize` 折算的块数；
+   `written` / `replaced` 是原始字节数，便于解释 overwrite/resume。
+3. **`INST? vh` 行。** `INST?` 在原来的 `INST? bsize ... free ...`（挂载点 statfs）
+   之外，再加一行设备卷头的数字：
+
+```
+INST? vh bsize 4096 blocks 4194304 free 4151919
+```
+
+   这样同一个 boot 里、安装前后都可以用同一条命令比较"内存里的 statfs"和
+   "设备卷头"。`INST?` 在流活跃时不发 raw read，避免和安装 I/O 交叉。
+
+orchestrator 在 `send_stream()` 里捕获 `INST FREE`（它在 `INST DONE` 前到达）并断言：
+
+* 流写了文件（`ok > 0`）却没有 `INST FREE` 行：失败，提示运行内核没有 0149；
+* `delta < 0`：失败；
+* `expected > 0` 且 `delta * 4 < expected * 3`：失败，提示自由块几乎没动，
+  分配位图/catalog 很可能没有落到设备，重启会丢文件。
+
+`skel` 流不做这个断言：骨架经常是在已有目录上重写很小的文件，净分配可能为 0；
+base/cache 流覆盖了真正的用户态数据。fake board 增加了 `no_free_delta` 注入点，
+用例 `free-stuck` 会输出干净的 `INST DONE` 但 `delta 0`，orchestrator 必须拒绝；
+这条用例就是 2026-10-28 真机结果的回归测试。
+
+### 3. 仍然由缓存承担的部分
+
+必须说清楚，避免把这一节读成"整条流都做了设备级校验"：
+
+* **逐文件 fsync 覆盖了每一个普通文件**，但它们随后的整文件读回仍然走 UBC。
+  读回通过只证明 VFS 视角一致；真正的落盘保证来自 fsync + 流末 `VFS_SYNC` +
+  `SYNCHRONIZE CACHE`，不是来自这次读回。
+* **冷读只覆盖四个样本**。其余文件没有第二次"从介质读回"的证据；它们只有
+  fsync、VFS 同步和设备缓存刷新的保证。样本选的是第一个、最大、中间、最后一个，
+  目的是覆盖"尾部被截断"和"大文件尾部丢失"，不是覆盖全部 16,295 个 entry。
+* **`INST CHECK` 仍然是 UBC 路径。** 正常 P1 顺序里它发生在 install 镜像刚启动
+  之后，UBC 里没有这些文件的页，所以实际上是从设备读；但代码没有显式逐出，不能
+  把它当成冷读证明。
+* **目录和符号链接没有单独 fsync。** 它们的目录项、catalog 记录由流末的
+  `VFS_SYNC` 覆盖；`ki_start_entry()` 创建目录/链接后只 `vnode_put()`。冷读样本
+  只取普通文件。
+* **没有文件级的 raw block 读。** `kebab_vol.c` 能 raw 读，是因为它知道卷头固定在
+  偏移 0；任意文件的 extent 映射是 HFS+ 私有的，本移植没有暴露"文件偏移到设备块"
+  的接口。因此这里做到的是"逐出 UBC 后重新走 VNOP_READ"，不是"直接读设备块"。
+  如果以后要在内核里做真正的设备级文件校验，需要在 HFS+ 里增加一个只读的
+  extent 查询接口，那是另一项改动。
+* **`VFS_SYNC` 是根挂载级，不是全局所有挂载。** 本移植没有第二个可写卷；将来若
+  增加数据卷，这里要改成遍历所有可写挂载。
+
+### 4. reset 前的同步
+
+`ud_run_reboot_command()` 在分派 `FASTBOOT`、`FASTBOOT2`、`REBOOT` 之前调用
+`kebab_install_sync_for_reset(why)`：
+
+* 先 `VFS_SYNC(root, MNT_WAIT)`，再 `kebab_ufs_sync()`；
+* 两者任一失败就打印
+  `KEBAB SYNC: <why> FAILED (vfs <n>, device <n>); not resetting` 并**不复位**，
+  避免把一次没有落盘的写变成一次无法归因的启动；
+* 成功打印
+  `KEBAB SYNC: <why>: VFS_SYNC + SYNCHRONIZE CACHE ok ms <n>`，然后才进
+  `ud_fastboot_restart()` / `ud_platform_restart()`。
+
+panic 路径没有改：`ud_panic_reboot()` 仍然直接调用 `ud_platform_restart()`，
+不经过 `ud_run_reboot_command()`，所以 panic 不会开始一次可能很长的文件系统同步。
+这是刻意保留的差异，不是漏改。
+
+### 5. 根卷只读断言
+
+`kebab_vol=1` 的全部安全性建立在"旧根仍然只读"上：根可写时，旧 HFS+ 的缓存块可能
+覆盖刚写下去的新卷元数据。内核在 mountroot 时打印
+`KEBAB VOL: kebab_vol=1 keeps the old root read-only`，但这一行发生在
+`kebab_usb_start()` 之前，USB tee 还没打开，所以它只到面板，不能作为控制台证据。
+`kebab_vol_status()` 因此把 `vfs_flags(rootvnode->v_mount) & MNT_RDONLY` 打成
+`VOL? root ro|rw space ...` 一行，这是控制台能看到的唯一证据。
+
+`scripts/bring-up.py` 现在：
+
+* 新增 `VOL_ROOT_RE` 解析
+  `VOL? root (ro|rw) space <free> free of <total> bytes bsize <n> blocks <n> free <n>`；
+* `vol_status()` 要求 `root == "ro"`，否则 `vol.status` 检查点失败，提示"root-rw
+  说明 kebab_vol=1 没有把旧根压成只读，不要从这次启动压卷"；
+* `C-VOL-STATUS` 的期望文本改成
+  `VOL? gated 1 writable 1 chunk 65536 root ro, VOL DISK vh bsize/blocks`。
+
+没有改内核来补这行：`VOL?` 已经打印它，缺的是主机侧解析。若 `VOL?` 根本没有
+`root` 行（例如 `vfs_statfs()` 失败），同样按缺失处理并失败，不会静默通过。
+
+### 6. 新的失败模式
+
+`FAIL_RE` 增加了三条前缀：
+
+* `INST busy`：上一次 INST 流还没被 60 秒 watchdog 清掉；
+* `INST refused`：`INST BEGIN` 在取流之前就被拒绝（gate、长度、缓冲区）；
+* `VOL busy`：上一次 VOL 流还没清掉。
+
+`PanicDetector.feed()` 对 busy 给出"等 60 秒的 `INST TIMEOUT` / `VOL TIMEOUT`，
+不要重启"的专项提示，对 `INST refused` 给出检查 `kebab_install=1`、`rootrw=1`、
+`ufsrw=1` 的提示。`send_stream()` 等 `INST BEGIN` 的谓词和 `vol_send()` 等
+`VOL BEGIN` 的谓词也直接匹配这三条，所以即使 detector 未 armed，也不会再出现
+180 秒的静默等待和"检查 rootrw"这种误导性提示。
+
+`scripts/test-bring-up.py` 的 fake board 增加了 `vol_root`、`inst_busy`、
+`inst_refused`、`no_free_delta` 四个注入点，并新增 `vol-root-rw`、`inst-busy`、
+`inst-refused`、`free-stuck` 四个用例；四者都要求退出码 3，且错误里必须出现对应的
+`VOL? root ro` / `INST busy` / `INST refused` / `check_free_delta` 证据。
+
+### 7. 真机还必须确认什么
+
+1. 每条非 dry 流在 `INST DONE` 之前有且只有一行
+   `INST SYNC stream end vfs ok device ok ms <n>`，以及一行 `INST FREE ...`。
+   没有 `INST SYNC` 是内核没带 0148；没有 `INST FREE` 是没带 0149，orchestrator
+   会拒绝这条流。
+2. 先手工验一次 `SYNC`：安装前发 `SYNC`，记下 `SYNC VH ... free <before>`；
+   发送 64 KiB 的 `skel.kist` 和 `base.kist` 后，再发 `SYNC`，确认
+   `SYNC VH ... after <after>` 比 before 小，且 `delta` 约等于两条流实际占用的
+   块数。再发 `INST?`，确认 `INST? vh ... free` 与 `SYNC VH after` 相同，而
+   `INST? space` 的 statfs 也同步变化。
+3. 至少出现一条 `INST VERIFY ... cold full ok` 或
+   `INST VERIFY ... cold tail 4096 ok`，且流末没有
+   `INST VERIFY ... failed` / `FAIL ... cold ...`。cache.kist 里 592 MB 的
+   `.symbols` 应该是"最大文件"样本，确认它的路径和 `cold tail` 行。
+4. 跑完 base 流后，用 `INST CHECK /private/etc/passwd` 和
+   `INST CHECK /usr/lib/libSystem.B.dylib` 记录 size/SHA-256；普通 `REBOOT`
+   后在同一 install 镜像上再查一次，必须与重启前完全一致。2026-10-28 的失败正是
+   这一步返回 `MISSING`。
+5. `FASTBOOT` 时先看到
+   `KEBAB SYNC: FASTBOOT: VFS_SYNC + SYNCHRONIZE CACHE ok ms <n>`，再看到
+   `KEBAB FASTBOOT: writing IMEM restart_reason ...`。整段必须在主机等
+   `KEBAB FASTBOOT: IMEM read back` 的 15 秒窗口内完成；如果超时，日志里会有
+   `KEBAB SYNC` 行，可据此判断是同步慢还是复位没发生。
+6. 记录 `INST DONE ... ms <n>` 与旧值比较。每个文件一次 fsync、每条流一次
+   `VFS_SYNC`、四个样本的冷读都会增加时间；7.84 MiB/s、1.04 GB 的 cache 流原来
+   约 7 分钟，现在要给 `INST DONE` 的 600 秒等待留出余量。第一次真机跑要先确认
+   `send.done` 没有踩 600 秒。
+7. 故意在 install 镜像上连发两次 `INST BEGIN`，确认第二次立刻 `INST busy` 失败并
+   带 60 秒提示，而不是 180 秒后报 `send.begin`。
+8. vol 镜像上确认 `C-VOL-STATUS` 的证据行里有 `root ro`；如果 boot 参数误删
+   `kebab_vol=1`，这一步必须失败，而不是继续压卷。
+9. 如果条件允许，做一次"`INST DONE` 后立刻断电、再启动 final 镜像"的破坏性验证：
+   用 `INST CHECK` 至少核 `.symbols` 和一个 cache 分片的长度与 SHA-256。这是唯一
+   能把"fsync + VFS_SYNC + SYNCHRONIZE CACHE"从推断变成实测的办法；不做也可以，
+   但要在风险清单里保留这条未验证项。
+10. panic 中途的行为要复核：panic 仍然直接 PSCI 复位，日志里不应出现
+    `KEBAB SYNC`，也不应因为同步而延迟复位。
+
+### 8. 改动位置
+
+* `bsd/dev/kebab_install.c`：`ki_tail_update()`、`ki_sample_add()`、
+  `ki_cold_verify_one()`、`ki_cold_verify()`、`ki_vfs_sync()`、`ki_read_vh()`、
+  `ki_report_free_delta()`、`ki_sync_media()`、
+  `kebab_install_sync_for_reset()`、`kebab_install_sync_report()`；
+  `ki_finish_entry()` 增加 `VNOP_FSYNC`，`ki_finish_stream()` 增加流末同步、冷读
+  和 `INST FREE`，`kebab_install_status()` 增加 `INST? vh`。
+* `bsd/dev/kebab_install.h`：`kebab_install_sync_for_reset()` /
+  `kebab_install_sync_report()` 声明。
+* `bsd/dev/kebab_usb.c`：`ud_run_reboot_command()` 在三个复位命令前调用同步，
+  新增 `SYNC` 命令分发；panic 路径不变。
+* `scripts/bring-up.py`：`VOL_ROOT_RE`、`vol_status()` 的 `root ro` 断言、
+  `FAIL_RE`、busy/refused 提示、`INST_FREE_RE` / `INST_VH_RE`、
+  `check_free_delta()`、`send_stream()` / `vol_send()` 的等待谓词。
+* `scripts/test-bring-up.py`：fake board 的 `vol_root` / `inst_busy` /
+  `inst_refused` / `no_free_delta` 注入点，以及 `vol-root-rw`、`inst-busy`、
+  `inst-refused`、`free-stuck` 用例。
+* `patches/xnu-8796-kebab/0148-kebab-install-durability.patch`：流末 fsync、
+  VFS_SYNC、SYNCHRONIZE CACHE、冷读、复位前同步。
+* `patches/xnu-8796-kebab/0149-kebab-install-free-delta.patch`：`SYNC` 命令、
+  `INST FREE`、`INST? vh`、orchestrator 的自由块断言。
+* `patches/xnu-8796-kebab/0150-kebab-dsc-bootarg.patch`：`kebab_dsc=1` 的
+  boot-arg 解析修复（字符串形式，而不是 numeric 写进 char 缓冲区）。序列总数为
+  129 个补丁（原 126 个加 0148、0149、0150）。
+
+### 9. 2026-10-28 修复后实测
+
+在 128 补丁内核（`kernel-0149.kebab`，sha256
+`e009981f…fcd0fe8`）上重跑了 phase B，镜像参数与旧 `boot-B.img` 逐字节相同。
+先发 `skel.kist` 和 `base.kist`，随后另起一轮发 `cache.kist`：
+
+| 步骤 | 设备卷头 free | delta | expected |
+| --- | ---: | ---: | ---: |
+| 安装前 baseline | 4,193,878 | — | — |
+| skel.kist 后 | 4,193,872 | 6 | 1 |
+| base.kist 后 | 4,193,449 | 423 | 419 |
+| 再次 `SYNC` | 4,193,449 | 0 | — |
+| `REBOOT` 后挂载 | 4,193,449 | — | — |
+| cache.kist 后 | 3,380,373 | 813,076 | 813,076 |
+| cache 后 `SYNC` | 3,380,373 | 0 | — |
+| cache 后 `REBOOT` 挂载 | 3,380,373 | — | — |
+
+* 三条流的 `INST SYNC stream end vfs ok device ok` 都在 `INST DONE` 之前出现；
+* `INST VERIFY` 三条 `cold full ok`（skel）、三条 `cold full ok`（base）、
+  两条 `cold full ok` + `.symbols cold tail 4096 ok`（cache）全部通过；
+* `INST FREE` 的 delta 分别是 6、423、813,076，expected 是 1、419、813,076；
+  base 多出的 4 块是 catalog/extents/bitmap 元数据，cache 的 delta 与 expected
+  完全相等；
+* cache.kist：44 entries、3,330,359,296 安装字节、1,067,909,120 wire 字节、
+  16,295 chunks；10:22:04 → 10:27:05，300.0 s，3.40 MiB/s（3.56 MB/s），
+  `INST DONE ... ms 299976`；
+* `REBOOT` 前打印
+  `KEBAB SYNC: REBOOT: VFS_SYNC + SYNCHRONIZE CACHE ok ms 0`；
+* base 后重启的 HFS 挂载行直接报 `free blocks 4193449`，
+  `INST CHECK /private/etc/passwd`、`/sbin/launchd`、`/usr/libexec/xpcproxy`
+  的 size/SHA-256 全部与安装时一致；
+* cache 后重启的挂载行报 `free blocks 3380373`，`INST CHECK` 的 small
+  (`.02`, 98,304 B)、medium (`.41.dylddata`, 102,547,456 B) 和
+  `.symbols` (592,101,376 B) 全部 MATCH；
+* `devfs_kernel_mount` 不再打印 `kernel_mount failed: 2`，`/dev` 正常；
+  `static.trustcache` 从卷上加载成功。
+
+一个需要写进 run book 的细节：**同一个 boot 内 `INST? space` / `INST? bsize` 的
+statfs free 不会随安装变化**，即使 `VFS_SYNC` 已经完成；HFS+ 把 statfs 的 free
+计数缓存在挂载结构里。设备卷头（`INST? vh` / `SYNC VH`）才是安装后立即正确的数字；
+重启后 statfs 才从卷头重算（base 后实测 4,151,935 → 4,151,506，正好 429 块；
+cache 后 4,151,506 → 3,338,430，正好 813,076 块）。orchestrator 的断言因此只用
+`INST FREE` 的设备卷头数字，不看同一 boot 的 statfs。
+
+这次实测覆盖 skel/base/cache 和两次普通 REBOOT。phase C（init 启动）已经尝试，
+但还没有进入 DSC，原因见第 10 节；最终镜像和断电测试仍未完成，不能据此宣称整条
+P1 已完成。
+
+### 10. phase C 的两个硬件发现（2026-10-28）
+
+第一次 phase C 启动（去掉 `kebab_noinit=1`/`kebab_install=1`，加
+`kebab_dsc=1 kebab_dsc_map=1`）得到两个与安装落盘无关、但必须记录的发现：
+
+1. **`kebab_dsc=1` 此前根本没有启用 DSC。** `kebab_dsc_boot()` 用
+   `PE_parse_boot_argn("kebab_dsc", arg, sizeof(arg))` 读进 `char arg[256]`。
+   `=1` 被 boot-arg parser 判成 numeric，`argnumcpy()` 往 char 缓冲区写了一个
+   32 位整数 1，于是 `arg` 是 `"\x01"` 而不是 `"1"`；`strcmp(arg, "1")` 永远
+   不成立，最后打印
+   `KEBAB DSC: kebab_dsc= is not an absolute directory; ignored`，整个
+   plan/map/dyld 路径没有执行。`0150` 改用 `PE_parse_boot_arg_str()`，并明确
+   `kebab_dsc_map` 是 numeric switch；`kebab_dsc=1` 现在会选择默认目录
+   `/System/Library/Caches/com.apple.dyld`，绝对路径仍可覆盖，`=0` 仍关闭。
+   在 0150 之前的 phase C 结果不能用来判断 DSC、dynamic-config 页或 slide。
+2. **`kebabkdp=1` 下 userspace panic 会停在 KDP，而不是按 0134 重启。** launchd
+   因 `mount-phase-1` 缺少可执行文件触发
+   `userspace panic: boot task failure: mount-phase-1 ...` 后，日志是
+   `Using serial KDP.` / `Waiting for remote debugger connection.`；向 COM7 发
+   `REBOOT` 和 `FASTBOOT` 都没有回应（后者写超时），板子需要物理断电重启。
+   这与没有 `kebabkdp=1` 时 0134 直接 PSCI 复位的 runbook 不同：调试 KDP 时
+   不要把"panic 后会自动回来"当成前提。
+
+`mount-phase-1` 可执行文件缺失是另一个 worker 的用户态任务，和本节的文件系统
+落盘无关；等它补齐后，phase C 才能同时验证 DSC 映射和 launchd 的 boot task。
+
+本节的代码已经编译进 `kernel.development.kebab`；第 7 小节中未在硬件上执行的部分
+不写成"已验证"。
+
+## 八十二、2026-10-28 真机：boot task 与 DSC 的当前边界
+
+> 本节记录 0150/0151 内核上的实测，接第八十一节。镜像 `p1-run/boot-C-0151.img`
+> 与 0150 相同，只去掉 `kebabkdp=1`，让 0134 的 panic 路径走复位而不是 KDP。
+
+### 1. 安装：新 base.kist 只补五个文件
+
+`0151` 的 base 流是 11 entries / 2,057,682 安装字节 / 655,360 线上字节，
+SHA-256 `8a40071e0b22b7af0a8460dd6da04fa2bfef31ea523f0f6681c8ef06494a4f58`。
+在已有 skel+base+cache 的卷上重发，安装器把 6 条同内容项标成 `SKIP`，只写
+5 条新文件：
+
+```
+INST FREE before 3380373 after 3380287 delta 86 expected 84 bsize 4096 written 341648 replaced 0
+INST SYNC stream end vfs ok device ok ms 1
+INST VERIFY /sbin/fsck 71008 cold full ok
+INST VERIFY /sbin/mount 91952 cold full ok
+INST VERIFY /usr/libexec/launchd_cache_loader 72336 cold full ok
+INST DONE entries 11 ok 5 skipped 6 bytes 2057682 wire 655360 ms 130
+```
+
+`SYNC` 随即确认卷头已是新值：`before 3380287 after 3380287 delta 0`。所以
+“只加文件、不重做 3.3 GB”这条路是通的。
+
+### 2. boot task：`/sbin/mount` 找到了，但被平台位挡住
+
+`mount-phase-1` 不再报 ENOENT；`/sbin/mount` 被 exec，信任缓存命中也正确：
+
+```
+KEBAB CS: exec cdhash b6a7272461fce359ceb407594e7aaf4fdf4949f1 cd=0x11a84+904 hash=2 slice=0x0 tc=hit platform=1
+Allowing spawn of iOS binary mount since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+panic(cpu 0 caller 0xfffffe0006b00a9c): userspace panic: boot task is not a platform binary (mount-phase-1, /sbin/mount)
+```
+
+launchd 的 boot task runner 在 `posix_spawnp` 成功后立刻
+`csops(pid, CS_OPS_STATUS)` 检查 bit 26；`kebab_cs` 的 `platform=1` 是
+exec 分类结果，但 `p_csflags` 里没有 `CS_PLATFORM_BINARY`（0100 的注释本来就
+说这个位是 AMFI 的，本移植从未设置它）。这是内核 CS 传播缺口，不是文件缺失；
+下一个改动应当是让“静态 TC 命中”同时落到 `p_csflags`，否则每个 boot task 都
+会停在同一处。
+
+### 3. DSC：plan 在 subcache 38 上被拒
+
+`kebab_dsc=1` 这次真的进了 plan（0150 的 `PE_parse_boot_arg_str` 修复生效），
+但计划在解析第 38 个分片时拒绝：
+
+```
+KEBAB DSC: subcache 38 suffix ".38" uuid 0f806d3d90313bab88bccbb44f5b1a04: NO FILE WITH THIS UUID
+KEBAB DSC: plan rejected (error 2); shared cache NOT mapped
+KEBAB DSC: resolved 37/42 subcaches by uuid; dylddata=1 dyldlinkedit=1
+KEBAB DSC: plan 38 files / 0 mappings / 0x0 bytes (0)
+```
+
+`.38` 的源文件在 `~/ios-userland/cryptex-cache/` 里，头里的 UUID 正是
+`0f806d3d…`，安装日志也有 `OK …/dyld_shared_cache_arm64.38 573440`；内核却
+连 `cannot open`/`not a dyld cache header` 都没打，说明它根本没在目录扫描结果
+里。两个候选原因，下一次安装启动可以区分：
+
+1. `.38` 的目录项没有在 3.3 GB 安装后存活（数据块已分配，所以 `INST FREE` 的
+   delta 仍然对得上；这需要 `INST CHECK` 全部 44 个文件才能发现）；
+2. `kebab_dsc_list_dir()` 用 `pos + sizeof(struct dirent) <= used` 作为循环边界，
+   而内核的 `struct dirent` 是 1048 字节、缓冲区是 8192 字节；如果 HFS+ 一次
+   读回的记录让尾部不足 1048 字节，最后几条会被静默丢掉。
+
+无论哪一条，dyld 都退回了文件系统路径：42 行
+`shared_region: … map(…'dyld_shared_cache_arm64.NN'): not in trust cache`，
+没有 `mapped cache does not contain dynamic config data`。
+
+### 4. 下一步（按依赖顺序）
+
+1. 进安装内核，对 44 个 cache 文件逐条 `INST CHECK`，确认 `.38` 是否还在卷上；
+2. 若在，修 `kebab_dsc_list_dir()` 的 dirent 边界（改用
+   `pos + offsetof(struct dirent, d_name) + 1` 或 `d_reclen` 自身做边界），
+   再上板；
+3. 同时把 `CS_PLATFORM_BINARY` 落到 boot task 子进程的 `p_csflags`，否则
+   `mount-phase-1` 之后无法继续。
+
+## 八十三、缓存目录扫描与平台标志的传播
+
+这一节记两件事：共享缓存的目录扫描漏掉了一个分片，以及平台标志没有从 blob 传到
+进程。两者属于同一类错误——内核已经得出了正确答案，却在最后一步把它丢掉，而且
+都不报错：一个静默少交一个名字，一个静默少置一个 bit。前者的后果是共享缓存不映射，
+后者的后果是 launchd 认为自己的启动任务不是平台二进制。
+
+### 1. 缺陷一：目录扫描丢掉每个窗口的最后一条记录
+
+2026-10-28 的真机日志（129 个补丁的内核，`kebab_dsc=1 kebab_dsc_map=1`）：
+
+```text
+KEBAB DSC: subcache 38 suffix ".38" uuid 0f806d3d90313bab88bccbb44f5b1a04: NO FILE WITH THIS UUID
+KEBAB DSC: plan rejected (error 2); shared cache NOT mapped
+KEBAB DSC: resolved 37/42 subcaches by uuid; dylddata=1 dyldlinkedit=1
+KEBAB DSC: plan 38 files / 0 mappings / 0x0 bytes (0)
+```
+
+`/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64.38` 在同一卷上装好并
+且哈希校验过，它自己头里的 UUID 就是 `0f806d3d…`。日志里既没有 `cannot open` 也没
+有 `not a dyld cache header`，所以不是打开失败，也不是头校验失败——这个名字**根本
+没有被交到解析器面前**。那一轮 `plan 38 files` 也说明 `37 + 1`：主缓存加 37 个解析
+成功分片，一个都没多。
+
+目录的真实内容是 44 个条目：主缓存 + 42 个分片（其中 `.27`、`.41` 是 `.dylddata`，
+`.28`、`.42` 是 `.dyldlinkedit`）+ 不映射的 `.symbols`（第四节的分片表逐个列过）。
+
+#### 1.1 两个候选，代码选了哪一个
+
+候选 (a)：3.3 GB 安装把 catalog 记录弄丢了（块被孤立，而空闲块差值仍然正确，所以
+全程静默）。候选 (b)：扫描的边界 `pos + sizeof(struct dirent) <= used` 静默丢掉窗口
+尾部的记录。
+
+**是 (b)**，把三个数字放在一起就没有第二种解释：
+
+* `sizeof(struct dirent)` 是 **1048** 字节（`d_ino` 8 + `d_seekoff` 8 + `d_reclen` 2
+  + `d_namlen` 2 + `d_type` 1 + `d_name[1024]`，8 字节对齐）。这是 HFS+ 能吐出的
+  **最大**记录，不是最小的记录。
+* HFS+ 的标准（非 extended）readdir 写的是**变长**记录：
+  `STD_DIRENT_LEN(namlen) = (sizeof(struct dirent) - 256) + ((namlen + 1 + 3) & ~3)`
+  （`bsd/kebab_hfs/core/hfs.h`）；对这个目录的 44 个名字，实际长度是 816–836 字节。
+* `KEBAB_DSC_DIRBUF` 是 8192 字节，所以一个窗口装 9 条记录，44 条要 **5 个窗口**。
+
+于是 `pos + 1048 <= used` 在剩余不足 1048 字节时停下，而那一刻窗口里通常还留着一条
+完整的 820 字节记录。`pos` 停在它之前，下一轮 `VNOP_READDIR` 用的却是**驱动**回报的
+offset（已经越过那条记录），所以它被永久跳过，且没有任何输出。每个窗口丢一条，5 个
+窗口就是 5 个名字——正好等于解析不到的 5 个分片（42 − 37）。丢的**条数**由窗口数唯一
+决定，不依赖具体是哪几条记录落在窗口尾部。
+
+在主机上按同样的记录长度跑一遍这个循环：44 条 → 5 个窗口 → 只交出 39 条，其中主缓存
+始终在内。这与真机的 37/42 同数同因。
+
+反过来看候选 (a)：如果 catalog 记录真的丢了，`NO FILE WITH THIS UUID` 之前一定先出现
+`cannot open`（按路径查找会 ENOENT），而且 `INST CHECK` 的按路径读回也会失败。日志里
+两者都没有，所以安装没有丢记录，问题纯粹在扫描。
+
+#### 1.2 现在怎么扫
+
+循环边界改成"只要能读到定长头就继续"，并把 `d_reclen` 当作可信值（在越界检查之后）：
+
+```c
+while (pos < used) {
+        /* offsetof(struct dirent, d_name) == 21 */
+        if (used - pos < KEBAB_DSC_DIRENT_MIN) { ...报错... }
+        dp = (struct dirent *)(void *)(buf + pos);
+        reclen = dp->d_reclen;
+        if (reclen < KEBAB_DSC_DIRENT_MIN || reclen > used - pos) { ...报错... }
+        ...
+        entries++;
+        pos += reclen;
+}
+```
+
+另外加了一条 `d_namlen + 1 <= reclen - KEBAB_DSC_DIRENT_MIN`：`d_namlen` 是名字拷贝
+唯一信任的字段，它必须落在刚校验过的那条记录里面。
+
+缓冲区仍是 8192 字节，没有变大：`VNOP_READDIR` 的外层循环本来就是对的（offset 由
+`uio_offset()` 带回，逐窗口推进），窗口小只是多跑几轮，而"每轮都不许丢记录"才是
+正确性的来源。这也顺带保证了单条记录永远装得下（最大 1048 < 8192）。
+
+#### 1.3 部分扫描现在会自己喊出来
+
+以前"装不下"等于 `break`，等于静默停在一个不完整的候选表上——这正是这次丢掉分片的
+形态。现在三种情况都会打印偏移量并把 plan 判为失败（`EIO`），而不是当成成功：
+
+| 情况 | 新输出（`KEBAB DSC: directory scan:` 前缀） |
+| --- | --- |
+| 窗口尾部剩余不足一个定长头 | `%u trailing byte(s) at offset %u of %u are shorter than a dirent header; refusing a partial scan` |
+| `d_reclen` 越界或小于定长头 | `record at offset %u claims d_reclen %u but %u byte(s) remain in the %u-byte window (readdir offset %lld); refusing a partial scan` |
+| 未到 EOF 却一个记录都没返回 | `readdir returned no records at offset %lld without setting EOF; refusing a partial scan` |
+
+"拒绝"意味着 `kebab_dsc_list_dir()` 返回 `EIO`，上层打印
+`KEBAB DSC: reading directory %s failed (error %d)`，共享缓存不映射。宁可整块不映射，
+也不要拿一个缺了分片的 plan 去映射。
+
+#### 1.4 新增的非 verbose 计数器
+
+每轮启动都会打印的那一行（`kebab_dsc_log_plan_summary()`）末尾加了三个数字：
+
+```text
+KEBAB DSC: plan 43 files / 51 mappings, 0xa2de4000 mapped, extent 0xaade4000 (end 0x22ade4000), base 0x180000000, slide 0x0, dynamic config page appended; dir 44 entries, 44 offered, 44 resolved
+```
+
+* `dir N entries`：扫描真正走过的目录记录条数（含非缓存名）；
+* `N offered`：其中名字前缀匹配 `dyld_shared_cache_arm64` 的条数，也就是交给解析器的
+  候选数；
+* `N resolved`：最终进入 plan 的文件数，外加那一个 `.symbols`（它被报告但不映射）。
+
+三者相等（44/44/44）才说明"一个名字都没丢"。如果扫描少走了一部分目录，第一个数字
+就会小于 44；如果有名字交上来却没能解析成文件，第三个数字会小——两种情况都不需要
+`kebab_dsc_verbose=1`。verbose 的明细行同样加了这三个数。
+
+### 2. 缺陷二：`CS_PLATFORM_BINARY` 没有传到进程
+
+同一轮真机日志的第二段：
+
+```text
+KEBAB CS: exec cdhash b6a7272461fce359ceb407594e7aaf4fdf4949f1 cd=0x11a84+904 hash=2 slice=0x0 tc=hit platform=1
+… Allowing spawn of iOS binary … unentitled_ios_sim_launch …
+panic(cpu 0 caller 0xfffffe0006b00a9c): userspace panic: boot task is not a platform binary (mount-phase-1, /sbin/mount)
+```
+
+信任缓存命中，`kebab_cs_classify_blob()` 也确实在 blob 上置了 `CS_PLATFORM_BINARY`
+（`platform=1` 就是它的 `csb_platform_binary`），`load_result.platform_binary` 也把
+**task** 标成了平台（`TFRO_PLATFORM`）。缺的是 **进程**：`p_csflags` 里没有这一位。
+
+原因在 `exec_mach_imgact()`：`load_result.csflags` 是经过一个固定掩码写进
+`imgp->ip_csflags` 的，而那个掩码里没有 `CS_PLATFORM_BINARY`——在 Apple 平台上这一位
+由 AMFI 负责，不属于 xnu 自己传播的那一组。于是：
+
+* `proc_csflags_update(p, imgp->ip_csflags)` 写出的 `p_csflags` 没有这一位；
+* `csops(CS_OPS_STATUS)` 返回的正是 `proc_getcsflags()`，于是用户态看到的"平台进程"
+  是 0；
+* launchd 对自己的启动任务做这个检查，结论是"不是平台二进制"，直接
+  `reboot(RB_PANIC)`。
+
+顺带说明为什么 `CS_OPS_STATUS` 里那句 `if (csproc_get_platform_binary(pt)) retflags |=
+CS_PLATFORM_BINARY;` 救不了它：`csproc_get_blob()` 在 `(proc_getcsflags(p) & CS_SIGNED)
+== 0` 时直接返回 NULL，而 `csb_flags` 来自 `(cd->flags & CS_ALLOWED_MACHO) | CS_VALID`，
+`CS_ALLOWED_MACHO` 不含 `CS_SIGNED`——这一位同样原本由 AMFI 置。这条链在本移植上恒为
+0，所以唯一的出口就是 `p_csflags` 本身。
+
+#### 2.1 改法：只传播已经做出的决定
+
+```c
+if (load_result.platform_binary) {
+        imgp->ip_csflags |= CS_PLATFORM_BINARY;
+}
+```
+
+放在 `exec_mach_imgact()` 里 `load_result.csflags` 那段之后，紧挨着它。之所以用
+`load_result.platform_binary` 而不是把 `CS_PLATFORM_BINARY` 加进通用掩码，是为了让
+**进程标志、task 标志（`task_set_platform_binary()`）、`csops` 的答案**三者由同一个
+值决定，不可能互相矛盾。
+
+策略门没有任何变化：`kebab_cs` 仍然决定一个 cdhash 能不能算平台（
+`KEBAB_CS_TRUSTCACHE_PLATFORM` + 静态信任缓存），`kebab_cs_classify_blob()` 不置位的
+blob 这里也不会置位。这一改动只是把"已经判成平台"这个结论送到用户态能看见的地方。
+
+`kebab_codesign.h` 里那句"这一位由 AMFI 设置、本移植永远不设"同步改成现在的实际情况。
+
+### 3. 真机需要确认什么
+
+1. `kebab_dsc=1 kebab_dsc_map=1` 启动，summary 行必须是
+   `dir 44 entries, 44 offered, 44 resolved`，明细行必须是
+   `resolved 42/42 subcaches by uuid; dylddata=2 dyldlinkedit=2`，plan 是
+   `43 files / 51 mappings / 0xa2de4000`；
+2. 全程不出现 `KEBAB DSC: directory scan:` 开头的任何一行（出现即说明目录窗口仍然
+   装不下，"refusing a partial scan"会同时说明是哪一段偏移）；
+3. 共享缓存映射成功之后，launchd 才能进到 mount-phase-1；`KEBAB CS:` 那行仍是
+   `platform=1`，而这次 panic 的那句 `boot task is not a platform binary` 必须消失
+   ——这是 `CS_PLATFORM_BINARY` 真的进了 `p_csflags` 的唯一证据；
+4. 反向验证（可选但值得）：`kebab_cs=1` 里去不掉 `KEBAB_CS_TRUSTCACHE_PLATFORM`
+   时，同一路径应该回到 panic——用来证明这一位确实来自 `kebab_cs` 的判断，而不是
+   无条件置位。
+
+## 八十四、panic 重启路径上的嵌套 panic
+
+本节记 2026-10-28 的第三个缺陷：用户态 panic 之后板子没有重启，而是打了一个嵌套
+panic，然后把控制台和 fastboot 一起弄丢，只能物理断电。它排在另外两个缺陷之前，
+因为它每次都要一次人工干预。
+
+### 1. 现象
+
+去掉 `kebabkdp=1` 之后，一次用户态 panic 本应经 0134 走到 PSCI 复位，实际是：
+
+```text
+panic(cpu 0 caller 0xfffffe0006b00a9c): userspace panic: boot task is not a platform binary (mount-phase-1, /sbin/mount)
+Nested panic detected … Attempt to take mutex … with preemption disabled @lock_mtx.c:194
+```
+
+之后 COM7 仍然枚举（`VID_1209:0001`，ProblemCode 0）但无法配置（WinError 31），
+也没有 fastboot 设备。
+
+### 2. 是哪一次调用
+
+`panic()` 在 `osfmk/kern/debug.c` 里先 `ml_set_interrupts_enabled(FALSE)` 再
+`disable_preemption()`，此后整条 panic 路径都带着抢占禁用。任何一次
+`lck_mtx_lock()` 在这里都会命中 `osfmk/kern/lock_mtx.c:193` 的
+`Attempt to take mutex … with preemption disabled`，也就是第二个 panic。
+
+调用链全部在树内可查：
+
+1. `panic()` 末尾 `if (!panicDebugging) kdp_machine_reboot_type(kPEPanicRestartCPU, …)`
+   ——0134 在没有 `kebabkdp=1` / `kdp_match_name` 时会把 `panicDebugging` 清掉，所以
+   走的正是这一支；
+2. `PEHaltRestart()` → `PEHaltRestartInternal()` → `gIOPlatform->haltRestart()` →
+   `KebabPlatformExpert::haltRestart()`；控制台还活着时它把 CPU 交给
+   `kebab_usb_panic_spin()`（`bsd/dev/kebab_usb.c`），也就是那个不返回的 panic 泵；
+3. panic 泵里有一句 `if (command != 0) ud_run_reboot_command(command);`——它和普通
+   控制台线程**共用**同一个命令分发器；
+4. `ud_run_reboot_command()` 对 `REBOOT` / `FASTBOOT` / `FASTBOOT2` 调用 0148 的
+   `kebab_install_sync_for_reset()`；
+5. 那个函数先 `VFS_SYNC(rootvnode->v_mount, MNT_WAIT, vfs_context_current())`，
+   再 `kebab_ufs_sync()` → `lck_mtx_lock(&kebab_ufs_lock)`。
+
+`MNT_WAIT` 会在 HFS+/UBC/mount 锁上睡眠，`kebab_ufs_sync()` 直接拿互斥量，所以第一个
+被走到的就会在抢占禁用下 panic。
+
+要点是：这条路径**本该不可达**。`kebab_install.c` 的注释写着"The panic path does not
+call this: a panic must not wait for a filesystem sync"，`kebab_usb.c` 的注释写着
+"The panic path calls ud_platform_restart() directly … so a panic still resets without
+waiting for a filesystem sync"——两句话都不成立，因为分发器是共用的，没有任何检查把
+panic 上下文挡在外面。同一个分发器还会把 `KEBAB_TOUCH_*`（`ktq.lock` 是互斥量）、
+RPMH/TCS/SPMI/VRM 报告和 FWLOG 暴露给 panic 上下文，所以就算没有 VFS_SYNC，那里也
+不止一个会睡的命令。
+
+### 3. 改法：panic 重启只做不会阻塞的事
+
+规则写成代码，而不是注释：
+
+* `ud_run_reboot_command(uint32_t command, boolean_t panicking)` 多一个参数。panic
+  态下，复位类命令**降级为纯 PSCI SYSTEM_RESET**，并且明说跳过了什么：
+
+  ```text
+  KEBAB PANIC: reset requested (REBOOT); skipping the install flush (VFS_SYNC and kebab_ufs_lock cannot run with preemption disabled) and resetting via PSCI SYSTEM_RESET
+  ```
+
+  其余命令一律拒绝一行 `KEBAB PANIC: command 0x%x refused while panicking; …`，泵继续
+  跑。这里的选择是明确的：**放弃一次还没落盘的写，好过永远不重启**。
+* `kebab_install_sync_for_reset()` 在 `panic_active()` 时直接拒绝（打印一行、返回
+  false），这样"panic 不同步文件系统"就从注释变成任何未来调用者也绕不过去的约束。
+* `KebabPlatformExpert::haltRestart()` 在 panic 里连 `kPEHaltCPU` 也直接走 PSCI，
+  不再落到 `IODTPlatformExpert::haltRestart()` 的关机通知分支
+  （`thread_call_allocate()`、`IORegistryEntry::fromPath()`、PM 客户端），那条分支会
+  分配内存、会拿互斥量；今天只是碰巧因为先收到过 `kPEPanicBegin` 才被
+  `PEHaltRestartInternal()` 跳过，而 panic 重启不该依赖这个巧合。
+
+panic 泵本身没有改动，仍然是纯原子量的无锁循环。非 panic 路径的行为完全不变：
+控制台线程的 `REBOOT` / `FASTBOOT` 依旧先做 `VFS_SYNC` + `SYNCHRONIZE CACHE` 再复位。
+
+### 4. 真机需要确认什么
+
+1. 制造一次用户态 panic（例如 `kebab_dsc` 路径上故意不满足平台标志的那种场景），
+   控制台必须停在 panic 泵里、仍然可读；
+2. 从主机发 `REBOOT`，只应看到**一行**
+   `KEBAB PANIC: reset requested (REBOOT); skipping the install flush …`，然后板子
+   复位；不得再出现 `Nested panic detected` 或 `Attempt to take mutex … with
+   preemption disabled`；
+3. 再测一次"没有控制台"的 panic（`kebabusb=0` 或控制器已死），应当是
+   `KEBAB PANIC: no console to service; rebooting via PSCI SYSTEM_RESET` 后复位；
+4. 发一个诊断类命令（如 `KEBAB_TOUCH_*`、`RPMH`），应当被拒绝一行且泵继续存活，
+   这证明拒绝路径本身不会把板子弄丢。
+
+## 八十五、CS_SIGNED 与签名身份的传播
+
+真机上 launchd 报：
+
+```
+initproc exited -- exit reason namespace 7 subcode 0x1
+failed to get the code signing identity for a boot-task
+(mount-phase-1, /sbin/mount) errno: 2
+```
+
+`cs_identity_get()` 在 `proc_getcsflags()` 没有 `CS_SIGNED` 时直接返回 NULL；`csproc_get_blob()`
+同样因为缺这一位而拒绝给出 blob。`CS_SIGNED` 在 Apple 平台由 AMFI 设置，所以它被刻意排除在
+`exec_mach_imgact()` 的 `load_result.csflags` 掩码之外，而这个移植从未设置它 —— 于是所有身份与
+权限路径都表现为"进程未签名"。
+
+`0154` 从同一个 `CS_VALID` 判定里传播它：已经通过 `cs_blob_init_validated()` 的 blob 带
+`CS_VALID`，因此该标志不可能比 blob 证明的更多。`kebab_cs` 仍然决定信任与否，这里只让进程标志
+与已附加的 blob 保持一致。
+
+真机需要确认：`mount-phase-1` 越过身份检查；`launchd` 不再以 namespace 7 退出。
+
+## 八十六、prelink 移植需求清单
+
+上游 sheng 用 prelink 把 Apple 的 kext 直接并进内核，从而运行真实的 APFS 与存储加密栈，
+并跑到了主屏幕。我们的移植当初换了目标设备时把 prelink 整段删掉了（提交 `96609a0`），
+不是技术否决。本节把恢复它所需的东西拆成可执行的清单。
+
+### 一、工具
+
+`kits/NativePrelink` 是 UniXNU 的子模块，本地未初始化。取法：
+
+```
+git submodule update --init --depth 1 kits/NativePrelink
+```
+
+已取到 `2b6ffb5`，含 `emit_prelink.py`、`native_prelink.py`、`patches/`、测试。
+
+接口：
+
+```
+--kernel <Mach-O>          我们自己构建的内核
+--prelinked <Mach-O>       供体 kernelcache 解密后的 Mach-O
+--root <bundle-id>         可重复，选择要并入的 kext
+--slide <int>              通常是负数，如 -0x1000000
+--early-security-init BUNDLE=VA
+--output <path>
+```
+
+### 二、输入
+
+| 输入 | 来源 | 状态 |
+| --- | --- | --- |
+| 我们的内核 Mach-O | KEBAB 构建产物 | 需确认能作为 prelink 输入 |
+| 供体 kernelcache | IPSW `kernelcache.release.iphone10b`，18,204,358 字节 | 在本地 IPSW 里 |
+| 供体解密 | iOS 的 kernelcache 是加密的 | **未解决** |
+| slide 与 early_security_init 地址 | 由供体计算 | 未算 |
+
+**这一条已经解决，而且不需要解密。** 供体 `kernelcache.release.iphone10b` 的 IM4P 净荷
+是 **LZFSE 压缩**，不是加密：没有 `encr` 标签，前四字节是 `bvx2`。用 `lzfse` 模块解压后得到
+50,937,884 字节，magic 为 `0xbebafeca`，即 **MH_FILESET**（iOS 12 之后的 kext 集合格式），
+里面能直接搜到 `com.apple.filesystems.apfs`、`com.apple.driver.AppleMobileFileIntegrity`、
+`com.apple.iokit.IOStorageFamily` 等 bundle id。
+
+```
+解压产物  /home/albert/kernelcache.iphone10b.macho
+长度      50,937,884 字节
+SHA-256   1c1e2d36a0c0daef07e4c6d2ac544eed08ab8e17a045ce8f95195a099bdadcc4
+格式      MH_FILESET（不是单一 Mach-O）
+依赖      pip install --user --break-system-packages lzfse
+```
+
+因此清单里原本标注为"未解决"的那一项，改为"已解决，输入就绪"。剩下的未知只有
+符号集与构建产物形态两项。
+
+### 三、roots 集合
+
+sheng 选了 31 个 bundle id，顺序即依赖顺序。与存储和用户态直接相关的核心项：
+
+```
+com.apple.filesystems.apfs                          文件系统
+com.apple.iokit.IOStorageFamily                     块设备栈
+com.apple.driver.AppleEffaceableStorage             密钥存储
+com.apple.driver.AppleMobileFileIntegrity           签名与信任
+com.apple.security.AppleImage4                      镜像校验
+com.apple.kec.corecrypto / Libm                     加密原语
+com.apple.iokit.IOCryptoAcceleratorFamily           加密加速
+com.apple.driver.IODARTFamily                       IOMMU
+com.apple.security.sandbox                          沙盒
+com.apple.kext.AppleMatch / CoreTrust
+com.apple.AppleFSCompression.AppleFSCompressionTypeZlib
+```
+
+其余是平台与图形相关（AppleARMPlatform、ApplePMGR、AppleARMWatchdogTimer、IOGPUFamily、
+IOSurface、IOMobileGraphicsFamily、IOHIDFamily、IOHIDEventDriver 等），对 mount-phase-1
+不是必需，但对后续用户态是。
+
+### 四、内核侧必须补的两个补丁
+
+工具目录自带两个补丁，但都是 **xnu-10063.141.1**（iOS 17）的：
+
+```
+patches/xnu-10063.141.1-security-init.patch
+patches/xnu-10063.141.1-sparse-index.patch
+```
+
+我们的树是 **xnu-8796.141.3**。两个补丁都要移植：
+
+- `security-init`：让内核在启动早期调用指定的安全扩展初始化（AMFI）
+- `sparse-index`：prelink 输出的稀疏索引，内核据此登记预链接进来的模块
+
+### 五、必须确认的三个技术前提
+
+1. **页大小**。sheng 是 4 KiB 内核，所以它需要 `native-4k-bootstrap-capacity` 一类补丁。
+   我们是 16 KiB，供体是 iOS 16 KiB，理论上反而更匹配，但要用实测确认
+   prelink 的段映射在 16 KiB 页下成立。
+2. **符号集**。并入的 kext import 大量内核符号，我们的内核必须导出同名同 ABI 的符号。
+   xnu 版本一致能解决大部分，但需要逐项核对。
+3. **构建产物形态**。sheng 需要 `mach.development.<machine>.unstripped.noctf`
+   （未剥离、无 CTF）。我们的 `kernel.development.kebab` 是否等价需要确认，
+   不等价的话要在构建里加一个对应产物。
+
+### 六、验证方法
+
+分四级，每级都有客观判据：
+
+```
+一  工具自检         kits/NativePrelink 自带的测试全过
+二  离线生成         用我们的内核 + 供体，成功产出 prelinked 镜像与元数据
+三  内核侧登记       启动日志中出现预链接模块的登记信息
+四  真机 kext 加载    com.apple.filesystems.apfs 出现在 IOKit 的已加载列表里
+```
+
+第四级之后才是 `mount-phase-1` 能否通过。
+
+### 七、当前判断
+
+这条路是唯一能让真实 APFS 与 data 卷可读的方案，而且有 sheng 的成功先例。
+但它卡在供体 kernelcache 解密这一条上，其余部分都是有明确做法的工程。
+解密不解决之前，不建议投入时间到内核补丁移植上。
+
+### 八、prelink 链路首次打通
+
+在三项前置都解决之后，工具第一次端到端产出了候选镜像：
+
+```
+供体     kernelcache.release.iphone10b，LZFSE 解压后 50,937,884 字节
+         外层 28 字节 FAT 头剥掉后是 MH_EXECUTE，内含 __PRELINK_INFO
+内核     kernel.development.kebab，17,227,160 字节
+         需要把 __CTF 段的 filesize 与 section size 清零（对应 sheng 的 noctf）
+root     com.apple.filesystems.apfs（依赖闭包 15 个组件）
+slide    -0x1eff1000000（-0x1f001000000 会让组件撞上 __TEXT_EXEC）
+产出     55,013,376 字节候选镜像
+```
+
+过程中解决的三件事：
+
+1. **符号缺口 42 个**。17 个是 IOUnifiedAddressTranslator 的 C++ 成员，
+   25 个是 C 函数，绝大多数属于本移植不运行的 IOMMU/DART。
+   补丁 `0157` 提供它们：`vfs_getvfs_with_vfsops` 是真实实现（APFS 用它），
+   其余是"调用即打印一次"的桩。
+2. **导出表走不通**。xnu 的 `kextsymboltool` 要求导出名出现在导入表里，
+   直接往 `config/BSDKernel.arm64.exports` 加会被拒。
+   改为让 prelink 工具在内核的 `LC_SYMTAB` 里回退查找，不改内核的符号集。
+3. **slide 需要搜索**。组件必须落在内核段之外，用相邻的 256 MiB 步长试探即可。
+
+### 九、尚未验证的部分
+
+```
+early_security_init 未设置      AMFI 不会在早期初始化
+内核侧模块登记                  未在真机看过 sparse-index 的输出
+候选镜像能否启动                未刷入
+APFS 能否真的挂载               未验证
+```
+
+下一步是刷入候选镜像并按第六节的四级判据验证。
+
+### 十、独立审查的结论（prelink 候选镜像）
+
+对 55 MB 候选镜像做了一次二进制级复核，三条结论改变了原先的判断：
+
+**一、引导器有硬性跨度上限**
+
+`DarwinBoot::ParseKernel()` 要求完整映射跨度不超过 `0x0fe00000`（254 MiB）。
+第一版候选的跨度是 `0x10bb8000`，超限，会在 XNU 执行前就被拒。
+放宽 ADT 窗口无用，因为解析发生在窗口处理之前。
+
+选 slide 时必须同时满足"段不冲突"和"总跨度在限内"。当前可用的组合：
+
+```
+slide = -0x1f009cdc000
+span  = 0xc015000（约 192 MB）
+```
+
+**二、缺 `early_security_init` 不阻止注册**
+
+kext 的生命周期是 `KLDBootstrap::readStartupExtensions()`
+→ `readPrelinkedExtensions()` → `OSKext::addKextsFromKextCollection()`，
+之后由 IOKit 匹配加载。`0155` 的 sparse-index 只登记分配元数据，不负责启动模块。
+`0156` 的早期初始化是**额外**机制，只在元数据存在时才会被调用。
+
+**三、24 个桩在本次闭包里一个都不会被调用**
+
+复核逐条检查了 6,964 个内核绑定，没有任何一个指向那些桩。
+原先"42 个缺失符号"是把**供体的导出差异**当成了**闭包的导入需求**，这是错的。
+闭包里唯一真正被调用的是 `vfs_getvfs_with_vfsops`，而它是真实实现：
+按 fsid 找到 mount 再比较 `mnt_op`，与供体的行为一致；返回 NULL 时 APFS 会走
+`ENOENT` 分支，不会解引用空指针。
+
+### 十一、两条仍需留意的事项
+
+**桩的符号命名**。C 标识符不能带前导下划线，否则编译出的 Mach-O 符号会多一个
+（`_tty_trylock` 写成 C 函数会产生 `__tty_trylock`）。已在 `0157` 里改成正确命名，
+虽然当前无人调用，但留着会变成以后静默失配的坑。
+
+**供体与原生内核的版本差**。供体内嵌版本是 `xnu-8796.142.1.703.8`，原生是
+`8796.141.3`。名字接近、补丁干净应用、指令未变，都不能证明私有结构布局、C++ vtable
+与回调契约一致。如果刷入后 APFS 注册成功但一访问就崩，这是第一个要怀疑的地方。
+
+### 十二、启动期不被镜像体积阻塞
+
+`arm_vm_init.c` 里那条 `BOOTSTRAP_TABLE_SIZE too small` 的 panic 比较的是
+`dynamic_memory_begin - gVirtBase`，即**物理内存跨度**，不是内核镜像大小；
+而且它拿页数去比字节数，实际上不可能触发。内核段走的是按 Mach-O 段表逐段映射的
+另一条路径，所以 55 MB 的候选镜像不受这条限制。
+
+### 十三、prelink 之后的下一个缺口：没有 IOMedia
+
+查 `kebab_ufs.c` 的对外形态：它是 BSD 块设备，通过 `cdevsw`/`bdevsw` 注册，
+`kebab_ufs_strategy()` 是 buf 例程，另有 `kebab_ufs_raw_read/raw_write/sync`
+直接对分区做偏移读写。它**没有注册成 IOKit 服务**。
+
+而 APFS 是 IOKit 驱动，它通过 `IOMedia` 找盘；`IOStorageFamily` 提供的是基类，
+不是实例。内核里目前没有任何东西发布 `IOMedia`。
+
+所以完整链条是五环，现在只完成了第一环：
+
+```
+一  prelink 把 APFS 链进来          已就绪（候选镜像 55,111,680 字节）
+二  APFS 注册到 IOKit                待真机验证
+三  提供一个 IOMedia                 缺
+四  APFS 挂载卷                      依赖三
+五  mount-phase-1 通过               依赖四
+```
+
+第三环的形态：把 `kebab_ufs` 包成 `IOBlockStorageDevice` 的子类并发布 `IOMedia`，
+让 `IOStorageFamily` 的匹配链能把它交到 APFS 手里。这需要 IOKit C++（本内核已开
+`IOKITCPP`），规模约两百行。它必须在第二环验证之后再做，因为要先确认 prelink
+真的能把驱动加载起来。
+## 八十七、为 APFS 发布 IOMedia
+
+写于 2026-10-28。第八十六节把 prelink 之后的缺口定位到"内核里没有任何东西发布
+`IOMedia`"。本节补上这块代码，并把实现过程中量出来的两个硬约束一并写清楚：
+C++ vtable 的 padding 不匹配，以及静态内核无法链接 `IOStorageFamily` 的符号。
+前者是 prelink 链路的阻塞项，后者决定了这块驱动当前只能以源码形式落地，
+不能进默认内核镜像。
+
+### 一、目标形态
+
+`kebab_ufs` 是 BSD 块设备（`bdevsw`/`strategy`）加一组按字节偏移读写的 raw 接口，
+没有 IOKit 服务。APFS 通过 `IOMedia` 找盘，而 `IOMedia` 由 `IOStorageFamily` 的
+通用 `IOBlockStorageDriver` 为 `IOBlockStorageDevice` 子类创建。因此链条是：
+
+```
+IOPlatformExpertDevice            现有 provider（getServiceRoot()）
+  KebabBlockStorageDevice         本次新增的 IOBlockStorageDevice 子类
+    IOBlockStorageDriver          Apple，来自 prelink 的 IOStorageFamily
+      IOMedia                     Whole=true，名字取自产品名 + " Media"
+```
+
+驱动本身不碰 UFS 硬件：`doAsyncReadWrite` 把请求按 64 KiB 切块，经
+`kebab_ufs_raw_read()` / `kebab_ufs_raw_write()` 落到分区上；`doSynchronize`
+调 `kebab_ufs_sync()`。几何全部来自驱动：`kebab_ufs_partition_bytes()`、新增的
+`kebab_ufs_block_size()`（返回 `UFS_BLOCK`，即 4096）、`kebab_ufs_writable()`。
+没有硬编码分区起始块或大小。传输用一块 64 KiB 的 bounce buffer 加 `IOLock`
+串行化，completion 在返回前同步调用（UFS 路径本来就是轮询同步的）。
+
+### 二、代码与注册点
+
+- `iokit/Kernel/arm/KebabBlockStorageDevice.cpp`：类 `KebabBlockStorageDevice`，
+  实现 `IOBlockStorageDevice` 的 14 个纯虚函数。`doEjectMedia`、`doFormatMedia`、
+  `doUnmap` 返回 `kIOReturnUnsupported`；`reportBlockSize` 返回 4096；
+  `reportMaxValidBlock` 返回块数减一；`reportWriteProtection` 跟随 `ufsrw`；
+  `reportMediaState` 第一次报告 `changedState=true`。
+- `bsd/dev/kebab_ufs.c`：新增只读 helper `kebab_ufs_block_size()`；在
+  `kebab_ufs_rootdev()` 释放 `kebab_ufs_lock` **之后**调用
+  `kebab_blockstorage_start()`。必须在锁外，因为注册路径会再读几何。
+  原有 BSD 接口（`bdevsw`、`strategy`、`raw_*`）一字未改，只是加了一个包装层。
+- 启动参数：`ufsmedia=1`，默认关闭。注册失败只打印，不 panic、不阻塞启动。
+  provider 用 `IOService::getServiceRoot()`，先 `attach()` 再 `registerService()`。
+- `IOStorageFamily` 的 `IOBlockStorageDriver` 按 prelink 镜像里读出的 personality
+  （`IOPropertyMatch = { device-type = Generic }`）匹配这个服务，然后按
+  `reportBlockSize()` / `reportMaxValidBlock()` 发布 `IOMedia`。
+
+成功时启动日志应出现（大小以驱动实测为准）：
+
+```
+KEBAB BLOCK: "userdata" 229843 MiB, 4096-byte blocks, read-only; IOMedia "UFS userdata Media"
+```
+
+随后 `ioreg -c IOMedia` 应能看到 `UFS userdata Media`，属性 `Whole=true`、
+`BlockSize=4096`、`Size` 等于分区字节数；如果 `IOMediaBSDClient` 也匹配，
+还会多出 `BSD Name`（如 `disk0`）和 `/dev/disk0`。**没有这一行或没有 IOMedia**
+就说明匹配/ABI 有问题，先查下面的第五节。
+
+### 三、vendored 头文件
+
+全部放在 `iokit/IOKit/storage/`，随源码树走，不依赖会移动的 SDK 路径：
+
+| 文件 | 处理 |
+| --- | --- |
+| `IOBlockStorageDevice.h` | 按 iOS 16.7.16 的 22 槽尾部裁剪（见下） |
+| `IOMedia.h` | 原样 |
+| `IOStorage.h` | 原样 |
+| `IOStorageDeviceCharacteristics.h` | 去掉 `TargetConditionals.h` / DriverKit 分支 |
+| `IOStorageProtocolCharacteristics.h` | 同上 |
+| `IOStorageControllerCharacteristics.h` | 去掉 `TargetConditionals.h` include |
+
+裁剪依据是从 prelink 候选镜像里实测的 `IOBlockStorageDevice` 派发表：iOS 16.7.16
+的类只有 **22 个自有虚函数**，顺序为 `doEjectMedia`、`doFormatMedia`、
+`doGetFormatCapacities`、`doLockUnlockMedia`、`getVendorString`、
+`getProductString`、`getRevisionString`、`getAdditionalDeviceInfoString`、
+`reportBlockSize`、`reportEjectability`、`reportMaxValidBlock`、
+`reportMediaState`、`reportRemovability`、`reportWriteProtection`、
+`getWriteCacheState`、`setWriteCacheState`、`doAsyncReadWrite`、`requestIdle`、
+`doUnmap`、`doSetPriority`、`doSynchronize`、`doGetProvisionStatus`；
+没有 macOS 头里的 `doSynchronizeCache`、`reportLockability`、
+`reportPollRequirements`、`doDiscard`，也没有 32 个 `OSMetaClass` reserved 槽。
+vendored 头按这个形状改：删掉上述四个方法，`doLockUnlockMedia` 保留并去掉
+`TARGET_OS_OSX` 保护，删掉全部 reserved 声明。三个 characteristics 头只做
+include 收敛，常量本身没动。
+
+### 四、当前不能进默认内核：链接边界
+
+把该文件加进 `iokit/conf/files.arm64` 后，内核在**链接**阶段失败：
+
+```
+Undefined symbols: IOBlockStorageDevice::gMetaClass,
+IOBlockStorageDevice::vtable, IOBlockStorageDevice::IOBlockStorageDevice(...),
+IOBlockStorageDevice::setProperties(...), ...
+```
+
+原因不是缺桩，而是架构边界：`IOStorageFamily` 是 prelink 进来的 kext，
+不在静态内核镜像里；内核代码对它的引用没有定义。prelink 工具只把 donor kext
+里的指针重绑到本内核的导出符号（`unique_kernel_binding`），不处理反方向的
+内核 → kext 引用。因此：
+
+- `iokit/conf/files.arm64` 里的构建行目前是**注释掉的**；
+- `kebab_ufs.c` 的调用点用 `#if defined(KEBAB_BLOCKSTORAGE)` 包住，默认不编译。
+
+要让驱动真正跑起来，必须先满足下面二选一，再加 `-DKEBAB_BLOCKSTORAGE`：
+
+1. 把驱动做成独立 kext，并让 prelink/加载链路接受作者提供的 kext
+   （当前 emitter 只按 bundle id 从 donor 里选组件）；或
+2. 把 `IOStorageFamily`（至少 `IOBlockStorageDevice`/`IOStorage`/`IOMedia`/
+   `IOBlockStorageDriver`）从源码编进内核，让这些符号在静态链接时就有定义，
+   像上游 sheng 的 `refer/IOStorageFamily` 那样。
+
+在此之前，本文件做到的是：用内核 IOKit 的完整编译参数（含 `-Weverything`）
+编译通过，新代码零 warning；整条 137 个 patch 的系列在 pristine `1b191cb` 上
+干净应用，内核构建通过（驱动被 gate 掉，不参与链接）。
+
+### 五、主要风险：macOS 14.5 头 vs iOS 16.7.16 IOStorageFamily
+
+实测两个数字：
+
+- donor kernelcache 的 `__ZTV9IOService` 是 **170** 槽；
+- 我们当前内核的是 **274** 槽。
+
+根因在 `libkern/libkern/c++/OSMetaClass.h`：
+
+```c
+#if !XNU_TARGET_OS_OSX
+#define APPLE_KEXT_VTABLE_PADDING   0
+#else
+#define APPLE_KEXT_VTABLE_PADDING   1
+#endif
+```
+
+本移植用 macOS SDK 构建，定义了 `XNU_TARGET_OS_OSX`，于是所有
+`OSMetaClassDeclareReservedUnused` 都变成真实 vtable 槽；iOS kext 是 0，
+没有这些槽。104 个槽的差不是"多几个方法"，而是**槽位整体错位**：内核按 274
+的布局调用 `probe`/`start`/`attach`，kext 对象按 170 的布局排 vtable，
+dispatch 会落到别的函数。对本驱动而言，`IOStorageFamily` 的
+`IOBlockStorageDriver` 会在 attach/start 时按 170 的基址取
+`reportBlockSize`、`doAsyncReadWrite` 等；只要基址不一致，轻则 `IOMedia`
+不出现，重则在 `IOStorageFamily` 内部崩。
+
+vendored 头已经把 22 槽尾部对齐；padding=0 时 `doEjectMedia` 正好落在 170，
+和 donor 一致（用同一份头编译探针验证）。也就是说**尾部不是问题，基址才是**。
+
+padding=0 原型（已由 `0159`/`0160` 正式化，见第八十八节）：在 `OSMetaClass.h`
+里对 KEBAB 强制 0，并删掉 `config/*.exports` 里那些 `_RESERVED*` 名字（arm64
+构建消费其中 5 个文件、共 438 个；全树 825 个，其余在 x86_64 表里。否则
+symbolset 阶段报 `exported name not in import list`），内核构建通过，
+重建后 `__ZTV9IOService` = **170**。40 个头文件里的 C++ 类受影响
+（`IOService` 46 个 reserved 声明、`IORegistryEntry` 32、`IOMemoryDescriptor`
+23、`IOPlatformExpert` 21、`IOUserClient` 20、`IOMedia` 16、`IOStorage` 9 等），
+`KebabPlatformExpert`/`KebabCPU`/`ArmDTPlatform` 这些内核内子类的基类布局全部
+变了。**构建通过不等于能启动**：真机若失败，最先怀疑 IOKit 早期类注册或
+平台专家 `start`，而不是本驱动。
+
+### 六、分区读写警告
+
+这个分区就是当前启动用的 HFS+ 根卷。默认 `ufsrw` 未开时驱动是只读的，发布出去
+不会写盘，风险可控；一旦 `ufsrw=1` 且 APFS 以读写方式挂载，APFS 会把 HFS+ 卷
+当作自己的容器重写，`/sbin/launchd` 等当前启动链依赖的文件会消失，下一次启动
+直接失败。所以：
+
+- 在 APFS 根卷真正接管之前，不要同时开 `ufsrw=1` 和 `ufsmedia=1` 让 APFS 挂载；
+- 即使只读，只要 APFS 认为卷可以修复并尝试写，后果相同；
+- 这块驱动目前只用于验证"`IOMedia` 是否出现"，不要在这块盘上做 APFS 写实验。
+
+### 七、验证状态
+
+```
+137 patches 应用在 1b191cb             通过
+内核构建（驱动 gate 掉，不参与链接）     通过
+驱动 TU 用内核 IOKit 完整 flags 编译     通过，新代码零 warning
+padding=0 原型构建                      通过，__ZTV9IOService = 170
+真机                                    未验证，未刷机
+```
+
+下一步的顺序应该是：先做 padding=0 的正式补丁，让内核在真机上启动并确认
+IOKit 类注册正常；再决定 kext 还是源码内置 `IOStorageFamily`；最后才打开
+`KEBAB_BLOCKSTORAGE` 和 `ufsmedia=1` 看 `IOMedia`。当前驱动只做到
+"编译可验证、代码就位"，还不能在未解决前两项的情况下宣称能挂载 APFS。
+
+## 八十八、C++ vtable padding 与 prelink 的 ABI 统一
+
+写于 2026-10-28。第八十七节把 prelink 链路的阻塞项定位到 `APPLE_KEXT_VTABLE_PADDING`：
+donor 的 `__ZTV9IOService` 是 170 个字，我们的是 274，任何 prelinked C++ kext 都
+不可能正确 dispatch。本节把这个原型做成正式补丁（`0159`、`0160`），在 pristine
+`1b191cb` 上重建，并据此产出新的 prelink 候选镜像。核心结果：padding=0 后
+`__ZTV9IOService` = **170**，与 donor 一致；候选镜像的映射跨度 **64.7 MiB**
+（沿用上一版的 slide 则是 191.8 MiB），四条 loader 检查全过。
+
+### 一、padding 是什么
+
+`libkern/libkern/c++/OSMetaClass.h` 里每个 IOKit 类都用
+`OSMetaClassDeclareReservedUnused(Class, n)` 预留若干虚函数槽，供 Apple 在不破坏
+二进制兼容的前提下增加虚函数。展开与否由这个宏决定：
+
+```c
+#ifdef XNU_KERNEL_PRIVATE
+
+#if !XNU_TARGET_OS_OSX
+#define APPLE_KEXT_VTABLE_PADDING   0
+#else /* !XNU_TARGET_OS_OSX */
+#define APPLE_KEXT_VTABLE_PADDING   1
+#endif /* !XNU_TARGET_OS_OSX */
+
+#else /* XNU_KERNEL_PRIVATE */
+/* 非内核私有分支按 TARGET_OS_IPHONE 判断 */
+#endif
+```
+
+内核私有分支只看 `XNU_TARGET_OS_OSX`：iOS 构建是 0，macOS 构建是 1。本移植用
+macOS SDK 构建内核，这个宏恒为 1，于是**每个** reserved 声明都变成真实槽位。
+
+一个 C++ vtable 的形状是 2 个头部字（offset-to-top、typeinfo）加每槽 8 字节。
+实测三份镜像：
+
+| 镜像 | `__ZTV9IOService` 起点 | 总字数 | 头部 | 虚函数槽 |
+| --- | --- | --- | --- | --- |
+| iOS 16.7.16 donor kernelcache | `0xfffffff0071977f0` | 170 | 2 | 168 |
+| 本移植 padding=1（`0157` 内核） | `0xfffffe000624e618` | 274 | 2 | 272 |
+| 本移植 padding=0（本节内核） | `0xfffffe000624b338` | **170** | 2 | 168 |
+
+差的 104 个字不是"多几个方法"，而是**整段错位**：kext 侧的对象按 170 的布局排
+vtable，内核按 274 的布局取槽，`probe`/`start`/`attach` 之外的每一次虚调用都会
+落到别的函数上。这也解释了为什么 `IOStorageFamily` 和 AMFI 之前在真机上不可能
+正常 attach——不是配置问题，是 ABI 问题。
+
+### 二、为什么发现它花了这么久
+
+顺序是反的：先怀疑"尾部对不齐"，后才发现"基址对不齐"。
+
+1. `IOBlockStorageDevice.h` 的 macOS 14.5 版本比 iOS 16.7.16 多四个方法
+   （`doSynchronizeCache`、`reportLockability`、`reportPollRequirements`、
+   `doDiscard`）和 32 个 `OSMetaClass` reserved 槽，于是把 vendored 头按 donor
+   实测的 22 槽尾部裁掉，让 `doEjectMedia` 落在 170。
+2. 裁完仍然对不上，因为**每个类的 vtable 都多了 reserved 槽**，尾部对齐只解决了
+   `IOBlockStorageDevice` 自己的 22 个槽，解决不了前面 104 个槽的整体平移。
+3. 直到把 padding 强制 0，`__ZTV9IOService` 才从 274 掉到 170——同一份头文件、
+   同一套编译参数，唯一变量是这个宏。
+
+代价是两次整机构建加一轮 vtable 实测。教训：**先量基类 vtable 的总字数，再谈
+派生类的尾部布局**；顺序反过来会把 22 个槽的局部问题当成全部问题。
+
+### 三、补丁 `0159`：对 KEBAB 强制 padding=0
+
+```c
+#if defined(KEBAB) || !XNU_TARGET_OS_OSX
+#define APPLE_KEXT_VTABLE_PADDING   0
+#else /* defined(KEBAB) || !XNU_TARGET_OS_OSX */
+#define APPLE_KEXT_VTABLE_PADDING   1
+#endif /* defined(KEBAB) || !XNU_TARGET_OS_OSX */
+```
+
+保留 `XNU_TARGET_OS_OSX`：SDK 头、`Availability` 宏和一批 `#if` 分支都靠它选
+macOS 形态，去掉会引出另一批编译错误。KEBAB 只在这一个宏上选择 iOS 的 ABI。
+`KEBAB` 由 `MACHINE_FLAGS_ARM64_KEBAB` 的 `-DKEBAB` 传入，不是新加的开关。
+
+影响的规模（pristine 树实测）：
+
+```
+40 个头文件出现 OSMetaClassDeclareReservedUnused，共 446 处
+（其中 OSMetaClass.h 的两处是宏定义本身，8 处是 OSMetaClass 自己的槽）
+
+IOService.h            46        IOUserClient.h         20
+IORegistryEntry.h      32        OSMetaClass.h           8
+IOMemoryDescriptor.h   23        IOMedia.h              16
+IOPlatformExpert.h     21        IOStorage.h             9
+```
+
+内核内子类（`KebabPlatformExpert`、`KebabCPU`、`ArmDTPlatform` 等）的基类布局
+随之改变；它们和内核一起重编，所以自洽。**构建通过仍然不等于能启动**：真机若
+失败，第一嫌疑仍是 IOKit 早期类注册，而不是本次 prelink。
+
+### 四、补丁 `0160`：导出表过滤，不是可选的
+
+padding=0 之后 reserved 声明展开为空，那些符号就不存在了；arm64 的 symbolset
+阶段会立刻拒绝：
+
+```
+exported name not in import list: __ZN18IOMemoryDescriptor28_RESERVEDIOMemoryDescriptor2Ev
+```
+
+删除的规模（只动 arm64 构建消费的五个文件）：
+
+| 文件 | 删除 |
+| --- | --- |
+| `config/IOKit.arm64.MacOSX.exports` | 258 |
+| `config/Libkern.arm64.MacOSX.exports` | 132 |
+| `config/Unsupported.arm64.MacOSX.exports` | 36 |
+| `config/IOKit.arm64.hibernation.MacOSX.exports` | 8 |
+| `config/Private.arm64.MacOSX.exports` | 4 |
+| 合计 | **438** |
+
+树里一共有 825 个 `_RESERVED...` 名字，其余在 x86_64 的导出表里；本移植不构建
+x86_64，那些文件不动。这一点容易记错：**438 是这五个文件里的数量，825 是全树
+总数**。
+
+为什么说它不可选：删除发生在 symbolset 生成阶段，早于链接。留着它，内核根本产
+不出来；把它当"清理"放到后面的补丁里，`0159` 单独就不可构建。两个补丁必须在同
+一个系列里、按这个顺序。
+
+### 五、端到端验证（离线）
+
+```
+pristine 树                    1b191cb（xnu-8796.141.3）
+系列                           139 个补丁，逐条 git apply --check + apply
+                               139/139 通过
+                               dxb 自带的 4 个非本移植补丁照旧跳过
+                               （0001/0002 由 build.sh 的 sed 取代，属预期）
+干净构建                       删除 build/ 与 fakeroot/ 后全量重建
+                               "🎉 XNU Build Done!"，无编译/链接错误
+                               "not in import list" 0 次
+内核                           16,969,016 字节
+                               sha256 706f4280f83e3777d1ab89ace24b2978
+                                      7e1d0c109ba2600c0b648ae56e393a3a
+__ZTV9IOService                170 字（2 头部 + 168 槽），donor 170
+内核自身映射                   0xfffffe0006004000 - 0xfffffe0007090000
+```
+
+符号普查（同一份内核，解析 `LC_SYMTAB` 的 `N_SECT` 定义）：
+
+```
+_kebab_* 已定义                        326 个
+_vfs_getvfs_with_vfsops                0xfffffe000694aa78
+_kalloc_sparse_prelink_index_version   0xfffffe0006009998
+_native_prelink_security_init_version  0xfffffe0006028900
+```
+
+`_kalloc_sparse_prelink_index_version` 与 `_native_prelink_security_init_version`
+是 `0155`/`0156` 的 ABI 标记，`_vfs_getvfs_with_vfsops` 是 `0157` 里唯一真实实现
+的符号（APFS 会调）。三个都在，说明 padding 与导出表改动没有误删 prelink 依赖的
+符号。`kebab_*` 比上一版内核多一个 `_kebab_ufs_block_size`，那是 `0158` 新增的
+helper，与本节无关。
+
+### 六、新的 prelink 候选镜像
+
+输入与上一版一致，只有内核换了：
+
+```
+内核        16,969,016 字节，__CTF 段 filesize 与 section size 清零（同上一版）
+供体        /home/albert/kernelcache.fileset.macho（28 字节 FAT 头已剥）
+roots       com.apple.filesystems.apfs
+            com.apple.driver.AppleMobileFileIntegrity
+early init  com.apple.driver.AppleMobileFileIntegrity=0xfffffff0056fb000
+闭包        13 个组件，与上一版完全相同
+绑定        27,201 条
+```
+
+slide 不能沿用。emitter 把每个 donor 段放到 `donor_va + slide`，而内核对 prelink
+区留的空洞（`__PRELINK_TEXT` 占位段 `0xfffffe0003004000` 到 `__TEXT`
+`0xfffffe0006004000`）是 48 MiB；donor 的四个 coalesced 段合计 48.2 MiB，正好
+卡进去。因此 slide 要重新解方程：让 `__PRELINK_TEXT` 落在占位段上。
+
+```
+slide = 0xfffffe0003004000 - 0xfffffff004dc8000 = -0x1f001dc4000
+```
+
+对比（同一个内核）：
+
+| slide | prelink 区起点 | 跨度 | 判定 |
+| --- | --- | --- | --- |
+| `-0x1f009cdc000`（上一版沿用的值） | `0xfffffdfffb0ec000` | 0xbfd5000（191.8 MiB） | 过，但白留 133 MiB |
+| `-0x1f001fc4000`（再降 2 MiB） | `0xfffffe0002e04000` | 0x42bd000（66.7 MiB） | 过 |
+| **`-0x1f001dc4000`**（本节） | `0xfffffe0003004000` | **0x40bd000（64.7 MiB）** | 过 |
+| 再升 2 MiB | — | — | prelink 区顶到 `__TEXT` 只剩 48 KiB，不再留余量 |
+
+选中的是"落在占位段上"这一档：prelink 区 `0xfffffe0003004000` -
+`0xfffffe0005df8000`，与 `__TEXT` 之间留 2 MiB。跨度直接由 loader 的上限决定，
+不是审美问题——`DarwinBoot::ParseKernel()` 对整张镜像的 `End - Base` 有硬上限
+`0x0fe00000`（256 MiB 窗口减 2 MiB），上一版 191.8 MiB 虽然过线，但余量只有 62 MiB。
+
+loader 四条检查（按 `ParseKernel()` 逐条复算）：
+
+```
+magic            0xfeedfacf                     ok
+cputype          0x100000c                      ok
+subtype          0                             ok
+filetype         2                             ok
+LC_UNIXTHREAD    cmdsize 288, flavor 6, count 68
+                 PC 0xfffffe0006477488，落在 __TEXT_EXEC（可执行段内）
+映射跨度         0x40bd000  <= 0x0fe00000        ok
+段数             15 mapped（上限 64）             ok
+段重叠           无                              ok
+Base 页对齐      0xfffffe0003004000              ok
+```
+
+产物与哈希：
+
+```
+候选镜像   prelink-0159.bin   54,853,632 字节
+           sha256 a25593d7855141471734c73ec1016e1ac3399ab4d0ab4b6fa6b3b6aacf16e9a2
+payload    payload-PL4.img    67,108,864 字节
+           sha256 d7b0a5d4efeca0ea30f60bf0d9940cf13c0b166ad1bfb56ff48834396431dc95
+boot       boot-PL4.img      100,663,296 字节
+           sha256 4d17727b972933d36d25030aaf9db2ed7f78da9ba7a6f9fb9d88b5412cbb55d0
+```
+
+`boot-PL4.img` 的 `[0, 0x800000)` 与 `signed.img` 逐字节相同，payload 区等于
+`payload-PL4.img`，其余不变。**没有刷机**，真机验证由人来做。候选镜像的
+`__ZTV9IOService` 也是 170 字（168 槽），与内核一致。
+
+### 七、下一个结构性缺口：IOMedia 还是进不了内核
+
+`IOStorageFamily` 是 prelinked kext。emitter 只把 **donor kext 里的指针重绑到
+本内核的导出符号**（`unique_kernel_binding`），反方向——内核代码引用 kext 的
+符号——它不处理，也不该处理：那在静态链接期就该有定义。
+
+所以 `KebabBlockStorageDevice`（`0158`）仍然只能以源码形式躺着：
+`iokit/conf/files.arm64` 里的构建行是注释掉的，`kebab_ufs.c` 的注册点在
+`#if defined(KEBAB_BLOCKSTORAGE)` 里面。要让 APFS 真正挂上 UFS，必须先满足二选一：
+
+1. emitter 支持"作者提供的 kext"（现在它只按 bundle id 从 donor 里选组件）；
+2. 把 `IOStorageFamily`（至少 `IOBlockStorageDevice`/`IOStorage`/`IOMedia`/
+   `IOBlockStorageDriver`）从源码编进内核。
+
+两条今天都不存在，这是继 vtable padding 之后的**下一个结构性缺口**，不是配置项。
+
+一个好消息：padding=0 之后，vendored 的 22 槽尾部正好落在 170 的基址上——上一轮
+为对齐尾部做的裁剪没有白做。等上面任一条成立，打开 `KEBAB_BLOCKSTORAGE` 就只剩
+链接问题，驱动代码本身不用再改布局。
+
+## 八十九、让内核调用预链接 kext
+
+写于 2026-10-28。第八十八节留下的最后一个结构性缺口是方向问题：emitter 只把
+**供体 kext 里的指针重绑到本内核的导出符号**，不支持**内核代码引用预链接 kext
+的符号**。本节补上反方向，给出机制、arm64 引用形式、可达范围分析，以及一个在
+真实 0159 内核、真实供体、真实 slide 上完成的离线原型。**没有刷机，也没有把
+`KebabBlockStorageDevice` 真正编进内核**；原型用一段注入到真实内核镜像里的
+四指令探针代替整块驱动，原因和边界见第五节。
+
+### 一、结论先行
+
+选定的机制是**清单驱动的直接重绑定**，不是 dyld 绑定，也不是 PLT/GOT 间接层：
+
+```
+--kernel-import SYMBOL=ORIGINAL_VA[@NATIVE_VA]
+```
+
+- `ORIGINAL_VA` 是符号在供体组件里的原始地址；
+- `NATIVE_VA` 是内核侧占位定义/探针槽的地址，省略时按同名符号查内核
+  `LC_SYMTAB`；
+- 最终地址 `FINAL_VA = ORIGINAL_VA + slide`；
+- emitter 在内核的**可执行段**里找 `B/BL`、`ADRP+ADD`、`ADRP+LDR`，在**非可执行
+  段**里找正好等于 `NATIVE_VA` 的 8 字节槽（vtable、GOT、字面量池），把目标改成
+  `FINAL_VA`；
+- 找不到引用、地址不在所选闭包内、`B/BL` 超出 ±128 MiB、`ADRP` 超出 ±4 GiB，
+  一律拒绝生成候选，而不是静默留下错误地址。
+
+原型结果：真实 0159 内核里的两条引用分别被改成
+`0xfffffe0005c451d0`（`IOBlockStorageDevice::gMetaClass`，落在
+`__PRELINK_DATA`）和 `0xfffffe0003815dc4`（`IOBlockStorageDevice::getMetaClass`，
+落在 `__PLK_TEXT_EXEC`）。反汇编复核两条目标都指向预链接块内部；函数字节与供体
+逐字节相同。
+
+### 二、为什么不是 dyld 的 GOT/惰性指针
+
+先把“内核是怎么引用一个外部符号的”量清楚。用 0158 的真实驱动 TU，在内核的完整
+编译参数下编译：
+
+```
+202 个未定义符号
+其中属于 IOStorageFamily 的 11 个：
+  gMetaClass
+  __ZTV20IOBlockStorageDevice
+  C2（构造）
+  D2（析构）
+  setProperties
+  doSetPriority
+  doLockUnlockMedia
+  getWriteCacheState
+  setWriteCacheState
+  doGetProvisionStatus
+  getProperty(OSSymbol const *)
+```
+
+`otool -rv` 给出的重定位形态是三类：
+
+| 形态 | 例子 | 数量 | 静态链接后的样子 |
+| --- | --- | --- | --- |
+| `GOTLDP/GOTLDPOFF` | `gMetaClass`、`__ZTV20IOBlockStorageDevice` | 各 3 处 | GOT 被 ld64 松弛成 `ADRP+ADD` / `ADRP+LDR` |
+| `BR26` | `C2`、`D2` | 6 + 3 处 | 直接 `BL` |
+| `UNSIGND` 8 字节槽 | 基类虚函数、`setProperties`、`getProperty` | vtable 的 0x128/0x180/0x578/0x5d0/0x5d8/0x5f8/0x608 | 绝对地址 |
+
+关键点：**最终内核是 `-static -pie`，没有 dyld**。`-undefined dynamic_lookup`
+在 `-static -pie` 下不是可用的逃生门：ld64 1053.12 在本机直接断言失败
+（`IndirectSymbolTableAtom<arm64>::symIndexOfLazyPointerAtom` /
+`ExternalRelocationsAtom::size`）。所以最终镜像里不会留下可被 dyld 处理的惰性
+绑定；能重写的只有已经形成的指令和 8 字节槽。
+
+这也解释了为什么不能只改 `LC_SYMTAB`：符号表值不参与已经链接好的指令。内核若
+用占位定义骗过链接器，引用会以 `ADRP+ADD`、`BL` 或 vtable 槽的形式固化；必须
+逐个改这些位置。
+
+### 三、arm64 引用形式与补丁位置
+
+对每个 `SYMBOL=ORIGINAL_VA`，emitter 在 native 镜像里做四类匹配：
+
+1. **`B/BL`**：`imm26` 解码出的目标正好是 `NATIVE_VA`。改 `imm26` 为
+   `(FINAL_VA - PC) >> 2`。这是函数调用的常见形态。
+2. **`ADRP+ADD`**：`ADRP` 的页基址加 `ADD` 的 12 位立即数正好是 `NATIVE_VA`。
+   同时改 `ADRP` 的 `immlo/immhi` 和 `ADD` 的 `imm12`。这是取数据地址
+   （`&gMetaClass`）的常见形态。
+3. **`ADRP+LDR`**：`ADRP` 的页基址加 `LDR` 的 12 位缩放偏移正好是
+   `NATIVE_VA`。同时改两者。用于“从符号地址读取内容”的形态。
+4. **8 字节绝对槽**：非可执行段里 qword 正好等于 `NATIVE_VA`。直接写
+   `FINAL_VA`。vtable 的基类虚函数槽、`setProperties`/`getProperty` 槽、以及
+   任何 GOT/字面量池都属于这一类。64 位绝对地址，**不受 ±128 MiB 限制**。
+
+工具对每个请求至少要求命中一个位置；命中后逐字节校验旧值再写，避免输入在扫描
+后被改动。报告里记录 `kind`、`va`、旧字、新字，便于离线复核。
+
+### 四、两个方向不是同一个问题
+
+供体→内核是**数据指针重绑**：`_PrelinkLinkKASLROffsets` 里的 8 字节槽是绝对
+地址，重定位表给的是“站点”，写入的是“目标”，不受指令编码范围影响。
+
+内核→kext 则混合了三种东西：
+
+- 数据地址：`ADRP+ADD`/`ADRP+LDR`，`ADRP` 可达 ±4 GiB，`ADD/LDR` 只覆盖页内
+  12 位；
+- 函数调用：`BL`，有符号 26 位，**±128 MiB**；
+- 取地址/虚表：8 字节绝对槽，无范围限制。
+
+当前 slide `-0x1f001dc4000` 下：
+
+```
+预链接块       0xfffffe0003004000 .. 0xfffffe00070c1000
+其中可执行     __PLK_TEXT_EXEC 0xfffffe00037c8000 .. 0xfffffe0004e9c000
+内核可执行     __TEXT_EXEC     0xfffffe00062d0000 .. 0xfffffe0006b2c000
+               __KLD          0xfffffe0006b2c000 .. 0xfffffe0006b30000
+```
+
+最坏 `BL` 距离是内核 `__KLD` 末尾到组件可执行段开头：
+
+```
+0xfffffe0006b30000 - 0xfffffe00037c8000 = 0x3368000
+                                      = 53,903,360 字节 = 51.4 MiB
+```
+
+原型探针的 `BL` 是
+
+```
+0xfffffe0003815dc4 - 0xfffffe00070c1008 = -0x38ab244
+                                       = -59,421,252 字节 = -56.7 MiB
+```
+
+两者都在 ±128 MiB 内。**但这个结论依赖当前 slide**。旧 slide
+`-0x1f009cdc000` 把预链接块放到 `0xfffffdfffb0ec000`，到内核可执行段的距离
+约 177.9 MiB；组件可执行子段从 `0xfffffdfffb8b0000` 开始，距离约 170.1 MiB，
+仍然超过 ±128 MiB。那种布局下直接 `BL` 必然不可达，必须加 veneer（本原型没有
+实现，工具会拒绝并报错）。
+
+`ADRP` 的 ±4 GiB 在两种布局下都够用；8 字节槽完全不受影响。因此设计上把
+“函数调用的可达性”作为必须显式检查的条件，而不是假设 slide 永远合适。
+
+### 五、原型：在真实内核里注入两条引用
+
+#### 1. 供体符号被剥掉了
+
+这里有一个必须先说的事实：`kernelcache.fileset.macho` 里 IOStorageFamily 组件的
+`LC_SYMTAB` 是**全零**（`symoff=0, nsyms=0, stroff=0, strsize=0`），也没有
+`LC_DYLD_EXPORTS_TRIE`；外层 `LC_SYMTAB` 只有 5873 个内核符号。也就是说，
+“组件导出的每个符号都有已知最终地址”这句话在 Apple 的 release kernelcache 上
+**不能靠符号表直接成立**。
+
+原型没有去伪造一个假的 `gMetaClass`，而是从 IOStorageFamily 的
+`__mod_init_func` 里把真实地址解出来：
+
+```
+0xfffffff0055da09c  __mod_init_func（IOBlockStorageDevice 的注册 thunk）
+  x0 = 0xfffffff007a091d0        // &gMetaClass
+  x1 = 0xfffffff004dd0376        // "IOBlockStorageDevice"
+  x2 = [0xfffffff006c72e68]      // 供体内核里的 IOService::gMetaClass
+  w3 = 0x90                      // class size
+  bl 0xfffffff0055eb304          // OSMetaClass 基类构造
+  str 0xfffffff006c74568, [x0]   // MetaClass vtable
+```
+
+因此：
+
+```
+gMetaClass（原始）       0xfffffff007a091d0
+gMetaClass（+ slide）    0xfffffe0005c451d0   __PRELINK_DATA
+getMetaClass（原始）     0xfffffff0055d9dc4   // adrp x0,&gMetaClass; add; ret
+getMetaClass（+ slide）  0xfffffe0003815dc4   __PLK_TEXT_EXEC
+```
+
+`getMetaClass` 的 thunk 本身也证实了 `gMetaClass` 的地址：它就是把
+`0xfffffff007a09000 + 0x1d0` 返回。
+
+#### 2. 探针
+
+把真实 0159 内核（16,969,016 字节，`706f4280…`）复制一份，在 Mach-O 头部的
+填充区里加一个 4 KiB 的 `__PRELINK_PROBE` 段：
+
+```
+VA       0xfffffe00070c1000
+fileoff  0x102f000
+权限     r-x
++0x00    ADRP x0, 0x70c1000
++0x04    ADD  x0, x0, #0x80        // -> 0x70c1080，占位 gMetaClass
++0x08    BL   0x70c1090            // -> 占位 getMetaClass
++0x0c    RET
++0x80    16 字节零                  // 占位对象
++0x90    RET                        // 占位函数
+```
+
+这不是“另写一个假内核”，而是**真实内核镜像 + 一段编译器会生成的引用形态**。
+没有编真实驱动的原因是：驱动要进内核，除了这 11 个符号，还缺一个完整的
+placeholder/import 对象和 vtable 槽布局验证；那属于下一组内核补丁，不是工具
+本身能单独证明的。探针明确只覆盖“数据地址 + 直接函数调用”两种最关键的形态，
+vtable 槽形态由合成单测覆盖。
+
+#### 3. emitter 调用
+
+```
+python3 emit_prelink.py \
+  --kernel kernel-0159-probe \
+  --prelinked kernelcache.fileset.macho \
+  --root com.apple.filesystems.apfs \
+  --root com.apple.driver.AppleMobileFileIntegrity \
+  --slide -0x1f001dc4000 \
+  --early-security-init com.apple.driver.AppleMobileFileIntegrity=0xfffffff0056fb000 \
+  --kernel-import '__ZN20IOBlockStorageDevice10gMetaClassE=0xfffffff007a091d0@0xfffffe00070c1080' \
+  --kernel-import '__ZN20IOBlockStorageDevice13getMetaClassEv=0xfffffff0055d9dc4@0xfffffe00070c1090' \
+  --output prelink-probe.bin
+```
+
+结果：
+
+```
+候选         54,857,728 字节（原 0159 候选 54,853,632 + 4 KiB 探针段）
+sha256       db77afd98931cadc55efa86d559ee9731b97a5c7919a9da1e458cec1c614e796
+探针原字     90000000 91020000 94000022 d65f03c0
+探针新字     90ff5c20 91074000 971d536f d65f03c0
+数据目标     0xfffffe0005c451d0  （__PRELINK_DATA）
+BL 目标      0xfffffe0003815dc4  （__PLK_TEXT_EXEC）
+```
+
+复核：
+
+- 两条目标都落在候选镜像的预链接段内；
+- `getMetaClass` 目标处 0x20 字节与供体原地址逐字节相同
+  （`8021019000400791c0035fd6…`）；
+- `gMetaClass` 在 `__common`，文件里是零填充，候选里也是零；
+- 不带 `--kernel-import` 重跑原内核，候选 sha256 仍是
+  `a25593d7855141471734c73ec1016e1ac3399ab4d0ab4b6fa6b3b6aacf16e9a2`，
+  与第八十八节的 0159 候选完全一致，说明改动没有影响原有输出；
+- 工具自测 25 项通过（14 项 `test_native_prelink.py`，11 项
+  `test_emit_prelink.py`），新增的两项覆盖 `ADRP+ADD`/`BL`/8 字节槽和
+  `BL` 超程拒绝。
+
+### 六、运行时风险（按优先级）
+
+**1. MetaClass 初始化顺序（最高）**
+
+内核自己的 C++ 静态构造在启动早期执行；`KebabBlockStorageDevice` 的
+`OSDefineMetaClassAndStructors` 会构造它自己的 `gMetaClass`，并把
+`&IOBlockStorageDevice::gMetaClass` 作为 `superClassLink` 存下来。此时
+IOStorageFamily 还没启动，它的 `gMetaClass` 只是预链接段里的零填充 BSS。
+
+`OSMetaClass::OSMetaClass()` 本身只保存指针，不立刻解引用；
+`postModLoad()` 会沿着 `superClassLink` 走链，但只读指针本身，零对象会让链
+提前结束、深度算错，不一定会立刻崩。`instanceConstructed()` 也是非虚函数，
+只对 `superClassLink` 指向的 `instanceCount`/链字段做读写；基类对象在
+`__PRELINK_DATA` 里是可写的，零对象上的读写不一定触发 fault，但会把实例计数
+和类链深度算错。更危险的是任何在基类初始化前发生的
+`metaCast`/`getClassName`/vtable dispatch：它们会读零 `className` 或零
+vtable。也就是说，**静态类构造不一定立刻崩，实例构造/动态 cast 才是危险点**；
+这个区别决定了注册点能否放在 `kebab_ufs_rootdev()` 里。
+
+启动顺序上有一个好消息：`PE_lockdown_iokit()` → `StartIOKitMatching()` 在
+`bsd_init()` 之前，而 `kebab_ufs_rootdev()` 在 `bsd_init()` 的 mountroot 路径里。
+也就是说**实例构造/注册**（如果放在 `kebab_ufs_rootdev` 里）大概率晚于 kext
+匹配；但**静态 `gMetaClass` 构造**仍然早于 kext 初始化。两者不是一回事，不能
+用“注册发生在后面”掩盖静态构造的顺序问题。这是上真机前第一个要加日志/断言的
+点。
+
+**2. vtable/ABI 是否真正一致**
+
+padding=0 只证明了 `IOService` 的 vtable 从 274 降到 170，与供体一致；没有证明
+`IOBlockStorageDevice` 的完整 vtable（继承部分 + 22 个自有槽）与供体逐槽一致。
+真实驱动把 5 个未覆盖的基类虚函数、`setProperties`、`getProperty` 的地址放进
+自己的 vtable；只要基址或槽序错一个，dispatch 就会落到别的函数。需要用供体
+vtable 与 vendored 头做逐槽对照，不能只看 `IOService` 的总字数。
+
+**3. 构造/析构与基类方法地址还没验证**
+
+原型只证明了 `gMetaClass` 和 `getMetaClass`。真实驱动还需要 `C2`/`D2`、5 个
+基类虚函数和 `setProperties`/`getProperty`。我们目前对 `C2` 的候选是
+`0xfffffff0055d9d98`（调用 `0xfffffff0055eb4c0` 后把 `0xfffffff006c73f60`
+写进 `[x0]`），但没有用真实链接 + 运行验证；`D2` 甚至还没定位。地址错一个的
+后果是对象构造/析构直接破坏内存，不是“少一个功能”。
+
+**4. 供体符号被剥掉，清单本身是可信边界**
+
+release kernelcache 没有 kext 符号表，也没有 export trie。原型的
+`gMetaClass` 地址是从 `__mod_init_func` 反解出来的，`getMetaClass` 是从
+thunk 反解出来的；这类地址与具体供体版本强绑定（供体是
+`xnu-8796.142.1.703.8`，本内核是 `8796.141.3`）。生产工具必须把“符号名 →
+原始地址”的清单当作输入，并对每个地址做字节指纹/结构校验；否则版本漂移会
+静默绑到错误函数。
+
+**5. `IOService::init` 能不能在 IOStorageFamily start 之前跑**
+
+分两层：
+
+- **实例 `init`**：如果注册点仍在 `kebab_ufs_rootdev()`，按当前启动顺序它在
+  `StartIOKitMatching()` 之后，实例层大概率合法；但这依赖
+  `IOStorageFamily` 已经被匹配/启动，而不仅是“被登记为 kext”。
+- **静态类注册**：如第 1 条，早于 kext 初始化，不能假设合法。
+
+因此不能简单回答“可以”；需要把驱动注册延后到 `IOStorageFamily` 的类注册
+完成之后，或者改成不依赖 `OSDefineMetaClassAndStructors` 的运行时查找
+（`OSMetaClass::lookupClass` 只能拿 meta class，拿不到构造函数，仍不够）。
+
+**6. loader 跨度/段数**
+
+探针把候选从 15 个映射段加到 16 个，跨度从 `0x40bd000` 增到 `0x40ef000`
+（64.9 MiB）。注意增量不是 4 KiB：`__PRELINK_INFO` 被探针段往后推了
+0x1000，从 `0x7090000` 移到 `0x70c2000`，所以总跨度多了 0x32000。仍远低于
+`DarwinBoot::ParseKernel()` 的 `0x0fe00000` 上限和 64 段上限。但如果后续把
+import 槽/veneer 也做成独立段，必须重新复算，不能假设“只加 4 KiB 没事”。
+
+**7. 生产形态**
+
+`__PRELINK_PROBE` 是测试段，不在 `_PrelinkInfoDictionary`、不在
+`_PrelinkLinkKASLROffsets`、不在 sparse index 里。它能被 Mach-O 段表映射，
+但不能作为正式机制。正式形态应该是：
+
+- 由内核构建生成一个 `__DATA,__prelink_imports` 段和配套的
+  `__TEXT_EXEC,__prelink_import_stubs`，每个 import 一个 8 字节槽；或
+- 把驱动做成作者 kext，让 kext→kext 链接在 prelink 阶段完成；
+- 或者退回到第八十七节的方案 2：把 IOStorageFamily 必要部分源码编进内核。
+
+在正式形态确定前，`KEBAB_BLOCKSTORAGE` 仍应保持关闭，`ufsmedia=1` 不应在
+真机上打开。
+
+### 七、当前状态与下一步
+
+```
+工具补丁          本地 NativePrelink 已扩展，25 项自测通过
+真实内核+真实供体  两条引用已离线绑定到预链接块，字节复核通过
+无 import 回归     0159 候选 sha256 不变
+真实驱动           未编进内核；C2/D2/vtable 未验证
+真机               未刷机，未做任何硬件动作
+```
+
+下一步顺序建议：
+
+1. 先解决/证明第 1 条（MetaClass 初始化顺序）。可以在内核里加一个
+   `IOBlockStorageDevice::gMetaClass` 的启动期指纹打印，或在
+   `OSMetaClass::postModLoad` 里加断言，确认 kext 类注册早于内核子类注册。
+2. 用供体 vtable 和 vendored 头做逐槽对照，确认 22 槽尾部与基址。
+3. 再补 `C2`/`D2`/5 个基类虚函数的地址清单，把真实驱动编进内核并做一次
+   离线链接；仍不刷机。
+4. 最后才讨论把 `ufsmedia=1` 放到真机；APFS 写风险仍按第八十七节第六节处理。
+
+### 八、工具补丁与复现
+
+工具改动不在 xnu 的 139 个补丁系列里（`kits/NativePrelink` 是独立工具仓库），
+单独放在：
+
+```
+patches/native-prelink/0001-prelink-kernel-imports.patch
+```
+
+在 `NativePrelink` 根目录应用：
+
+```
+git apply ../../patches/native-prelink/0001-prelink-kernel-imports.patch
+# 或
+patch -p1 < ../../patches/native-prelink/0001-prelink-kernel-imports.patch
+```
+
+自测：
+
+```
+cd kits/NativePrelink
+python3 -m unittest -v test_native_prelink.py test_emit_prelink.py
+```
+
+补丁新增 `--kernel-import`、四类引用扫描/重写、超程拒绝和两项单测；不含
+真实驱动、桥接 kext 或内核构建改动。探针段与验证脚本是本次离线原型的测试
+载体，不进入默认内核构建。
+
+## 九十、prelink 在真机上跑通
+
+2026-10-28 傍晚，预链接内核在 kebab 上启动成功，这是本条线的目标。
+
+### 结果
+
+```
+内核载入 13 个 Apple 组件（apfs、IOStorageFamily、AppleEffaceableStorage、
+AppleImage4、corecrypto、CoreTrust、IOCryptoAcceleratorFamily 等）
+bsd_init 一路执行，USB 控制台出现并响应命令
+launchd 启动，spawn 了 mount-phase-1
+/sbin/mount 被执行，以退出码 66（EX_NOINPUT）退出
+libignition 打印 preboot: mounting preboot
+```
+
+也就是说 Apple 的 kext 栈被内核接住了 ✓，只是它们没有块设备可以挂载 ✗。
+
+### 四次失败给出的四个必要条件
+
+一、**C++ vtable 填充**。`APPLE_KEXT_VTABLE_PADDING` 在 macOS 目标是 1、iOS 是 0。
+我们的 `IOService` vtable 是 274 字，供体是 170 字，虚函数派发全部错位。
+补丁 `0159` 强制为 0，`0160` 删掉 438 个 `_RESERVED*` 导出名。
+
+二、**32 MiB 引导映射同余**。内核用 32 MiB 的 L2 块建初始映射，要求
+`(physBase ^ virtBase) & 0x1ffffff == 0`。把预链接块放在内核下方会把最低段
+拉低 0x03000000，同余被破坏，翻译一开就取错物理地址，而早期异常向量是自旋的，
+于是没有输出、没有复位 —— 表现为静默挂住。
+把块放在内核上方（slide `-0x1effcdc8000`）即恢复同余。
+
+三、**KPI 伪 kext 的假 Mach 头**。`com.apple.kpi.*` 记录的
+`_PrelinkExecutableLoadAddr` 是相对 `__PRELINK_TEXT` 基址的小偏移，在 Apple 自己的
+布局里落在合法头上；我们的摆放让它们落在别处。内核在
+`slidePrelinkedExecutable()+0x48` 读 `getcommandfromheader()` 时 data abort，
+`far = 0x180`。补丁 `0162` 校验魔数后按无可执行体返回。
+
+四、**未对齐地址传给 ml_static_mfree**。`OSKext::unload()` 释放上面那些记录的地址时
+传入非页对齐值，`machine_routines.c` 的断言触发。补丁 `0163` 在 `ml_static_mfree`
+里把范围向外取整并打印一行，而不是断言。
+
+### 当前阻塞：没有 IOMedia
+
+`kebab_ufs` 是 BSD 块设备（`bdevsw` + `strategy`），不是 IOKit 服务；
+内核里没有任何东西发布 `IOMedia`，而 APFS 通过它找盘。所以 APFS 注册了却无事可做。
+
+### 下一步的确切做法
+
+```
+一  打开 iokit/conf/files.arm64 里被注释的那行
+      iokit/Kernel/arm/KebabBlockStorageDevice.cpp  optional iokitcpp
+    并去掉 bsd/dev/kebab_ufs.c 里 #if defined(KEBAB_BLOCKSTORAGE) 的守卫
+二  为 IOStorageFamily 的 11 个符号提供占位定义，让静态链接通过
+      gMetaClass、__ZTV20IOBlockStorageDevice、C2、D2、setProperties、
+      doSetPriority、doLockUnlockMedia、getWriteCacheState、
+      setWriteCacheState、doGetProvisionStatus、getProperty(OSSymbol const*)
+三  用工具的 --kernel-import 把这 11 个引用改写到预链接块里的真实地址
+      工具侧原型已完成：patches/native-prelink/0001-prelink-kernel-imports.patch
+      已恢复的真实地址示例：
+        IOBlockStorageDevice::gMetaClass   → 0xfffffe0005c451d0
+        IOBlockStorageDevice::getMetaClass → 0xfffffe0003815dc4
+      注意供体符号表是空的，地址要从 __mod_init_func 恢复
+四  启动参数加 ufsmedia=1，判据是 IOKit 里出现 IOMedia，
+    然后 mount-phase-1 不再退出 66
+```
+
+## 九十一、IOMedia 这一环的现状与入口
+
+目标：让 `kebab_ufs` 以 IOKit 块设备的身份发布 `IOMedia`，供 APFS 认领。
+
+### 已就绪
+
+```
+驱动         iokit/Kernel/arm/KebabBlockStorageDevice.cpp（补丁 0158，457 行）
+             IOBlockStorageDevice 的子类，几何取自 kebab_ufs_partition_bytes()，
+             传输走 kebab_ufs_raw_read/write，不碰 BSD 接口
+头文件       0158 随补丁带了六个 vendored 头，按 iOS 16.7.16 的 22 槽尾巴裁剪
+构建入口     iokit/conf/files.arm64 里那行默认被注释；测试时改为启用即可
+守卫         bsd/dev/kebab_ufs.c 里两处 `#if defined(KEBAB_BLOCKSTORAGE)`
+             改成 `#if 1` 即可（直接删掉会留下孤立的 #endif）
+反向绑定工具  patches/native-prelink/0001-prelink-kernel-imports.patch
+             支持 --kernel-import SYMBOL=ORIGINAL_VA，会改写 B/BL、ADRP+ADD、
+             ADRP+LDR 和绝对槽位；拒绝超出 ±128 MiB 的直接跳转
+```
+
+### 链接时缺的 11 个符号（实测，一个不多）
+
+```
+IOBlockStorageDevice::gMetaClass                     数据
+vtable for IOBlockStorageDevice                      数据
+IOBlockStorageDevice::IOBlockStorageDevice(OSMetaClass const *)
+IOBlockStorageDevice::~IOBlockStorageDevice()
+IOBlockStorageDevice::setProperties(OSObject *)
+IOBlockStorageDevice::getProperty(OSSymbol const *) const
+IOBlockStorageDevice::doSetPriority(IOBlockStorageDeviceExtent *, unsigned int, unsigned char)
+IOBlockStorageDevice::doLockUnlockMedia(bool)
+IOBlockStorageDevice::getWriteCacheState(bool *)
+IOBlockStorageDevice::setWriteCacheState(bool)
+IOBlockStorageDevice::doGetProvisionStatus(unsigned long long, unsigned long long, unsigned int *, IOBlockStorageProvisionStatus *)
+```
+
+### 为什么不能用 C++ 桩
+
+`gMetaClass` 和 vtable 是数据符号，构造函数要初始化基类，而基类在预链接的 kext 里。
+写 C++ 桩会引出 `IOStorage`、`IOService` 的更多未定义符号。
+
+### 可行的做法：汇编占位
+
+给这 11 个符号定义**全局标签**，函数体放 `brk #0`。因为 emitter 最后会把每一处引用
+改写到预链接块里的真实地址，占位体永远不会执行。注意事项：
+
+```
+vtable 是数据符号，用 .globl 标签即可，本身不带重定位
+但驱动会把自己的 vtable 建立在它之上，链接器会在其中写入对 22 个方法槽的引用
+那些槽同样需要占位，否则会继续报未定义
+建议先把 vtable 之外 10 个函数符号占位，看链接器还缺什么，逐步补齐
+```
+
+### 已知的两个真实地址（从 __mod_init_func 恢复，供体符号表是空的）
+
+```
+IOBlockStorageDevice::gMetaClass   原址 0xfffffff007a091d0
+IOBlockStorageDevice::getMetaClass 原址 0xfffffff0055d9dc4
+```
+
+其余九个需要同样方法恢复：在组件里找 `__mod_init_func` 的注册 thunk，
+或从 vtable 槽位反查。
+
+### 验证顺序
+
+```
+一  链接通过（占位齐全）
+二  emitter 用 --kernel-import 改写成功，跨度与同余仍然通过
+三  真机启动，参数加 ufsmedia=1
+四  日志出现 KEBAB BLOCK: "userdata" ... 与 IOMedia 名
+五  mount-phase-1 不再退出 66
+```
+
+## 九十二、IOMedia 绑定的地址恢复进展
+
+### 已完成：11 个符号的真实名字
+
+从编好的 `KebabBlockStorageDevice.cpo` 的符号表里直接读出，与链接器报的完全一致。
+清单存于 `p1-run/kebab-11-symbols.txt`：
+
+```
+__ZN20IOBlockStorageDevice10gMetaClassE
+__ZN20IOBlockStorageDevice13doSetPriorityEP26IOBlockStorageDeviceExtentjh
+__ZN20IOBlockStorageDevice13setPropertiesEP8OSObject
+__ZN20IOBlockStorageDevice17doLockUnlockMediaEb
+__ZN20IOBlockStorageDevice18getWriteCacheStateEPb
+__ZN20IOBlockStorageDevice18setWriteCacheStateEb
+__ZN20IOBlockStorageDevice20doGetProvisionStatusEyyPjP35IOBlockStorageProvisionDeviceExtenty
+__ZN20IOBlockStorageDeviceC2EPK11OSMetaClass
+__ZN20IOBlockStorageDeviceD2Ev
+__ZNK20IOBlockStorageDevice11getPropertyEPK8OSSymbol
+__ZTV20IOBlockStorageDevice
+```
+
+### 已恢复的两个地址
+
+```
+gMetaClass     原址 0xfffffff007a091d0（由 __mod_init_func 的注册 thunk 得到）
+getMetaClass   原址 0xfffffff0055d9dc4（adrp/add/ret 返回 &gMetaClass）
+```
+
+### 供体的段布局（本轮实测）
+
+```
+存储 kext 的代码            __PLK_TEXT_EXEC  0xfffffff00558c000 + 0x16d4000
+数据                        __DATA_CONST     0xfffffff0070...
+                            __DATA           0xfffffff00784...
+                            __PRELINK_DATA   0xfffffff007aa...
+```
+
+### 已排除的做法
+
+**按数据段里的连续代码指针找 vtable 行不通。**
+`__DATA_CONST` 里有 103 段长度 ≥20 的连续代码指针，`__PRELINK_DATA` 里 10 段，
+但它们要么是跳转表（199 个槽全部落在 0x6e41xxx 这个窄区间），要么与存储无关。
+`getMetaClass` 是静态方法，不在 vtable 里，所以用它做过滤也无效。
+
+### 下一步的确切做法
+
+vtable 的地址由**构造函数**写入 `this+8`。所以从构造函数反查更可靠：
+
+```
+在 __PLK_TEXT_EXEC 里找形如
+    adrp x8, <__DATA_CONST 页>
+    add  x8, x8, #<偏移>
+    str  x8, [x0, #8]
+的函数 —— 那就是基类构造函数，它写的就是 __ZTV 的地址
+再对该地址按 190 槽（sheng 记录的槽数）读出 22 个存储方法槽
+```
+
+注意 sheng 的审计里 `method_slots == 190`，那是整个基类链的槽数，不是我们子类的 22。
+我们的 vendored 头只声明了尾巴那 22 个，所以槽位比对要从第 190-22 个开始对齐。
+
+### 收口状态
+
+```
+补丁 142 个，全序列通过
+内核构建通过（0163 之后），预链接镜像真机跑通 launchd
+IOMedia 驱动可编译，链接缺 11 个符号，名字已确认
+地址恢复：2/11
+```
+
+## 九十三、恢复 IOStorageFamily 的十一个符号地址
+
+写于 2026-10-28。第九十二节停在 2/11，本节把十一个地址全部从供体的结构里恢复出来。
+先说结论里最要紧的一条：**十个符号在供体里有确切的函数或数据对象，第十一个
+`doLockUnlockMedia` 在 iOS 16.7.16 的类里并不存在**——vendored 头把它放在了
+`doSynchronizeCache` 的那一槽上。按槽位绑定仍然可用（两者默认实现同为
+`kIOReturnUnsupported`），但这是 vendored 头要修的问题，不是地址猜错，详见第三节。
+
+### 一、十一个地址
+
+| # | 符号 | 原址（未滑动） | 置信度 | 证据 |
+| --- | --- | --- | --- | --- |
+| 1 | `__ZN20IOBlockStorageDevice10gMetaClassE` | `0xfffffff007a091d0` | 确定 | `__mod_init_func[2]=0xfffffff0055da09c` 把该地址作为 `this`，`x1` 为 `"IOBlockStorageDevice"`，`w3=0x90`，调用 `OSMetaClass` 构造后把 `0xfffffff006c74568` 写进 `[x0]` |
+| 2 | `__ZN20IOBlockStorageDevice13doSetPriorityEP26IOBlockStorageDeviceExtentjh` | `0xfffffff0055da068` | 高 | vtable 槽 187；函数体 `mov w0,#0x2c7 / movk w0,#0xe000 / ret`（`kIOReturnUnsupported`）；槽位由声明顺序定，见第二节第 6 步 |
+| 3 | `__ZN20IOBlockStorageDevice13setPropertiesEP8OSObject` | `0xfffffff0055d9f38` | 确定 | vtable 槽 44；先调 `super::setProperties`，再 `clientHasPrivilege(current_task(),"root")`，取字典 `"WriteCacheState"` 后调用槽 183（`setWriteCacheState`） |
+| 4 | `__ZN20IOBlockStorageDevice17doLockUnlockMediaEb` | `0xfffffff0055da074` | 见第三节 | vtable 槽 171；**供体该槽是 `doSynchronizeCache`**（槽 188 的 `doSynchronize` 尾调 `[x0,#0x558]` 就是它） |
+| 5 | `__ZN20IOBlockStorageDevice18getWriteCacheStateEPb` | `0xfffffff0055da038` | 确定 | vtable 槽 182；被槽 33（`getProperty`）和槽 44（`setProperties`）以 `&bool` 调用，返回 `kIOReturnUnsupported` |
+| 6 | `__ZN20IOBlockStorageDevice18setWriteCacheStateEb` | `0xfffffff0055da044` | 确定 | vtable 槽 183；被槽 44 以 `bool` 参数调用，返回 `kIOReturnUnsupported` |
+| 7 | `__ZN20IOBlockStorageDevice20doGetProvisionStatusEyyPjP35IOBlockStorageProvisionDeviceExtenty` | `0xfffffff0055da08c` | 高 | vtable 最后一个槽 189；返回 `kIOReturnUnsupported`；槽位由声明顺序定，见第二节第 6 步 |
+| 8 | `__ZN20IOBlockStorageDeviceC2EPK11OSMetaClass` | `0xfffffff0055d9d98` | 确定 | 整个 kext 里唯一一条把 `0xfffffff006c73f60` 写进 `[x0]` 的 `str`（在 `0x55d9dac`）；前面 `bl 0x55eb4c0` 是 `IOService` 构造桩；`IOUserBlockStorageDevice` 的构造在 `0x55d7640` 直接调它 |
+| 9 | `__ZN20IOBlockStorageDeviceD2Ev` | `0xfffffff0055d9db8` | 确定 | 紧接 C2 之后、无栈帧的 `b 0x55eb4cc`（`IOService` 析构桩）；`IOUserBlockStorageDevice` 的 D1/D0（`0x55d7658`/`0x55d765c`）都尾调它 |
+| 10 | `__ZNK20IOBlockStorageDevice11getPropertyEPK8OSSymbol` | `0xfffffff0055d9e88` | 确定 | vtable 槽 33；`key->isEqualTo("WriteCacheState")` 为真时调槽 182，返回 `kOSBooleanTrue`/`kOSBooleanFalse` |
+| 11 | `__ZTV20IOBlockStorageDevice` | `0xfffffff006c73f50` | 确定 | `0x6c73f50`/`0x6c73f58` 是两个零头字，`0x6c73f60` 起 190 个槽；`0x6c73f40` 是 `&gMetaClass`；C2 写进对象的 vptr 是 `0x6c73f60`（即 `__ZTV+16`） |
+
+注意 `__ZTV` 给的是**符号地址**（两个头字里第一个的地址），不是对象里的 vptr：
+Itanium ABI 下 vptr = `__ZTV + 16`。供体 `__ZTV9IOService` 的符号值是
+`0xfffffff0071977f0`、槽从 `0xfffffff007197800` 起，也是这个关系；这两点可以互相印证。
+
+### 二、方法
+
+整个过程只用供体文件，不依赖符号表（供体的 `LC_SYMTAB` 里没有 kext 符号）。
+
+1. **先给 kext 划界。** 外层 Mach-O 的段表只到 `__PRELINK_TEXT` /
+   `__PLK_TEXT_EXEC` 这一级；每个 kext 在 `__PRELINK_TEXT` 里自带一个
+   `MH_KEXT_BUNDLE`（filetype 11）头。以 4 字节对齐扫 `0xfeedfacf`，逐个解析，
+   得到每个 kext 的 `__TEXT` / `__TEXT_EXEC` / `__DATA_CONST` / `__DATA` 的
+   最终（未滑动）地址。也可以用 `__PRELINK_INFO` 里
+   `com.apple.iokit.IOStorageFamily` 字典的 `_PrelinkExecutableLoadAddr`
+   （`0xfffffff004dcf280`）直接定位。实测：
+
+   ```
+   __TEXT       0xfffffff004dcf280 + 0x1fc0    __cstring / __const
+   __TEXT_EXEC  0xfffffff0055d7000 + 0x14808   __text / __stubs
+   __DATA_CONST 0xfffffff006c72c80 + 0x5c20    __got / __mod_init_func / __const / ...
+   __DATA       0xfffffff007a09000 + 0x3b1     __data / __common / __bss
+   __LINKEDIT   size 0（符号表和导出 trie 都没了）
+   ```
+
+   注意 `__const`（`0x6c73210`–`0x6c77e80`）才是 vtable 所在，**不是**外层的
+   `__DATA_CONST` / `__PRELINK_DATA`。第九十二节第 1 条在错误的段里扫，
+   自然只能扫到跳转表。
+
+2. **找类注册。** kext 的 `__mod_init_func`（`0x6c73160`，11 项）里有一项是
+   该类的 `gMetaClass` 静态初始化：`adrp/add x0, &gMetaClass`、`x1` 指向
+   类名字符串、`w3 = sizeof(class)`，调用 `OSMetaClass` 构造，最后把
+   `MetaClass` 的 vtable 写进 `[x0]`。对 `IOBlockStorageDevice`：
+
+   ```
+   0x55da0a4  adrp x0, 0xfffffff007a09000
+   0x55da0a8  add  x0, x0, #0x1d0          ; x0 = &gMetaClass = 0xfffffff007a091d0
+   0x55da0ac  adrp x1, 0xfffffff004dd0000
+   0x55da0b0  add  x1, x1, #0x376          ; "IOBlockStorageDevice"
+   0x55da0b4  adrp x2, 0xfffffff006c72000
+   0x55da0b8  ldr  x2, [x2, #0xe68]        ; 父类 metaclass（GOT，启动时绑定）
+   0x55da0bc  mov  w3, #0x90               ; sizeof(IOBlockStorageDevice)
+   0x55da0c0  bl   0xfffffff0055eb304      ; OSMetaClass::OSMetaClass()
+   0x55da0c4  adrp x8, 0xfffffff006c74000
+   0x55da0c8  add  x8, x8, #0x568          ; MetaClass vtable = 0xfffffff006c74568
+   0x55da0cc  str  x8, [x0]
+   ```
+
+3. **找实例 vtable。** 在 kext 的 `__DATA_CONST,__const` 里扫
+   “16 个零字节 + 一长串指向可执行段的指针”（零字是 offset-to-top 和
+   typeinfo，`-fno-rtti` 下都是 0）。对每个候选验证两件事：
+
+   - `vtable_slots[-0x10]`（即 vtable 头字之前的那个 qword）等于第 2 步得到的
+     `&gMetaClass`；
+   - 槽 7 是一个 `adrp/add &gMetaClass; ret` 的小函数（`getMetaClass`）。
+
+   命中 `0xfffffff006c73f50`，190 个槽。
+
+4. **槽位对齐。** `IOService` 的 vtable 是 168 槽（`__ZTV9IOService =
+   0xfffffff0071977f0`，槽从 `0x7197800` 起，共 170 字 = 2 头 + 168 槽），
+   所以本类自己的 22 个虚函数占槽 168–189。槽位映射用两条独立证据交叉验证：
+
+   - 内核对 `init` / `getProperty` / `setProperties` 的覆盖分别在槽 21 / 33 / 44，
+     而内核自己的 `LC_SYMTAB` 里
+     `__ZTV9IOService+16+21*8 = __ZN9IOService4initEP12OSDictionary`、
+     `+33*8 = __ZNK15IORegistryEntry11getPropertyEPK8OSSymbol`、
+     `+44*8 = __ZN15IORegistryEntry13setPropertiesEP8OSObject`，完全对上；
+   - 22 个新槽里恰好 14 个都指向同一个内核地址 `0xfffffff00770ace4`
+     （`__cxa_pure_virtual`），这 14 个正是头文件里的 14 个纯虚函数
+     （`doEjectMedia`、`doFormatMedia`、`doGetFormatCapacities`、
+     `getVendorString`、`getProductString`、`getRevisionString`、
+     `getAdditionalDeviceInfoString`、`reportBlockSize`、`reportEjectability`、
+     `reportMaxValidBlock`、`reportMediaState`、`reportRemovability`、
+     `reportWriteProtection`、`doAsyncReadWrite`）；其余 8 个是具体默认实现。
+     子类 `IOUserBlockStorageDevice`（vtable `0xfffffff006c73230`）恰好覆盖这
+     14 个纯虚槽加 doUnmap、doSynchronize，保留另外 8 个，反向印证了这个划分。
+
+5. **构造函数和析构函数不在 vtable 里**，要单独找：
+
+   - C2：全 kext 唯一一条把 `vtable+16` 写进 `[this]` 的 `str`。命中的函数
+     形如 `bl <IOService 构造桩>; adrp/add x8, vtable; str x8,[x0]; ret`，
+     函数首地址就是 C2（`0x55d9d98`）。
+   - D2：clang 把 D2 紧挨着 C2 发射，且 D2 没有栈帧，只有一条到
+     `IOService` 析构桩的 `b`（`0x55d9db8`）。再用子类的 D1/D0 验证：它们都
+     尾调这个地址。
+
+6. **槽位 → 方法名**按类声明顺序读（`IOBlockStorageDevice.h`，iOS 版本），
+   槽 168–189 依次是：
+
+   | 槽 | 方法 | 槽 | 方法 |
+   | --- | --- | --- | --- |
+   | 168 | doEjectMedia（纯） | 179 | reportMediaState（纯） |
+   | 169 | doFormatMedia（纯） | 180 | reportRemovability（纯） |
+   | 170 | doGetFormatCapacities（纯） | 181 | reportWriteProtection（纯） |
+   | 171 | **doSynchronizeCache** | 182 | getWriteCacheState |
+   | 172 | getVendorString（纯） | 183 | setWriteCacheState |
+   | 173 | getProductString（纯） | 184 | doAsyncReadWrite（纯） |
+   | 174 | getRevisionString（纯） | 185 | requestIdle |
+   | 175 | getAdditionalDeviceInfoString（纯） | 186 | doUnmap |
+   | 176 | reportBlockSize（纯） | 187 | doSetPriority |
+   | 177 | reportEjectability（纯） | 188 | doSynchronize |
+   | 178 | reportMaxValidBlock（纯） | 189 | doGetProvisionStatus |
+
+   槽 33 / 44 的位置则用行为认：槽 33 读 `"WriteCacheState"` 并返回
+   `kOSBoolean*`，是 `getProperty`；槽 44 做 `clientHasPrivilege(...,"root")`
+   后取字典再写回，是 `setProperties`。
+
+### 三、`doLockUnlockMedia` 为什么不在供体里
+
+`IOBlockStorageDevice.h` 的 macOS 版本里，`doLockUnlockMedia`、
+`reportLockability`、`reportPollRequirements`、`doDiscard` 四个方法在
+`#if TARGET_OS_OSX` 里；iOS 构建不编译它们。上一轮的 vendored 头把
+`doLockUnlockMedia` 留了下来、却删掉了 `doSynchronizeCache`，两个名字正好错位：
+
+- 供体槽 171 的实现（`0xfffffff0055da074`）被槽 188 的 `doSynchronize`
+  尾调，而 Apple 源码里 `doSynchronize` 的实现就是
+  `return doSynchronizeCache();`——所以槽 171 是 `doSynchronizeCache`；
+- 如果槽 171 是 `doLockUnlockMedia`，`doSynchronize` 就会去调
+  “锁/解锁介质”，语义上说不通，而且 22 个槽的纯虚/具体分布也会错位。
+
+所以供体里没有 `doLockUnlockMedia` 这个符号。**绑定时把
+`0xfffffff0055da074` 给它是槽位正确的**（我们的子类 vtable 槽 171 需要的正是
+这个实现，返回值也同为 `kIOReturnUnsupported`），但正确的修法是改 vendored 头：
+把 `doLockUnlockMedia` 换成 `doSynchronizeCache`，那时链接期缺的符号会变成
+`__ZN20IOBlockStorageDevice18doSynchronizeCacheEv`，地址仍是
+`0xfffffff0055da074`。
+
+### 四、复现
+
+脚本在 `scripts/recover-kext-symbols.py`，只读供体：
+
+```
+python3 scripts/recover-kext-symbols.py /home/albert/kernelcache.fileset.macho \
+        IOBlockStorageDevice com.apple.iokit.IOStorageFamily
+```
+
+它打印 kext 的段、注册初始化、vtable 的 190 个槽（含每个槽的
+pure/kext/kernel 分类）、C2/D2，以及最终 11 个地址。换别的类时改类名和
+bundle id 即可；槽位表（`TAIL`）要按那个类的头文件另写，纯虚/具体分布和
+子类覆盖情况仍然是最好的交叉验证。
+
+### 五、收口状态
+
+```
+地址恢复                 11/11（其中 doLockUnlockMedia 为同槽位绑定）
+名字精确匹配             10/11
+vendored 头待修           doLockUnlockMedia ↔ doSynchronizeCache
+本节只改文档和新增 scripts/recover-kext-symbols.py，未改内核代码，未重跑构建
+HEAD 40eef86，补丁 142 个
+```

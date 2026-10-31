@@ -1,0 +1,52 @@
+--- a/bsd/dev/kebab_bt_fat_impl.h
++++ b/bsd/dev/kebab_bt_fat_impl.h
+@@ -3,6 +3,8 @@
+ struct kbf_fat {
+  const uint8_t *raw;
+  uint32_t bytes,bps,cluster_bytes,clusters,fat,fat_bytes,root,root_bytes,data,bits;
++ uint64_t logical_bytes;
++ uint32_t logical_clusters;
+ };
+ struct kbf_file { uint32_t first,bytes; };
+ static uint16_t kbf_u16(const uint8_t *p){return (uint16_t)(p[0]|p[1]<<8);}
+@@ -41,17 +43,22 @@
+  }else if(!entries||entries%(bps/32))return EINVAL;
+  uint64_t fatbytes=(uint64_t)fatsectors*bps,rootbytes=((uint64_t)entries*32+bps-1)/bps*bps;
+  uint64_t root=((uint64_t)reserved+(uint64_t)fats*fatsectors)*bps,data=root+rootbytes,extent=(uint64_t)total*bps;
+- if(!fatsectors||extent>bytes||data>=extent||fatbytes>bytes)return EINVAL;
+- uint32_t clusterbytes=bps*spc,clusters=(uint32_t)((extent-data)/clusterbytes);
+- if(!clusters||clusters>0xfffffedu)return EINVAL;
+- if(!bits)bits=clusters<4085?12:16;
+- if(bits==16&&clusters>=65525)return EINVAL;
+- uint64_t needed=bits==12?((uint64_t)(clusters+2)*3+1)/2:(uint64_t)(clusters+2)*(bits/8);
++ /* Firmware images may retain only the populated prefix of a larger logical
++  * FAT volume. BPB geometry determines FAT width; the resident container is
++  * the absolute read limit. All metadata and each complete file cluster must
++  * fit the resident bytes. This is not a writable mount or a full FS check. */
++ if(!fatsectors||data>=extent||data>=bytes||fatbytes>bytes)return EINVAL;
++ uint32_t clusterbytes=bps*spc,logical=(uint32_t)((extent-data)/clusterbytes);
++ uint32_t clusters=(bytes-(uint32_t)data)/clusterbytes;if(clusters>logical)clusters=logical;
++ if(!logical||!clusters||logical>0xfffffedu)return EINVAL;
++ if(!bits)bits=logical<4085?12:16;
++ if(bits==16&&logical>=65525)return EINVAL;
++ uint64_t needed=bits==12?((uint64_t)(logical+2)*3+1)/2:(uint64_t)(logical+2)*(bits/8);
+  if(needed>fatbytes)return EINVAL;
+  uint32_t fat=(uint32_t)(((uint64_t)reserved+(uint64_t)active*fatsectors)*bps);
+  if(fats==2&&!(bits==32&&(kbf_u16(raw+40)&0x80))&&memcmp(raw+fat,raw+fat+(uint32_t)fatbytes,(size_t)fatbytes))return EINVAL;
+  struct kbf_fat result={raw,bytes,bps,clusterbytes,clusters,fat,(uint32_t)fatbytes,
+-     bits==32?kbf_u32(raw+44):(uint32_t)root,(uint32_t)rootbytes,(uint32_t)data,bits};
++     bits==32?kbf_u32(raw+44):(uint32_t)root,(uint32_t)rootbytes,(uint32_t)data,bits,extent,logical};
+  if(bits==32&&!kbf_cluster(&result,result.root))return EINVAL;
+  *f=result;return 0;
+ }
+--- a/bsd/dev/kebab_bt_firmware_impl.h
++++ b/bsd/dev/kebab_bt_firmware_impl.h
+@@ -84,7 +84,7 @@
+   error=kbf_init(&fat,image,KBF_IMAGE_BYTES);
+  }
+  if(!error){
+-  printf("KEBAB BTFW: validated FAT%u; clusters=%u clusterbytes=%u\n",fat.bits,fat.clusters,fat.cluster_bytes);
++  printf("KEBAB BTFW: bounded FAT%u reader; logical-bytes=%llu resident-bytes=%u logical-clusters=%u readable-clusters=%u clusterbytes=%u\n",fat.bits,(unsigned long long)fat.logical_bytes,fat.bytes,fat.logical_clusters,fat.clusters,fat.cluster_bytes);
+   for(unsigned i=0;i<4;++i){
+    struct kbf_file file;int result=kbf_find(&fat,kbf_names[i],&file);
+    if(!result){

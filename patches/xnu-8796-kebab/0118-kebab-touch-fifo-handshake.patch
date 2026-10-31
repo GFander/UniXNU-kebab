@@ -1,0 +1,116 @@
+fix(touch): arm the GENI TX watermark and abort commands that stop moving
+
+Comparing kt_i2c_write() with Qualcomm's i2c-qcom-geni.c FIFO path found
+three differences, all in the first real transaction this driver ever got
+to issue:
+
+  - the FIFO write path never armed SE_GENI_TX_WATERMARK_REG.  Linux writes
+    1 to it right after the command word ("Get FIFO IRQ"), and that is what
+    makes the watermark status bit rise; this driver waited for a bit that
+    could not arrive and timed out with M_IRQ_STATUS 0;
+  - the NACK bit was tested as bit 9, but M_GP_IRQ_1_EN is bit 10 (bit 9 is
+    GP_IRQ_0), so a real NACK would have been reported as an unknown error;
+  - a timed-out command was only printed and left active.  Add kt_se_abort(),
+    which writes M_CMD_ABORT_EN to SE_GENI_M_CMD_CTRL_REG, polls the abort
+    status with the same bounded loop, then clears the IRQ status and the TX
+    watermark, mirroring geni_cancel_m_cmd()/geni_abort_m_cmd().
+
+The read-only probe also prints TX_WATERMARK and M_IRQ_EN now, so the next
+run can show the handshake state instead of inferring it.
+
+No transfer is sent from the boot path; this only changes what TOUCHINIT
+does when it is asked to run.
+
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -254,7 +254,8 @@
+ #define M_CMD_FAILURE           (1u << 3)
+ #define M_CMD_CANCEL            (1u << 4)
+ #define M_CMD_ABORT             (1u << 5)
+-#define M_GP_IRQ_1_NACK         (1u << 9)
++#define M_GP_IRQ_0              (1u << 9)
++#define M_GP_IRQ_1_NACK         (1u << 10)
+ #define M_RX_FIFO_WATERMARK     (1u << 26)
+ #define M_RX_FIFO_LAST          (1u << 27)
+ #define M_TX_FIFO_WATERMARK     (1u << 30)
+@@ -1152,6 +1153,8 @@
+ 	    kt_se_rd(SE_GENI_M_IRQ_STATUS), kt_se_rd(SE_GENI_S_IRQ_STATUS));
+ 	kt_trace("KEBAB TOUCH: probe DMA_MODE_EN 0x%08x CGC_CTRL 0x%08x\n",
+ 	    kt_se_rd(SE_GENI_DMA_MODE_EN), kt_se_rd(GENI_CGC_CTRL));
++	kt_trace("KEBAB TOUCH: probe TX_WATERMARK 0x%08x M_IRQ_EN 0x%08x\n",
++	    kt_se_rd(SE_GENI_TX_WATERMARK_REG), kt_se_rd(SE_GENI_M_IRQ_EN));
+ 	kt_trace("KEBAB TOUCH: probe SER_M_CLK_CFG 0x%08x SCL_COUNTERS 0x%08x\n",
+ 	    kt_se_rd(GENI_SER_M_CLK_CFG), kt_se_rd(SE_I2C_SCL_COUNTERS));
+ 	kt_trace("KEBAB TOUCH: probe TX_FIFO_STATUS 0x%08x RX_FIFO_STATUS 0x%08x\n",
+@@ -1526,6 +1529,33 @@
+ 	return -1;
+ }
+ 
++/*
++ * Abort a command that stopped making progress.  Linux calls
++ * geni_cancel_m_cmd() and then geni_abort_m_cmd() and waits up to a second
++ * for the abort interrupt; this driver has no interrupt handler, so it polls
++ * the same status bits with a bounded loop and then clears them.
++ */
++static void
++kt_se_abort(const char *why)
++{
++	uint32_t status = 0;
++	uint32_t i;
++
++	kt_trace("KEBAB TOUCH: aborting the active command (%s)\n", why);
++	kt_se_wr(SE_GENI_M_CMD_CTRL_REG, M_CMD_ABORT);
++	for (i = 0; i < 100; i++) {
++		status = kt_se_rd(SE_GENI_M_IRQ_STATUS);
++		if ((status & (M_CMD_ABORT | M_CMD_DONE | M_CMD_FAILURE)) != 0) {
++			break;
++		}
++		delay(100);
++	}
++	kt_se_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
++	kt_se_wr(SE_GENI_TX_WATERMARK_REG, 0);
++	kt_trace("KEBAB TOUCH: abort done: status 0x%08x GENI_STATUS 0x%08x\n",
++	    status, kt_se_rd(SE_GENI_STATUS));
++}
++
+ static int
+ kt_i2c_write(const uint8_t *buf, uint32_t len)
+ {
+@@ -1543,6 +1573,13 @@
+ 	kt_se_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
+ 	kt_se_wr(SE_I2C_TX_TRANS_LEN, len);
+ 	kt_se_wr(SE_GENI_M_CMD0, (I2C_WRITE << M_OPCODE_SHFT) | kt_i2c_param());
++	/*
++	 * Arm one word of TX watermark.  Qualcomm's FIFO path writes 1 here
++	 * right after the command word (i2c-qcom-geni.c, "Get FIFO IRQ");
++	 * without it the sequencer never raises the watermark interrupt and
++	 * this driver waits for a status bit that cannot arrive.
++	 */
++	kt_se_wr(SE_GENI_TX_WATERMARK_REG, 1);
+ 
+ 	/* The sequencer asks for data by raising the TX watermark. */
+ 	for (i = 0; i < 100; i++) {
+@@ -1558,6 +1595,7 @@
+ 	if (i == 100) {
+ 		printf("KEBAB TOUCH: write watermark timeout, status 0x%08x\n",
+ 		    status);
++		kt_se_abort("write watermark timeout");
+ 		return -1;
+ 	}
+ 
+@@ -1585,6 +1623,7 @@
+ 		delay(100);
+ 	}
+ 	printf("KEBAB TOUCH: write did not complete, status 0x%08x\n", status);
++	kt_se_abort("write completion timeout");
+ 	return -1;
+ }
+ 
+@@ -1632,6 +1671,7 @@
+ 	if (i == 300) {
+ 		printf("KEBAB TOUCH: read did not complete, status 0x%08x got %u "
+ 		    "of %u\n", status, got, len);
++		kt_se_abort("read completion timeout");
+ 		return -1;
+ 	}
+ 	if (got != len) {

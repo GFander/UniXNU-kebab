@@ -1,0 +1,60 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -25,16 +25,16 @@
+ 	proc_unlock(process);
+ 	printf("KEBAB PROC: pid=%d parent=%d state=%u flags=0x%x name=%s\n",
+ 	    pid, parent, state, flags, name);
+-	return ++*count >= 64 ? PROC_RETURNED_DONE : PROC_RETURNED;
++	return ++*count >= 512 ? PROC_RETURNED_DONE : PROC_RETURNED;
+ }
+ 
+ void
+ kebab_process_report(void)
+ {
+ 	unsigned count = 0;
+-	printf("KEBAB PROC: active process snapshot begin (cap64)\n");
++	printf("KEBAB PROC: active process snapshot begin (cap512)\n");
+ 	proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS, kebab_process_line, &count, NULL, NULL);
+-	printf("KEBAB PROC: snapshot end count=%u%s\n", count, count == 64 ? "+" : "");
++	printf("KEBAB PROC: snapshot end count=%u%s\n", count, count == 512 ? "+" : "");
+ }
+ 
+ void
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1851,18 +1851,19 @@
+ }
+ 
+ #if defined(KEBAB)
+-/* First real failure per selected daemon, before corpse resource exhaustion.
++/* First real exit per selected daemon, including ordinary status0/1 exits.
+  * Ordinary signals, exit reasons, critical policy and crash handling remain. */
+ static void
+ kebab_runtime_exit_evidence(proc_t p,int rv,struct uthread *ut)
+ {
+- static const char *const names[]={"tccd","mediaserverd","locationd","SpringBoard","notifyd","securityd","configd","lockdownd","powerd","ReportCrash","navd","backboardd","fairplayd.H2"};
++ static const char *const names[]={"tccd","mediaserverd","locationd","SpringBoard","notifyd","securityd","configd","lockdownd","powerd","ReportCrash","navd","backboardd","fairplayd.H2","bluetoothd","coreduetd","CommCenter","identityservices"};
+  static uint32_t reported;
+- if(!WTERMSIG(rv) && !PROC_HAS_EXITREASON(p))return;
++ // A selected daemon can voluntarily exit0/1 without a signal or exit reason.
++ // Record its first real exit too; absence of a corpse message is not liveness.
+  for(unsigned i=0;i<sizeof(names)/sizeof(*names);i++)if(!strcmp(p->p_comm,names[i])){
+   uint32_t bit=1u<<i;if(__atomic_fetch_or(&reported,bit,__ATOMIC_RELAXED)&bit)return;
+-  bool own=p==current_proc();
+-  printf("KEBAB RUNTIME EXIT: name=%s pid=%d signal=%d status=%d cs=0x%x own=%u exception=%d code=0x%llx subcode=0x%llx reason=%u/0x%llx desc=%.192s\n",p->p_comm,proc_getpid(p),WTERMSIG(rv),WEXITSTATUS(rv),proc_getcsflags(p),own,own?(int)ut->uu_exception:0,own?(unsigned long long)ut->uu_code:0,own?(unsigned long long)ut->uu_subcode:0,p->p_exit_reason?p->p_exit_reason->osr_namespace:0,p->p_exit_reason?(unsigned long long)p->p_exit_reason->osr_code:0,p->p_exit_reason&&exit_reason_get_string_desc(p->p_exit_reason)?exit_reason_get_string_desc(p->p_exit_reason):"none");
++  bool own=p==current_proc();bool fault=own&&ut&&WTERMSIG(rv);
++  printf("KEBAB RUNTIME EXIT: name=%s pid=%d signal=%d status=%d cs=0x%x own=%u exception=%d code=0x%llx subcode=0x%llx reason=%u/0x%llx desc=%.192s\n",p->p_comm,proc_getpid(p),WTERMSIG(rv),WEXITSTATUS(rv),proc_getcsflags(p),own,fault?(int)ut->uu_exception:0,fault?(unsigned long long)ut->uu_code:0,fault?(unsigned long long)ut->uu_subcode:0,p->p_exit_reason?p->p_exit_reason->osr_namespace:0,p->p_exit_reason?(unsigned long long)p->p_exit_reason->osr_code:0,p->p_exit_reason&&exit_reason_get_string_desc(p->p_exit_reason)?exit_reason_get_string_desc(p->p_exit_reason):"none");
+   if(own){uintptr_t frames[12]={};struct backtrace_user_info info=BTUINFO_INIT;unsigned count=backtrace_user(frames,12,NULL,&info);
+    printf("KEBAB RUNTIME FRAMES: name=%s pid=%d count=%u error=%d\n",p->p_comm,proc_getpid(p),count,info.btui_error);
+    for(unsigned j=0;j<count;j++)printf("KEBAB RUNTIME PC: name=%s pid=%d depth=%u pc=0x%llx\n",p->p_comm,proc_getpid(p),j,(unsigned long long)frames[j]);
+--- a/iokit/Kernel/arm/kebab_aks_userclient_impl.h
++++ b/iokit/Kernel/arm/kebab_aks_userclient_impl.h
+@@ -64,7 +64,7 @@
+    }
+   }
+  }
+- IOLog("KEBAB AKS UC: selector=%u scalar=%u/%u struct-in=%u result=%x; hardware factory C/D only\n",selector,in,out,si,result);
++ IOLog("KEBAB AKS UC: selector=%u scalar=%u/%u struct-in=%u result=%x; hardware factory C/D only; struct-out=%llu desc=%u/%u\n",selector,in,out,si,result,(unsigned long long)a->structureOutputSize,a->structureInputDescriptor!=nullptr,a->structureOutputDescriptor!=nullptr);
+  return result;
+ }
+ 

@@ -1,0 +1,20 @@
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -2780,11 +2780,15 @@
+ void
+ kebab_usb_kdp_start(void)
+ {
+-	if (!kebab_usb_kdp_enabled()) {
++	uint32_t early_console = 0;
++	bool kdp = kebab_usb_kdp_enabled();
++
++	if (!kdp && !(PE_parse_boot_argn("kebabusb_early", &early_console,
++	    sizeof(early_console)) && early_console != 0)) {
+ 		return;
+ 	}
+ 	kebab_usb_start();
+-	if (ud.running) {
++	if (ud.running && kdp) {
+ 		ud.console_input = true;
+ 	}
+ }

@@ -1,0 +1,21 @@
+--- a/bsd/dev/kebab_bt_firmware_impl.h
++++ b/bsd/dev/kebab_bt_firmware_impl.h
+@@ -76,10 +76,17 @@
+   for(uint32_t i=0;i<size&&shown<8;i+=32){
+    const uint8_t *e=f->raw+off+i;
+    if(!e[0])return;
+-   if(e[0]==0xe5||e[0]=='.'||(e[11]&8)||e[11]==0x0f)continue;
++   if(e[0]==0xe5||e[0]=='.')continue;
++   if(e[11]==0x0f){
++    static const uint8_t positions[13]={1,3,5,7,9,14,16,18,20,22,24,28,30};
++    char part[14];for(unsigned j=0;j<13;++j){uint16_t ch=kbf_u16(e+positions[j]);part[j]=ch>=32&&ch<127?(char)ch:'.';}part[13]=0;
++    printf("KEBAB BTFW: dir=%s LFN seq=%x checksum=%x chunk=%s\n",scope,e[0],e[13],part);continue;
++   }
++   if(e[11]&8)continue;
+    char name[12];for(unsigned j=0;j<11;++j)name[j]=e[j]>=32&&e[j]<127?(char)e[j]:'.';name[11]=0;
+    uint32_t n=kbf_u16(e+26);if(f->bits==32)n|=(uint32_t)kbf_u16(e+20)<<16;
+    printf("KEBAB BTFW: dir=%s short-name=%s attr=%x first=%u bytes=%u\n",scope,name,e[11],n,kbf_u32(e+28));++shown;
++   if((e[11]&0x10)&&!strcmp(scope,"root")&&kbf_cluster(f,n))kbf_report_names(f,n,false,name);
+   }
+   if(fixed)return;
+   uint32_t next;if(kbf_next(f,cluster,&next)||kbf_eoc(f,next))return;cluster=next;

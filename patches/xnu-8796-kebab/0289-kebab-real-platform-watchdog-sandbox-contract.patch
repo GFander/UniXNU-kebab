@@ -1,0 +1,80 @@
+--- a/iokit/Kernel/arm/kebab_watchdog_impl.h
++++ b/iokit/Kernel/arm/kebab_watchdog_impl.h
+@@ -1,7 +1,7 @@
+ // Adapted from mouse233/unixnu-fuxi RamWatchdog.cpp (MIT), blob 29b2a369bc1d6b8ff3ea5b27320fcca5e9e403d9.
+ // Requalified for original iOS16 20H392; no shared addresses with iOS17.
+ // SPDX-License-Identifier: MIT
+-// RAM bring-up backend for the unchanged 21H461 IOWatchdog/client protocol.
++// RAM bring-up backend for the original 20H392 IOWatchdog/client protocol.
+ // This is a software deadline observer, not a claim of Snapdragon hardware WDT.
+ #include "KebabOriginalWatchdogABI.h"
+ #include <IOKit/IOLib.h>
+@@ -26,12 +26,14 @@
+ int kebab_watchdog_prepare(void);
+ }
+ 
+-class KebabWatchdog : public IOWatchdog {
+-    OSDeclareDefaultStructors(KebabWatchdog)
++class KebabPlatformWatchdog : public IOWatchdog {
++    // Owner Sandbox policy maps its existing Apple platform-watchdog class
++    // predicate to this real native class. No Apple hardware identity alias.
++    OSDeclareDefaultStructors(KebabPlatformWatchdog)
+     thread_call_t timer = nullptr;
+     unsigned armed = 0;
+     static void expired(thread_call_param_t parameter, thread_call_param_t) {
+-        auto *self = static_cast<KebabWatchdog *>(parameter);
++        auto *self = static_cast<KebabPlatformWatchdog *>(parameter);
+         if (!__atomic_load_n(&self->armed, __ATOMIC_ACQUIRE)) return;
+         // These fields and their lock are qualified from the original methods
+         // that enable/disable/pet the watchdog. Never write original state here.
+@@ -110,9 +112,9 @@
+         if (__atomic_load_n(&armed, __ATOMIC_ACQUIRE)) schedule();
+     }
+ };
+-OSDefineMetaClassAndStructors(KebabWatchdog, IOWatchdog)
++OSDefineMetaClassAndStructors(KebabPlatformWatchdog, IOWatchdog)
+ 
+-static KebabWatchdog *watchdog; // Published service retained for this RAM boot.
++static KebabPlatformWatchdog *watchdog; // Published service retained for this RAM boot.
+ static const OSMetaClass *lookup(const char *name) {
+     const OSSymbol *key = OSSymbol::withCString(name);
+     const OSMetaClass *meta = key ? OSMetaClass::getMetaClassWithName(key) : nullptr;
+@@ -152,13 +154,13 @@
+     int before = countServices(nullptr);
+     kebab_watchdog_detail = before;
+     if (before != 0) return before < 0 ? -before : EEXIST;
+-    const OSMetaClass *subclass = lookup("KebabWatchdog");
++    const OSMetaClass *subclass = lookup("KebabPlatformWatchdog");
+     if (!subclass || subclass->getSuperClass() != base) return ENOEXEC;
+     kebab_watchdog_step = "provider";
+     IOService *provider = IOService::getResourceService();
+     if (!provider) return ENXIO;
+     kebab_watchdog_step = "allocate";
+-    watchdog = new KebabWatchdog;
++    watchdog = new KebabPlatformWatchdog;
+     if (!watchdog) return ENOMEM;
+     kebab_watchdog_step = "init";
+     if (!watchdog->init()) return ENOMEM;
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -4272,6 +4272,20 @@
+ #endif
+ 		return kIOReturnNotPermitted;
+ 	}
++#if defined(KEBAB)
++    // Observation only, in the actual calling task/credential. Both checks
++    // use original Sandbox. The unrelated resource service is never opened.
++    if (connect_type == 1 && !strcmp(service->getMetaClass()->getClassName(), "KebabPlatformWatchdog")) {
++        static unsigned scope_reports;
++        if (__atomic_fetch_add(&scope_reports, 1u, __ATOMIC_RELAXED) == 0) {
++            int other = mac_iokit_check_open_service(kauth_cred_get(), IOService::getResourceService(), connect_type);
++            OSString *taskName = IOCopyLogNameForPID(proc_selfpid());
++            IOLog("KEBAB MACF SCOPE: pid=%d task=%s real=KebabPlatformWatchdog type=1 policy=%d unrelated=IOResources policy=%d; original checks, no override\n",
++                proc_selfpid(),taskName ? taskName->getCStringNoCopy() : "unknown",open_service_policy,other);
++            OSSafeReleaseNULL(taskName);
++        }
++    }
++#endif
+ #endif
+ 	do{
+ 		if (properties) {

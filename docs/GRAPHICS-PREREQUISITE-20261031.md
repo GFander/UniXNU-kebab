@@ -1,0 +1,19 @@
+# 图形与输入阶段：0425–0427
+
+最新指南复核已按实际0424源码、payload和用户态日志完成，见[0424复核](GPU-DISPLAY-INPUT-REVIEW-0424.md)。蓝牙保持延期，不作为图形阶段前置。
+
+本阶段完成了一个真实依赖：原供体IOHIDFamily与IOHIDEventDriver预链接闭包已加入，0426和完整内核重启的0427均进入原版用户态；0427实际注册一个有效IOHIDResource，provider为IOResources。它是原版HID资源服务，不是伪造的空设备。
+
+尚未取得IOHIDInterface、IOHIDEventService或IOHIDEventDriver的匹配证据，相关查询为unavailable，不能将其记作成功或严格的零计数。尚未发布原生触摸HID设备、验证真实报告或让SpringBoard消费事件。
+
+同时修正了已核实的显示ABI错误：iOS16 selector74是可选帧追踪条目的查询，实际调用者用1个scalar输入、1个scalar输出及最多64字节字符串输出；旧实现却返回自定义显示模式结构。现在明确返回unsupported，避免伪报追踪能力。几何仍由既有selector8提供。诊断改为按用户连接记录首次调用，包含首次验证失败；MobileGestalt的一次调用不再掩盖另一客户端。该修正未消除SpringBoard的主CADisplay断言，没有把错误消失当作验收。
+
+实际供体的结构盘点得到IOHIDDevice对象208字节、207个虚表槽；IOHIDInterface对象264字节、187个槽。证据来自匹配哈希kernelcache的初始化记录、元类和虚表结构。方法含义及构造/析构ABI仍未核实，不能据此直接绑定外来C++对象，也不能复用iOS17声明。旧存储恢复工具的IOStorage方法标签没有用于HID记录。
+
+0425/0426/0427均实测保留原硬件Root/nonce、原版MKB/systembag、factory C/D真实加密Data、defaults忙引用归零、持久RTC/NVRAM及原版watchdog心跳超过180秒。当前正常boot_b为0427，捕获已关闭且哈希固定。最近独立只读Data fsck仍为0416；未重新全量校验System/SystemOS，未格式化或重新生成密钥。
+
+0315与0316全量构建通过，295 common +4 host补丁独立回放后5252源文件一致。0425到0427的唯一原生源码变化是固定类诊断清单，HID闭包由受控package参数单独启用。生产可选查询分支及按连接日志片段的主机测试通过，错误成功返回的行为变异被拒绝；明确的内存/进程名替身不能替代实际显示或输入资格。原有framebuffer九种启动失败与计时器停止/释放测试仍通过。
+
+下一步：审计并绑定20H392原版IOHIDDevice方法，连接S3908与PMIC真实采样，验证描述符、完整触点帧、按下/移动/抬起及按键释放；并追踪CADisplay/原backboardd的显示枚举和真正调用契约。后续仍需A650后端、Metal、硬件vsync与DPU直扫。A/B、口令和AKS17/35也未完成；这些若成为真实启动阻塞则针对性解决，不返回假成功。
+
+本阶段没有GPU渲染、真实图像呈现、HID事件消费或可用SpringBoard资格。完整目标仍在进行。公开[验收目录](qualification/0427/README.md)不包含固件、原版闭源组件、原始设备日志或密钥。

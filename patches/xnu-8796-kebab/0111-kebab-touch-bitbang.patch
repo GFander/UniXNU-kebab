@@ -1,0 +1,421 @@
+feat(touch): add a bit-banged GPIO I2C transport next to QUPv3
+
+The QUPv3/SE13 path is the one part of this driver that has never run on
+hardware: it depends on the bootloader having clocked the block and selected
+I2C, and nothing in this kernel can repair that if it did not.  The sibling
+OnePlus 9 port (b1ackm4x/hackios-xnu-kernel, bsd/dev/lemonade_touch.c) drives
+the same Synaptics family at the same 0x48 address by bit-banging I2C on the
+TLMM pins, bypassing GENI entirely, and it works on hardware.
+
+This adds that as a second byte transport under the existing TCM layer.
+kebab_touch_bb=1 selects it; QUPv3 remains the default, so the two can be
+compared with one boot argument and nothing above kt_i2c_write()/kt_i2c_read()
+changes.  The bit-bang path never reads or writes an SE or wrapper register.
+
+The pins are SDA 36 / SCL 37 / reset 38 / IRQ 39, already the pins named by
+the device tree's qupv3_se13_i2c_active group and by the touch node's
+reset-gpio/irq-gpio.  Before changing anything the driver reads and prints
+TLMM_CTL and TLMM_IO for all four, including the current mux field; then it
+sets SDA/SCL to mux 0 (plain GPIO), pull-up and output disabled.  mux 0 is the
+GPIO function this driver already uses for the reset pin, while the device
+tree's "qup13" is function 1.  Both lines are open drain: high means release,
+low means drive 0; neither is ever driven high.  Each failed transaction
+prints the phase and the two line levels, so a failure says where it died.
+
+The transport is diagnostic and read/write-command only: it issues the same
+TCM identify/info commands as the QUP path and never an update, erase or
+calibration command.
+diff --git a/bsd/dev/kebab_touch.c b/bsd/dev/kebab_touch.c
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -48,6 +48,18 @@
+  * answered with a 4-byte header {0xa5, code, length_lo, length_hi} followed by
+  * the payload.
+  *
++ * TWO TRANSPORTS
++ *
++ * QUPv3/GENI is the default and uses the block the bootloader configured.
++ * kebab_touch_bb=1 selects a second transport that bit-bangs I2C on the same
++ * two pins as plain GPIO (mux 0, open drain, pull-up), with the same TCM
++ * command layer above it.  The alternate path exists because the GENI setup is
++ * the one part of this driver that cannot be checked without hardware; the
++ * sibling OnePlus 9 port uses the bit-banged scheme on the same Synaptics
++ * family at the same 0x48 address.  It is a diagnostic comparison, not a
++ * replacement: QUPv3 stays the default.  With bit-bang selected, no SE or
++ * wrapper register is read or written at all - only TLMM and the chip.
++ *
+  * WHAT IS NOT CONFIRMED (read this before trusting a silent console)
+  *
+  *   1. The bootloader is assumed to have left QUPv3_1/SE13 clocked and its
+@@ -93,6 +105,7 @@
+  *
+  * Boot arguments:
+  *   kebab_touch=1          enable this driver (required)
++ *   kebab_touch_bb=1       bit-bang I2C on GPIO 36/37 instead of QUPv3 SE13
+  *   kebab_touch_raw=1      dump SE registers, TLMM state and raw messages
+  *   kebab_touch_dump=1     print the full per-object decode of every down
+  *   kebab_touch_move_ms=N  minimum interval between move lines (default 200,
+@@ -367,6 +380,7 @@
+ 	vm_offset_t wrap;
+ 	vm_offset_t tlmm;
+ 	bool        raw;
++	bool        bb;                 /* kebab_touch_bb=1: GPIO bit-banged I2C */
+ 	bool        tcm_seen;
+ 	bool        app_mode;
+ 	bool        decode;
+@@ -811,16 +825,20 @@
+ 	uint32_t proto;
+ 
+ 	printf("KEBAB TOUCH: SE13 register dump (%s)\n", when);
+-	printf("KEBAB TOUCH:   wrapper QUP_HW_VER [0x004] 0x%08x\n",
+-	    kt.wrap != 0 ? kt_rd(kt.wrap, QUP_HW_VER) : 0);
+-	proto = (kt_se_rd(GENI_FW_REVISION_RO) & FW_REV_PROTOCOL_MSK) >>
+-	    FW_REV_PROTOCOL_SHFT;
+-	printf("KEBAB TOUCH:   protocol %u (want %u for I2C), GENI_STATUS 0x%08x\n",
+-	    proto, GENI_SE_I2C_PROTO, kt_se_rd(SE_GENI_STATUS));
+-	for (i = 0; i < sizeof(kt_se_regs) / sizeof(kt_se_regs[0]); i++) {
+-		printf("KEBAB TOUCH:   %-20s [0x%03x] 0x%08x\n",
+-		    kt_se_regs[i].name, kt_se_regs[i].off,
+-		    kt_se_rd(kt_se_regs[i].off));
++	if (kt.se == 0) {
++		printf("KEBAB TOUCH:   SE13 not mapped (bit-bang transport); TLMM only\n");
++	} else {
++		printf("KEBAB TOUCH:   wrapper QUP_HW_VER [0x004] 0x%08x\n",
++		    kt.wrap != 0 ? kt_rd(kt.wrap, QUP_HW_VER) : 0);
++		proto = (kt_se_rd(GENI_FW_REVISION_RO) & FW_REV_PROTOCOL_MSK) >>
++		    FW_REV_PROTOCOL_SHFT;
++		printf("KEBAB TOUCH:   protocol %u (want %u for I2C), GENI_STATUS 0x%08x\n",
++		    proto, GENI_SE_I2C_PROTO, kt_se_rd(SE_GENI_STATUS));
++		for (i = 0; i < sizeof(kt_se_regs) / sizeof(kt_se_regs[0]); i++) {
++			printf("KEBAB TOUCH:   %-20s [0x%03x] 0x%08x\n",
++			    kt_se_regs[i].name, kt_se_regs[i].off,
++			    kt_se_rd(kt_se_regs[i].off));
++		}
+ 	}
+ 	if (kt.tlmm != 0) {
+ 		printf("KEBAB TOUCH:   TLMM ctl %u..%u 0x%08x 0x%08x 0x%08x 0x%08x\n",
+@@ -981,6 +999,231 @@
+ 	return true;
+ }
+ 
++/* ---------------------------------------------------- bit-banged GPIO I2C */
++
++/*
++ * Optional second transport, selected with kebab_touch_bb=1; QUPv3 remains
++ * the default.  The sibling Synaptics port for the OnePlus 9 (S6SY792, same
++ * 0x48 address) bit-bangs the same kind of bus after finding the GENI/SE
++ * setup was the unreliable part, and keeping one TCM layer above two byte
++ * transports is what makes a comparison between them meaningful.
++ *
++ * Both lines are open drain.  A high level means "release" (mux 0, pull-up,
++ * output disabled); a low level means "drive 0" (output enable, data 0).
++ * Neither line is ever driven high.  The TLMM register layout is the one the
++ * QUP path already uses: mux in bits 5:2, pull in 1:0, drive in 8:6, output
++ * enable in bit 9; TLMM_IO bit 0 is the input level and bit 1 the output
++ * value.  mux 0 is the plain GPIO function, the same value kt_reset_level()
++ * already uses; the device tree gives pins 36/37 function "qup13" for the
++ * QUP path, which is why the registers are read and printed before the mux
++ * is changed here.
++ */
++
++#define KT_BB_HALF_US   5u      /* ~100 kHz, like the reference port */
++#define KT_BB_STRETCH   1000u   /* 5 ms of clock stretching, then fail */
++
++static bool
++kt_bb_level(uint32_t pin)
++{
++	return (kt_rd(kt.tlmm, TLMM_IO(pin)) & 1u) != 0;
++}
++
++static void
++kt_bb_line(uint32_t pin, bool high)
++{
++	uint32_t ctl = kt_rd(kt.tlmm, TLMM_CTL(pin));
++
++	if (!high) {
++		kt_wr(kt.tlmm, TLMM_IO(pin), 0);
++	}
++	ctl &= ~(TLMM_MUX_MSK | TLMM_PULL_MSK | TLMM_DRV_MSK | TLMM_OE);
++	ctl |= 3u;                      /* pull-up, mux 0 == plain GPIO */
++	if (!high) {
++		ctl |= TLMM_OE;
++	}
++	kt_wr(kt.tlmm, TLMM_CTL(pin), ctl);
++}
++
++static bool
++kt_bb_clock_high(void)
++{
++	kt_bb_line(KT_PIN_SCL, true);
++	for (uint32_t i = 0; i < KT_BB_STRETCH; i++) {
++		if (kt_bb_level(KT_PIN_SCL)) {
++			return true;
++		}
++		delay(KT_BB_HALF_US);
++	}
++	return false;
++}
++
++static bool
++kt_bb_start(void)
++{
++	kt_bb_line(KT_PIN_SDA, true);
++	delay(KT_BB_HALF_US);
++	if (!kt_bb_clock_high() || !kt_bb_level(KT_PIN_SDA)) {
++		return false;
++	}
++	delay(KT_BB_HALF_US);
++	kt_bb_line(KT_PIN_SDA, false);
++	delay(KT_BB_HALF_US);
++	kt_bb_line(KT_PIN_SCL, false);
++	return true;
++}
++
++static void
++kt_bb_stop(void)
++{
++	kt_bb_line(KT_PIN_SCL, false);
++	kt_bb_line(KT_PIN_SDA, false);
++	delay(KT_BB_HALF_US);
++	(void)kt_bb_clock_high();
++	delay(KT_BB_HALF_US);
++	kt_bb_line(KT_PIN_SDA, true);
++	delay(KT_BB_HALF_US);
++}
++
++static bool
++kt_bb_send(uint8_t byte)
++{
++	for (int bit = 7; bit >= 0; bit--) {
++		kt_bb_line(KT_PIN_SDA, ((byte >> bit) & 1u) != 0);
++		delay(KT_BB_HALF_US);
++		if (!kt_bb_clock_high()) {
++			return false;
++		}
++		delay(KT_BB_HALF_US);
++		kt_bb_line(KT_PIN_SCL, false);
++	}
++	kt_bb_line(KT_PIN_SDA, true);
++	delay(KT_BB_HALF_US);
++	if (!kt_bb_clock_high()) {
++		return false;
++	}
++	delay(KT_BB_HALF_US);
++	bool ack = !kt_bb_level(KT_PIN_SDA);
++	kt_bb_line(KT_PIN_SCL, false);
++	return ack;
++}
++
++static bool
++kt_bb_receive(uint8_t *byte, bool ack)
++{
++	uint32_t value = 0;
++
++	kt_bb_line(KT_PIN_SDA, true);
++	for (uint32_t bit = 0; bit < 8; bit++) {
++		delay(KT_BB_HALF_US);
++		if (!kt_bb_clock_high()) {
++			return false;
++		}
++		delay(KT_BB_HALF_US);
++		value = (value << 1) | (kt_bb_level(KT_PIN_SDA) ? 1u : 0u);
++		kt_bb_line(KT_PIN_SCL, false);
++	}
++	kt_bb_line(KT_PIN_SDA, !ack);
++	delay(KT_BB_HALF_US);
++	if (!kt_bb_clock_high()) {
++		return false;
++	}
++	delay(KT_BB_HALF_US);
++	kt_bb_line(KT_PIN_SCL, false);
++	kt_bb_line(KT_PIN_SDA, true);
++	*byte = (uint8_t)value;
++	return true;
++}
++
++static int
++kt_bb_fail(const char *what, uint32_t phase)
++{
++	if (kt.errors < 8) {
++		printf("KEBAB TOUCH: bit-bang %s failed at phase %u (SDA %u SCL %u)\n",
++		    what, phase, kt_bb_level(KT_PIN_SDA),
++		    kt_bb_level(KT_PIN_SCL));
++	}
++	kt.errors++;
++	kt_bb_stop();
++	return -1;
++}
++
++static int
++kt_bb_write(const uint8_t *buf, uint32_t len)
++{
++	if (len == 0 || len > 64) {
++		return -1;
++	}
++	if (!kt_bb_start()) {
++		return kt_bb_fail("start", 0);
++	}
++	if (!kt_bb_send((uint8_t)(KT_I2C_ADDR << 1))) {
++		return kt_bb_fail("address", 1);
++	}
++	for (uint32_t i = 0; i < len; i++) {
++		if (!kt_bb_send(buf[i])) {
++			return kt_bb_fail("write", 2 + i);
++		}
++	}
++	kt_bb_stop();
++	return 0;
++}
++
++static int
++kt_bb_read(uint8_t *buf, uint32_t len)
++{
++	if (len == 0 || len > 128) {
++		return -1;
++	}
++	if (!kt_bb_start()) {
++		return kt_bb_fail("start", 0);
++	}
++	if (!kt_bb_send((uint8_t)((KT_I2C_ADDR << 1) | 1u))) {
++		return kt_bb_fail("address", 1);
++	}
++	for (uint32_t i = 0; i < len; i++) {
++		if (!kt_bb_receive(&buf[i], i + 1 < len)) {
++			return kt_bb_fail("read", 2 + i);
++		}
++	}
++	kt_bb_stop();
++	return 0;
++}
++
++/*
++ * Show the pin state the previous boot stage left, then take SDA/SCL for
++ * plain GPIO.  This is deliberately one read-only print before any write:
++ * if the mux or pad layout differs from the QUP path's assumption it is
++ * visible in the log before the first write happens.
++ */
++static void
++kt_bb_pins_config(void)
++{
++	static const uint32_t pins[] = {
++		KT_PIN_SDA, KT_PIN_SCL, KT_PIN_RESET, KT_PIN_IRQ
++	};
++	uint32_t i;
++
++	for (i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
++		uint32_t ctl = kt_rd(kt.tlmm, TLMM_CTL(pins[i]));
++		uint32_t io = kt_rd(kt.tlmm, TLMM_IO(pins[i]));
++
++		printf("KEBAB TOUCH: bit-bang pin %u ctl 0x%08x (mux %u pull %u drive %u oe %u) io 0x%08x\n",
++		    pins[i], ctl, (ctl & TLMM_MUX_MSK) >> 2, ctl & TLMM_PULL_MSK,
++		    (ctl & TLMM_DRV_MSK) >> 6, (ctl >> 9) & 1u, io);
++	}
++	for (i = 0; i < 2; i++) {
++		uint32_t old = kt_rd(kt.tlmm, TLMM_CTL(pins[i]));
++		uint32_t val = old;
++
++		val &= ~(TLMM_MUX_MSK | TLMM_PULL_MSK | TLMM_DRV_MSK |
++		    TLMM_OE);
++		val |= 3u;              /* mux 0 GPIO, pull-up, released */
++		kt_wr(kt.tlmm, TLMM_CTL(pins[i]), val);
++		printf("KEBAB TOUCH: bit-bang pin %u ctl 0x%08x -> 0x%08x (mux 0 GPIO, pull-up, released)\n",
++		    pins[i], old, kt_rd(kt.tlmm, TLMM_CTL(pins[i])));
++	}
++}
++
+ /* ------------------------------------------------------------- I2C master */
+ 
+ static uint32_t
+@@ -1009,6 +1252,9 @@
+ 	uint32_t status = 0;
+ 	uint32_t words;
+ 
++	if (kt.bb) {
++		return kt_bb_write(buf, len);
++	}
+ 	if (len == 0 || len > 64) {
+ 		return -1;
+ 	}
+@@ -1068,6 +1314,9 @@
+ 	uint32_t i;
+ 	uint32_t status = 0;
+ 
++	if (kt.bb) {
++		return kt_bb_read(buf, len);
++	}
+ 	if (len == 0 || len > 128) {
+ 		return -1;
+ 	}
+@@ -1555,6 +1804,8 @@
+ 
+ 	kt.dump = PE_parse_boot_argn("kebab_touch_dump", &value,
+ 	    sizeof(value)) && value != 0;
++	kt.bb = PE_parse_boot_argn("kebab_touch_bb", &value,
++	    sizeof(value)) && value != 0;
+ 	kt.move_ms = 200;
+ 	if (PE_parse_boot_argn("kebab_touch_move_ms", &value, sizeof(value))) {
+ 		kt.move_ms = value;
+@@ -1573,23 +1824,42 @@
+ 	}
+ 	kt.queue_ok = kt_queue_selftest();
+ 
+-	kt.se = ml_io_map(se_pa, KT_SE13_SIZE);
+-	if (kt.se == 0) {
+-		printf("KEBAB TOUCH: cannot map SE13 at 0x%08x\n", se_pa);
+-		return;
++	if (!kt.bb) {
++		kt.se = ml_io_map(se_pa, KT_SE13_SIZE);
++		if (kt.se == 0) {
++			printf("KEBAB TOUCH: cannot map SE13 at 0x%08x\n", se_pa);
++			return;
++		}
++		kt.wrap = ml_io_map(KT_WRAP_PA_DEFAULT, KT_WRAP_SIZE);
++	} else {
++		/*
++		 * The bit-bang transport never reads an SE or wrapper register:
++		 * the point of the alternate path is to remove that dependency.
++		 * Only TLMM is mapped.
++		 */
++		printf("KEBAB TOUCH: transport bit-banged GPIO I2C; QUPv3 SE13 is not used (SDA %u SCL %u reset %u IRQ %u)\n",
++		    KT_PIN_SDA, KT_PIN_SCL, KT_PIN_RESET, KT_PIN_IRQ);
+ 	}
+-	kt.wrap = ml_io_map(KT_WRAP_PA_DEFAULT, KT_WRAP_SIZE);
+-	if (pins != 0 || reset != 0 || kt.raw) {
++	if (kt.bb || pins != 0 || reset != 0 || kt.raw) {
+ 		kt.tlmm = ml_io_map(KT_TLMM_PA, KT_TLMM_SIZE);
+ 	}
++	if (kt.bb && kt.tlmm == 0) {
++		printf("KEBAB TOUCH: bit-bang transport needs TLMM and it is not mapped\n");
++		return;
++	}
+ 
+-	printf("KEBAB TOUCH: S6SY761 on QUPv3 SE13 at 0x%08x (I2C 0x%02x, %u Hz)"
+-	    ", wrapper 0x%08x\n", se_pa, KT_I2C_ADDR, hz, KT_WRAP_PA_DEFAULT);
+-	printf("KEBAB TOUCH: wrapper QUP_HW_VER 0x%08x, SE13 GENI_FW_REVISION_RO "
+-	    "0x%08x\n", kt.wrap != 0 ? kt_rd(kt.wrap, QUP_HW_VER) : 0u,
+-	    kt_se_rd(GENI_FW_REVISION_RO));
++	if (!kt.bb) {
++		printf("KEBAB TOUCH: S6SY761 on QUPv3 SE13 at 0x%08x (I2C 0x%02x, %u Hz)"
++		    ", wrapper 0x%08x\n", se_pa, KT_I2C_ADDR, hz,
++		    KT_WRAP_PA_DEFAULT);
++		printf("KEBAB TOUCH: wrapper QUP_HW_VER 0x%08x, SE13 GENI_FW_REVISION_RO "
++		    "0x%08x\n", kt.wrap != 0 ? kt_rd(kt.wrap, QUP_HW_VER) : 0u,
++		    kt_se_rd(GENI_FW_REVISION_RO));
++	}
+ 
+-	if (kt.tlmm != 0 && pins != 0) {
++	if (kt.tlmm != 0 && kt.bb) {
++		kt_bb_pins_config();
++	} else if (kt.tlmm != 0 && pins != 0) {
+ 		kt_pins_config();
+ 	}
+ 	if (kt.tlmm != 0 && reset != 0) {
+@@ -1599,7 +1869,7 @@
+ 		kt_dump_regs("before init");
+ 	}
+ 
+-	if (!kt_se_init(hz)) {
++	if (!kt.bb && !kt_se_init(hz)) {
+ 		if (kt.raw) {
+ 			kt_dump_regs("after failed init");
+ 		}

@@ -1,0 +1,35 @@
+{
+  "version": "0398",
+  "stage": "fsck",
+  "stage_accepted": true,
+  "baseline_version": "0343",
+  "native_sha256": "ce33dbbc233eb1f1081dc37c1f4b4f13a481e3df596960a1cf6d1e26bc65aa3c",
+  "actual_log_sha256": "618ab0fd9b00b9a97d3663d2dab6fcf9fff170cdc5882295c382c9e46f7376ae",
+  "real_original_apfs": true,
+  "encrypted_data_flags": 0,
+  "real_c_d_files": {
+    "3": {
+      "bytes": 65559,
+      "plaintext_sha256": "55b019a00c0eb6d37414bb68d9610cc285babecd5d11e3e6c3ad4e1fa62cd50b",
+      "native_class_metadata_checked": true
+    },
+    "4": {
+      "bytes": 65559,
+      "plaintext_sha256": "76e73da70e60f45ba92d53aeb2022f3d000311507e2039d791c92079a08abb75",
+      "native_class_metadata_checked": true
+    }
+  },
+  "raw_ciphertext_stripes": {
+    "3:0": "d97f5d8d12a5954bcc6c8ec4e77009aef07bd269b7be703186e4c5c5de330a60",
+    "3:61440": "bbbda2e359c32a168cbeb02a32a3e4015507a481d078cad846f58ac16d015968",
+    "4:0": "6507e1952d6dc383f184fbe855cb3c982a7ac6d27af99c5fcae8a4f608c8f388",
+    "4:61440": "12641e2addbb2da1afd3446b64e062e4e4390475600922ef9a960be3581312c4"
+  },
+  "hardware_root_bank_cold_restored": true,
+  "preboot_nonce_root_bank_preserved": true,
+  "system_readonly": true,
+  "all_storage_readonly": true,
+  "all_requested_items_complete": false,
+  "remaining": "cold files if create; original fsck/full normal regression; then GPU guide audit only",
+  "cold_ciphertext_and_plaintext_match_written_receipt": true
+}

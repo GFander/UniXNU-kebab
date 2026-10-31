@@ -1,0 +1,10 @@
+[2026-10-29T08:35:29] sending 'FASTBOOT' on COM7
+[   0.086] KEBAB PANIC: reset requested (FASTBOOT); skipping filesystem sync
+[   0.086] KEBAB PON: restart reason: SOFT_RB_SPARE 0x00 -> 0x04 (mask 0xfe, PON_RESTART_REASON_BOOTLOADER 0x02 << 1 = 0x04)
+[   0.086] KEBAB PON: restart reason verified: read back 0x04, field 0x04, bit 0 unchanged 0x0
+[   0.086] KEBAB FASTBOOT: cookie 0x77665500 (default)
+[   0.087] KEBAB FASTBOOT: writing IMEM restart_reason 0x432981fc -> 0x77665500
+[   0.148] KEBAB FASTBOOT: IMEM read back 0x77665500 (MATCH)
+[   0.148] KEBAB REBOOT: panic PSCI SYSTEM_RESET (no platform driver required)
+[2026-10-29T08:35:30] console went away while reading the ack: ClearCommError failed (PermissionError(13, '设备不识别此命令。', None, 22))
+[2026-10-29T08:35:30] done, 502 bytes

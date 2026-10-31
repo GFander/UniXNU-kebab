@@ -1,0 +1,44 @@
+--- a/bsd/kern/kern_newsysctl.c
++++ b/bsd/kern/kern_newsysctl.c
+@@ -1602,6 +1602,10 @@
+ 	int error;
+ 	boolean_t unlocked_node_found = FALSE;
+ 	boolean_t namestring_started = FALSE;
++#if defined(KEBAB)
++	uint32_t kebab_trace_arg = 0;
++	boolean_t kebab_trace = FALSE;
++#endif
+ 
+ 	/* Get the read lock on the geometry */
+ 	lck_rw_lock_shared(&sysctl_geometry_lock);
+@@ -1805,12 +1809,30 @@
+ 	    ptrauth_function_pointer_type_discriminator(typeof(oid_handler)));
+ #endif /* defined(HAS_APPLE_PAC) */
+ 
++#if defined(KEBAB)
++	/* Default-off, PID1-only normal trace. OID is referenced and geometry is
++	 * unlocked here; observe the existing call without changing its result. */
++	kebab_trace = !from_kernel && req->p != PROC_NULL && proc_pid(req->p) == 1 &&
++	    PE_parse_boot_argn("kebab_sysctl_trace", &kebab_trace_arg, sizeof(kebab_trace_arg)) && kebab_trace_arg != 0;
++	if (kebab_trace) {
++		printf("KEBAB SYSCTL: enter %.*s leaf=%s handler=0x%llx oldlen=%llu newlen=%llu\n",
++		    192, namestring == NULL ? oid->oid_name : namestring, oid->oid_name,
++		    (unsigned long long)(uintptr_t)oid_handler,
++		    (unsigned long long)req->oldlen, (unsigned long long)req->newlen);
++	}
++#endif
+ 	if ((oid->oid_kind & CTLTYPE) == CTLTYPE_NODE) {
+ 		i = oid_handler(oid, name + indx, (int)(namelen - indx), req);
+ 	} else {
+ 		i = oid_handler(oid, oid->oid_arg1, oid->oid_arg2, req);
+ 	}
+ 	error = i;
++#if defined(KEBAB)
++	if (kebab_trace) {
++		printf("KEBAB SYSCTL: leave %.*s error=%d copied=%llu\n", 192,
++		    namestring == NULL ? oid->oid_name : namestring, i, (unsigned long long)req->oldidx);
++	}
++#endif
+ 
+ 	if (unlocked_node_found) {
+ 		lck_mtx_unlock(&sysctl_unlocked_node_lock);

@@ -1,0 +1,262 @@
+{
+  "accepted": true,
+  "scope": "Physical volume-up/down snapshots accepted by unchanged original HID parser/event driver, plus exact live Data dev_t identity for RTC/NVRAM; not touch/UI/GPU qualification",
+  "normal_default": "0430",
+  "native_sha256": "89e477a1b5a3641b7ff8f31e5cda0183bca6fe8317ffe7f140c50781f0244d40",
+  "native_bytes": 18913712,
+  "source_version": "0429",
+  "source_replay": {
+    "common": 297,
+    "host": 4,
+    "files": 5259,
+    "all_equal": true
+  },
+  "normal_regressions": {
+    "0429": {
+      "version": "0429",
+      "defaults_matching_complete": true,
+      "actual_log_sha256": "45500f01f5047d92b7e7d67c9659f0f172c2d45e5ef27f2f690c62444ea8b190",
+      "native_sha256": "89e477a1b5a3641b7ff8f31e5cda0183bca6fe8317ffe7f140c50781f0244d40",
+      "real_apple_image4_start_succeeded": true,
+      "actual_busy_reference_released": true,
+      "busy_lifecycle": [
+        [
+          0,
+          0,
+          1,
+          "defaults"
+        ],
+        [
+          11,
+          1,
+          1,
+          "AppleImage4"
+        ],
+        [
+          14,
+          2,
+          -1,
+          "defaults"
+        ],
+        [
+          15,
+          1,
+          -1,
+          "AppleImage4"
+        ]
+      ],
+      "final_busy_state": 0,
+      "actual_waits": [
+        "IOAESAccelerator",
+        "IOResources/IONVRAM",
+        "IODTNVRAM"
+      ],
+      "hardware_nonce_and_data_restored_without_generation": true,
+      "native_nvram_existing_proxy_adopted": true,
+      "nvram_encrypted_data_banks_cold_restored": true,
+      "nvram_restored_bank": 1,
+      "nvram_restored_generation": 258,
+      "nvram_hardware_or_rollback_claim": false,
+      "nvram_durable_write_calls": 2,
+      "watchdog_enabled": true,
+      "original_iokit_monitoring_preserved": true,
+      "watchdog_heartbeat_times": [
+        38.486,
+        38.486,
+        48.508,
+        58.492,
+        68.507,
+        78.477,
+        88.5,
+        98.523,
+        108.491,
+        118.518,
+        128.495,
+        138.516,
+        148.489,
+        158.527,
+        168.494,
+        178.523
+      ],
+      "original_locked_observations": [
+        [
+          60.42,
+          30,
+          4
+        ],
+        [
+          90.428,
+          60,
+          7
+        ],
+        [
+          120.459,
+          90,
+          10
+        ],
+        [
+          150.484,
+          120,
+          13
+        ],
+        [
+          180.515,
+          150,
+          16
+        ]
+      ],
+      "systembag_and_hardware_c_d_preserved": true,
+      "rtc_record_reused": true,
+      "panic": [],
+      "full_ios_or_springboard": false,
+      "gpu_display_input_started": true
+    },
+    "0430": {
+      "version": "0430",
+      "defaults_matching_complete": true,
+      "actual_log_sha256": "340a49cdb2973cc2edbff6771268ff1da4a1b2a3a44d9534e66387c4e0642fef",
+      "native_sha256": "89e477a1b5a3641b7ff8f31e5cda0183bca6fe8317ffe7f140c50781f0244d40",
+      "real_apple_image4_start_succeeded": true,
+      "actual_busy_reference_released": true,
+      "busy_lifecycle": [
+        [
+          0,
+          0,
+          1,
+          "defaults"
+        ],
+        [
+          11,
+          1,
+          1,
+          "AppleImage4"
+        ],
+        [
+          14,
+          2,
+          -1,
+          "defaults"
+        ],
+        [
+          15,
+          1,
+          -1,
+          "AppleImage4"
+        ]
+      ],
+      "final_busy_state": 0,
+      "actual_waits": [
+        "IOAESAccelerator",
+        "IOResources/IONVRAM",
+        "IODTNVRAM"
+      ],
+      "hardware_nonce_and_data_restored_without_generation": true,
+      "native_nvram_existing_proxy_adopted": true,
+      "nvram_encrypted_data_banks_cold_restored": true,
+      "nvram_restored_bank": 0,
+      "nvram_restored_generation": 263,
+      "nvram_hardware_or_rollback_claim": false,
+      "nvram_durable_write_calls": 2,
+      "watchdog_enabled": true,
+      "original_iokit_monitoring_preserved": true,
+      "watchdog_heartbeat_times": [
+        38.463,
+        38.463,
+        48.429,
+        58.463,
+        68.482,
+        78.483,
+        88.446,
+        98.484,
+        108.442,
+        118.467,
+        128.483,
+        138.462,
+        148.444,
+        158.477,
+        168.497,
+        178.483
+      ],
+      "original_locked_observations": [
+        [
+          60.393,
+          30,
+          4
+        ],
+        [
+          90.437,
+          60,
+          7
+        ],
+        [
+          120.46,
+          90,
+          10
+        ],
+        [
+          150.5,
+          120,
+          13
+        ],
+        [
+          180.539,
+          150,
+          16
+        ]
+      ],
+      "systembag_and_hardware_c_d_preserved": true,
+      "rtc_record_reused": true,
+      "panic": [],
+      "full_ios_or_springboard": false,
+      "gpu_display_input_started": true
+    }
+  },
+  "physical_volume_key_reports_0429": [
+    {
+      "count": 1,
+      "timestamp_ns": 50303528489,
+      "keys": 0,
+      "result": 0
+    },
+    {
+      "count": 2,
+      "timestamp_ns": 101580806406,
+      "keys": 2,
+      "result": 0
+    },
+    {
+      "count": 3,
+      "timestamp_ns": 101737736927,
+      "keys": 0,
+      "result": 0
+    },
+    {
+      "count": 4,
+      "timestamp_ns": 102714355260,
+      "keys": 4,
+      "result": 0
+    },
+    {
+      "count": 5,
+      "timestamp_ns": 102902073489,
+      "keys": 0,
+      "result": 0
+    }
+  ],
+  "original_hid_device_interface_and_event_driver_matched": true,
+  "original_hid_parser_accepted_volume_key_edges": true,
+  "backboardd_or_UI_consumption_qualified": false,
+  "power_key_qualified": false,
+  "touch_qualified": false,
+  "gpu_qualified": false,
+  "display_presentation_qualified": false,
+  "usable_springboard": false,
+  "bluetooth_deferred": true,
+  "existing_hardware_roots_original_mkb_and_encrypted_cd_preserved": true,
+  "data_device_changed_from_stale_1_3_to_actual_1_4": true,
+  "metadata_permissions_class_and_record_checks_preserved": true,
+  "last_independent_readonly_data_fsck": "0416",
+  "new_full_system_hash": false,
+  "daily_development_fast": true,
+  "host_behavioral_mutations_refused": 9
+}

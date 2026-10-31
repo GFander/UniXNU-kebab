@@ -1,0 +1,39 @@
+fix(install): let launchd spawn jobs from /usr/libexec
+
+launchd has no direct job spawn.  Every LaunchDaemon job is started as
+posix_spawnp("/usr/libexec/xpcproxy", {"xpcproxy", <service>, ...}) at
+0x100024abc; the only other spawn sites are the boot-task direct run and
+launchd's own re-exec.  The installer's prefix table had no /usr/libexec
+entry and the current root volume does not carry the binary, so a job
+would fail with ENOENT even when launchd itself starts.
+
+Add /usr/libexec/ to both copies of the allowlist (bsd/dev/kebab_install.c
+and scripts/make-minimal-userland.py), and add the real xpcproxy as the
+sixth base.kist entry.  The binary is 96,352 bytes; its three dylib
+dependencies are all in the split shared cache and its cdhash is in
+Apple's 2,760-entry static trust cache.
+
+The earlier note said the binary is in Cryptex1,SystemOS.  It is not: the
+cryptex's /usr has only lib/, and /usr/libexec does not exist in that
+volume.  /usr/libexec/xpcproxy is in the OS root DMG (mtree inode
+1152921500312217273); docs/IOS-USERLAND.md now records the correction and
+the extraction command.
+
+The new base.kist is 6 entries / 1,716,034 bytes installed / 655,360
+bytes on the wire (640.0 KiB, 10 chunks), SHA-256
+eec6cbefbb52a671275fef924f088c5ffded10dbeda829438d98e53bb28aa5dc.
+It was packed and re-read with pack-userland.py --verify.  The bring-up
+orchestrator and the fake-board fixture now expect six base entries.
+
+diff --git a/bsd/dev/kebab_install.c b/bsd/dev/kebab_install.c
+index 95d2d07..06b586e 100644
+--- a/bsd/dev/kebab_install.c
++++ b/bsd/dev/kebab_install.c
+@@ -91,6 +91,7 @@
+ static const char *const ki_allow[] = {
+ 	"/sbin/",
+ 	"/usr/lib/",
++	"/usr/libexec/",
+ 	"/usr/standalone/",
+ 	"/System/Library/Caches/com.apple.dyld/",
+ 	"/System/Library/Caches/com.apple.kernelcaches/",

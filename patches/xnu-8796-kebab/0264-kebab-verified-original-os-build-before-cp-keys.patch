@@ -1,0 +1,68 @@
+--- a/bsd/dev/kebab_cryptex_media.c
++++ b/bsd/dev/kebab_cryptex_media.c
+@@ -356,6 +356,26 @@
+  return error;
+ }
+ 
++/* Same kern.osversion handler used by original early userland; never write
++ * a guessed marketing version into CP state. Bind exact original plist bytes. */
++#include <sys/sysctl.h>
++#include <sys/cprotect.h>
++extern int kernel_sysctlbyname(const char *,void *,size_t *,void *,size_t);
++int
++kebab_cryptex_system_version_prepare(void)
++{
++ static const uint8_t expected[32]={0x52,0x6d,0xe9,0xe2,0x6c,0x80,0xf9,0x3f,0xae,0x30,0x89,0x72,0x5f,0x9e,0x24,0xcf,
++  0x1d,0xf5,0x59,0x97,0xe8,0x28,0xd5,0x71,0xdb,0x1e,0x0f,0x64,0x80,0xbf,0x19,0x62};
++ char build[]="20H392";
++ int error=kebab_cryptex_mount_recheck();
++ if(!error)error=kcm_verify_boot_file("/System/Library/CoreServices/SystemVersion.plist",574,expected);
++ if(!error&&osversion[0]&&strcmp(osversion,build))error=EAUTH;
++ if(!error&&!osversion[0])error=kernel_sysctlbyname("kern.osversion",NULL,NULL,build,sizeof(build));
++ if(!error&&(strcmp(osversion,build)||cp_os_version()!=0x14480188u))error=EAUTH;
++ printf("KEBAB DATA VERSION: verified SystemVersion20H392 -> original kern.osversion/CP version14480188 %s (%d)\n",error?"FAIL":"PASS",error);
++ return error;
++}
++
+ int
+ kebab_cryptex_fsck_verify(void)
+ {
+--- a/bsd/dev/kebab_cryptex_media.h
++++ b/bsd/dev/kebab_cryptex_media.h
+@@ -12,6 +12,7 @@
+ int kebab_cryptex_boot_files_verify(void);
+ int kebab_cryptex_tool_verify(void);
+ int kebab_cryptex_fsck_verify(void);
++int kebab_cryptex_system_version_prepare(void);
+ /* Requires complete original OS Merkle verification, not two boot files. */
+ int kebab_cryptex_os_recheck(void);
+ /* Explicit development-fast policy is separate from complete-content proof. */
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -288,9 +288,10 @@
+ kebab_data_setup_finish(int status)
+ {
+  if(!kdf_live||kdf_policy())return;
+- int error=kebab_ufs_sync();kdf_live=false;kebab_file_keys_cancel();
++ unsigned writable=0;PE_parse_boot_argn("ufsrw",&writable,sizeof(writable));
++ int error=writable?kebab_ufs_sync():0;kdf_live=false;kebab_file_keys_cancel();
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+- if(tool==7)printf("KEBAB DATA FSCK: original signed checker exit=%d UFS sync=%d; live Root/class context revoked\n",status,error);
++ if(tool==7)printf("KEBAB DATA FSCK: original signed checker exit=%d UFS sync=%d (readonly: flush skipped); live Root/class context revoked\n",status,error);
+  else printf("KEBAB DATA FORMAT: signed formatter exit=%d UFS sync=%d; live Root/class context revoked; encrypted mount not yet qualified\n",status,error);
+ }
+ #endif
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7153,6 +7153,11 @@
+  if (kebab_apfs_probe_error) panic("kebab APFS probe failed: %d", kebab_apfs_probe_error);
+  int owner_dsc_prepare_error = kebab_dsc_after_mount();
+  if (owner_dsc_prepare_error) panic("kebab owner DSC prepare failed: %d", owner_dsc_prepare_error);
++ if(tool_mode>=2){
++  extern int kebab_cryptex_system_version_prepare(void);
++  int version_error=kebab_cryptex_system_version_prepare();
++  if(version_error)panic("KEBAB DATA VERSION: original OS identity/init rejected %d",version_error);
++ }
+  if(tool_mode==7){
+   extern int kebab_data_mount_probe(proc_t,user_addr_t);
+   int checked=kebab_data_mount_probe(p,(user_addr_t)scratch_addr);

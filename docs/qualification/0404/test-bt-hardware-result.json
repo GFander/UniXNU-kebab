@@ -1,0 +1,17 @@
+{
+  "passed": true,
+  "cases": 429,
+  "production_files": {
+    "bsd/dev/kebab_bluetooth.c": "be2c8a325cc31ea9758fb226469a3ddb30346fbc5b50626cda9095b0bbe3926b",
+    "bsd/dev/kebab_bt_hw_impl.h": "a8eb3f8fb7c59074cdab8409fe53f2bd634f6c8f2fc812b1f99d23d6c3a40382",
+    "bsd/dev/kebab_bt_clock_impl.h": "c873e14b23882524453b422117a97f6d4bf180c789f8fdf92ca9794064977fdb",
+    "bsd/dev/kebab_geni_registers.h": "32b8d87bc423d3c122d159186ee1a63e0451a3778941a84b57e3aff1b703736d",
+    "bsd/dev/kebab_geni.c": "60da46c79df49c9822d8c14514b40eced204a525de66ca81d4c690608d9b99f3"
+  },
+  "behavioral_mutations_refused": 7,
+  "fixture_sha256": "21e1268a3333b777e0a2ce9704b4af8272ff87e4bd2f8537de9ef0fdb14a686f",
+  "mmio_and_barriers_mocked": true,
+  "geni_touch_field_decode_executed": true,
+  "complete_touch_transport_tested": false,
+  "real_uart_or_radio_tested": false
+}

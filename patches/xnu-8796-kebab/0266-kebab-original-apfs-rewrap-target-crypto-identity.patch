@@ -1,0 +1,26 @@
+--- a/bsd/kern/kebab_apfs_file_native_impl.h
++++ b/bsd/kern/kebab_apfs_file_native_impl.h
+@@ -115,9 +115,21 @@
+  memcpy(uuid,credential->bytes+22,16);memcpy(sealed,input->key,96);
+  lck_mtx_lock(&kfk_lock);int error=kfn_kek_locked(uuid,source,kek);
+  if(!error)error=kfk_wrap(kek,sealed,96,plain,false);
+- if(!error&&!kfn_identity(plain,credential,source))error=(int)kIOReturnNotPermitted;
++ /* Original APFS may allocate a fresh crypto_id for the target class.
++  * Its only credential carries that TARGET id (jobj.c change_dstream and
++  * crypto_id_converter), not the authenticated source id inside KF02.
++  * Authenticate the complete old AES-KW envelope first, retain exact UUID,
++  * revision, source class and structure, then bind the target id on output.
++  * Unwrap remains strict for every byte of its caller identity. */
++ if(!error){
++  struct kebab_aks_credential source_identity=*credential;
++  memcpy(source_identity.bytes,plain+24,8);
++  if(!kfn_identity(plain,&source_identity,source))error=(int)kIOReturnNotPermitted;
++  kfk_wipe(&source_identity,sizeof(source_identity));
++ }
++
+  if(!error)error=kfn_kek_locked(uuid,cls,kek);
+- if(!error){memcpy(plain+32,&cls,4);error=kfk_wrap(kek,plain,88,result,true);}
++ if(!error){memcpy(plain+24,credential->bytes,8);memcpy(plain+32,&cls,4);error=kfk_wrap(kek,plain,88,result,true);}
+  if(!error){memcpy(output->key,result,96);output->key_len=96;output->dp_class=cls;}
+  lck_mtx_unlock(&kfk_lock);
+  printf("KEBAB APFS FILE REWRAP: source=%u target=%u status=%x\n",source,cls,error);

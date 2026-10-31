@@ -1,0 +1,213 @@
+--- a/bsd/dev/kebab_bluetooth.h
++++ b/bsd/dev/kebab_bluetooth.h
+@@ -5,6 +5,7 @@
+ extern "C" {
+ #endif
+ void kebab_bluetooth_hardware_report(void);
++void kebab_bluetooth_power_report(void);
+ void kebab_bluetooth_clock_prepare(void);
+ void kebab_bluetooth_uart_loopback(void);
+ #ifdef __cplusplus
+--- /dev/null
++++ b/bsd/dev/kebab_bt_power_impl.h
+@@ -0,0 +1,107 @@
++/* Read-only fixed Bluetooth regulator discovery. No rail commands here.
++ * cmd-db.c and kona-regulators.dtsi, LineageOS98a7970 define this layout.
++ * The DB checksum field is unused by that firmware ABI; do not invent one.
++ */
++#ifndef KEBAB_BT_POWER_IMPL_H
++#define KEBAB_BT_POWER_IMPL_H
++
++#define KBP_DB_PA 0x80860000u
++#define KBP_DB_SIZE 0x20000u
++#define KBP_DB_HEADER 144u
++#define KBP_RESOURCE_COUNT 3u
++
++static const char kbp_names[KBP_RESOURCE_COUNT][8] = {
++ "smpa5", "smpa6", "smpc8"
++};
++struct kbp_resource {
++ uint32_t address;
++ uint16_t slave_version, auxiliary_length;
++};
++struct kbp_result {
++ uint32_t version, standalone;
++ struct kbp_resource resources[KBP_RESOURCE_COUNT];
++};
++struct kbp_io {
++ int (*read32)(void *, uint32_t, uint32_t *);
++ void *context;
++};
++
++/* Only aligned reads wholly inside the supplied reserved region. The native
++ * callback independently enforces the physical mapping and the same bound. */
++static int
++kbp_word(const struct kbp_io *io, size_t length, uint32_t offset, uint32_t *value)
++{
++ if (!io || !io->read32 || !value || (offset & 3u) ||
++     length < 4u || offset > length - 4u) return EINVAL;
++ return io->read32(io->context, offset, value);
++}
++
++static int
++kbp_discover(const struct kbp_io *io, size_t length, struct kbp_result *out)
++{
++ if (!out) return EINVAL;
++ memset(out, 0, sizeof(*out));
++ if (!io || !io->read32 || length < KBP_DB_HEADER || length > KBP_DB_SIZE ||
++     (length & 3u)) return EINVAL;
++ struct kbp_result found;
++ memset(&found, 0, sizeof(found));
++ uint32_t magic, reserved, mask = 0;
++ int error = kbp_word(io, length, 0, &found.version);
++ if (error) return error;
++ error = kbp_word(io, length, 4, &magic);
++ if (error) return error;
++ if (found.version != 1u || magic != 0x0c0330dbu) return EINVAL;
++ error = kbp_word(io, length, 140, &reserved);
++ if (error) return error;
++ found.standalone = reserved & 1u;
++ for (unsigned slave = 0; slave < 8u; ++slave) {
++  uint32_t w0, w1, w2, header = 8u + slave * 16u;
++  error = kbp_word(io, length, header, &w0);
++  if (error) return error;
++  error = kbp_word(io, length, header + 4u, &w1);
++  if (error) return error;
++  error = kbp_word(io, length, header + 8u, &w2);
++  if (error) return error;
++  uint32_t id = w0 & 0xffffu, entries = w1 >> 16;
++  uint32_t headers = KBP_DB_HEADER + (w0 >> 16);
++  uint32_t auxiliary = KBP_DB_HEADER + (w1 & 0xffffu);
++  if (!entries) continue;
++  if (!id || id > 7u || entries > 1024u || (headers & 3u) ||
++      headers > length || entries > (length - headers) / 24u ||
++      auxiliary > length) return EINVAL;
++  /* Firmware can have multiple tables of the same slave class. Search all
++   * of them; reject duplicate selected identifiers, never pick the first. */
++  for (unsigned entry = 0; entry < entries; ++entry) {
++   uint32_t offset = headers + entry * 24u, name[2];
++   error = kbp_word(io, length, offset, &name[0]);
++   if (error) return error;
++   error = kbp_word(io, length, offset + 4u, &name[1]);
++   if (error) return error;
++   for (unsigned index = 0; index < KBP_RESOURCE_COUNT; ++index) {
++    if (memcmp(name, kbp_names[index], 8)) continue;
++    if (mask & (1u << index)) return EEXIST;
++    uint32_t address, tail;
++    error = kbp_word(io, length, offset + 16u, &address);
++    if (error) return error;
++    error = kbp_word(io, length, offset + 20u, &tail);
++    if (error) return error;
++    uint32_t bytes = tail & 0xffffu, relative = tail >> 16;
++    if (id != 4u || (address & 0xffff0000u) != 0x00040000u ||
++        (address & 0xffu) || relative > length - auxiliary ||
++        bytes > length - auxiliary - relative) return EINVAL;
++    /* No alias may map two rail names to the same accelerator register. */
++    for (unsigned previous = 0; previous < KBP_RESOURCE_COUNT; ++previous)
++     if ((mask & (1u << previous)) &&
++         found.resources[previous].address == address) return EINVAL;
++    found.resources[index].address = address;
++    found.resources[index].slave_version = (uint16_t)w2;
++    found.resources[index].auxiliary_length = (uint16_t)bytes;
++    mask |= 1u << index;
++   }
++  }
++ }
++ if (mask != (1u << KBP_RESOURCE_COUNT) - 1u) return ENOENT;
++ *out = found;
++ return 0;
++}
++#endif
+--- a/bsd/dev/kebab_rpmh.c
++++ b/bsd/dev/kebab_rpmh.c
+@@ -5,6 +5,12 @@
+ #if defined(KEBAB)
+ #define KEBAB_RPMH_KERNEL 1
+ #include <sys/param.h>
++#include <sys/errno.h>
++#include <sys/proc_internal.h>
++#include <kern/debug.h>
++#include <machine/machine_routines.h>
++#include "kebab_bluetooth.h"
++#include "kebab_bt_power_impl.h"
+ #include <sys/systm.h>
+ #include <kern/clock.h>
+ #include <mach/boolean.h>
+@@ -657,4 +663,47 @@
+ 	info->command_status = kebab_rpmh_read32(vrm.tcs, KEBAB_RSC_CMD_STATUS);
+ 	return 0;
+ }
++
++/* Bluetooth resource discovery is read-only and separate from the existing
++ * touch rail encoder. No new resource is added to that write whitelist. */
++extern int get_preemption_level(void);
++static vm_offset_t kbp_native_db;
++static int
++kbp_native_read32(void *context, uint32_t offset, uint32_t *value)
++{
++ (void)context;
++ if (!value || (offset & 3u) || offset > KBP_DB_SIZE - 4u) return EINVAL;
++ if (!kbp_native_db) {
++  kbp_native_db = ml_io_map(KBP_DB_PA, KBP_DB_SIZE);
++  if (!kbp_native_db) return ENOMEM;
++ }
++ *value = kebab_rpmh_read32(kbp_native_db, offset);
++ return 0;
++}
++void
++kebab_bluetooth_power_report(void)
++{
++ if (panic_active() || ml_at_interrupt_context() || get_preemption_level() ||
++     !ml_get_interrupts_enabled()) {
++  printf("KEBAB BTPWR: end error=%d unsafe-context; no register access\n", EBUSY);
++  return;
++ }
++ if (__atomic_load_n(&initproc, __ATOMIC_ACQUIRE) == PROC_NULL) {
++  printf("KEBAB BTPWR: end error=%d BSD startup incomplete; no register access\n", EAGAIN);
++  return;
++ }
++ const struct kbp_io io = { kbp_native_read32, NULL };
++ struct kbp_result result;
++ kebab_spmi_bus_lock();
++ int error = kbp_discover(&io, KBP_DB_SIZE, &result);
++ kebab_spmi_bus_unlock();
++ printf("KEBAB BTPWR: cmd-db=%08x+%x version=%u standalone=%u error=%d\n",
++     KBP_DB_PA, KBP_DB_SIZE, result.version, result.standalone, error);
++ if (!error) for (unsigned i = 0; i < KBP_RESOURCE_COUNT; ++i)
++  printf("KEBAB BTPWR: resource=%s address=%08x slave-version=%04x aux-bytes=%u\n",
++      kbp_names[i], result.resources[i].address,
++      result.resources[i].slave_version, result.resources[i].auxiliary_length);
++ printf("KEBAB BTPWR: end error=%d read-only; board binding and rail ownership not established\n", error);
++}
++
+ #endif /* KEBAB */
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -275,6 +275,8 @@
+ #define UD_REBOOT_BTHW_REPORT 35u
+ #define UD_REBOOT_BTCLK_PREPARE 36u
+ #define UD_REBOOT_BTUART_LOOPBACK 37u
++#define UD_REBOOT_BTPWR_REPORT 38u
++extern void kebab_bluetooth_power_report(void);
+ extern void kebab_bluetooth_uart_loopback(void);
+ extern void kebab_bluetooth_clock_prepare(void);
+ extern void kebab_bluetooth_hardware_report(void);
+@@ -1465,6 +1467,9 @@
+ 		    sizeof("DRV?\n") - 1)) {
+ 			return UD_REBOOT_DRV_REPORT;
+ 		}
++		if (ud_command_seen(buf, received, "BTPWR?\n", sizeof("BTPWR?\n") - 1)) {
++			return UD_REBOOT_BTPWR_REPORT;
++		}
+ 		if (ud_command_seen(buf, received, "BTUART\n", sizeof("BTUART\n") - 1)) {
+ 			return UD_REBOOT_BTUART_LOOPBACK;
+ 		}
+@@ -1730,6 +1735,8 @@
+ 		kebab_pid1_report();
+ 	} else if (command == UD_REBOOT_QSEELOG_REPORT) {
+ 		kebab_qsee_log_report();
++	} else if (command == UD_REBOOT_BTPWR_REPORT) {
++		kebab_bluetooth_power_report();
+ 	} else if (command == UD_REBOOT_BTUART_LOOPBACK) {
+ 		kebab_bluetooth_uart_loopback();
+ 	} else if (command == UD_REBOOT_BTCLK_PREPARE) {

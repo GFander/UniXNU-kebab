@@ -1,0 +1,115 @@
+{
+  "version": "0423",
+  "defaults_matching_complete": true,
+  "actual_log_sha256": "603ea91aa1c4fc33acce4981b7c207135b36ab9121a0daec5425d1c5713a3e4f",
+  "native_sha256": "bea59aaf413c87356caadad4c3cd8c2fab52c7b91a62b69fb9e4a228eff11366",
+  "real_apple_image4_start_succeeded": true,
+  "actual_busy_reference_released": true,
+  "busy_lifecycle": [
+    [
+      0,
+      0,
+      1,
+      "defaults"
+    ],
+    [
+      11,
+      1,
+      1,
+      "AppleImage4"
+    ],
+    [
+      14,
+      2,
+      -1,
+      "defaults"
+    ],
+    [
+      15,
+      1,
+      -1,
+      "AppleImage4"
+    ]
+  ],
+  "final_busy_state": 0,
+  "actual_waits": [
+    "IOAESAccelerator",
+    "IOResources/IONVRAM",
+    "IODTNVRAM"
+  ],
+  "hardware_nonce_and_data_restored_without_generation": true,
+  "native_nvram_existing_proxy_adopted": true,
+  "nvram_encrypted_data_banks_cold_restored": true,
+  "nvram_restored_bank": 0,
+  "nvram_restored_generation": 233,
+  "nvram_hardware_or_rollback_claim": false,
+  "nvram_durable_write_calls": 2,
+  "watchdog_enabled": true,
+  "original_iokit_monitoring_preserved": true,
+  "watchdog_heartbeat_times": [
+    43.71,
+    43.71,
+    53.76,
+    63.742,
+    73.74,
+    83.738,
+    93.719,
+    103.762,
+    113.757,
+    123.751,
+    133.743,
+    143.738,
+    153.74,
+    163.727,
+    173.751,
+    183.742,
+    193.745,
+    203.78,
+    213.77,
+    223.785,
+    233.741,
+    243.738
+  ],
+  "original_locked_observations": [
+    [
+      60.494,
+      30,
+      3
+    ],
+    [
+      90.533,
+      60,
+      6
+    ],
+    [
+      120.568,
+      90,
+      9
+    ],
+    [
+      150.622,
+      120,
+      12
+    ],
+    [
+      180.62,
+      150,
+      15
+    ],
+    [
+      210.65,
+      180,
+      18
+    ],
+    [
+      240.677,
+      210,
+      21
+    ]
+  ],
+  "systembag_and_hardware_c_d_preserved": true,
+  "rtc_record_reused": true,
+  "panic": [],
+  "full_ios_or_springboard": false,
+  "gpu_display_input_started": false
+}

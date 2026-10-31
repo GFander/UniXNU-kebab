@@ -1,0 +1,1474 @@
+feat(vol): replace the userdata HFS+ volume with a host-made image
+
+The kernel mounts an HFS+ root on userdata, but that volume is only 64 MiB:
+the 592 MB .symbols install stops at 64,028,672 bytes with ENOSPC, and the
+3.3 GB split dyld shared cache cannot start.  The volume header's totalBlocks
+sets the size, so the partition being 229 GiB does not help; the volume has to
+be rebuilt.
+
+Nothing in the kernel formats HFS+.  This adds the receiving end of a volume
+imprint that Apple's own newfs_hfs prepares on the host:
+
+  - scripts/make-root-volume.py creates a sparse raw image, runs newfs_hfs -v
+    KebabRoot -b 4096 on it, reads the new volume header and its allocation
+    bitmap, and writes a VEXT v1 stream: a 32-byte header (magic, version,
+    volume bytes, block size, extent count, data bytes), then records of
+    {u64 offset, u32 length, u32 reserved, data}, then zero padding to a
+    64 KiB boundary.  Only blocks the new volume allocates are shipped; the
+    measured 16 GiB volume needs 426 of 4,194,304 blocks, 3 extents and
+    1,744,896 bytes of extent data.
+  - bsd/dev/kebab_vol.c parses that stream forward, validates every field and
+    every extent against the declared volume and the userdata partition,
+    captures the primary volume header from the stream and checks it before
+    the first block is written, then writes each extent through the UFS block
+    path.  After the last extent it reads the header back from the device,
+    compares all 512 bytes with the stream, and prints both headers.  Every
+    failure is a printed VOL ABORT/FAIL; nothing here panics.
+  - bsd/dev/kebab_ufs.c grows a raw block path (kebab_ufs_raw_write/read)
+    that bypasses the buffer cache and re-checks offset and length against the
+    userdata partition under the UFS lock.  There is no other device to write.
+  - bsd/dev/kebab_usb.c carries VOL BEGIN/DRY?/VOL? over the existing bulk OUT
+    transport, one 64 KiB chunk per command and one "VOL ACK <cumulative>"
+    line back, reusing the installer's buffer and pending/ACK discipline.  A
+    chunk is routed by the stream that armed it, not by the current mode.
+  - the command family is behind boot argument kebab_vol=1 (default off), and
+    a real write additionally needs the literal CONFIRM and a volume size that
+    fits inside userdata.  kebab_vol=1 also keeps the old root read-only even
+    when rootrw=1: the mounted HFS+ must not flush a cached block over the new
+    metadata.  The next, ordinary boot mounts the new volume read-write.
+  - the HFS+ mount log now prints the mounted volume's block size, total
+    blocks and free blocks, so the 64 MiB -> 16 GiB change is visible without
+    another tool.
+
+The old volume's header is printed as fields and as all 512 raw bytes before
+anything is written; the volume's contents are destroyed by design and are
+restored from the host with the existing KIST installer.
+
+The host side is measured: 16 GiB, 4096-byte blocks, 4,194,304 blocks, 426
+allocated, 3 extents, 1,744,896 bytes of extent data and a 1,769,472-byte
+stream.  The same kebab_vol.c compiled for the macOS host reconstructs a volume
+whose 426 allocated blocks and both volume headers are byte-identical to the
+newfs_hfs image and which fsck_hfs reports OK; a corrupted header and an
+oversized volume both abort with zero write calls.  The on-board imprint, the
+mount log showing 4,194,304 blocks, INST? free space and the 592,101,376-byte
+install are still pending -- the board was stranded in a panic when this was
+written -- and docs/BRING-UP-STATE.md section 63 carries the exact commands and
+expected output for that run.
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 6d92945..f38b521 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -108,6 +108,7 @@ bsd/dev/kebab_ufs.c			standard
+ bsd/dev/kebab_usb.c			standard
+ bsd/dev/kebab_fwlog.c			standard
+ bsd/dev/kebab_install.c			standard
++bsd/dev/kebab_vol.c			standard
+ bsd/dev/kebab_spmi.c			standard
+ bsd/dev/kebab_rpmh_vrm.c		standard
+ bsd/dev/kebab_touch.c			standard
+diff --git a/bsd/dev/kebab_ufs.c b/bsd/dev/kebab_ufs.c
+index 01ec82f..5d23d88 100644
+--- a/bsd/dev/kebab_ufs.c
++++ b/bsd/dev/kebab_ufs.c
+@@ -43,6 +43,8 @@ extern void kebab_early_putc(char c);
+ #include <pexpert/device_tree.h>
+ #include <libkern/libkern.h>
+ 
++#include "kebab_ufs.h"
++
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+ /* osfmk/arm/machine_routines.h, not exported to the BSD layer */
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -580,6 +582,124 @@ done:
+ 	buf_biodone(bp);
+ }
+ 
++/*
++ * Raw block path for bsd/dev/kebab_vol.c.  It deliberately bypasses the buffer
++ * cache: the caller writes a new filesystem over the one that is mounted, so a
++ * cached block must never be allowed to reach the device afterwards.  The old
++ * root is mounted read-only for that boot (kebab_vol=1), and the next boot
++ * reads everything from the device.
++ */
++int
++kebab_ufs_raw_write(uint64_t offset, const void *data, uint32_t length)
++{
++	int error = 0;
++	uint64_t part_bytes;
++
++	if (data == NULL || length == 0 ||
++	    (offset & (UFS_BLOCK - 1)) || (length & (UFS_BLOCK - 1)) ||
++	    length > BOUNCE_SIZE) {
++		return EINVAL;
++	}
++	lck_mtx_lock(&kebab_ufs_lock);
++	if (!su.ready) {
++		error = ENXIO;
++		goto out;
++	}
++	if (!su.writable) {
++		error = EROFS;
++		goto out;
++	}
++	part_bytes = su.nblocks * UFS_BLOCK;
++	if (offset > part_bytes || length > part_bytes - offset) {
++		error = EINVAL;
++		goto out;
++	}
++	memcpy((void *)(su.dma + DMA_BOUNCE), data, length);
++	error = ufs_write_blocks(su.first_block + offset / UFS_BLOCK,
++	    length / UFS_BLOCK);
++out:
++	lck_mtx_unlock(&kebab_ufs_lock);
++	return error;
++}
++
++int
++kebab_ufs_raw_read(uint64_t offset, void *data, uint32_t length)
++{
++	int error = 0;
++	uint64_t part_bytes, first;
++	uint32_t skip, blocks;
++
++	if (data == NULL || length == 0 || length > BOUNCE_SIZE) {
++		return EINVAL;
++	}
++	lck_mtx_lock(&kebab_ufs_lock);
++	if (!su.ready) {
++		error = ENXIO;
++		goto out;
++	}
++	part_bytes = su.nblocks * UFS_BLOCK;
++	if (offset > part_bytes || length > part_bytes - offset) {
++		error = EINVAL;
++		goto out;
++	}
++	first = offset & ~(uint64_t)(UFS_BLOCK - 1);
++	skip = (uint32_t)(offset - first);
++	blocks = (skip + length + UFS_BLOCK - 1) / UFS_BLOCK;
++	if (blocks > BOUNCE_SIZE / UFS_BLOCK) {
++		error = EINVAL;
++		goto out;
++	}
++	error = ufs_read_blocks(su.first_block + first / UFS_BLOCK, blocks);
++	if (!error) {
++		memcpy(data, (const void *)(su.dma + DMA_BOUNCE + skip), length);
++	}
++out:
++	lck_mtx_unlock(&kebab_ufs_lock);
++	return error;
++}
++
++uint64_t
++kebab_ufs_partition_bytes(void)
++{
++	uint64_t bytes = 0;
++
++	lck_mtx_lock(&kebab_ufs_lock);
++	if (su.ready) {
++		bytes = su.nblocks * UFS_BLOCK;
++	}
++	lck_mtx_unlock(&kebab_ufs_lock);
++	return bytes;
++}
++
++bool
++kebab_ufs_writable(void)
++{
++	bool writable;
++
++	lck_mtx_lock(&kebab_ufs_lock);
++	writable = su.ready && su.writable;
++	lck_mtx_unlock(&kebab_ufs_lock);
++	return writable;
++}
++
++/* SYNCHRONIZE CACHE(10), so the volume survives the reboot that follows. */
++int
++kebab_ufs_sync(void)
++{
++	int error;
++
++	lck_mtx_lock(&kebab_ufs_lock);
++	if (!su.ready) {
++		error = ENXIO;
++	} else if (!su.writable) {
++		error = EROFS;
++	} else {
++		error = ufs_sync_cache();
++	}
++	lck_mtx_unlock(&kebab_ufs_lock);
++	return error;
++}
++
+ static int
+ kebab_ufs_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag,
+     __unused struct proc *p, int is_char)
+diff --git a/bsd/dev/kebab_ufs.h b/bsd/dev/kebab_ufs.h
+new file mode 100644
+index 0000000..bd8a79f
+--- /dev/null
++++ b/bsd/dev/kebab_ufs.h
+@@ -0,0 +1,32 @@
++/*
++ * KEBAB UFS: the block path behind the console volume writer.
++ *
++ * The installer goes through the mounted filesystem; the volume writer cannot,
++ * because it replaces the filesystem that is mounted.  These calls talk to the
++ * userdata partition directly: whole 4 KiB device blocks, bounds-checked
++ * against the partition on every call, and only when boot-arg ufsrw=1 made the
++ * disk writable.  There is no buffer cache in this path, so the caller must
++ * never use it while the old volume is mounted writable; kebab_vol=1 forces the
++ * root mount read-only for exactly that reason.
++ */
++#ifndef _KEBAB_UFS_H_
++#define _KEBAB_UFS_H_
++
++#include <sys/types.h>
++
++/* Write whole blocks.  offset and length must both be 4 KiB aligned. */
++int kebab_ufs_raw_write(uint64_t offset, const void *data, uint32_t length);
++
++/* Read arbitrary bytes.  Used for the volume header before and after a write. */
++int kebab_ufs_raw_read(uint64_t offset, void *data, uint32_t length);
++
++/* userdata's size in bytes, zero when the disk did not come up. */
++uint64_t kebab_ufs_partition_bytes(void);
++
++/* True when the disk is up and boot-arg ufsrw=1 allowed writes. */
++bool kebab_ufs_writable(void);
++
++/* Flush the device's write cache after a batch of raw writes. */
++int kebab_ufs_sync(void);
++
++#endif /* _KEBAB_UFS_H_ */
+diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
+index a671c31..b87690a 100644
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -30,6 +30,14 @@
+ #include <vm/vm_kern.h>
+ 
+ #include "kebab_install.h"
++#include "kebab_vol.h"
++
++/*
++ * The installer and the volume writer share one 64 KiB bulk buffer and one
++ * ACK line, so the two chunk sizes must stay identical.
++ */
++_Static_assert(KEBAB_VOL_CHUNK == KEBAB_INST_CHUNK,
++    "installer and volume writer must use the same chunk size");
+ 
+ /* PEHaltRestart() and kPERestartCPU: the platform restart path, not a
+  * driver-private reset register. */
+@@ -290,6 +298,9 @@ extern int kebab_spmi_pon_reason_write(void);
+ #define UD_REBOOT_INST_DRY      23u
+ #define UD_REBOOT_INST_STATUS   24u
+ #define UD_REBOOT_INST_CHECK    25u
++#define UD_REBOOT_VOL_BEGIN     26u
++#define UD_REBOOT_VOL_DRY       27u
++#define UD_REBOOT_VOL_STATUS    28u
+ 
+ struct ud_endpoint {
+ 	uint32_t trb, length, ctl, resource;
+@@ -359,6 +370,19 @@ static struct {
+ 	volatile bool     inst_stream;
+ 	volatile bool     inst_pending;
+ 	uint32_t          inst_len;
++	/*
++	 * The volume writer uses the same buffer and the same pending/ACK
++	 * discipline, with its own mode flag so a chunk is never handed to the
++	 * wrong parser.  out_stream records which stream the arm was issued for,
++	 * because the mode can change while a transfer is in flight.
++	 */
++	volatile bool     vol_stream;
++	volatile bool     vol_pending;
++	uint32_t          vol_len;
++	uint32_t          out_stream;       /* 0 console, 1 INST, 2 VOL */
++	uint64_t          vol_wire;         /* VOL BEGIN / VOL DRY argument */
++	uint64_t          vol_size;         /* requested volume size */
++	bool              vol_confirm;
+ 	uint32_t          out_off;          /* buffer the pending OUT arm uses */
+ 	uint64_t          inst_wire;        /* the INST BEGIN argument */
+ 	char              inst_path[KEBAB_INST_PATH_MAX];
+@@ -1158,12 +1182,14 @@ ud_service(void)
+ 	 * right buffer and length).
+ 	 */
+ 	if (!ud.ep[EP_BULK_OUT].busy && !ud.ep[EP_BULK_OUT].halted &&
+-	    !ud.inst_pending && ud.reboot_command == 0) {
+-		uint32_t off = ud.inst_stream ? UD_INST : UD_BULKOUT;
+-		uint32_t len = ud.inst_stream ? KEBAB_INST_CHUNK : ud.mps;
++	    !ud.inst_pending && !ud.vol_pending && ud.reboot_command == 0) {
++		bool stream = ud.inst_stream || ud.vol_stream;
++		uint32_t off = stream ? UD_INST : UD_BULKOUT;
++		uint32_t len = stream ? KEBAB_INST_CHUNK : ud.mps;
+ 		int rc = ud_start(UD_TRB_BULKOUT, EP_BULK_OUT, off, len, TRBCTL_NORMAL);
+ 		if (rc) { ud_fault((unsigned)-rc); return; }
+ 		ud.out_off = off;
++		ud.out_stream = ud.vol_stream ? 2u : (ud.inst_stream ? 1u : 0u);
+ 	}
+ 	if (ud.notify_pending && !ud.ep[EP_NOTIFY].busy && !ud.ep[EP_NOTIFY].halted) {
+ 		/* Device-side virtual UART is online: DCD|DSR, independent of host DTR. */
+@@ -1260,6 +1286,102 @@ ud_inst_command(const char *buf, uint32_t received)
+ 	return 0;
+ }
+ 
++/*
++ * VOL commands carry two numbers and a literal confirmation:
++ *
++ *   VOL BEGIN <wire_bytes> <volume_bytes> CONFIRM
++ *   VOL DRY <wire_bytes>
++ *   VOL?
++ *
++ * The confirmation is not decoration: a write replaces the filesystem the
++ * kernel is running from, so the operator has to spell out the size and the
++ * word.  Everything is parsed out of the same completion, into bounded fields.
++ */
++static bool
++ud_u64_span(const char *p, uint32_t n, uint64_t *out, uint32_t *used)
++{
++	uint64_t v = 0;
++	uint32_t i = 0;
++
++	if (n == 0 || p[0] < '0' || p[0] > '9') {
++		return false;
++	}
++	while (i < n && p[i] >= '0' && p[i] <= '9') {
++		if (v > (0xffffffffffffffffull - 9) / 10) {
++			return false;
++		}
++		v = v * 10 + (uint64_t)(p[i] - '0');
++		i++;
++	}
++	*out = v;
++	*used = i;
++	return true;
++}
++
++static uint32_t
++ud_vol_command(const char *buf, uint32_t received)
++{
++	for (uint32_t i = 0; i + 4 <= received; i++) {
++		const char *p = buf + i;
++		uint32_t n = received - i;
++		uint64_t wire = 0, size = 0;
++		uint32_t used = 0, off;
++
++		if (memcmp(p, "VOL", 3) != 0) {
++			continue;
++		}
++		if (n >= sizeof("VOL?\n") - 1 &&
++		    !memcmp(p, "VOL?\n", sizeof("VOL?\n") - 1)) {
++			return UD_REBOOT_VOL_STATUS;
++		}
++		if (n > sizeof("VOL BEGIN ") - 1 &&
++		    !memcmp(p, "VOL BEGIN ", sizeof("VOL BEGIN ") - 1)) {
++			off = sizeof("VOL BEGIN ") - 1;
++			if (!ud_u64_span(p + off, n - off, &wire, &used)) {
++				continue;
++			}
++			off += used;
++			if (off >= n || p[off] != ' ') {
++				continue;
++			}
++			off++;
++			if (!ud_u64_span(p + off, n - off, &size, &used)) {
++				continue;
++			}
++			off += used;
++			if (off >= n || p[off] != ' ') {
++				continue;
++			}
++			off++;
++			if (n - off < sizeof("CONFIRM\n") - 1 ||
++			    memcmp(p + off, "CONFIRM\n",
++			    sizeof("CONFIRM\n") - 1) != 0) {
++				continue;
++			}
++			ud.vol_wire = wire;
++			ud.vol_size = size;
++			ud.vol_confirm = true;
++			return UD_REBOOT_VOL_BEGIN;
++		}
++		if (n > sizeof("VOL DRY ") - 1 &&
++		    !memcmp(p, "VOL DRY ", sizeof("VOL DRY ") - 1)) {
++			off = sizeof("VOL DRY ") - 1;
++			if (!ud_u64_span(p + off, n - off, &wire, &used)) {
++				continue;
++			}
++			off += used;
++			if (off >= n || p[off] != '\n') {
++				continue;
++			}
++			ud.vol_wire = wire;
++			ud.vol_size = 0;
++			ud.vol_confirm = false;
++			return UD_REBOOT_VOL_DRY;
++		}
++	}
++	return 0;
++}
++
+ /*
+  * While serial KDP owns the byte stream, a KDP frame always starts with 0xFA,
+  * so a command anchored at the first byte cannot be confused with debugger
+@@ -1334,6 +1456,10 @@ ud_reboot_command(const char *buf, uint32_t received)
+ 			uint32_t inst = ud_inst_command(buf, received);
+ 			if (inst != 0) return inst;
+ 		}
++		{
++			uint32_t vol = ud_vol_command(buf, received);
++			if (vol != 0) return vol;
++		}
+ 		return 0;
+ 	}
+ 	if (received >= sizeof("REBOOT\n") - 1 &&
+@@ -1427,6 +1553,10 @@ ud_reboot_command(const char *buf, uint32_t received)
+ 		uint32_t inst = ud_inst_command(buf, received);
+ 		if (inst != 0) return inst;
+ 	}
++	{
++		uint32_t vol = ud_vol_command(buf, received);
++		if (vol != 0) return vol;
++	}
+ 	return 0;
+ }
+ 
+@@ -1645,6 +1775,15 @@ ud_inst_arm(bool dry)
+ 	ud.inst_stream = kebab_install_active();
+ }
+ 
++/* Same contract as ud_inst_arm(): the mode switch happens only when the writer
++ * really took the stream. */
++static void
++ud_vol_arm(bool dry)
++{
++	kebab_vol_begin(dry, ud.vol_wire, ud.vol_size, ud.vol_confirm);
++	ud.vol_stream = kebab_vol_active();
++}
++
+ static void
+ ud_run_reboot_command(uint32_t command)
+ {
+@@ -1699,6 +1838,12 @@ ud_run_reboot_command(uint32_t command)
+ 		kebab_install_status();
+ 	} else if (command == UD_REBOOT_INST_CHECK) {
+ 		kebab_install_check(ud.inst_path);
++	} else if (command == UD_REBOOT_VOL_BEGIN) {
++		ud_vol_arm(false);
++	} else if (command == UD_REBOOT_VOL_DRY) {
++		ud_vol_arm(true);
++	} else if (command == UD_REBOOT_VOL_STATUS) {
++		kebab_vol_status();
+ 	}
+ }
+ 
+@@ -1720,8 +1865,18 @@ ud_bulk_out_done(uint32_t received)
+ 	if (ud.out_off == UD_INST) {
+ 		if (received > KEBAB_INST_CHUNK) { ud_fault(4); return; }
+ 		ud_from_dev(UD_INST, received);
+-		ud.inst_len = received;
+-		ud.inst_pending = true;
++		/*
++		 * Which stream this arm belonged to is recorded when the arm is
++		 * issued.  Reading the current mode instead would misroute a
++		 * chunk that completes after the stream was aborted.
++		 */
++		if (ud.out_stream == 2u) {
++			ud.vol_len = received;
++			ud.vol_pending = true;
++		} else {
++			ud.inst_len = received;
++			ud.inst_pending = true;
++		}
+ 		return;
+ 	}
+ 	ud_from_dev(UD_BULKOUT, ud.mps);
+@@ -1980,8 +2135,22 @@ ud_thread(void *arg __unused, wait_result_t wr __unused)
+ 			kebab_install_bytes((const void *)(ud.dma + UD_INST), len);
+ 			ud.inst_stream = kebab_install_active();
+ 		}
++		/*
++		 * The volume writer runs here for the same reason as the
++		 * installer: raw UFS commands sleep/poll and must not hold the
++		 * transport gate.  vol_pending keeps the endpoint unarmed until
++		 * the chunk has been written and acknowledged.
++		 */
++		if (ud.vol_pending) {
++			uint32_t len = ud.vol_len;
++			ud.vol_pending = false;
++			kebab_vol_bytes((const void *)(ud.dma + UD_INST), len);
++			ud.vol_stream = kebab_vol_active();
++		}
+ 		kebab_install_poll();
+ 		ud.inst_stream = kebab_install_active();
++		kebab_vol_poll();
++		ud.vol_stream = kebab_vol_active();
+ 		ud_sleep_ms(1);
+ 	}
+ }
+diff --git a/bsd/dev/kebab_vol.c b/bsd/dev/kebab_vol.c
+new file mode 100644
+index 0000000..72c2b9b
+--- /dev/null
++++ b/bsd/dev/kebab_vol.c
+@@ -0,0 +1,813 @@
++/*
++ * KEBAB VOL: write a host-made HFS+ volume onto the userdata partition.
++ *
++ * The host (scripts/make-root-volume.py) runs newfs_hfs and ships the blocks
++ * the new volume allocates as a VEXT v1 stream:
++ *
++ *   32-byte stream header, little endian
++ *     0   4  magic 'VEXT'            4   2  version 1
++ *     6   2  header size 32          8   8  volume size in bytes
++ *    16   4  allocation block size  20   4  extent count
++ *    24   8  sum of extent lengths
++ *   16-byte extent header, then length bytes of data, repeated
++ *     0   8  byte offset in the volume (block aligned)
++ *     8   4  length in bytes (block aligned, non-zero)
++ *    12   4  reserved, zero
++ *   zero padding to a 64 KiB boundary
++ *
++ * The parser only moves forward, every field is bounded before it is used,
++ * each extent must be ordered and inside the declared volume, and the volume
++ * itself must fit inside the userdata partition.  The primary volume header is
++ * captured from the stream and validated before the first block is written, so
++ * a stream whose header and size disagree cannot destroy the old volume.
++ *
++ * The host owns the transport: bsd/dev/kebab_usb.c takes one 64 KiB chunk per
++ * bulk-OUT completion and this file answers "VOL ACK <cumulative bytes>".
++ * Nothing here sleeps, panics or retries a failed write.
++ */
++#if defined(KEBAB)
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <sys/kernel.h>
++#include <sys/mount.h>
++#include <sys/vnode.h>
++#include <sys/vnode_internal.h>
++#include <kern/clock.h>
++#include <mach/mach_time.h>
++#include <libkern/libkern.h>
++#include <pexpert/pexpert.h>
++
++#include "kebab_ufs.h"
++#include "kebab_vol.h"
++
++#define KV_HDR          32u
++#define KV_EXT_HDR      16u
++#define KV_BLOCK        4096u
++#define KV_VH_OFF       1024u
++#define KV_VH_SIZE      512u
++#define KV_TIMEOUT_NS   60000000000ull  /* 60 s with no chunk */
++
++#define KV_MAGIC        0x54584556u     /* 'VEXT' */
++#define KV_VERSION      1u
++
++enum kv_state {
++	KV_S_HDR = 0,
++	KV_S_EXT_HDR,
++	KV_S_DATA,
++	KV_S_PAD,
++	KV_S_DONE,
++};
++
++static struct {
++	bool        gate_checked;
++	bool        gated;
++	bool        active;
++	bool        dry;
++
++	uint32_t    state;
++	uint32_t    hdr_got;
++	uint8_t     hdr[KV_HDR];
++
++	uint64_t    wire_total;
++	uint64_t    wire_seen;
++	uint64_t    wire_left;
++	uint64_t    volume_bytes;
++	uint32_t    block_size;
++	uint32_t    extent_total;
++	uint32_t    extent_done;
++	uint64_t    data_total;
++	uint64_t    data_seen;
++
++	uint64_t    extent_off;      /* current extent, absolute */
++	uint64_t    extent_len;
++	uint64_t    extent_left;
++	uint64_t    extent_written;  /* flushed bytes of the current extent */
++	uint8_t    *io;              /* KV_CHUNK staging buffer */
++	uint32_t    io_fill;
++
++	uint8_t     vh[KV_VH_SIZE];  /* captured from the stream */
++	bool        vh_seen;
++	uint64_t    prev_end;
++
++	uint32_t    failed;
++	uint64_t    ns_start;
++	uint64_t    ns_last;
++} kv;
++
++static uint16_t
++kv_le16(const uint8_t *p)
++{
++	return (uint16_t)(p[0] | (p[1] << 8));
++}
++
++static uint32_t
++kv_le32(const uint8_t *p)
++{
++	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
++	    ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++}
++
++static uint64_t
++kv_le64(const uint8_t *p)
++{
++	return (uint64_t)kv_le32(p) | ((uint64_t)kv_le32(p + 4) << 32);
++}
++
++static uint32_t
++kv_be16(const uint8_t *p)
++{
++	return (uint32_t)p[0] << 8 | p[1];
++}
++
++static uint32_t
++kv_be32(const uint8_t *p)
++{
++	return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 |
++	    (uint32_t)p[2] << 8 | p[3];
++}
++
++static uint64_t
++kv_now_ns(void)
++{
++	uint64_t ns = 0;
++
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns;
++}
++
++/* --------------------------------------------------------------- gating */
++
++bool
++kebab_vol_gated(void)
++{
++	uint32_t on = 0;
++
++	if (!kv.gate_checked) {
++		kv.gate_checked = true;
++		kv.gated = PE_parse_boot_argn("kebab_vol", &on, sizeof(on)) && on != 0;
++	}
++	return kv.gated;
++}
++
++static bool
++kv_gate(void)
++{
++	if (!kebab_vol_gated()) {
++		printf("VOL disabled: boot with kebab_vol=1 to enable the volume "
++		    "writer\n");
++		return false;
++	}
++	return true;
++}
++
++/* ------------------------------------------------------- volume header */
++
++/*
++ * Decode and print one volume header.  The raw bytes are printed too: the old
++ * header is about to stop existing, and "print it, do not save it" only works
++ * if the bytes themselves appear in the log.
++ */
++static void
++kv_print_vh(const char *tag, const uint8_t *vh, bool hex)
++{
++	char line[16 * 3 + 1];
++	static const char digits[] = "0123456789abcdef";
++	uint32_t i, j;
++
++	printf("VOL %s vh sig 0x%04x version %u attributes 0x%08x "
++	    "lastMount 0x%08x journal 0x%08x\n", tag,
++	    kv_be16(vh), kv_be16(vh + 2), kv_be32(vh + 4), kv_be32(vh + 8),
++	    kv_be32(vh + 12));
++	printf("VOL %s vh created %u modified %u checked %u files %u "
++	    "folders %u nextcnid %u\n", tag, kv_be32(vh + 16),
++	    kv_be32(vh + 20), kv_be32(vh + 28), kv_be32(vh + 32),
++	    kv_be32(vh + 36), kv_be32(vh + 64));
++	printf("VOL %s vh bsize %u blocks %u free %u freebytes %llu "
++	    "volbytes %llu\n", tag, kv_be32(vh + 40), kv_be32(vh + 44),
++	    kv_be32(vh + 48),
++	    (unsigned long long)kv_be32(vh + 48) * kv_be32(vh + 40),
++	    (unsigned long long)kv_be32(vh + 44) * kv_be32(vh + 40));
++	if (!hex) {
++		return;
++	}
++	for (i = 0; i < KV_VH_SIZE; i += 16) {
++		for (j = 0; j < 16; j++) {
++			line[j * 3] = digits[vh[i + j] >> 4];
++			line[j * 3 + 1] = digits[vh[i + j] & 15];
++			line[j * 3 + 2] = j == 15 ? 0 : ' ';
++		}
++		printf("VOL %s bytes %03x %s\n", tag, i, line);
++	}
++}
++
++static int
++kv_check_vh(const uint8_t *vh, uint64_t volume_bytes)
++{
++	uint32_t sig = kv_be16(vh);
++	uint32_t ver = kv_be16(vh + 2);
++	uint32_t bsize = kv_be32(vh + 40);
++	uint32_t blocks = kv_be32(vh + 44);
++
++	if (sig != 0x482b || ver != 4) {
++		printf("VOL ABORT volume header signature 0x%04x version %u\n",
++		    sig, ver);
++		return EINVAL;
++	}
++	if (bsize != KV_BLOCK) {
++		printf("VOL ABORT volume header block size %u, this writer "
++		    "writes %u-byte blocks\n", bsize, KV_BLOCK);
++		return EINVAL;
++	}
++	if ((uint64_t)blocks * bsize != volume_bytes) {
++		printf("VOL ABORT volume header says %u blocks of %u = %llu "
++		    "bytes, stream declares %llu\n", blocks, bsize,
++		    (unsigned long long)blocks * bsize,
++		    (unsigned long long)volume_bytes);
++		return EINVAL;
++	}
++	return 0;
++}
++
++static int
++kv_read_vh(uint8_t *vh)
++{
++	int error = kebab_ufs_raw_read(KV_VH_OFF, vh, KV_VH_SIZE);
++	if (error) {
++		printf("VOL: cannot read the on-disk volume header (error %d)\n",
++		    error);
++	}
++	return error;
++}
++
++/* ------------------------------------------------------------- session */
++
++static void
++kv_reset(void)
++{
++	kv.active = false;
++	kv.state = KV_S_DONE;
++	kv.hdr_got = 0;
++	kv.io_fill = 0;
++}
++
++static void
++kv_abort(const char *why, int error)
++{
++	if (error) {
++		printf("VOL ABORT %s (error %d)\n", why, error);
++	} else {
++		printf("VOL ABORT %s\n", why);
++	}
++	kv.failed++;
++	kv_reset();
++}
++
++void
++kebab_vol_begin(bool dry, uint64_t wire_bytes, uint64_t volume_bytes,
++    bool confirmed)
++{
++	uint64_t partition;
++	uint8_t old[KV_VH_SIZE];
++	bool have_old;
++
++	if (!kv_gate()) {
++		return;
++	}
++	if (kv.active) {
++		printf("VOL busy: %llu of %llu bytes already consumed\n",
++		    (unsigned long long)kv.wire_seen,
++		    (unsigned long long)kv.wire_total);
++		return;
++	}
++	if (!dry && !kebab_ufs_writable()) {
++		printf("VOL refused: userdata is read-only; boot with ufsrw=1\n");
++		return;
++	}
++	partition = kebab_ufs_partition_bytes();
++	if (partition == 0) {
++		printf("VOL refused: the userdata partition is not available\n");
++		return;
++	}
++	if (wire_bytes == 0 || (wire_bytes % KEBAB_VOL_CHUNK) != 0) {
++		printf("VOL refused: the stream must be a non-zero multiple of "
++		    "%u bytes, not %llu\n", KEBAB_VOL_CHUNK,
++		    (unsigned long long)wire_bytes);
++		return;
++	}
++	if (!dry) {
++		if (!confirmed) {
++			printf("VOL refused: a real write needs the confirmation "
++			    "argument (VOL BEGIN <wire> <volume> CONFIRM)\n");
++			return;
++		}
++		if (volume_bytes == 0 || (volume_bytes % KV_BLOCK) != 0) {
++			printf("VOL refused: volume size %llu is not a non-zero "
++			    "multiple of %u\n", (unsigned long long)volume_bytes,
++			    KV_BLOCK);
++			return;
++		}
++		if (volume_bytes > partition) {
++			printf("VOL refused: requested volume %llu bytes exceeds "
++			    "the %llu-byte userdata partition\n",
++			    (unsigned long long)volume_bytes,
++			    (unsigned long long)partition);
++			return;
++		}
++	} else {
++		volume_bytes = 0;
++	}
++	if (kv.io == NULL) {
++		kv.io = kalloc_data(KEBAB_VOL_CHUNK, Z_WAITOK);
++		if (kv.io == NULL) {
++			printf("VOL refused: no %u-byte buffer\n",
++			    KEBAB_VOL_CHUNK);
++			return;
++		}
++	}
++
++	/*
++	 * Read and print the old header before VOL BEGIN is announced.  The
++	 * host starts sending only when it sees that line, so the old bytes are
++	 * already in the log before the first block can move, and a header that
++	 * cannot be read aborts the write without taking the stream.
++	 */
++	have_old = (kv_read_vh(old) == 0);
++	if (!have_old && !dry) {
++		printf("VOL refused: the old volume header cannot be read\n");
++		return;
++	}
++
++	kv.active = true;
++	kv.dry = dry;
++	kv.state = KV_S_HDR;
++	kv.hdr_got = 0;
++	kv.wire_total = wire_bytes;
++	kv.wire_seen = 0;
++	kv.wire_left = wire_bytes;
++	kv.volume_bytes = volume_bytes;
++	kv.block_size = KV_BLOCK;
++	kv.extent_total = 0;
++	kv.extent_done = 0;
++	kv.data_total = 0;
++	kv.data_seen = 0;
++	kv.extent_off = 0;
++	kv.extent_len = 0;
++	kv.extent_left = 0;
++	kv.extent_written = 0;
++	kv.io_fill = 0;
++	kv.vh_seen = false;
++	kv.prev_end = 0;
++	kv.failed = 0;
++	kv.ns_start = kv.ns_last = kv_now_ns();
++
++	printf("VOL partition %llu bytes (%llu MiB), writable %d\n",
++	    (unsigned long long)partition, (unsigned long long)(partition >> 20),
++	    kebab_ufs_writable() ? 1 : 0);
++	if (have_old) {
++		kv_print_vh("OLD", old, true);
++	}
++	printf("VOL BEGIN %llu volume %llu %s chunk %u\n",
++	    (unsigned long long)wire_bytes,
++	    (unsigned long long)volume_bytes, dry ? "dry" : "write",
++	    KEBAB_VOL_CHUNK);
++}
++
++/* --------------------------------------------------------------- output */
++
++static int
++kv_flush(void)
++{
++	int error;
++
++	if (kv.io_fill == 0) {
++		return 0;
++	}
++	if ((kv.io_fill % KV_BLOCK) != 0) {
++		printf("VOL ABORT extent at 0x%llx has a %u-byte tail that is "
++		    "not block aligned\n", (unsigned long long)kv.extent_off,
++		    kv.io_fill);
++		return EINVAL;
++	}
++	if (!kv.dry) {
++		error = kebab_ufs_raw_write(kv.extent_off + kv.extent_written,
++		    kv.io, kv.io_fill);
++		if (error) {
++			printf("VOL FAIL write 0x%llx+0x%x (error %d)\n",
++			    (unsigned long long)(kv.extent_off +
++			    kv.extent_written), kv.io_fill, error);
++			return error;
++		}
++	}
++	kv.extent_written += kv.io_fill;
++	kv.io_fill = 0;
++	return 0;
++}
++
++/*
++ * The volume header is captured from the stream itself, and checked before the
++ * staging buffer that holds it is flushed.  A stream whose header disagrees
++ * with the declared volume therefore stops before it overwrites block 0.
++ */
++static int
++kv_capture_vh(void)
++{
++	uint64_t have;
++
++	if (kv.vh_seen || kv.extent_off != 0) {
++		return 0;
++	}
++	have = kv.extent_written + kv.io_fill;
++	if (have < KV_VH_OFF + KV_VH_SIZE) {
++		return 0;
++	}
++	if (kv.extent_written > KV_VH_OFF) {
++		printf("VOL ABORT volume header is no longer in the staging "
++		    "buffer\n");
++		return EINVAL;
++	}
++	memcpy(kv.vh, kv.io + KV_VH_OFF - kv.extent_written, KV_VH_SIZE);
++	kv.vh_seen = true;
++	return kv_check_vh(kv.vh, kv.volume_bytes);
++}
++
++/* ------------------------------------------------------------ parsing */
++
++static void
++kv_stream_hdr(void)
++{
++	uint64_t expected;
++	uint64_t pad;
++	uint32_t count;
++	uint32_t bsize;
++
++	if (kv_le32(kv.hdr) != KV_MAGIC || kv_le16(kv.hdr + 4) != KV_VERSION) {
++		kv_abort("bad stream header", 0);
++		return;
++	}
++	if (kv_le16(kv.hdr + 6) != KV_HDR) {
++		kv_abort("unexpected stream header size", 0);
++		return;
++	}
++	bsize = kv_le32(kv.hdr + 16);
++	count = kv_le32(kv.hdr + 20);
++	if (bsize != KV_BLOCK) {
++		printf("VOL ABORT stream block size %u, this writer writes %u\n",
++		    bsize, KV_BLOCK);
++		kv.failed++;
++		kv_reset();
++		return;
++	}
++	if (kv.volume_bytes != 0 && kv_le64(kv.hdr + 8) != kv.volume_bytes) {
++		printf("VOL ABORT stream volume %llu != command volume %llu\n",
++		    (unsigned long long)kv_le64(kv.hdr + 8),
++		    (unsigned long long)kv.volume_bytes);
++		kv.failed++;
++		kv_reset();
++		return;
++	}
++	kv.volume_bytes = kv_le64(kv.hdr + 8);
++	if (kv.volume_bytes == 0 || (kv.volume_bytes % KV_BLOCK) != 0 ||
++	    kv.volume_bytes > kebab_ufs_partition_bytes()) {
++		printf("VOL ABORT volume %llu does not fit the partition\n",
++		    (unsigned long long)kv.volume_bytes);
++		kv.failed++;
++		kv_reset();
++		return;
++	}
++	kv.extent_total = count;
++	kv.data_total = kv_le64(kv.hdr + 24);
++	/* Every data byte has to fit in the stream, so this cannot overflow. */
++	if (kv.data_total > kv.wire_total ||
++	    (uint64_t)count * KV_EXT_HDR > kv.wire_total ||
++	    kv.data_total > kv.wire_total - (uint64_t)count * KV_EXT_HDR) {
++		kv_abort("stream declares more data than it carries", 0);
++		return;
++	}
++	expected = (uint64_t)KV_HDR + (uint64_t)count * KV_EXT_HDR +
++	    kv.data_total;
++	if (expected > kv.wire_total) {
++		kv_abort("stream declares more data than it carries", 0);
++		return;
++	}
++	pad = kv.wire_total - expected;
++	if (pad >= KEBAB_VOL_CHUNK) {
++		kv_abort("stream padding is larger than one chunk", 0);
++		return;
++	}
++	if (count == 0) {
++		kv_abort("stream has no extents", 0);
++		return;
++	}
++	printf("VOL STREAM volume %llu bytes (%llu MiB), block %u, "
++	    "extents %u, data %llu bytes, wire %llu\n",
++	    (unsigned long long)kv.volume_bytes,
++	    (unsigned long long)(kv.volume_bytes >> 20), kv.block_size,
++	    count, (unsigned long long)kv.data_total,
++	    (unsigned long long)kv.wire_total);
++	kv.state = KV_S_EXT_HDR;
++}
++
++static void
++kv_extent_hdr(void)
++{
++	uint64_t off = kv_le64(kv.hdr);
++	uint32_t len = kv_le32(kv.hdr + 8);
++	uint32_t rsvd = kv_le32(kv.hdr + 12);
++
++	if (rsvd != 0 || len == 0 || (off % KV_BLOCK) != 0 ||
++	    (len % KV_BLOCK) != 0) {
++		kv_abort("malformed extent header", 0);
++		return;
++	}
++	if (off < kv.prev_end) {
++		kv_abort("extents are not ordered or overlap", 0);
++		return;
++	}
++	if (off > kv.volume_bytes || len > kv.volume_bytes - off) {
++		kv_abort("extent lies outside the volume", 0);
++		return;
++	}
++	if (kv.extent_done == 0 && off != 0) {
++		kv_abort("first extent does not start at block 0", 0);
++		return;
++	}
++	if (kv.data_seen + len > kv.data_total) {
++		kv_abort("extents carry more data than the stream declares", 0);
++		return;
++	}
++	kv.prev_end = off + len;
++	kv.extent_off = off;
++	kv.extent_len = len;
++	kv.extent_left = len;
++	kv.extent_written = 0;
++	kv.io_fill = 0;
++	printf("VOL EXTENT %u/%u off 0x%llx len 0x%x\n",
++	    kv.extent_done + 1, kv.extent_total, (unsigned long long)off, len);
++	kv.state = KV_S_DATA;
++}
++
++static void
++kv_data(const uint8_t *p, uint32_t n)
++{
++	while (n > 0 && kv.active) {
++		uint32_t room = KEBAB_VOL_CHUNK - kv.io_fill;
++		uint32_t take = n;
++		int error;
++
++		if ((uint64_t)take > kv.extent_left) {
++			take = (uint32_t)kv.extent_left;
++		}
++		if (take > room) {
++			take = room;
++		}
++		memcpy(kv.io + kv.io_fill, p, take);
++		kv.io_fill += take;
++		kv.extent_left -= take;
++		kv.data_seen += take;
++		p += take;
++		n -= take;
++
++		error = kv_capture_vh();
++		if (error) {
++			kv.failed++;
++			kv_reset();
++			return;
++		}
++		if (kv.io_fill == KEBAB_VOL_CHUNK) {
++			error = kv_flush();
++			if (error) {
++				kv_abort("write failed", error);
++				return;
++			}
++		}
++		if (kv.extent_left == 0) {
++			error = kv_flush();
++			if (error) {
++				kv_abort("write failed", error);
++				return;
++			}
++			if (kv.extent_written != kv.extent_len) {
++				kv_abort("extent length mismatch", 0);
++				return;
++			}
++			kv.extent_done++;
++			if (!kv.vh_seen) {
++				kv_abort("the stream does not contain block 0", 0);
++				return;
++			}
++			if (kv.extent_done == kv.extent_total) {
++				kv.state = KV_S_PAD;
++			} else {
++				kv.state = KV_S_EXT_HDR;
++			}
++		}
++	}
++}
++
++static void
++kv_finish(void)
++{
++	uint8_t disk[KV_VH_SIZE];
++	uint64_t ms = (kv_now_ns() - kv.ns_start) / 1000000ull;
++	int error;
++
++	if (kv.extent_done != kv.extent_total ||
++	    kv.data_seen != kv.data_total || kv.wire_seen != kv.wire_total) {
++		printf("VOL ABORT stream ended after %u/%u extents, %llu/%llu "
++		    "data, %llu/%llu wire\n", kv.extent_done, kv.extent_total,
++		    (unsigned long long)kv.data_seen,
++		    (unsigned long long)kv.data_total,
++		    (unsigned long long)kv.wire_seen,
++		    (unsigned long long)kv.wire_total);
++		kv.failed++;
++		kv_reset();
++		return;
++	}
++	if (!kv.vh_seen) {
++		kv_abort("no volume header in the stream", 0);
++		return;
++	}
++	if (kv.dry) {
++		kv_print_vh("PLAN", kv.vh, false);
++		printf("VOL PLAN extents %u bytes %llu wire %llu volume %llu\n",
++		    kv.extent_done, (unsigned long long)kv.data_seen,
++		    (unsigned long long)kv.wire_seen,
++		    (unsigned long long)kv.volume_bytes);
++		kv_reset();
++		return;
++	}
++	error = kebab_ufs_sync();
++	if (error) {
++		kv_abort("the new volume cannot be flushed to the device", error);
++		return;
++	}
++	error = kebab_ufs_raw_read(KV_VH_OFF, disk, KV_VH_SIZE);
++	if (error) {
++		kv_abort("the new volume header cannot be read back", error);
++		return;
++	}
++	if (memcmp(disk, kv.vh, KV_VH_SIZE) != 0) {
++		printf("VOL FAIL the header read back from the device differs "
++		    "from the stream\n");
++		kv.failed++;
++		kv_reset();
++		return;
++	}
++	kv_print_vh("NEW", disk, true);
++	printf("VOL DONE extents %u bytes %llu wire %llu ms %llu\n",
++	    kv.extent_done, (unsigned long long)kv.data_seen,
++	    (unsigned long long)kv.wire_seen, (unsigned long long)ms);
++	kv_reset();
++}
++
++/*
++ * One bulk-OUT chunk.  Called by the USB event thread with no transport lock
++ * held; the endpoint stays unarmed until this returns and the ACK is printed.
++ */
++void
++kebab_vol_bytes(const void *buf, uint32_t len)
++{
++	const uint8_t *p = buf;
++	uint32_t n = len;
++
++	if (!kv.active) {
++		return;
++	}
++	if ((uint64_t)len > kv.wire_left) {
++		printf("VOL ABORT chunk of %u bytes exceeds the %llu bytes "
++		    "left\n", len, (unsigned long long)kv.wire_left);
++		kv.failed++;
++		kv_reset();
++		return;
++	}
++	kv.ns_last = kv_now_ns();
++
++	while (n > 0 && kv.active) {
++		switch (kv.state) {
++		case KV_S_HDR: {
++			uint32_t need = KV_HDR - kv.hdr_got;
++			uint32_t take = MIN(need, n);
++
++			memcpy(kv.hdr + kv.hdr_got, p, take);
++			kv.hdr_got += take;
++			p += take;
++			n -= take;
++			kv.wire_seen += take;
++			kv.wire_left -= take;
++			if (kv.hdr_got == KV_HDR) {
++				kv.hdr_got = 0;
++				kv_stream_hdr();
++			}
++			break;
++		}
++		case KV_S_EXT_HDR: {
++			uint32_t need = KV_EXT_HDR - kv.hdr_got;
++			uint32_t take = MIN(need, n);
++
++			memcpy(kv.hdr + kv.hdr_got, p, take);
++			kv.hdr_got += take;
++			p += take;
++			n -= take;
++			kv.wire_seen += take;
++			kv.wire_left -= take;
++			if (kv.hdr_got == KV_EXT_HDR) {
++				kv.hdr_got = 0;
++				kv_extent_hdr();
++			}
++			break;
++		}
++		case KV_S_DATA: {
++			uint64_t left = kv.extent_left;
++			uint32_t take = left > n ? n : (uint32_t)left;
++
++			kv_data(p, take);
++			if (!kv.active) {
++				return;
++			}
++			p += take;
++			n -= take;
++			kv.wire_seen += take;
++			kv.wire_left -= take;
++			break;
++		}
++		case KV_S_PAD:
++			for (uint32_t i = 0; i < n; i++) {
++				if (p[i] != 0) {
++					kv_abort("non-zero stream padding", 0);
++					return;
++				}
++			}
++			kv.wire_seen += n;
++			kv.wire_left -= n;
++			p += n;
++			n = 0;
++			break;
++		default:
++			return;
++		}
++	}
++	if (!kv.active) {
++		return;
++	}
++	printf("VOL ACK %llu\n", (unsigned long long)kv.wire_seen);
++	if (kv.wire_left == 0) {
++		kv_finish();
++	}
++}
++
++void
++kebab_vol_poll(void)
++{
++	if (!kv.active) {
++		return;
++	}
++	if (kv_now_ns() - kv.ns_last < KV_TIMEOUT_NS) {
++		return;
++	}
++	printf("VOL TIMEOUT after %llu of %llu bytes\n",
++	    (unsigned long long)kv.wire_seen,
++	    (unsigned long long)kv.wire_total);
++	kv.failed++;
++	kv_reset();
++}
++
++bool
++kebab_vol_active(void)
++{
++	return kv.active;
++}
++
++void
++kebab_vol_status(void)
++{
++	uint8_t vh[KV_VH_SIZE];
++	struct vfsstatfs *sfs;
++
++	printf("VOL? gated %d active %d dry %d chunk %u writable %d\n",
++	    kebab_vol_gated() ? 1 : 0, kv.active ? 1 : 0, kv.dry ? 1 : 0,
++	    KEBAB_VOL_CHUNK, kebab_ufs_writable() ? 1 : 0);
++	printf("VOL? partition %llu bytes (%llu MiB)\n",
++	    (unsigned long long)kebab_ufs_partition_bytes(),
++	    (unsigned long long)(kebab_ufs_partition_bytes() >> 20));
++	if (kv_read_vh(vh) == 0) {
++		kv_print_vh("DISK", vh, false);
++	}
++	if (rootvnode != NULLVP && rootvnode->v_mount != NULL) {
++		sfs = vfs_statfs(rootvnode->v_mount);
++		if (sfs != NULL && sfs->f_bsize) {
++			printf("VOL? root %s space %llu free of %llu bytes "
++			    "bsize %u blocks %llu free %llu\n",
++			    (vfs_flags(rootvnode->v_mount) & MNT_RDONLY) ?
++			    "ro" : "rw",
++			    (unsigned long long)sfs->f_bavail * sfs->f_bsize,
++			    (unsigned long long)sfs->f_blocks * sfs->f_bsize,
++			    sfs->f_bsize,
++			    (unsigned long long)sfs->f_blocks,
++			    (unsigned long long)sfs->f_bavail);
++		}
++	}
++}
++
++#endif /* KEBAB */
+diff --git a/bsd/dev/kebab_vol.h b/bsd/dev/kebab_vol.h
+new file mode 100644
+index 0000000..7aae017
+--- /dev/null
++++ b/bsd/dev/kebab_vol.h
+@@ -0,0 +1,51 @@
++/*
++ * KEBAB VOL: replace the userdata HFS+ volume from a host-made extent stream.
++ *
++ * The kernel has no HFS+ implementation and should not grow one.  The volume is
++ * built on the host with newfs_hfs, and only the blocks the new volume actually
++ * allocates travel over the console.  This module is the receiving end: it
++ * validates the VEXT v1 stream, writes every extent to the userdata partition
++ * through the UFS block path, prints the old and the new volume header, and
++ * reads the header back from the device before declaring success.
++ *
++ * The transport is the one the installer already proved: one 64 KiB bulk-OUT
++ * chunk per console command, one "VOL ACK <cumulative bytes>" line per chunk.
++ * bsd/dev/kebab_usb.c owns the endpoint and the buffer; this file owns the
++ * state machine and never touches the controller.
++ *
++ * Gating is deliberately paranoid: the command family is behind the boot
++ * argument kebab_vol=1 (default off), and a real write additionally requires
++ * the literal confirmation argument CONFIRM and a volume size that fits inside
++ * the userdata partition.  A dry run validates the same stream without writing.
++ */
++#ifndef _KEBAB_VOL_H_
++#define _KEBAB_VOL_H_
++
++#include <sys/types.h>
++
++/* Same chunk as the installer: one bulk-OUT TRB, one ACK line. */
++#define KEBAB_VOL_CHUNK     65536u
++
++/* Boot argument kebab_vol=1; everything below is a no-op without it. */
++bool kebab_vol_gated(void);
++
++/*
++ * VOL BEGIN <wire_bytes> <volume_bytes> CONFIRM  (confirmed = true)
++ * VOL DRY <wire_bytes>                          (dry = true)
++ * Prints VOL BEGIN only when the stream is really taken.
++ */
++void kebab_vol_begin(bool dry, uint64_t wire_bytes, uint64_t volume_bytes,
++    bool confirmed);
++
++/* One bulk-OUT completion.  Must run with no transport lock held. */
++void kebab_vol_bytes(const void *buf, uint32_t len);
++
++/* Inactivity watchdog, called from the event thread. */
++void kebab_vol_poll(void);
++
++bool kebab_vol_active(void);
++
++/* VOL?: gate, partition size, on-disk header, mounted root's free space. */
++void kebab_vol_status(void);
++
++#endif /* _KEBAB_VOL_H_ */
+diff --git a/bsd/kebab_hfs/core/hfs_vfsops.c b/bsd/kebab_hfs/core/hfs_vfsops.c
+index bfc5247..8cd20eb 100644
+--- a/bsd/kebab_hfs/core/hfs_vfsops.c
++++ b/bsd/kebab_hfs/core/hfs_vfsops.c
+@@ -1858,6 +1858,19 @@ hfs_mountfs(struct vnode *devvp, struct mount *mp, struct hfs_mount_args *args,
+ 		   (hfsmp->vcbVN[0] ? (const char*) hfsmp->vcbVN : "unknown"),
+ 		   dev_name ?: "unknown device");
+ 
++	/*
++	 * The mount log is the acceptance test for a re-imprinted root volume:
++	 * the old KebabRoot was 64 MiB, and a bigger one has to be visible here
++	 * without any other tool.
++	 */
++	printf("KEBAB HFS: %s: block size %u, total blocks %u (%llu MiB), "
++	    "free blocks %u (%llu MiB)\n",
++	    (hfsmp->vcbVN[0] ? (const char*) hfsmp->vcbVN : "unknown"),
++	    hfsmp->blockSize, hfsmp->totalBlocks,
++	    (unsigned long long)hfsmp->totalBlocks * hfsmp->blockSize >> 20,
++	    hfsmp->freeBlocks,
++	    (unsigned long long)hfsmp->freeBlocks * hfsmp->blockSize >> 20);
++
+ 	if (dev_name)
+ 		vnode_putname_printable(dev_name);
+ 
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index d90dd17..dea0ca6 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1173,6 +1173,31 @@ bsdinit_task(void)
+ 	kebab_dsc_boot();
+ #endif /* KEBAB */
+ 
++#if defined(KEBAB)
++	/*
++	 * Bring-up escape hatch: launchd is killed by the code-signing model on
++	 * this port (CS_KILLED), and a panic in the middle of a volume imprint
++	 * or a large install reboots the board and strands the transfer.  With
++	 * kebab_noinit=1 the init thread parks in the kernel instead of
++	 * launching PID 1, so the console and the filesystem paths remain usable
++	 * for as long as the test needs.  It must block, not return: this runs
++	 * from the init task's BSD AST, and returning would resume a user thread
++	 * that has no user context.  Default off: an ordinary boot is unchanged.
++	 */
++	{
++		uint32_t noinit = 0;
++		if (PE_parse_boot_argn("kebab_noinit", &noinit, sizeof(noinit)) &&
++		    noinit != 0) {
++			printf("KEBAB: kebab_noinit=1: staying in the kernel, no "
++			    "init program\n");
++			lock_trace = 1;
++			for (;;) {
++				(void)thread_block(THREAD_CONTINUE_NULL);
++			}
++		}
++	}
++#endif /* KEBAB */
++
+ 	load_init_program(p);
+ 	lock_trace = 1;
+ }
+diff --git a/bsd/vfs/vfs_subr.c b/bsd/vfs/vfs_subr.c
+index fedd426..9c00b29 100644
+--- a/bsd/vfs/vfs_subr.c
++++ b/bsd/vfs/vfs_subr.c
+@@ -1271,11 +1271,23 @@ vfs_mountroot(void)
+ 		 * There is no separate data volume on this port: /private/var lives on
+ 		 * the root, so boot-arg rootrw=1 mounts it read-write from the start.
+ 		 * Without the boot-arg the root stays read-only.
++		 *
++		 * kebab_vol=1 overrides rootrw: that boot replaces the volume under
++		 * the mounted root, and the old HFS+ must not be able to write a
++		 * cached block over the new metadata.  rootrw keeps its meaning on
++		 * every ordinary boot, including the one after the imprint.
+ 		 */
+ 		{
+ 			uint32_t rootrw = 0;
++			uint32_t kebabvol = 0;
+ 			if (PE_parse_boot_argn("rootrw", &rootrw, sizeof(rootrw)) && rootrw) {
+-				mp->mnt_flag &= ~MNT_RDONLY;
++				if (PE_parse_boot_argn("kebab_vol", &kebabvol,
++				    sizeof(kebabvol)) && kebabvol) {
++					printf("KEBAB VOL: kebab_vol=1 keeps the old "
++					    "root read-only\n");
++				} else {
++					mp->mnt_flag &= ~MNT_RDONLY;
++				}
+ 			}
+ 		}
+ #endif

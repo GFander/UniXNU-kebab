@@ -1,0 +1,63 @@
+--- a/bsd/dev/kebab_bt_uart_impl.h
++++ b/bsd/dev/kebab_bt_uart_impl.h
+@@ -10,7 +10,7 @@
+  void *ctx;
+ };
+ struct kbu_result {
+- uint32_t phase,frames,tx,rx,mp,sp,pll[6];
++ uint32_t phase,frames,tx,rx,mp,sp,pll[6],route,gsi,dma,blocked_offset,blocked_value;
+  int error,cleanup_error;
+  bool changed,restored;
+ };
+@@ -33,7 +33,7 @@
+  if(space!=KBU_SE)return false;
+  for(unsigned i=0;i<KBU_CONFIG_COUNT;++i)if(off==kbu_config[i])return true;
+  if(write)return off==0x20||off==0x600||off==0x604||off==0x618||off==0x630||off==0x634||off==0x648||off==0x700;
+- return off==0x40||off==0x68||off==0x6c||off==0x610||off==0x640||off==0x780||off==0x800||off==0x804||off==0xe24||off==0xe28;
++ return off==0x40||off==0x64||off==0x68||off==0x6c||off==0x610||off==0x640||off==0x780||off==0x800||off==0x804||off==0xe24||off==0xe28;
+ }
+ static int
+ kbu_read(const struct kbu_io *io,enum kbu_space space,uint32_t off,uint32_t *v)
+@@ -166,19 +166,21 @@
+   e=EPROTONOSUPPORT;goto done;
+  }
+  out->phase=2;
++ e=kbu_read(io,KBU_SE,0x64,&v);if(e)goto done;if(v&1){e=EPROTONOSUPPORT;goto done;}
+  e=kbu_read(io,KBU_SE,0x68,&v);if(e)goto done;if(((v>>8)&255)!=2){e=EPROTONOSUPPORT;goto done;}
+  e=kbu_read(io,KBU_SE,0x6c,&v);if(e)goto done;if(((v>>8)&255)!=2){e=EPROTONOSUPPORT;goto done;}
+  e=kbu_read(io,KBU_SE,0xe24,&v);if(e)goto done;if(((v>>16)&63)!=16||((v>>24)&63)!=32){e=EPROTONOSUPPORT;goto done;}
+  e=kbu_read(io,KBU_SE,0xe28,&v);if(e)goto done;if(((v>>16)&63)!=32||((v>>24)&63)!=32){e=EPROTONOSUPPORT;goto done;}
+  for(unsigned i=0;i<5;++i){
+   const uint32_t offsets[]={0x40,0x800,0x804,0x610,0x640};
+-  e=kbu_read(io,KBU_SE,offsets[i],&v);if(e)goto done;if(v){e=EBUSY;goto done;}
++  e=kbu_read(io,KBU_SE,offsets[i],&v);if(e)goto done;if(v){out->blocked_offset=offsets[i];out->blocked_value=v;e=EBUSY;goto done;}
+  }
+  e=kbu_read(io,KBU_GCC,0x17730,&v);if(e)goto done;if(v&1){e=EBUSY;goto done;}
+  for(unsigned i=0;i<4;++i){e=kbu_read(io,KBU_GCC,0x17734+4*i,&root[i]);if(e)goto done;}
+  for(unsigned i=0;i<KBU_CONFIG_COUNT;++i){e=kbu_read(io,KBU_SE,kbu_config[i],&saved[i]);if(e)goto done;++saved_count;}
+  /* No live DMA or interrupt consumer may be displaced. */
+- if(saved[0]||saved[1]||saved[12]&1){e=EBUSY;goto done;}
++ out->route=saved[0];out->gsi=saved[1];out->dma=saved[12];
++ if(saved[0]||saved[1]||saved[12]&1){out->blocked_offset=saved[0]?0xe1c:saved[1]?0xe18:0x258;out->blocked_value=saved[0]?saved[0]:saved[1]?saved[1]:saved[12];e=EBUSY;goto done;}
+  out->changed=true;out->phase=3;
+  /* Polled bootstrap: local status latches enabled, CPU IRQ routing stays0. */
+  #define KBU_SET(space,off,val) do{e=kbu_set(io,space,off,val);if(e)goto cleanup;}while(0)
+@@ -217,6 +219,8 @@
+   if(!c){
+    for(unsigned i=0;i<2;++i){uint32_t status;int x=kbu_read(io,KBU_SE,i?0x640:0x610,&status);if(!x)x=kbu_write(io,KBU_SE,i?0x648:0x618,status);if(!c)c=x;}
+    uint32_t status;int x=kbu_read(io,KBU_SE,0x804,&status);if(!x&&(status&0x1ffffffu))x=EIO;if(!c)c=x;
++   x=kbu_read(io,KBU_SE,0x800,&status);if(!x&&(status&0xfffffffu))x=EIO;if(!c)c=x;
++   x=kbu_read(io,KBU_SE,0x40,&status);if(!x&&(status&0x1001u))x=EIO;if(!c)c=x;
+   }
+   if(!c){
+    c=kbu_set(io,KBU_SE,0x48,0);if(!c)c=kbu_set(io,KBU_SE,0x4c,0);
+--- a/bsd/dev/kebab_bt_uart.c
++++ b/bsd/dev/kebab_bt_uart.c
+@@ -65,6 +65,7 @@
+  if(out.changed&&!out.restored)kbu_native.dead=true;
+  bool dead=kbu_native.dead;kebab_geni_transaction_unlock();
+  printf("KEBAB BTUART: phase=%u frames=%u tx=%u rx=%u irq=%08x/%08x changed=%u restored=%u cleanup=%d quarantined=%u\n",out.phase,out.frames,out.tx,out.rx,out.mp,out.sp,out.changed,out.restored,out.cleanup_error,dead);
++ printf("KEBAB BTUART: preflight route=%08x gsi=%08x dma=%08x blocked=%03x value=%08x\n",out.route,out.gsi,out.dma,out.blocked_offset,out.blocked_value);
+  printf("KEBAB BTUART: LUCID mode=%08x L=%08x user=%08x opmode=%08x alpha=%08x vote=%08x\n",out.pll[0],out.pll[1],out.pll[2],out.pll[3],out.pll[4],out.pll[5]);
+  printf("KEBAB BTUART: end error=%d internal-SE6-only; no controller/HCI/RF qualification\n",e);
+ }

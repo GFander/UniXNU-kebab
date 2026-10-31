@@ -1,0 +1,176 @@
+--- a/bsd/dev/kebab_cryptex_media.c
++++ b/bsd/dev/kebab_cryptex_media.c
+@@ -310,15 +310,15 @@
+ }
+ 
+ static int
+-kcm_verify_boot_file(const char *path, off_t bytes, const uint8_t expected[32])
++kcm_verify_file_on_mount(const char *path, off_t bytes, const uint8_t expected[32], mount_t expected_mount)
+ {
+  vnode_t file = NULLVP;
+  vfs_context_t context = vfs_context_current();
+  int error = vnode_open(path, O_NOFOLLOW | FREAD, 0, 0, &file, context);
+  if (error) return error;
+  uint8_t *buffer = NULL, digest[32];
+- if (!vnode_isreg(file) || vnode_mount(file) != kcm_system ||
+-     !kcm_mount_readonly(kcm_system)) error = EAUTH;
++ if (!vnode_isreg(file) || vnode_mount(file) != expected_mount ||
++     !kcm_mount_readonly(expected_mount)) error = EAUTH;
+  struct vnode_attr attributes;VATTR_INIT(&attributes);VATTR_WANTED(&attributes,va_data_size);
+  if(!error)error=vnode_getattr(file,&attributes,context);
+  if(!error && (!VATTR_IS_SUPPORTED(&attributes,va_data_size) || attributes.va_data_size!=(uint64_t)bytes))error=EAUTH;
+@@ -340,6 +340,72 @@
+  if (buffer) kfree_data(buffer, KCM_CHUNK);
+  int closed = vnode_close(file, FREAD, context);
+  if (!error) error = closed;
++ return error;
++}
++
++static int
++kcm_verify_boot_file(const char *path, off_t bytes, const uint8_t expected[32])
++{
++ return kcm_verify_file_on_mount(path, bytes, expected, kcm_system);
++}
++
++/* Existing native bindfs/union lookup keeps the original lower /usr/lib.
++ * Only the original, owner-pinned, read-only SystemOS is visible above it.
++ * This does not change rootvnode, the System UUID, dyld, or any APFS bytes. */
++extern int bindfs_getbackingvnode(vnode_t, vnode_t *);
++int
++kebab_cryptex_libraries_prepare(void)
++{
++ static const char source[] = KEBAB_CRYPTEX_MOUNT_PATH "/usr/lib";
++ static const char target[] = "/usr/lib";
++ static const struct { const char *name; off_t bytes; uint8_t hash[32]; } files[] = {
++  {"libobjc-trampolines.dylib",68080,{0x16,0xa4,0x8e,0x77,0x84,0x63,0x0f,0xaa,0x0a,0xa8,0x93,0x44,0x30,0x33,0xa1,0x3f,0x6b,0xb4,0x65,0xce,0x98,0x6b,0x11,0xbf,0x0b,0xbd,0x8d,0x9b,0x9b,0x77,0xe4,0x6c}},
++  {"libffi-trampolines.dylib",51504,{0x9f,0x0a,0x51,0x5a,0x88,0xa5,0xac,0x23,0xc4,0x34,0xac,0x70,0xc9,0x9b,0x49,0xc9,0xe0,0x02,0x92,0x91,0x5b,0x8c,0xb1,0x19,0xd1,0x81,0x16,0xd4,0x78,0x7d,0x26,0xdd}},
++  {"libstdc++.6.0.9.dylib",819568,{0x33,0x97,0x28,0xe8,0x58,0xb4,0x9f,0x94,0x83,0x1f,0xf9,0x97,0x75,0xdd,0x99,0xb4,0xa4,0xbc,0x17,0x8a,0x09,0x41,0x61,0x46,0x21,0x47,0xbd,0x30,0xa4,0xdb,0x84,0x95}}
++ };
++ unsigned mode=0;PE_parse_boot_argn("kebab_apfs_tool",&mode,sizeof(mode));
++ if(mode!=12 || kdf_policy())return EPERM;
++ int error=kebab_cryptex_mount_recheck();
++ vfs_context_t ctx=vfs_context_kernel();
++ vnode_t upper=NULLVP,lower=NULLVP,visible=NULLVP,backing=NULLVP;
++ if(!error)error=vnode_lookup(source,VNODE_LOOKUP_NOFOLLOW,&upper,ctx);
++ if(!error && (!vnode_isdir(upper)||kebab_cryptex_vnode_recheck(upper)))error=EAUTH;
++ if(!error)error=vnode_lookup(target,VNODE_LOOKUP_NOFOLLOW,&lower,ctx);
++ if(!error && (!vnode_isdir(lower)||vnode_mount(lower)!=kcm_system||
++     !kcm_mount_readonly(kcm_system)))error=EAUTH;
++ for(unsigned i=0;!error&&i<sizeof(files)/sizeof(*files);i++){
++  char path[MAXPATHLEN];snprintf(path,sizeof(path),"%s/%s",source,files[i].name);
++  error=kcm_verify_file_on_mount(path,files[i].bytes,files[i].hash,kcm_owned_mount);
++ }
++ if(!error)error=kernel_mount("bindfs",NULLVP,NULLVP,target,(void *)source,
++     sizeof(source),MNT_RDONLY|MNT_UNION|MNT_NOSUID|MNT_NODEV,0,ctx);
++ if(!error)error=vnode_lookup(target,VNODE_LOOKUP_NOFOLLOW,&visible,ctx);
++ if(!error){
++  mount_t mp=vnode_mount(visible);
++  if(strcmp(vfs_statfs(mp)->f_fstypename,"bindfs") ||
++      (vfs_flags(mp)&(MNT_RDONLY|MNT_UNION|MNT_NOSUID|MNT_NODEV))!=
++      (MNT_RDONLY|MNT_UNION|MNT_NOSUID|MNT_NODEV))error=EAUTH;
++  if(!error)error=bindfs_getbackingvnode(visible,&backing);
++  if(!error && backing!=upper)error=EAUTH;
++  if(backing){vnode_put(backing);backing=NULLVP;}
++ }
++ for(unsigned i=0;!error&&i<sizeof(files)/sizeof(*files);i++){
++  char path[MAXPATHLEN];snprintf(path,sizeof(path),"%s/%s",target,files[i].name);
++  vnode_t file=NULLVP;error=vnode_lookup(path,VNODE_LOOKUP_NOFOLLOW,&file,ctx);
++  if(!error)error=bindfs_getbackingvnode(file,&backing);
++  if(!error)error=kebab_cryptex_vnode_recheck(backing);
++  if(backing){vnode_put(backing);backing=NULLVP;}
++  if(file)vnode_put(file);
++ }
++ /* Missing upper dyld must fall through the native union to the exact lower
++  * file, not a replacement linker. Rehash only this small existing boot pin. */
++ static const uint8_t dyld[32]={0x58,0x06,0x83,0x45,0x64,0xfe,0x64,0x62,0xae,0x98,0x1d,0x09,0x15,0xd6,0x12,0xb1,0xeb,0x2f,0x6f,0x16,0x88,0x22,0xb5,0xd2,0x78,0xbe,0xe5,0x62,0x54,0x93,0x37,0x57};
++ if(!error)error=kcm_verify_boot_file("/usr/lib/dyld",922912,dyld);
++ if(!error)error=kebab_cryptex_mount_recheck();
++ if(visible)vnode_put(visible);
++ if(lower)vnode_put(lower);
++ if(upper)vnode_put(upper);
++ printf("KEBAB CRYPTEX LIBRARIES: original3 SHA/RO union + original lower dyld/root identity %s (%d)\n",error?"FAIL":"PASS",error);
+  return error;
+ }
+ 
+--- a/bsd/dev/kebab_cryptex_media.h
++++ b/bsd/dev/kebab_cryptex_media.h
+@@ -13,6 +13,7 @@
+ int kebab_cryptex_tool_verify(void);
+ int kebab_cryptex_fsck_verify(void);
+ int kebab_cryptex_system_version_prepare(void);
++int kebab_cryptex_libraries_prepare(void);
+ /* Requires complete original OS Merkle verification, not two boot files. */
+ int kebab_cryptex_os_recheck(void);
+ /* Explicit development-fast policy is separate from complete-content proof. */
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7181,6 +7181,9 @@
+    if(checked)panic("KEBAB SYSTEM BAG: original disk envelope init/auth failed %d",checked);
+    checked=kebab_aks_userclient_start();
+    if(checked)panic("KEBAB AKS UC: live bank/native user-client publication failed %d",checked);
++   extern int kebab_cryptex_libraries_prepare(void);
++   checked=kebab_cryptex_libraries_prepare();
++   if(checked)panic("KEBAB CRYPTEX LIBRARIES: native RO library namespace rejected %d",checked);
+    extern int kebab_watchdog_prepare(void);
+    checked=kebab_watchdog_prepare();
+    if(checked)panic("KEBAB WATCHDOG: original service/backend prepare failed %d",checked);
+--- a/bsd/miscfs/bindfs/bind_vfsops.c
++++ b/bsd/miscfs/bindfs/bind_vfsops.c
+@@ -58,6 +58,7 @@
+  * $FreeBSD$
+  */
+ 
++#include <pexpert/arm64/board_config.h>
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <sys/fcntl.h>
+@@ -100,6 +101,29 @@
+ 
+ 	return vfs_getattr(mp, vfap, ctx);
+ }
++
++/* A kernel_mount uses a kernel pointer and a kernel VFS context. Neither
++ * condition is supplied by the mount syscall; ordinary callers retain the
++ * original entitlement check and copyinstr, including privileged users. */
++#if defined(KEBAB)
++static int
++bindfs_mount_path(struct mount *mp, user_addr_t input, vfs_context_t ctx,
++    char data[MAXPATHLEN], size_t *count)
++{
++ if (vfs_context_iskernel(ctx) && (mp->mnt_kern_flag & MNTK_KERNEL_MOUNT)) {
++  if (!input) return EFAULT;
++  const char *path = (const char *)(uintptr_t)input;
++  size_t length = strnlen(path, MAXPATHLEN);
++  if (length == MAXPATHLEN) return ENAMETOOLONG;
++  if (!length) return EINVAL;
++  *count = length + 1;
++  memcpy(data, path, *count);
++  return 0;
++ }
++ if (!IOCurrentTaskHasEntitlement(BINDFS_ENTITLEMENT)) return EPERM;
++ return copyinstr(input, data, MAXPATHLEN - 1, count);
++}
++#endif
+ 
+ /*
+  * Mount bind layer
+@@ -139,15 +163,15 @@
+ 		return ENOTSUP;
+ 	}
+ 
++#if defined(KEBAB)
++ error = bindfs_mount_path(mp, user_data, ctx, data, &count);
++#else
+ 	/* check entitlement */
+ 	if (!IOCurrentTaskHasEntitlement(BINDFS_ENTITLEMENT)) {
+ 		return EPERM;
+ 	}
+-
+-	/*
+-	 * Get argument
+-	 */
+ 	error = copyinstr(user_data, data, MAXPATHLEN - 1, &count);
++#endif
+ 	if (error) {
+ 		BINDFSERROR("error copying data from user %d\n", error);
+ 		goto error;

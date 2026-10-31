@@ -1,0 +1,165 @@
+{
+  "notification_state_scope_accepted": true,
+  "full_goal_complete": false,
+  "source": {
+    "common": 270,
+    "host": 4,
+    "files": 5239,
+    "exact": true
+  },
+  "original_abi": {
+    "qualified": true,
+    "original_kernelcache_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+    "original_cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+    "native_contract": "provider-owned notification-registration flag; not key availability or a fabricated device-state reply",
+    "provider_flag_offset": 164,
+    "semantics": {
+      "set_selector": 102,
+      "read_selector": 103,
+      "read_scalar_input_count": 0,
+      "read_scalar_output_count": 1,
+      "initial_state": 0,
+      "set_state": 1
+    },
+    "methods": [
+      {
+        "selector": 102,
+        "entry": "0xfffffff0060d8f0c",
+        "instructions_checked": 5,
+        "code_sha256": "631d207a67bf4b4f7ee77d0106376121fde16547580f9dc56d4df4bdd818070b"
+      },
+      {
+        "selector": 103,
+        "entry": "0xfffffff0060d8f20",
+        "instructions_checked": 9,
+        "code_sha256": "c9ac1855c2f3cb6bc63b0cdbf98a1b2830492e100efa07d2773fd48e3211cecf"
+      }
+    ],
+    "original_wrappers": [
+      {
+        "selector": 102,
+        "va": "0x1ae401b0c",
+        "code_sha256": "555c140d54243f9dd53f2a369a2b337aae9ef72da1aaa01882450037972b7b45"
+      },
+      {
+        "selector": 103,
+        "va": "0x1ae401b58",
+        "code_sha256": "65f7ffd1c674d6e1e2c8e934e8caac144ca4b936b57d66d1bd17965ea84ba881"
+      }
+    ],
+    "hardware_key_operation_claim": false,
+    "full_aks_compatibility": false
+  },
+  "host_tests": {
+    "passed": true,
+    "production_sha256": "404c071523d755936c2eceaab02617f38eb967c186940f67f3447915eec85feb",
+    "fixture_sha256": "5dc7b2c4ea6b069815d282eaacabf61a0c871d110294ad9bee02a023ea309399",
+    "cases": 16384,
+    "behavioral_mutations_refused": 3,
+    "mutations_failed_actual_assertions": true,
+    "iokit_apis_mocked": true,
+    "sealed_bank_export_mocked": true,
+    "actual_hardware": false
+  },
+  "boots": [
+    {
+      "version": "0388",
+      "actual_log_sha256": "53038fff48e5d773874b3985e1092ea6cd23356dad14f536c2d08c90ddcaad98",
+      "native_sha256": "25ee2e0c11059b4c8249819d036339cf1fcb287d060ac492a63176a27fdd259d",
+      "state_events": [
+        [
+          "103",
+          "0"
+        ],
+        [
+          "102",
+          "1"
+        ]
+      ],
+      "watchdog_last_heartbeat": 272.761,
+      "root_cd_mkb_defaults_regression": true,
+      "kernel_panic": false,
+      "actual_userland_post_set_read_observed": false,
+      "class_b_failures_still_visible": 298
+    },
+    {
+      "version": "0389",
+      "actual_log_sha256": "155c163417b9eb76ba098df2ddeef03a0ea6cea63af2031cfcb4d53da1917937",
+      "native_sha256": "25ee2e0c11059b4c8249819d036339cf1fcb287d060ac492a63176a27fdd259d",
+      "state_events": [
+        [
+          "103",
+          "0"
+        ],
+        [
+          "102",
+          "1"
+        ]
+      ],
+      "watchdog_last_heartbeat": 218.431,
+      "root_cd_mkb_defaults_regression": true,
+      "kernel_panic": false,
+      "actual_userland_post_set_read_observed": false,
+      "class_b_failures_still_visible": 237
+    }
+  ],
+  "complete_reboot_resets_flag": true,
+  "hardware_crypto_changed": false,
+  "encrypted_data_reformatted": false,
+  "original_watchdog_preserved": true,
+  "host_cross_client_and_concurrent_state_tested": true,
+  "actual_userland_read_before_set_and_set_observed": true,
+  "real_notification_delivery_or_all_aks_claim": false,
+  "device_state_selectors_17_35_implemented": false,
+  "class_a_b_file_keys_implemented": false,
+  "bluetooth_functional": false,
+  "all_daemon_errors_fixed": false,
+  "most_recent_independent_readonly_data_fsck": "0385; no new fsck claimed for this one-header state change",
+  "github_uploaded": true,
+  "publication": {
+    "commit": "cb91f5d2bb58bfc3f4f52ef26f97fd5b4fba576e",
+    "remote_commit": "cb91f5d2bb58bfc3f4f52ef26f97fd5b4fba576e",
+    "branch": "ios16",
+    "pushed": true,
+    "reviewed_staged_paths": [
+      "README.md",
+      "docs/AKS-NOTIFY-20261031.md",
+      "docs/BLUETOOTH-BRINGUP-20261031.md",
+      "docs/STATUS.md",
+      "docs/qualification/0389/0388-defaults-qualified.json",
+      "docs/qualification/0389/0388-systembag-qualified.json",
+      "docs/qualification/0389/0389-defaults-qualified.json",
+      "docs/qualification/0389/0389-systembag-qualified.json",
+      "docs/qualification/0389/AKS-NOTIFY-ACCEPTED-0389.json",
+      "docs/qualification/0389/README.md",
+      "docs/qualification/0389/all-mac-source-0388.json",
+      "docs/qualification/0389/all-source-replay-0388.json",
+      "docs/qualification/0389/bluetooth-reference-inputs.json",
+      "docs/qualification/0389/original-aks-notify-abi-qualified.json",
+      "docs/qualification/0389/test-aks-notification-state-result.json",
+      "patches/xnu-8796-kebab/0291-kebab-real-aks-notification-state.patch",
+      "scripts/boot123-20261029/analyse-defaults-lifecycle.py",
+      "scripts/boot123-20261029/analyse-systembag.py",
+      "scripts/boot123-20261029/audit-original-aks-notify.py",
+      "scripts/boot123-20261029/extract-bluetooth-vendor-reference.py",
+      "scripts/boot123-20261029/qualify-aks-notification-runtime.py",
+      "scripts/tests/aks-notification-0388.cpp",
+      "scripts/tests/run-aks-notification.py"
+    ],
+    "url": "https://github.com/GFander/UniXNU-kebab/commit/cb91f5d2bb58bfc3f4f52ef26f97fd5b4fba576e",
+    "scope": "original102/103 notification state; no Bluetooth or full AKS claim"
+  },
+  "normal_default": {
+    "version": "0390",
+    "normal_default_restored": true,
+    "native_sha256": "25ee2e0c11059b4c8249819d036339cf1fcb287d060ac492a63176a27fdd259d",
+    "boot_sha256": "64f4ae776c29f40bea71647456e42f558eebacce74005138d63c29abc84084c7",
+    "actual_log_sha256": "f0a7e18f533974e96ffbdca6ce753d0cf72bd71cf0feb3b1ee4f649b5b2c3cd6",
+    "normal_tool12": true,
+    "hardware_roots_cd_mkb_defaults_retained": true,
+    "original_watchdog_last_heartbeat": 257.831,
+    "panic": [],
+    "bluetooth_functional": false,
+    "full_goal_complete": false
+  }
+}

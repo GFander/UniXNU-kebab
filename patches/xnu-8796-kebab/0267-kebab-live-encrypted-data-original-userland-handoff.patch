@@ -1,0 +1,95 @@
+--- a/bsd/kern/kebab_data_setup_policy.h
++++ b/bsd/kern/kebab_data_setup_policy.h
+@@ -7,7 +7,7 @@
+ {
+ #if DEVELOPMENT || DEBUG
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+- if(tool!=2&&tool!=3&&tool!=4&&tool!=6&&tool!=7&&tool!=8)return EPERM;
++ if(tool!=2&&tool!=3&&tool!=4&&tool!=6&&tool!=7&&tool!=8&&tool!=9)return EPERM;
+  static const char *const names[]={"kebab_apfs_tool","ufsrw","rootrw","ufsmedia_root","cpus",
+   "kebab_apfs_probe","kebab_data_root","kebab_file_keys_test","kebab_aks_fs","kebab_aks_fv","kebab_cpx_xts",
+   "kebab_owner_fast","kebab_owner_startup","kebab_owner_dsc","kebab_owner_os","kebab_dsc","kebab_dsc_map",
+@@ -16,7 +16,7 @@
+   "kebab_hardware_nonce","kebab_cpx_handles","kebab_aes_key_probe","kebab_cryptex_dirs"};
+  static const unsigned expected[]={2,1,0,2,8,17,2,9,1,1,1,1,1,1,1,1,1,1,2,1,1,1,1,0,0,0,0,0,0,0};
+  for(unsigned i=0;i<sizeof(expected)/sizeof(*expected);++i){
+-  unsigned value=0;PE_parse_boot_argn(names[i],&value,sizeof(value));unsigned wanted=expected[i];if(i==0)wanted=tool;if(i==1&&(tool==3||tool==6||tool==7))wanted=0;
++  unsigned value=0;PE_parse_boot_argn(names[i],&value,sizeof(value));unsigned wanted=expected[i];if(i==0)wanted=tool;if(i==1&&(tool==3||tool==6||tool==7||tool==9))wanted=0;
+   /* Final readonly fsck may explicitly request the existing full owner scan. */
+   if(i==11&&tool==7&&(value==0||value==1))wanted=value;
+   if(value!=wanted)return EPERM;
+--- a/bsd/kern/kebab_device_classbag_file_impl.h
++++ b/bsd/kern/kebab_device_classbag_file_impl.h
+@@ -38,7 +38,7 @@
+  if(!error)error=kebab_device_classbag_open(kdb_container_uuid,kdb_system_uuid,w->readback,4096);
+  if(!error&&!kebab_device_classbag_available())error=EAUTH;
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+- if(!error&&tool!=2&&tool!=3&&tool!=4&&tool!=6&&tool!=7&&tool!=8){
++ if(!error&&tool!=2&&tool!=3&&tool!=4&&tool!=6&&tool!=7&&tool!=8&&tool!=9){
+   /* Failed authentication must revoke cached class material, then valid
+    * durable bytes must restore it. Never touch the stored record. */
+   w->readback[129]^=1;
+--- a/bsd/kern/kebab_apfs_tool_impl.h
++++ b/bsd/kern/kebab_apfs_tool_impl.h
+@@ -14,7 +14,7 @@
+ {
+ #if DEVELOPMENT || DEBUG
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+- if(tool==2||tool==3||tool==4||tool==6||tool==7||tool==8)return kdf_policy();
++ if(tool==2||tool==3||tool==4||tool==6||tool==7||tool==8||tool==9)return kdf_policy();
+  static const char *const names[]={"kebab_apfs_tool","ufsrw","rootrw","ufsmedia_root",
+   "kebab_apfs_probe","kebab_owner_fast","kebab_owner_startup","kebab_owner_dsc",
+   "kebab_owner_os","kebab_dsc","kebab_dsc_map","kebab_cryptex_media","kebab_boot_firmware",
+--- a/bsd/kern/kebab_data_mount_impl.h
++++ b/bsd/kern/kebab_data_mount_impl.h
+@@ -5,7 +5,7 @@
+ kebab_data_mount_probe(proc_t p,user_addr_t scratch)
+ {
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+- if((tool!=3&&tool!=4&&tool!=6&&tool!=7&&tool!=8)||kdf_policy()||!p||proc_getpid(p)!=1||!scratch||!kdf_live||
++ if((tool!=3&&tool!=4&&tool!=6&&tool!=7&&tool!=8&&tool!=9)||kdf_policy()||!p||proc_getpid(p)!=1||!scratch||!kdf_live||
+      !kebab_file_keys_available()||!kebab_device_classbag_available())return EPERM;
+  struct kebab_volume_identity system,data;
+  int error=kebab_lookup_apfs_live_data(&system,&data);if(error)return error;
+@@ -42,6 +42,6 @@
+  printf("KEBAB DATA MOUNT: mounted /private/var dev=%u/%u readonly=%u System-readonly=%u identity=%s\n",
+      major(actual),minor(actual),(vfs_flags(mounted)&MNT_RDONLY)!=0,(vfs_flags(original)&MNT_RDONLY)!=0,error?"FAIL":"PASS");
+  vnode_put(point);
+- if(!error&&(tool==4||tool==6||tool==7||tool==8))error=kdp_files(p,scratch,mounted,tool==4,tool==8);
++ if(!error&&(tool==4||tool==6||tool==7||tool==8||tool==9))error=kdp_files(p,scratch,mounted,tool==4,tool==8);
+  return error;
+ }
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -292,6 +292,7 @@
+  int error=writable?kebab_ufs_sync():0;kdf_live=false;kebab_file_keys_cancel();
+  unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
+  if(tool==7)printf("KEBAB DATA FSCK: original signed checker exit=%d UFS sync=%d (readonly: flush skipped); live Root/class context revoked\n",status,error);
++ else if(tool==9)printf("KEBAB DATA USERLAND: original init exit=%d; readonly Root/class context revoked\n",status);
+  else printf("KEBAB DATA FORMAT: signed formatter exit=%d UFS sync=%d; live Root/class context revoked; encrypted mount not yet qualified\n",status,error);
+ }
+ #endif
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7158,6 +7158,12 @@
+   int version_error=kebab_cryptex_system_version_prepare();
+   if(version_error)panic("KEBAB DATA VERSION: original OS identity/init rejected %d",version_error);
+  }
++ if(tool_mode==9){
++  extern int kebab_data_mount_probe(proc_t,user_addr_t);
++  int checked=kebab_data_mount_probe(p,(user_addr_t)scratch_addr);
++  if(checked)panic("KEBAB DATA USERLAND: cold encrypted Data prerequisites failed %d",checked);
++  printf("KEBAB DATA USERLAND: genuine encrypted Data mounted; hardware Root/class bank and native FS/FV services live; original launchd handoff, all storage RO\n");
++ }
+  if(tool_mode==7){
+   extern int kebab_data_mount_probe(proc_t,user_addr_t);
+   int checked=kebab_data_mount_probe(p,(user_addr_t)scratch_addr);
+@@ -7175,7 +7181,7 @@
+   if(tool_mode!=3)panic("KEBAB DATA FILES: original protected C/D %s %s (%d); fsck/full regression still pending",tool_mode==4?"write/read":(tool_mode==8?"rewrap-read":"cold-read"),mounted?"FAIL":"PASS",mounted);
+   panic("KEBAB DATA MOUNT: original encrypted Data read-only mount %s (%d); real protected RW/cold/fsck still pending",mounted?"FAIL":"PASS",mounted);
+  }
+- if(tool_mode) {
++ if(tool_mode&&tool_mode!=9) {
+   if(tool_mode!=1&&tool_mode!=2)panic("KEBAB APFS TOOL: unsupported tool mode %u",tool_mode);
+   int tool_error=kat_prepare(p,(user_addr_t)scratch_addr);
+   if(tool_error)panic("KEBAB APFS TOOL: profile/hash/console rejected %d",tool_error);

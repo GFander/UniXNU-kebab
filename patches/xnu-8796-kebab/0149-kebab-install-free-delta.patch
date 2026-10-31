@@ -1,0 +1,345 @@
+install: add SYNC and prove the allocation reached the volume header
+
+Hardware on 2026-10-28 showed the install writing nothing that survived a
+REBOOT: skel 16/16 and base 6/6 reported OK with matching INST CHECK
+read-backs, then /private/etc/passwd was MISSING and INST? still reported
+the pre-install free count.  The writes and their in-memory metadata died
+at the reset; even a 64 KiB stream lost 100%.
+
+The stream-end VFS_SYNC from 0148 is the fix for the metadata, but it has
+to be observable.  Add:
+
+  - SYNC console command: VFS_SYNC + SYNCHRONIZE CACHE, then read the HFS+
+    volume header back from the device and print free before/after/delta.
+    Works with kebab_noinit=1 because it does not need the init thread;
+  - INST FREE at each stream completion: the volume header's free-block
+    count before the stream and after the flush, the delta, and the block
+    count expected from the bytes written net of the old contents replaced;
+  - INST? vh: the on-disk volume header's free count alongside the mounted
+    statfs, without issuing a raw read while a stream is live.
+
+The orchestrator asserts INST FREE: when a stream wrote files, delta must
+be positive and at least three quarters of expected.  The fake board gets a
+free-stuck injection that reproduces the hardware result, so a clean
+INST DONE without free-block movement now fails the run instead of passing
+and losing the data at the next reboot.
+
+diff --git a/bsd/dev/kebab_install.c b/bsd/dev/kebab_install.c
+index 870609c..78637be 100644
+--- a/bsd/dev/kebab_install.c
++++ b/bsd/dev/kebab_install.c
+@@ -82,6 +82,12 @@
+ #define KI_TAIL_LEN       4096u         /* cold-read tail sample per file */
+ #define KI_COLD_FULL_MAX  (4u * 1024u * 1024u) /* full cold hash up to 4 MiB */
+ #define KI_SAMPLE_MAX     4u
++/* HFS+ volume header, read from the device after a flush. */
++#define KI_VH_OFF         1024u
++#define KI_VH_SIZE        512u
++#define KI_VH_BSIZE_OFF   40u
++#define KI_VH_BLOCKS_OFF  44u
++#define KI_VH_FREE_OFF    48u
+ #define KI_HDR_PATH_OFF   60u
+ #define KI_HDR_SHA_OFF    28u
+ #define KI_HDR_USIZE_OFF  20u
+@@ -141,6 +147,7 @@ struct ki_entry {
+ 	uint16_t    flags;
+ 	uint64_t    wire;          /* payload bytes on the wire */
+ 	uint64_t    size;          /* bytes the file must have */
++	uint64_t    old_size;      /* size before this write, 0 if new */
+ 	uint8_t     sha[32];       /* hash of the uncompressed content */
+ 	uint64_t    wire_left;
+ 	uint64_t    got;           /* uncompressed bytes produced so far */
+@@ -205,6 +212,12 @@ static struct {
+ 	uint32_t    skipped;
+ 	uint32_t    failed;
+ 
++	uint64_t    bytes_written;  /* regular-file bytes written this stream */
++	uint64_t    bytes_replaced; /* old bytes those writes replaced */
++	uint32_t    free_before;    /* volume-header free blocks at INST BEGIN */
++	uint32_t    vh_bsize;
++	bool        free_before_valid;
++
+ 	uint64_t    ns_start;
+ 	uint64_t    ns_last;
+ 
+@@ -236,6 +249,19 @@ ki_le64(const uint8_t *p)
+ 	return (uint64_t)ki_le32(p) | ((uint64_t)ki_le32(p + 4) << 32);
+ }
+ 
++static uint16_t
++ki_be16(const uint8_t *p)
++{
++	return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
++}
++
++static uint32_t
++ki_be32(const uint8_t *p)
++{
++	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
++	    ((uint32_t)p[2] << 8) | (uint32_t)p[3];
++}
++
+ static uint32_t
+ ki_hex08(char *out, uint8_t v)
+ {
+@@ -651,6 +677,38 @@ ki_vfs_sync(void)
+ 	return VFS_SYNC(rootvnode->v_mount, MNT_WAIT, vfs_context_current());
+ }
+ 
++/*
++ * Read the on-disk HFS+ volume header, not the mounted filesystem's cached
++ * statfs.  This is the number that proves a flush: the allocation bitmap and
++ * the header's freeBlocks field only reach the device when HFS+ syncs.  The
++ * caller must have flushed first and must not be running an install.
++ */
++static int
++ki_read_vh(uint32_t *bsizep, uint32_t *blocksp, uint32_t *freep)
++{
++	uint8_t vh[KI_VH_SIZE];
++	uint32_t bsize, blocks, freeb;
++	int error;
++
++	error = kebab_ufs_raw_read(KI_VH_OFF, vh, KI_VH_SIZE);
++	if (error) {
++		return error;
++	}
++	if (ki_be16(vh) != 0x482b || ki_be16(vh + 2) != 4) {
++		return EINVAL;
++	}
++	bsize = ki_be32(vh + KI_VH_BSIZE_OFF);
++	blocks = ki_be32(vh + KI_VH_BLOCKS_OFF);
++	freeb = ki_be32(vh + KI_VH_FREE_OFF);
++	if (bsize == 0 || blocks == 0 || freeb > blocks) {
++		return EINVAL;
++	}
++	*bsizep = bsize;
++	*blocksp = blocks;
++	*freep = freeb;
++	return 0;
++}
++
+ static void
+ ki_sample_store(uint32_t slot)
+ {
+@@ -837,11 +895,49 @@ ki_cold_verify(void)
+ 	return (int)bad;
+ }
+ 
++/*
++ * Print the on-disk free-block movement for this stream.  before is read from
++ * the volume header at INST BEGIN, after from the same header once VFS_SYNC
++ * and SYNCHRONIZE CACHE have run.  expected converts the bytes this stream
++ * actually wrote (minus the old contents it replaced) to 4 KiB blocks, so a
++ * non-zero delta is what distinguishes "allocated on the volume" from "only
++ * in the page cache".
++ */
++static void
++ki_report_free_delta(void)
++{
++	uint32_t bsize = 0, blocks = 0, after = 0;
++	uint64_t net, expected;
++	int64_t delta;
++	int error;
++
++	if (!ki.free_before_valid) {
++		printf("INST FREE before unknown: the volume header was not "
++		    "readable at INST BEGIN\n");
++		return;
++	}
++	error = ki_read_vh(&bsize, &blocks, &after);
++	if (error) {
++		printf("INST FREE before %u after unknown (error %d)\n",
++		    ki.free_before, error);
++		return;
++	}
++	delta = (int64_t)ki.free_before - (int64_t)after;
++	net = ki.bytes_written > ki.bytes_replaced ?
++	    ki.bytes_written - ki.bytes_replaced : 0;
++	expected = bsize ? (net + bsize - 1) / bsize : 0;
++	printf("INST FREE before %u after %u delta %lld expected %llu "
++	    "bsize %u written %llu replaced %llu\n", ki.free_before, after,
++	    (long long)delta, (unsigned long long)expected, bsize,
++	    (unsigned long long)ki.bytes_written,
++	    (unsigned long long)ki.bytes_replaced);
++}
++
+ /*
+  * Push the whole install to stable storage: VFS metadata first, then the
+  * device write cache, then the cold sample check.  Called from the stream
+- * state machine before INST DONE, and from the reboot path before a reset.
+- * Returns the number of failed steps (0 means everything reached the device).
++ * state machine before INST DONE.  Returns the number of failed steps (0
++ * means everything reached the device).
+  */
+ static int
+ ki_sync_media(const char *why, bool samples)
+@@ -906,6 +1002,43 @@ kebab_install_sync_for_reset(const char *why)
+ 	return true;
+ }
+ 
++/*
++ * SYNC console command.  It forces the same two flushes as the stream end and
++ * then reads the volume header back from the device, so an operator can see
++ * the free-block count that actually reached the medium.  It works with
++ * kebab_noinit=1 because it does not need the init thread.
++ */
++void
++kebab_install_sync_report(void)
++{
++	uint64_t t0 = ki_now_ns();
++	uint32_t before_bsize = 0, before_blocks = 0, before_free = 0;
++	uint32_t after_bsize = 0, after_blocks = 0, after_free = 0;
++	int before_error, after_error;
++	int vfs_error, dev_error;
++
++	printf("SYNC BEGIN\n");
++	before_error = ki_read_vh(&before_bsize, &before_blocks, &before_free);
++	vfs_error = ki_vfs_sync();
++	dev_error = kebab_ufs_sync();
++	if (dev_error == EROFS) {
++		dev_error = 0;
++	}
++	after_error = ki_read_vh(&after_bsize, &after_blocks, &after_free);
++	printf("SYNC VFS vfs %d device %d\n", vfs_error, dev_error);
++	if (before_error == 0 && after_error == 0) {
++		printf("SYNC VH before %u after %u delta %lld bsize %u "
++		    "blocks %u\n", before_free, after_free,
++		    (long long)((int64_t)before_free - (int64_t)after_free),
++		    after_bsize, after_blocks);
++	} else {
++		printf("SYNC VH unreadable (before %d, after %d)\n",
++		    before_error, after_error);
++	}
++	printf("SYNC DONE vfs %d device %d ms %llu\n", vfs_error, dev_error,
++	    (unsigned long long)((ki_now_ns() - t0) / 1000000ull));
++}
++
+ /*
+  * Free and total bytes on the root volume.  HFS+ reports these in allocation
+  * blocks; the installer uses them to refuse a stream that cannot fit before it
+@@ -1219,6 +1352,9 @@ ki_start_entry(void)
+ 		 * so their ownership and mode are re-applied.
+ 		 */
+ 		error = ki_hash_file(e->path, &have, digest, ctx);
++		if (error == 0) {
++			e->old_size = have;
++		}
+ 		if (error == 0 && have == size &&
+ 		    memcmp(digest, e->sha, sizeof(digest)) == 0) {
+ 			e->skip = true;
+@@ -1571,6 +1707,8 @@ ki_finish_entry(void)
+ 			vnode_put(vp);
+ 		}
+ 		ki_sample_add();
++		ki.bytes_written += e->size;
++		ki.bytes_replaced += e->old_size;
+ 		ki.ok++;
+ 	}
+ 	ki_next_entry();
+@@ -1620,6 +1758,18 @@ kebab_install_begin(bool dry, uint64_t wire_bytes)
+ 	ki.ok = 0;
+ 	ki.skipped = 0;
+ 	ki.failed = 0;
++	ki.bytes_written = 0;
++	ki.bytes_replaced = 0;
++	ki.free_before = 0;
++	ki.vh_bsize = 0;
++	ki.free_before_valid = false;
++	if (!dry) {
++		uint32_t blocks = 0;
++
++		if (ki_read_vh(&ki.vh_bsize, &blocks, &ki.free_before) == 0) {
++			ki.free_before_valid = true;
++		}
++	}
+ 	ki.ns_start = ki.ns_last = ki_now_ns();
+ 	ki.session++;
+ 	printf("INST BEGIN %llu %s chunk %u\n",
+@@ -1659,6 +1809,9 @@ ki_finish_stream(void)
+ 	if (ki.failed == 0) {
+ 		ki.failed += (uint32_t)ki_sync_media("stream end", true);
+ 	}
++	if (ki.failed == 0) {
++		ki_report_free_delta();
++	}
+ 	ms = (ki_now_ns() - ki.ns_start) / 1000000ull;
+ 	if (ki.failed == 0) {
+ 		printf("INST DONE entries %u ok %u skipped %u bytes %llu "
+@@ -1850,6 +2003,7 @@ void
+ kebab_install_status(void)
+ {
+ 	bool rw = false;
++	uint32_t vh_bsize = 0, vh_blocks = 0, vh_free = 0;
+ 
+ 	if (rootvnode != NULLVP && rootvnode->v_mount != NULL) {
+ 		rw = (vfs_flags(rootvnode->v_mount) & MNT_RDONLY) == 0;
+@@ -1860,6 +2014,15 @@ kebab_install_status(void)
+ 	printf("INST? wire %llu/%llu entries %u/%u ok %u skip %u fail %u\n",
+ 	    (unsigned long long)ki.wire_seen, (unsigned long long)ki.wire_total,
+ 	    ki.entries_done, ki.entries_total, ki.ok, ki.skipped, ki.failed);
++	/*
++	 * The on-disk header, not the mounted statfs: this is the number that
++	 * moves only when HFS+ has actually written the allocation bitmap and
++	 * the volume header.  Do not issue a raw read while a stream is live.
++	 */
++	if (!ki.active && ki_read_vh(&vh_bsize, &vh_blocks, &vh_free) == 0) {
++		printf("INST? vh bsize %u blocks %u free %u\n", vh_bsize,
++		    vh_blocks, vh_free);
++	}
+ 	if (!rw) {
+ 		printf("INST? the root volume is read-only; boot with rootrw=1\n");
+ 	} else {
+diff --git a/bsd/dev/kebab_install.h b/bsd/dev/kebab_install.h
+index 795db71..dba0507 100644
+--- a/bsd/dev/kebab_install.h
++++ b/bsd/dev/kebab_install.h
+@@ -49,4 +49,7 @@ void kebab_install_check(const char *path);
+  */
+ bool kebab_install_sync_for_reset(const char *why);
+ 
++/* SYNC command: flush root + device and print the on-disk volume header. */
++void kebab_install_sync_report(void);
++
+ #endif /* _KEBAB_INSTALL_H_ */
+diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
+index dd09439..8777564 100644
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -301,6 +301,7 @@ extern int kebab_spmi_pon_reason_write(void);
+ #define UD_REBOOT_VOL_BEGIN     26u
+ #define UD_REBOOT_VOL_DRY       27u
+ #define UD_REBOOT_VOL_STATUS    28u
++#define UD_REBOOT_SYNC          29u
+ 
+ struct ud_endpoint {
+ 	uint32_t trb, length, ctl, resource;
+@@ -1400,6 +1401,9 @@ ud_reboot_command(const char *buf, uint32_t received)
+ 		if (ud_command_seen(buf, received, "REBOOT\n", sizeof("REBOOT\n") - 1)) {
+ 			return UD_REBOOT_PLAIN;
+ 		}
++		if (ud_command_seen(buf, received, "SYNC\n", sizeof("SYNC\n") - 1)) {
++			return UD_REBOOT_SYNC;
++		}
+ 		if (ud_command_seen(buf, received, "FASTBOOT2\n", sizeof("FASTBOOT2\n") - 1)) {
+ 			return UD_REBOOT_FASTBOOT2;
+ 		}
+@@ -1466,6 +1470,10 @@ ud_reboot_command(const char *buf, uint32_t received)
+ 	    !memcmp(buf, "REBOOT\n", sizeof("REBOOT\n") - 1)) {
+ 		return UD_REBOOT_PLAIN;
+ 	}
++	if (received >= sizeof("SYNC\n") - 1 &&
++	    !memcmp(buf, "SYNC\n", sizeof("SYNC\n") - 1)) {
++		return UD_REBOOT_SYNC;
++	}
+ 	if (received >= sizeof("FASTBOOT2\n") - 1 &&
+ 	    !memcmp(buf, "FASTBOOT2\n", sizeof("FASTBOOT2\n") - 1)) {
+ 		return UD_REBOOT_FASTBOOT2;
+@@ -1848,6 +1856,8 @@ ud_run_reboot_command(uint32_t command)
+ 		kebab_fwlog_report(4096);
+ 	} else if (command == UD_REBOOT_FWLOG_ALL) {
+ 		kebab_fwlog_report(0);
++	} else if (command == UD_REBOOT_SYNC) {
++		kebab_install_sync_report();
+ 	} else if (command == UD_REBOOT_INST_BEGIN) {
+ 		ud_inst_arm(false);
+ 	} else if (command == UD_REBOOT_INST_DRY) {

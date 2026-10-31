@@ -1,0 +1,620 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -109,6 +109,7 @@
+ bsd/dev/kebab_reboot.c			standard
+ bsd/dev/kebab_fwlog.c			standard
+ bsd/dev/kebab_install.c			standard
++bsd/dev/kebab_cryptex_media.c		standard
+ bsd/dev/kebab_vol.c			standard
+ bsd/dev/kebab_spmi.c			standard
+ bsd/dev/kebab_spmi_bus.c			standard
+--- /dev/null
++++ b/bsd/dev/kebab_cryptex_media.c
+@@ -0,0 +1,298 @@
++/* A fixed original image is an owner policy input, not an Apple IM4M result.
++ * Publish only after full SHA on the actual, pinned read-only Preboot mount. */
++#include <pexpert/arm64/board_config.h>
++#if defined(KEBAB)
++#include <pexpert/pexpert.h>
++#include <sys/param.h>
++#include <sys/errno.h>
++#include <sys/mount_internal.h>
++#include <sys/vnode_internal.h>
++#include <sys/fcntl.h>
++#include <sys/uio.h>
++#include <sys/ubc.h>
++#include <sys/namei.h>
++#include <sys/proc_internal.h>
++#include <sys/sysproto.h>
++#include <kern/kalloc.h>
++#include <kern/locks.h>
++#include <libkern/libkern.h>
++#include <libkern/crypto/sha2.h>
++#include "kebab_cryptex_media.h"
++#include "kebab_cryptex_stage.h"
++#include "../kern/kebab_apfs_probe.h"
++
++#define KCM_CHUNK (64u * 1024u)
++static vnode_t kcm_file;
++static mount_t kcm_backing, kcm_system;
++static uint32_t kcm_vid, kcm_ready;
++static LCK_GRP_DECLARE(kcm_group, "kebab_cryptex");
++static LCK_MTX_DECLARE(kcm_prepare_lock, &kcm_group);
++
++static dev_t
++kcm_device(mount_t mounted)
++{
++ vnode_t device = vfs_devvp(mounted);
++ dev_t number = device ? vnode_specrdev(device) : NODEV;
++ if (device) vnode_put(device);
++ return number;
++}
++
++static bool
++kcm_mount_readonly(mount_t mounted)
++{
++ return mounted && (vfs_flags(mounted) & MNT_RDONLY) &&
++     !strcmp(vfs_statfs(mounted)->f_fstypename, "apfs");
++}
++
++static int
++kcm_open_verify(void)
++{
++ uint32_t enabled = 0, rw = 0;
++ PE_parse_boot_argn("kebab_cryptex_media", &enabled, sizeof(enabled));
++ PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
++ if (enabled != 1 || rw || rootvnode == NULLVP) return EROFS;
++ struct kebab_volume_identity system, preboot;
++ int error = kebab_lookup_apfs_preboot(&system, &preboot);
++ if (error) return error;
++ mount_t system_mount = vnode_mount(rootvnode);
++ if (!kcm_mount_readonly(system_mount) ||
++     kcm_device(system_mount) != makedev(system.major_number, system.minor_number)) return EINVAL;
++ vfs_context_t context = vfs_context_current();
++ vnode_t anchor = NULLVP, file = NULLVP;
++ error = vnode_lookup("/private/preboot", VNODE_LOOKUP_NOFOLLOW, &anchor, context);
++ if (error) return error;
++ mount_t backing = vnode_mount(anchor);
++ if (!vnode_isdir(anchor) || !kcm_mount_readonly(backing) || backing == system_mount ||
++     kcm_device(backing) != makedev(preboot.major_number, preboot.minor_number)) error = EINVAL;
++ if (!error) error = vnode_open(KEBAB_CRYPTEX_STAGE_PATH, O_NOFOLLOW | FREAD, 0, 0, &file, context);
++ uint8_t *buffer = NULL;
++ if (!error) {
++  struct vnode_attr attributes;
++  VATTR_INIT(&attributes);
++  VATTR_WANTED(&attributes, va_data_size);
++  VATTR_WANTED(&attributes, va_uid);
++  VATTR_WANTED(&attributes, va_gid);
++  VATTR_WANTED(&attributes, va_nlink);
++  VATTR_WANTED(&attributes, va_mode);
++  error = vnode_getattr(file, &attributes, context);
++  if (!error && (!vnode_isreg(file) || vnode_mount(file) != backing ||
++      !VATTR_IS_SUPPORTED(&attributes, va_data_size) || !VATTR_IS_SUPPORTED(&attributes, va_uid) ||
++      !VATTR_IS_SUPPORTED(&attributes, va_gid) || !VATTR_IS_SUPPORTED(&attributes, va_nlink) ||
++      !VATTR_IS_SUPPORTED(&attributes, va_mode) || attributes.va_uid || attributes.va_gid ||
++      attributes.va_nlink != 1 || !kebab_cryptex_stage_contract(KEBAB_CRYPTEX_STAGE_PATH,
++          attributes.va_data_size, attributes.va_data_size, attributes.va_mode & 07777,
++          0, kebab_cryptex_stage_sha256))) error = EINVAL;
++ }
++ if (!error) {
++  buffer = kalloc_data(KCM_CHUNK, Z_WAITOK);
++  if (!buffer) error = ENOMEM;
++ }
++ if (!error) {
++  SHA256_CTX hash;
++  uint8_t digest[32];
++  SHA256_Init(&hash);
++  for (uint64_t offset = 0; !error && offset < KEBAB_CRYPTEX_STAGE_BYTES; offset += KCM_CHUNK) {
++   uint64_t left = KEBAB_CRYPTEX_STAGE_BYTES - offset;
++   int count = left < KCM_CHUNK ? (int)left : (int)KCM_CHUNK, residual = 0;
++   error = vn_rdwr(UIO_READ, file, (caddr_t)buffer, count, (off_t)offset,
++       UIO_SYSSPACE, IO_NOCACHE, vfs_context_ucred(context), &residual, NULL);
++   if (!error && residual) error = EIO;
++   if (error) break;
++   SHA256_Update(&hash, buffer, (size_t)count);
++   if (!offset && (*(const uint32_t *)(const void *)(buffer + 32) != 0x4253584e ||
++       *(const uint32_t *)(const void *)(buffer + 36) != 4096 ||
++       *(const uint64_t *)(const void *)(buffer + 40) != KEBAB_CRYPTEX_STAGE_BYTES / 4096)) error = EINVAL;
++   if (offset && !(offset & ((256u << 20) - 1)))
++    printf("KEBAB CRYPTEX MEDIA: verified %llu MiB of original SystemOS\n", offset >> 20);
++  }
++  SHA256_Final(digest, &hash);
++  if (!error && memcmp(digest, kebab_cryptex_stage_sha256, sizeof(digest))) error = EAUTH;
++  bzero(digest, sizeof(digest));
++ }
++ if (!error && (vnode_mount(file) != backing || vnode_mount(rootvnode) != system_mount ||
++     !kcm_mount_readonly(backing) || !kcm_mount_readonly(system_mount) ||
++     ubc_getsize(file) != (off_t)KEBAB_CRYPTEX_STAGE_BYTES)) error = EINVAL;
++ if (!error) {
++  /* Keep the FREAD open and its iocount for this immutable boot lifetime.
++   * Each worker read additionally obtains/relinquishes an iocount by vid. */
++  kcm_file = file; kcm_vid = vnode_vid(file);
++  kcm_backing = backing; kcm_system = system_mount; file = NULLVP;
++  __atomic_store_n(&kcm_ready, 1, __ATOMIC_RELEASE);
++ }
++ if (buffer) kfree_data(buffer, KCM_CHUNK);
++ if (file != NULLVP) (void)vnode_close(file, FREAD, context);
++ vnode_put(anchor);
++ return error;
++}
++
++int
++kebab_cryptex_media_prepare(void)
++{
++ lck_mtx_lock(&kcm_prepare_lock);
++ int error = __atomic_load_n(&kcm_ready, __ATOMIC_ACQUIRE) ? 0 : kcm_open_verify();
++ lck_mtx_unlock(&kcm_prepare_lock);
++ printf("KEBAB CRYPTEX MEDIA: fixed original SystemOS full SHA/RO identity %s (%d)\n", error ? "FAIL" : "PASS", error);
++ return error;
++}
++
++uint64_t
++kebab_cryptex_media_bytes(void)
++{
++ return __atomic_load_n(&kcm_ready, __ATOMIC_ACQUIRE) ? KEBAB_CRYPTEX_STAGE_BYTES : 0;
++}
++
++int
++kebab_cryptex_media_read(uint64_t offset, void *buffer, uint32_t length)
++{
++ if (!buffer || !length || length > KCM_CHUNK || offset > KEBAB_CRYPTEX_STAGE_BYTES ||
++     length > KEBAB_CRYPTEX_STAGE_BYTES - offset) return EINVAL;
++ if (!__atomic_load_n(&kcm_ready, __ATOMIC_ACQUIRE)) return ENXIO;
++ int error = vnode_getwithvid(kcm_file, kcm_vid);
++ if (error) return error;
++ if (rootvnode == NULLVP || vnode_mount(rootvnode) != kcm_system ||
++     vnode_mount(kcm_file) != kcm_backing || !kcm_mount_readonly(kcm_backing) ||
++     !kcm_mount_readonly(kcm_system) || ubc_getsize(kcm_file) != (off_t)KEBAB_CRYPTEX_STAGE_BYTES) error = EROFS;
++ if (!error) {
++  int residual = 0;
++  vfs_context_t context = vfs_context_current();
++  error = vn_rdwr(UIO_READ, kcm_file, (caddr_t)buffer, (int)length, (off_t)offset,
++      UIO_SYSSPACE, IO_NOCACHE, vfs_context_ucred(context), &residual, NULL);
++  if (!error && residual) error = EIO;
++ }
++ vnode_put(kcm_file);
++ return error;
++}
++
++static int
++kcm_directory_identity(vnode_t directory, mount_t expected, vfs_context_t context)
++{
++ if (!vnode_isdir(directory) || vnode_mount(directory) != expected) return EINVAL;
++ struct vnode_attr attributes;
++ VATTR_INIT(&attributes);
++ VATTR_WANTED(&attributes, va_uid);
++ VATTR_WANTED(&attributes, va_gid);
++ VATTR_WANTED(&attributes, va_mode);
++ int error = vnode_getattr(directory, &attributes, context);
++ if (!error && (!VATTR_IS_SUPPORTED(&attributes, va_uid) || !VATTR_IS_SUPPORTED(&attributes, va_gid) ||
++     !VATTR_IS_SUPPORTED(&attributes, va_mode) || attributes.va_uid || attributes.va_gid ||
++     (attributes.va_mode & 07777) != 0755)) error = EINVAL;
++ return error;
++}
++
++static int
++kcm_mkdir_fixed(const char *path, mount_t expected, vfs_context_t context)
++{
++ vnode_t directory = NULLVP;
++ int error = vnode_lookup(path, VNODE_LOOKUP_NOFOLLOW, &directory, context);
++ if (!error) {
++  error = kcm_directory_identity(directory, expected, context);
++  vnode_put(directory); return error;
++ }
++ if (error != ENOENT) return error;
++ struct nameidata name;
++ NDINIT(&name, CREATE, OP_MKDIR, LOCKPARENT, UIO_SYSSPACE, CAST_USER_ADDR_T(path), context);
++ name.ni_cnd.cn_flags |= WILLBEDIR;
++ error = namei(&name);
++ if (error) return error;
++ vnode_t parent = name.ni_dvp;
++ directory = name.ni_vp;
++ if (!parent || vnode_mount(parent) != expected || !vnode_isdir(parent)) error = EINVAL;
++ if (!error && directory) error = kcm_directory_identity(directory, expected, context);
++ else if (!error) {
++  struct vnode_attr attributes;
++  VATTR_INIT(&attributes);
++  VATTR_SET(&attributes, va_type, VDIR);
++  VATTR_SET(&attributes, va_mode, 0755);
++  VATTR_SET(&attributes, va_uid, 0);
++  VATTR_SET(&attributes, va_gid, 0);
++  error = vn_create(parent, &directory, &name, &attributes, 0, 0, NULL, context);
++  if (!error && directory) error = kcm_directory_identity(directory, expected, context);
++  if (!error && !directory) error = EIO;
++ }
++ if (directory) vnode_put(directory);
++ nameidone(&name);
++ if (parent) vnode_put(parent);
++ return error;
++}
++
++int kebab_cryptex_prepare_directories(mount_t);
++int
++kebab_cryptex_prepare_directories(mount_t expected)
++{
++ uint32_t enabled = 0, rw = 0;
++ PE_parse_boot_argn("kebab_cryptex_dirs", &enabled, sizeof(enabled));
++ if (!enabled) return 0;
++ PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
++ if (enabled != 1 || rw != 1 || !expected || (vfs_flags(expected) & MNT_RDONLY) ||
++     rootvnode == NULLVP || !kcm_mount_readonly(vnode_mount(rootvnode))) return EROFS;
++ struct kebab_volume_identity system, preboot;
++ int error = kebab_lookup_apfs_preboot(&system, &preboot);
++ if (error) return error;
++ if (kcm_device(vnode_mount(rootvnode)) != makedev(system.major_number, system.minor_number) ||
++     kcm_device(expected) != makedev(preboot.major_number, preboot.minor_number) ||
++     expected == vnode_mount(rootvnode) || strcmp(vfs_statfs(expected)->f_fstypename, "apfs")) return EINVAL;
++ vfs_context_t context = vfs_context_current();
++ error = kcm_mkdir_fixed("/private/preboot/Cryptexes", expected, context);
++ if (!error) error = kcm_mkdir_fixed(KEBAB_CRYPTEX_MOUNT_PATH, expected, context);
++ printf("KEBAB CRYPTEX: fixed mount directories %s (%d)\n", error ? "FAIL" : "PASS", error);
++ return error;
++}
++
++int kebab_cryptex_mount_prepare(proc_t, user_addr_t);
++int
++kebab_cryptex_mount_prepare(proc_t process, user_addr_t scratch)
++{
++ uint32_t enabled = 0;
++ PE_parse_boot_argn("kebab_cryptex_media", &enabled, sizeof(enabled));
++ if (!enabled) return 0;
++ if (enabled != 1 || !scratch || rootvnode == NULLVP) return EINVAL;
++ mount_t system = vnode_mount(rootvnode);
++ if (!kcm_mount_readonly(system)) return EROFS;
++ int error = kebab_cryptex_blockstorage_start();
++ if (error) return error;
++ dev_t selected = NODEV;
++ char name[32] = {0}, device_path[64] = {0};
++ error = kebab_cryptex_blockstorage_volume(&selected, name, sizeof(name));
++ if (error || selected == NODEV) return error ? error : ENXIO;
++ snprintf(device_path, sizeof(device_path), "/dev/%s", name);
++ vnode_t destination = NULLVP;
++ vfs_context_t context = vfs_context_current();
++ error = vnode_lookup(KEBAB_CRYPTEX_MOUNT_PATH, VNODE_LOOKUP_NOFOLLOW, &destination, context);
++ if (error) return error;
++ error = kcm_directory_identity(destination, kcm_backing, context);
++ vnode_put(destination);
++ if (error) return error;
++ /* Exact payload qualified against the unchanged 20H392 APFS mount syscall. */
++ uint8_t payload[0x150] = {0};
++ user64_addr_t spec = scratch + 0x180;
++ uint16_t normal_mount = 1;
++ uint64_t readonly = MNT_RDONLY;
++ uint32_t anonymous_owner = UINT32_MAX;
++ memcpy(payload, &spec, sizeof(spec));
++ memcpy(payload + 8, &readonly, sizeof(readonly));
++ memcpy(payload + 16, &normal_mount, sizeof(normal_mount));
++ memcpy(payload + 0x144, &anonymous_owner, sizeof(anonymous_owner));
++ memcpy(payload + 0x148, &anonymous_owner, sizeof(anonymous_owner));
++ struct mount_args request = {.type = scratch + 0x100, .path = scratch + 0x120,
++     .flags = MNT_RDONLY | MNT_NOSUID | MNT_NODEV, .data = scratch + 0x200};
++ int32_t result = 0;
++ if ((error = copyout("apfs", request.type, 5)) ||
++     (error = copyout(KEBAB_CRYPTEX_MOUNT_PATH, request.path, sizeof(KEBAB_CRYPTEX_MOUNT_PATH))) ||
++     (error = copyout(device_path, spec, strlen(device_path) + 1)) ||
++     (error = copyout(payload, request.data, sizeof(payload)))) return error;
++ error = mount(process, &request, &result);
++ printf("KEBAB CRYPTEX: original APFS mount uuid=%s dev=%s status=%d\n", KEBAB_CRYPTEX_VOLUME_UUID, device_path, error);
++ if (error) return error;
++ destination = NULLVP;
++ error = vnode_lookup(KEBAB_CRYPTEX_MOUNT_PATH, VNODE_LOOKUP_NOFOLLOW, &destination, context);
++ if (!error) {
++  mount_t actual = vnode_mount(destination);
++  if (!kcm_mount_readonly(actual) || actual == kcm_backing || kcm_device(actual) != selected ||
++      vnode_mount(rootvnode) != system || !kcm_mount_readonly(system) ||
++      !kcm_mount_readonly(kcm_backing) || !kebab_cryptex_media_bytes()) error = EAUTH;
++  vnode_put(destination);
++ }
++ printf("KEBAB CRYPTEX: mounted fixed original SystemOS UUID/dev_t/RO %s (%d)\n", error ? "FAIL" : "PASS", error);
++ return error;
++}
++#endif
+--- /dev/null
++++ b/bsd/dev/kebab_cryptex_media.h
+@@ -0,0 +1,11 @@
++#ifndef KEBAB_CRYPTEX_MEDIA_H
++#define KEBAB_CRYPTEX_MEDIA_H
++/* Owner-pinned original SystemOS; never writable and never a generic file disk. */
++#define KEBAB_CRYPTEX_VOLUME_UUID "96096B28-B6DC-4BC7-9D3A-2632A0FE53F1"
++#define KEBAB_CRYPTEX_MOUNT_PATH "/private/preboot/Cryptexes/OS"
++int kebab_cryptex_media_prepare(void);
++uint64_t kebab_cryptex_media_bytes(void);
++int kebab_cryptex_media_read(uint64_t offset, void *buffer, uint32_t length);
++int kebab_cryptex_blockstorage_start(void);
++int kebab_cryptex_blockstorage_volume(dev_t *device, char *name, size_t capacity);
++#endif
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -18,6 +18,8 @@
+ #define KEBAB_APFS_PROOF_SIZE 65559u
+ #define KEBAB_APFS_PROOF_PATH "/private/preboot/.hios-apfs-proof-v1"
+ extern int kebab_ufs_sync(void);
++extern int kebab_cryptex_prepare_directories(mount_t);
++extern int kebab_cryptex_mount_prepare(proc_t, user_addr_t);
+ 
+ static uint8_t
+ kebab_apfs_proof_byte(uint64_t i)
+@@ -209,6 +211,7 @@
+      (vfs_flags(original_root) & MNT_RDONLY) != 0, error ? "FAIL" : "PASS");
+  if (!error && mode != 1) error = kebab_apfs_proof_file(mounted, mode==2);
+  if (!error && (mode==4 || mode==5)) error=kebab_nonce_record_file(mounted,mode==4);
++ if (!error && mode == 6) error = kebab_cryptex_prepare_directories(mounted);
+  if (write_file) {
+   /* Flush even after a failed file operation, before a diagnostic panic. */
+   int filesystem_error = VFS_SYNC(mounted, MNT_WAIT, vfs_context_current());
+@@ -217,6 +220,7 @@
+   if (!error) error = filesystem_error ? filesystem_error : device_error;
+  }
+  vnode_put(data_root);
++ if (!error && !write_file) error = kebab_cryptex_mount_prepare(p, scratch);
+  return error;
+ }
+ #endif
+--- a/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
++++ b/iokit/Kernel/arm/KebabBlockStorageDevice.cpp
+@@ -54,13 +54,16 @@
+ #include <libkern/c++/OSNumber.h>
+ #include <libkern/c++/OSString.h>
+ #include <sys/types.h>
++#include <sys/param.h>
+ #include <IOKit/storage/IOBlockStorageDevice.h>
+ #include <pexpert/pexpert.h>
+ #include <sys/errno.h>
+ #include <kern/locks.h>
++#include <kern/thread.h>
+ 
+ extern "C" {
+ #include "../../../bsd/dev/kebab_ufs.h"
++#include "../../../bsd/dev/kebab_cryptex_media.h"
+ }
+ 
+ #pragma clang diagnostic pop
+@@ -92,6 +95,18 @@
+ 	void *	fBounce;
+ 	IOLock *fLock;
+ 
++	struct FileRequest {
++		FileRequest *next;
++		IOMemoryDescriptor *buffer;
++		UInt64 offset, length;
++		IOStorageCompletion completion;
++	};
++	bool fFileStorage, fFileStopping, fFileWorkerActive;
++	thread_t fFileThread;
++	unsigned int fFilePending;
++	FileRequest *fFileHead, *fFileTail;
++	static void fileWorker(void *argument, wait_result_t result);
++	IOReturn enqueueFileRead(IOMemoryDescriptor *, UInt64, UInt64, IOStorageCompletion *);
+ 	static IOReturn statusForError(int error);
+ 
+ public:
+@@ -131,11 +146,13 @@
+  * staging buffer. Publication is serialized independently of the backend lock:
+  * matching can call geometry/read methods, so never hold kebab_ufs_lock here. */
+ static KebabBlockStorageDevice *kebab_block_device;
++static KebabBlockStorageDevice *kebab_cryptex_device;
+ static LCK_GRP_DECLARE(kebab_block_group, "kebab_block");
+ static LCK_MTX_DECLARE(kebab_block_publish_lock, &kebab_block_group);
+ 
+ static char kebabVendorString[] = "KEBAB";
+ static char kebabProductString[] = "UFS userdata";
++static char kebabCryptexProductString[] = "Verified SystemOS";
+ static char kebabRevisionString[] = "1";
+ static char kebabAdditionalString[] = "OnePlus 8T UFS LUN 0";
+ 
+@@ -174,9 +191,13 @@
+ 	fLock = NULL;
+ 	fOnline = false;
+ 	fMediaStateReported = false;
+-	fBlockSize = kebab_ufs_block_size();
+-	bytes = kebab_ufs_partition_bytes();
+-	fWritable = kebab_ufs_writable();
++	OSBoolean *file = properties ? OSDynamicCast(OSBoolean, properties->getObject("KebabCryptex")) : NULL;
++	fFileStorage = file && file->isTrue();
++	fFileStopping = false; fFileWorkerActive = false; fFileThread = THREAD_NULL;
++	fFilePending = 0; fFileHead = fFileTail = NULL;
++	fBlockSize = fFileStorage ? 4096 : kebab_ufs_block_size();
++	bytes = fFileStorage ? kebab_cryptex_media_bytes() : kebab_ufs_partition_bytes();
++	fWritable = !fFileStorage && kebab_ufs_writable();
+ 	if (fBlockSize == 0 || fBlockSize > KEBAB_BLOCK_CHUNK ||
+ 	    KEBAB_BLOCK_CHUNK % fBlockSize != 0 || bytes == 0 ||
+ 	    (bytes % fBlockSize) != 0) {
+@@ -203,6 +224,16 @@
+ 	IOLockLock(fLock);
+ 	fOnline = true;
+ 	IOLockUnlock(fLock);
++	if (fFileStorage) {
++		fFileWorkerActive = true;
++		retain(); /* The worker owns the instance until its queue is drained. */
++		kern_return_t kr = kernel_thread_start(&KebabBlockStorageDevice::fileWorker, this, &fFileThread);
++		if (kr != KERN_SUCCESS) {
++			fOnline = false; fFileWorkerActive = false;
++			release(); IOBlockStorageDevice::stop(provider); return false;
++		}
++		thread_deallocate(fFileThread);
++	}
+ 	IOLog("KEBAB BLOCK: block storage up: %llu MiB, %llu-byte blocks, %s\n",
+ 	    (unsigned long long)(fBlockCount * fBlockSize >> 20),
+ 	    (unsigned long long)fBlockSize, fWritable ? "read-write" : "read-only");
+@@ -216,6 +247,14 @@
+ 	IOLockLock(fLock);
+ 	fOnline = false;
+ 	fMediaStateReported = false;
++	if (fFileStorage) {
++		fFileStopping = true;
++		IOLockWakeup(fLock, &fFileHead, false);
++		/* Normal stop drains accepted requests. A completion may reenter stop
++		 * on this worker; its retain defers free until the remaining queue drains. */
++		while (fFileWorkerActive && current_thread() != fFileThread)
++			(void)IOLockSleep(fLock, &fFileWorkerActive, THREAD_UNINT);
++	}
+ 	IOLockUnlock(fLock);
+ 	IOBlockStorageDevice::stop(provider);
+ }
+@@ -265,7 +304,7 @@
+ char *
+ KebabBlockStorageDevice::getProductString(void)
+ {
+-	return kebabProductString;
++	return fFileStorage ? kebabCryptexProductString : kebabProductString;
+ }
+ 
+ char *
+@@ -376,6 +415,9 @@
+ 	length = nblks * fBlockSize;
+ 	if (buffer->getLength() < length) {
+ 		return kIOReturnBadArgument;
++	}
++	if (fFileStorage) {
++		return enqueueFileRead(buffer, offset, length, completion);
+ 	}
+ 
+ 	IOLockLock(fLock);
+@@ -425,6 +467,73 @@
+ 	return status;
+ }
+ 
++/* File I/O may sleep and recurse into the backing APFS/UFS stack. Queue it
++ * outside the requesting IOStorage call stack; one worker owns the bounce
++ * buffer. Outstanding allocations are bounded to 32 requests. */
++IOReturn
++KebabBlockStorageDevice::enqueueFileRead(IOMemoryDescriptor *buffer, UInt64 offset,
++    UInt64 length, IOStorageCompletion *completion)
++{
++	if (!completion || !completion->action) return kIOReturnBadArgument;
++	FileRequest *request = (FileRequest *)IOMalloc(sizeof(*request));
++	if (!request) return kIOReturnNoMemory;
++	request->next = NULL; request->buffer = buffer;
++	request->offset = offset; request->length = length; request->completion = *completion;
++	IOLockLock(fLock);
++	IOReturn status = !fOnline || fFileStopping ? kIOReturnNoDevice :
++	    fFilePending >= 32 ? kIOReturnBusy : kIOReturnSuccess;
++	if (status == kIOReturnSuccess) {
++		buffer->retain(); fFilePending++;
++		if (fFileTail) fFileTail->next = request; else fFileHead = request;
++		fFileTail = request;
++		IOLockWakeup(fLock, &fFileHead, false);
++	}
++	IOLockUnlock(fLock);
++	if (status != kIOReturnSuccess) IOFree(request, sizeof(*request));
++	return status;
++}
++
++void
++KebabBlockStorageDevice::fileWorker(void *argument, wait_result_t result __unused)
++{
++	KebabBlockStorageDevice *self = (KebabBlockStorageDevice *)argument;
++	for (;;) {
++		IOLockLock(self->fLock);
++		while (!self->fFileHead && !self->fFileStopping)
++			(void)IOLockSleep(self->fLock, &self->fFileHead, THREAD_UNINT);
++		FileRequest *request = self->fFileHead;
++		if (!request) { IOLockUnlock(self->fLock); break; }
++		self->fFileHead = request->next;
++		if (!self->fFileHead) self->fFileTail = NULL;
++		bool online = self->fOnline && !self->fFileStopping;
++		IOLockUnlock(self->fLock);
++		IOReturn status = online ? kIOReturnSuccess : kIOReturnNoDevice;
++		UInt64 done = 0;
++		while (status == kIOReturnSuccess && done < request->length) {
++			UInt64 left = request->length - done;
++			UInt32 count = (UInt32)(left < KEBAB_BLOCK_CHUNK ? left : KEBAB_BLOCK_CHUNK);
++			status = statusForError(kebab_cryptex_media_read(request->offset + done, self->fBounce, count));
++			if (status != kIOReturnSuccess) break;
++			if (request->buffer->writeBytes(done, self->fBounce, count) != count) {
++				status = kIOReturnOverrun; break;
++			}
++			done += count;
++		}
++		IOLockLock(self->fLock);
++		self->fFilePending--;
++		IOLockUnlock(self->fLock);
++		/* Complete exactly once without either bridge or backing FS locks. */
++		request->completion.action(request->completion.target, request->completion.parameter, status, done);
++		request->buffer->release(); IOFree(request, sizeof(*request));
++	}
++	IOLockLock(self->fLock);
++	self->fFileWorkerActive = false;
++	IOLockWakeup(self->fLock, &self->fFileWorkerActive, false);
++	IOLockUnlock(self->fLock);
++	self->release();
++	thread_terminate(current_thread());
++}
++
+ IOReturn
+ KebabBlockStorageDevice::doSynchronize(UInt64 block, UInt64 nblks,
+     IOStorageSynchronizeOptions options)
+@@ -537,6 +646,73 @@
+ 	lck_mtx_lock(&kebab_block_publish_lock);
+ 	int error = kebab_blockstorage_publish();
+ 	lck_mtx_unlock(&kebab_block_publish_lock);
++	return error;
++}
++
++/* init is called only after the owner-fixed image has passed full SHA/RO
++ * checks. No supplied path, writable media or dynamically supplied hash. */
++extern "C" int
++kebab_cryptex_blockstorage_start(void)
++{
++	int error = kebab_cryptex_media_prepare();
++	if (error) return error;
++	if (kebab_cryptex_device) return 0;
++	IOService *provider = IOService::getServiceRoot();
++	OSDictionary *properties = OSDictionary::withCapacity(1);
++	KebabBlockStorageDevice *device = new KebabBlockStorageDevice;
++	if (!provider || !properties || !device) {
++		OSSafeReleaseNULL(properties); OSSafeReleaseNULL(device); return ENOMEM;
++	}
++	bool initialized = properties->setObject("KebabCryptex", kOSBooleanTrue) && device->init(properties);
++	properties->release();
++	if (!initialized) { device->release(); return ENXIO; }
++	device->setName("kebab-systemos0");
++	device->setProperty(kIOBlockStorageDeviceTypeKey, kIOBlockStorageDeviceTypeGeneric);
++	if (!device->attach(provider)) { device->release(); return ENXIO; }
++	if (!device->start(provider)) { device->detach(provider); device->release(); return ENXIO; }
++	kebab_cryptex_device = device;
++	device->registerService();
++	IOLog("KEBAB CRYPTEX MEDIA: registered original SystemOS read-only worker-backed media\n");
++	return 0;
++}
++
++extern "C" int
++kebab_cryptex_blockstorage_volume(dev_t *device, char *name, size_t capacity)
++{
++	if (!device || !name || !capacity || !kebab_cryptex_device) return EINVAL;
++	*device = NODEV; name[0] = 0;
++	if (kebab_cryptex_device->waitQuiet(10ULL * kSecondScale) != kIOReturnSuccess) return ETIMEDOUT;
++	IORegistryIterator *iterator = IORegistryIterator::iterateOver(kebab_cryptex_device,
++	    gIOServicePlane, kIORegistryIterateRecursively);
++	if (!iterator) return ENOMEM;
++	IORegistryEntry *entry;
++	unsigned int count = 0;
++	int error = ENOENT;
++	while ((entry = iterator->getNextObject()) != NULL) {
++		if (!entry->metaCast("IOMedia")) continue;
++		OSString *uuid = OSDynamicCast(OSString, entry->getProperty("UUID"));
++		if (!uuid || !uuid->isEqualTo(KEBAB_CRYPTEX_VOLUME_UUID)) continue;
++		if (++count != 1) { error = EINVAL; break; }
++		OSString *bsd = OSDynamicCast(OSString, entry->getProperty(kIOBSDNameKey));
++		OSNumber *maj = OSDynamicCast(OSNumber, entry->getProperty(kIOBSDMajorKey));
++		OSNumber *min = OSDynamicCast(OSNumber, entry->getProperty(kIOBSDMinorKey));
++		OSBoolean *writable = OSDynamicCast(OSBoolean, entry->getProperty("Writable"));
++		if (!bsd || !maj || !min || !writable || writable->isTrue() ||
++		    maj->unsigned64BitValue() > 255 || min->unsigned64BitValue() > 0xffffff ||
++		    bsd->getLength() == 0 || bsd->getLength() >= capacity) { error = EINVAL; break; }
++		const char *text = bsd->getCStringNoCopy();
++		bool valid = true;
++		for (unsigned int i = 0; i < bsd->getLength(); i++) {
++			char c = text[i];
++			if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) valid = false;
++		}
++		if (!valid) { error = EINVAL; break; }
++		*device = makedev(maj->unsigned32BitValue(), min->unsigned32BitValue());
++		strlcpy(name, text, capacity); error = 0;
++	}
++	if (!iterator->isValid() || count != 1) error = EINVAL;
++	iterator->release();
++	if (error) { *device = NODEV; name[0] = 0; }
+ 	return error;
+ }
+ 

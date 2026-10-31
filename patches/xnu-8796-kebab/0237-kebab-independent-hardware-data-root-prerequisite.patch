@@ -1,0 +1,349 @@
+--- a/bsd/kern/kebab_qsee_probe.c
++++ b/bsd/kern/kebab_qsee_probe.c
+@@ -6,6 +6,7 @@
+ #if defined(KEBAB)
+ #include <sys/param.h>
+ #include <sys/systm.h>
++#include <sys/errno.h>
+ #include <kern/kalloc.h>
+ #include "../dev/kebab_dma_limits.h"
+ #include <libkern/crypto/crypto_internal.h>
+@@ -423,6 +424,9 @@
+ 		return kebab_aes_nonce_prepare((const unsigned char *)(page+0x3800),32);
+ 	return !difference;
+ }
++
++#include "kebab_data_root_policy.h"
++#include "kebab_data_root_qsee_impl.h"
+ 
+ static bool
+ qsee_storage_probe(vm_offset_t page, uint64_t pa, uint32_t app)
+@@ -476,10 +480,12 @@
+ 	    (int32_t)response[0],vendor_patch);
+ 	if (response[0]) goto done;
+ 	uint32_t blob_size=0;
+-	if (qsee_nonce_mode==2) {
+-		blob_size=qsee_nonce_word(qsee_nonce_record,20);
+-		memcpy((void *)(page+0x1000),qsee_nonce_record+64,blob_size);
+-		printf("KEBAB NONCE ROOT: restoring opaque keyblob; generation skipped\n");
++	if (qsee_nonce_mode==2 || qsee_data_mode==2) {
++		const uint8_t *record=qsee_data_mode ? qsee_data_record : qsee_nonce_record;
++		blob_size=qsee_nonce_word(record,20);
++		memcpy((void *)(page+0x1000),record+(qsee_data_mode ? 128 : 64),blob_size);
++		if (qsee_data_mode) printf("KEBAB DATA ROOT: restoring opaque keyblob; generation skipped\n");
++		else printf("KEBAB NONCE ROOT: restoring opaque keyblob; generation skipped\n");
+ 	} else {
+ 	bzero(request,0x1000-0x100);
+ 	/* Active 4.1/4.558 path: command followed by a definite CBOR map.
+@@ -572,6 +578,7 @@
+ 		printf("KEBAB QSEE: hardware-wrapped repeated derivation %s; cold-boot identity unqualified\n",
+ 		    difference ? "FAIL" : "PASS");
+ 		if (!difference && qsee_nonce_mode) qsee_nonce_ok=qsee_nonce_witness(page,blob_size);
++		if (!difference && qsee_data_mode) qsee_data_ok=qsee_data_witness(page,blob_size);
+ 	}
+ done:
+ 	qsee_log_report();
+@@ -718,14 +725,14 @@
+ 		if (r.status) break; /* No retry after transport errors. */
+ 	}
+ 	if (outstanding) {
+-		qsee_nonce_ok=false;
++		qsee_nonce_ok=false; qsee_data_ok=false;
+ 		printf("KEBAB QSEE: incomplete call; page and bridge retained until reset\n"); return;
+ 	}
+ 	bzero((void *)page,PAGE_SIZE); qsee_cache(page,true);
+ 	if (bridged) {
+ 		struct qsee_result r=qsee_call(0x42000c1d,1,handle,0,0,0);
+ 		printf("KEBAB QSEE: bridge-delete status=%d result=%llu; page retained\n",r.status,r.value);
+-		if (r.status || r.value) qsee_nonce_ok=false;
++		if (r.status || r.value) { qsee_nonce_ok=false; qsee_data_ok=false; }
+ 	}
+ 	printf("KEBAB QSEE: fixed lookup end; no hardware key qualification\n");
+ }
+@@ -735,7 +742,7 @@
+ bool
+ kebab_qsee_nonce_record(uint8_t *record, unsigned size, unsigned mode)
+ {
+-	if (!record || size!=4096 || (mode!=1 && mode!=2) || qsee_nonce_record ||
++	if (!record || size!=4096 || (mode!=1 && mode!=2) || qsee_nonce_record || qsee_data_record ||
+ 	    panic_active() || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()) return false;
+ 	if (mode==2 && !qsee_nonce_layout(record,size)) {
+ 		printf("KEBAB NONCE ROOT: rejected record header/binding/length\n");return false;
+@@ -752,4 +759,19 @@
+ 	qsee_nonce_record=NULL;qsee_nonce_mode=0;qsee_nonce_ok=false;
+ 	return ok;
+ }
++
++/* Separate one-shot Data prerequisite; secret stays in the erased QSEE page.
++ * No APFS key callbacks or nonce selector are published by this entry point. */
++bool
++kebab_qsee_data_root_record(uint8_t *record, unsigned size, unsigned mode)
++{
++	if (!record || size!=4096 || kdr_policy(mode) || qsee_data_record || qsee_nonce_record ||
++	    panic_active() || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()) return false;
++	if (mode==2 && !qsee_data_layout(record,size)) return false;
++	qsee_data_record=record;qsee_data_mode=mode;qsee_data_ok=false;
++	kebab_qsee_probe();
++	bool ok=qsee_data_ok;
++	qsee_data_record=NULL;qsee_data_mode=0;qsee_data_ok=false;
++	return ok;
++}
+ #endif /* KEBAB */
+--- a/bsd/kern/kebab_apfs_probe.c
++++ b/bsd/kern/kebab_apfs_probe.c
+@@ -150,17 +150,23 @@
+  return error;
+ }
+ 
++#include "kebab_data_root_file_impl.h"
++
+ int kebab_apfs_probe_prepare(proc_t, user_addr_t);
+ int
+ kebab_apfs_probe_prepare(proc_t p, user_addr_t scratch)
+ {
+  uint32_t mode = 0, rw = 0;
+  if (!PE_parse_boot_argn("kebab_apfs_probe", &mode, sizeof(mode)) || !mode) return 0;
+- if (mode > 7 || !scratch) return EINVAL;
++ if (mode > 9 || !scratch) return EINVAL;
+  unsigned nonce_root=0;
+  PE_parse_boot_argn("kebab_nonce_root",&nonce_root,sizeof(nonce_root));
+- if ((mode==4 && nonce_root!=1) || (mode==5 && nonce_root!=2) || ((mode<4 || mode==6 || mode==7) && nonce_root)) return EINVAL;
+- bool write_file = (mode == 2 || mode == 4 || mode == 6 || mode == 7);
++ if ((mode==4 && nonce_root!=1) || (mode==5 && nonce_root!=2) || ((mode<4 || mode==6 || mode==7 || mode==8 || mode==9) && nonce_root)) return EINVAL;
++ unsigned data_key_mode=0;
++ PE_parse_boot_argn("kebab_data_root",&data_key_mode,sizeof(data_key_mode));
++ if ((mode==8 && data_key_mode!=1) || (mode==9 && data_key_mode!=2) || (mode<8 && data_key_mode)) return EINVAL;
++ if ((mode==8 || mode==9) && kdr_policy(data_key_mode)) return EPERM;
++ bool write_file = (mode == 2 || mode == 4 || mode == 6 || mode == 7 || mode == 8);
+  PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
+  if ((write_file && rw != 1) || (!write_file && rw)) return EINVAL;
+  mount_t original_root = vnode_mount(rootvnode);
+@@ -215,6 +221,11 @@
+  if (!error && mode == 6) error = kebab_cryptex_prepare_directories(mounted);
+  if (!error && mode == 7) error = kebab_boot_firmware_prepare(mounted);
+  if (!error && mode == 7) error = kebab_apfs_proof_file(mounted, false);
++ if (!error && (mode==8 || mode==9)) {
++  error = kdr_file(mounted, data_key_mode);
++  int proof_error = kebab_apfs_proof_file(mounted, false);
++  if (!error) error = proof_error;
++ }
+  if (write_file) {
+   /* Flush even after a failed file operation, before a diagnostic panic. */
+   int filesystem_error = VFS_SYNC(mounted, MNT_WAIT, vfs_context_current());
+@@ -224,6 +235,8 @@
+  }
+  vnode_put(data_root);
+  if (!error && mode == 7) panic("KEBAB OWNER FW: maintenance durable, original proof/nonce preserved; no userland started");
++ if (!error && mode==8) panic("KEBAB DATA ROOT: independent opaque record durable; no Data mount/userland started");
++ if (!error && mode==9) panic("KEBAB DATA ROOT: cold hardware restore verified; no Data mount/userland started");
+  if (!error && !write_file) error = kebab_cryptex_mount_prepare(p, scratch);
+  return error;
+ }
+--- /dev/null
++++ b/bsd/kern/kebab_data_root_policy.h
+@@ -0,0 +1,31 @@
++/* Explicit boot-thread prerequisite only; never a general key service. */
++#ifndef KEBAB_DATA_ROOT_POLICY_H
++#define KEBAB_DATA_ROOT_POLICY_H
++static int
++kdr_policy(unsigned mode)
++{
++#if DEVELOPMENT || DEBUG
++ if (mode != 1 && mode != 2) return EINVAL;
++ static const char *const disabled[] = { "rootrw", "kebab_owner_fast", "kebab_install",
++     "kebab_owner_startup", "kebab_owner_dsc", "kebab_owner_os", "kebab_dsc", "kebab_dsc_map",
++     "kebab_cryptex_media", "kebab_nonce_root", "kebab_hardware_nonce", "kebab_boot_firmware",
++     "kebab_driver_test", "kebab_aes_key_probe" };
++ unsigned value = 0;
++ for (unsigned i = 0; i < sizeof(disabled) / sizeof(disabled[0]); ++i) {
++  value = 0; PE_parse_boot_argn(disabled[i], &value, sizeof(value));
++  if (value) return EPERM;
++ }
++ const char *const required[] = { "kebab_data_root", "kebab_apfs_probe", "ufsrw",
++     "kebab_qsee_probe", "kebab_keymaster_version", "kebab_wrapped_key_probe", "kebab_qsee_time" };
++ const unsigned expected[] = { mode, mode == 1 ? 8u : 9u, mode == 1 ? 1u : 0u, 1, 1, 1, 1 };
++ for (unsigned i = 0; i < sizeof(required) / sizeof(required[0]); ++i) {
++  value = 0; PE_parse_boot_argn(required[i], &value, sizeof(value));
++  if (value != expected[i]) return EINVAL;
++ }
++ return 0;
++#else
++ (void)mode;
++ return EPERM;
++#endif
++}
++#endif
+--- /dev/null
++++ b/bsd/kern/kebab_data_root_qsee_impl.h
+@@ -0,0 +1,57 @@
++/* Independent Data-root record. No raw secret is persisted or published.
++ * Included after the qualified nonce record helper, before storage transport. */
++static uint8_t *qsee_data_record;
++static unsigned qsee_data_mode;
++static bool qsee_data_ok;
++static const uint8_t qsee_data_magic[16] = "HIOS-DATA-ROOT";
++static const uint8_t qsee_data_binding[32] = {
++ 0x0e,0x25,0xf3,0x31,0x62,0x79,0x45,0x8a,0x9c,0xfe,0xf3,0x95,0x98,0xda,0x17,0xaa,
++ 0xda,0xdd,0x93,0xf8,0xdb,0xbf,0x4b,0x17,0xa1,0xdf,0x0f,0x11,0xe6,0x41,0x72,0xf7
++};
++/* Bind the immutable owner container/System, not the pre-format empty Data UUID.
++ * Future class/file envelopes must separately bind their actual Data UUID. */
++
++static bool
++qsee_data_layout(const uint8_t *record, unsigned size)
++{
++ if (!record || size != 4096 || memcmp(record, qsee_data_magic, 16)) return false;
++ unsigned bytes = qsee_nonce_word(record, 20);
++ if (bytes < 8 || bytes > 0xc00 || qsee_nonce_word(record, 16) != 1 ||
++     qsee_nonce_word(record, 24) != 160716 || qsee_nonce_word(record, 28) ||
++     qsee_nonce_word(record, 32) != 20241005 || qsee_nonce_word(record, 36) != 4 ||
++     qsee_nonce_word(record, 40) != 558 || qsee_nonce_word(record, 44) != 1 ||
++     memcmp(record + 48, qsee_data_binding, sizeof(qsee_data_binding))) return false;
++ for (unsigned i = 80; i < 128; ++i) if (record[i]) return false;
++ for (unsigned i = 128 + bytes; i < 4064; ++i) if (record[i]) return false;
++ return true;
++}
++
++static bool
++qsee_data_witness(vm_offset_t page, unsigned bytes)
++{
++ if (!qsee_data_record || (qsee_data_mode != 1 && qsee_data_mode != 2) ||
++     bytes < 8 || bytes > 0xc00 || !g_crypto_funcs ||
++     !g_crypto_funcs->ccsha256_di || !g_crypto_funcs->cchmac_fn) return false;
++ if (qsee_data_mode == 1) {
++  bzero(qsee_data_record, 4096);
++  memcpy(qsee_data_record, qsee_data_magic, sizeof(qsee_data_magic));
++  const uint32_t fields[] = { 1, bytes, 160716, 0, 20241005, 4, 558, 1 };
++  memcpy(qsee_data_record + 16, fields, sizeof(fields));
++  memcpy(qsee_data_record + 48, qsee_data_binding, sizeof(qsee_data_binding));
++  memcpy(qsee_data_record + 128, (const void *)(page + 0x1000), bytes);
++ }
++ if (!qsee_data_layout(qsee_data_record, 4096) || bytes != qsee_nonce_word(qsee_data_record, 20)) return false;
++ uint8_t witness[32];
++ g_crypto_funcs->cchmac_fn(g_crypto_funcs->ccsha256_di, 32, (const void *)(page + 0x3800),
++     4064, qsee_data_record, witness);
++ unsigned difference = 0;
++ if (qsee_data_mode == 1) memcpy(qsee_data_record + 4064, witness, sizeof(witness));
++ else for (unsigned i = 0; i < sizeof(witness); ++i) difference |= witness[i] ^ qsee_data_record[4064 + i];
++ volatile uint8_t *wipe = witness;
++ for (unsigned i = 0; i < sizeof(witness); ++i) wipe[i] = 0;
++ printf("KEBAB DATA ROOT: %s hardware consistency witness %s; no secret published\n",
++     qsee_data_mode == 1 ? "generated independent" : "restored", difference ? "FAIL" : "PASS");
++ return !difference;
++}
++
++bool kebab_qsee_data_root_record(uint8_t *, unsigned, unsigned);
+--- /dev/null
++++ b/bsd/kern/kebab_data_root_file_impl.h
+@@ -0,0 +1,111 @@
++/* Fixed Preboot record prerequisite. No Data mount, file-key service or format. */
++#include <sys/xattr.h>
++#include "kebab_data_root_policy.h"
++#define KDR_PATH "/private/preboot/.hios-data-root-v1"
++extern bool kebab_qsee_data_root_record(uint8_t *, unsigned, unsigned);
++
++static int
++kdr_metadata(vnode_t file, mount_t expected, vfs_context_t context)
++{
++ if (!file || !vnode_isreg(file) || vnode_mount(file) != expected) return EAUTH;
++ struct vnode_attr a;
++ VATTR_INIT(&a);
++ VATTR_WANTED(&a, va_data_size); VATTR_WANTED(&a, va_mode);
++ VATTR_WANTED(&a, va_uid); VATTR_WANTED(&a, va_gid);
++ VATTR_WANTED(&a, va_flags); VATTR_WANTED(&a, va_nlink);
++ int error = vnode_getattr(file, &a, context);
++ if (!error && (!VATTR_IS_SUPPORTED(&a, va_data_size) || !VATTR_IS_SUPPORTED(&a, va_mode) ||
++     !VATTR_IS_SUPPORTED(&a, va_uid) || !VATTR_IS_SUPPORTED(&a, va_gid) ||
++     !VATTR_IS_SUPPORTED(&a, va_flags) || !VATTR_IS_SUPPORTED(&a, va_nlink) ||
++     a.va_data_size != 4096 || (a.va_mode & 07777) != 0600 || a.va_uid || a.va_gid || a.va_flags || a.va_nlink != 1)) error = EAUTH;
++ size_t bytes = 0;
++ if (!error) error = vn_listxattr(file, NULL, &bytes, XATTR_NODEFAULT | XATTR_NOSECURITY | XATTR_NOFOLLOW, context);
++ return !error && bytes ? EAUTH : error;
++}
++
++static int
++kdr_read(const char *path, mount_t expected, uint8_t *buffer, vfs_context_t context)
++{
++ vnode_t file = NULLVP;
++ int error = vnode_open(path, O_NOFOLLOW | FREAD, 0, 0, &file, context);
++ if (error) return error;
++ error = kdr_metadata(file, expected, context);
++ if (!error) {
++  int residual = 0;
++  error = vn_rdwr(UIO_READ, file, (caddr_t)buffer, 4096, 0, UIO_SYSSPACE, IO_NOCACHE,
++      vfs_context_ucred(context), &residual, NULL);
++  if (!error && residual) error = EIO;
++ }
++ int close_error = vnode_close(file, FREAD, context);
++ return error ? error : close_error;
++}
++
++static int
++kdr_file(mount_t expected, unsigned mode)
++{
++ int error = kdr_policy(mode);
++ if (error) return error;
++ if (!expected || !rootvnode || expected == vnode_mount(rootvnode) ||
++     strcmp(vfs_statfs(expected)->f_fstypename, "apfs") ||
++     !(vfs_flags(vnode_mount(rootvnode)) & MNT_RDONLY) ||
++     (((vfs_flags(expected) & MNT_RDONLY) != 0) != (mode == 2))) return EROFS;
++ vfs_context_t context = vfs_context_current();
++ uint8_t *record = kalloc_data(4096, Z_WAITOK | Z_ZERO);
++ uint8_t *readback = kalloc_data(4096, Z_WAITOK | Z_ZERO);
++ uint8_t before[32] = {0}, after[32] = {0};
++ bool nonce_measured = false;
++ vnode_t file = NULLVP;
++ if (!record || !readback) { error = ENOMEM; goto done; }
++ error = kdr_read(KEBAB_NONCE_PATH, expected, readback, context);
++ if (error) goto done;
++ SHA256_CTX hash; SHA256_Init(&hash); SHA256_Update(&hash, readback, 4096); SHA256_Final(before, &hash);
++ nonce_measured = true;
++ if (mode == 1) {
++  /* Refuse an existing record before generating any independent hardware key. */
++  error = vnode_open(KDR_PATH, O_NOFOLLOW | FREAD, 0, 0, &file, context);
++  if (!error) { int ignored = vnode_close(file, FREAD, context); (void)ignored; file = NULLVP; error = EEXIST; goto done; }
++  if (error != ENOENT) goto done;
++  error = 0;
++  if (!kebab_qsee_data_root_record(record, 4096, 1)) { error = EIO; goto done; }
++  uint32_t old_size = 0, new_size = 0;
++  memcpy(&old_size, readback + 20, sizeof(old_size));
++  memcpy(&new_size, record + 20, sizeof(new_size));
++  if (old_size < 8 || old_size > 0xc00 || new_size < 8 || new_size > 0xc00 ||
++      (old_size == new_size && !memcmp(readback + 64, record + 128, old_size))) { error = EAUTH; goto done; }
++  printf("KEBAB DATA ROOT: independent opaque blob differs from nonce record PASS\n");
++  error = vnode_open(KDR_PATH, O_CREAT | O_EXCL | O_NOFOLLOW | FWRITE, 0600, 0, &file, context);
++  if (error) goto done;
++  if (!vnode_isreg(file) || vnode_mount(file) != expected) error = EAUTH;
++  if (!error) {
++   int residual = 0;
++   error = vn_rdwr(UIO_WRITE, file, (caddr_t)record, 4096, 0, UIO_SYSSPACE, IO_SYNC | IO_NOCACHE,
++       vfs_context_ucred(context), &residual, NULL);
++   if (!error && residual) error = EIO;
++   int sync_error = VNOP_FSYNC(file, MNT_WAIT, context);
++   if (!error) error = sync_error;
++  }
++  int close_error = vnode_close(file, FWRITE, context); file = NULLVP;
++  if (!error) error = close_error;
++  if (error) goto done;
++ }
++ error = kdr_read(KDR_PATH, expected, readback, context);
++ if (!error && mode == 1 && memcmp(record, readback, 4096)) error = EAUTH;
++ if (!error && mode == 2 && !kebab_qsee_data_root_record(readback, 4096, 2)) error = EAUTH;
++done:
++ if (nonce_measured) {
++  int preservation = kdr_read(KEBAB_NONCE_PATH, expected, readback, context);
++  if (!preservation) {
++   SHA256_CTX check; SHA256_Init(&check); SHA256_Update(&check, readback, 4096); SHA256_Final(after, &check);
++   if (memcmp(before, after, sizeof(before))) preservation = EAUTH;
++  }
++  printf("KEBAB DATA ROOT: original nonce record preserved=%u\n", preservation == 0);
++  if (!error) error = preservation;
++ }
++ printf("KEBAB DATA ROOT: %s %s (%d); opaque4096B only, no Data mount\n",
++     mode == 1 ? "exclusive write/read" : "cold restore", error ? "FAIL" : "PASS", error);
++ if (record) { volatile uint8_t *p = record; for (unsigned i = 0; i < 4096; ++i) p[i] = 0; kfree_data(record, 4096); }
++ if (readback) { volatile uint8_t *p = readback; for (unsigned i = 0; i < 4096; ++i) p[i] = 0; kfree_data(readback, 4096); }
++ volatile uint8_t *p = before, *q = after;
++ for (unsigned i = 0; i < sizeof(before); ++i) { p[i] = 0; q[i] = 0; }
++ return error;
++}

@@ -1,0 +1,202 @@
+--- a/bsd/dev/kebab_spmi.c
++++ b/bsd/dev/kebab_spmi.c
+@@ -62,6 +62,7 @@
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <kern/clock.h>
++#include <kern/locks.h>
+ #include <mach/boolean.h>
+ #include <pexpert/pexpert.h>
+ #include <vm/pmap.h>
+@@ -95,6 +96,13 @@
+ int kebab_spmi_vrm_enable(const char *rail);
+ void kebab_spmi_vrm_init(void);
+ void kebab_tcs_report(void);
++
++/* Normal callers share arbiter command/data registers. Panic recovery uses
++ * kebab_spmi_pon_reason_write() directly and must never acquire this mutex. */
++static LCK_GRP_DECLARE(kebab_spmi_normal_group, "kebab_spmi_normal");
++static LCK_MTX_DECLARE(kebab_spmi_normal_lock, &kebab_spmi_normal_group);
++int kebab_spmi_pon_reason_write_normal(void);
++void kebab_spmi_test_panic_lock(void);
+ 
+ /* ------------------------------------------------------------ board facts */
+ 
+@@ -600,8 +608,8 @@
+  * This is a read-only path: the only write is the observer command that asks
+  * the arbiter for a transfer.  No PMIC register is changed.
+  */
+-int
+-kebab_spmi_keys_sample(uint8_t raw[4])
++static int
++kebab_spmi_keys_sample_unserialized(uint8_t raw[4])
+ {
+ 	static const uint32_t addr[4] = {
+ 		KEBAB_SPMI_KEYS_PON_RT,
+@@ -656,8 +664,8 @@
+  * reports these bytes and withholds a key whose pin is not configured that
+  * way, instead of turning a disabled input into a permanent press.
+  */
+-int
+-kebab_spmi_keys_config(uint8_t gpio6[3], uint8_t gpio7[3])
++static int
++kebab_spmi_keys_config_unserialized(uint8_t gpio6[3], uint8_t gpio7[3])
+ {
+ 	static const uint32_t addr[6] = {
+ 		KEBAB_SPMI_KEYS_GPIO6_MODE,
+@@ -1644,8 +1652,8 @@
+  * second attempt into a state machine that refused the first one is exactly
+  * what that gate exists to prevent.  The caller must not retry either.
+  */
+-int
+-kebab_spmi_vrm_boot_power(void)
++static int
++kebab_spmi_vrm_boot_power_unserialized(void)
+ {
+ 	static const struct {
+ 		const char *rail;
+@@ -1719,8 +1727,8 @@
+ 	printf("KEBAB RPMH: done; no register was written\n");
+ }
+ 
+-void
+-kebab_spmi_power_report(void)
++static void
++kebab_spmi_power_report_unserialized(void)
+ {
+ 	uint32_t i;
+ 
+@@ -1737,8 +1745,8 @@
+ 	printf("KEBAB SPMI: PWR: done; no peripheral write was issued\n");
+ }
+ 
+-void
+-kebab_spmi_report(void)
++static void
++kebab_spmi_report_unserialized(void)
+ {
+ 	struct kebab_spmi_match matches[8];
+ 	uint32_t version, count, total, i, entries;
+@@ -1810,8 +1818,8 @@
+  * read-only gate: the observer command register is written to issue a read,
+  * no PMIC register is written.
+  */
+-void
+-kebab_spmi_pon_report(void)
++static void
++kebab_spmi_pon_report_unserialized(void)
+ {
+ 	struct kebab_spmi_match matches[8];
+ 	uint32_t count, i, chosen = 0, version;
+@@ -1904,4 +1912,78 @@
+ 	}
+ }
+ 
++int
++kebab_spmi_keys_sample(uint8_t raw[4])
++{
++	lck_mtx_lock(&kebab_spmi_normal_lock);
++	int result = kebab_spmi_keys_sample_unserialized(raw);
++	lck_mtx_unlock(&kebab_spmi_normal_lock);
++	return result;
++}
++
++int
++kebab_spmi_keys_config(uint8_t gpio6[3], uint8_t gpio7[3])
++{
++	lck_mtx_lock(&kebab_spmi_normal_lock);
++	int result = kebab_spmi_keys_config_unserialized(gpio6, gpio7);
++	lck_mtx_unlock(&kebab_spmi_normal_lock);
++	return result;
++}
++
++void
++kebab_spmi_report(void)
++{
++	lck_mtx_lock(&kebab_spmi_normal_lock);
++	kebab_spmi_report_unserialized();
++	lck_mtx_unlock(&kebab_spmi_normal_lock);
++}
++
++void
++kebab_spmi_pon_report(void)
++{
++	lck_mtx_lock(&kebab_spmi_normal_lock);
++	kebab_spmi_pon_report_unserialized();
++	lck_mtx_unlock(&kebab_spmi_normal_lock);
++}
++
++void
++kebab_spmi_power_report(void)
++{
++	lck_mtx_lock(&kebab_spmi_normal_lock);
++	kebab_spmi_power_report_unserialized();
++	lck_mtx_unlock(&kebab_spmi_normal_lock);
++}
++
++int
++kebab_spmi_vrm_boot_power(void)
++{
++	lck_mtx_lock(&kebab_spmi_normal_lock);
++	int result = kebab_spmi_vrm_boot_power_unserialized();
++	lck_mtx_unlock(&kebab_spmi_normal_lock);
++	return result;
++}
++
++int
++kebab_spmi_pon_reason_write_normal(void)
++{
++	lck_mtx_lock(&kebab_spmi_normal_lock);
++	int result = kebab_spmi_pon_reason_write();
++	lck_mtx_unlock(&kebab_spmi_normal_lock);
++	return result;
++}
++
++/* Default-off failure injection: PANIC! invokes this on the normal console
++ * thread. Holding the ordinary bus mutex across the panic proves that the
++ * independent panic FASTBOOT path cannot wait on the interrupted owner. */
++void
++kebab_spmi_test_panic_lock(void)
++{
++	uint32_t enabled = 0;
++	if (PE_parse_boot_argn("kebab_spmi_lockpanic", &enabled, sizeof(enabled)) && enabled) {
++		lck_mtx_lock(&kebab_spmi_normal_lock);
++		printf("KEBAB SPMI TEST: normal bus mutex held for intentional panic\n");
++		panic("kebab usb console test (normal SPMI lock held)");
++	}
++}
++
+ #endif /* KEBAB */
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -126,6 +126,8 @@
+ 
+ extern bool kebab_spmi_pon_writes_enabled(void);
+ extern int kebab_spmi_pon_reason_write(void);
++extern int kebab_spmi_pon_reason_write_normal(void);
++extern void kebab_spmi_test_panic_lock(void);
+ 
+ /* ---------------------------------------------------------------- registers */
+ 
+@@ -1701,7 +1703,8 @@
+ 	 * uncontrolled experiment: if the masked write fails, the boot that
+ 	 * follows would not be attributable to the PON reason.
+ 	 */
+-	if (kebab_spmi_pon_reason_write() != 0) {
++	if ((panic_active() ? kebab_spmi_pon_reason_write() :
++	    kebab_spmi_pon_reason_write_normal()) != 0) {
+ 		printf("KEBAB FASTBOOT: PON restart reason was not verified; not resetting\n");
+ 		return;
+ 	}
+@@ -2230,7 +2233,10 @@
+ 			ud_leave(irq);
+ 		}
+ 		/* Panic/restart only after releasing the transport and acknowledging events. */
+-		if (trigger) panic("kebab usb console test");
++		if (trigger) {
++			kebab_spmi_test_panic_lock();
++			panic("kebab usb console test");
++		}
+ 		if (command != 0) ud_run_reboot_command(command, FALSE);
+ 		/*
+ 		 * The installer writes to the root filesystem, which can sleep, so

@@ -1,0 +1,142 @@
+feat(rpmh): virtual-MMIO validation of the TCS1 send path
+
+R5-C2, plus the four blockers found in the 0127 draft.
+
+The send state machine now lives in package/KebabRpmhVrm.c and talks to an
+injected kebab_tcs_io, so the host tests drive exactly the code a kernel port
+would use.  Fixes:
+
+  - the entry point re-checks NULL, the command whitelist and that the channel
+    is TCS1 before any register is touched;
+  - completion requires ISSUED and COMPL together, and a pre-existing COMPL is
+    a dirty channel, so a stale completion cannot stand in for this command;
+  - failures are phase-aware: before the trigger only this attempt's writes
+    are undone; after the trigger nothing is cleaned up, the status is kept as
+    evidence and the channel is marked dead;
+  - the one-shot gate is documented as a single-command experiment, not as the
+    full two-rail power sequence.
+
+package/KebabRpmhTcsHostTests.c runs the state machine against a virtual
+register file: 33 assertions across the ten scenarios, including zero writes
+for every refused command, bounded readback, ISSUED/COMPL combinations,
+post-trigger timeout leaving the channel untouched, one-shot enforcement and
+TCS0/TCS2 rejection.
+
+0128 removes the uncompiled #if KEBAB_RPMH_WRITES draft from the kernel and
+points at the package module instead: one implementation, the one that is
+tested.  The production image still has no write path.
+
+--- a/bsd/dev/kebab_spmi.c
++++ b/bsd/dev/kebab_spmi.c
+@@ -992,106 +992,12 @@
+ }
+ 
+ /*
+- * R5-C: the only code that would ever write a TCS.
+- *
+- * It is compiled out unless KEBAB_RPMH_WRITES is set at build time; in this
+- * build no console command, boot argument or runtime flag can reach it.
+- *
+- * When enabled it follows the vendor sequence, with one deliberate change:
+- * every readback wait is bounded.  Linux' write_tcs_reg_sync() spins until the
+- * value matches, which is exactly the kind of loop an experimental kernel must
+- * not borrow.
+- *
+- * State is reported in three steps the caller has to keep apart: submitted,
+- * completed by the hardware, and only then a rail that may be up.
++ * R5-C: the TCS send state machine is not built here yet.  It lives in
++ * package/KebabRpmhVrm.c, where the host tests drive the same code against a
++ * virtual register file; the MMIO port happens only after that matrix passes
++ * and the channel ownership question is settled.  Keeping one implementation
++ * in the tree is better than an uncompiled second draft that can drift.
+  */
+-#define KEBAB_RPMH_WRITES 0
+-
+-#if KEBAB_RPMH_WRITES
+-static bool kebab_rpmh_tcs_dead;
+-
+-static int
+-kebab_rpmh_tcs_wr_wait(vm_offset_t t, uint32_t off, uint32_t val)
+-{
+-	uint32_t i;
+-
+-	kebab_spmi_wr(t, off, val);
+-	for (i = 0; i < 100; i++) {
+-		if (kebab_spmi_rd(t, off) == val) {
+-			return 0;
+-		}
+-		delay(100);
+-	}
+-	return -1;
+-}
+-
+-static int
+-kebab_rpmh_tcs_send(const kebab_rpmh_cmd *cmd)
+-{
+-	vm_offset_t drv, base, t;
+-	uint32_t i, status = 0, control;
+-
+-	if (kebab_rpmh_tcs_dead) {
+-		return -1;
+-	}
+-	drv = ml_io_map(KEBAB_RSC_DRV2_PA, KEBAB_RSC_SIZE);
+-	if (drv == 0) {
+-		kebab_rpmh_tcs_dead = true;
+-		return -1;
+-	}
+-	/* Only the active TCS1; TCS0 keeps another owner's requests. */
+-	base = drv + KEBAB_RSC_TCS_OFF;
+-	t = base + 1 * KEBAB_RSC_TCS_STRIDE;
+-	control = kebab_spmi_rd(t, KEBAB_RSC_CONTROL);
+-	if (kebab_spmi_rd(t, KEBAB_RSC_CMD_ENABLE) != 0 ||
+-	    kebab_spmi_rd(t, KEBAB_RSC_CMD_WAIT) != 0 ||
+-	    (control & KEBAB_RSC_AMC_TRIGGER) != 0) {
+-		kebab_rpmh_tcs_dead = true;
+-		return -1;
+-	}
+-	/* Slot 0 only, with the vendor register offsets. */
+-	kebab_spmi_wr(t, KEBAB_RSC_CMD_MSGID, cmd->msgid);
+-	kebab_spmi_wr(t, KEBAB_RSC_CMD_ADDR, cmd->addr);
+-	kebab_spmi_wr(t, KEBAB_RSC_CMD_DATA, cmd->data);
+-	if (kebab_rpmh_tcs_wr_wait(t, KEBAB_RSC_CMD_WAIT, 1u) != 0) {
+-		goto fail;
+-	}
+-	if (kebab_rpmh_tcs_wr_wait(t, KEBAB_RSC_CMD_ENABLE, 1u) != 0) {
+-		goto fail;
+-	}
+-	if (kebab_rpmh_tcs_wr_wait(t, KEBAB_RSC_CONTROL,
+-	    control | KEBAB_RSC_AMC_ENABLE) != 0) {
+-		goto fail;
+-	}
+-	if (kebab_rpmh_tcs_wr_wait(t, KEBAB_RSC_CONTROL,
+-	    control | KEBAB_RSC_AMC_ENABLE | KEBAB_RSC_AMC_TRIGGER) != 0) {
+-		goto fail;
+-	}
+-	for (i = 0; i < 1000; i++) {
+-		status = kebab_spmi_rd(t, KEBAB_RSC_CMD_STATUS);
+-		if ((status & KEBAB_RSC_CMD_COMPL) != 0) {
+-			break;
+-		}
+-		delay(100);
+-	}
+-	if ((status & KEBAB_RSC_CMD_COMPL) == 0) {
+-		goto fail;
+-	}
+-	/* Release the slot the way Linux does, then keep the channel shut. */
+-	kebab_spmi_wr(t, KEBAB_RSC_CONTROL, control);
+-	kebab_spmi_wr(t, KEBAB_RSC_CMD_ENABLE, 0);
+-	kebab_spmi_wr(t, KEBAB_RSC_CMD_WAIT, 0);
+-	kebab_rpmh_tcs_dead = true;     /* one request per boot until reviewed */
+-	return 0;
+-
+-fail:
+-	kebab_spmi_wr(t, KEBAB_RSC_CONTROL, control);
+-	kebab_spmi_wr(t, KEBAB_RSC_CMD_ENABLE, 0);
+-	kebab_spmi_wr(t, KEBAB_RSC_CMD_WAIT, 0);
+-	kebab_rpmh_tcs_dead = true;
+-	return -1;
+-}
+-#endif /* KEBAB_RPMH_WRITES */
+ 
+ void
+ kebab_rpmh_report(void)

@@ -1,0 +1,173 @@
+--- a/bsd/dev/kebab_cryptex_media.c
++++ b/bsd/dev/kebab_cryptex_media.c
+@@ -1,5 +1,6 @@
+ /* A fixed original image is an owner policy input, not an Apple IM4M result.
+- * Publish only after full SHA on the actual, pinned read-only Preboot mount. */
++ * Full mode hashes every byte on the pinned RO mount.  Explicit development
++ * fast mode checks identity/header only and never claims full content proof. */
+ #include <pexpert/arm64/board_config.h>
+ #if defined(KEBAB)
+ #include <pexpert/pexpert.h>
+@@ -29,6 +30,7 @@
+ static vnode_t kcm_owned_root;
+ static dev_t kcm_owned_device = NODEV;
+ static uint32_t kcm_owned_ready;
++static bool kcm_full_hash_verified;
+ static LCK_GRP_DECLARE(kcm_group, "kebab_cryptex");
+ static LCK_MTX_DECLARE(kcm_prepare_lock, &kcm_group);
+ 
+@@ -48,9 +50,39 @@
+      !strcmp(vfs_statfs(mounted)->f_fstypename, "apfs");
+ }
+ 
++/* User-selected debugging policy. Never inferred from a stale receipt or xid. */
++static int
++kcm_owner_fast_mode(void)
++{
++ uint32_t fast = 0;
++ PE_parse_boot_argn("kebab_owner_fast", &fast, sizeof(fast));
++ if (!fast) return 0;
++#if DEVELOPMENT || DEBUG
++ if (fast != 1) return -1;
++ static const char *const disabled[] = { "ufsrw", "rootrw", "kebab_install" };
++ static const char *const required[] = { "kebab_owner_os", "kebab_owner_dsc",
++     "kebab_owner_startup", "kebab_cryptex_media" };
++ for (unsigned i = 0; i < sizeof(disabled) / sizeof(disabled[0]); ++i) {
++  uint32_t value = 0;
++  PE_parse_boot_argn(disabled[i], &value, sizeof(value));
++  if (value) return -1;
++ }
++ for (unsigned i = 0; i < sizeof(required) / sizeof(required[0]); ++i) {
++  uint32_t value = 0;
++  PE_parse_boot_argn(required[i], &value, sizeof(value));
++  if (value != 1) return -1;
++ }
++ return 1;
++#else
++ return -1;
++#endif
++}
++
+ static int
+ kcm_open_verify(void)
+ {
++ int fast = kcm_owner_fast_mode();
++ if (fast < 0) return EAUTH;
+  uint32_t enabled = 0, rw = 0;
+  PE_parse_boot_argn("kebab_cryptex_media", &enabled, sizeof(enabled));
+  PE_parse_boot_argn("ufsrw", &rw, sizeof(rw));
+@@ -95,7 +127,8 @@
+   SHA256_CTX hash;
+   uint8_t digest[32];
+   SHA256_Init(&hash);
+-  for (uint64_t offset = 0; !error && offset < KEBAB_CRYPTEX_STAGE_BYTES; offset += KCM_CHUNK) {
++  uint64_t verification_bytes = fast ? KCM_CHUNK : KEBAB_CRYPTEX_STAGE_BYTES;
++  for (uint64_t offset = 0; !error && offset < verification_bytes; offset += KCM_CHUNK) {
+    uint64_t left = KEBAB_CRYPTEX_STAGE_BYTES - offset;
+    int count = left < KCM_CHUNK ? (int)left : (int)KCM_CHUNK, residual = 0;
+    error = vn_rdwr(UIO_READ, file, (caddr_t)buffer, count, (off_t)offset,
+@@ -110,7 +143,7 @@
+     printf("KEBAB CRYPTEX MEDIA: verified %llu MiB of original SystemOS\n", offset >> 20);
+   }
+   SHA256_Final(digest, &hash);
+-  if (!error && memcmp(digest, kebab_cryptex_stage_sha256, sizeof(digest))) error = EAUTH;
++  if (!error && !fast && memcmp(digest, kebab_cryptex_stage_sha256, sizeof(digest))) error = EAUTH;
+   bzero(digest, sizeof(digest));
+  }
+  if (!error && (vnode_mount(file) != backing || vnode_mount(rootvnode) != system_mount ||
+@@ -119,6 +152,7 @@
+  if (!error) {
+   /* Keep the FREAD open and its iocount for this immutable boot lifetime.
+    * Each worker read additionally obtains/relinquishes an iocount by vid. */
++  kcm_full_hash_verified = !fast;
+   kcm_file = file; kcm_vid = vnode_vid(file);
+   kcm_backing = backing; kcm_system = system_mount; file = NULLVP;
+   __atomic_store_n(&kcm_ready, 1, __ATOMIC_RELEASE);
+@@ -135,7 +169,11 @@
+  lck_mtx_lock(&kcm_prepare_lock);
+  int error = __atomic_load_n(&kcm_ready, __ATOMIC_ACQUIRE) ? 0 : kcm_open_verify();
+  lck_mtx_unlock(&kcm_prepare_lock);
+- printf("KEBAB CRYPTEX MEDIA: fixed original SystemOS full SHA/RO identity %s (%d)\n", error ? "FAIL" : "PASS", error);
++ if (kcm_owner_fast_mode() == 1) {
++  printf("KEBAB CRYPTEX MEDIA: DEVELOPMENT FAST header/RO identity %s (%d); full SHA skipped\n", error ? "FAIL" : "PASS", error);
++ } else {
++  printf("KEBAB CRYPTEX MEDIA: fixed original SystemOS full SHA/RO identity %s (%d)\n", error ? "FAIL" : "PASS", error);
++ }
+  return error;
+ }
+ 
+--- a/bsd/dev/kebab_cryptex_media.h
++++ b/bsd/dev/kebab_cryptex_media.h
+@@ -12,6 +12,8 @@
+ int kebab_cryptex_boot_files_verify(void);
+ /* Requires complete original OS Merkle verification, not two boot files. */
+ int kebab_cryptex_os_recheck(void);
++/* Explicit development-fast policy is separate from complete-content proof. */
++int kebab_cryptex_owner_content_recheck(void);
+ #ifndef __cplusplus
+ int kebab_cryptex_vnode_recheck(vnode_t);
+ #endif
+--- a/bsd/dev/kebab_owner_os_impl.h
++++ b/bsd/dev/kebab_owner_os_impl.h
+@@ -25,6 +25,7 @@
+  uint32_t nodes;
+ };
+ static uint32_t koos_verified;
++static uint32_t koos_fast_ready;
+ static vnode_t koos_root;
+ 
+ static int
+@@ -256,6 +257,14 @@
+  PE_parse_boot_argn("kebab_owner_os", &enabled, sizeof(enabled));
+  if (!enabled) return 0;
+  if (enabled != 1 || koos_identity()) return EAUTH;
++ int fast = kcm_owner_fast_mode();
++ if (fast < 0) return EAUTH;
++ if (fast == 1) {
++  koos_root = rootvnode;
++  __atomic_store_n(&koos_fast_ready, 1, __ATOMIC_RELEASE);
++  printf("KEBAB OWNER OS: DEVELOPMENT FAST: full tree scan skipped; no complete-content proof\n");
++  return 0;
++ }
+  if (__atomic_load_n(&koos_verified, __ATOMIC_ACQUIRE)) return koos_root == rootvnode ? 0 : EAUTH;
+  struct koos_scan scan = {0};
+  scan.frames = kalloc_data(KOOS_DEPTH * sizeof(*scan.frames), Z_WAITOK | Z_ZERO);
+@@ -343,6 +352,17 @@
+ int
+ kebab_cryptex_os_recheck(void)
+ {
+- if (!__atomic_load_n(&koos_verified, __ATOMIC_ACQUIRE) || koos_root != rootvnode) return EAUTH;
++ if (!kcm_full_hash_verified || !__atomic_load_n(&koos_verified, __ATOMIC_ACQUIRE) || koos_root != rootvnode) return EAUTH;
+  return koos_identity();
+ }
++
++/* A distinct development policy gate; never reported as full OS verification. */
++int
++kebab_cryptex_owner_content_recheck(void)
++{
++ int fast = kcm_owner_fast_mode();
++ if (fast == 0) return kebab_cryptex_os_recheck();
++ if (fast != 1 || !__atomic_load_n(&koos_fast_ready, __ATOMIC_ACQUIRE) ||
++     koos_root != rootvnode) return EAUTH;
++ return koos_identity();
++}
+--- a/bsd/kern/kebab_dyldcache.c
++++ b/bsd/kern/kebab_dyldcache.c
+@@ -2199,7 +2199,7 @@
+  if (kebab_dsc_owner_mode != 1 || kebab_dsc_owner_startup > 1 || !kebab_dsc_enabled ||
+      (kebab_dsc_owner_startup && (!kebab_dsc_map_enabled || dyld_flags))) return EINVAL;
+  int error = kebab_cryptex_boot_files_verify();
+- if (!error && kebab_dsc_owner_startup) error = kebab_cryptex_os_recheck();
++ if (!error && kebab_dsc_owner_startup) error = kebab_cryptex_owner_content_recheck();
+  if (!error) error = kebab_dsc_prepare_plan();
+  printf("KEBAB OWNER DSC: post-mount original split plan %s (%d)\n", error ? "FAIL" : "PASS", error);
+  return error;
+@@ -2226,7 +2226,7 @@
+  if (!kebab_dsc_plan) return kebab_dsc_owner_mode ? EAUTH : 0;
+  if (kebab_dsc_owner_mode) {
+   error = kebab_cryptex_mount_recheck();
+-  if (!error && kebab_dsc_owner_startup) error = kebab_cryptex_os_recheck();
++  if (!error && kebab_dsc_owner_startup) error = kebab_cryptex_owner_content_recheck();
+   if (error) return error;
+   if (kebab_dsc_map_attempted) return kebab_dsc_owner_map_ok ? kebab_dsc_owner_region_recheck(target) : EAUTH;
+  } else if (kebab_dsc_map_attempted) return 0;

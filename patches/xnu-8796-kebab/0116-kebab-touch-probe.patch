@@ -1,0 +1,325 @@
+feat(touch): probe GCC and GENI read-only, and gate bring-up behind TOUCH?
+
+The first QUPv3 boot on this tree printed the SE revision, muxed pins 36/37
+to qup13, pulsed reset, and then stopped: the next line would have come from
+kt_se_init(), which writes the GENI block, and the USB console never came
+back.  That run says nothing about I2C itself; it says the first GENI write
+is where the board stops being observable.
+
+Make every hardware step explicit and conservative:
+
+  - add a read-only GCC probe for the three SE13 clocks the vendor DTS names
+    (GCC_QUPV3_WRAP1_S5_CLK, GCC_QUPV3_WRAP_1_M_AHB_CLK and ..._S_AHB_CLK)
+    with the offsets and bits from gcc-kona.c, through two 4 KiB pages
+    rather than the 2 MiB GCC block;
+  - add a read-only GENI/TLMM dump: QUP_HW_VER, firmware revision,
+    GENI_STATUS, master/slave IRQ status, DMA mode, CGC control, SCL
+    counters, FIFO status and the four pins;
+  - stop running the driver at boot.  kebab_touch=1 now maps MMIO and
+    prints a hint; the hardware is untouched unless kebab_touch_boot=1 asks
+    for the old behaviour or kebab_touch_probe=1 asks for the read-only
+    dump;
+  - add TOUCH? (probe) and TOUCHINIT (pins, reset, se_init, identify) to the
+    USB console, so a bad GENI access costs only the console it was typed
+    into, not the boot path;
+  - trace kt_se_init() before each register group it writes, so a hang names
+    the group.
+
+No transfer, clock enable, firmware update or reset change is added here:
+this patch only makes the next experiment observable.
+
+diff --git a/bsd/dev/kebab_touch.c b/bsd/dev/kebab_touch.c
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -156,6 +156,10 @@
+ extern bool kebab_usb_console_ready(void);
+ extern void kebab_usb_log_flush(void);
+ 
++/* bsd/dev/kebab_usb.c: console entry points, read-only probe first. */
++void kebab_touch_probe(void);
++void kebab_touch_init_now(void);
++
+ void kebab_touch_start(void);
+ 
+ /* ----------------------------------------------------------- address facts */
+@@ -409,6 +413,8 @@
+ 	vm_offset_t tlmm;
+ 	bool        raw;
+ 	bool        bb;                 /* kebab_touch_bb=1: GPIO bit-banged I2C */
++	vm_offset_t gcc_en;             /* GCC page with the SE13 enable bits */
++	vm_offset_t gcc_halt;           /* GCC page with the halt registers */
+ 	bool        tcm_seen;
+ 	bool        app_mode;
+ 	bool        decode;
+@@ -1005,6 +1011,7 @@
+ 	uint32_t depth;
+ 	uint32_t proto;
+ 
++	kt_trace("KEBAB TOUCH: se_init: clear IRQs\n");
+ 	kt_se_wr(SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
+ 	kt_se_wr(SE_GENI_S_IRQ_CLEAR, 0xffffffffu);
+ 	kt_se_wr(SE_GENI_DMA_MODE_EN, kt_se_rd(SE_GENI_DMA_MODE_EN) & ~1u);
+@@ -1015,6 +1022,7 @@
+ 	kt_se_wr(SE_DMA_GENERAL_CFG,
+ 	    kt_se_rd(SE_DMA_GENERAL_CFG) | DMA_GENERAL_CFG_VAL);
+ 	kt_se_wr(GENI_OUTPUT_CTRL, DEFAULT_IO_OUTPUT_CTRL);
++	kt_trace("KEBAB TOUCH: se_init: force default, output ctrl\n");
+ 	kt_se_wr(GENI_FORCE_DEFAULT_REG, 1);
+ 
+ 	/* geni_se_io_set_mode() */
+@@ -1035,6 +1043,7 @@
+ 	kt_se_wr(SE_GENI_M_IRQ_EN, kt_se_rd(SE_GENI_M_IRQ_EN) | M_IRQ_FIFO);
+ 
+ 	/* geni_se_config_packing(8 bits, 4 words, msb first) */
++	kt_trace("KEBAB TOUCH: se_init: packing + byte granularity\n");
+ 	kt_se_wr(SE_GENI_TX_PACKING_CFG0, PACK_CFG0);
+ 	kt_se_wr(SE_GENI_TX_PACKING_CFG1, PACK_CFG1);
+ 	kt_se_wr(SE_GENI_RX_PACKING_CFG0, PACK_CFG0);
+@@ -1042,6 +1051,7 @@
+ 	kt_se_wr(SE_GENI_BYTE_GRAN, 0);
+ 
+ 	/* qcom_geni_i2c_conf(): internal SE clock, then the SCL timing. */
++	kt_trace("KEBAB TOUCH: se_init: clock select + SCL counters\n");
+ 	kt_se_wr(SE_GENI_CLK_SEL, 0);
+ 	if (hz == 400000u) {
+ 		kt_se_wr(GENI_SER_M_CLK_CFG, KT_SER_CLK_CFG(2));
+@@ -1068,6 +1078,152 @@
+ 	return true;
+ }
+ 
++/* ------------------------------------------------------- read-only probes */
++
++/* Defined with the TCM layer below; TOUCHINIT reaches it after se_init. */
++static void kt_identify(void);
++
++/*
++ * The vendor DTS (kona-qupv3.dtsi, i2c@a94000) gives SE13 three GCC clocks,
++ * and drivers/clk/qcom/gcc-kona.c gives their registers:
++ *
++ *   GCC_QUPV3_WRAP1_S5_CLK      enable 0x52008 bit 27  halt 0x185fc
++ *   GCC_QUPV3_WRAP_1_M_AHB_CLK  enable 0x52008 bit 20  halt 0x18004
++ *   GCC_QUPV3_WRAP_1_S_AHB_CLK  enable 0x52008 bit 21  halt 0x18008
++ *
++ * Linux enables them in the i2c driver's runtime resume.  This kernel never
++ * has, so before a GENI register is written it matters whether the SE has a
++ * clock at all.  Only the two 4 KiB pages holding those registers are mapped,
++ * not the 2 MiB GCC block: io_map's submap is 8 MiB and shared with
++ * everything else this port maps.
++ */
++#define KT_GCC_PA               0x00100000u
++#define KT_GCC_PAGE_EN          0x00052000u
++#define KT_GCC_PAGE_HALT        0x00018000u
++#define KT_GCC_ENABLE           0x00052008u
++#define KT_GCC_HALT_M_AHB       0x00018004u
++#define KT_GCC_HALT_S_AHB       0x00018008u
++#define KT_GCC_HALT_WRAP1_S5    0x000185fcu
++#define KT_GCC_EN_S5            (1u << 27)
++#define KT_GCC_EN_M_AHB         (1u << 20)
++#define KT_GCC_EN_S_AHB         (1u << 21)
++
++static void
++kt_gcc_probe(void)
++{
++	uint32_t en, m_ahb, s_ahb, s5;
++
++	if (kt.gcc_en == 0) {
++		kt.gcc_en = ml_io_map(KT_GCC_PA + KT_GCC_PAGE_EN, 0x1000);
++		kt.gcc_halt = ml_io_map(KT_GCC_PA + KT_GCC_PAGE_HALT, 0x1000);
++	}
++	if (kt.gcc_en == 0 || kt.gcc_halt == 0) {
++		printf("KEBAB TOUCH: cannot map the GCC pages; clock state unknown\n");
++		return;
++	}
++	en = kt_rd(kt.gcc_en, KT_GCC_ENABLE - KT_GCC_PAGE_EN);
++	kt_trace("KEBAB TOUCH: GCC 0x%05x = 0x%08x: wrap1_s5 %u m_ahb %u s_ahb %u\n",
++	    KT_GCC_ENABLE, en, (en & KT_GCC_EN_S5) != 0,
++	    (en & KT_GCC_EN_M_AHB) != 0, (en & KT_GCC_EN_S_AHB) != 0);
++	m_ahb = kt_rd(kt.gcc_halt, KT_GCC_HALT_M_AHB - KT_GCC_PAGE_HALT);
++	s_ahb = kt_rd(kt.gcc_halt, KT_GCC_HALT_S_AHB - KT_GCC_PAGE_HALT);
++	s5 = kt_rd(kt.gcc_halt, KT_GCC_HALT_WRAP1_S5 - KT_GCC_PAGE_HALT);
++	kt_trace("KEBAB TOUCH: GCC halt m_ahb 0x%08x s_ahb 0x%08x wrap1_s5 0x%08x\n",
++	    m_ahb, s_ahb, s5);
++}
++
++/*
++ * Read-only GENI state.  Every register here was already read by the boot
++ * path on this board, so the probe adds no new access class.
++ */
++static void
++kt_geni_probe(void)
++{
++	uint32_t rev;
++
++	rev = kt_se_rd(GENI_FW_REVISION_RO);
++	kt_trace("KEBAB TOUCH: probe wrapper QUP_HW_VER 0x%08x\n",
++	    kt.wrap != 0 ? kt_rd(kt.wrap, QUP_HW_VER) : 0u);
++	kt_trace("KEBAB TOUCH: probe GENI_FW_REVISION_RO 0x%08x protocol %u\n",
++	    rev, (rev & FW_REV_PROTOCOL_MSK) >> FW_REV_PROTOCOL_SHFT);
++	kt_trace("KEBAB TOUCH: probe GENI_STATUS 0x%08x M_IRQ_STATUS 0x%08x "
++	    "S_IRQ_STATUS 0x%08x\n", kt_se_rd(SE_GENI_STATUS),
++	    kt_se_rd(SE_GENI_M_IRQ_STATUS), kt_se_rd(SE_GENI_S_IRQ_STATUS));
++	kt_trace("KEBAB TOUCH: probe DMA_MODE_EN 0x%08x CGC_CTRL 0x%08x\n",
++	    kt_se_rd(SE_GENI_DMA_MODE_EN), kt_se_rd(GENI_CGC_CTRL));
++	kt_trace("KEBAB TOUCH: probe SER_M_CLK_CFG 0x%08x SCL_COUNTERS 0x%08x\n",
++	    kt_se_rd(GENI_SER_M_CLK_CFG), kt_se_rd(SE_I2C_SCL_COUNTERS));
++	kt_trace("KEBAB TOUCH: probe TX_FIFO_STATUS 0x%08x RX_FIFO_STATUS 0x%08x\n",
++	    kt_se_rd(SE_GENI_TX_FIFO_STATUS), kt_se_rd(SE_GENI_RX_FIFO_STATUS));
++}
++
++static void
++kt_pins_probe(void)
++{
++	static const uint32_t pins[] = {
++		KT_PIN_SDA, KT_PIN_SCL, KT_PIN_RESET, KT_PIN_IRQ
++	};
++	uint32_t i;
++
++	for (i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
++		kt_trace("KEBAB TOUCH: probe pin %u ctl 0x%08x io 0x%08x\n",
++		    pins[i], kt_rd(kt.tlmm, TLMM_CTL(pins[i])),
++		    kt_rd(kt.tlmm, TLMM_IO(pins[i])));
++	}
++}
++
++/*
++ * Console entry points.  Neither runs at boot unless a boot argument asks for
++ * it: the previous run showed that a bad GENI access can take the USB console
++ * down with it, and the console is the only recovery channel that does not
++ * need a key press on the phone.
++ */
++void
++kebab_touch_probe(void)
++{
++	if (kt.se == 0) {
++		kt.se = ml_io_map(KT_SE13_PA_DEFAULT, KT_SE13_SIZE);
++		kt.wrap = ml_io_map(KT_WRAP_PA_DEFAULT, KT_WRAP_SIZE);
++	}
++	if (kt.tlmm == 0) {
++		kt.tlmm = ml_io_map(KT_TLMM_PA + TLMM_TILE_SOUTH, KT_TLMM_SIZE);
++	}
++	if (kt.se == 0 || kt.tlmm == 0) {
++		printf("KEBAB TOUCH: probe cannot map SE13 or TLMM\n");
++		return;
++	}
++	kt_trace("KEBAB TOUCH: read-only probe begin; no register is written\n");
++	kt_gcc_probe();
++	kt_geni_probe();
++	kt_pins_probe();
++	kt_trace("KEBAB TOUCH: read-only probe end\n");
++}
++
++void
++kebab_touch_init_now(void)
++{
++	if (kt.se == 0) {
++		kt.se = ml_io_map(KT_SE13_PA_DEFAULT, KT_SE13_SIZE);
++		kt.wrap = ml_io_map(KT_WRAP_PA_DEFAULT, KT_WRAP_SIZE);
++	}
++	if (kt.tlmm == 0) {
++		kt.tlmm = ml_io_map(KT_TLMM_PA + TLMM_TILE_SOUTH, KT_TLMM_SIZE);
++	}
++	if (kt.se == 0 || kt.tlmm == 0) {
++		printf("KEBAB TOUCH: TOUCHINIT cannot map SE13 or TLMM\n");
++		return;
++	}
++	kt_trace("KEBAB TOUCH: TOUCHINIT begin; writes follow\n");
++	kt_gcc_probe();
++	kt_pins_config();
++	kt_reset_pulse(KT_PIN_RESET);
++	if (!kt_se_init(100000)) {
++		return;
++	}
++	kt_identify();
++	kt_trace("KEBAB TOUCH: TOUCHINIT end\n");
++}
++
+ /* ---------------------------------------------------- bit-banged GPIO I2C */
+ 
+ /*
+@@ -1876,6 +2032,8 @@
+ 	uint32_t hz = 100000;
+ 	uint32_t pins = 1;
+ 	uint32_t reset = 1;
++	uint32_t boot = 0;
++	uint32_t probe = 0;
+ 	uint8_t resp[8];
+ 	uint32_t len = 0;
+ 	uint8_t code = 0;
+@@ -1901,6 +2059,12 @@
+ 	if (PE_parse_boot_argn("kebab_touch_reset", &value, sizeof(value))) {
+ 		reset = value;
+ 	}
++	if (PE_parse_boot_argn("kebab_touch_boot", &value, sizeof(value))) {
++		boot = value;
++	}
++	if (PE_parse_boot_argn("kebab_touch_probe", &value, sizeof(value))) {
++		probe = value;
++	}
+ 
+ 	kt.dump = PE_parse_boot_argn("kebab_touch_dump", &value,
+ 	    sizeof(value)) && value != 0;
+@@ -1963,6 +2127,15 @@
+ 	kt_trace("KEBAB TOUCH: MMIO done: se 0x%llx wrap 0x%llx tlmm 0x%llx\n",
+ 	    (unsigned long long)kt.se, (unsigned long long)kt.wrap,
+ 	    (unsigned long long)kt.tlmm);
++	if (probe != 0) {
++		kebab_touch_probe();
++		return;
++	}
++	if (boot == 0) {
++		printf("KEBAB TOUCH: MMIO mapped, hardware untouched; "
++		    "TOUCH? is read-only, TOUCHINIT starts the driver\n");
++		return;
++	}
+ 	if (kt.bb && kt.tlmm == 0) {
+ 		printf("KEBAB TOUCH: bit-bang transport needs TLMM and it is not mapped\n");
+ 		return;
+diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -76,6 +76,10 @@
+ extern void kebab_spmi_init(void);
+ extern void kebab_spmi_report(void);
+ extern void kebab_spmi_pon_report(void);
++
++/* bsd/dev/kebab_touch.c: read-only probe and explicit bring-up. */
++extern void kebab_touch_probe(void);
++extern void kebab_touch_init_now(void);
+ extern bool kebab_spmi_pon_writes_enabled(void);
+ extern int kebab_spmi_pon_reason_write(void);
+ 
+@@ -237,6 +241,8 @@
+ #define UD_REBOOT_PSCI_NEGATIVE 6u
+ #define UD_REBOOT_SPMI_REPORT   7u
+ #define UD_REBOOT_PON_REPORT    8u
++#define UD_REBOOT_TOUCH_PROBE   9u
++#define UD_REBOOT_TOUCH_INIT    10u
+ 
+ struct ud_endpoint {
+ 	uint32_t trb, length, ctl, resource;
+@@ -1190,6 +1196,14 @@
+ 	    !memcmp(buf, "PON?\n", sizeof("PON?\n") - 1)) {
+ 		return UD_REBOOT_PON_REPORT;
+ 	}
++	if (received >= sizeof("TOUCH?\n") - 1 &&
++	    !memcmp(buf, "TOUCH?\n", sizeof("TOUCH?\n") - 1)) {
++		return UD_REBOOT_TOUCH_PROBE;
++	}
++	if (received >= sizeof("TOUCHINIT\n") - 1 &&
++	    !memcmp(buf, "TOUCHINIT\n", sizeof("TOUCHINIT\n") - 1)) {
++		return UD_REBOOT_TOUCH_INIT;
++	}
+ 	return 0;
+ }
+ 
+@@ -1414,6 +1428,10 @@
+ 		kebab_spmi_report();
+ 	} else if (command == UD_REBOOT_PON_REPORT) {
+ 		kebab_spmi_pon_report();
++	} else if (command == UD_REBOOT_TOUCH_PROBE) {
++		kebab_touch_probe();
++	} else if (command == UD_REBOOT_TOUCH_INIT) {
++		kebab_touch_init_now();
+ 	}
+ }
+ 

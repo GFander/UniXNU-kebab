@@ -1,0 +1,125 @@
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -136,25 +136,17 @@
+  static bool published;
+  if(published||!image||current>=2)return EINVAL;
+  IOPlatformExpert *platform=IOService::getPlatform();
+- IORegistryEntry *root=IORegistryEntry::fromPath("/",gIODTPlane);
+  IORegistryEntry *chosen=IORegistryEntry::fromPath("/chosen",gIODTPlane);
+  IORegistryEntry *options=IORegistryEntry::fromPath("/options",gIODTPlane);
+- if(!platform||!root||!chosen||options){OSSafeReleaseNULL(root);OSSafeReleaseNULL(chosen);OSSafeReleaseNULL(options);return EAUTH;}
++ IODTNVRAM *native=OSDynamicCast(IODTNVRAM,options);
++ if(!platform||!chosen||!native){IOLog("KEBAB NVRAM: existing native options missing\n");OSSafeReleaseNULL(chosen);OSSafeReleaseNULL(options);return EAUTH;}
+  uint32_t size=8192,count=2;
+  bool ok=chosen->setProperty("nvram-bank-size",&size,sizeof(size))&&chosen->setProperty("nvram-bank-count",&count,sizeof(count))&&
+    chosen->setProperty("nvram-current-bank",&current,sizeof(current))&&chosen->setProperty("nvram-proxy-data",const_cast<uint8_t *>(image),size);
+- options=new IORegistryEntry;
+- ok=ok&&options&&options->init();
+- if(ok){options->setName("options");ok=options->attachToParent(root,gIODTPlane);}
+- OSSafeReleaseNULL(options);root->release();chosen->release();if(!ok)return ENOMEM;
++ if(ok)ok=native->kebabAdoptProxy(image,size,current);
++ chosen->release();options->release();
++ if(!ok)return EAUTH;
+  platform->publishNVRAM();
+- options=IORegistryEntry::fromPath("/options",gIODTPlane);
+- IODTNVRAM *native=OSDynamicCast(IODTNVRAM,options);
+- if(!native){OSSafeReleaseNULL(options);return EAUTH;}
+-
+-
+-
+- options->release();
+  KebabNVRAM *controller=new KebabNVRAM;
+  if(!controller||!controller->init()||!controller->attach(platform)||!controller->start(platform)){OSSafeReleaseNULL(controller);return ENOMEM;}
+  controller->setProperty("HiOSEncryptedDataBacked",true);
+--- a/iokit/Kernel/IONVRAM.cpp
++++ b/iokit/Kernel/IONVRAM.cpp
+@@ -940,6 +940,9 @@
+ 	bool             _systemActive;
+ 
+ public:
++#if defined(KEBAB)
++ void kebabSetSystemActive(bool active){_systemActive=active;}
++#endif
+ 	bool                    init(const uuid_t guid, const bool systemActive);
+ 	virtual bool            start(IOService * provider) APPLE_KEXT_OVERRIDE;
+ 
+@@ -1394,6 +1397,27 @@
+ 	_freshInterval = true;
+ }
+ 
++#if defined(KEBAB)
++/* The board boots with an empty generation-zero proxy before Data is readable.
++ * Adopt the authenticated filesystem's durable image before controller/resource
++ * publication. No replacement is permitted after variables or a controller exist. */
++bool
++IODTNVRAM::kebabAdoptProxy(const uint8_t *image,unsigned size,unsigned current)
++{
++ if(!image||size!=8192||current>=2)return false;
++ NVRAMWRITELOCK();CONTROLLERLOCK();
++ bool ok=_format&&_format->getVersion()==kNVRAMVersion1&&
++   static_cast<IONVRAMCHRPHandler *>(_format)->kebabLoadProxy(image,size,current);
++ if(ok){bool active=_format->getSystemPartitionActive();
++  if(_commonService)_commonService->kebabSetSystemActive(active);
++  if(_systemService)_systemService->kebabSetSystemActive(active);
++ }
++ CONTROLLERUNLOCK();NVRAMUNLOCK();
++ IOLog("KEBAB NVRAM: existing native generation-zero proxy adoption %s\n",ok?"PASS":"FAIL");
++ return ok;
++}
++#endif
++
+ void
+ IODTNVRAM::registerNVRAMController(IONVRAMController *controller)
+ {
+--- a/iokit/Kernel/IONVRAMCHRPHandler.cpp
++++ b/iokit/Kernel/IONVRAMCHRPHandler.cpp
+@@ -110,6 +110,14 @@
+ 	static  IONVRAMCHRPHandler *init(IODTNVRAM *provider, const uint8_t *image, IOByteCount length,
+ 	    OSSharedPtr<OSDictionary> &varDict);
+ 
++#if defined(KEBAB)
++ bool kebabLoadProxy(const uint8_t *image,unsigned size,unsigned current) {
++  if(_nvramController||_generation||_varDict->getCount()||size!=8192||current>=2||!getNVRAMProperties()||_bankSize!=size||_bankCount!=2||_currentBank!=current)return false;
++  if(unserializeImage(image,size)!=kIOReturnSuccess)return false;
++  _commonUsed=0;_systemUsed=0;_newData=false;_reload=false;
++  return unserializeVariables()==kIOReturnSuccess;
++ }
++#endif
+ 	virtual IOReturn unserializeVariables(void) APPLE_KEXT_OVERRIDE;
+ 	virtual IOReturn setVariable(const uuid_t varGuid, const char *variableName, OSObject *object) APPLE_KEXT_OVERRIDE;
+ 	virtual bool     setController(IONVRAMController *controller) APPLE_KEXT_OVERRIDE;
+--- a/iokit/IOKit/IONVRAM.h
++++ b/iokit/IOKit/IONVRAM.h
+@@ -120,6 +120,9 @@
+ 	virtual bool init(IORegistryEntry *old, const IORegistryPlane *plane) APPLE_KEXT_OVERRIDE;
+ 	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
+ 
++#if defined(KEBAB)
++ bool kebabAdoptProxy(const uint8_t *,unsigned,unsigned);
++#endif
+ 	virtual void registerNVRAMController(IONVRAMController *controller);
+ 
+ 	virtual void sync(void);
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -3795,6 +3795,7 @@
+  * match, deadline or watchdog-policy changes. Early events survive until USB. */
+ static thread_t kebab_defaults_thread;
+ static uint32_t kebab_defaults_events;
++static bool kebab_defaults_live_output;
+ static struct {uint32_t ready;char text[384];} kebab_defaults_trace[96];
+ static void
+ kebab_defaults_note(const char *format,...)
+@@ -3803,10 +3804,12 @@
+  if(slot>=96)return;
+  va_list args;va_start(args,format);vsnprintf(kebab_defaults_trace[slot].text,384,format,args);va_end(args);
+  __atomic_store_n(&kebab_defaults_trace[slot].ready,1,__ATOMIC_RELEASE);
++ if(__atomic_load_n(&kebab_defaults_live_output,__ATOMIC_ACQUIRE))printf("KEBAB DEFAULTS LIVE[%u]: %s\n",slot,kebab_defaults_trace[slot].text);
+ }
+ extern "C" void
+ kebab_defaults_report(void)
+ {
++ __atomic_store_n(&kebab_defaults_live_output,true,__ATOMIC_RELEASE);
+  uint32_t total=__atomic_load_n(&kebab_defaults_events,__ATOMIC_ACQUIRE);
+  printf("KEBAB DEFAULTS: trace total=%u capacity=96; observations only\n",total);
+  for(uint32_t i=0;i<total&&i<96;i++)if(__atomic_load_n(&kebab_defaults_trace[i].ready,__ATOMIC_ACQUIRE))

@@ -1,0 +1,171 @@
+--- a/osfmk/vm/vm_shared_region.c
++++ b/osfmk/vm/vm_shared_region.c
+@@ -1282,8 +1282,9 @@
+ }
+ #endif /* __has_feature(ptrauth_calls) */
+ 
+-void
+-vm_shared_region_undo_mappings(
++static void
++vm_shared_region_undo_mappings_for_region(
++	vm_shared_region_t       shared_region,
+ 	vm_map_t                 sr_map,
+ 	mach_vm_offset_t         sr_base_address,
+ 	struct _sr_file_mappings *srf_mappings,
+@@ -1291,17 +1292,12 @@
+ 	unsigned int             srf_current_mappings_count)
+ {
+ 	unsigned int             j = 0;
+-	vm_shared_region_t       shared_region = NULL;
+ 	boolean_t                reset_shared_region_state = FALSE;
+ 	struct _sr_file_mappings *srfmp;
+ 	unsigned int             mappings_count;
+ 	struct shared_file_mapping_slide_np *mappings;
+ 
+-	shared_region = vm_shared_region_get(current_task());
+-	if (shared_region == NULL) {
+-		printf("Failed to undo mappings because of NULL shared region.\n");
+-		return;
+-	}
++	assert(shared_region != NULL);
+ 
+ 	shared_region->sr_first_mapping = (mach_vm_offset_t) -1;
+ 
+@@ -1392,6 +1388,23 @@
+ 		reset_shared_region_state = FALSE;
+ 	}
+ 
++}
++
++void
++vm_shared_region_undo_mappings(
++	vm_map_t                 sr_map,
++	mach_vm_offset_t         sr_base_address,
++	struct _sr_file_mappings *srf_mappings,
++	struct _sr_file_mappings *srf_mappings_current,
++	unsigned int             srf_current_mappings_count)
++{
++	vm_shared_region_t shared_region = vm_shared_region_get(current_task());
++	if (shared_region == NULL) {
++		printf("Failed to undo mappings because of NULL shared region.\n");
++		return;
++	}
++	vm_shared_region_undo_mappings_for_region(shared_region, sr_map, sr_base_address,
++	    srf_mappings, srf_mappings_current, srf_current_mappings_count);
+ 	vm_shared_region_deallocate(shared_region);
+ }
+ 
+@@ -1901,7 +1914,7 @@
+ 		 */
+ 		assert(sr_map != NULL);
+ 		/* undo all the previous mappings */
+-		vm_shared_region_undo_mappings(sr_map, sr_base_address, sr_file_mappings, srfmp, i);
++		vm_shared_region_undo_mappings_for_region(shared_region, sr_map, sr_base_address, sr_file_mappings, srfmp, i);
+ 		return kr;
+ 	}
+ 
+@@ -1929,6 +1942,12 @@
+  * It will return KERN_SUCCESS if the mappings were successfully established
+  * or if they were already established identically by another process.
+  */
++/* The mapping API already owns its explicit region. Borrow that same
++ * reference through sliding and rollback, even during replacement-task exec. */
++static int vm_shared_region_slide_for_region(vm_shared_region_t, uint32_t,
++    mach_vm_offset_t, mach_vm_size_t, mach_vm_offset_t, mach_vm_size_t,
++    mach_vm_offset_t, memory_object_control_t, vm_prot_t);
++
+ __attribute__((noinline))
+ kern_return_t
+ vm_shared_region_map_file(
+@@ -2009,7 +2028,7 @@
+ 	}
+ #endif /* __has_feature(ptrauth_calls) */
+ 	for (i = 0; i < mappings_to_slide_cnt; ++i) {
+-		kr = vm_shared_region_slide(shared_region->sr_slide,
++		kr = vm_shared_region_slide_for_region(shared_region, shared_region->sr_slide,
+ 		    mappings_to_slide[i]->sms_file_offset,
+ 		    mappings_to_slide[i]->sms_size,
+ 		    mappings_to_slide[i]->sms_slide_start,
+@@ -2026,10 +2045,10 @@
+ 				(long long)mappings_to_slide[i]->sms_slide_start,
+ 				(long long)mappings_to_slide[i]->sms_slide_size,
+ 				kr));
+-			vm_shared_region_undo_mappings(sr_map, shared_region->sr_base_address,
++			vm_shared_region_undo_mappings_for_region(shared_region, sr_map, shared_region->sr_base_address,
+ 			    &sr_file_mappings[0],
+ 			    &sr_file_mappings[sr_file_mappings_count - 1],
+-			    sr_file_mappings_count);
++			    sr_file_mappings[sr_file_mappings_count - 1].mappings_count);
+ 			vm_shared_region_lock();
+ 			goto done;
+ 		}
+@@ -3660,8 +3679,9 @@
+ #endif
+ }
+ 
+-int
+-vm_shared_region_slide(
++static int
++vm_shared_region_slide_for_region(
++	vm_shared_region_t      sr,
+ 	uint32_t slide,
+ 	mach_vm_offset_t        entry_start_address,
+ 	mach_vm_size_t          entry_size,
+@@ -3671,21 +3691,13 @@
+ 	memory_object_control_t sr_file_control,
+ 	vm_prot_t               prot)
+ {
+-	vm_shared_region_t      sr;
+ 	kern_return_t           error;
+ 
+ 	SHARED_REGION_TRACE_DEBUG(
+ 		("vm_shared_region_slide: -> slide %#x, entry_start %#llx, entry_size %#llx, slide_start %#llx, slide_size %#llx\n",
+ 		slide, entry_start_address, entry_size, slide_start, slide_size));
+ 
+-	sr = vm_shared_region_get(current_task());
+-	if (sr == NULL) {
+-		printf("%s: no shared region?\n", __FUNCTION__);
+-		SHARED_REGION_TRACE_DEBUG(
+-			("vm_shared_region_slide: <- %d (no shared region)\n",
+-			KERN_FAILURE));
+-		return KERN_FAILURE;
+-	}
++	assert(sr != NULL);
+ 
+ 	/*
+ 	 * Protect from concurrent access.
+@@ -3724,12 +3736,33 @@
+ #endif /* XNU_TARGET_OS_OSX */
+ 	vm_shared_region_unlock();
+ 
+-	vm_shared_region_deallocate(sr);
+ 
+ 	SHARED_REGION_TRACE_DEBUG(
+ 		("vm_shared_region_slide: <- %d\n",
+ 		error));
+ 
++	return error;
++}
++
++int
++vm_shared_region_slide(
++	uint32_t slide,
++	mach_vm_offset_t        entry_start_address,
++	mach_vm_size_t          entry_size,
++	mach_vm_offset_t        slide_start,
++	mach_vm_size_t          slide_size,
++	mach_vm_offset_t        slid_mapping,
++	memory_object_control_t sr_file_control,
++	vm_prot_t               prot)
++{
++	vm_shared_region_t sr = vm_shared_region_get(current_task());
++	if (sr == NULL) {
++		printf("%s: no shared region?\n", __FUNCTION__);
++		return KERN_FAILURE;
++	}
++	int error = vm_shared_region_slide_for_region(sr, slide, entry_start_address,
++	    entry_size, slide_start, slide_size, slid_mapping, sr_file_control, prot);
++	vm_shared_region_deallocate(sr);
+ 	return error;
+ }
+ 

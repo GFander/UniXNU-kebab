@@ -724,6 +724,34 @@ dyld_shared_cache_arm64        393,216
 | `System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e` | **该名字不存在**；缓存以拆分形式存在（见上）|
 | `usr/lib/libSystem.B.dylib` | **不存在**。`/usr/lib` 只有 6 个条目，OS 卷里也没有 |
 | `usr/lib/dyld` | **不在 cryptex**，在 OS 卷（922,912 字节）|
+| `usr/libexec/xpcproxy` | **不在 cryptex**；`/usr` 下只有 `lib/`，没有 `libexec/`。在 OS 卷，见下 |
+
+### `/usr/libexec/xpcproxy` 也不在 cryptex
+
+P1 的 job spawn 还缺 `/usr/libexec/xpcproxy`。它不是 cryptex 成员：这个
+SystemOS 卷里 `/usr` 下只有 `lib/`，没有 `libexec/`；裸 APFS 解析
+`--apfs-find /usr/libexec/xpcproxy` 返回
+`ABSENT (resolved /usr, no entry 'libexec')`。它在 **OS 根卷**的 mtree 清单里
+（inode `1152921500312217273`），`apfs-get.py` 从 OS DMG 取出：
+
+| 项 | 值 |
+| --- | --- |
+| 路径 | `/usr/libexec/xpcproxy`（OS 卷）|
+| 大小 | 96,352 字节 |
+| SHA-256 | `a97bc59d024c3b7fcf293aa6ef2fa75b60ef7220b2546ab4382adcbe78ddbfec` |
+| Mach-O | arm64 executable，ncmds 20，platform 2，minos 16.7.0 |
+| cdhash | `f7f090b0a9b94dc944026136fc6154372763c846`（SHA-256，19/19 槽）|
+| 静态信任缓存 | 命中（OS 卷 2,760 条 v2 TC，hash type 2）|
+
+```sh
+~/ios-userland/venv/bin/python scripts/apfs-get.py \
+    --ipsw ~/ios-work/iPhoneX-16.7.16.ipsw \
+    --get /usr/libexec/xpcproxy --out ~/ios-userland/extracted
+```
+
+依赖表见 `docs/BRING-UP-STATE.md` 第七十五节：三条 dylib 全在共享缓存，
+`LC_LOAD_DYLINKER` 指向随 `base.kist` 装的 `/usr/lib/dyld`。所以“从 cryptex 取
+xpcproxy”这个前提是错的，改动的是 OS 卷这一份。
 
 ### 对 P1 的结论
 

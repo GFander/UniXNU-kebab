@@ -1,0 +1,431 @@
+{
+  "accepted": true,
+  "scope": "Exact optional-trace ABI correction and original HIDFamily closure startup/IOHIDResource match only",
+  "normal_default": "0427",
+  "native_sha256": "b9af2033c94445303a6f75bd78bbc0b34b08b1d892f61c9297df002a08c005cb",
+  "source_version": "0427",
+  "source_replay": {
+    "common": 295,
+    "host": 4,
+    "files": 5252,
+    "all_equal": true
+  },
+  "normal_regressions": {
+    "0425": {
+      "version": "0425",
+      "defaults_matching_complete": true,
+      "actual_log_sha256": "277f6a1cb50063eedc31f1eb98e9470a6b6f9fff4109f3cbfab787a58b9fdf90",
+      "native_sha256": "9e720064c4e8e691352a11edfda0231ec05f4fdf923fc249c1ea33cb87e8bde9",
+      "real_apple_image4_start_succeeded": true,
+      "actual_busy_reference_released": true,
+      "busy_lifecycle": [
+        [
+          0,
+          0,
+          1,
+          "defaults"
+        ],
+        [
+          11,
+          1,
+          1,
+          "AppleImage4"
+        ],
+        [
+          14,
+          2,
+          -1,
+          "defaults"
+        ],
+        [
+          15,
+          1,
+          -1,
+          "AppleImage4"
+        ]
+      ],
+      "final_busy_state": 0,
+      "actual_waits": [
+        "IOAESAccelerator",
+        "IOResources/IONVRAM",
+        "IODTNVRAM"
+      ],
+      "hardware_nonce_and_data_restored_without_generation": true,
+      "native_nvram_existing_proxy_adopted": true,
+      "nvram_encrypted_data_banks_cold_restored": true,
+      "nvram_restored_bank": 0,
+      "nvram_restored_generation": 243,
+      "nvram_hardware_or_rollback_claim": false,
+      "nvram_durable_write_calls": 2,
+      "watchdog_enabled": true,
+      "original_iokit_monitoring_preserved": true,
+      "watchdog_heartbeat_times": [
+        38.536,
+        38.536,
+        48.538,
+        58.527,
+        68.565,
+        78.532,
+        88.564,
+        98.535,
+        108.531,
+        118.509,
+        128.557,
+        138.539,
+        148.521,
+        158.518,
+        168.558,
+        178.539
+      ],
+      "original_locked_observations": [
+        [
+          60.52,
+          30,
+          4
+        ],
+        [
+          90.556,
+          60,
+          7
+        ],
+        [
+          120.57,
+          90,
+          10
+        ],
+        [
+          150.584,
+          120,
+          13
+        ],
+        [
+          180.603,
+          150,
+          16
+        ]
+      ],
+      "systembag_and_hardware_c_d_preserved": true,
+      "rtc_record_reused": true,
+      "panic": [],
+      "full_ios_or_springboard": false,
+      "gpu_display_input_started": true
+    },
+    "0426": {
+      "version": "0426",
+      "defaults_matching_complete": true,
+      "actual_log_sha256": "9d55d2e34792ce75e4681e280752b9b21361c922cf93ccdc42b50c3adac79f6a",
+      "native_sha256": "9e720064c4e8e691352a11edfda0231ec05f4fdf923fc249c1ea33cb87e8bde9",
+      "real_apple_image4_start_succeeded": true,
+      "actual_busy_reference_released": true,
+      "busy_lifecycle": [
+        [
+          0,
+          0,
+          1,
+          "defaults"
+        ],
+        [
+          11,
+          1,
+          1,
+          "AppleImage4"
+        ],
+        [
+          14,
+          2,
+          -1,
+          "defaults"
+        ],
+        [
+          15,
+          1,
+          -1,
+          "AppleImage4"
+        ]
+      ],
+      "final_busy_state": 0,
+      "actual_waits": [
+        "IOAESAccelerator",
+        "IOResources/IONVRAM",
+        "IODTNVRAM"
+      ],
+      "hardware_nonce_and_data_restored_without_generation": true,
+      "native_nvram_existing_proxy_adopted": true,
+      "nvram_encrypted_data_banks_cold_restored": true,
+      "nvram_restored_bank": 1,
+      "nvram_restored_generation": 248,
+      "nvram_hardware_or_rollback_claim": false,
+      "nvram_durable_write_calls": 2,
+      "watchdog_enabled": true,
+      "original_iokit_monitoring_preserved": true,
+      "watchdog_heartbeat_times": [
+        38.56,
+        38.56,
+        48.557,
+        58.557,
+        68.56,
+        78.607,
+        88.6,
+        98.557,
+        108.609,
+        118.601,
+        128.569,
+        138.614,
+        148.598,
+        158.568,
+        168.615,
+        178.593
+      ],
+      "original_locked_observations": [
+        [
+          60.491,
+          30,
+          4
+        ],
+        [
+          90.534,
+          60,
+          7
+        ],
+        [
+          120.593,
+          90,
+          10
+        ],
+        [
+          150.595,
+          120,
+          13
+        ],
+        [
+          180.648,
+          150,
+          16
+        ]
+      ],
+      "systembag_and_hardware_c_d_preserved": true,
+      "rtc_record_reused": true,
+      "panic": [],
+      "full_ios_or_springboard": false,
+      "gpu_display_input_started": true
+    },
+    "0427": {
+      "version": "0427",
+      "defaults_matching_complete": true,
+      "actual_log_sha256": "59c6983e0bb949b06888b2bd3db056d4c3bae722a8d3cc9b63b065897f814c7d",
+      "native_sha256": "b9af2033c94445303a6f75bd78bbc0b34b08b1d892f61c9297df002a08c005cb",
+      "real_apple_image4_start_succeeded": true,
+      "actual_busy_reference_released": true,
+      "busy_lifecycle": [
+        [
+          0,
+          0,
+          1,
+          "defaults"
+        ],
+        [
+          11,
+          1,
+          1,
+          "AppleImage4"
+        ],
+        [
+          14,
+          2,
+          -1,
+          "AppleImage4"
+        ],
+        [
+          15,
+          1,
+          -1,
+          "defaults"
+        ]
+      ],
+      "final_busy_state": 0,
+      "actual_waits": [
+        "IOAESAccelerator",
+        "IOResources/IONVRAM",
+        "IODTNVRAM"
+      ],
+      "hardware_nonce_and_data_restored_without_generation": true,
+      "native_nvram_existing_proxy_adopted": true,
+      "nvram_encrypted_data_banks_cold_restored": true,
+      "nvram_restored_bank": 0,
+      "nvram_restored_generation": 253,
+      "nvram_hardware_or_rollback_claim": false,
+      "nvram_durable_write_calls": 2,
+      "watchdog_enabled": true,
+      "original_iokit_monitoring_preserved": true,
+      "watchdog_heartbeat_times": [
+        46.731,
+        46.731,
+        56.712,
+        66.71,
+        76.707,
+        86.752,
+        96.729,
+        106.718,
+        116.751,
+        126.725,
+        136.71,
+        146.701,
+        156.737,
+        166.728,
+        176.744,
+        186.724,
+        196.727,
+        206.765,
+        216.75
+      ],
+      "original_locked_observations": [
+        [
+          60.462,
+          30,
+          3
+        ],
+        [
+          90.5,
+          60,
+          6
+        ],
+        [
+          120.558,
+          90,
+          9
+        ],
+        [
+          150.563,
+          120,
+          12
+        ],
+        [
+          180.608,
+          150,
+          15
+        ],
+        [
+          210.63,
+          180,
+          18
+        ]
+      ],
+      "systembag_and_hardware_c_d_preserved": true,
+      "rtc_record_reused": true,
+      "panic": [],
+      "full_ios_or_springboard": false,
+      "gpu_display_input_started": true
+    }
+  },
+  "original_hid_closures": {
+    "0425": {
+      "components": [
+        "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
+        "com.apple.driver.AppleARMPlatform",
+        "com.apple.driver.AppleARMWatchdogTimer",
+        "com.apple.driver.AppleEffaceableStorage",
+        "com.apple.driver.AppleMobileFileIntegrity",
+        "com.apple.driver.ApplePMGR",
+        "com.apple.filesystems.apfs",
+        "com.apple.iokit.CoreAnalyticsFamily",
+        "com.apple.iokit.IOCryptoAcceleratorFamily",
+        "com.apple.iokit.IOReportFamily",
+        "com.apple.iokit.IOSlowAdaptiveClockingFamily",
+        "com.apple.iokit.IOStorageFamily",
+        "com.apple.kec.corecrypto",
+        "com.apple.kext.AppleMatch",
+        "com.apple.kext.CoreTrust",
+        "com.apple.security.AppleImage4",
+        "com.apple.security.sandbox"
+      ],
+      "codeless": [],
+      "original_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+      "prelink_sha256": "6f04a28e40554d89eb8c8daf86a15271fe0a14dcf48466a34128634086f479ca",
+      "native_sha256": "9e720064c4e8e691352a11edfda0231ec05f4fdf923fc249c1ea33cb87e8bde9"
+    },
+    "0426": {
+      "components": [
+        "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
+        "com.apple.driver.AppleARMPlatform",
+        "com.apple.driver.AppleARMWatchdogTimer",
+        "com.apple.driver.AppleEffaceableStorage",
+        "com.apple.driver.AppleMobileFileIntegrity",
+        "com.apple.driver.ApplePMGR",
+        "com.apple.filesystems.apfs",
+        "com.apple.iokit.CoreAnalyticsFamily",
+        "com.apple.iokit.IOCryptoAcceleratorFamily",
+        "com.apple.iokit.IOHIDFamily",
+        "com.apple.iokit.IOReportFamily",
+        "com.apple.iokit.IOSlowAdaptiveClockingFamily",
+        "com.apple.iokit.IOStorageFamily",
+        "com.apple.kec.corecrypto",
+        "com.apple.kext.AppleMatch",
+        "com.apple.kext.CoreTrust",
+        "com.apple.security.AppleImage4",
+        "com.apple.security.sandbox"
+      ],
+      "codeless": [
+        "com.apple.iokit.IOHIDEventDriver"
+      ],
+      "original_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+      "prelink_sha256": "fa4cd3e8fe40aabdb54d2386c77cdf63198fc699558ad3c05401533b86d2f346",
+      "native_sha256": "9e720064c4e8e691352a11edfda0231ec05f4fdf923fc249c1ea33cb87e8bde9"
+    },
+    "0427": {
+      "components": [
+        "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
+        "com.apple.driver.AppleARMPlatform",
+        "com.apple.driver.AppleARMWatchdogTimer",
+        "com.apple.driver.AppleEffaceableStorage",
+        "com.apple.driver.AppleMobileFileIntegrity",
+        "com.apple.driver.ApplePMGR",
+        "com.apple.filesystems.apfs",
+        "com.apple.iokit.CoreAnalyticsFamily",
+        "com.apple.iokit.IOCryptoAcceleratorFamily",
+        "com.apple.iokit.IOHIDFamily",
+        "com.apple.iokit.IOReportFamily",
+        "com.apple.iokit.IOSlowAdaptiveClockingFamily",
+        "com.apple.iokit.IOStorageFamily",
+        "com.apple.kec.corecrypto",
+        "com.apple.kext.AppleMatch",
+        "com.apple.kext.CoreTrust",
+        "com.apple.security.AppleImage4",
+        "com.apple.security.sandbox"
+      ],
+      "codeless": [
+        "com.apple.iokit.IOHIDEventDriver"
+      ],
+      "original_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+      "prelink_sha256": "6d43fb261247014d83c0438febd5cc23ab0a552d5fd815508ad215352c418d20",
+      "native_sha256": "b9af2033c94445303a6f75bd78bbc0b34b08b1d892f61c9297df002a08c005cb"
+    }
+  },
+  "actual_registry": {
+    "hid-resource": [
+      "KEBAB DRV: hid-resource class=IOHIDResource id=100000146 state=0x1e inactive=0 provider=IOResources",
+      "KEBAB DRV: hid-resource class=IOHIDResource matched=1 valid=1 scope=original HIDFamily registry match; not input qualification"
+    ],
+    "hid-interface": [
+      "KEBAB DRV: hid-interface class=IOHIDInterface query=unavailable scope=actual original interfaces; no invented usage/transport"
+    ],
+    "hid-event-service": [
+      "KEBAB DRV: hid-event-service class=IOHIDEventService query=unavailable scope=actual published event services; event consumption separate"
+    ],
+    "hid-event-driver": [
+      "KEBAB DRV: hid-event-driver class=IOHIDEventDriver query=unavailable scope=actual original report translator matches"
+    ]
+  },
+  "actual_registry_log_sha256": "424eaa55ec61e7a6b05c4611c86bdb716836e67661f23e937d1f4192456e25ce",
+  "iohidresource_actual_match": true,
+  "hid_interfaces_or_event_services_qualified": false,
+  "real_touch_or_keys_via_hid_qualified": false,
+  "gpu_qualified": false,
+  "display_presentation_qualified": false,
+  "usable_springboard": false,
+  "springboard_main_cadisplay_assertion_remains": true,
+  "bluetooth_deferred": true,
+  "hardware_roots_and_original_encrypted_data_preserved": true,
+  "last_independent_readonly_data_fsck": "0416",
+  "new_full_system_hash": false,
+  "daily_development_fast": true
+}

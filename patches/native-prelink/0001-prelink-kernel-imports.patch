@@ -1,0 +1,385 @@
+--- a/native_prelink.py
++++ b/native_prelink.py
+@@ -226,7 +226,7 @@
+             raise ValueError('Rebased pointer outside 64-bit address space')
+         bindings.append({'site': site, 'target': target, 'new_site': site + slide,
+                          'new_target': replacement, 'kind': kind, 'module': source[2]})
+-    extents = []
++    extents, original_extents = [], []
+     for start, end, identifier, segment in owned:
+         if identifier not in selected:
+             continue
+@@ -237,15 +237,220 @@
+                 raise ValueError(f'Rebased component collides with native {s["name"]}')
+         extents.append({'module': identifier, 'segment': segment['name'],
+                         'va': start + slide, 'size': end - start})
++        original_extents.append({'module': identifier, 'segment': segment['name'],
++                                 'va': start, 'size': end - start})
+     return {'native_sha256': hashlib.sha256(native_data).hexdigest(),
+             'original_sha256': hashlib.sha256(original_data).hexdigest(),
+             'slide': slide, 'components': sorted(selected - codeless),
+             'codeless_components': sorted(codeless), 'kernel_interfaces': sorted(interfaces),
+             'pointer_counts': dict(Counter(binding['kind'] for binding in bindings)),
+-            'extents': extents, 'bindings': bindings, 'images_modified': False,
++            'extents': extents, 'original_extents': original_extents, 'bindings': bindings,
++            'images_modified': False,
+             'instruction_relocation_complete': False, 'abi_qualified': False, 'loadable': False}
+ 
+ 
++def _signed(value, bits):
++    return value - (1 << bits) if value & (1 << (bits - 1)) else value
++
++
++def _adrp_target(word, pc):
++    if word & 0x9f000000 != 0x90000000:
++        raise ValueError('Not an ADRP instruction')
++    immediate = ((word >> 5) & 0x7ffff) << 2 | ((word >> 29) & 3)
++    return (pc & ~4095) + (_signed(immediate, 21) << 12)
++
++
++def _encode_adrp(word, pc, target):
++    delta = (target & ~4095) - (pc & ~4095)
++    if delta % 4096 or not -(1 << 32) <= delta < (1 << 32):
++        raise ValueError(f'ADRP target {target:#x} is not page-reachable from {pc:#x}')
++    immediate = delta >> 12
++    if not -(1 << 20) <= immediate < (1 << 20):
++        raise ValueError(f'ADRP target {target:#x} is outside the signed 21-bit range')
++    return (word & 0x9f00001f) | (((immediate & 3) << 29) | (((immediate >> 2) & 0x7ffff) << 5))
++
++
++def _encode_add(word, target):
++    offset = target & 0xfff
++    return (word & ~(0xfff << 10)) | (offset << 10)
++
++
++def _encode_ldr(word, target):
++    if target % 8:
++        raise ValueError(f'LDR target {target:#x} is not 8-byte aligned')
++    offset = target & 0xfff
++    if offset % 8 or offset > 32760:
++        raise ValueError(f'LDR target {target:#x} is outside the unsigned 12-bit scaled range')
++    return (word & ~(0xfff << 10)) | ((offset // 8) << 10)
++
++
++def _bl_target(word, pc):
++    if word & 0x7c000000 not in (0x14000000, 0x94000000):
++        raise ValueError('Not a B/BL instruction')
++    return pc + (_signed(word & 0x3ffffff, 26) << 2)
++
++
++def _encode_bl(word, pc, target):
++    delta = target - pc
++    if delta % 4 or not -(1 << 27) <= delta < (1 << 27):
++        raise ValueError(f'Branch target {target:#x} is outside the signed 26-bit (+/-128 MiB) range from {pc:#x}')
++    return (word & 0xfc000000) | ((delta >> 2) & 0x3ffffff)
++
++
++def _segment_containing(image, address, length=1):
++    matches = [s for s in image['segments']
++               if s['va'] <= address and address + length <= s['va'] + s['size']]
++    if len(matches) != 1:
++        raise ValueError(f'Address {address:#x}+{length:#x} is not in exactly one segment')
++    return matches[0]
++
++
++def find_kernel_import_sites(data, image, address):
++    """Find every native reference the linker could emit for one symbol.
++
++    A static arm64 kernel has no dyld: a resolved external data symbol appears
++    as ADRP+ADD (address materialisation), ADRP+LDR (load through the symbol
++    address), or an absolute 8-byte slot (vtable/GOT/literal). A resolved
++    external function appears as B/BL or, when its address is taken, as data
++    in a vtable/GOT slot. The scanner is deliberately conservative: it only
++    reports encodings whose decoded target is exactly ``address``.
++    """
++    sites = []
++    for segment in image['segments']:
++        if not segment['filesize']:
++            continue
++        blob = data[segment['fileoff']:segment['fileoff'] + segment['filesize']]
++        if segment['initprot'] & 4:
++            offset = 0
++            while offset + 4 <= len(blob):
++                word, = struct.unpack_from('<I', blob, offset)
++                pc = segment['va'] + offset
++                if word & 0x9f000000 == 0x90000000 and offset + 8 <= len(blob):
++                    page = _adrp_target(word, pc)
++                    following, = struct.unpack_from('<I', blob, offset + 4)
++                    if (following & 0x7f000000 == 0x11000000
++                            and (following >> 22) & 3 == 0
++                            and (following >> 5) & 31 == word & 31
++                            and (following & 31) == word & 31):
++                        if page + ((following >> 10) & 0xfff) == address:
++                            sites.append({'kind': 'adrp_add', 'va': pc, 'word0': word,
++                                          'word1': following})
++                    elif (following & 0xffc00000 == 0xf9400000
++                          and (following >> 5) & 31 == word & 31):
++                        if page + (((following >> 10) & 0xfff) << 3) == address:
++                            sites.append({'kind': 'adrp_ldr', 'va': pc, 'word0': word,
++                                          'word1': following})
++                if word & 0x7c000000 in (0x14000000, 0x94000000):
++                    if _bl_target(word, pc) == address:
++                        sites.append({'kind': 'b' if word & 0x80000000 == 0 else 'bl',
++                                      'va': pc, 'word': word})
++                offset += 4
++        elif segment['name'] not in ('__LINKEDIT', '__LINKINFO', '__PRELINK_INFO', '__CTF'):
++            offset = (8 - segment['va'] % 8) % 8
++            while offset + 8 <= len(blob):
++                value, = struct.unpack_from('<Q', blob, offset)
++                if value == address:
++                    sites.append({'kind': 'slot', 'va': segment['va'] + offset,
++                                  'word': value})
++                offset += 8
++    sites.sort(key=lambda site: (site['va'], site['kind']))
++    unique, seen = [], set()
++    for site in sites:
++        key = (site['va'], site['kind'])
++        if key not in seen:
++            unique.append(site)
++            seen.add(key)
++    return unique
++
++
++def patch_kernel_import_sites(output, image, sites, address):
++    patches = []
++    for site in sites:
++        segment = _segment_containing(image, site['va'], 8 if site['kind'] == 'slot' else 4)
++        at = segment['fileoff'] + site['va'] - segment['va']
++        if site['kind'] in ('b', 'bl'):
++            word = _encode_bl(site['word'], site['va'], address)
++            expected = struct.pack('<I', site['word'])
++            if output[at:at + 4] != expected:
++                raise ValueError(f'Native bytes changed at import site {site["va"]:#x}')
++            struct.pack_into('<I', output, at, word)
++            patches.append({**site, 'new_word': word})
++        elif site['kind'] == 'adrp_add':
++            word0 = _encode_adrp(site['word0'], site['va'], address)
++            word1 = _encode_add(site['word1'], address)
++            expected = struct.pack('<II', site['word0'], site['word1'])
++            if output[at:at + 8] != expected:
++                raise ValueError(f'Native bytes changed at import site {site["va"]:#x}')
++            struct.pack_into('<II', output, at, word0, word1)
++            patches.append({**site, 'new_word0': word0, 'new_word1': word1})
++        elif site['kind'] == 'adrp_ldr':
++            word0 = _encode_adrp(site['word0'], site['va'], address)
++            word1 = _encode_ldr(site['word1'], address)
++            expected = struct.pack('<II', site['word0'], site['word1'])
++            if output[at:at + 8] != expected:
++                raise ValueError(f'Native bytes changed at import site {site["va"]:#x}')
++            struct.pack_into('<II', output, at, word0, word1)
++            patches.append({**site, 'new_word0': word0, 'new_word1': word1})
++        elif site['kind'] == 'slot':
++            expected = struct.pack('<Q', site['word'])
++            if output[at:at + 8] != expected:
++                raise ValueError(f'Native bytes changed at import slot {site["va"]:#x}')
++            struct.pack_into('<Q', output, at, address)
++            patches.append({**site, 'new_word': address})
++        else:
++            raise ValueError(f'Unsupported import site kind {site["kind"]}')
++    return patches
++
++
++def resolve_kernel_imports(output, native_data, native_image, report, requests):
++    """Resolve nominated kernel-side imports to final prelinked VAs.
++
++    ``requests`` entries are ``{'symbol', 'original_va', 'native_va'}``. The
++    native address is normally looked up in the kernel symbol table; a caller
++    may pass it explicitly for a probe or an author-provided import veneer.
++    """
++    native_by_name = {}
++    for address, names in exports(native_data, native_image).items():
++        for name in names:
++            native_by_name.setdefault(name, set()).add(address)
++    results = []
++    for request in requests:
++        symbol, original = request['symbol'], request['original_va']
++        native_va = request.get('native_va')
++        if native_va is None:
++            candidates = native_by_name.get(symbol)
++            if not candidates or len(candidates) != 1:
++                raise ValueError(f'Kernel import {symbol} has '
++                                 f'{0 if not candidates else len(candidates)} native definitions')
++            native_va = next(iter(candidates))
++        if not 0 <= original < 1 << 64 or not 0 <= native_va < 1 << 64:
++            raise ValueError(f'Import {symbol} address outside 64-bit space')
++        final = (original + report['slide']) & ((1 << 64) - 1)
++        source = [e for e in report['original_extents']
++                  if e['va'] <= original < e['va'] + e['size']]
++        destination = [e for e in report['extents']
++                       if e['va'] <= final < e['va'] + e['size']]
++        if len(source) != 1:
++            raise ValueError(f'Import {symbol} original address {original:#x} is outside the selected closure')
++        if len(destination) != 1:
++            raise ValueError(f'Import {symbol} final address {final:#x} is outside the emitted closure')
++        if source[0]['module'] != destination[0]['module']:
++            raise ValueError(f'Import {symbol} changed component across the slide')
++        if symbol in native_by_name and native_va not in native_by_name[symbol]:
++            raise ValueError(f'Import {symbol} native address {native_va:#x} is not its symbol value')
++        sites = find_kernel_import_sites(native_data, native_image, native_va)
++        if not sites:
++            raise ValueError(f'No instruction or slot reference to kernel import {symbol} '
++                             f'at {native_va:#x}; refusing to emit a candidate whose import '
++                             'could not be bound')
++        patches = patch_kernel_import_sites(output, native_image, sites, final)
++        results.append({'symbol': symbol, 'original_va': original, 'native_va': native_va,
++                        'final_va': final, 'module': source[0]['module'],
++                        'segment': source[0]['segment'], 'sites': patches,
++                        'site_count': len(patches)})
++    return results
++
++
+ def main():
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument('--kernel', required=True, type=Path)
+--- a/emit_prelink.py
++++ b/emit_prelink.py
+@@ -9,7 +9,8 @@
+ import struct
+ import xml.etree.ElementTree as ET
+ 
+-from native_prelink import backed_offset, exports, macho, plan, unserialize_xml
++from native_prelink import (backed_offset, exports, macho, plan, resolve_kernel_imports,
++                            unserialize_xml)
+ 
+ # Standard SHA-256 round constants, stored as 64 little-endian words. Some
+ # assemblers embed these data in executable sections; do not decode as code.
+@@ -114,7 +115,8 @@
+             'register_dataflow_qualified': False}
+ 
+ 
+-def emit(native_data, original_data, roots, slide, early_security_init=None):
++def emit(native_data, original_data, roots, slide, early_security_init=None,
++         kernel_imports=None):
+     report = plan(native_data, original_data, roots, slide)
+     native, original = macho(native_data), macho(original_data)
+     marker = [address for address, names in exports(native_data, native).items()
+@@ -208,6 +210,12 @@
+ 
+     for binding in report['bindings']:
+         struct.pack_into('<Q', output, new_offset(binding['new_site'], 8), binding['new_target'])
++    # The reverse direction: kernel code/data that references a prelinked
++    # component. These sites live in the native image, not in the donor pointer
++    # table, so they are patched after the components have been placed and
++    # before the candidate hash is taken.
++    report['kernel_imports'] = resolve_kernel_imports(
++        output, native_data, native, report, kernel_imports or [])
+     # Mach-O VM addresses are not all included in the cache's pointer list.
+     # Rebase these headers explicitly; preserve section flags and offsets.
+     for identifier, module in modules.items():
+@@ -289,7 +297,8 @@
+         raise ValueError('Insufficient native Mach-O header padding for sparse index section')
+     struct.pack_into('<I', output, 20, len(rebuilt))
+     output[32:32 + len(rebuilt)] = rebuilt
+-    # No executable instruction byte is patched, including original POST code.
++    # No original component executable instruction byte is patched; the only
++    # instruction rewrites are the nominated native import sites.
+     text_hashes = {}
+     for identifier, module in modules.items():
+         for segment in module['segments']:
+@@ -315,6 +324,9 @@
+     parser.add_argument('--output', required=True, type=Path)
+     parser.add_argument('--early-security-init', action='append', default=[], metavar='BUNDLE=ORIGINAL_VA',
+                         help='Explicit original void(void) policy initializer, called before lockdown; requires source ABI')
++    parser.add_argument('--kernel-import', action='append', default=[],
++                        metavar='SYMBOL=ORIGINAL_VA[@NATIVE_VA]',
++                        help='Bind one native kernel reference to a selected component address')
+     args = parser.parse_args()
+     initializers = {}
+     for request in args.early_security_init:
+@@ -322,7 +334,17 @@
+         if not separator or not identifier or identifier in initializers:
+             parser.error('Use one BUNDLE=ORIGINAL_VA initializer per module')
+         initializers[identifier] = int(address, 0)
+-    image, report = emit(args.kernel.read_bytes(), args.prelinked.read_bytes(), args.root, args.slide, initializers)
++    imports, seen = [], set()
++    for request in args.kernel_import:
++        symbol, separator, addresses = request.partition('=')
++        original, separator_at, native = addresses.partition('@')
++        if not separator or not symbol or not original or symbol in seen:
++            parser.error('Use one SYMBOL=ORIGINAL_VA[@NATIVE_VA] per kernel import')
++        seen.add(symbol)
++        imports.append({'symbol': symbol, 'original_va': int(original, 0),
++                        'native_va': int(native, 0) if separator_at else None})
++    image, report = emit(args.kernel.read_bytes(), args.prelinked.read_bytes(), args.root,
++                         args.slide, initializers, imports)
+     if args.output.exists():
+         raise SystemExit('Refuse to overwrite an existing candidate')
+     args.output.parent.mkdir(parents=True, exist_ok=True)
+--- a/test_native_prelink.py
++++ b/test_native_prelink.py
+@@ -5,7 +5,8 @@
+ import unittest
+ import xml.etree.ElementTree as ET
+ 
+-from native_prelink import macho, plan, unserialize_xml
++from native_prelink import (_adrp_target, _bl_target, find_kernel_import_sites, macho,
++                            patch_kernel_import_sites, plan, unserialize_xml)
+ 
+ 
+ def segment(name, va, size, off, length):
+@@ -83,7 +84,47 @@
+     return bytes(native), bytes(original)
+ 
+ 
++def executable_segment(name, va, size, off, length):
++    command = bytearray(segment(name, va, size, off, length))
++    struct.pack_into('<I', command, 60, 5)
++    return bytes(command)
++
++
++def import_fixture():
++    native = bytearray(0x2000)
++    commands = [executable_segment('__TEXT', 0x100000, 0x1000, 0, 0x1000),
++                segment('__DATA', 0x101000, 0x1000, 0x1000, 0x1000)]
++    blob = header(2, commands)
++    native[:len(blob)] = blob
++    # ADRP x0, 0x101000; ADD x0, x0, #0x40; BL 0x101060; RET.
++    struct.pack_into('<4I', native, 0x100, 0xb0000000, 0x91010000, 0x940003d6, 0xd65f03c0)
++    # Absolute function slot in data, exactly as a vtable/GOT entry would look.
++    struct.pack_into('<Q', native, 0x1080, 0x101060)
++    return bytes(native), macho(bytes(native))
++
++
+ class NativePrelinkTests(unittest.TestCase):
++    def test_kernel_import_scanner_patches_all_reference_forms(self):
++        native, image = import_fixture()
++        data_sites = find_kernel_import_sites(native, image, 0x101040)
++        self.assertEqual([site['kind'] for site in data_sites], ['adrp_add'])
++        output = bytearray(native)
++        patch_kernel_import_sites(output, image, data_sites, 0x200100)
++        word0, word1 = struct.unpack_from('<2I', output, 0x100)
++        self.assertEqual(_adrp_target(word0, 0x100100) + ((word1 >> 10) & 0xfff), 0x200100)
++        function_sites = find_kernel_import_sites(native, image, 0x101060)
++        self.assertEqual([site['kind'] for site in function_sites], ['bl', 'slot'])
++        patch_kernel_import_sites(output, image, function_sites, 0x200200)
++        word, = struct.unpack_from('<I', output, 0x108)
++        self.assertEqual(_bl_target(word, 0x100108), 0x200200)
++        self.assertEqual(struct.unpack_from('<Q', output, 0x1080)[0], 0x200200)
++
++    def test_refuse_out_of_reach_kernel_import_branch(self):
++        native, image = import_fixture()
++        sites = find_kernel_import_sites(native, image, 0x101060)
++        with self.assertRaisesRegex(ValueError, '128 MiB'):
++            patch_kernel_import_sites(bytearray(native), image, sites, 0x20000000)
++
+     def test_exact_pointer_binding_and_closure(self):
+         report = plan(*fixture(), ['test.a'], 0x4000)
+         self.assertEqual(report['components'], ['test.a', 'test.b'])
+--- a/README.md
++++ b/README.md
+@@ -5,3 +5,15 @@
+ Current state: used by the kernel build and the sheng payload step.
+ 
+ Run by `unixnu build kernel` and `unixnu build payload`.
++
++## Kernel imports
++
++`emit_prelink.py --kernel-import SYMBOL=ORIGINAL_VA[@NATIVE_VA]` binds a
++reference in the static kernel to a symbol in a selected donor component.
++`ORIGINAL_VA` is the component address in the donor; `NATIVE_VA` overrides the
++kernel-side symbol lookup (used by the offline probe). The emitter rewrites
++direct B/BL, ADRP+ADD and ADRP+LDR references, plus absolute 8-byte
++vtable/GOT/literal slots, to `ORIGINAL_VA + slide`. It refuses a request with no
++reference, an address outside the selected closure, or a B/BL outside the
++signed +/-128 MiB range. The result is still offline-only and not runtime
++qualified.

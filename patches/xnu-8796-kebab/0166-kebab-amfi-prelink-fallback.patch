@@ -1,0 +1,50 @@
+--- a/bsd/kern/kebab_amfi.c
++++ b/bsd/kern/kebab_amfi.c
+@@ -28,6 +28,8 @@
+ 
+ #include "kebab_codesign.h"
+ 
++void kebab_amfi_register(void);
++
+ static void
+ kebab_amfi_entitlements_invalidate(__unused void *os_entitlements)
+ {
+@@ -191,11 +193,16 @@
+ };
+ 
+ __startup_func
+-static void
++void
+ kebab_amfi_register(void)
+ {
++	/* Prelinked AMFI may already have registered before EARLY_BOOT. */
++	if (amfi != NULL) {
++		printf("KEBAB AMFI: prelinked interface retained (TrustCache version %u)\n",
++		    amfi->TrustCache.version);
++		return;
++	}
+ 	amfi_interface_register(&kebab_amfi);
+ 	printf("KEBAB AMFI: built-in interface registered (no entitlements)\n");
+ }
+-STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, kebab_amfi_register);
+ #endif /* KEBAB */
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -741,6 +741,17 @@
+ #endif
+ #endif
+ 
++#if defined(KEBAB)
++	/* Security kexts register AMFI in mac_policy_initmach(). Only now may
++	 * the standalone fallback claim the interface, before trust cache init
++	 * and before machine_lockdown makes the registration immutable.
++	 */
++	{
++		extern void kebab_amfi_register(void);
++		kebab_amfi_register();
++	}
++#endif
++
+ #if CONFIG_DTRACE
+ 	kernel_bootstrap_log("dtrace_early_init");
+ 	dtrace_early_init();

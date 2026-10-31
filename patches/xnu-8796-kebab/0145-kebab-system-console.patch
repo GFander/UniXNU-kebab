@@ -1,0 +1,325 @@
+fix(console): route /dev/console to the kebab character device
+
+launchd opens /dev/console for its log fallback and passes it as fd 0/1/2
+to every spawned job.  The generic arm path is cnopen -> cndev ->
+km_tty[0] -> kmopen, but that tty path has never been observed to
+complete on this port and its failure is reported as errno 6 before
+xpcproxy's ENOENT, hiding the real blocker.
+
+Route all console entry points to the character device the kebab UFS
+driver already publishes while it is up.  cnopen/cnwrite/cnread/cnioctl/
+cnselect become thin calls into kebab_console_*; open and close return 0
+without taking a tty lock, writes go through console_write() so _cnputc
+tees them to kebab_usb_log() and the panel, reads return EOF and select
+reports writable.  cndev() keeps the generic path but no longer
+dereferences a NULL km_tty.
+
+This is option (b): it uses the device that already exists, cannot block
+or panic on the unproven tty path, and puts userland bytes on the USB
+console.  Option (a) would need hardware proof that kmopen returns;
+option (c) would leave a substitution notice in the log for no benefit.
+
+diff --git a/bsd/dev/arm/cons.c b/bsd/dev/arm/cons.c
+index 5ac18e2..8e90c57 100644
+--- a/bsd/dev/arm/cons.c
++++ b/bsd/dev/arm/cons.c
+@@ -19,6 +19,11 @@
+ #include <sys/tty.h>
+ #include <sys/proc.h>
+ #include <sys/uio.h>
++#include <sys/errno.h>
++
++#if defined(KEBAB)
++#include <dev/kebab_ufs.h>
++#endif
+ 
+ struct tty      *constty;               /* current console device */
+ 
+@@ -38,20 +43,54 @@ int cnwrite(__unused dev_t dev, struct uio *uio, int ioflag);
+ int cnioctl(__unused dev_t dev, u_long cmd, caddr_t addr, int flg, proc_t p);
+ int cnselect(__unused dev_t dev, int flag, void * wql, proc_t p);
+ 
++/*
++ * The device behind cnopen()/cnread()/cnwrite().  A missing km tty used to be
++ * dereferenced unconditionally; on kebab the console is routed to the UFS
++ * character device before this is reached, so the NULL check is only a guard
++ * for the generic path.
++ */
+ static dev_t
+ cndev(void)
+ {
+ 	if (constty) {
+ 		return constty->t_dev;
+-	} else {
++	} else if (km_tty[0]) {
+ 		return km_tty[0]->t_dev;
++	} else {
++		return NODEV;
+ 	}
+ }
+ 
++/*
++ * kebab: /dev/console has no working tty behind it.  cnopen -> cndev ->
++ * km_tty[0] -> kmopen depends on tty initialisation that has never completed
++ * on this port, so while the kebab UFS driver is up, send all console entry
++ * points to the plain character device it publishes.  The fallback below is
++ * the generic arm path, kept for the window before the UFS driver initialises
++ * and for non-kebab arm kernels.
++ */
++static bool
++kebab_console_route(void)
++{
++#if defined(KEBAB)
++	return constty == NULL && kebab_console_available();
++#else
++	return false;
++#endif
++}
++
+ int
+ cnopen(__unused dev_t dev, int flag, int devtype, struct proc *pp)
+ {
++#if defined(KEBAB)
++	if (kebab_console_route()) {
++		return kebab_console_open(dev, flag, devtype, pp);
++	}
++#endif
+ 	dev = cndev();
++	if (dev == NODEV) {
++		return ENXIO;
++	}
+ 	return (*cdevsw[major(dev)].d_open)(dev, flag, devtype, pp);
+ }
+ 
+@@ -59,7 +98,15 @@ cnopen(__unused dev_t dev, int flag, int devtype, struct proc *pp)
+ int
+ cnclose(__unused dev_t dev, int flag, int mode, struct proc *pp)
+ {
++#if defined(KEBAB)
++	if (kebab_console_route()) {
++		return kebab_console_close(dev, flag, mode, pp);
++	}
++#endif
+ 	dev = cndev();
++	if (dev == NODEV) {
++		return ENXIO;
++	}
+ 	return (*cdevsw[major(dev)].d_close)(dev, flag, mode, pp);
+ }
+ 
+@@ -67,7 +114,15 @@ cnclose(__unused dev_t dev, int flag, int mode, struct proc *pp)
+ int
+ cnread(__unused dev_t dev, struct uio *uio, int ioflag)
+ {
++#if defined(KEBAB)
++	if (kebab_console_route()) {
++		return kebab_console_read(dev, uio, ioflag);
++	}
++#endif
+ 	dev = cndev();
++	if (dev == NODEV) {
++		return ENXIO;
++	}
+ 	return (*cdevsw[major(dev)].d_read)(dev, uio, ioflag);
+ }
+ 
+@@ -75,7 +130,15 @@ cnread(__unused dev_t dev, struct uio *uio, int ioflag)
+ int
+ cnwrite(__unused dev_t dev, struct uio *uio, int ioflag)
+ {
++#if defined(KEBAB)
++	if (kebab_console_route()) {
++		return kebab_console_write(dev, uio, ioflag);
++	}
++#endif
+ 	dev = cndev();
++	if (dev == NODEV) {
++		return ENXIO;
++	}
+ 	return (*cdevsw[major(dev)].d_write)(dev, uio, ioflag);
+ }
+ 
+@@ -83,7 +146,15 @@ cnwrite(__unused dev_t dev, struct uio *uio, int ioflag)
+ int
+ cnioctl(__unused dev_t dev, u_long cmd, caddr_t addr, int flag, struct proc *p)
+ {
++#if defined(KEBAB)
++	if (kebab_console_route()) {
++		return kebab_console_ioctl(dev, cmd, addr, flag, p);
++	}
++#endif
+ 	dev = cndev();
++	if (dev == NODEV) {
++		return ENXIO;
++	}
+ 
+ 	/*
+ 	 * XXX This check prevents the cons.c code from being shared between
+@@ -108,6 +179,14 @@ cnioctl(__unused dev_t dev, u_long cmd, caddr_t addr, int flag, struct proc *p)
+ int
+ cnselect(__unused dev_t dev, int flag, void *wql, struct proc *p)
+ {
++#if defined(KEBAB)
++	if (kebab_console_route()) {
++		return kebab_console_select(dev, flag, wql, p);
++	}
++#endif
+ 	dev = cndev();
++	if (dev == NODEV) {
++		return ENXIO;
++	}
+ 	return (*cdevsw[major(dev)].d_select)(dev, flag, wql, p);
+ }
+diff --git a/bsd/dev/kebab_ufs.c b/bsd/dev/kebab_ufs.c
+index 5d23d88..29cf09b 100644
+--- a/bsd/dev/kebab_ufs.c
++++ b/bsd/dev/kebab_ufs.c
+@@ -24,7 +24,6 @@
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ 
+-extern void kebab_early_putc(char c);
+ #include <sys/buf.h>
+ #include <sys/conf.h>
+ #include <sys/disk.h>
+@@ -46,6 +45,7 @@ extern void kebab_early_putc(char c);
+ #include "kebab_ufs.h"
+ 
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern void console_write(char *buf, int len);
+ /* osfmk/arm/machine_routines.h, not exported to the BSD layer */
+ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ 
+@@ -807,30 +807,52 @@ static const struct bdevsw kebab_ufs_bdevsw = {
+ };
+ 
+ /*
+- * /dev/kebabcon - a write-only console for userland.
++ * /dev/kebabcon and the /dev/console backend.
+  *
+- * The kernel log already reaches the panel through cons_ops, but userland has
+- * no tty on this port: /dev/console resolves through cnopen -> cndev ->
+- * km_tty[0] -> kmopen, and that path does not complete here yet. Rather than
+- * fight the tty layer for a bring-up test, expose the framebuffer console as a
+- * plain character device: whatever a process writes is drawn directly.
++ * /dev/console still resolves through cdevsw[0] -> cnopen -> cndev ->
++ * km_tty[0] -> kmopen, and that tty path has never been observed to return on
++ * this port.  Rather than keep the whole userland behind an unproven tty
++ * initialisation, /dev/console is routed to this character device while the
++ * kebab UFS driver is up (bsd/dev/arm/cons.c does the routing).  The device
++ * has no tty state, no line discipline and no lock of its own, so open and
++ * close are unconditional and cannot block or panic.
++ *
++ * Writes go through console_write(), the same path kprintf uses.  _cnputc()
++ * tees every character to kebab_usb_log() and then draws it on the panel, so
++ * a userland write reaches the USB console and the screen from one place.
++ *
++ * Reads return EOF: there is no keyboard or serial input behind this node.
++ * Select reports the device writable and never readable.
+  */
+-static int
+-kebabcon_open(__unused dev_t dev, __unused int flags, __unused int devtype,
++bool
++kebab_console_available(void)
++{
++	return su.ready && su.conmajor >= 0;
++}
++
++int
++kebab_console_open(__unused dev_t dev, __unused int flags, __unused int devtype,
+     __unused struct proc *p)
+ {
+ 	return 0;
+ }
+ 
+-static int
+-kebabcon_close(__unused dev_t dev, __unused int flags, __unused int mode,
++int
++kebab_console_close(__unused dev_t dev, __unused int flags, __unused int mode,
+     __unused struct proc *p)
+ {
+ 	return 0;
+ }
+ 
+-static int
+-kebabcon_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
++int
++kebab_console_read(__unused dev_t dev, __unused struct uio *uio,
++    __unused int ioflag)
++{
++	return 0;               /* EOF: nothing produces input on this port */
++}
++
++int
++kebab_console_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
+ {
+ 	char buf[64];
+ 
+@@ -840,22 +862,34 @@ kebabcon_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
+ 		if (error) {
+ 			return error;
+ 		}
+-		for (size_t i = 0; i < want; i++) {
+-			kebab_early_putc(buf[i]);
+-		}
++		console_write(buf, (int)want);
+ 	}
+ 	return 0;
+ }
+ 
++int
++kebab_console_ioctl(__unused dev_t dev, __unused u_long cmd,
++    __unused caddr_t data, __unused int flag, __unused struct proc *p)
++{
++	return ENOTTY;          /* not a tty; TIOCGETA and friends do not apply */
++}
++
++int
++kebab_console_select(dev_t dev, int flag, __unused void *wql,
++    __unused struct proc *p)
++{
++	return seltrue(dev, flag, p);
++}
++
+ static const struct cdevsw kebabcon_cdevsw = {
+-	.d_open   = kebabcon_open,
+-	.d_close  = kebabcon_close,
+-	.d_read   = eno_rdwrt,
+-	.d_write  = kebabcon_write,
+-	.d_ioctl  = eno_ioctl,
++	.d_open   = kebab_console_open,
++	.d_close  = kebab_console_close,
++	.d_read   = kebab_console_read,
++	.d_write  = kebab_console_write,
++	.d_ioctl  = kebab_console_ioctl,
+ 	.d_stop   = eno_stop,
+ 	.d_reset  = eno_reset,
+-	.d_select = eno_select,
++	.d_select = kebab_console_select,
+ 	.d_mmap   = eno_mmap,
+ 	.d_strategy = eno_strat,
+ 	.d_type   = 0,          /* not a tty: there is no struct tty behind it */
+diff --git a/bsd/dev/kebab_ufs.h b/bsd/dev/kebab_ufs.h
+index bd8a79f..7ce9cfc 100644
+--- a/bsd/dev/kebab_ufs.h
++++ b/bsd/dev/kebab_ufs.h
+@@ -29,4 +29,19 @@ bool kebab_ufs_writable(void);
+ /* Flush the device's write cache after a batch of raw writes. */
+ int kebab_ufs_sync(void);
+ 
++/*
++ * /dev/console backend.  bsd/dev/arm/cons.c routes cnopen()/cnread()/cnwrite()
++ * here while the UFS driver is up, so the console does not depend on the km
++ * tty path.  Writes go through console_write() and reach both the USB console
++ * and the panel; reads return EOF.
++ */
++bool kebab_console_available(void);
++int kebab_console_open(dev_t dev, int flags, int devtype, struct proc *p);
++int kebab_console_close(dev_t dev, int flags, int mode, struct proc *p);
++int kebab_console_read(dev_t dev, struct uio *uio, int ioflag);
++int kebab_console_write(dev_t dev, struct uio *uio, int ioflag);
++int kebab_console_ioctl(dev_t dev, u_long cmd, caddr_t data, int flag,
++    struct proc *p);
++int kebab_console_select(dev_t dev, int flag, void *wql, struct proc *p);
++
+ #endif /* _KEBAB_UFS_H_ */

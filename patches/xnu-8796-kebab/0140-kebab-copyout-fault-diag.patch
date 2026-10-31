@@ -1,0 +1,348 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 716c1eb..b8d2a9f 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5338,6 +5338,45 @@ copyoutptr(user_addr_t ua, user_addr_t ptr, int ptr_size)
+ }
+ 
+ 
++#if defined(KEBAB)
++/*
++ * Kebab bring-up (0140): the state the copyout failure path has to print.
++ *
++ * create_unix_stack() records the stack geometry it installed so that
++ * exec_copyout_strings() can print the audit's three containment checks
++ * without re-deriving them.  The record is one deep and execs can overlap, so
++ * the pid is stored next to it: a mismatch means the geometry fields belong
++ * to a different exec (the pid and the map still tell the two apart).
++ *
++ * sleh.c keeps the matching one-deep record of the last kernel data abort that
++ * copyio had to recover from.  kebab_kfault_valid is cleared when a copyout
++ * starts, so a fault from an earlier exec cannot be reported here.
++ */
++static struct {
++	int             pid;
++	vm_map_t        map;
++	user_addr_t     user_stack;     /* top of the stack being copied out */
++	user_addr_t     alloc_base;     /* start of the stack allocation */
++	mach_vm_size_t  alloc_size;     /* page-rounded allocation size */
++	user_addr_t     guard_base;     /* start of the guard mapping */
++	mach_vm_size_t  guard_size;     /* size of the guard mapping */
++} kebab_stack_rec;
++
++extern uint64_t  kebab_kfault_far;
++extern uint32_t  kebab_kfault_esr;
++extern int       kebab_kfault_fast;
++extern int       kebab_kfault_vm;
++extern boolean_t kebab_kfault_valid;
++extern void     *kebab_kfault_thread;
++
++/*
++ * Defined in osfmk/arm/pmap/pmap.c.  The walk and the PTE bits are pmap
++ * internals (bsd does not see osfmk/arm/pmap/pmap.h), so the helper prints
++ * its own line instead of returning a struct.
++ */
++extern void kebab_pmap_probe_log(vm_map_t map, vm_map_offset_t va);
++#endif /* KEBAB */
++
+ /*
+  * exec_copyout_strings
+  *
+@@ -5428,6 +5467,7 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+ 	int error;
+ #if defined(KEBAB)
+ 	const char *stage = "alignment";
++	user_addr_t kebab_fail_addr = 0;
+ #endif
+ 
+ 	unsigned i;
+@@ -5475,6 +5515,10 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+ 
+ 	stack = *stackp;
+ 
++#if defined(KEBAB)
++	kebab_kfault_valid = FALSE;
++#endif
++
+ 	/*
+ 	 * All previous contributors to the string area
+ 	 * should have aligned their sub-area
+@@ -5526,6 +5570,7 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+ 	 */
+ #if defined(KEBAB)
+ 	stage = "strings";
++	kebab_fail_addr = string_area;
+ #endif
+ 	error = copyout(imgp->ip_strings, string_area,
+ 	    string_size);
+@@ -5579,6 +5624,7 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+ 	 */
+ #if defined(KEBAB)
+ 	stage = "pointers";
++	kebab_fail_addr = ptr_area;
+ #endif
+ 	error = copyout(ptr_buffer_start, ptr_area,
+ 	    ptr_area_size);
+@@ -5589,6 +5635,7 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+ 	/* argc (int32, stored in a ptr_size area) */
+ #if defined(KEBAB)
+ 	stage = "argc";
++	kebab_fail_addr = argc_area;
+ #endif
+ 	error = copyoutptr((user_addr_t)imgp->ip_argc, argc_area, ptr_size);
+ 	if (error) {
+@@ -5598,6 +5645,11 @@ exec_copyout_strings(struct image_params *imgp, user_addr_t *stackp)
+ bad:
+ #if defined(KEBAB)
+ 	if (error != 0) {
++		int pid = proc_getpid(p);
++		vm_map_t cur_map = current_map();
++		boolean_t have_fault;
++		user_addr_t probe_addr;
++
+ 		printf("KEBAB EXEC: copyout stage=%s error=%d ptr_size=%d "
+ 		    "strspace_mod=%d string_size=%lu string=0x%llx ptr=0x%llx "
+ 		    "argc=0x%llx\n",
+@@ -5606,6 +5658,55 @@ bad:
+ 		    (unsigned long long)string_area,
+ 		    (unsigned long long)ptr_area,
+ 		    (unsigned long long)argc_area);
++
++		/* The map the copyout runs against vs the map the stack went into. */
++		printf("KEBAB EXEC: copyout map cur=%p alloc=%p same=%d pid=%d "
++		    "recpid=%d\n",
++		    (void *)cur_map, (void *)kebab_stack_rec.map,
++		    (int)(cur_map == kebab_stack_rec.map), pid,
++		    kebab_stack_rec.pid);
++
++		/*
++		 * Whether the write faulted at all, and what the abort handler
++		 * made of it: fast is arm_fast_fault() and vm is vm_fault(), -1
++		 * when that path did not run.
++		 */
++		have_fault = kebab_kfault_valid &&
++		    kebab_kfault_thread == (void *)current_thread();
++		if (have_fault) {
++			printf("KEBAB EXEC: copyout fault far=0x%llx esr=0x%x "
++			    "dfsc=0x%x wnr=%d fast=%d vm=%d\n",
++			    (unsigned long long)kebab_kfault_far,
++			    kebab_kfault_esr, kebab_kfault_esr & 0x3f,
++			    (int)((kebab_kfault_esr >> 6) & 1),
++			    kebab_kfault_fast, kebab_kfault_vm);
++		} else {
++			printf("KEBAB EXEC: copyout fault none\n");
++		}
++
++		/*
++		 * Translation for the page that failed.  Without a recorded fault,
++		 * fall back to the destination of the failing stage, or to the
++		 * stack top when the failure was the alignment check.
++		 */
++		probe_addr = have_fault ? (user_addr_t)kebab_kfault_far :
++		    (kebab_fail_addr != 0 ? kebab_fail_addr :
++		    (user_addr_t)p->user_stack);
++		kebab_pmap_probe_log(cur_map, probe_addr);
++
++		/*
++		 * The audit's containment checks.  "user" is the stack top this
++		 * copy started from; alloc_base/size and guard come from
++		 * create_unix_stack().
++		 */
++		printf("KEBAB EXEC: copyout checks user_eq_alloc=%d "
++		    "str_eq_user=%d argc_ge_guard=%d\n",
++		    (int)(kebab_stack_rec.user_stack ==
++		    kebab_stack_rec.alloc_base + kebab_stack_rec.alloc_size),
++		    (int)(string_area + string_size ==
++		    (user_addr_t)p->user_stack),
++		    (int)(argc_area >=
++		    kebab_stack_rec.guard_base + kebab_stack_rec.guard_size));
+ 	}
+ #endif /* KEBAB */
+ 	return error;
+@@ -6816,6 +6917,15 @@ create_unix_stack(vm_map_t map, load_result_t* load_result,
+ 		}
+ 	}
+ 
++#if defined(KEBAB)
++	kebab_stack_rec.pid = proc_getpid(p);
++	kebab_stack_rec.map = map;
++	kebab_stack_rec.user_stack = user_stack;
++	kebab_stack_rec.alloc_base = load_result->user_stack_alloc;
++	kebab_stack_rec.alloc_size = size;
++	kebab_stack_rec.guard_base = prot_addr;
++	kebab_stack_rec.guard_size = prot_size;
++#endif
+ 	KEBAB_UNIX_STACK_LOG(KERN_SUCCESS);
+ 	return KERN_SUCCESS;
+ }
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 68cadfc..fb904f6 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -2073,6 +2073,78 @@ pmap_get_arm64_prot(
+ 
+ 	return effective_prot_bits;
+ }
++
++#if defined(KEBAB)
++/*
++ * Kebab bring-up (0140): print the leaf translation for one user address
++ * without faulting it in and without taking the pmap lock.
++ *
++ * Called only from exec_copyout_strings() after a copyout into the new task's
++ * stack failed, against a task that has not run yet, so the page tables cannot
++ * change while this walks them.  The decode stays here because the walk and
++ * the PTE bits are pmap-private; bsd does not include osfmk/arm/pmap/pmap.h
++ * (vm/pmap.h only pulls in <machine/pmap.h> under MACH_KERNEL_PRIVATE), so the
++ * helper prints its own line instead of returning a struct.
++ *
++ * pmap_get_arm64_prot() above cannot be reused for this: it returns 0 both for
++ * "no translation" and for a translation whose protection bits happen to be
++ * zero, and it drops the access flag, which is the bit that separates an
++ * access-flag fault from a missing mapping.  The raw entry is printed as well,
++ * so a compressed entry reads as tte=0x8000... instead of as a hole.
++ */
++void
++kebab_pmap_probe_log(vm_map_t map, vm_map_offset_t va)
++{
++	pmap_t pmap;
++	const pt_attr_t *pt_attr;
++	tt_entry_t tte = ARM_TTE_EMPTY;
++	boolean_t leaf = FALSE;
++	boolean_t valid = FALSE;
++	boolean_t af = FALSE;
++	boolean_t uxn = FALSE;
++	boolean_t pxn = FALSE;
++	unsigned int ap = 0;
++	unsigned int level;
++
++	pmap = (map != VM_MAP_NULL) ? vm_map_pmap(map) : PMAP_NULL;
++	if (pmap == PMAP_NULL || pmap == kernel_pmap) {
++		printf("KEBAB EXEC: copyout pmap va=0x%llx unavailable\n",
++		    (unsigned long long)va);
++		return;
++	}
++
++	pt_attr = pmap_get_pt_attr(pmap);
++	for (level = pt_attr->pta_root_level;
++	    level <= pt_attr->pta_max_level; level++) {
++		tt_entry_t *ttep = pmap_ttne(pmap, level, va);
++
++		if (ttep == TT_ENTRY_NULL) {
++			break;
++		}
++		tte = *ttep;
++		if (!(tte & ARM_TTE_VALID)) {
++			break;
++		}
++		if ((tte & ARM_TTE_TYPE_MASK) == ARM_TTE_TYPE_BLOCK ||
++		    level == pt_attr->pta_max_level) {
++			leaf = TRUE;
++			break;
++		}
++	}
++
++	if (leaf) {
++		valid = TRUE;
++		af = (tte & ARM_PTE_AF) != 0;
++		ap = (unsigned int)ARM_PTE_EXTRACT_AP(tte);
++		uxn = (tte & ARM_PTE_NX) != 0;
++		pxn = (tte & ARM_PTE_PNX) != 0;
++	}
++	printf("KEBAB EXEC: copyout pmap va=0x%llx tte=0x%llx lvl=%d "
++	    "valid=%d af=%d ap=%u uxn=%d pxn=%d\n",
++	    (unsigned long long)va, (unsigned long long)tte, (int)level,
++	    (int)valid, (int)af, ap, (int)uxn, (int)pxn);
++}
++#endif /* KEBAB */
+ #endif /* __arm64__ */
+ 
+ /*
+diff --git a/osfmk/arm/pmap/pmap.h b/osfmk/arm/pmap/pmap.h
+index 75f3db0..b50a887 100644
+--- a/osfmk/arm/pmap/pmap.h
++++ b/osfmk/arm/pmap/pmap.h
+@@ -283,6 +283,11 @@ extern void set_mmu_ttb_alternate(uint64_t);
+ extern uint64_t get_tcr(void);
+ extern void set_tcr(uint64_t);
+ extern uint64_t pmap_get_arm64_prot(pmap_t, vm_offset_t);
++
++#if defined(KEBAB)
++/* Kebab bring-up (0140): prints the leaf translation for one user address. */
++extern void kebab_pmap_probe_log(vm_map_t map, vm_map_offset_t va);
++#endif /* KEBAB */
+ #else /* defined(__arm64__) */
+ #error Unsupported architecture
+ #endif /* defined(__arm64__) */
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 4911ff2..dfd54fb 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -282,6 +282,23 @@ struct copyio_recovery_entry {
+ extern struct copyio_recovery_entry copyio_recover_table[];
+ extern struct copyio_recovery_entry copyio_recover_table_end[];
+ 
++#if defined(KEBAB)
++/*
++ * Kebab bring-up (0140): the last kernel data abort that copyio recovered
++ * from.  exec_copyout_strings() clears kebab_kfault_valid before it copies and
++ * prints the record if the copyout fails, which is what separates "the write
++ * faulted and the fault could not be resolved" from "the write never reached
++ * the page tables".  One record is enough: only the failing exec reads it, and
++ * the thread pointer rejects a record written by another thread.
++ */
++uint64_t  kebab_kfault_far;
++uint32_t  kebab_kfault_esr;
++int       kebab_kfault_fast;
++int       kebab_kfault_vm;
++boolean_t kebab_kfault_valid;
++void     *kebab_kfault_thread;
++#endif /* KEBAB */
++
+ static inline ptrdiff_t
+ copyio_recovery_offset(uintptr_t addr)
+ {
+@@ -1547,6 +1564,10 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
+ 		kern_return_t result = KERN_FAILURE;
+ 		vm_map_t      map;
+ 		int           interruptible;
++#if defined(KEBAB)
++		kebab_kfault_fast = -1;
++		kebab_kfault_vm = -1;
++#endif
+ 
+ 		/*
+ 		 * Ensure no faults in the physical aperture. This could happen if
+@@ -1591,6 +1612,9 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
+ 			result = arm_fast_fault(map->pmap,
+ 			    fault_addr,
+ 			    fault_type, (fault_code == FSC_ACCESS_FLAG_FAULT_L3), FALSE);
++#if defined(KEBAB)
++			kebab_kfault_fast = (int)result;
++#endif
+ 			if (result == KERN_SUCCESS) {
+ 				return;
+ 			}
+@@ -1603,6 +1627,9 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
+ 			result = vm_fault(map, fault_addr, fault_type,
+ 			    /* change_wiring */ FALSE, VM_KERN_MEMORY_NONE, interruptible,
+ 			    /* caller_pmap */ NULL, /* caller_pmap_addr */ 0);
++#if defined(KEBAB)
++			kebab_kfault_vm = (int)result;
++#endif
+ 		}
+ 
+ 		if (result == KERN_SUCCESS) {
+@@ -1613,6 +1640,12 @@ handle_kernel_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_ad
+ 		 *  If we have a recover handler, invoke it now.
+ 		 */
+ 		if (recover) {
++#if defined(KEBAB)
++			kebab_kfault_far = fault_addr;
++			kebab_kfault_esr = esr;
++			kebab_kfault_thread = thread;
++			kebab_kfault_valid = TRUE;
++#endif
+ 			handle_kernel_abort_recover(state, esr, fault_addr, thread);
+ 			return;
+ 		}

@@ -1,0 +1,117 @@
+{
+  "version": "0390",
+  "defaults_matching_complete": true,
+  "actual_log_sha256": "f0a7e18f533974e96ffbdca6ce753d0cf72bd71cf0feb3b1ee4f649b5b2c3cd6",
+  "native_sha256": "25ee2e0c11059b4c8249819d036339cf1fcb287d060ac492a63176a27fdd259d",
+  "real_apple_image4_start_succeeded": true,
+  "actual_busy_reference_released": true,
+  "busy_lifecycle": [
+    [
+      0,
+      0,
+      1,
+      "defaults"
+    ],
+    [
+      11,
+      1,
+      1,
+      "AppleImage4"
+    ],
+    [
+      14,
+      2,
+      -1,
+      "defaults"
+    ],
+    [
+      15,
+      1,
+      -1,
+      "AppleImage4"
+    ]
+  ],
+  "final_busy_state": 0,
+  "actual_waits": [
+    "IOAESAccelerator",
+    "IOResources/IONVRAM",
+    "IODTNVRAM"
+  ],
+  "hardware_nonce_and_data_restored_without_generation": true,
+  "native_nvram_existing_proxy_adopted": true,
+  "nvram_encrypted_data_banks_cold_restored": true,
+  "nvram_restored_bank": 0,
+  "nvram_restored_generation": 75,
+  "nvram_hardware_or_rollback_claim": false,
+  "nvram_durable_write_calls": 2,
+  "watchdog_enabled": true,
+  "original_iokit_monitoring_preserved": true,
+  "watchdog_heartbeat_times": [
+    38.248,
+    38.248,
+    48.219,
+    58.212,
+    68.221,
+    78.241,
+    88.241,
+    98.25,
+    108.239,
+    118.239,
+    128.248,
+    138.253,
+    147.835,
+    157.842,
+    167.815,
+    177.859,
+    187.856,
+    197.852,
+    207.86,
+    217.827,
+    227.823,
+    237.841,
+    247.827,
+    257.831
+  ],
+  "original_locked_observations": [
+    [
+      60.338,
+      30,
+      4
+    ],
+    [
+      90.424,
+      60,
+      7
+    ],
+    [
+      120.426,
+      90,
+      10
+    ],
+    [
+      150.026,
+      120,
+      13
+    ],
+    [
+      180.045,
+      150,
+      16
+    ],
+    [
+      210.115,
+      180,
+      19
+    ],
+    [
+      240.087,
+      210,
+      22
+    ]
+  ],
+  "systembag_and_hardware_c_d_preserved": true,
+  "rtc_record_reused": true,
+  "panic": [],
+  "full_ios_or_springboard": false,
+  "gpu_display_input_started": false
+}

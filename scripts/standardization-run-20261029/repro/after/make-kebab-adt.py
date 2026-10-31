@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+"""Generate the kebab (OnePlus 8T / SM8250) Apple-format device tree.
+
+The structure mirrors the proven sheng and QEMU entry fixtures: the same
+required nodes and the same properties the source XNU boot converged on.
+The hardware values are kebab's own, taken from this device's firmware:
+
+  - GICv3 distributor 0x17A00000/0x10000, redistributor 0x17A60000/0x100000
+    with a 0x20000 stride, both inside an APSS window at 0x17000000.
+    Source: the MADT (APIC.aml) of the kebab ACPI tables in Mu-Silicium.
+  - CPU timebase 19200000 Hz (the Qualcomm architectural counter; the board
+    firmware programs the same value).
+  - DRAM base 0x80000000 (kebab MemoryMapLib).
+  - UFS host controller 0x01D84000, measured on this device.
+
+This is first-boot bring-up data. The platform has no matching platform
+expert yet, so the kernel is expected to reach the console and report the
+genuine missing-driver panic on screen. No property is invented beyond the
+sources named above.
+"""
+from pathlib import Path
+import argparse
+import os
+import hashlib
+import struct
+import base64
+import json
+import zlib
+
+ROOT = Path(__file__).resolve().parents[1]
+
+DRAM_BASE = 0x80000000
+ARMIO_BASE = 0x17000000          # APSS peripheral block containing the GIC
+ARMIO_SIZE = 0x08000000
+GIC_DIST = 0x17A00000
+GIC_DIST_SIZE = 0x10000
+GIC_REDIST = 0x17A60000
+GIC_REDIST_SIZE = 0x100000
+UFS_BASE = 0x01D84000          # UFS host controller (UFSHCI)
+UFS_SIZE = 0x30000
+PANIC_LOG_BASE = 0xC8000000   # 128 MiB into the 256 MiB window; far from the kernel image
+PANIC_LOG_SIZE = 0xB4000
+GIC_REDIST_STRIDE = 0x20000      # 8 cores x 0x20000 == the 0x100000 range
+TIMEBASE = 19200000
+UFS_HC = 0x01D84000
+
+# SM8250 ("kona"): four Cortex-A55 little cores then four Cortex-A77 big cores,
+# numbered 0x000..0x700 in Affinity1.  The MADT lists eight GICC entries with
+# ACPI uids 0..7 and the PPTT agrees.
+LITTLE = range(0x000, 0x400, 0x100)
+BIG = range(0x400, 0x800, 0x100)
+
+
+def node(name, properties=(), children=(), named=True):
+    # XNU's kext loader walks /chosen/memory-map and warns about every key
+    # that is not a booter kext, so that node must not carry a name property.
+    properties = ([('name', name.encode() + b'\0')] if named else []) + list(properties)
+    result = struct.pack('<II', len(properties), len(children))
+    for key, data in properties:
+        result += struct.pack('<32sI', key.encode(), len(data))
+        result += data + bytes(-len(data) % 4)
+    return result + b''.join(children)
+
+
+def load_product_node(path):
+    """The real D22AP /product node, converted from `ipsw dtree` output.
+
+    syscfg placeholders and AAPL,phandle were filtered when the JSON was
+    generated; values carry their ADT type so this only encodes them.
+    """
+    import base64 as _b64
+
+    def enc(prop):
+        kind, value = prop['t'], prop['v']
+        if kind == 'str':
+            return value.encode() + b'\0'
+        if kind == 'u32':
+            return struct.pack('<I', value)
+        if kind == 'u64':
+            return struct.pack('<Q', value)
+        if kind == 'data':
+            return _b64.b64decode(value)
+        raise SystemExit(f'unknown product property type {kind!r}')
+
+    def build(entry):
+        return node(entry['name'],
+                    [(prop['k'], enc(prop)) for prop in entry['props']],
+                    [build(child) for child in entry.get('children', [])])
+
+    data = json.loads(Path(path).read_text())
+    return ([(prop['k'], enc(prop)) for prop in data['props']],
+            [build(child) for child in data.get('children', [])])
+
+
+def empty_nvram_proxy():
+    """A fresh volatile CHRP bank for upstream IODTNVRAM, with no controller."""
+    def header(name, size):
+        raw = bytearray(struct.pack('<BBH12s', 0x70, 0, size // 16, name))
+        checksum = sum(raw)
+        while checksum > 255:
+            checksum = (checksum & 255) + (checksum >> 8)
+        raw[1] = checksum
+        return raw
+
+    image = bytearray(8192)
+    image[:16] = header(b'nvram', 32)
+    image[32:48] = header(b'common', 16 + 2048)
+    free_at = 32 + 16 + 2048
+    image[free_at:free_at + 16] = header(b'free', len(image) - free_at)
+    struct.pack_into('<I', image, 16, zlib.adler32(image[20:]))
+    return [('nvram-bank-size', struct.pack('<I', len(image))),
+            ('nvram-bank-count', struct.pack('<I', 1)),
+            ('nvram-current-bank', struct.pack('<I', 0)),
+            ('nvram-proxy-data', bytes(image))]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output', type=Path,
+                        default=ROOT / 'build/kebab/boot/kernel.macho.adt')
+    parser.add_argument('--dram-size', type=lambda value: int(value, 0), required=True,
+                        help='Actual observed DRAM size, e.g. 0x300000000 for 12 GiB')
+    parser.add_argument('--owned-memory-size', type=lambda value: int(value, 0), default=None,
+                        help='Explicit DarwinBoot contiguous window request, 256 MiB..8 GiB in 2 MiB steps')
+    parser.add_argument('--root-match-volume-uuid', default=None,
+                        help='/chosen/root-matching: select the root by the UUID of an IOMedia')
+    parser.add_argument('--unique-chip-id', type=lambda value: int(value, 16), default=None,
+                        help='/chosen/unique-chip-id (8 bytes) and --chip-id (4 bytes) seed XNU IOPlatformUUID')
+    parser.add_argument('--chip-id', type=lambda value: int(value, 16), default=None)
+    parser.add_argument('--development-boot', action='store_true',
+                        help='Declare custom UEFI mix-and-match policy and a development boot nonce; '
+                             'does not establish an Apple secure boot chain')
+    parser.add_argument('--owner-boot-manifest', type=Path,
+                        help='Owner image-set JSON to measure with SHA384; requires --development-boot')
+    parser.add_argument('--iphone-identity', action='store_true',
+                        help='/product and /buttons describe an iPhone-class device: phone idiom, '
+                             'iPhone X (iPhone10,3 / D22AP) identity strings')
+    parser.add_argument('--ipad-identity', action='store_true',
+                        help='/product and /buttons describe an iPad-class device without a Home button; '
+                             'the prelinked kernelcache is an iPad7,1 one, so the identity matches it')
+    parser.add_argument('--cpu-regs', default=','.join(hex(reg) for reg in (*LITTLE, *BIG)),
+                        help='Comma-separated CPU MPIDR affinity values; the first is the boot CPU')
+    parser.add_argument('--psci-method', choices=['smc', 'hvc'], default='smc',
+                        help='/psci method used by the secondary-CPU start (the board firmware uses smc)')
+    parser.add_argument('--timebase', type=lambda value: int(value, 0), default=TIMEBASE,
+                        help='CNTFRQ value in Hz; override with the value read from the device')
+    parser.add_argument('--trust-cache', action='store_true',
+                        help='Zeroed TrustCache sidecar handoff placeholder')
+    parser.add_argument('--product-file', type=Path,
+                        default=Path(__file__).resolve().parents[1] / 'configs/d22ap-product.json',
+                        help='real D22AP /product node as JSON (from ipsw dtree)')
+    args = parser.parse_args()
+    development_nonce = os.urandom(32) if args.development_boot else None
+    owner_manifest = None
+    owner_domain = None
+    if args.owner_boot_manifest:
+        if not args.development_boot:
+            parser.error('--owner-boot-manifest requires --development-boot')
+        owner_manifest = args.owner_boot_manifest.read_bytes()
+        owner_domain = json.loads(owner_manifest).get('domain')
+        if not isinstance(owner_domain, str) or not owner_domain or '\0' in owner_domain:
+            parser.error('Owner manifest requires a nonempty domain string')
+
+    if (args.unique_chip_id is None) != (args.chip_id is None):
+        parser.error('--unique-chip-id and --chip-id must be supplied together')
+    if args.unique_chip_id is not None and not (0 < args.unique_chip_id < 1 << 64 and 0 < args.chip_id < 1 << 32):
+        parser.error('--unique-chip-id must fit 8 bytes and --chip-id 4 bytes, both nonzero')
+    if args.owned_memory_size is not None and (
+            not 0x10000000 <= args.owned_memory_size <= 0x200000000
+            or args.owned_memory_size % 0x200000):
+        parser.error('Owned memory must be 256 MiB to 8 GiB, aligned to 2 MiB')
+
+    try:
+        cpu_regs = [int(value, 0) for value in args.cpu_regs.split(',')]
+    except ValueError:
+        parser.error('--cpu-regs must be integers')
+    if (not cpu_regs or cpu_regs[0] != 0 or len(set(cpu_regs)) != len(cpu_regs) or len(cpu_regs) > 8
+            or any(reg < 0 or reg > 0xffff or reg & 0xff for reg in cpu_regs)):
+        parser.error('--cpu-regs: up to eight distinct Affinity1-numbered cores, boot CPU 0 first')
+
+    def cpu_compatible(reg):
+        return b'arm,cortex-a77\0' if reg >= 0x400 else b'arm,cortex-a55\0'
+
+    cpus = [node('cpu%d' % index, [('state', b'running\0' if index == 0 else b'waiting\0'),
+                                   ('reg', struct.pack('<I', reg)),
+                                   ('device_type', b'cpu\0'),
+                                   ('compatible', cpu_compatible(reg)),
+                                   ('timebase-frequency', struct.pack('<I', args.timebase)),
+                                   # XNU divides by this; an absent property leaves
+                                   # bus_clock_rate_hz at 0 and breaks the clock ratios.
+                                   ('bus-frequency', struct.pack('<I', args.timebase))])
+            for index, reg in enumerate(cpu_regs)]
+
+    if args.iphone_identity and args.product_file and args.product_file.is_file():
+
+        _pp, _pc = load_product_node(args.product_file)
+
+        product_node = node('product', _pp + [('model', b'oneplus,kebab\0')], _pc)
+
+    else:
+
+        product_node = node('product', [('product-name', b'OnePlus 8T\0'),
+
+                                            ('model', b'oneplus,kebab\0')])
+
+
+    # Board-native normal-service resource contracts. These root entries use
+    # absolute 64-bit little-endian PA/size pairs (not arm-io-relative cells).
+    # Backend validation precedes publishing scoped child nubs.
+    normal_buses = [
+        node('kebab-spmi', [
+            ('compatible', b'kebab,sm8250-spmi\0qcom,spmi-pmic-arb\0'),
+            ('reg', struct.pack('<8Q', 0x0c440000, 0x1100, 0x0e600000, 0x100000,
+                                0x0c40a000, 0x26000, 0x0c600000, 0x2000000)),
+            ('qcom,ee', struct.pack('<I', 0)),
+            ('kebab,pon', struct.pack('<2I', 0, 8)),
+            ('kebab,pmic-keys', struct.pack('<4I', 0, 8, 0xc5, 0xc6)),
+            ('kebab,rpmh-rsc', struct.pack('<2Q', 0x18220000, 0x10000)),
+            ('kebab,rpmh-cmd-db', struct.pack('<2Q', 0x80860000, 0x20000))]),
+        node('kebab-geni13', [
+            ('compatible', b'kebab,sm8250-geni13\0qcom,i2c-geni\0'),
+            ('reg', struct.pack('<6Q', 0xa94000, 0x4000, 0xac0000, 0x2000, 0xf500000, 0x40000)),
+            ('kebab,touch-address', struct.pack('<I', 0x4b))]),
+    ]
+
+    tree = node('device-tree', [
+        ('model', b'iPhone10,3\0' if args.iphone_identity else (b'iPad7,1\0' if args.ipad_identity else b'OnePlus 8T\0')),
+        *([('target-type', b'D22AP\0')] if args.iphone_identity else ([('target-type', b'J120\0')] if args.ipad_identity else [])),
+        # The compiled board DT's own root strings.
+        ('compatible', b'oneplus,kebab\0qcom,sm8250\0qcom,kona\0'),
+        ('#address-cells', struct.pack('<I', 2)),
+        ('#size-cells', struct.pack('<I', 2)),
+    ], [
+        node('chosen', [('random-seed', os.urandom(64)),
+                        *([('unique-chip-id', struct.pack('<Q', args.unique_chip_id)),
+                           ('chip-id', struct.pack('<I', args.chip_id))]
+                          if args.unique_chip_id is not None else []),
+                        ('osenvironment', b'main\0'),
+                        # This UEFI path has no Apple previous-stage manifest.
+                        *([('mix-n-match-prevention-status', struct.pack('<I', 0)),
+                           ('boot-nonce', development_nonce)]
+                          if development_nonce is not None else []),
+                        *([('owner-boot-manifest-domain', owner_domain.encode() + b'\0'),
+                           ('owner-boot-manifest', owner_manifest),
+                           ('boot-manifest-hash', hashlib.sha384(owner_manifest).digest())]
+                          if owner_manifest is not None else []),
+                        *([('certificate-production-status', struct.pack('<I', 0)),
+                           ('effective-production-status-ap', struct.pack('<I', 0)),
+                           ('certificate-security-mode', struct.pack('<I', 1)),
+                           ('effective-security-mode-sep', struct.pack('<I', 1))]
+                          if args.ipad_identity else []),
+                        *([('darwinboot-memory-size', struct.pack('<Q', args.owned_memory_size))]
+                          if args.owned_memory_size else []),
+                        ('embedded-panic-log-size', struct.pack('<I', PANIC_LOG_SIZE)),
+                        ('dram-base', struct.pack('<Q', DRAM_BASE)),
+                        ('dram-size', struct.pack('<Q', args.dram_size)),
+                        ('firmware-version', b'kebab-uefi-1.0\0'),
+                        ('crypto-hash-method', b'sha2-384\0'),
+                        *([('root-matching', ('<dict><key>IOProviderClass</key><string>IOMedia</string>'
+                                              '<key>IOPropertyMatch</key><dict><key>UUID</key><string>' +
+                                              args.root_match_volume_uuid.upper() + '</string></dict></dict>\0').encode())]
+                          if args.root_match_volume_uuid else []),
+                        ('amfi-only-platform-code', struct.pack('<I', 1)),
+                        *empty_nvram_proxy()],
+             # No RAMDisk entry: kebab roots on the real block device, not on a
+             # memory image, so nothing here should advertise one.
+             [node('memory-map', ([('TrustCache', bytes(16))] if args.trust_cache else [])),
+              node('manifest-properties', [('BNCH', hashlib.sha384(development_nonce).digest())]
+                   if development_nonce is not None else [])]),
+        # Panic log lives at the far end of the window the loader hands over.
+        node('pram', [('reg', struct.pack('<QQ', PANIC_LOG_BASE, PANIC_LOG_SIZE))]),
+        # UFS host controller. It sits far below the arm-io window, so it gets an
+        # absolute reg at the root and the driver looks it up by path.
+        node('kebab-ufs', [('compatible', b'qcom,sm8250-ufshc\0qcom,kona-ufshc\0'),
+                           ('reg', struct.pack('<QQ', UFS_BASE, UFS_SIZE))]),
+        node('cpus', children=cpus),
+        *([node('psci', [('compatible', b'arm,psci-1.0\0'),
+                         ('method', args.psci_method.encode() + b'\0')])] if len(cpus) > 1 else []),
+        node('defaults', [('sleep-disabled', struct.pack('<I', 1))]),
+        node('options', []),
+        *([node('buttons', [('compatible', b'buttons\0'), ('device_type', b'buttons\0'),
+                            ('button-names', b'hold\0voldown\0volup\0'),
+                            ('home-button-type', struct.pack('<I', 2))])] if args.ipad_identity
+                           else ([node('buttons', [('compatible', b'buttons\0'), ('device_type', b'buttons\0'),
+                                                   ('button-names', b'hold\0voldown\0volup\0')])]
+                                 if args.iphone_identity else [])),
+        product_node,
+        node('arm-io', [('device_type', b'arm-io\0'),
+                        ('#address-cells', struct.pack('<I', 2)),
+                        ('#size-cells', struct.pack('<I', 2)),
+                        ('ranges', struct.pack('<QQQ', 0, ARMIO_BASE, ARMIO_SIZE))],
+             [node('gic', [('compatible', b'arm,gic-v3\0'),
+                            # XNU finds the PIC with SecureDTFindEntry("interrupt-controller", "master").
+                            ('interrupt-controller', b'master\0'),
+                            ('reg', struct.pack('<4Q',
+                                                GIC_DIST - ARMIO_BASE, GIC_DIST_SIZE,
+                                                GIC_REDIST - ARMIO_BASE, GIC_REDIST_SIZE)),
+                            ('redistributor-stride', struct.pack('<I', GIC_REDIST_STRIDE)),
+                            ('virtual-timer-intid', struct.pack('<I', 27))]),
+              # pe_arm_map_interrupt_controller() also insists on a timer node; the
+              # arm64 generic timer lives in system registers, so the window only
+              # has to be a mapped device range.
+              node('timer', [('device_type', b'timer\0'),
+                             ('reg', struct.pack('<QQ', GIC_DIST - ARMIO_BASE, 0x1000))]),
+              # UFS (0x01D84000) lies far below the arm-io window, so a child reg
+              # offset would be negative. The node exists only for class matching;
+              # the driver takes its physical windows from board constants.
+              node('ufshc', [('compatible', b'qcom,sm8250-ufshc\0qcom,kona-ufshc\0')])]),
+    ] + normal_buses)
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_bytes(tree)
+    print(f'kebab ADT: {len(tree)} bytes, dram {args.dram_size:#x}, cpu {len(cpus)}, '
+          f'timebase {args.timebase}, gic {GIC_DIST:#x}/{GIC_REDIST:#x}')
+
+
+if __name__ == '__main__':
+    main()

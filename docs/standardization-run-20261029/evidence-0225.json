@@ -1,0 +1,29 @@
+{
+  "stable_version": "0225",
+  "native_build_version": "0224",
+  "source_files_in_manifest": 51,
+  "source_manifest_matches_actual_Mac_and_snapshot": true,
+  "native_same_as_qualified_0224": true,
+  "selftest_fault_and_experimental_bootargs_absent": true,
+  "System_and_Preboot_readonly": true,
+  "Preboot_reboot_SHA_verified": true,
+  "System_file_SHA_verified": true,
+  "normal_sync_fastboot": true,
+  "held_normal_SPMI_lock_panic_FWLOG_fastboot": true,
+  "stable_config_18minute_four_checkpoint_soak": true,
+  "stable_config_64KiB_FWLOG": true,
+  "final_state": "fastboot; active slot b",
+  "full_64KiB_FWLOG_without_self_header": true,
+  "all_source_replay": {
+    "common": 176,
+    "host": 4,
+    "files": 5192
+  },
+  "native_sha256": "e7cb391447d5a6aaf2feb45a3e5d48191996ca775f179a40adecc38f09b1655b",
+  "boot_sha256": "4a9601ee935d4530bac165e16322faba3705a27546995b377f15d18b142080cf",
+  "qualification_limits": [
+    "cpus=1",
+    "Data content protection and nonce selector2212 unimplemented",
+    "no full launchd/Cryptex/DSC/UI qualification"
+  ]
+}

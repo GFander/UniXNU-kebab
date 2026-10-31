@@ -1,0 +1,332 @@
+feat(console): instrument the fastboot reset path and add SYSTEM_RESET2
+
+FASTBOOT writes the Qualcomm restart reason into IMEM and resets, but the board
+still boots normally.  Nothing ever captured the command's own log lines: the
+reset did not give the log ring time to drain, and no read-back proved whether
+the write stuck.  This change adds measurement, and one alternative reset the
+firmware may offer; the proven REBOOT path still uses SYSTEM_RESET unchanged.
+
+  * PSCI_VERSION and PSCI_FEATURES for SYSTEM_RESET and SYSTEM_RESET2 are read
+    once at start-up and again on demand (PSCI?).  A feature result of 0 for
+    0xC4000012 means the architectural warm reset does not exist on this
+    firmware; it is reported as NOT_SUPPORTED rather than replaced with a
+    vendor-specific reset type.
+  * The IMEM cell is read at start-up, the earliest point this kernel can
+    observe what the bootloader left behind.  ABL may have consumed or cleared
+    it, so a zero there does not prove the value was lost during reset.
+  * FASTBOOT now drains the console log, waits 300 ms, and reads the cell back
+    after writing it, so the old value, the new value and the read-back all
+    reach the host before the port disappears.
+  * FASTBOOT2 performs the same IMEM write and then SYSTEM_RESET2 with
+    reset_type 0 (architectural warm reset) and cookie 0 instead of
+    PEHaltRestart().  It refuses to reset unless the feature probe returned 1.
+    It is a separate command so the original FASTBOOT stays a one-change test.
+  * IMEM? is a read-only dump of the cell.
+
+The reset calls live next to SYSTEM_RESET in KebabPlatformExpert.cpp so the
+firmware interface keeps one owner; the USB driver only decides when to ask.
+
+diff --git a/bsd/dev/kebab_usb.c b/bsd/dev/kebab_usb.c
+index 8c32da3..7185fea 100644
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -57,6 +57,16 @@ void kebab_usb_kdp_tx_frame(uint32_t len);
+ static void ud_pump_log(void);
+ static uint32_t ud_log_take(char *out, uint32_t max);
+ 
++/*
++ * The firmware reset interface lives in KebabPlatformExpert.cpp, next to the
++ * SYSTEM_RESET backend that PEHaltRestart() already uses.  FASTBOOT2 needs
++ * SYSTEM_RESET2 directly, and the probe needs PSCI_FEATURES; neither belongs
++ * in a USB driver, so the platform expert exports them.
++ */
++extern int kebab_psci_version(void);
++extern int kebab_psci_features(uint32_t function);
++extern int kebab_psci_system_reset2(uint32_t reset_type, uint32_t cookie);
++
+ /* ---------------------------------------------------------------- registers */
+ 
+ #define GCTL            0xc110
+@@ -181,15 +191,29 @@ static uint32_t ud_log_take(char *out, uint32_t max);
+  * field offset come from the device's own DTB:
+  *   /soc/qcom,msm-imem@146bf000  reg = <0x146bf000 0x1000>
+  *   /soc/.../restart_reason@65c  reg = <0x65c 0x04>
+- * The cookie value is not verified on this device; see the boot argument.
++ *
++ * 0x77665500 is not a guess: the vendor kernel writes exactly this value for
++ * "bootloader" (drivers/power/reset/msm-poweroff.c, msm_restart_prepare with
++ * cmd="bootloader"), together with PON_RESTART_REASON_BOOTLOADER.  0x77665501
++ * is the "anything else" value in that same table, so writing it would ask
++ * for a normal boot.
+  */
+ #define KEBAB_IMEM_PA           0x146bf000u
+ #define KEBAB_IMEM_SIZE         0x1000u
+ #define KEBAB_IMEM_RESTART      0x65cu
+-#define KEBAB_FASTBOOT_COOKIE   0x77665501u
++#define KEBAB_FASTBOOT_COOKIE   0x77665500u
++
++/* PSCI function IDs: SYSTEM_RESET is SMC32, SYSTEM_RESET2 is SMC64-only. */
++#define KEBAB_PSCI_VERSION      0x84000000u
++#define KEBAB_PSCI_FEATURES     0x8400000au
++#define KEBAB_PSCI_SYSTEM_RESET 0x84000009u
++#define KEBAB_PSCI_RESET2       0xc4000012u
+ 
+ #define UD_REBOOT_PLAIN         1u
+ #define UD_REBOOT_FASTBOOT      2u
++#define UD_REBOOT_FASTBOOT2     3u
++#define UD_REBOOT_PSCI_REPORT   4u
++#define UD_REBOOT_IMEM_REPORT   5u
+ 
+ struct ud_endpoint {
+ 	uint32_t trb, length, ctl, resource;
+@@ -249,6 +273,7 @@ static struct {
+ 	 */
+ 	volatile uint32_t reboot_command;   /* UD_REBOOT_* or zero */
+ 	volatile bool     restart_armed;    /* console asked for the restart */
++	int         psci_reset2;       /* PSCI_FEATURES(SYSTEM_RESET2), -1 unknown */
+ 	uint32_t    tx_bytes;
+ 	uint32_t    rx_bytes;          /* bulk-OUT bytes accepted into in_ring */
+ 	uint32_t    rx_dropped;        /* bulk-OUT bytes lost to a full in_ring */
+@@ -1077,22 +1102,47 @@ static uint32_t
+ ud_reboot_command(const char *buf, uint32_t received)
+ {
+ 	if (!kebab_usb_kdp_enabled()) {
++		/*
++		 * FASTBOOT2 and FASTBOOT share a prefix; the longer command has to
++		 * be tested first or "FASTBOOT2\n" would never reach it.
++		 */
+ 		if (ud_command_seen(buf, received, "REBOOT\n", sizeof("REBOOT\n") - 1)) {
+ 			return UD_REBOOT_PLAIN;
+ 		}
++		if (ud_command_seen(buf, received, "FASTBOOT2\n", sizeof("FASTBOOT2\n") - 1)) {
++			return UD_REBOOT_FASTBOOT2;
++		}
+ 		if (ud_command_seen(buf, received, "FASTBOOT\n", sizeof("FASTBOOT\n") - 1)) {
+ 			return UD_REBOOT_FASTBOOT;
+ 		}
++		if (ud_command_seen(buf, received, "PSCI?\n", sizeof("PSCI?\n") - 1)) {
++			return UD_REBOOT_PSCI_REPORT;
++		}
++		if (ud_command_seen(buf, received, "IMEM?\n", sizeof("IMEM?\n") - 1)) {
++			return UD_REBOOT_IMEM_REPORT;
++		}
+ 		return 0;
+ 	}
+ 	if (received >= sizeof("REBOOT\n") - 1 &&
+ 	    !memcmp(buf, "REBOOT\n", sizeof("REBOOT\n") - 1)) {
+ 		return UD_REBOOT_PLAIN;
+ 	}
++	if (received >= sizeof("FASTBOOT2\n") - 1 &&
++	    !memcmp(buf, "FASTBOOT2\n", sizeof("FASTBOOT2\n") - 1)) {
++		return UD_REBOOT_FASTBOOT2;
++	}
+ 	if (received >= sizeof("FASTBOOT\n") - 1 &&
+ 	    !memcmp(buf, "FASTBOOT\n", sizeof("FASTBOOT\n") - 1)) {
+ 		return UD_REBOOT_FASTBOOT;
+ 	}
++	if (received >= sizeof("PSCI?\n") - 1 &&
++	    !memcmp(buf, "PSCI?\n", sizeof("PSCI?\n") - 1)) {
++		return UD_REBOOT_PSCI_REPORT;
++	}
++	if (received >= sizeof("IMEM?\n") - 1 &&
++	    !memcmp(buf, "IMEM?\n", sizeof("IMEM?\n") - 1)) {
++		return UD_REBOOT_IMEM_REPORT;
++	}
+ 	return 0;
+ }
+ 
+@@ -1126,17 +1176,40 @@ ud_platform_restart(void)
+ 
+ 	ud.restart_armed = true;
+ 	printf("KEBAB REBOOT: PEHaltRestart(kPERestartCPU)\n");
++	/*
++	 * The reset only returns on failure, so the lines above have to leave the
++	 * device first.  Without this the host sees the port vanish with the
++	 * diagnosis still queued in the log ring.
++	 */
++	kebab_usb_log_flush();
++	delay(300000);
+ 	rc = PEHaltRestart(kPERestartCPU);
+ 	ud.restart_armed = false;
+ 	printf("KEBAB REBOOT: PEHaltRestart returned %d, the machine did not reset\n", rc);
+ 	return rc;
+ }
+ 
++/*
++ * SYSTEM_RESET2 with reset_type 0 is the architectural warm reset.  It must be
++ * asked for explicitly and only when PSCI_FEATURES says it exists; this is not
++ * a vendor-specific reset type.
++ */
++static int
++ud_platform_restart2(void)
++{
++	int rc;
++
++	printf("KEBAB REBOOT: PSCI SYSTEM_RESET2(reset_type=0, cookie=0)\n");
++	rc = kebab_psci_system_reset2(0, 0);
++	printf("KEBAB REBOOT: SYSTEM_RESET2 returned %d, the machine did not reset\n", rc);
++	return rc;
++}
++
+ static void
+-ud_fastboot_restart(void)
++ud_fastboot_restart(bool use_reset2)
+ {
+ 	volatile uint32_t *reason;
+-	uint32_t previous, cookie;
++	uint32_t previous, cookie, readback;
+ 	int rc;
+ 
+ 	if (ud.imem == 0) {
+@@ -1145,6 +1218,11 @@ ud_fastboot_restart(void)
+ 		(void)ud_platform_restart();
+ 		return;
+ 	}
++	if (use_reset2 && ud.psci_reset2 != 1) {
++		printf("KEBAB FASTBOOT: SYSTEM_RESET2 is not supported (%d); not resetting\n",
++		    ud.psci_reset2);
++		return;
++	}
+ 	reason = (volatile uint32_t *)(ud.imem + KEBAB_IMEM_RESTART);
+ 	previous = *reason;
+ 	cookie = ud_fastboot_cookie();
+@@ -1152,7 +1230,10 @@ ud_fastboot_restart(void)
+ 	    KEBAB_IMEM_PA, KEBAB_IMEM_RESTART, previous, cookie);
+ 	*reason = cookie;
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+-	rc = ud_platform_restart();
++	readback = *reason;
++	printf("KEBAB FASTBOOT: read back 0x%08x (%s)\n", readback,
++	    readback == cookie ? "MATCH" : "MISMATCH");
++	rc = use_reset2 ? ud_platform_restart2() : ud_platform_restart();
+ 	if (rc != 0) {
+ 		/* The machine is still here, so a later reset must not inherit a
+ 		 * fastboot request that was never delivered. */
+@@ -1162,13 +1243,53 @@ ud_fastboot_restart(void)
+ 	}
+ }
+ 
++/*
++ * Read-only probes.  PSCI_FEATURES(0xC4000012) is the architectural answer to
++ * "can this firmware do SYSTEM_RESET2"; 0 means not supported, 1 supported,
++ * 2 invalid parameter, negative a PSCI error.
++ */
++static void
++ud_psci_report(void)
++{
++	int version = kebab_psci_version();
++	int reset = kebab_psci_features(KEBAB_PSCI_SYSTEM_RESET);
++	int reset2 = kebab_psci_features(KEBAB_PSCI_RESET2);
++
++	ud.psci_reset2 = reset2;
++	printf("KEBAB PSCI: version 0x%08x; FEATURES(0x%08x)=%d FEATURES(0x%08x)=%d\n",
++	    version, KEBAB_PSCI_SYSTEM_RESET, reset, KEBAB_PSCI_RESET2, reset2);
++	printf("KEBAB PSCI: SYSTEM_RESET2 %s\n",
++	    reset2 == 1 ? "supported" :
++	    (reset2 == 0 ? "NOT_SUPPORTED" : "probe error"));
++}
++
++static void
++ud_imem_report(void)
++{
++	volatile uint32_t *reason;
++
++	if (ud.imem == 0) {
++		printf("KEBAB IMEM: not mapped\n");
++		return;
++	}
++	reason = (volatile uint32_t *)(ud.imem + KEBAB_IMEM_RESTART);
++	printf("KEBAB IMEM: restart_reason at 0x%x+0x%x is 0x%08x\n",
++	    KEBAB_IMEM_PA, KEBAB_IMEM_RESTART, *reason);
++}
++
+ static void
+ ud_run_reboot_command(uint32_t command)
+ {
+ 	if (command == UD_REBOOT_FASTBOOT) {
+-		ud_fastboot_restart();
++		ud_fastboot_restart(false);
++	} else if (command == UD_REBOOT_FASTBOOT2) {
++		ud_fastboot_restart(true);
+ 	} else if (command == UD_REBOOT_PLAIN) {
+ 		(void)ud_platform_restart();
++	} else if (command == UD_REBOOT_PSCI_REPORT) {
++		ud_psci_report();
++	} else if (command == UD_REBOOT_IMEM_REPORT) {
++		ud_imem_report();
+ 	}
+ }
+ 
+@@ -1651,9 +1772,19 @@ kebab_usb_start(void)
+ 		printf("KEBAB USB: cannot map IMEM at 0x%x; FASTBOOT will fall back\n",
+ 		    KEBAB_IMEM_PA);
+ 	} else {
+-		printf("KEBAB USB: IMEM mapped at 0x%x (restart_reason +0x%x)\n",
+-		    KEBAB_IMEM_PA, KEBAB_IMEM_RESTART);
++		/*
++		 * This is the earliest point in this kernel at which the boot
++		 * reason can be observed.  ABL may have consumed or cleared the
++		 * cell already, so a zero here does not prove the value was lost
++		 * during reset; it only says nobody can see it any more.
++		 */
++		printf("KEBAB USB: IMEM mapped at 0x%x (restart_reason +0x%x); boot read 0x%08x\n",
++		    KEBAB_IMEM_PA, KEBAB_IMEM_RESTART,
++		    *(volatile uint32_t *)(ud.imem + KEBAB_IMEM_RESTART));
+ 	}
++	/* Record the firmware's PSCI answer once, early, in normal context. */
++	ud.psci_reset2 = -1;
++	ud_psci_report();
+ 	/* wired pages need a real tag: VM_KERN_MEMORY_NONE trips an assertion */
+ 	if (kmem_alloc(kernel_map, &ud.dma, UD_SIZE, KMA_DATA | KMA_NOFAIL,
+ 	    VM_KERN_MEMORY_BSD) != KERN_SUCCESS) {
+diff --git a/iokit/Kernel/arm/KebabPlatformExpert.cpp b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+index d6a30a7..cca0ed4 100644
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -122,6 +122,46 @@ kebab_psci_system_reset(void)
+ 	return (int32_t)x0;
+ }
+ 
++/*
++ * The remaining PSCI calls used by the fastboot diagnosis.  They live here so
++ * the firmware interface has one owner; the USB driver only decides when to
++ * ask.  SYSTEM_RESET2 is SMC64-only (0xC4000012) and takes reset_type in x1
++ * and an implementation-defined cookie in x2; reset_type 0 is the
++ * architectural warm reset.  A return value means the call failed.
++ */
++extern "C" uint64_t
++kebab_psci_call(uint64_t function, uint64_t arg1, uint64_t arg2)
++{
++	register uint64_t x0 __asm__("x0") = function;
++	register uint64_t x1 __asm__("x1") = arg1;
++	register uint64_t x2 __asm__("x2") = arg2;
++
++	__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2) : :
++	    "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10",
++	    "x11", "x12", "x13", "x14", "x15", "x16", "x17", "cc", "memory");
++	return x0;
++}
++
++/* PSCI_VERSION: major in bits 31:16, minor in bits 15:0. */
++extern "C" int
++kebab_psci_version(void)
++{
++	return (int32_t)kebab_psci_call(0x84000000ULL, 0, 0);
++}
++
++/* PSCI_FEATURES: 0 not supported, 1 supported, 2 invalid parameter, <0 error. */
++extern "C" int
++kebab_psci_features(uint32_t function)
++{
++	return (int32_t)kebab_psci_call(0x8400000aULL, function, 0);
++}
++
++extern "C" int
++kebab_psci_system_reset2(uint32_t reset_type, uint32_t cookie)
++{
++	return (int32_t)kebab_psci_call(0xc4000012ULL, reset_type, cookie);
++}
++
+ /*
+  * A panic ends in a halt or a restart request. Halting leaves the USB controller
+  * orphaned and the host loses the port, so when the panic report has been produced

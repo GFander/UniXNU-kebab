@@ -1,0 +1,103 @@
+/* Fixed read-only firmware capability survey, not a crypto/key backend.
+ * Protocol facts: Linux v6.12 qcom_scm.c/qcom_scm-smc.c and ARM SMCCC.
+ * No Linux implementation is incorporated. Only INFO_IS_CALL_AVAIL is sent
+ * to Qualcomm; queried ICE/QSEE operations are never invoked. */
+#if defined(KEBAB)
+#include <sys/param.h>
+#include <sys/systm.h>
+#include <kern/debug.h>
+#include <arm/machine_routines.h>
+#include <pexpert/pexpert.h>
+/* arm/cpu_data.h is private to Mach, not a BSD export header. */
+extern int get_preemption_level(void);
+
+struct kebab_scm_regs { uint64_t x[8]; };
+struct kebab_scm_result {
+	int32_t status;
+	uint64_t value;
+	unsigned attempts;
+};
+
+/* SMCCC 1.0 may clobber x0..x17. Qualcomm additionally returns its resume
+ * cookie in x6. No pointer or shared-memory argument is passed here. */
+static void
+kebab_scm_raw(struct kebab_scm_regs *r)
+{
+	register uint64_t x0 __asm__("x0") = r->x[0];
+	register uint64_t x1 __asm__("x1") = r->x[1];
+	register uint64_t x2 __asm__("x2") = r->x[2];
+	register uint64_t x3 __asm__("x3") = r->x[3];
+	register uint64_t x4 __asm__("x4") = r->x[4];
+	register uint64_t x5 __asm__("x5") = r->x[5];
+	register uint64_t x6 __asm__("x6") = r->x[6];
+	register uint64_t x7 __asm__("x7") = r->x[7];
+	__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3),
+	    "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7) : :
+	    "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "cc", "memory");
+	r->x[0] = x0; r->x[1] = x1; r->x[2] = x2; r->x[3] = x3;
+	r->x[4] = x4; r->x[5] = x5; r->x[6] = x6; r->x[7] = x7;
+}
+
+/* Bound interrupted-call resumes. This cannot bound a firmware call that
+ * never returns; no busy retry, waitqueue, allocation, lock or IRQ path. */
+static struct kebab_scm_result
+kebab_scm_query(uint32_t function, uint32_t target)
+{
+	uint64_t cookie = 0;
+	struct kebab_scm_result result = {};
+	for (unsigned i = 0; i < 32; i++) {
+		struct kebab_scm_regs r = { .x = { i ? 1 : function, 1, target, 0, 0, 0, cookie, 0 } };
+		kebab_scm_raw(&r);
+		result.status = (int32_t)r.x[0];
+		result.value = r.x[1];
+		result.attempts = i + 1;
+		if (result.status != 1) break;
+		cookie = r.x[6];
+	}
+	return result;
+}
+
+void kebab_scm_probe(void);
+void
+kebab_scm_probe(void)
+{
+	int enabled = 0;
+	PE_parse_boot_argn("kebab_scm_probe", &enabled, sizeof(enabled));
+	if (enabled != 1) return;
+	if (panic_active() || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()) {
+		printf("KEBAB SCM: refused unsafe context\n");
+		return;
+	}
+	printf("KEBAB SCM: fixed capability survey begin; no key operations\n");
+	struct kebab_scm_regs version = { .x = { 0x80000000, 0, 0, 0, 0, 0, 0, 0 } };
+	kebab_scm_raw(&version);
+	printf("KEBAB SCM: SMCCC version raw=0x%llx\n", version.x[0]);
+	uint32_t function = 0xc2000601; /* SIP INFO_IS_CALL_AVAIL, fast SMC64. */
+	struct kebab_scm_result result = kebab_scm_query(function, 0x02000601);
+	printf("KEBAB SCM: convention64 status=%d available=%llu attempts=%u\n", result.status, result.value, result.attempts);
+	if (result.status != 0 || result.value != 1) {
+		function = 0x82000601; /* Same query using SMC32; no legacy fallback. */
+		result = kebab_scm_query(function, 0x02000601);
+		printf("KEBAB SCM: convention32 status=%d available=%llu attempts=%u\n", result.status, result.value, result.attempts);
+	}
+	if (result.status != 0 || result.value != 1) {
+		printf("KEBAB SCM: no supported query convention; stopped\n");
+		return;
+	}
+	static const struct { const char *name; uint32_t target; } queries[] = {
+		{ "ice-invalidate", 0x02001003 },
+		{ "ice-set", 0x02001004 },
+		{ "qsee-version", 0x32000603 },
+	};
+	for (unsigned i = 0; i < sizeof(queries) / sizeof(queries[0]); i++) {
+		result = kebab_scm_query(function, queries[i].target);
+		printf("KEBAB SCM: query=%s target=0x%x status=%d available=%llu attempts=%u\n",
+		    queries[i].name, queries[i].target, result.status, result.value, result.attempts);
+		if (result.status != 0) {
+			printf("KEBAB SCM: query failure; stopped\n");
+			return;
+		}
+	}
+	printf("KEBAB SCM: fixed capability survey end; hardware keys unqualified\n");
+}
+#endif /* KEBAB */

@@ -1,0 +1,18 @@
+--- a/osfmk/prng/prng_random.c
++++ b/osfmk/prng/prng_random.c
+@@ -263,6 +263,15 @@
+ static void
+ negroni_prng_startup(void)
+ {
++#if defined(KEBAB)
++	/* PE_init_iokit loads prelinked corecrypto before EARLY_BOOT. Only
++	 * install the standalone fallback when no provider registered there.
++	 */
++	if (prng_ready) {
++		kprintf("KEBAB PRNG: corecrypto already registered; fallback skipped\n");
++		return;
++	}
++#endif
+ 	/* Ensure the boot seed exists before registration erases the early DRBG. */
+ 	(void)early_random();
+ 	const struct cckprng_funcs funcs = {
