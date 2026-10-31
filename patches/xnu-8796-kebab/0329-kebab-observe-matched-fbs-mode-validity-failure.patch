@@ -1,0 +1,67 @@
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1851,6 +1851,56 @@
+ }
+ 
+ #if defined(KEBAB)
++/* Matched20H392 FrontBoardServices FBSDisplayMode validity failure. The
++ * constructor retains its unreturned object in callee-saved x19 at this BRK.
++ * Read only the current exiting UI task in normal BSD context, never user
++ * memory from the trap handler. Exact PC, class and original objc ISA mask
++ * are pinned to the existing slide0 cache; another image requires re-audit. */
++static void
++kebab_fbs_mode_failure_evidence(proc_t p, int rv)
++{
++    if (p != current_proc() || !WTERMSIG(rv) ||
++        (strcmp(p->p_comm, "SpringBoard") && strcmp(p->p_comm, "PreBoard"))) return;
++    static unsigned reported;
++    unsigned slot = __atomic_load_n(&reported, __ATOMIC_RELAXED);
++    if (slot >= 8) return;
++    arm_thread_state64_t saved = {};
++    mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
++    kern_return_t result = thread_get_state(current_thread(), ARM_THREAD_STATE64,
++        (thread_state_t)&saved, &count);
++    if (result != KERN_SUCCESS || count != ARM_THREAD_STATE64_COUNT ||
++        saved.pc != 0x19b91abd4ULL) return;
++    do {
++        if (slot >= 8) return;
++    } while (!__atomic_compare_exchange_n(&reported, &slot, slot + 1, false,
++        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
++    uint64_t isa = 0, mode[10] = {};
++    user_addr_t object = saved.x[19];
++    int error = copyin(object, &isa, sizeof(isa));
++    if (error || (isa & 0x0000000ffffffff8ULL) != 0x1e1dd3380ULL) {
++        printf("KEBAB FBS MODE: name=%s pid=%d event=%u object-read=%d class-match=0; payload not read\n",
++            p->p_comm, proc_getpid(p), slot + 1, error);
++        return;
++    }
++    error = copyin(object, mode, 73); /* Exact original instanceSize, not allocation padding. */
++    if (error) {
++        printf("KEBAB FBS MODE: name=%s pid=%d event=%u mode-read=%d; original exit preserved\n",
++            p->p_comm, proc_getpid(p), slot + 1, error);
++        return;
++    }
++    if ((mode[0] & 0x0000000ffffffff8ULL) != 0x1e1dd3380ULL) {
++        printf("KEBAB FBS MODE: name=%s pid=%d event=%u class changed; payload not logged\n",
++            p->p_comm, proc_getpid(p), slot + 1);
++        return;
++    }
++    printf("KEBAB FBS MODE: name=%s pid=%d event=%u width=%llu height=%llu preferred-scale=%llu override-bits=0x%llx refresh-bits=0x%llx gamut=%llu hdr=%llu rotation=%llu virtual=%u; constructor object, original exit preserved\n",
++        p->p_comm, proc_getpid(p), slot + 1, (unsigned long long)mode[1],
++        (unsigned long long)mode[2], (unsigned long long)mode[3],
++        (unsigned long long)mode[4], (unsigned long long)mode[5],
++        (unsigned long long)mode[6], (unsigned long long)mode[7],
++        (unsigned long long)mode[8], (unsigned)(mode[9] & 255));
++}
++
+ /* First real exit per selected daemon, including ordinary status0/1 exits.
+  * Ordinary signals, exit reasons, critical policy and crash handling remain. */
+ static void
+@@ -1890,6 +1940,7 @@
+ 		proc_handle_critical_exit(p, rv);
+ 	}
+ #if defined(KEBAB)
++ kebab_fbs_mode_failure_evidence(p,rv);
+  kebab_runtime_exit_evidence(p,rv,ut);
+ #endif
+ 

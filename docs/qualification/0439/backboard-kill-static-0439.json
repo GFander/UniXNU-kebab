@@ -1,0 +1,32 @@
+{
+  "binary_sha256": "7aa6f8bf5ea2c3634fb8c8916a4e9c3c84508de78eccf57ca65c1ae4f676267c",
+  "uuid": "70b72340737a39738b474e9970f4ecb9",
+  "read_only": true,
+  "kill_calls": [
+    {
+      "address": "0x100041804",
+      "target": "0x1000915c0",
+      "import_name": "__ZSt9terminatev",
+      "start": "0x1000417fc",
+      "end": "0x100041808",
+      "function": "sub_0x1000417fc"
+    },
+    {
+      "address": "0x10005e104",
+      "target": "0x100091854",
+      "import_name": "_kill",
+      "start": "0x10005e080",
+      "end": "0x10005e134",
+      "function": "sub_0x10005e080"
+    },
+    {
+      "address": "0x10005e31c",
+      "target": "0x100091854",
+      "import_name": "_kill",
+      "start": "0x10005e22c",
+      "end": "0x10005e388",
+      "function": "sub_0x10005e22c"
+    }
+  ],
+  "stub_count": 453
+}

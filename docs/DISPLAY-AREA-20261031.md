@@ -1,0 +1,13 @@
+# 原版 display-area ABI 修复：0438
+
+0437接通真实GOP显示枚举后，原版backboardd调用selector29，要求8字节输出；自制驱动错误地返回16字节{x,y,w,h}矩形，实际得到NoSpace。0438修复布局和真实数值计算，原backboardd的同一调用实际返回0；没有改日志、屏蔽返回值或跳过调用。
+
+本轮没有把旧版第三方头文件当作ABI依据。匹配原kernelcache SHA2ec297...的IOMobileGraphicsFamily中，唯一分发表同时符合selector8/28/29/57/74已知形状；29的trampoline将structureOutput传到provider虚函数+0x5e8。原参考实现先调用+0x5e0读取dot-pitch，再把像素字段0x145c与0x1458分别转成Float32、除以同一密度，存至输出+0与+4。+0x7b0的display-size实现以0x1458、0x145c的顺序返回尺寸，因此area的顺序是第二个已报告像素尺寸/pitch、再第一个/pitch。这是两个Float32，并非单个CGFloat或矩形。原provider类名未独立恢复，不以类名猜测代替上述调用与数据流证据。
+
+新代码按相同布局计算当前已报告的逻辑高度/pitch、逻辑宽度/pitch，保留1125×2436逻辑显示及458逻辑密度；没有把它们声称为新测量的OnePlus物理面板尺寸。真实面板密度、映射和校准仍需后续处理。转换以整数实现IEEE754 binary32的nearest-even舍入，接受当前显示参数所在的正整数精确表示范围；避免在内核新增浮点运算。缺失/无效内部几何会明确报错，过短输出和descriptor写失败仍保留真实错误。
+
+304 common+4 host补丁两套独立回放、5261源码文件逐项一致，目标KDK和全量内核构建通过，207个原版HID槽位再次检查。编译的framebuffer对象2366条指令没有浮点转换/算术opcode，该检查不排除已有向量数据移动。公开测试校验完整当前header、selector case、输出helper与源码SHA，ASAN/UBSAN对100280组整数比值与Float32结果对照，覆盖inline/descriptor大小、尾部、失败和无效输入；五个行为变异均须断言失败。descriptor是明确的host模型，实机调用证据另列。
+
+0438原硬件Root/nonce、原版MKB/systembag、真实加密Data C/D、RTC/NVRAM、defaults和原版watchdog实机回归通过超过180秒。已有GOP节点、逻辑模式、其他framebuffer接口及原版安全后端保留；没有格式化或生成新密钥/包。development-fast保留，独立ROData fsck仍为0416，完整System/SystemOS内容证明为0341。
+
+此验收只修复该真实接口，不等于GPU或可用SpringBoard。SpringBoard随后仍发生SIGKILL及其他崩溃，需要追踪发送者/终止路径，不能由退出线程在MobileGestalt open/preferredScale中的PC直接推断因果。真实A650/Metal及呈现仍待开发。触摸采样按用户要求等其回来，蓝牙仍延期。

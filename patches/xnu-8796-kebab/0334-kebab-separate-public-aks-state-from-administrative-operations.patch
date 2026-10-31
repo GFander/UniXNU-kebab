@@ -1,0 +1,50 @@
+--- a/iokit/Kernel/arm/kebab_aks_userclient_impl.h
++++ b/iokit/Kernel/arm/kebab_aks_userclient_impl.h
+@@ -51,6 +51,10 @@
+ 
+ class AppleKeyStoreUserClient final : public IOUserClient {
+  OSDeclareDefaultStructors(AppleKeyStoreUserClient)
++ friend class AppleKeyStore;
++ /* Set once by the provider after initWithTask. Unprivileged connections
++  * expose public status only; no selector can promote this access role. */
++ bool administrative=false;
+  bool opened=false;
+ public:
+  IOReturn clientClose() override {opened=false;terminate();return kIOReturnSuccess;}
+@@ -70,6 +74,7 @@
+   if(in||out||si||a->structureInputDescriptor||a->structureOutputSize||a->structureOutputDescriptor)result=kIOReturnBadArgument;
+   else{opened=true;result=kIOReturnSuccess;}
+  }else if(!opened)result=kIOReturnNotOpen;
++ else if(!administrative&&selector!=7&&selector!=14&&selector!=17)result=kIOReturnNotPrivileged;
+  else if(selector==102||selector==103){
+   result=kuc_notify_method(getProvider(),selector,a);
+  }else if(selector==65||selector==68){
+@@ -105,6 +110,7 @@
+   }
+  }
+  IOLog("KEBAB AKS UC: selector=%u scalar=%u/%u struct-in=%u result=%x; hardware factory C/D only; struct-out=%llu desc=%u/%u\n",selector,in,out,si,result,(unsigned long long)a->structureOutputSize,a->structureInputDescriptor!=nullptr,a->structureOutputDescriptor!=nullptr);
++ IOLog("KEBAB AKS ACCESS: selector=%u role=%s result=%x\n",selector,administrative?"administrative":"read-only-status",result);
+  return result;
+ }
+ 
+@@ -116,14 +122,18 @@
+  IOReturn makeClient(task_t task,void *security,UInt32 type,OSDictionary *properties,IOUserClient **out){
+   if(out)*out=nullptr;
+   if(!out||!task||type)return kIOReturnBadArgument;
+-  if(IOUserClient::clientHasPrivilege(task,kIOClientPrivilegeAdministrator)!=kIOReturnSuccess)return kIOReturnNotPrivileged;
++  /* MKBGetDeviceLockState is used by the mobile DataMigration service.
++   * A connection is not authorization for key/volume/notification operations;
++   * those remain gated per selector by the immutable role below. */
++  bool administrative=IOUserClient::clientHasPrivilege(task,kIOClientPrivilegeAdministrator)==kIOReturnSuccess;
+   if(!kuc_ready())return kIOReturnNotReady;
+   AppleKeyStoreUserClient *client=new AppleKeyStoreUserClient;
+   if(!client)return kIOReturnNoMemory;
+   if(!client->initWithTask(task,security,type,properties)){client->release();return kIOReturnError;}
++  client->administrative=administrative;
+   if(!client->attach(this)){client->release();return kIOReturnError;}
+   if(!client->start(this)){client->detach(this);client->release();return kIOReturnError;}
+-  IOLog("KEBAB AKS UC: root client opened; original ABI, authenticated durable hardware bag available\n");
++  IOLog("KEBAB AKS UC: %s client opened; original ABI, authenticated durable hardware bag available\n",administrative?"administrative":"read-only status");
+   *out=client;return kIOReturnSuccess;
+  }
+ public:

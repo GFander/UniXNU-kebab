@@ -1,0 +1,91 @@
+{
+  "version": "0436",
+  "adt_sha256": "ef1eeeb766587ee0233be94c8e849abb07c69f58f4512dc661c3a2a6732a1009",
+  "read_only": true,
+  "nodes": [
+    {
+      "path": "/device-tree/arm-io",
+      "properties": {
+        "name": {
+          "hex": "61726d2d696f00",
+          "text": "arm-io"
+        },
+        "device_type": {
+          "hex": "61726d2d696f00",
+          "text": "arm-io"
+        },
+        "#address-cells": {
+          "hex": "02000000",
+          "text": "\u0002"
+        },
+        "#size-cells": {
+          "hex": "02000000",
+          "text": "\u0002"
+        },
+        "ranges": {
+          "hex": "000000000000000000000017000000000000000800000000",
+          "text": "\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0017\u0000\u0000\u0000\u0000\u0000\u0000\u0000\b"
+        }
+      }
+    },
+    {
+      "path": "/device-tree/arm-io/gic",
+      "properties": {
+        "name": {
+          "hex": "67696300",
+          "text": "gic"
+        },
+        "compatible": {
+          "hex": "61726d2c6769632d763300",
+          "text": "arm,gic-v3"
+        },
+        "interrupt-controller": {
+          "hex": "6d617374657200",
+          "text": "master"
+        },
+        "reg": {
+          "hex": "0000a0000000000000000100000000000000a600000000000000100000000000",
+          "text": "\u0000\u0000\ufffd\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\ufffd\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0010"
+        },
+        "redistributor-stride": {
+          "hex": "00000200",
+          "text": "\u0000\u0000\u0002"
+        },
+        "virtual-timer-intid": {
+          "hex": "1b000000",
+          "text": "\u001b"
+        }
+      }
+    },
+    {
+      "path": "/device-tree/arm-io/timer",
+      "properties": {
+        "name": {
+          "hex": "74696d657200",
+          "text": "timer"
+        },
+        "device_type": {
+          "hex": "74696d657200",
+          "text": "timer"
+        },
+        "reg": {
+          "hex": "0000a000000000000010000000000000",
+          "text": "\u0000\u0000\ufffd\u0000\u0000\u0000\u0000\u0000\u0000\u0010"
+        }
+      }
+    },
+    {
+      "path": "/device-tree/arm-io/ufshc",
+      "properties": {
+        "name": {
+          "hex": "756673686300",
+          "text": "ufshc"
+        },
+        "compatible": {
+          "hex": "71636f6d2c736d383235302d75667368630071636f6d2c6b6f6e612d756673686300",
+          "text": "qcom,sm8250-ufshc\u0000qcom,kona-ufshc"
+        }
+      }
+    }
+  ]
+}

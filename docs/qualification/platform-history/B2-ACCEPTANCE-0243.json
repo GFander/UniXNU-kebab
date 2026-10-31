@@ -1,0 +1,54 @@
+{
+  "checkpoint": "B2 selector 2212 hardware-wrapped device root, opt-in",
+  "keymaster_utc_listener": true,
+  "hardware_key_generation_and_repeated_derivation": true,
+  "opaque_blob_saved_preboot_once": "/private/preboot/.hios-nonce-root-v1",
+  "reboot_restore_hmac_verified_versions": [
+    "0240",
+    "0242",
+    "0243"
+  ],
+  "physical_power_loss_tested": false,
+  "nonce_kdf_public_positive_and_negative_tested": true,
+  "original_image4_ignition_blob_return": {
+    "version": "0243",
+    "error": 0,
+    "bytes": 132
+  },
+  "original_executable_text_sha256": {
+    "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib": "74de14b497448628cc801505b7c989ef6da13e5f1f681077a1605a4a0bc54325",
+    "com.apple.driver.AppleARMPlatform": "247b8b77815f8c87b43290e52a6b3888053cb3763a60bf21a004cd65b341388b",
+    "com.apple.driver.AppleEffaceableStorage": "2e7b3402cdb22319fa82544ab66a9a211799f3e970c5a66f53d3867270ae0d57",
+    "com.apple.driver.AppleMobileFileIntegrity": "6cbea28deab02a2b848dfac28f11c3c00745b55e7b2a896bac3cf9a600a4c7b1",
+    "com.apple.driver.ApplePMGR": "74ac53a277da51806f323e8c7d765d4ce9baa443adf4e513be2cff52a245db0e",
+    "com.apple.filesystems.apfs": "ebc47d686c6917c7fb154a0b2e2ed19e3d6a277d994d1395b02d3214142577cc",
+    "com.apple.iokit.CoreAnalyticsFamily": "29d73b6c2a37d9eb40712b9413db0790e7fe0122f202341852f7725e24b9ee1f",
+    "com.apple.iokit.IOCryptoAcceleratorFamily": "87758ce6148f662f31e20fb7a2ec645f90f3697084db0b04331f6b44036a06fb",
+    "com.apple.iokit.IOReportFamily": "6dc8734b81f576c22bd9fd78a686b29b46ba5cac4bff0957a489c001ffbc08d1",
+    "com.apple.iokit.IOSlowAdaptiveClockingFamily": "e9c3a7337345297aa9282bdd5bda52c0a3ac39a997fb2c9de5ff0952cc39294b",
+    "com.apple.iokit.IOStorageFamily": "4c9e7e8f12306986dc124e9e2cd4f9126fa7dc61e89155d973767b88a0d5ce6f",
+    "com.apple.kec.corecrypto": "0da4ca3127ef4ef272b776b932e8bb97855878845034ea1a2d58bb1f5fd6ddd9",
+    "com.apple.kext.CoreTrust": "ffc005c8163fc83206f3b87720b512a3c7b438d64fa37fece7f437429fdaaa51",
+    "com.apple.security.AppleImage4": "1ad058c1e525926c1e5f99b80ee59a05e2ec96c5a9c4663f3e5196f43656099b"
+  },
+  "negative_no_publication_and_panic_fastboot_verified": true,
+  "active_nonce_key_panic_fastboot_verified": true,
+  "default_off_readonly_regression": "0244",
+  "native_sha256": "9570a5c15dfa44163aee8d849c40eec51d5572e13cb4c61201c5715162633723",
+  "positive_boot_sha256": "7019b985b539e16014a64dedae73200dc1e83af13c2ec5edae688124ce86ab4a",
+  "common_patches": 191,
+  "host_patches": 4,
+  "all_source_files_equal": 5193,
+  "new_blockers": [
+    "DeviceTree /filesystems/fstab missing (ENOENT2)",
+    "dyld cache/libSystem missing after libignition failure; PID1 exits and kernel panics"
+  ],
+  "full_ios_or_ui_booted": false,
+  "apple_uid_emulation_claimed": false,
+  "clock_source": "HLOS host UTC anchor + monotonic elapsed; old images retain a stale anchor; RTC pending",
+  "final_boot_version": "0243",
+  "final_slot": "b",
+  "final_device_mode": "fastboot",
+  "userdata_redeployed_this_run": false,
+  "device": "c073a488\t fastboot"
+}

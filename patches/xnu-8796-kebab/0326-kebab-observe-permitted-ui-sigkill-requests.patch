@@ -1,0 +1,45 @@
+--- a/bsd/kern/kern_sig.c
++++ b/bsd/kern/kern_sig.c
+@@ -1386,6 +1386,32 @@
+ 	return 0;
+ }
+ 
++#if defined(KEBAB)
++/* Observe only permission-checked, positive-PID kill(2) requests for the real
++ * UI process names. Caller and target references are live, and this syscall
++ * path holds no proc/task lock here. The signal action is never changed.
++ * A request can race exit: correlate the target PID with real exit evidence,
++ * rather than claiming a logged request proves delivery or the root cause. */
++static void
++kebab_ui_kill_request(proc_t sender, proc_t target, int signum)
++{
++    if (signum != SIGKILL) return;
++    char target_name[MAXCOMLEN + 1] = {};
++    proc_name(proc_pid(target), target_name, sizeof(target_name));
++    if (strcmp(target_name, "SpringBoard") && strcmp(target_name, "PreBoard")) return;
++    static unsigned reported;
++    unsigned slot = __atomic_load_n(&reported, __ATOMIC_RELAXED);
++    do {
++        if (slot >= 16) return;
++    } while (!__atomic_compare_exchange_n(&reported, &slot, slot + 1, false,
++        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
++    char sender_name[MAXCOMLEN + 1] = {};
++    proc_name(proc_pid(sender), sender_name, sizeof(sender_name));
++    printf("KEBAB UI KILL: accepted kill(2) request=%u sender=%s pid=%d target=%s pid=%d signal=%d; permission passed, delivery not proven\n",
++        slot + 1, sender_name, proc_pid(sender), target_name, proc_pid(target), signum);
++}
++#endif
++
+ int
+ kill(proc_t cp, struct kill_args *uap, __unused int32_t *retval)
+ {
+@@ -1417,6 +1443,9 @@
+ 			return EPERM;
+ 		}
+ 		if (uap->signum) {
++#if defined(KEBAB)
++			kebab_ui_kill_request(cp, p, uap->signum);
++#endif
+ 			psignal(p, uap->signum);
+ 		}
+ 		proc_rele(p);

@@ -1,0 +1,236 @@
+--- /dev/null
++++ b/bsd/dev/kebab_tcm_wire.h
+@@ -0,0 +1,31 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/* Synaptics TCM continued-read transactions, per the matched oncell driver.
++ * Every I2C continuation has its own a5/03 prefix. The final one-byte pad is
++ * omitted by the protocol when it would require a transfer by itself. It is
++ * never treated as application data. Caller serializes the complete message. */
++#ifndef KEBAB_TCM_WIRE_H
++#define KEBAB_TCM_WIRE_H
++#include "kebab_touch_tcm.h"
++#define KEBAB_TCM_WIRE_CHUNK 64u
++typedef int (*kebab_tcm_wire_read)(void *,uint8_t *,uint32_t);
++static inline int
++kebab_tcm_wire_body(uint32_t length,uint8_t *out,uint32_t capacity,
++    kebab_tcm_wire_read read,void *context)
++{
++    uint8_t chunk[KEBAB_TCM_WIRE_CHUNK];
++    if (!out || !read || length>KEBAB_TCM_MAX_PAYLOAD || capacity<length+1) return -1;
++    uint32_t offset=0,remaining=length+1;
++    while (remaining) {
++        uint32_t bytes=remaining>KEBAB_TCM_WIRE_CHUNK-2?KEBAB_TCM_WIRE_CHUNK-2:remaining;
++        if (bytes==1) {
++            /* This can only be the trailing pad, never a payload byte. */
++            if (offset!=length) return -1;
++            out[offset]=KEBAB_TCM_PADDING;return 0;
++        }
++        if (read(context,chunk,bytes+2) || chunk[0]!=KEBAB_TCM_MARKER || chunk[1]!=0x03) return -1;
++        for (uint32_t i=0;i<bytes;i++) out[offset+i]=chunk[i+2];
++        offset+=bytes;remaining-=bytes;
++    }
++    return out[length]==KEBAB_TCM_PADDING?0:-1;
++}
++#endif
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -160,6 +160,7 @@
+  * decoded.
+  */
+ #include "kebab_touch_tcm.h"
++#include "kebab_tcm_wire.h"
+ #include "kebab_hid_bridge.h"
+ #include "kebab_geni.h"
+ #define KT_RAIL_SETTLE_MS 15
+@@ -748,54 +749,28 @@
+ 
+ /* -------------------------------------------------------------- TCM layer */
+ 
+-/*
+- * Read and validate one message header.  The four bytes are printed whenever
+- * they are rejected, and the window slides one byte at a time because the
+- * failure this bring-up actually saw was a stream one byte out of phase: after
+- * the identify payload came a 0x00, and the next four bytes read as a 0x5a00
+- * payload length (23040) instead of a status message.  A wrong marker is the
+- * same class of problem, so both slide.
+- *
+- * The slide is bounded at four bytes: a stream that needs more than that is not
+- * one byte out of phase, it is not a TCM stream, and the caller's retry loop
+- * will try again after a delay.
+- */
++/* Each I2C read is a framed transaction, not a byte-stream continuation.
++ * The body helper verifies/strips every continued-read prefix and validates
++ * the trailer before either command or touch payload is decoded. */
++static int
++kt_tcm_wire_read(void *context, uint8_t *bytes, uint32_t length)
++{
++    (void)context;
++    return kebab_geni_i2c_read(bytes, length);
++}
++
+ static int
+ kt_tcm_read_header(uint8_t cmd, kebab_tcm_header *header)
+ {
+-	uint8_t win[KEBAB_TCM_HEADER_SIZE];
+-	uint8_t next;
+-	uint32_t slid;
+-	int err;
+-
+-	err = kebab_geni_i2c_read(win, KEBAB_TCM_HEADER_SIZE);
+-	if (err != 0) {
+-		return -1;
+-	}
+-	for (slid = 0; slid < 4; slid++) {
+-		kebab_tcm_status st = kebab_tcm_header_parse(win, header);
+-
+-		if (st == KEBAB_TCM_OK) {
+-			if (slid != 0) {
+-				kebab_geni_trace("KEBAB TOUCH: command 0x%02x: resynchronised after %u byte(s)\n",
+-				    cmd, slid);
+-			}
+-			return 0;
+-		}
+-		if (slid == 0) {
+-			kebab_geni_trace("KEBAB TOUCH: command 0x%02x: header %02x %02x %02x %02x rejected (%s), sliding\n",
+-			    cmd, win[0], win[1], win[2], win[3],
+-			    kebab_tcm_status_name(st));
+-		}
+-		if (kebab_geni_i2c_read(&next, 1) != 0) {
+-			return -1;
+-		}
+-		win[0] = win[1];
+-		win[1] = win[2];
+-		win[2] = win[3];
+-		win[3] = next;
+-	}
+-	return -1;
++    uint8_t bytes[KEBAB_TCM_HEADER_SIZE];
++    if (kebab_geni_i2c_read(bytes, sizeof(bytes))) return -1;
++    kebab_tcm_status status = kebab_tcm_header_parse(bytes, header);
++    if (status != KEBAB_TCM_OK || header->code == 0x03) {
++        printf("KEBAB TOUCH: command 0x%02x invalid transaction header %02x %02x %02x %02x; no byte sliding\n",
++            cmd, bytes[0], bytes[1], bytes[2], bytes[3]);
++        return -1;
++    }
++    return 0;
+ }
+ 
+ /*
+@@ -825,7 +800,6 @@
+ 	kebab_tcm_header header;
+ 	uint32_t written;
+ 	uint32_t i;
+-	uint32_t pad;
+ 	int err;
+ 
+ 	written = kebab_tcm_build_command(out, sizeof(out), cmd, payload, len);
+@@ -862,22 +836,20 @@
+ 			delay(1000);
+ 			continue;
+ 		}
+-		pad = header.payload_len;
+-		err = kebab_geni_i2c_read(scratch, header.payload_len + 1);
+-		if (err != 0) {
+-			printf("KEBAB TOUCH: command 0x%02x: answer 0x%02x could not be read\n",
+-			    cmd, header.code);
+-			return -1;
+-		}
+-		printf("KEBAB TOUCH: command 0x%02x answer: code 0x%02x, %u payload byte(s), trailing byte 0x%02x\n",
+-		    cmd, header.code, header.payload_len, scratch[pad]);
+-		if (header.payload_len != 0) {
+-			kt_hexdump("answer", scratch, header.payload_len);
+-		}
+-		if (scratch[pad] != KEBAB_TCM_PADDING) {
+-			printf("KEBAB TOUCH: command 0x%02x: the trailing byte is not the vendor padding 0x%02x; the stream and this driver disagree about where the message ends\n",
+-			    cmd, KEBAB_TCM_PADDING);
+-		}
++        /* IDLE has no continuation body. Never consume the next a5 marker
++         * as a one-byte padding read. BUSY likewise has no useful payload. */
++        if (header.code == 0x00 || header.code == 0x02) {
++            delay(1000);continue;
++        }
++        err = kebab_tcm_wire_body(header.payload_len, scratch, sizeof(scratch),
++            kt_tcm_wire_read, NULL);
++        if (err) {
++            printf("KEBAB TOUCH: command 0x%02x invalid continued body; not decoded\n", cmd);
++            return -1;
++        }
++        printf("KEBAB TOUCH: command 0x%02x answer: code 0x%02x, %u payload byte(s), TCM framing validated\n",
++            cmd, header.code, header.payload_len);
++        if (header.payload_len) kt_hexdump("answer", scratch, header.payload_len);
+ 
+ 		if (want_report != 0) {
+ 			/*
+@@ -1379,15 +1351,9 @@
+ 	}
+ }
+ 
+-/*
+- * Read one queued TCM message, if any.  The framing is the module's: four
+- * header bytes, payload, one 0x5a.  A header whose declared length is not
+- * plausible is not a header, and a message whose last byte is not the padding
+- * is not necessarily in phase either -- both are counted and printed, and only
+- * a message that passes is decoded.  That is the check the previous bring-up
+- * lacked, where a 0x5a00 length turned into "payload 23040 too large" and then
+- * into a framing error on every poll.
+- */
++/* Poll one complete TCM transaction. Valid IDLE/BUSY headers have no body;
++ * bad markers, continuation prefixes and padding remain observable errors,
++ * and never reach the report decoder. */
+ static int
+ kt_poll_once(void)
+ {
+@@ -1403,39 +1369,20 @@
+ 		return -1;
+ 	}
+ 	st = kebab_tcm_header_parse(hdr, &header);
+-	if (st == KEBAB_TCM_ERR_MARKER) {
+-		/*
+-		 * An idle bus reads back bytes that are not a message.  That is
+-		 * the normal "nothing there" answer, not a polling error.
+-		 */
+-		return 0;
+-	}
+-	if (st != KEBAB_TCM_OK) {
+-		if (kt.padding++ < 8) {
+-			printf("KEBAB TOUCH: message header %02x %02x %02x %02x rejected (%s); not decoded\n",
+-			    hdr[0], hdr[1], hdr[2], hdr[3],
+-			    kebab_tcm_status_name(st));
+-		}
+-		return -1;
+-	}
+-	len = header.payload_len;
+-	err = kebab_geni_i2c_read(payload, len + 1);
+-	if (err != 0) {
+-		return -1;
+-	}
+-	if (payload[len] != KEBAB_TCM_PADDING && kt.padding++ < 8) {
+-		/*
+-		 * A header that passed the marker and length checks is strong
+-		 * evidence of phase, so one wrong padding byte is more likely a
+-		 * firmware that pads with something else than a lost byte.  It is
+-		 * printed loudly and the message is still decoded; a run that
+-		 * shows this line on every report says the firmware pads with
+-		 * 0x%02x and nothing else is wrong.
+-		 */
+-		printf("KEBAB TOUCH: message 0x%02x: padding 0x%02x, not the vendor 0x%02x; decoding anyway\n",
+-		    (unsigned)header.code, (unsigned)payload[len],
+-		    KEBAB_TCM_PADDING);
+-	}
++    if (st != KEBAB_TCM_OK || header.code == 0x03) {
++        if (kt.padding++ < 8)
++            printf("KEBAB TOUCH: invalid poll transaction header %02x %02x %02x %02x; not decoded\n",
++                hdr[0], hdr[1], hdr[2], hdr[3]);
++        return -1;
++    }
++    if (header.code == 0x00 || header.code == 0x02) return 0;
++    len = header.payload_len;
++    if (kebab_tcm_wire_body(len, payload, sizeof(payload), kt_tcm_wire_read, NULL)) {
++        if (kt.padding++ < 8)
++            printf("KEBAB TOUCH: message 0x%02x invalid continued body; not decoded\n", header.code);
++        return -1;
++    }
++
+ 	if (kt.raw && kt.raw_dumps < 16) {
+ 		kt.raw_dumps++;
+ 		printf("KEBAB TOUCH: message code 0x%02x len %u\n",

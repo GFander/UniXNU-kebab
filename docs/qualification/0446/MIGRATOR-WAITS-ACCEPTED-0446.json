@@ -1,0 +1,287 @@
+{
+  "accepted": true,
+  "version": "0446",
+  "scope": "Fixed full-name DataMigration wait observer and real PreBoard-unlock dependency; no migration completion claim",
+  "native_sha256": "7e6d8a453171ee30d4a596c37996d03b4a388ef05d426072f127465b54b5f5f7",
+  "native_bytes": 18914376,
+  "actual_log_sha256": "2000982d19a43360271659b77def0eb1c349d2973aae0e620654b1aeb52d294a",
+  "source_replay": {
+    "version": "0446",
+    "common": 311,
+    "host": 4,
+    "files": 5261,
+    "all_equal": true
+  },
+  "formal_patch": "0332-kebab-observe-fixed-original-data-migrator-waits.patch",
+  "fixed_normal_command": "MIG?",
+  "exact_best_name": "com.apple.datamigrator",
+  "required_parent": 1,
+  "name_copy_under_proc_lock": true,
+  "mutable_name_not_authorization": true,
+  "actual_uid_observed": 501,
+  "migrator_snapshot_headers": [
+    {
+      "label": "MIG",
+      "name": "datamigrator",
+      "pid": 130,
+      "uid": 501,
+      "seconds": 132.066,
+      "scanned": 70,
+      "sample": 1,
+      "exec_base": "0x1049fc000"
+    },
+    {
+      "label": "MIG",
+      "name": "datamigrator",
+      "pid": 130,
+      "uid": 501,
+      "seconds": 347.841,
+      "scanned": 69,
+      "sample": 2,
+      "exec_base": "0x1049fc000"
+    }
+  ],
+  "wait_thread": 754,
+  "wait": "MigratorAlternateAppDelegate::waitUntilPreboardDidFinishUnlock, called from DMMigrator::_unlockKeyBagUseOfForceIsAuthorized",
+  "migration_plugin_execution_not_reached_at_sampled_wait": true,
+  "selector17_interface_gap": {
+    "cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+    "build": "20H392",
+    "original_binary": {
+      "build": "20H392",
+      "read_only_original": true,
+      "files": {
+        "datamigrator": {
+          "sha256": "979848942d141c57289b8092ea68e396133cc99162ba308f7192316d669caa52",
+          "bytes": 200752,
+          "uuid": "708912fb4c533e4db6cac38af2f3521d",
+          "path": "/System/Library/PrivateFrameworks/DataMigration.framework/XPCServices/com.apple.datamigrator.xpc/com.apple.datamigrator",
+          "bundle_identifier": "com.apple.datamigrator",
+          "xpc_role_account": "mobile"
+        }
+      },
+      "runtime_uuid_independently_read": false
+    },
+    "read_only_originals": true,
+    "migrator_wait_call": "0x10000b8f0",
+    "migrator_lock_query": "0x10000b864 MKBGetDeviceLockState(NULL)",
+    "migrator_fast_paths": "0x10000b868/0x10000b86c allow return0 or3; other returns lead to PreBoard wait",
+    "mkb_export": "0x1ae3df468",
+    "mkb_common_helper": "0x1ae3e0130 __get_device_lock_state",
+    "mkb_normal_state_stub": "0x1ae3e082c sets selector0x11",
+    "aks_export": "0x1f2ec5d20 aks_get_device_state",
+    "aks_original_io_connect_call": "0x1f2ec5dc8 scalar1, output<=4096",
+    "aks_original_state_decoder": "0x1f2eb50f8 _decode_extended_state",
+    "mkb_error_map": "0x1ae3e0654; e00002c7 follows default0x1ae3e0784, optional logging, then w8=-1 at0x1ae3e07cc",
+    "native_aks_source_sha256": "404c071523d755936c2eceaab02617f38eb967c186940f67f3447915eec85feb",
+    "native_selector17_supported": false,
+    "native_state17_errors": 759,
+    "native_state17_error": "e00002c7",
+    "raw_mkb_return_independently_sampled": false,
+    "current_factory_bank": "authenticated hardware-root-backed C/D only; A/B/passcode/SEP unsupported",
+    "upstream_state_only_reference": "https://github.com/UniXNU/AppleKeyStoreState/blob/42ff83e08b2265fe741d4adaf084bebe003452ba/NativeKeyStoreEvents.cpp",
+    "upstream_fixture_not_adopted": true,
+    "apple_state_semantics_reference": "https://support.apple.com/en-au/guide/security/sec6483d5760/web",
+    "next": "Implement only truthful authenticated backend status semantics, validate actual original decoder and consumer; retain failures for missing class/key operations"
+  },
+  "host_public_runner_behavioral_mutants": 24,
+  "process_scan_cap": 512,
+  "thread_reference_cap": 32,
+  "user_frame_pair_cap": 16,
+  "user_stack_window_bytes": 65536,
+  "no_suspension_or_credentials_change": true,
+  "original_ui_and_panic_routes_preserved": true,
+  "hardware_security_regression": {
+    "version": "0446",
+    "defaults_matching_complete": true,
+    "actual_log_sha256": "2000982d19a43360271659b77def0eb1c349d2973aae0e620654b1aeb52d294a",
+    "native_sha256": "7e6d8a453171ee30d4a596c37996d03b4a388ef05d426072f127465b54b5f5f7",
+    "real_apple_image4_start_succeeded": true,
+    "actual_busy_reference_released": true,
+    "busy_lifecycle": [
+      [
+        0,
+        0,
+        1,
+        "defaults"
+      ],
+      [
+        11,
+        1,
+        1,
+        "AppleImage4"
+      ],
+      [
+        14,
+        2,
+        -1,
+        "defaults"
+      ],
+      [
+        15,
+        1,
+        -1,
+        "AppleImage4"
+      ]
+    ],
+    "final_busy_state": 0,
+    "actual_waits": [
+      "IOAESAccelerator",
+      "IOResources/IONVRAM",
+      "IODTNVRAM"
+    ],
+    "hardware_nonce_and_data_restored_without_generation": true,
+    "native_nvram_existing_proxy_adopted": true,
+    "nvram_encrypted_data_banks_cold_restored": true,
+    "nvram_restored_bank": 0,
+    "nvram_restored_generation": 343,
+    "nvram_hardware_or_rollback_claim": false,
+    "nvram_durable_write_calls": 2,
+    "watchdog_enabled": true,
+    "original_iokit_monitoring_preserved": true,
+    "watchdog_heartbeat_times": [
+      42.007,
+      42.007,
+      52.005,
+      61.998,
+      71.998,
+      82.01,
+      92.003,
+      101.992,
+      112.022,
+      122.027,
+      132.065,
+      141.994,
+      151.992,
+      162.007,
+      172.003,
+      182.003,
+      192.022,
+      202.011,
+      212.031,
+      222.028,
+      232.036,
+      242.029,
+      252.009,
+      262.008,
+      272.011,
+      282.001,
+      292.054,
+      301.999,
+      312.054,
+      322.05
+    ],
+    "original_locked_observations": [
+      [
+        63.808,
+        30,
+        4
+      ],
+      [
+        93.817,
+        60,
+        7
+      ],
+      [
+        123.834,
+        90,
+        10
+      ],
+      [
+        153.864,
+        120,
+        13
+      ],
+      [
+        183.936,
+        150,
+        16
+      ],
+      [
+        213.905,
+        180,
+        19
+      ],
+      [
+        243.963,
+        210,
+        22
+      ],
+      [
+        274.008,
+        240,
+        25
+      ],
+      [
+        303.996,
+        270,
+        28
+      ],
+      [
+        334.025,
+        300,
+        31
+      ],
+      [
+        364.064,
+        330,
+        34
+      ],
+      [
+        394.086,
+        360,
+        37
+      ],
+      [
+        424.128,
+        390,
+        40
+      ],
+      [
+        454.127,
+        420,
+        43
+      ],
+      [
+        484.157,
+        450,
+        46
+      ],
+      [
+        514.213,
+        480,
+        49
+      ],
+      [
+        544.241,
+        510,
+        52
+      ],
+      [
+        574.29,
+        540,
+        55
+      ]
+    ],
+    "systembag_and_hardware_c_d_preserved": true,
+    "rtc_record_reused": true,
+    "panic": [],
+    "full_ios_or_springboard": false,
+    "gpu_display_input_started": true
+  },
+  "original_watchdog_last_seconds": 574.29,
+  "state_service_repaired": false,
+  "migration_complete": false,
+  "hardware_120hz_mode_qualified": false,
+  "user_panel_refresh_target_hz": 120,
+  "physical_touch_qualified": false,
+  "manual_touch_deferred_by_user": true,
+  "gpu_qualified": false,
+  "real_presentation_qualified": false,
+  "usable_springboard": false,
+  "bluetooth_deferred": true,
+  "development_fast": true,
+  "last_independent_ro_data_fsck": "0416",
+  "last_full_system_systemos_check": "0341",
+  "next": "Implement only truthful authenticated backend status semantics, validate actual original decoder and consumer; retain failures for missing class/key operations"
+}

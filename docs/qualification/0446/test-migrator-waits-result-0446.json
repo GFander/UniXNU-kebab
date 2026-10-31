@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "actual_production_sources": {
+    "osfmk/kern/kebab_bootdiag.c": "2d0a1b7ca1012d32e55adc8179ed74a543c21cd6772794064f99db8dec4ce00c",
+    "bsd/kern/kebab_bootdiag.c": "9edc328cebf9913be66a8e602680a143970bedd52bea07e5aea7b47981c7da44"
+  },
+  "fixture_sha256": "dce0d0f5e7b81dae978cbf5fdadca6f3add7547a817a9db55ef392d08af60692",
+  "behavioral_mutations_refused": 12,
+  "full_name": "com.apple.datamigrator",
+  "short_name_is_insufficient": true,
+  "name_under_proc_lock": true,
+  "name_is_not_authorization": true,
+  "normal_only": true,
+  "ui_legacy_regression": true,
+  "task_scheduler_map_nofault_explicit_models": true
+}

@@ -1,0 +1,55 @@
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -65,15 +65,16 @@
+  * best-effort call sites, not a consistent suspended-thread backtrace. The
+  * retained user map survives exit; copyinmap reports invalid/unmapped pages.
+  * Bound every read to that map, aligned increasing frames in a64KiB window,
+- * at most8pairs. Never use copyinmap's kernel-pmap memcpy fast path. */
++ * at most16pairs (the fixed backboardd wrapper keeps its8pair budget). Never use copyinmap's kernel-pmap memcpy fast path. */
+ static void
+-kebab_user_wait_report(vm_map_t map, const char *label, uint64_t tid, const struct kebab_saved_user_site *site)
++kebab_user_wait_report(vm_map_t map, const char *label, uint64_t tid, const struct kebab_saved_user_site *site, unsigned frame_cap)
+ {
+     if (map == VM_MAP_NULL || vm_map_pmap(map) == pmap_kernel()) return;
+     printf("KEBAB %s USER: tid=%llu saved pc=0x%llx lr=0x%llx fp=0x%llx; best-effort, target may resume\n",
+         label, tid, site->pc, site->lr, site->fp);
++    if (frame_cap > 16) frame_cap = 16;
+     uint64_t fp = site->fp, origin = fp;
+-    for (unsigned i = 0; i < 8; i++) {
++    for (unsigned i = 0; i < frame_cap; i++) {
+         uint64_t pair[2];
+         if ((fp & 15) != 0 || fp < vm_map_min(map) || fp >= vm_map_max(map) ||
+             vm_map_max(map) - fp < sizeof(pair) || fp < origin || fp - origin > 65536) break;
+@@ -90,7 +91,7 @@
+ }
+ 
+ static void
+-kebab_task_threads_report(task_t task, const char *label, bool user_sites)
++kebab_task_threads_report(task_t task, const char *label, bool user_sites, unsigned user_frame_cap)
+ {
+ 	thread_t observed[32], thread;
+ 	unsigned count = 0, thread_total = 0;
+@@ -131,7 +132,7 @@
+ 		for (unsigned frame = 0; frame < frame_count; frame++) {
+ 			printf("KEBAB %s: tid=%llu kframe[%u]=0x%llx\n", label, tid, frame, frames[frame]);
+ 		}
+-		if (have_site) kebab_user_wait_report(map, label, tid, &site);
++		if (have_site) kebab_user_wait_report(map, label, tid, &site, user_frame_cap);
+ 		thread_deallocate(thread);
+ 	}
+ 	if (map != VM_MAP_NULL) vm_map_deallocate(map);
+@@ -140,10 +141,10 @@
+ 
+ void kebab_pid1_task_report(task_t task);
+ void kebab_backboardd_task_report(task_t task);
+-void kebab_pid1_task_report(task_t task) { kebab_task_threads_report(task, "PID1", false); }
+-void kebab_backboardd_task_report(task_t task) { kebab_task_threads_report(task, "BBOARD", true); }
++void kebab_pid1_task_report(task_t task) { kebab_task_threads_report(task, "PID1", false, 0); }
++void kebab_backboardd_task_report(task_t task) { kebab_task_threads_report(task, "BBOARD", true, 8); }
+ void kebab_springboard_task_report(task_t task);
+ void kebab_preboard_task_report(task_t task);
+-void kebab_springboard_task_report(task_t task) { kebab_task_threads_report(task, "UI-SB", true); }
+-void kebab_preboard_task_report(task_t task) { kebab_task_threads_report(task, "UI-PB", true); }
++void kebab_springboard_task_report(task_t task) { kebab_task_threads_report(task, "UI-SB", true, 16); }
++void kebab_preboard_task_report(task_t task) { kebab_task_threads_report(task, "UI-PB", true, 16); }
+ #endif /* KEBAB */

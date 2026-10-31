@@ -1,0 +1,271 @@
+{
+  "accepted": true,
+  "scope": "Real existing GOP display declaration enables original IOMFB enumeration and actual backboardd client; NOT GPU/presentation/usable SpringBoard acceptance",
+  "version": "0437",
+  "native_source_version": "0436",
+  "native_sha256": "bae1fcdc58d3dc3c248fbea86776c6dd1a4dbb65894781cddd0f6d2f18a91cfe",
+  "native_bytes": 18897512,
+  "prelink_sha256": "4b5859e8b1338acc48ab47a1cf63ec7626c308e43db670885062a69f42580a0d",
+  "native_and_prelink_identical_to_0436": true,
+  "actual_log_sha256": "cf587123e84a26a7331cc9da23459d3609712994f36ff75817bcfd63d2220f92",
+  "actual_added_node": "/arm-io/kebab-display",
+  "device_type": "display-subsystem",
+  "compatible": "unixnu,kebab-gop-display",
+  "hardware_resources_added": false,
+  "consumer_original_image": "/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer",
+  "consumer_name": "___IOMobileFramebufferCreateDisplayList_block_invoke",
+  "consumer_address": "0x1af229980",
+  "consumer_code_sha256": "0c41425bcec679f08f510d6e3da715be41faffb50a075ef7cfdec46b84620180",
+  "source_replay": {
+    "common": 303,
+    "host": 4,
+    "files": 5260,
+    "all_equal": true
+  },
+  "original_backboard_framebuffer_calls": [
+    {
+      "selector": 57,
+      "scalar_in": 0,
+      "struct_in": 0,
+      "scalar_out": 1,
+      "struct_out": 0,
+      "result": "0x0"
+    },
+    {
+      "selector": 15,
+      "scalar_in": 2,
+      "struct_in": 0,
+      "scalar_out": 1,
+      "struct_out": 0,
+      "result": "0x0"
+    },
+    {
+      "selector": 22,
+      "scalar_in": 1,
+      "struct_in": 0,
+      "scalar_out": 0,
+      "struct_out": 0,
+      "result": "0x0"
+    },
+    {
+      "selector": 8,
+      "scalar_in": 0,
+      "struct_in": 0,
+      "scalar_out": 2,
+      "struct_out": 0,
+      "result": "0x0"
+    },
+    {
+      "selector": 28,
+      "scalar_in": 0,
+      "struct_in": 0,
+      "scalar_out": 1,
+      "struct_out": 0,
+      "result": "0x0"
+    },
+    {
+      "selector": 29,
+      "scalar_in": 0,
+      "struct_in": 0,
+      "scalar_out": 0,
+      "struct_out": 8,
+      "result": "0xe00002db"
+    },
+    {
+      "selector": 33,
+      "scalar_in": 1,
+      "struct_in": 0,
+      "scalar_out": 0,
+      "struct_out": 0,
+      "result": "0x0"
+    },
+    {
+      "selector": 79,
+      "scalar_in": 2,
+      "struct_in": 0,
+      "scalar_out": 0,
+      "struct_out": 1580,
+      "result": "0xe00002c7"
+    },
+    {
+      "selector": 74,
+      "scalar_in": 1,
+      "struct_in": 0,
+      "scalar_out": 1,
+      "struct_out": 64,
+      "result": "0xe00002c7"
+    },
+    {
+      "selector": 12,
+      "scalar_in": 1,
+      "struct_in": 0,
+      "scalar_out": 0,
+      "struct_out": 0,
+      "result": "0x0"
+    },
+    {
+      "selector": 6,
+      "scalar_in": 3,
+      "struct_in": 0,
+      "scalar_out": 0,
+      "struct_out": 0,
+      "result": "0xe00002f0"
+    }
+  ],
+  "springboard_reached_real_cadisplay_mode_configuration": true,
+  "original_main_cadisplay_assertion_not_observed": true,
+  "backboard_metal_context_wait_samples": 1,
+  "later_main_thread_cf_runloop_observed": true,
+  "persistent_metal_wait_not_proven": true,
+  "selector29_real_eight_byte_output_not_yet_fixed": true,
+  "selector29_value_semantics_not_yet_verified": true,
+  "springboard_later_sigkill_observed": true,
+  "springboard_sigkill_cause_proven": false,
+  "hardware_security_regression": {
+    "version": "0437",
+    "defaults_matching_complete": true,
+    "actual_log_sha256": "cf587123e84a26a7331cc9da23459d3609712994f36ff75817bcfd63d2220f92",
+    "native_sha256": "bae1fcdc58d3dc3c248fbea86776c6dd1a4dbb65894781cddd0f6d2f18a91cfe",
+    "real_apple_image4_start_succeeded": true,
+    "actual_busy_reference_released": true,
+    "busy_lifecycle": [
+      [
+        0,
+        0,
+        1,
+        "defaults"
+      ],
+      [
+        11,
+        1,
+        1,
+        "AppleImage4"
+      ],
+      [
+        14,
+        2,
+        -1,
+        "defaults"
+      ],
+      [
+        15,
+        1,
+        -1,
+        "AppleImage4"
+      ]
+    ],
+    "final_busy_state": 0,
+    "actual_waits": [
+      "IOAESAccelerator",
+      "IOResources/IONVRAM",
+      "IODTNVRAM"
+    ],
+    "hardware_nonce_and_data_restored_without_generation": true,
+    "native_nvram_existing_proxy_adopted": true,
+    "nvram_encrypted_data_banks_cold_restored": true,
+    "nvram_restored_bank": 1,
+    "nvram_restored_generation": 298,
+    "nvram_hardware_or_rollback_claim": false,
+    "nvram_durable_write_calls": 2,
+    "watchdog_enabled": true,
+    "original_iokit_monitoring_preserved": true,
+    "watchdog_heartbeat_times": [
+      42.036,
+      42.036,
+      52.02,
+      62.055,
+      72.057,
+      82.048,
+      92.036,
+      102.027,
+      112.012,
+      122.02,
+      132.045,
+      142.039,
+      152.034,
+      162.029,
+      172.022,
+      182.007,
+      192.067,
+      202.066,
+      212.058,
+      222.072,
+      232.051,
+      242.044,
+      252.05,
+      262.037,
+      272.056,
+      282.042,
+      292.035,
+      302.024,
+      312.023,
+      322.022
+    ],
+    "original_locked_observations": [
+      [
+        63.927,
+        30,
+        4
+      ],
+      [
+        93.971,
+        60,
+        7
+      ],
+      [
+        123.962,
+        90,
+        10
+      ],
+      [
+        154.035,
+        120,
+        13
+      ],
+      [
+        184.074,
+        150,
+        16
+      ],
+      [
+        214.064,
+        180,
+        19
+      ],
+      [
+        244.104,
+        210,
+        22
+      ],
+      [
+        274.117,
+        240,
+        25
+      ],
+      [
+        304.149,
+        270,
+        28
+      ],
+      [
+        334.184,
+        300,
+        31
+      ]
+    ],
+    "systembag_and_hardware_c_d_preserved": true,
+    "rtc_record_reused": true,
+    "panic": [],
+    "full_ios_or_springboard": false,
+    "gpu_display_input_started": true
+  },
+  "physical_touch_qualified": false,
+  "manual_touch_deferred_by_user": true,
+  "gpu_qualified": false,
+  "real_presentation_qualified": false,
+  "usable_springboard": false,
+  "bluetooth_deferred": true,
+  "last_independent_ro_data_fsck": "0416",
+  "last_full_system_systemos_check": "0341",
+  "development_fast": true
+}

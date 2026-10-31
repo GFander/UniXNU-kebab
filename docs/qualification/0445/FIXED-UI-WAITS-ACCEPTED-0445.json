@@ -1,0 +1,264 @@
+{
+  "accepted": true,
+  "version": "0445",
+  "scope": "Bounded fixed UI wait observation locates original SpringBoard check-in; diagnostic milestone only",
+  "native_sha256": "115d2e00c5d84272fce844c9bdaf4849789ea64b830deaa584171a74f127ee59",
+  "native_bytes": 18947016,
+  "actual_log_sha256": "b7550ec6663d24d044adad0f814de05bbc71e8f4499c1ea4772e0795402c01ab",
+  "source_replay": {
+    "version": "0445",
+    "common": 310,
+    "host": 4,
+    "files": 5261,
+    "all_equal": true
+  },
+  "formal_patches": [
+    "0330-kebab-fixed-springboard-preboard-wait-snapshots.patch",
+    "0331-kebab-bound-fixed-ui-user-caller-depth-to16.patch"
+  ],
+  "normal_only_fixed_command": "UI?",
+  "fixed_process_names": [
+    "SpringBoard",
+    "PreBoard"
+  ],
+  "required_parent": 1,
+  "actual_uid_observed": 501,
+  "process_scan_cap_each": 512,
+  "thread_reference_cap": 32,
+  "ui_user_frame_pairs": 16,
+  "backboard_pairs_unchanged": 8,
+  "user_stack_window_bytes": 65536,
+  "target_suspension": false,
+  "best_effort_target_can_resume": true,
+  "no_arbitrary_pid_name_map_command": true,
+  "original_panic_dispatch_unchanged": true,
+  "actual_usb_ui_completions": 2,
+  "ui_snapshot_headers": [
+    {
+      "label": "UI-SB",
+      "name": "SpringBoard",
+      "pid": 193,
+      "uid": 501,
+      "seconds": 136.042,
+      "scanned": 23,
+      "sample": 1,
+      "exec_base": "0x100e08000"
+    },
+    {
+      "label": "UI-PB",
+      "name": "PreBoard",
+      "pid": 192,
+      "uid": 501,
+      "seconds": 136.043,
+      "scanned": 24,
+      "sample": 1,
+      "exec_base": "0x104750000"
+    },
+    {
+      "label": "UI-SB",
+      "name": "SpringBoard",
+      "pid": 193,
+      "uid": 501,
+      "seconds": 374.104,
+      "scanned": 29,
+      "sample": 2,
+      "exec_base": "0x100e08000"
+    },
+    {
+      "label": "UI-PB",
+      "name": "PreBoard",
+      "pid": 192,
+      "uid": 501,
+      "seconds": 374.105,
+      "scanned": 30,
+      "sample": 2,
+      "exec_base": "0x104750000"
+    }
+  ],
+  "original_ui_cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+  "springboard_main_wait": "BKSSystemShellService::_checkIn synchronous BoardServices XPC, via FBSystemShellInitialize/SBSystemAppMain",
+  "preboard_main_observed": "UIApplicationMain / UIApplication::_run / GSEventRunModal / CFRunLoop",
+  "backboard_other_thread_observed": "DMConnection::migrateCheckingNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly: synchronous DataMigration XPC",
+  "actual_checkin_pending_branch_directly_sampled": false,
+  "datamigrator_receiver_wait_not_yet_sampled": true,
+  "initial_block_system_app_kill_remains": true,
+  "host_public_runner_behavioral_mutants": 14,
+  "host_models": [
+    "task",
+    "scheduler",
+    "map",
+    "nofault",
+    "peripheral action functions"
+  ],
+  "hardware_security_regression": {
+    "version": "0445",
+    "defaults_matching_complete": true,
+    "actual_log_sha256": "b7550ec6663d24d044adad0f814de05bbc71e8f4499c1ea4772e0795402c01ab",
+    "native_sha256": "115d2e00c5d84272fce844c9bdaf4849789ea64b830deaa584171a74f127ee59",
+    "real_apple_image4_start_succeeded": true,
+    "actual_busy_reference_released": true,
+    "busy_lifecycle": [
+      [
+        0,
+        0,
+        1,
+        "defaults"
+      ],
+      [
+        11,
+        1,
+        1,
+        "AppleImage4"
+      ],
+      [
+        14,
+        2,
+        -1,
+        "defaults"
+      ],
+      [
+        15,
+        1,
+        -1,
+        "AppleImage4"
+      ]
+    ],
+    "final_busy_state": 0,
+    "actual_waits": [
+      "IOAESAccelerator",
+      "IOResources/IONVRAM",
+      "IODTNVRAM"
+    ],
+    "hardware_nonce_and_data_restored_without_generation": true,
+    "native_nvram_existing_proxy_adopted": true,
+    "nvram_encrypted_data_banks_cold_restored": true,
+    "nvram_restored_bank": 1,
+    "nvram_restored_generation": 338,
+    "nvram_hardware_or_rollback_claim": false,
+    "nvram_durable_write_calls": 2,
+    "watchdog_enabled": true,
+    "original_iokit_monitoring_preserved": true,
+    "watchdog_heartbeat_times": [
+      42.072,
+      42.072,
+      52.06,
+      62.047,
+      72.05,
+      82.093,
+      92.084,
+      102.071,
+      112.072,
+      122.061,
+      132.062,
+      142.1,
+      152.097,
+      162.081,
+      172.068,
+      182.104,
+      192.085,
+      202.065,
+      212.113,
+      222.104,
+      232.097,
+      242.092,
+      252.082,
+      262.09,
+      272.073,
+      282.134,
+      292.137,
+      302.126,
+      312.122,
+      322.099
+    ],
+    "original_locked_observations": [
+      [
+        63.857,
+        30,
+        4
+      ],
+      [
+        93.893,
+        60,
+        7
+      ],
+      [
+        123.936,
+        90,
+        10
+      ],
+      [
+        153.968,
+        120,
+        13
+      ],
+      [
+        183.976,
+        150,
+        16
+      ],
+      [
+        213.99,
+        180,
+        19
+      ],
+      [
+        244.028,
+        210,
+        22
+      ],
+      [
+        274.079,
+        240,
+        25
+      ],
+      [
+        304.061,
+        270,
+        28
+      ],
+      [
+        334.093,
+        300,
+        31
+      ],
+      [
+        364.144,
+        330,
+        34
+      ],
+      [
+        394.189,
+        360,
+        37
+      ],
+      [
+        424.223,
+        390,
+        40
+      ],
+      [
+        453.815,
+        420,
+        43
+      ]
+    ],
+    "systembag_and_hardware_c_d_preserved": true,
+    "rtc_record_reused": true,
+    "panic": [],
+    "full_ios_or_springboard": false,
+    "gpu_display_input_started": true
+  },
+  "original_watchdog_last_seconds": 453.815,
+  "hardware_120hz_mode_qualified": false,
+  "user_panel_refresh_target_hz": 120,
+  "physical_touch_qualified": false,
+  "manual_touch_deferred_by_user": true,
+  "gpu_qualified": false,
+  "real_presentation_qualified": false,
+  "usable_springboard": false,
+  "bluetooth_deferred": true,
+  "development_fast": true,
+  "last_independent_ro_data_fsck": "0416",
+  "last_full_system_systemos_check": "0341",
+  "next": "Trace the real DataMigration receiver and migration lifecycle; do not bypass pending check-in or claim unsupported AKS class2 causes it without evidence"
+}

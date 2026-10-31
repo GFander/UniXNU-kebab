@@ -1,0 +1,71 @@
+--- a/bsd/kern/kebab_data_files_impl.h
++++ b/bsd/kern/kebab_data_files_impl.h
+@@ -72,12 +72,34 @@
+  return error;
+ }
+ 
++/* Only the private known-pattern proof file may be restored after a normal
++ * userspace session changed its reported class from D to C. The caller must
++ * first prove its complete original payload, metadata and two encrypted raw
++ * extents. Use the original authorized class migration, never recreate the
++ * file, edit raw metadata, replace class keys or touch a system/application file.
++ * Reopen and repeat the full proof after this call. */
++static int
++kdp_restore_fixture_d(mount_t expected,vfs_context_t context)
++{
++ const char *path="/private/var/.hios-cp-d-v1";vnode_t file=NULLVP;
++ int error=vnode_open(path,O_NOFOLLOW|FREAD|FWRITE,0,0,&file,context);if(error)return error;
++ error=kdp_metadata(file,expected,3,KDP_BYTES,context);
++ if(!error)error=vnode_authorize(file,NULLVP,KAUTH_VNODE_ACCESS|KAUTH_VNODE_WRITE_DATA,context);
++ if(!error){struct vnode_attr attr;VATTR_INIT(&attr);VATTR_SET(&attr,va_dataprotect_class,4);error=VNOP_SETATTR(file,&attr,context);}
++ int synced=VNOP_FSYNC(file,MNT_WAIT,context);if(!error)error=synced;
++ int closed=vnode_close(file,FREAD|FWRITE,context);if(!error)error=closed;
++ printf("KEBAB DATA FIXTURE: original authorized class C -> D result=%d; fixed known-pattern file only\n",error);
++ return error;
++}
++
+ static int
+ kdp_file(mount_t expected,const char *path,uint32_t cls,bool create,bool rewrap)
+ {
+  struct Work{uint8_t plain[KDP_BYTES],back[KDP_BYTES],cipher[4096];};
+  struct Work *w=kalloc_data(sizeof(*w),Z_WAITOK|Z_ZERO);if(!w)return ENOMEM;
+  vfs_context_t context=vfs_context_current();vnode_t file=NULLVP;int error=0;const char *step="create";
++ unsigned tool=0;PE_parse_boot_argn("kebab_apfs_tool",&tool,sizeof(tool));
++ uint32_t observed_class=cls;bool restore_d=false,restored_d=false;
+  for(unsigned i=0;i<KDP_BYTES;++i)w->plain[i]=(uint8_t)(i*17+(i>>7)+cls*29);
+  if(create){
+   error=kdp_create(path,cls,&file,context);
+@@ -94,8 +116,15 @@
+   if(error)goto done;
+  }
+  if(rewrap){error=kdp_reclass(expected,path,cls,w->plain,w->back);if(error)goto done;}
++read_file:
+  step="open";error=vnode_open(path,O_NOFOLLOW|FREAD,0,0,&file,context);if(error)goto done;
+  step="metadata";error=kdp_metadata(file,expected,cls,KDP_BYTES,context);
++ if(error==EAUTH&&tool==12&&!create&&!rewrap&&!restored_d&&cls==4&&
++     !strcmp(path,"/private/var/.hios-cp-d-v1")&&
++     !kdp_metadata(file,expected,3,KDP_BYTES,context)){
++  error=0;observed_class=3;restore_d=true;
++  printf("KEBAB DATA FIXTURE: observed original class C; full existing D-pattern/raw proof required before restoration\n");
++ }
+  if(!error){
+   step="protected-read";int residual=0;error=vn_rdwr(UIO_READ,file,(caddr_t)w->back,KDP_BYTES,0,UIO_SYSSPACE,
+       IO_NOCACHE,vfs_context_ucred(context),&residual,NULL);
+@@ -115,10 +144,16 @@
+   if(!error&&!memcmp(w->cipher,w->plain+logical,4096))error=EAUTH;
+   if(!error){
+    uint8_t digest[32];SHA256_CTX hash;SHA256_Init(&hash);SHA256_Update(&hash,w->cipher,4096);SHA256_Final(digest,&hash);
+-   printf("KEBAB DATA FILE: class=%u logical=%llu ciphertext-sha256=",cls,(unsigned long long)logical);
++   printf("KEBAB DATA FILE: class=%u logical=%llu ciphertext-sha256=",observed_class,(unsigned long long)logical);
+    for(unsigned j=0;j<32;++j)printf("%02x",digest[j]);printf(" differs from plaintext\n");
+    bzero(digest,sizeof(digest));
+   }
++ }
++ if(!error&&restore_d){
++  step="restore-private-fixture-D";
++  error=vnode_close(file,FREAD,context);file=NULLVP;
++  if(!error)error=kdp_restore_fixture_d(expected,context);
++  if(!error){restore_d=false;restored_d=true;observed_class=cls;goto read_file;}
+  }
+  if(!error){
+   uint8_t digest[32];SHA256_CTX hash;SHA256_Init(&hash);SHA256_Update(&hash,w->back,KDP_BYTES);SHA256_Final(digest,&hash);

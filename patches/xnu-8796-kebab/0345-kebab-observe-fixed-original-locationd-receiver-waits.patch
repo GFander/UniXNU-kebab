@@ -1,0 +1,51 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -160,6 +160,7 @@
+ extern void kebab_migrator_task_report(task_t);
+ extern void kebab_plugin_task_report(task_t);
+ extern void kebab_installer_task_report(task_t);
++extern void kebab_locationd_task_report(task_t);
+ void kebab_migrator_report(void);
+ struct kebab_migrator_snapshot {
+     const char *name; const uint8_t *expected_uuid; task_t task;
+@@ -244,12 +245,14 @@
+     if (ml_at_interrupt_context() || get_preemption_level() != 0 ||
+         !ml_get_interrupts_enabled()) return;
+     kebab_installer_directories_report();
+-    static const char *const names[] = {"com.apple.datamigrator", "com.apple.migrationpluginwrapper", "installcoordinationd"};
+-    static const char *const labels[] = {"MIG", "MIG-W", "MIG-I"};
++    static const char *const names[] = {"com.apple.datamigrator", "com.apple.migrationpluginwrapper", "installcoordinationd", "locationd"};
++    static const char *const labels[] = {"MIG", "MIG-W", "MIG-I", "MIG-L"};
+     static const uint8_t wrapper_uuid[16] = {0xa3,0x6b,0x14,0xaa,0x98,0x19,0x3d,0x1f,0x90,0x0c,0xe8,0x0b,0x45,0xc8,0xea,0xc7};
++    /* Exact original receiver binary; actual UID is observed, never changed. */
++    static const uint8_t locationd_uuid[16] = {0x72, 0x36, 0xf5, 0x20, 0xb3, 0x31, 0x38, 0x3c, 0x8b, 0x98, 0x5c, 0x4e, 0x2c, 0xc5, 0x9c, 0x06};
+     for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+         struct kebab_migrator_snapshot snapshot = {};
+-        snapshot.name = names[i];snapshot.expected_uuid = i == 1 ? wrapper_uuid : NULL;
++        snapshot.name = names[i];snapshot.expected_uuid = i == 1 ? wrapper_uuid : (i == 3 ? locationd_uuid : NULL);
+         proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS, kebab_migrator_select, &snapshot, NULL, NULL);
+         if (snapshot.task == TASK_NULL) {
+             printf("KEBAB %s: no referenced task found=%u scanned=%u uuid-refused=%u (parent1/full-name; cap512)\n",
+@@ -259,7 +262,8 @@
+                 labels[i], snapshot.pid, snapshot.uid, snapshot.scanned);
+             if (i == 0) kebab_migrator_task_report(snapshot.task);
+             else if (i == 1) kebab_plugin_task_report(snapshot.task);
+-            else kebab_installer_task_report(snapshot.task);
++            else if (i == 2) kebab_installer_task_report(snapshot.task);
++            else kebab_locationd_task_report(snapshot.task);
+             task_deallocate(snapshot.task);
+         }
+     }
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -272,4 +272,10 @@
+ {
+     kebab_task_threads_report(task, "MIG-I", true, 16);
+ }
++void kebab_locationd_task_report(task_t task);
++void
++kebab_locationd_task_report(task_t task)
++{
++    kebab_task_threads_report(task, "MIG-L", true, 16);
++}
+ #endif /* KEBAB */

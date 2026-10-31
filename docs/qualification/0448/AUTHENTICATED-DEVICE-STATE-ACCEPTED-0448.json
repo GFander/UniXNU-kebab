@@ -1,0 +1,555 @@
+{
+  "accepted": true,
+  "version": "0448",
+  "scope": "Real authenticated factory C/D status and read-only/admin client separation; original migration advances past PreBoard unlock into plugin invocation",
+  "native_sha256": "3cc1cd1ae4e97f37e8cb67d91d222a05ed985ad8e559b36838224ea6562983ba",
+  "native_bytes": 18914600,
+  "actual_log_sha256": "4bd45a5024228b6db4c0fe3592c5835a0ee26b10b098b9b8ae2b30cf5491c255",
+  "source_replay": {
+    "version": "0448",
+    "common": 313,
+    "host": 4,
+    "files": 5261,
+    "all_equal": true
+  },
+  "formal_patches": [
+    "0333-kebab-report-authenticated-factory-device-state.patch",
+    "0334-kebab-separate-public-aks-state-from-administrative-operations.patch"
+  ],
+  "status_source": "locked snapshot of authenticated bank metadata plus real unwrapped C/D key availability",
+  "factory_no_passcode_only": true,
+  "no_generic_unlock_operation_or_new_key_generation": true,
+  "existing_systembag_and_cookie_preserved": true,
+  "state17_normal_original_client_calls_succeed": true,
+  "read_only_original_client_calls_succeed": true,
+  "administrative_volume_mapping_call_preserved": true,
+  "cookie68_implementation_unchanged_and_host_regression": true,
+  "cookie68_call_observed": false,
+  "read_only_mutation_refusal_host_exhaustive_selectors": true,
+  "original_mkb_export_return_independently_live_sampled": false,
+  "migrator_snapshots": [
+    {
+      "label": "MIG",
+      "name": "datamigrator",
+      "pid": 132,
+      "uid": 501,
+      "seconds": 63.832,
+      "scanned": 41,
+      "sample": 1,
+      "exec_base": "0x104fe4000"
+    },
+    {
+      "label": "MIG",
+      "name": "datamigrator",
+      "pid": 132,
+      "uid": 501,
+      "seconds": 334.66,
+      "scanned": 71,
+      "sample": 2,
+      "exec_base": "0x104fe4000"
+    }
+  ],
+  "old_unlock_wait_absent": true,
+  "first_observed_later_phase": "ProgressUI display info collection",
+  "second_observed_later_phase": "DataMigrationPlugin::_performOneMigrationWithParameters via DMMigrationPluginWrapperConnection::runPluginAtPath",
+  "migration_plugin_invocation_observed": true,
+  "migration_complete": false,
+  "springboard_snapshots": [
+    {
+      "label": "UI-SB",
+      "name": "SpringBoard",
+      "pid": 27,
+      "uid": 501,
+      "seconds": 83.354,
+      "scanned": 148,
+      "sample": 1,
+      "exec_base": "0x104d88000"
+    },
+    {
+      "label": "UI-SB",
+      "name": "SpringBoard",
+      "pid": 27,
+      "uid": 501,
+      "seconds": 376.336,
+      "scanned": 171,
+      "sample": 2,
+      "exec_base": "0x104d88000"
+    }
+  ],
+  "initial_springboard_pid27_survives": true,
+  "no_preboard_spawn_or_block_kill_in_this_factory_window": true,
+  "all_alternate_app_cases_fixed": false,
+  "host_core_cases": 8452,
+  "host_client_cases": 16572,
+  "host_behavioral_mutants": 21,
+  "core_and_client_tests": [
+    {
+      "passed": true,
+      "fixture_sha256": "889f98cadbd3d4654bfaea71d5cf7de897c6ff6f2694ffc8cd28a28f36744c51",
+      "source_files": {
+        "bsd/kern/kebab_file_keys.c": "96d204072e22f85d294ba3ec1d2fbd2ffd561ba5d9e5007dc572dff7aef34396",
+        "bsd/kern/kebab_device_classbag_impl.h": "40f89236e0448bf9c0feb12d73ddb8df354ab648b5b56ea1ef16a1c3aea33cb6",
+        "bsd/kern/kebab_metadata_keys_impl.h": "b27db78c230603a0682b98ec3d80d12a5df206be892bf7897e4dd247ac43eee5",
+        "bsd/kern/kebab_volume_keys_impl.h": "92f6b00b76b0c8db50aa3162a00946ebcd9e856ae9ca9b3ce8a71a51ebcb1af9",
+        "bsd/kern/kebab_volume_control_impl.h": "df27fcdfb91e5488ac64e7c0cc1b4cd23355ee3da33610f55074f7e4cc8c0c93",
+        "bsd/kern/kebab_cpx_handles_impl.h": "266b29556e011410571cc94adf45064b8b2cf968b6a66e89a74a854ce4eba91a",
+        "bsd/kern/kebab_volume_wrapped_impl.h": "3290f685416fffbb0c0c6e5e82df64f9ad3e993a5b7906add50149a7c4ae2266",
+        "bsd/kern/kebab_apfs_metadata_native_impl.h": "6f02a440f039397f94b128c0f39e4ef19a2b330d7c52d300add7ae3518950858",
+        "bsd/kern/kebab_apfs_file_native_impl.h": "51254d08bc1c0861166451a1be930c0db60f65d2fa44de79a90f57c017da747e"
+      },
+      "header_sha256": "912ddb21d8acad631df4cffc68436e13eda6ac1a65902a29ec68855e29ae0518",
+      "actual_complete_core": true,
+      "independent_rfc3394_vector": true,
+      "all4096_record_byte_tampers_revoke_status": true,
+      "authenticated_invalid_policy_and_context_and_class_checks": true,
+      "output_unchanged_on_failure": true,
+      "no_status_key_material_or_generation": true,
+      "behavioral_mutants_refused": 9,
+      "openssl_crypto_and_context_lock_models": true
+    },
+    {
+      "passed": true,
+      "native_userclient_sha256": "276e8ad4818c7bd98f340425b9caabf729549aae80171ee6f06774dcfc46fe6e",
+      "cookie_header_sha256": "431931da7f669810bad06dcbd017272a70873af3a0f9171d8fe6be809c66c998",
+      "status_header_sha256": "912ddb21d8acad631df4cffc68436e13eda6ac1a65902a29ec68855e29ae0518",
+      "fixture_sha256": "04668001bff53e8ebb7faf925893a0f9c5431ce284eb32ab47bb8f97efb4fb69",
+      "behavioral_mutants_refused": 12,
+      "original_open_access_close_cookie_notify_regression": true,
+      "inline_and_descriptor_capacity_faults": true,
+      "auth_factory_no_pin_only": true,
+      "unsupported35_preserved": true,
+      "backend_and_iokit_explicit_models": true
+    }
+  ],
+  "original_decoder_reference": {
+    "build": "20H392",
+    "cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+    "original_DER_packet": "311330070c02737302010430080c03736c73020103",
+    "meaning": {
+      "ss": "bit2: actual provisioned C/D keys available since boot",
+      "sls": "3: authenticated factory no-passcode policy; not sls0 all-class unlock"
+    },
+    "optional_unestablished_fields_omitted": true,
+    "bank_header": {
+      "version_offset": 16,
+      "policy_offset": 60,
+      "version": 1,
+      "policy": 1
+    },
+    "authenticated_inner_prefix": "DCB1/version1/factory-no-passcode1/class3/class4",
+    "class_mask": "0x18",
+    "underlying_bank_format_and_keys_unchanged": true,
+    "original_decoder_oracles": [
+      {
+        "decoder": "0x1f2eb50f8 _decode_extended_state",
+        "code_hashes": {
+          "0x1f2eb50f8": "5a09ccc3515b5d9177218d658889f62b892826c93b47191b361a387f4e676499",
+          "0x1f2eb3284": "733e8f5f14c062d77fcd085140cc3d569ce5c3a3c4d1b8317c8ecf7eb52cc410"
+        },
+        "result": {
+          "result": 0,
+          "output": "040000000300000000000000000000000000000000000000000000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+          "ss": 4,
+          "sls": 3,
+          "steps": 1717,
+          "libc_models": [
+            "memcmp",
+            "memset_s"
+          ],
+          "cache_pages": 16,
+          "validated_original_branch_pool_thunks": {
+            "0x1f2fb2e1c": {
+              "target": "0x18dc47ec4",
+              "sha256": "ed44f902a43b3c9523ccb52fe0f941b5a2285f3819ef43d7ea032a7a76bbec50"
+            },
+            "0x1f2fb2a68": {
+              "target": "0x1d1b0dd4c",
+              "sha256": "888f503fc2223a15f8d4bc99d57e252578c9d7f51b122d94ae940070562c5bfa"
+            },
+            "0x1f2fb2ab0": {
+              "target": "0x1d1b0dda4",
+              "sha256": "c71f369b696e51e5c2328973a81eabd4d74303e38fd5dd3f539da5a61f2216be"
+            },
+            "0x1f2fb2aa4": {
+              "target": "0x1d1b10810",
+              "sha256": "18dab003ed3dbe60f56c0d63851dda2b17b8e27693ebaeaeb1aa8d1409eb364e"
+            },
+            "0x1f2fb2a74": {
+              "target": "0x1d1b11830",
+              "sha256": "a6fd241664e00403c50c6dd3076e31d3e91f06df38b7c8cb0f91137c0a67b728"
+            }
+          }
+        },
+        "explicit_models": [
+          "libc memset_s",
+          "libc memcmp",
+          "stack-canary binding",
+          "nine audited constant key-pointer relocations"
+        ],
+        "explicit_data_bindings": [
+          {
+            "cell": 8895450136,
+            "raw": 2207393863696,
+            "target": 8370608144,
+            "key": "ss"
+          },
+          {
+            "cell": 8895450144,
+            "raw": 2207393863700,
+            "target": 8370608148,
+            "key": "sls"
+          },
+          {
+            "cell": 8895450152,
+            "raw": 2207393863705,
+            "target": 8370608153,
+            "key": "sb"
+          },
+          {
+            "cell": 8895450168,
+            "raw": 2207393863714,
+            "target": 8370608162,
+            "key": "sfa"
+          },
+          {
+            "cell": 8895450184,
+            "raw": 2207393863725,
+            "target": 8370608173,
+            "key": "sgs"
+          },
+          {
+            "cell": 8895450192,
+            "raw": 2207393863730,
+            "target": 8370608178,
+            "key": "sas"
+          },
+          {
+            "cell": 8895450200,
+            "raw": 2207393863735,
+            "target": 8370608183,
+            "key": "sgpe"
+          },
+          {
+            "cell": 8895450208,
+            "raw": 2207393863741,
+            "target": 8370608189,
+            "key": "srcd"
+          },
+          {
+            "cell": 8895450248,
+            "raw": 2207393863771,
+            "target": 8370608219,
+            "key": "sr"
+          },
+          {
+            "cell": 8849890480,
+            "raw": 2206836204400,
+            "target": 7812948848,
+            "import_symbol": "__platform_memcmp"
+          }
+        ]
+      },
+      {
+        "decoder": "0x1ae3dfbe0 _decode_extended_state",
+        "code_hashes": {
+          "0x1ae3dfbe0": "de56c5a1f7cac0ba3091a961aa1341da54a27dce77c97a18e815f48b78050c00",
+          "0x1ae3dffb4": "a171e668454a570ce3f3b39e9d769f39537a9b9f5fd0fd31f246bd8f856b26c9"
+        },
+        "result": {
+          "result": 0,
+          "output": "040000000300000000000000000000000000000000000000000000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+          "ss": 4,
+          "sls": 3,
+          "steps": 1717,
+          "libc_models": [
+            "memcmp",
+            "memset_s"
+          ],
+          "cache_pages": 17,
+          "validated_original_branch_pool_thunks": {
+            "0x1afb86858": {
+              "target": "0x18dc47ec4",
+              "sha256": "6ca908862c09ac30fc6f08d2a4e80960960d3839868477bdee82abc7454410ce"
+            },
+            "0x1afb86528": {
+              "target": "0x1d1b0dd4c",
+              "sha256": "713e3602af1f6f11d9469adf054cccf86c1b0daa2ec340a1faf3418a183c1421"
+            },
+            "0x1afb86558": {
+              "target": "0x1d1b0dda4",
+              "sha256": "93e2987be6c6bb31d308ad8022462f7c72a2bf31bbf509858b05915c5a63bd9d"
+            },
+            "0x1afb8654c": {
+              "target": "0x1d1b10810",
+              "sha256": "5ff58b18ce65852f6178644d9e3e8589bf50bfd87be9dc608c0cb3626b1723cd"
+            },
+            "0x1afb86534": {
+              "target": "0x1d1b11830",
+              "sha256": "31eff16f522c7ebd0f7bb0a32ce66ba5346688b97f4fee37ec70b6caf7db220f"
+            }
+          }
+        },
+        "explicit_models": [
+          "libc memset_s",
+          "libc memcmp",
+          "stack-canary binding",
+          "nine audited constant key-pointer relocations"
+        ],
+        "explicit_data_bindings": [
+          {
+            "cell": 8015402256,
+            "raw": 2206241718336,
+            "target": 7218462784,
+            "key": "ss"
+          },
+          {
+            "cell": 8015402264,
+            "raw": 2206241718340,
+            "target": 7218462788,
+            "key": "sls"
+          },
+          {
+            "cell": 8015402272,
+            "raw": 2206241718345,
+            "target": 7218462793,
+            "key": "sb"
+          },
+          {
+            "cell": 8015402288,
+            "raw": 2206241718354,
+            "target": 7218462802,
+            "key": "sfa"
+          },
+          {
+            "cell": 8015402304,
+            "raw": 2206241718365,
+            "target": 7218462813,
+            "key": "sgs"
+          },
+          {
+            "cell": 8015402312,
+            "raw": 2206241718370,
+            "target": 7218462818,
+            "key": "sas"
+          },
+          {
+            "cell": 8015402320,
+            "raw": 2206241718375,
+            "target": 7218462823,
+            "key": "sgpe"
+          },
+          {
+            "cell": 8015402328,
+            "raw": 2206241718381,
+            "target": 7218462829,
+            "key": "srcd"
+          },
+          {
+            "cell": 8015402368,
+            "raw": 2206241718411,
+            "target": 7218462859,
+            "key": "sr"
+          },
+          {
+            "cell": 7965625912,
+            "raw": 2206836204400,
+            "target": 7812948848,
+            "import_symbol": "__platform_memcmp"
+          }
+        ]
+      }
+    ],
+    "oracles_execute_original_arm64_parser_and_corecrypto": true,
+    "oracles_not_hardware_execution": true,
+    "public_status_selectors": [
+      0,
+      7,
+      14,
+      17
+    ],
+    "administrative_implemented_selectors": [
+      3,
+      65,
+      68,
+      102,
+      103
+    ],
+    "role_source": "IOUserClient::clientHasPrivilege(task,kIOClientPrivilegeAdministrator)",
+    "role_set_once_after_initWithTask_before_attach": true,
+    "names_not_used_for_access": true,
+    "full_original_entitlement_matrix_claim": false,
+    "selector35_and_other_key_operations_remain_unsupported": true,
+    "original_migration_code_unmodified": true
+  },
+  "hardware_security_regression": {
+    "version": "0448",
+    "defaults_matching_complete": true,
+    "actual_log_sha256": "4bd45a5024228b6db4c0fe3592c5835a0ee26b10b098b9b8ae2b30cf5491c255",
+    "native_sha256": "3cc1cd1ae4e97f37e8cb67d91d222a05ed985ad8e559b36838224ea6562983ba",
+    "real_apple_image4_start_succeeded": true,
+    "actual_busy_reference_released": true,
+    "busy_lifecycle": [
+      [
+        0,
+        0,
+        1,
+        "defaults"
+      ],
+      [
+        11,
+        1,
+        1,
+        "AppleImage4"
+      ],
+      [
+        14,
+        2,
+        -1,
+        "defaults"
+      ],
+      [
+        15,
+        1,
+        -1,
+        "AppleImage4"
+      ]
+    ],
+    "final_busy_state": 0,
+    "actual_waits": [
+      "IOAESAccelerator",
+      "IOResources/IONVRAM",
+      "IODTNVRAM"
+    ],
+    "hardware_nonce_and_data_restored_without_generation": true,
+    "native_nvram_existing_proxy_adopted": true,
+    "nvram_encrypted_data_banks_cold_restored": true,
+    "nvram_restored_bank": 0,
+    "nvram_restored_generation": 353,
+    "nvram_hardware_or_rollback_claim": false,
+    "nvram_durable_write_calls": 2,
+    "watchdog_enabled": true,
+    "original_iokit_monitoring_preserved": true,
+    "watchdog_heartbeat_times": [
+      41.546,
+      41.546,
+      51.542,
+      61.546,
+      71.53,
+      81.514,
+      91.539,
+      101.553,
+      111.549,
+      121.544,
+      131.505,
+      141.565,
+      151.56,
+      161.519,
+      171.51,
+      181.54,
+      191.528,
+      201.531,
+      211.524,
+      221.573,
+      231.561,
+      241.568,
+      251.554,
+      261.541,
+      271.537,
+      281.52,
+      291.529,
+      301.582,
+      311.531,
+      321.535
+    ],
+    "original_locked_observations": [
+      [
+        63.833,
+        30,
+        4
+      ],
+      [
+        93.85,
+        60,
+        7
+      ],
+      [
+        123.854,
+        90,
+        10
+      ],
+      [
+        153.906,
+        120,
+        13
+      ],
+      [
+        183.913,
+        150,
+        16
+      ],
+      [
+        213.955,
+        180,
+        19
+      ],
+      [
+        244.0,
+        210,
+        22
+      ],
+      [
+        274.03,
+        240,
+        25
+      ],
+      [
+        304.079,
+        270,
+        28
+      ],
+      [
+        334.1,
+        300,
+        31
+      ],
+      [
+        364.127,
+        330,
+        34
+      ],
+      [
+        394.165,
+        360,
+        37
+      ],
+      [
+        424.15,
+        390,
+        40
+      ],
+      [
+        454.213,
+        420,
+        43
+      ]
+    ],
+    "systembag_and_hardware_c_d_preserved": true,
+    "rtc_record_reused": true,
+    "panic": [],
+    "full_ios_or_springboard": false,
+    "gpu_display_input_started": true
+  },
+  "original_watchdog_last_seconds": 454.213,
+  "hardware_120hz_mode_qualified": false,
+  "user_panel_refresh_target_hz": 120,
+  "physical_touch_qualified": false,
+  "manual_touch_deferred_by_user": true,
+  "gpu_qualified": false,
+  "real_presentation_qualified": false,
+  "usable_springboard": false,
+  "bluetooth_deferred": true,
+  "development_fast": true,
+  "last_independent_ro_data_fsck": "0416",
+  "last_full_system_systemos_check": "0341",
+  "next": "Identify the real migration plugin/wrapper wait and complete genuine migration; transient kauth resolver waits require investigation, not ACL bypass or unproven platform changes"
+}

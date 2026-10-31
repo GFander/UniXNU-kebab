@@ -1,0 +1,1272 @@
+{
+  "version": "0436",
+  "cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+  "original_backboard_sha256": "7aa6f8bf5ea2c3634fb8c8916a4e9c3c84508de78eccf57ca65c1ae4f676267c",
+  "original_backboard_uuid": "70b72340737a39738b474e9970f4ecb9",
+  "runtime_executable_uuid_independently_verified": false,
+  "shared_cache_slide": 0,
+  "best_effort": true,
+  "main_cf_runloop": true,
+  "render_server_mach_receive": true,
+  "migration_xpc_sync_wait": true,
+  "dispatch_group_wait": true,
+  "display_failure_cause_proven": false,
+  "call_sites": [
+    {
+      "tid": 394,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_trap",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_internal",
+      "offset": "0x48",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg_overwrite",
+      "offset": "0x1e0",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "frame[1]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg",
+      "offset": "0x10",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "frame[2]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "___CFRunLoopServiceMachPort",
+      "offset": "0x98",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "frame[3]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "___CFRunLoopRun",
+      "offset": "0x4b4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "frame[4]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "_CFRunLoopRunSpecific",
+      "offset": "0x244",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "frame[5]",
+      "image": "/usr/libexec/backboardd",
+      "symbol": "sub_0x100009664",
+      "offset": "0x7d8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "frame[6]",
+      "image": "/usr/lib/dyld",
+      "symbol": "start",
+      "offset": "0x740",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 533,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "___workq_kernreturn",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 533,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_wqthread",
+      "offset": "0x164",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 533,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "_start_wqthread",
+      "offset": "0x4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "___ulock_wait",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "lr",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dlock_wait",
+      "offset": "0x30",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dispatch_group_wait_slow",
+      "offset": "0x30",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[1]",
+      "image": "/usr/libexec/backboardd",
+      "symbol": "sub_0x1000181d8",
+      "offset": "0x1c",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[2]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dispatch_call_block_and_release",
+      "offset": "0x14",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[3]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dispatch_client_callout",
+      "offset": "0xc",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[4]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dispatch_lane_serial_drain$VARIANT$armv81",
+      "offset": "0x254",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[5]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dispatch_lane_invoke$VARIANT$armv81",
+      "offset": "0x1ac",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[6]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dispatch_workloop_worker_thread",
+      "offset": "0x25c",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[7]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_wqthread",
+      "offset": "0x118",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 564,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "___workq_kernreturn",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 564,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_wqthread",
+      "offset": "0x164",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 564,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "_start_wqthread",
+      "offset": "0x4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_trap",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_internal",
+      "offset": "0x48",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg_overwrite",
+      "offset": "0x1e0",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[1]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg",
+      "offset": "0x10",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[2]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "___CFRunLoopServiceMachPort",
+      "offset": "0x98",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[3]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "___CFRunLoopRun",
+      "offset": "0x4b4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[4]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "_CFRunLoopRunSpecific",
+      "offset": "0x244",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[5]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "_CFRunLoopRun",
+      "offset": "0x38",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[6]",
+      "image": "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
+      "symbol": "___IOHIDServiceRunLoopCompatibilityThread",
+      "offset": "0x110",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[7]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_start",
+      "offset": "0x70",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_trap",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_internal",
+      "offset": "0x48",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg_overwrite",
+      "offset": "0x1e0",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[1]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg",
+      "offset": "0x10",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[2]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dispatch_mach_send_and_wait_for_reply",
+      "offset": "0x210",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[3]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "_dispatch_mach_send_with_result_and_wait_for_reply$VARIANT$armv81",
+      "offset": "0x34",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[4]",
+      "image": "/usr/lib/system/libxpc.dylib",
+      "symbol": "_xpc_connection_send_message_with_reply_sync",
+      "offset": "0xe8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[5]",
+      "image": "/System/Library/PrivateFrameworks/DataMigration.framework/DataMigration",
+      "symbol": "-[DMXPCConnection sendMessageSync:]",
+      "offset": "0x30",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[6]",
+      "image": "/System/Library/PrivateFrameworks/DataMigration.framework/DataMigration",
+      "symbol": "-[DMConnection migrateCheckingNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:]",
+      "offset": "0xac",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[7]",
+      "image": "/System/Library/PrivateFrameworks/DataMigration.framework/DataMigration",
+      "symbol": "-[DMClientAPIController _migrateWithConnection:checkNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:]",
+      "offset": "0x9c",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_trap",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_internal",
+      "offset": "0x48",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg_overwrite",
+      "offset": "0x1e0",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "frame[1]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg",
+      "offset": "0x10",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "frame[2]",
+      "image": "/System/Library/Frameworks/QuartzCore.framework/QuartzCore",
+      "symbol": "__ZN2CA6Render6Server13server_threadEPv",
+      "offset": "0x224",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "frame[3]",
+      "image": "/System/Library/Frameworks/QuartzCore.framework/QuartzCore",
+      "symbol": "__ZL10thread_funPv",
+      "offset": "0x18",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "frame[4]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_start",
+      "offset": "0x70",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "frame[5]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "_thread_start",
+      "offset": "0x4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_trap",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_internal",
+      "offset": "0x48",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg_overwrite",
+      "offset": "0x1e0",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[1]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg",
+      "offset": "0x10",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[2]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "___CFRunLoopServiceMachPort",
+      "offset": "0x98",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[3]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "___CFRunLoopRun",
+      "offset": "0x4b4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[4]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "_CFRunLoopRunSpecific",
+      "offset": "0x244",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[5]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "_CFRunLoopRun",
+      "offset": "0x38",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[6]",
+      "image": "/System/Library/Frameworks/CoreMotion.framework/CoreMotion",
+      "symbol": "__ZN16CLMotionActivity15isTypeInVehicleENS_4TypeE",
+      "offset": "0x5af4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[7]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_start",
+      "offset": "0x70",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1028,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "___workq_kernreturn",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1028,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_wqthread",
+      "offset": "0x164",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1028,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "_start_wqthread",
+      "offset": "0x4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1046,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "___workq_kernreturn",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1046,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_wqthread",
+      "offset": "0x164",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1046,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "_start_wqthread",
+      "offset": "0x4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1047,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "___workq_kernreturn",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1047,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_wqthread",
+      "offset": "0x164",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1047,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "_start_wqthread",
+      "offset": "0x4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1110,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "___workq_kernreturn",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1110,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_wqthread",
+      "offset": "0x164",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1110,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "_start_wqthread",
+      "offset": "0x4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_trap",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_internal",
+      "offset": "0x48",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg_overwrite",
+      "offset": "0x1e0",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "frame[1]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg",
+      "offset": "0x10",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "frame[2]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "___CFRunLoopServiceMachPort",
+      "offset": "0x98",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "frame[3]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "___CFRunLoopRun",
+      "offset": "0x4b4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "frame[4]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "_CFRunLoopRunSpecific",
+      "offset": "0x244",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "frame[5]",
+      "image": "/usr/libexec/backboardd",
+      "symbol": "sub_0x100009664",
+      "offset": "0x7d8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 394,
+      "kind": "frame[6]",
+      "image": "/usr/lib/dyld",
+      "symbol": "start",
+      "offset": "0x740",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 533,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "___workq_kernreturn",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 533,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_wqthread",
+      "offset": "0x164",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 533,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "_start_wqthread",
+      "offset": "0x4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "___ulock_wait",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "lr",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dlock_wait",
+      "offset": "0x30",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dispatch_group_wait_slow",
+      "offset": "0x30",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[1]",
+      "image": "/usr/libexec/backboardd",
+      "symbol": "sub_0x1000181d8",
+      "offset": "0x1c",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[2]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dispatch_call_block_and_release",
+      "offset": "0x14",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[3]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dispatch_client_callout",
+      "offset": "0xc",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[4]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dispatch_lane_serial_drain$VARIANT$armv81",
+      "offset": "0x254",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[5]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dispatch_lane_invoke$VARIANT$armv81",
+      "offset": "0x1ac",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[6]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dispatch_workloop_worker_thread",
+      "offset": "0x25c",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 550,
+      "kind": "frame[7]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_wqthread",
+      "offset": "0x118",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 564,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "___workq_kernreturn",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 564,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_wqthread",
+      "offset": "0x164",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 564,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "_start_wqthread",
+      "offset": "0x4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_trap",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_internal",
+      "offset": "0x48",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg_overwrite",
+      "offset": "0x1e0",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[1]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg",
+      "offset": "0x10",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[2]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "___CFRunLoopServiceMachPort",
+      "offset": "0x98",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[3]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "___CFRunLoopRun",
+      "offset": "0x4b4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[4]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "_CFRunLoopRunSpecific",
+      "offset": "0x244",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[5]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "_CFRunLoopRun",
+      "offset": "0x38",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[6]",
+      "image": "/System/Library/Frameworks/IOKit.framework/Versions/A/IOKit",
+      "symbol": "___IOHIDServiceRunLoopCompatibilityThread",
+      "offset": "0x110",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 824,
+      "kind": "frame[7]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_start",
+      "offset": "0x70",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_trap",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_internal",
+      "offset": "0x48",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg_overwrite",
+      "offset": "0x1e0",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[1]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg",
+      "offset": "0x10",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[2]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dispatch_mach_send_and_wait_for_reply",
+      "offset": "0x210",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[3]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "_dispatch_mach_send_with_result_and_wait_for_reply$VARIANT$armv81",
+      "offset": "0x34",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[4]",
+      "image": "/usr/lib/system/libxpc.dylib",
+      "symbol": "_xpc_connection_send_message_with_reply_sync",
+      "offset": "0xe8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[5]",
+      "image": "/System/Library/PrivateFrameworks/DataMigration.framework/DataMigration",
+      "symbol": "-[DMXPCConnection sendMessageSync:]",
+      "offset": "0x30",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[6]",
+      "image": "/System/Library/PrivateFrameworks/DataMigration.framework/DataMigration",
+      "symbol": "-[DMConnection migrateCheckingNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:]",
+      "offset": "0xac",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 897,
+      "kind": "frame[7]",
+      "image": "/System/Library/PrivateFrameworks/DataMigration.framework/DataMigration",
+      "symbol": "-[DMClientAPIController _migrateWithConnection:checkNecessity:lastRelevantPlugin:testMigrationInfrastructureOnly:]",
+      "offset": "0x9c",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_trap",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_internal",
+      "offset": "0x48",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg_overwrite",
+      "offset": "0x1e0",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "frame[1]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg",
+      "offset": "0x10",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "frame[2]",
+      "image": "/System/Library/Frameworks/QuartzCore.framework/QuartzCore",
+      "symbol": "__ZN2CA6Render6Server13server_threadEPv",
+      "offset": "0x224",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "frame[3]",
+      "image": "/System/Library/Frameworks/QuartzCore.framework/QuartzCore",
+      "symbol": "__ZL10thread_funPv",
+      "offset": "0x18",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "frame[4]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_start",
+      "offset": "0x70",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1001,
+      "kind": "frame[5]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "_thread_start",
+      "offset": "0x4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_trap",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_internal",
+      "offset": "0x48",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg_overwrite",
+      "offset": "0x1e0",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[1]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg",
+      "offset": "0x10",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[2]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "___CFRunLoopServiceMachPort",
+      "offset": "0x98",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[3]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "___CFRunLoopRun",
+      "offset": "0x4b4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[4]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "_CFRunLoopRunSpecific",
+      "offset": "0x244",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[5]",
+      "image": "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+      "symbol": "_CFRunLoopRun",
+      "offset": "0x38",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[6]",
+      "image": "/System/Library/Frameworks/CoreMotion.framework/CoreMotion",
+      "symbol": "__ZN16CLMotionActivity15isTypeInVehicleENS_4TypeE",
+      "offset": "0x5af4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1003,
+      "kind": "frame[7]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_start",
+      "offset": "0x70",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1028,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "___workq_kernreturn",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1028,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_wqthread",
+      "offset": "0x164",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1028,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "_start_wqthread",
+      "offset": "0x4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1046,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "___workq_kernreturn",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1046,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_wqthread",
+      "offset": "0x164",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1046,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "_start_wqthread",
+      "offset": "0x4",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1047,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_trap",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1047,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg2_internal",
+      "offset": "0x48",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1047,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg_overwrite",
+      "offset": "0x1e0",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1047,
+      "kind": "frame[1]",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "_mach_msg",
+      "offset": "0x10",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1047,
+      "kind": "frame[2]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "__dispatch_mach_send_and_wait_for_reply",
+      "offset": "0x210",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1047,
+      "kind": "frame[3]",
+      "image": "/usr/lib/system/libdispatch.dylib",
+      "symbol": "_dispatch_mach_send_with_result_and_wait_for_reply$VARIANT$armv81",
+      "offset": "0x34",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1047,
+      "kind": "frame[4]",
+      "image": "/usr/lib/system/libxpc.dylib",
+      "symbol": "_xpc_connection_send_message_with_reply_sync",
+      "offset": "0xe8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1047,
+      "kind": "frame[5]",
+      "image": "/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices",
+      "symbol": "-[RBSXPCMessage sendToConnection:error:]",
+      "offset": "0x140",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1047,
+      "kind": "frame[6]",
+      "image": "/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices",
+      "symbol": "-[RBSConnection executeLaunchRequest:process:assertion:error:]",
+      "offset": "0x170",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1047,
+      "kind": "frame[7]",
+      "image": "/System/Library/PrivateFrameworks/RunningBoardServices.framework/RunningBoardServices",
+      "symbol": "-[RBSLaunchRequest execute:error:]",
+      "offset": "0x40",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1110,
+      "kind": "saved pc",
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "symbol": "___workq_kernreturn",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1110,
+      "kind": "lr",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "__pthread_wqthread",
+      "offset": "0x164",
+      "nearest_symbol_only": true
+    },
+    {
+      "tid": 1110,
+      "kind": "frame[0]",
+      "image": "/usr/lib/system/libsystem_pthread.dylib",
+      "symbol": "_start_wqthread",
+      "offset": "0x4",
+      "nearest_symbol_only": true
+    }
+  ]
+}

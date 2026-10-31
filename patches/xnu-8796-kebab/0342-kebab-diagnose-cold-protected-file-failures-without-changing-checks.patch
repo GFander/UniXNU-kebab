@@ -1,0 +1,76 @@
+--- a/bsd/kern/kebab_data_files_impl.h
++++ b/bsd/kern/kebab_data_files_impl.h
+@@ -7,7 +7,7 @@
+ static int
+ kdp_metadata(vnode_t file,mount_t expected,uint32_t cls,uint64_t bytes,vfs_context_t context)
+ {
+- if(!vnode_isreg(file)||vnode_mount(file)!=expected)return EAUTH;
++ if(!vnode_isreg(file)||vnode_mount(file)!=expected){printf("KEBAB DATA FILE META: class=%u wrong type/mount identity\n",cls);return EAUTH;}
+  struct vnode_attr attr;VATTR_INIT(&attr);
+  VATTR_WANTED(&attr,va_uid);VATTR_WANTED(&attr,va_mode);VATTR_WANTED(&attr,va_nlink);
+  VATTR_WANTED(&attr,va_flags);VATTR_WANTED(&attr,va_data_size);VATTR_WANTED(&attr,va_dataprotect_class);
+@@ -16,7 +16,19 @@
+      !VATTR_IS_SUPPORTED(&attr,va_nlink)||!VATTR_IS_SUPPORTED(&attr,va_flags)||
+      !VATTR_IS_SUPPORTED(&attr,va_data_size)||!VATTR_IS_SUPPORTED(&attr,va_dataprotect_class)||
+      attr.va_uid||attr.va_nlink!=1||attr.va_flags||(attr.va_mode&07777)!=0600||
+-     attr.va_data_size!=bytes||attr.va_dataprotect_class!=cls)return EAUTH;
++     attr.va_data_size!=bytes||attr.va_dataprotect_class!=cls){
++  printf("KEBAB DATA FILE META: class=%u uid=%u mode=0%o nlink=%llu flags=0x%x bytes=%llu protection=%u supported=%u%u%u%u%u%u\n",cls,
++      VATTR_IS_SUPPORTED(&attr,va_uid)?attr.va_uid:UINT32_MAX,
++      VATTR_IS_SUPPORTED(&attr,va_mode)?attr.va_mode:0,
++      (unsigned long long)(VATTR_IS_SUPPORTED(&attr,va_nlink)?attr.va_nlink:0),
++      VATTR_IS_SUPPORTED(&attr,va_flags)?attr.va_flags:0,
++      (unsigned long long)(VATTR_IS_SUPPORTED(&attr,va_data_size)?attr.va_data_size:0),
++      VATTR_IS_SUPPORTED(&attr,va_dataprotect_class)?attr.va_dataprotect_class:0,
++      !!VATTR_IS_SUPPORTED(&attr,va_uid),!!VATTR_IS_SUPPORTED(&attr,va_mode),
++      !!VATTR_IS_SUPPORTED(&attr,va_nlink),!!VATTR_IS_SUPPORTED(&attr,va_flags),
++      !!VATTR_IS_SUPPORTED(&attr,va_data_size),!!VATTR_IS_SUPPORTED(&attr,va_dataprotect_class));
++  return EAUTH;
++ }
+  return 0;
+ }
+ 
+@@ -65,7 +77,7 @@
+ {
+  struct Work{uint8_t plain[KDP_BYTES],back[KDP_BYTES],cipher[4096];};
+  struct Work *w=kalloc_data(sizeof(*w),Z_WAITOK|Z_ZERO);if(!w)return ENOMEM;
+- vfs_context_t context=vfs_context_current();vnode_t file=NULLVP;int error=0;
++ vfs_context_t context=vfs_context_current();vnode_t file=NULLVP;int error=0;const char *step="create";
+  for(unsigned i=0;i<KDP_BYTES;++i)w->plain[i]=(uint8_t)(i*17+(i>>7)+cls*29);
+  if(create){
+   error=kdp_create(path,cls,&file,context);
+@@ -82,18 +94,21 @@
+   if(error)goto done;
+  }
+  if(rewrap){error=kdp_reclass(expected,path,cls,w->plain,w->back);if(error)goto done;}
+- error=vnode_open(path,O_NOFOLLOW|FREAD,0,0,&file,context);if(error)goto done;
+- error=kdp_metadata(file,expected,cls,KDP_BYTES,context);
++ step="open";error=vnode_open(path,O_NOFOLLOW|FREAD,0,0,&file,context);if(error)goto done;
++ step="metadata";error=kdp_metadata(file,expected,cls,KDP_BYTES,context);
+  if(!error){
+-  int residual=0;error=vn_rdwr(UIO_READ,file,(caddr_t)w->back,KDP_BYTES,0,UIO_SYSSPACE,
++  step="protected-read";int residual=0;error=vn_rdwr(UIO_READ,file,(caddr_t)w->back,KDP_BYTES,0,UIO_SYSSPACE,
+       IO_NOCACHE,vfs_context_ucred(context),&residual,NULL);
+   if(!error&&residual)error=EIO;
+  }
+- if(!error&&memcmp(w->plain,w->back,KDP_BYTES))error=EAUTH;
++ if(!error&&memcmp(w->plain,w->back,KDP_BYTES)){
++  step="plaintext-pattern";unsigned first=0;while(first<KDP_BYTES&&w->plain[first]==w->back[first])first++;
++  printf("KEBAB DATA FILE READ: class=%u first mismatch offset=%u; no file/key bytes disclosed\n",cls,first);error=EAUTH;
++ }
+  int blocksize=vfs_devblocksize(expected);
+  if(!error&&blocksize!=512&&blocksize!=4096)error=EINVAL;
+  for(unsigned i=0;!error&&i<2;++i){
+-  off_t logical=i?61440:0;daddr64_t block=-1;size_t run=0;
++  off_t logical=i?61440:0;daddr64_t block=-1;size_t run=0;step=i?"raw-extent-tail":"raw-extent-head";
+   error=VNOP_BLOCKMAP(file,logical,4096,&block,&run,NULL,VNODE_READ|VNODE_BLOCKMAP_NO_TRACK,context);
+   if(!error&&(block<0||run<4096||(uint64_t)block>UINT64_MAX/(unsigned)blocksize))error=EINVAL;
+   if(!error)error=kebab_ufs_raw_read((uint64_t)block*(unsigned)blocksize,w->cipher,4096);
+@@ -111,6 +126,7 @@
+   for(unsigned j=0;j<32;++j)printf("%02x",digest[j]);printf(" PASS\n");bzero(digest,sizeof(digest));
+  }
+ done:
++ if(error)printf("KEBAB DATA FILE FAILURE: class=%u step=%s error=%d; checks retained\n",cls,step,error);
+  if(file){int closed=vnode_close(file,FREAD,context);if(!error)error=closed;}
+  printf("KEBAB DATA FILE: fixed %s class=%u %s (%d)\n",create?"exclusive create":(rewrap?"class rewrap":"cold restore"),cls,error?"FAIL":"PASS",error);
+  bzero(w,sizeof(*w));kfree_data(w,sizeof(*w));return error;

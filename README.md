@@ -1,439 +1,161 @@
-最新输入阶段：0429/0430，正常默认0430。297 common +4 host /5259源码一致。
+# UniXNU-kebab / HiOS
 
-实机音量上/下的按下、松开已被原版HID解析器接受，并匹配原版IOHIDInterface/EventDriver；已修复RTC/NVRAM误把Data设备号写死为1/3的问题，真实1/4挂载保留全部原认证检查。两次正常启动的原密钥、加密Data、MKB、defaults与watchdog回归通过。触摸、界面事件消费、GPU、显示呈现及可用SpringBoard仍未完成；蓝牙继续延期。见[本轮范围](docs/HID-INPUT-AND-DATA-IDENTITY-20261031.md)及[验收资料](docs/qualification/0430/README.md)。以下为历史阶段。
+在 **一加 8T（kebab / Qualcomm SM8250）** 上移植 XNU，运行原版 **iOS 16.7.16（20H392）用户态**。项目采用 Mu-Silicium UEFI、DarwinBoot、自编译的 XNU 8796.141.3 和供体原版组件的 prelink 路线，参考 [UniXNU 移植指南](https://unixnu.com/zh/porting/) 与 [UniXNU-sheng](https://github.com/UniXNU/UniXNU-sheng)。
 
-最新图形/输入前置阶段：0425–0427；正常默认0427。295 common +4 host /5252源码一致。
+**截至 2026-10-31：原版 iOS 用户态、硬件密钥后端、真实加密 Data、8 核和原版 HID 触摸已经有实机证据；尚未显示可用的 SpringBoard。** 当前主线开发分支为 [`ios16`](https://github.com/GFander/UniXNU-kebab/tree/ios16)。本页汇总立项以来的成果，历史阶段的“已完成”不代表整台手机的对应功能已完成。
 
-已修正iOS16 selector74可选追踪契约，并在两次正常启动中加入原版IOHIDFamily/EventDriver闭包；实机确认一个原版IOHIDResource。真实触摸/按键HID事件、GPU、图像呈现与可用SpringBoard尚未完成，主CADisplay断言仍在。见[本轮范围](docs/GRAPHICS-PREREQUISITE-20261031.md)、[最新版指南复核](docs/GPU-DISPLAY-INPUT-REVIEW-0424.md)及[实机/源码证据](docs/qualification/0427/README.md)。蓝牙继续延期至可用SpringBoard之后。以下是历史阶段。
+## 当前基线
 
-最新阶段：0423/0424 实机板型与共享锁收尾验收通过；正常默认0424。293 common +4 host /5252源文件一致。
-
-按用户最新安排，蓝牙从现在起延期到GPU、显示、输入和可用SpringBoard之后。实际板型19805、供电拓扑、内部UART、固件/资源只读采集及测试证据已保存；控制器/HCI/RF仍未完成，蓝牙不可用。见[归档与恢复入口](docs/BLUETOOTH-DEFERRED-20261031.md)及[本轮实机/源码证据](docs/qualification/0424/README.md)。下列旧阶段顺序与“待读取板型”描述属于历史，以上述归档为准。
-
-当前阶段验收：0422；正常默认0422。292 common +4 host /5249 源码一致。
-
-真实蓝牙供电资源只读发现与等价别名检查已通过0421/0422完整重启实测。控制器供电、HCI、扫描/连接/数据仍未完成，蓝牙整体不可用。见[本阶段范围](docs/BLUETOOTH-POWER-DISCOVERY-20261031.md)、[LineageOS对照](docs/BLUETOOTH-LINEAGE-COMPARISON-20261031.md)和[源码/实机证据](docs/qualification/0422/README.md)。
-
-# UniXNU-kebab
-
-## 0404/0405历史基线（2026-10-31）
-
-新增真实SE6时钟准备与状态读取，0402及完整重启0403均验证首次获取、重复调用和UART微码/FIFO参数；修正既有GENI把字宽当深度的错误。0404原版只读Data检查通过。控制器供电、UART字节收发、HCI及蓝牙真实业务仍未完成，[范围报告](docs/BLUETOOTH-SE6-CLOCK-20261031.md)。
-
-当前进度以[最新状态](docs/STATUS.md)、[Sandbox/watchdog验收](docs/SANDBOX-WATCHDOG-20261031.md)和[最新源码回放与实机证据](docs/qualification/0404/README.md)为准。
-
-原版APFS和真实加密Data、硬件Root/nonce、原版MKB_INIT及C/D文件、持久RTC/NVRAM、原版watchdog监控均已通过对应实测。新接通原版Sandbox与真实Kebab平台watchdog类授权：原任务允许、无关服务拒绝。A/B密钥和若干原版AKS接口、剩余daemon行为及GPU/显示/输入仍需开发，尚未到达可用SpringBoard。
-
-这里公开279个板级补丁、4个Mac构建补丁以及5246源文件的独立回放证据，不分发固件/IPSW、原版闭源组件、设备密钥或私人Data。`board.toml`的早期standalone入口未参与本次端到端prelink实机验收；源码回放通过也不能代替boot镜像实测。
-
-以下保留早期移植记录，其中HFS+、单核和当时阻塞点是历史状态，请勿把它们当作最新验收结果。
-
----
-
-一加 8T（kebab，SM8250）的 UniXNU 设备仓库：**16 KiB 页**的 XNU 移植，目标是用
-iPhone X 的身份启动 iOS 16.7.16 用户态。
-
-仓库按[项目规范](https://unixnu.com/zh/contributing/repository)组织：设备仓库只放
-板级描述与设备专属补丁集，每个驱动单独一个公开仓库、以子模块引用。
-
-```
-board.toml                   unixnu 读取的板级描述
-configs/                     defconfig 与 iPhone X 的 /product 子树
-patches/xnu-8796-kebab/      本机内核补丁集（108 个文件，按文件名顺序应用）
-firmware/                    固件侧 DXE 驱动（KFLG 日志环、RPMh 探针）与中文集成说明
-scripts/make-kebab-adt.py    设备树（ADT）生成器
-drivers/KebabCPU/            子模块 -> GFander/KebabCPU（PSCI / 多核）
-drivers/KebabEarlyConsole/   子模块 -> GFander/KebabEarlyConsole（面板控制台）
-crypto-bearssl/              备用密码学补丁集（当前未启用，见文末）
-docs/BRING-UP-STATE.md       详细的移植状态记录
-docs/FIRMWARE.md             固件的构建、镜像布局与重新打包
-docs/ROADMAP.md              对照参考实现的路线图与差距分析
-docs/EP0-PROBE.md            EP0 进度探针的编码与记录点
-docs/EP0-TEST-PLAN.md        panic 后重连的真机测试流程
-docs/IOS-USERLAND.md         从 IPSW 取用户态：提取、APFS、缓存、依赖
-docs/PANEL-DSI.md            面板 AMB655X 的初始化序列与时序
-docs/GPU-ASSESSMENT.md       图形路线的决策与依据
-scripts/verify-all.sh        一条命令验证整棵树
-```
-
-克隆时加 `--recurse-submodules`。
-
----
-
-## 1. Mu-Silicium 适配情况
-
-固件在 `Mu-Silicium` 的 `Platforms/OnePlus/kebabPkg` 下，分支
-`experiment/kebab-xnu-ramdisk`，产出 `Mu-kebab.img` / `SILICIUM_UEFI.fd`。
-
-### 已完成的适配
-
-| 项目 | 状态 |
+| 项目 | 已核对的状态 |
 | --- | --- |
-| 设备包（`kebab.dsc` / `kebab.fdf` / `kebab.dec` / `DeviceBuild.py`）| ✅ |
-| UFS 初始化不再致命，能正常进入 BDS | ✅ |
-| 启动诊断（协议探测、USBCFG 候选）| ✅ |
-| 只读 RAM FAT 卷（BlockIo producer）| ✅ |
-| 把预编译的 `UniXNU.efi` / `UniXNUDxe.efi` / `DarwinBoot.efi` 打进 FV | ✅ |
-| 从 `PlatformBootManagerAfterConsole` 注册 UniXNU 启动项 | ✅ |
-| 配置卷 `\EFI\UniXNU\unixnu.toml`（菜单、Restart / Power off）| ✅ |
-| `Reboot to bootloader` 菜单项，misc 分区靠解析 GPT 定位 | ✅ |
-| 图形输出（GOP）：`0x9C000000`，1080×2400，行距 4320 字节，32 bpp | ✅ |
-| USB（主机 / 设备 / USB-C）| ⚠️ 仅排入 APRIORI，未打通 |
+| 实机 | OnePlus 8T，12 GB / 256 GB 机型；实际交给 XNU 的连续内存约 7.998 GiB |
+| CPU / 内核 | 8 核上线；ARM64、16 KiB 页、XNU 8796.141.3 / Darwin 22.6.0 |
+| 用户态来源 | iPhone X / D22AP，iOS 16.7.16，build 20H392；不是对 A11 硬件的完整模拟 |
+| 最近正常启动验收 | **0460**；最新人工触摸验收 **0459** |
+| 源码核对 | 324 个共同补丁 + 4 个 Mac 主机补丁，5,261 个源码文件与实际构建输入一致 |
+| 当前阻塞 | 原版 `locationd` 数据库初始化进入 `SQLITE_IOERR` 重试；迁移、system-shell check-in 和图形呈现尚未完成 |
+| 桌面 / 刷新率 | SpringBoard 进程已执行，尚无可用桌面；面板目标 120 Hz，真实时序尚未验证 |
 
-### USB
+最近实机源码检查点：[4662532](https://github.com/GFander/UniXNU-kebab/commit/466253282294f3f88478bac78bbbec8e6001b90f)。0460 原生内核 SHA-256：
 
-**内核侧的设备模式 USB 调试串口已经打通**，见第 3 节。
-下面是固件侧的状态，与本节的串口是两件事。
+```text
+25ab228e22dc4ac29cea74b887f1097ef3409fa8440549e25f4aac60dc642156
+```
 
-#### ⚠️ 固件侧的 USB 尚未适配完成
+详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0460 实机验收记录](docs/qualification/0460/0460-qualified-runtime.json)。编译、源码回放、实机测试分别记录，互不替代。
 
-USB 相关组件只是被**排进了 DXE APRIORI**，真机上还没有打通任何一条路径：
+## 已达成的功能
 
-| 组件 | 现状 |
+“已验证”仅覆盖表内所写的行为。比如 HID 接收成功不等于桌面已消费触摸，内部 UART 收发成功不等于蓝牙可连接。
+
+### 启动、内核与调试
+
+| 功能 | 已经实际做到 | 验证边界与资料 |
+| --- | --- | --- |
+| 完整引导交接 | 原厂 bootloader → `boot_b` → Mu-Silicium UEFI → DarwinBoot → XNU → 原版 launchd；GOP 可显示内核与 panic 文本 | 当前是设备专用实验链；[早期引导记录](docs/BRING-UP-STATE.md)、[正常启动日志](docs/qualification/0460/0460-media-boot.log) |
+| XNU 平台接入 | 板级 PlatformExpert、设备树、GICv3、架构定时器、异常、调度、Mach/BSD、内置 pthread 接入并运行真实用户进程 | 不是完整 Apple SoC 电源管理；[驱动标准化](docs/DRIVER-STANDARDIZATION-20261029.md) |
+| 8 核与大内存 | PSCI 次级核启动，8 个物理 affinity 的定时器中断、SGI 和本核回调验收；实际可用窗口 8 GiB−2 MiB | 12 GiB 全量、多 bank 接管、AMP 调度、DVFS、挂起/唤醒和系统负载压力尚未验收；[平台证据](docs/PLATFORM-BASELINE-20261029.md) |
+| 原版用户态加载 | 原版 launchd/dyld 执行、共享缓存映射、动态配置及依赖接入，后续原版系统服务运行 | 仍有 daemon 失败和系统迁移等待；[用户态资料](docs/IOS-USERLAND.md)、[CoreLocation 现场](docs/CORELOCATION-WAIT-20261031.md) |
+| 内核 USB 控制台 | DWC3 设备模式 CDC-ACM 输出，正常命令与有界诊断，实际完整传输超过 16 KiB 环容量的线程报告 | 不是 UEFI 通用 USB、主机模式或 Type-C 全功能；[0460 报告](docs/CORELOCATION-WAIT-20261031.md) |
+| panic 与恢复 | 原生 panic、stackshot、回溯及 USB panic 命令；正常同步 FASTBOOT 与已覆盖的 panic FASTBOOT 路径验证 | 内核/USB 尚未启动、控制器完全失去响应等情况不能保证软件恢复；[历史恢复测试](docs/BRING-UP-STATE.md)、[标准化验收](docs/STANDARDIZATION-RESULT-20261029.md) |
+| KDP 调试前置 | 历史阶段已接入 CDC-ACM serial KDP，保存 LLDB/线上协议与调试记录 | 这是独立开发模式；不声称所有当前多核场景可继续执行或已重复验收；[历史测试](docs/BRING-UP-STATE.md) |
+| 开发诊断与复现 | 固定对象/UUID 的进程与线程采样、退出原因追踪、源码逐文件回放、ABI 检查、打包回读、带哈希的实机记录 | 诊断成功不等于被诊断服务已修复；[开发与验证流程](docs/DEVELOPMENT.md) |
+
+### 存储、加密与原版系统服务
+
+| 功能 | 已经实际做到 | 验证边界与资料 |
+| --- | --- | --- |
+| UFS 块存储 | 使用真实内部 UFS，识别 GPT/userdata，读写、同步与 SCSI cache flush 接入；IOStorage ABI 核对 | 当前仍含轮询及继承固件状态的路径；完整 IRQ/SMMU/电源生命周期尚未完成；[存储与驱动审计](docs/DRIVER-AUDIT-20261029.md) |
+| 原版 APFS | prelink 原版 APFS；真实容器上使用 System、Preboot 和加密 Data，System 保持只读；受控 Preboot 持久写与重启读取通过 | 早期 HFS+ 根卷属于历史；当前路线为 APFS；[Data phase 2](docs/DATA-PHASE2-QUALIFIED-0351.md) |
+| Cryptex / SystemOS | 原始 SystemOS 只读介质、挂载身份、共享缓存及相关库路径接通，原版代码从中加载 | owner 内容策略与原版 trust-cache 交接不等于 Apple IM4M/SSV 认证；[启动日志](docs/qualification/0460/0460-media-boot.log)、[Cryptex 库测试](scripts/tests/cryptex-libraries-0378.cpp) |
+| 硬件 Root 与 nonce 2212 | 经 Qualcomm QSEE/Keymaster 硬件封装密钥恢复 Root，派生专用 Image4 nonce key，原版 ignition 路径继续启动；复位恢复、认证与失败拒绝已有实测 | 不是 Apple 熔丝 UID/SEP；不声称 UFS ICE 硬件数据加密或物理断电安全验收；[最新密钥回归证据](docs/qualification/0460/0460-systembag-qualified.json) |
+| 软件密码学基础 | 内核所需哈希/HMAC、PRNG/DRBG、AES-CBC 与 APFS 所用 XTS 路径接入，正反向/已知答案与真实加密文件验证 | 密钥来源的硬件保护和数据运算实现是两件事，不把软件 AES 称为硬件加速；[平台与密钥里程碑](docs/PLATFORM-BASELINE-20261029.md)、[加密 Data](docs/LOCAL-IDENTITY-AND-PROTECTED-DATA-LIFECYCLE-20261031.md) |
+| 原版 APFS 密钥接口 | FS/FV、卷控制、metadata/每文件密钥与 CPX I/O 接通；原版工具创建并挂载真实加密 Data | 当前为硬件 Root 支撑的 factory 无口令 C/D 策略，未实现全类别；[Data 与密钥生命周期](docs/LOCAL-IDENTITY-AND-PROTECTED-DATA-LIFECYCLE-20261031.md) |
+| C/D 类加密文件 | 真实文件写入、同步、复位后读取、受控 class rewrap；旧明文与原始密文样本保持；私有测试文件的类别生命周期已修复 | 不能推导 A/B 类、锁屏口令、完整 keychain 或 SEP 可用；[0459 验收](docs/qualification/0459/0459-qualified-runtime.json)、[0460 回归](docs/qualification/0460/0460-systembag-qualified.json) |
+| 真实 Data 内容与 phase 2 | 恢复 9,624 项固定初始布局、约 511 MB 逻辑文件；FactoryData/Pearl 布局、原版挂载 phase 2 及正常卸载已有实测 | 不伪造校准数据、不预设 setup 完成；原版首次系统迁移仍未完成；[恢复与验收](docs/DATA-PHASE2-QUALIFIED-0351.md) |
+| keybagd / system bag | 原版 `MKB_INIT` 完成；真实持久化 systembag envelope、认证 cookie 与实际 Data 映射，重启复用原 bank | envelope 内是本后端真实封装记录，不是 Apple SEP blob；用户态 AKS 仅已覆盖接口可用；[原版 keybagd 验收](docs/KEYBAGD-BOOTSTRAP-0356.md) |
+| RTC / 系统日历 | PMIC RTC 读取、持久日历偏移与重启恢复，解决早期系统时间回退引发的时间警告 | 不是可信时间、抗回滚或完整低功耗时钟验收；[时钟报告](docs/WATCHDOG-CLOCK-20261030.md) |
+| 持久 NVRAM / defaults | 原生 NVRAM 接口配合加密 Data 双银行文件，保留早期变量；真实 provider 匹配完成，Image4/defaults busy 回到 0 | 不是硬件 NVRAM；非 root 写者和断电撕裂写未完整验收；[60 秒等待根因及修复](docs/DEFAULTS-LIFECYCLE-20261031.md) |
+| Sandbox / watchdog 授权 | 原版 Sandbox 执行器与 MACF 保留；owner 策略精确映射真实本机 watchdog 类，watchdogd 允许、无关服务拒绝 | 策略数据经过板级适配，并非字节未改的 Apple 策略；[授权修复](docs/SANDBOX-WATCHDOG-20261031.md) |
+| 原版 watchdog 监控 | 原版用户客户端、真实心跳及截止时间持续推进；最新正常回归包含超过 300 秒的监控窗口 | 后端是软件截止时间观察器，尚非独立 Qualcomm 硬件 watchdog；有限窗口不能证明永久稳定 |
+| iOS 身份与 ACL | 去除误继承的 macOS 外部 DirectoryService resolver，恢复 Apple 原生本地 UID/GID/GUID、组与 ACL 行为 | 不放宽 MACF、ACL 或文件权限；[原始阻塞与修复证据](docs/LOCAL-IDENTITY-AND-PROTECTED-DATA-LIFECYCLE-20261031.md) |
+| 原版安装服务前置条件 | 修复精确识别出的损坏 Library 目录元数据，原版安装协调器实际创建后续目录并继续执行 | 应用安装全部完成、DataMigration 完成与 system-shell 登记仍未验收；[安装器报告](docs/INSTALLER-LIBRARY-20261031.md) |
+
+### 输入、显示与底层外设
+
+| 功能 | 已经实际做到 | 验证边界与资料 |
+| --- | --- | --- |
+| SPMI / PMIC / RPMh 基础 | 共享总线事务串行化、类型化服务、真实寄存器回读；触摸供电票据与 PON 复位已有实测 | 通用调压/时钟消费者、完整电源管理与休眠唤醒未完成；[标准化阶段记录](docs/STANDARDIZATION-RESULT-20261029.md) |
+| GENI / S3908 触摸协议 | 实际触摸控制器识别、供电、GENI 传输、TCM 帧与报告配置；修复续读前缀和 FIFO 上限问题 | 不是 Android HAL 转发或合成事件；[触摸协议验收](docs/TOUCH-PROTOCOL-20261031.md) |
+| 原版 HID 音量键 | 实机音量上/下按下、松开，经自制报告生产者进入原版 IOHIDDevice/Interface/EventDriver | GUI 消费、其他键和完整按键策略尚未逐项验收；[0429/0430 验收](docs/HID-INPUT-AND-DATA-IDENTITY-20261031.md) |
+| 原版 HID 真实触摸 | 五点点击、横竖滑动、双指分离、依次抬起及 10 秒双指保持；新增 **2,030** 份报告被原版 HID 接收，队列丢失 **0** | 实测最多 2 指；描述符 10 指容量不等于 10 指实测。GUI 事件消费、像素对齐和采样率仍未验收；[人工实机证据](docs/TOUCH-PHYSICAL-20261031.md) |
+| 物理屏幕与原版显示枚举 | 固件 GOP/控制台可见；真实屏幕 DT 声明、framebuffer 打开与原版显示枚举接通 | 此处不代表已有桌面、CoreAnimation 呈现或 GPU；[显示枚举](docs/GOP-DISPLAY-ENUMERATION-20261031.md) |
+| 显示 ABI / 布局修复 | 原版 selector29 显示区域合约修复，3x UI 缩放声明接入，原先主显示/零缩放断言在相应窗口消失 | 未证明完整模式切换与实际刷新；[显示区域](docs/DISPLAY-AREA-20261031.md)、[缩放修复](docs/DISPLAY-SCALE-20261031.md) |
+| 蓝牙开发前置资料 | 原固件只读提取、SE6 时钟/FIFO、真实内部 UART 9 组/1,225 字节收发、Command DB 供电资源及板型读取 | **蓝牙不可用**：未完成控制器供电、固件下载、HCI、扫描/连接/业务数据；按计划延期至可用 SpringBoard 之后；[完整归档](docs/BLUETOOTH-DEFERRED-20261031.md) |
+
+## 尚未达成
+
+- **可见、可交互 SpringBoard**：进程执行和同 PID 存活不是桌面验收；系统迁移与 shell check-in 仍有等待。
+- **当前数据库故障**：0460 三次实机采样确认原版 locationd 进入 SQLite I/O 错误后的 5 秒重试，实际数据库路径和失败操作尚未确定。不能据此认定是权限、损坏或缺失密钥。0461 是诊断候选，尚未实机验收。
+- **真实图形加速与呈现**：A650/Metal、CoreAnimation 到屏幕的完整链路、DPU/DSI 时序和物理 120 Hz 尚未验收；软件定时器或 FrontBoard 上报值不算物理 vsync。
+- **完整 AppleKeyStore/安全能力**：A/B 类、口令、完整 keychain、多用户及 SEP 兼容尚未完成；未知接口真实返回错误。
+- **完整手机外设体验**：蓝牙无线功能、Wi-Fi、蜂窝、音频、相机、传感器、完整充电/电池/热管理与休眠唤醒，没有本项目的完整可用验收。
+
+后续顺序为：定位实际 I/O 故障 → 完成原版迁移与 shell 登记 → 修复阻塞主线的 daemon 功能 → 推进并验证真实图形呈现和 GUI 输入 → 可用 SpringBoard → 恢复蓝牙任务。不通过隐藏日志、停止 watchdog 或伪造成功缩小问题。
+
+## 从立项到当前的里程碑
+
+| 阶段 | 成果及后续演进 |
 | --- | --- |
-| `UsbfnDwc3Dxe` / `UsbDeviceDxe` / `UsbConfigDxe`（设备模式）| 仅排入 APRIORI，未验证 |
-| `UsbBusDxe` / `UsbKbDxe` / `UsbMassStorageDxe`（主机模式）| 仅排入 APRIORI，未验证 |
-| `UsbPwrCtrlDxe`、QMP PHY、Type-C 角色切换与充电 | 未适配 |
+| 早期 bring-up | UEFI/XNU 入口、16 KiB 页、真实 UFS、HFS+ 首个用户进程、屏幕/USB/panic 调试；旧 HFS+ 路线随后被 APFS 替代 |
+| 0173–0225 标准化 | IOKit/storage 生命周期与供体 ABI、SPMI/GENI 分层、复位策略、真实服务与 Preboot 持久写；见[标准化记录](docs/STANDARDIZATION-RESULT-20261029.md) |
+| 0226–0244 硬件 nonce | 打通 QSEE/Keymaster、持久硬件封装 Root 与原版 Image4 nonce 2212，PID1 越过 ignition 阻塞 |
+| 0247–0274 APFS / SMP | APFS 主线、SystemOS/Cryptex 前置接入、2→4→8 核上线及约 7.998 GiB 连续窗口；随后接通真实 DSC/库路径 |
+| 0275–0347 加密 Data | 原版 APFS 密钥服务、卷初始化/挂载、真实 C/D 文件与 rewrap、原始明文/密文保持及存储检查 |
+| 0348–0356 原版启动任务 | 原始 Data 内容、FactoryData/Pearl 布局、phase 2 挂载、原版 keybagd/system bag 初始化 |
+| 0357–0386 时钟与授权 | RTC 日历、持久 NVRAM/defaults 资源生命周期、原版 watchdog 与板级 Sandbox 策略匹配 |
+| 0387–0424 外设研究 | AKS/daemon 诊断及蓝牙固件、时钟、UART、供电资源和板型证据；蓝牙功能延期 |
+| 0425–0443 HID / 显示前置 | 原版 HID 闭包、真实音量键、触摸协议；真实显示枚举、区域与缩放修复 |
+| 0445–0460 原版迁移追踪 | 修复 factory 状态服务、安装器目录和本地身份解析、保护文件生命周期；真实触摸验收；定位 locationd 原版数据库重试 |
 
-也就是说：**设备模式（fastboot / CDC-ACM 之类）、主机模式（U 盘、键盘）、
-USB-C 角色切换三条路都还不通**。目前固件与内核的所有输出都依赖屏幕，没有
-任何 USB 侧的输入/输出通道。
+阶段编号是构建/验收序列，表中包含诊断与回归；不表示每个编号都新增了完整功能。更详细的历史与精确边界见[文档索引](docs/README.md)。
 
-### 已知行为与限制
+## 仓库布局
 
-* **固件固定从 `boot_b` 读取载荷**，与当前活动槽位无关 —— 刷 bring-up 镜像时
-  必须写 `boot_b`。
-* 载荷卷位于 boot 镜像偏移 `0x800000`（`signed.img` 96 MiB，载荷拼接在此处）。
-* 屏幕顶部那条**绿色横条是 DarwinBoot 的 `DarwinEnter` 画的**（表示内核入口代码
-  已运行），不是内核输出。
-* 固件自身的日志走 GOP 文本输出，速度较慢但可读。
-* 暂未实现按槽位自动探测载荷卷；需要重新构建固件才能支持。
-
----
-
-## 2. UniXNU 走到哪一步了
-
-### 启动链
-
-```
-ABL → boot_b 上的镜像 → Mu-Silicium UEFI → UniXNU 菜单
-    → DarwinBoot（校验输入、ExitBootServices、x0 = boot_args 物理地址）
-    → 内核 _start（start.s）
-```
-
-### 内核已验证到达的位置
-
-截至本文档，内核在真机上已经跑过：
-
-| 阶段 | 状态 |
-| --- | --- |
-| `start.s`：引导页表、帧缓冲映射、开 MMU、KVA 交接 | ✅ |
-| `arm_init` → `PE_init_platform` → `ml_parse_cpu_topology` → `cpu_init` | ✅ |
-| `arm_vm_init`：建立正式内核 pmap、关闭 bootstrap TTBR0 | ✅ |
-| `pmap_bootstrap` → `machine_startup` → `kernel_bootstrap` | ✅ |
-| 引导线程启动、**第一次上下文切换**（`sched_startup`）| ✅ |
-| `thread_daemon_init` / `thread_call` / `thread_bind` / `mapping_adjust` / `clock_service_create` | ✅ |
-| `kdp_init` / `coredump handler` / `bootprofile_init` | ✅ |
-| `sysctl` 阶段（phase 15）| ✅ |
-| **`PE_init_iokit`**：IONVRAM 解析、"name" not a kext | ✅ |
-| `early_boot`（phase 16）、内核 PRNG 注册 | ✅ |
-| **XNU panic + stackshot + 栈回溯** | ✅ 完全可用 |
-| `trust_cache_init`（缺 AMFI/Image4 时降级）| ✅ |
-| `mac_policy_initmach` / `vnguard_policy_init` / `dtrace_early_init` | ✅ |
-| `OSKextRemoveKextBootstrap` / `machine_lockdown` / `kernel_do_post` | ✅ |
-| **`PE_lockdown_iokit`（内核自身初始化收尾）** | ✅ |
-| **`KebabPlatformExpert` 匹配成功，IOKit 开始建 nub** | ✅ |
-| `kperf_init_early`（`ml_set_max_cpus` 死锁已修）| ✅ |
-| **`bsd_init()` 进入 BSD 层** | ✅ |
-| `pthread_init()`（内置 libpthread-514.100.2）| ✅ |
-| **UFS 驱动：找到 `userdata` 分区（229043 MiB），发布 `ufsroot0`** | ✅ |
-| 挂载根文件系统（内置 HFS+，`KebabRoot`，可读写）| ✅ |
-| 加载 `/sbin/launchd`，PID 1 打开 `/dev/kebabcon` | ✅ |
-| **设备模式 USB CDC-ACM 调试串口** | ✅ 见第 3 节 |
-| **serial KDP over CDC-ACM**（LLDB 可连） | ✅ 见第 6 节 |
-| **S6SY761 触摸** + `/dev/kebab_touch` 事件节点 | ✅ 见第 7 节 |
-| **内置 `IOMobileFramebuffer`（AppleCLCD）** | ✅ 见第 4 节 |
-
-### 已修复的关键问题
-
-1. **KVA 映射偏移 16 MiB** —— 16 KiB 粒度下 32 MiB 块的低 25 位来自虚拟地址，
-   链接地址必须与物理加载地址的低位一致。内核改为链接在 `0xfffffe0006004000`。
-2. **ARMv8.4 指令** —— SM8250 的 A77/A55 是 ARMv8.2，`mrs x, DIT` 会触发未定义
-   指令异常，第一次上下文切换因此崩溃。已对 KEBAB 关闭 `__ARM_ARCH_8_4__`。
-3. **没有 crypto kext** —— `g_crypto_funcs` 永远为 NULL。SHA-1/MD5/SHA-256/512
-   改用 BearSSL 实现，内核 PRNG 用 HMAC-SHA256 DRBG，kmem 分配器用 SplitMix64。
-4. **设备树缺节点** —— 补上 `interrupt-controller = "master"`、`timer`、`pram`
-   与 `/chosen/embedded-panic-log-size`，`ml_init_timebase` 才真正执行。
-5. **早期控制台** —— 手机没有可用串口，日志镜像到帧缓冲；`kprintf` 与 panic
-   都直接打屏。
-6. **异常向量** —— 早期自建向量表会吞掉中断，现已交还 XNU 的
-   `ExceptionVectorsBase`，IRQ/FIQ 正常处理。
-7. **缺少平台驱动** —— IOKit 找不到匹配 `oneplus,kebab` 的 `IOPlatformExpert`，
-   兜底的 `IOPanicPlatform` 直接 panic。已加 `KebabPlatformExpert`
-   （`0060-kebab-platform-expert.patch`）。
-9. **没有文件系统** —— 开源树只带 `devfs`/`nullfs`/`mockfs`。HFS 需要 vendored 进内核，
-   并且要阻止 `mockfs` 抢走根设备（它的 `vfc_mountroot` 会接受任何设备）。
-10. **`ml_wait_max_cpus()` 永久睡眠** —— Apple 由 CPU 启动路径调用
-   `ml_set_max_cpus()`，我们没有那条路径，`kperf_init_early()` 的第一句就永远
-   等下去。改在引导线程里发布 `max_cpus`（`0062`）。
-11. **探针会骗人** —— 早期内联汇编探针硬编码恒等映射地址，pmap 切换后自己崩掉，
-    看起来像内核卡死。现在有原生 panic + 栈回溯，探针已全部移除。
-8. **AMFI / Image4 缺失** —— trust cache 初始化改为降级为空运行时而不是 panic
-   （`0059-kebab-trustcache.patch`）。
-
-> 教训：探针本身也会骗人。早期把内联汇编探针硬编码到恒等映射地址，而
-> `arm_vm_init` 之后该映射已关闭，探针自己崩溃、伪装成内核卡死。
-
-### 阶段 6 与阶段 7（已通过）
-
-存储、根卷与首个用户进程全部打通，详细日志与踩坑记录见
-`docs/BRING-UP-STATE.md` 第六节。结论：
-
-| 里程碑 | 证据 |
-| --- | --- |
-| UFS 分区发布 | `BSD root: ufsroot0, major 1, minor 0` |
-| HFS+ 挂载 | `hfs: mounted KebabRoot on device b(1, 0)` |
-| 根卷认证降级 | `KEBAB: root volume is not sealed (error 25); continuing` |
-| PID 1 exec 全流程 | `KEBAB: exec P1` … `P9` |
-| 用户态执行 | `KEBAB: syscall enter` |
-
-### 当前阻塞
-
-块设备层已经打通：`bsd_init` 走到 `vfs_mountroot()`，我们的 UFS 驱动：
-
-```
-ufs "userdata" on LUN 0, first block 0x2c7420, 229043 MiB, read-only
+```text
+README.md                         当前功能总览
+AGENTS.md                         本仓库协作与证据规则
+board.toml / configs/             现存板级描述与配置
+feeds.toml / unixnu.lock           组件来源与固定版本
+drivers/                          已有驱动子模块
+package/                          设备 kit 与构建集成
+firmware/                         设备固件侧源码与说明
+patches/xnu-8796-kebab/            当前共同补丁，按文件名排序
+patches/hosts/macos-dxb-13.5/       四个主机构建适配补丁
+scripts/driver-standardization/   ABI、设备树、打包与构建工具
+scripts/qualification/            公共源码回放及实机记录校验
+scripts/tests/                    生产代码/契约主机测试
+docs/STATUS.md                    当前已验收状态与阻塞
+docs/qualification/               分阶段固定哈希的验收资料
+docs/history/                     已替代的首页、交接和早期草稿
 ```
 
-它读到了 UFSHCI 寄存器、发了轮询 SCSI 命令、解析了 GPT、用 READ CAPACITY 拿到容量。
-（同时也证明了 SMMU 没有阻断内核的 DMA 缓冲区。）
+本仓库仍保留历史格式的 `board.toml`，其中 standalone、单核等设置不描述目前的完整 prelink 实机流程。**不能把旧入口当作一键重建当前 0460 的配方。** 官方格式 2、结构化 `porting.toml`/CI 和统一构建入口的迁移仍未完成；详见[仓库整理与规范差距](docs/REPOSITORY-LAYOUT.md)。
 
-失败点是 **`ENODEV`** —— 开源 xnu 树里**没有任何文件系统**（HFS/APFS 在 Apple 那边
-都是 kext）。所以下一步是把 Apple 开源的 **HFS** 编进内核，做法与参考移植一致。
-
-### 存储：UFS 根卷驱动已就位
-
-`bsd/dev/kebab_ufs.c`（`0070`–`0072` 补丁）：复用固件留下的 UFS 主控状态，
-轮询式发 SCSI 命令，按名字找到 GPT 分区并以 `ufsroot0` 暴露，供
-`rd=ufsroot0` 挂根。**只读**。全部 DMA 走一块连续内存，并用 `dc civac`/`dc ivac`
-手工维护缓存（8796 没有 `invalidate_dcache64`）。
-
----
-
-## 3. 后续要跟进的工作
-
-### 内核
-
-1. **验证 trust cache 降级** —— 期望内核越过 BSD 初始化继续前进。
-2. **AMFI / Image4 占位实现** —— 代码签名、entitlements 相关的调用需要一个最小
-   可用的替身，否则用户态启动会被挡住。
-3. **IOKit 平台驱动匹配** —— `AppleARMPE` 需要匹配的设备树节点；显示、UART、
-   USB 控制器都还没有驱动。
-4. **中断链路端到端验证** —— GIC 与虚拟定时器已初始化（`KEBAB GIC: virtual
-   timer INTID 27`），但真正的定时器中断处理还没在真机上确认。
-5. **多核** —— 目前 `cpus=1`；PSCI 与 GIC 重分发器需要在真机上逐个验证。
-6. **内存窗口** —— 内核只管理 DarwinBoot 交出的 256 MiB，设备有 12 GiB，
-   后续需要扩大窗口或让内核接管其余 DRAM。
-
-### 固件（Mu-Silicium）
-
-1. **USB 栈适配**（当前最大的固件缺口）：
-   * 设备模式：`UsbfnDwc3Dxe` → `UsbDeviceDxe` → `UsbConfigDxe`，目标是
-     fastboot / CDC-ACM 之类可用的下载与调试通道；
-   * 主机模式：`UsbBusDxe` + `UsbKbDxe` / `UsbMassStorageDxe`，目标是键盘与
-     U 盘枚举；
-   * USB-C：`UsbPwrCtrlDxe`、QMP PHY、角色切换与充电。
-2. 载荷卷**按活动槽位自动探测**（当前写死 `boot_b`）。
-2. 把 panic 日志写入 `pram`，重启后可回读。
-3. 菜单交互（音量键选择）与超时策略。
-
-### 内核服务（当前阶段）
-
-1. **libpthread 内置化** —— 把 `libpthread-514.100.2` 编进内核，填满
-   `pthread_functions` 表，让 `pthread_init()` 与线程创建可用。
-
-### 块驱动与根卷
-
-**设计决定：不使用 RAMDisk。** 内核必须从真实块设备挂载根卷，而不是从内存镜像。
-loader 里也不保留 `RAMDisk` 映射项。
-
-1. **内核块驱动（下一步的重点）** —— 在 IOKit 里实现 UFS：
-   * 控制器初始化：QMP PHY、时钟、电源域（需要内核侧的时钟/RPMh 支持）；
-   * UIC 命令、描述符读取、传输请求队列；
-   * 对外发布 `IOBlockStorageDevice` → `IOMedia`；
-   * GPT 解析后应出现 `OS` / `SystemOS` 分区。
-2. **根卷匹配**：`/chosen/root-matching` 的 UUID 要指向 `userdata` 里的系统卷，
-   让 `vfs_mountroot()` 能选到它。
-3. `launchd` 从该卷启动。
-
-参考材料：Mu-Silicium 的 `UfsDxe`（UEFI 侧）里有完整的寄存器序列、PHY 与
-UIC 配置，可以作为写内核驱动时的对照；但它本身是 UEFI 代码，不能直接搬进内核。
-
-### 用户态
-2. **kext 加载**：设备树 `/chosen/memory-map` 里的 booter kext 目前是空的，
-   后续需要把 AMFI 等内核扩展塞进载荷。
-4. **AMFI / Image4 最小实现**：代码签名与 entitlements 校验需要能通过。
-5. 启动 `launchd` → 加载 iOS 16.7.16 的 `/System/Library` 组件。
-6. 用 iPhone X（`D22AP`）的身份完成平台相关校验。
-
----
-
-## 构建与刷机
-
-内核与载荷由 GitHub Actions（`macos-dxb.yml`，`blacktop/darwin-xnu-build`）构建，
-产物发布在 `GFander/UniXNU` 的 `kebab-latest` release：
+## 获取源码与验证
 
 ```sh
-# 载荷 -> boot 镜像
-gunzip -c payload.img.gz > payload.img          # 必须正好 67,108,864 字节
-python pack.py                                   # 拼接到 signed.img 的 0x800000
-
-# 刷机（务必是 boot_b）
-fastboot flash boot_b XNU-<n>.img
-fastboot reboot
+git clone --branch ios16 --recurse-submodules https://github.com/GFander/UniXNU-kebab.git
+cd UniXNU-kebab
 ```
 
-回到 LineageOS：`fastboot flash boot_a <lineage boot.img>`。
+公共源码回放需要 Git、Python 3 和本地 Apple OSS XNU 仓库，脚本固定基提交并应用当前补丁。它不需要手机、IPSW、SDK 或任何密钥：
 
-## 备用密码学补丁集
-
-`crypto-bearssl/` 里是完整替换 `libkern/crypto` 包装的 BearSSL 补丁（SHA-1、
-MD5、SHA-256/384/512、HMAC-DRBG、AES-CBC），应用、编译与 982 组测试向量均已
-验证通过。当前内核只需要 SHA-1 与 PRNG，因此尚未启用；等后续阶段需要 MD5、
-SHA-384/512 或 AES 时再应用（注意 `0050` 会取代现有 SHA-1 补丁）。
-
----
-
-## 3. USB 调试串口（内核侧，已打通）
-
-内核把 DWC3 从设备模式接管过来，枚举成一个 **CDC-ACM 串口**：主机侧不需要装驱动，
-Windows 显示为「USB 串行设备 (COMx)」，macOS 是 `/dev/tty.usbmodem*`。
-
-```
-内核 printf ──→ _cnputc() ──→ 16 KiB 无锁环形缓冲 ──→ 事件线程每 2 ms 提交 bulk IN
+```sh
+git clone https://github.com/apple-oss-distributions/xnu.git ../apple-xnu
+mkdir -p .cache/qualification
+python3 scripts/qualification/replay-xnu.py \
+  --repo . --xnu-source ../apple-xnu \
+  --manifest docs/qualification/0460/all-mac-source-0460.json \
+  --receipt .cache/qualification/replay-0460.json \
+  --cache .cache --expected-common 324
 ```
 
-**挂点在 `_cnputc`，不是 `_cnputs`**：panic 报告走的是无缓冲通路
-（`paniclog_append_noflush` → `consdebug_putc_unbuffered` →
-`console_write_unbuffered` → `_cnputc`），挂在 `_cnputs` 上会漏掉全部 panic 输出。
-`_cnputs` 本身逐字符调用 `_cnputc`，一个钩子覆盖两条路径。
+校验已公开的真实触摸记录：
 
-### panic 捕获
-
-panic 时事件线程已停，因此 `kebab_usb_log()` 在 `panic_active()` 下走同步路径
-`ud_flush_from_panic()`：每次取 511 字节、提交、**等待完成事件**，直到环空；带单所有者
-原子标志，防止传输路径里的 `printf` 递归进来。
-
-实测一次 panic 能送出 **约 8.9 KB**，包含寄存器现场、逐层栈回溯（lr/fp）、Zone info、
-Metadata 和 Stackshot 统计。
-
-> **使用前提**：串口必须在 panic 之前就已经打开。panic 之后设备不再完成控制传输，
-> 主机无法重新配置端口。
-
-### 已知问题
-
-| 问题 | 状态 |
-| --- | --- |
-| panic 后重新连接 | ❌ 未打通。`haltRestart` 钩子已确认被调用（panic 后没有 `MACH Reboot`，说明 `PEHaltRestart` 没返回），泵循环在跑，但主机无法重新配置端口 |
-| 交互式调试器（KDP over CDC-ACM） | ❌ 未实现，需要把 KDP 架到 bulk 端点上 |
-| `debug=0x14f` 停在调试器 | ❌ 仍然走重启路径，运行时的 `panicDebugging` / panic options 待用探针确认 |
-
-## 4. 显示（内置 IOMobileFramebuffer）
-
-`AppleCLCD` 从 `PE_current_console()` 取引导器留下的 GOP 帧缓冲
-（`0x9C000000`，1080×2400，行距 4320，32 bpp），把它发布成 IOSurface，
-再作为 `IOMobileFramebuffer` 服务注册。启动日志：
-
-```
-KEBAB FB: AppleCLCD 1080x2400 stride 4320 at 0x9c000000, default surface 1
-KEBAB FB: started 1080x2400
+```sh
+python3 scripts/qualification/verify-touch-live.py \
+  --qualification docs/qualification/0459-touch \
+  --source-manifest docs/qualification/0459/all-mac-source-0459.json \
+  --output .cache/qualification/touch-0459.json
 ```
 
-面板由引导器直接扫描输出，因此不需要写 DPU 就能出画面。`KebabSurface` 提供
-IOSurface 语义，`SwapEnd` 用 CPU 把图层拷进面板内存，vsync 是 60 Hz 定时器。
+上述命令分别检查公开源码与已封存测试记录，不会在手机上重新执行触摸，也不证明新构建的运行状态。实际内核构建依赖固定 Xcode/KDK/SDK、合法取得的供体输入、prelink 工具和私有设备配置，参见[开发流程](docs/DEVELOPMENT.md)及[历史构建基线](docs/BUILD-BASELINE-20261029.md)。当前不提供未经复验的一键刷机说明。
 
-## 5. 本地构建（不再依赖 CI）
+## 证据、许可与致谢
 
-一台 macOS 14.6 虚拟机 + Xcode 15.4 即可，首次约 20 分钟，之后增量 2～4 分钟：
+每个已验收小目标分别保存源码补丁、主机测试、构建/ABI、实机日志和哈希收据。正常开发启动使用已记录的 development-fast 策略；不在每次启动重复扫描全部 System/SystemOS 或恢复整个 Data，完整扫描与原版只读 fsck 使用独立验收流程。
 
-```bash
-~/kebab-build/build-local.sh          # 增量构建
-~/kebab-build/check-file.sh bsd/dev/kebab_usb.c   # 单文件语法检查，1 秒
-```
+仓库发布板级源码、补丁、工具和经审阅的验收资料，不分发 IPSW、Apple 闭源二进制、可刷固件、硬件根密钥、keyblob 或私人 Data。开发者 owner 策略与板级兼容服务不代表通过 Apple 原厂安全启动认证。
 
-`pack-payload.py` 直接在 FAT32 里替换内核文件（保留 ADT 与启动参数），
-`pack-boot.py` 把 64 MiB 载荷放到 boot 镜像的 `0x800000`。
-
-需要注意的三点：
-
-* Xcode 必须是 **15.x**。Xcode 26/27 的 `iig` 生成的代码引用 xnu-8796 没有的 `IORPC` 成员。
-* dxb 编译 `libfirehose_kernel.a` 时写死了 `ARCHS="x86_64 arm64e"`，arm64 内核链不上，要补上 `arm64`。
-* dxb 会把 PATH 净化成只含 Xcode 与系统目录，`python`（macOS 只有 `python3`）需要
-  `$HOME/bin` 提供包装脚本，并让 build.sh 保留该目录。
-
----
-
-## 6. 内核调试（serial KDP over CDC-ACM）
-
-控制台本身就是 KDP 的传输层：`pal_serial_putc_nocr`/`pal_serial_getc` 在
-`kebabkdp=1` 时改走 USB，其余情况仍是 UART。一帧 KDP 约 3 KB，所以 bulk-OUT
-环从 256 字节扩到 4096。
-
-```
-启动           debug=0x14e serial=3 kebabusb=1 kebabkdp=1
-启动即停在 KDP debug=0x14f serial=3 kebabusb=1 kebabkdp=1
-
-主机           python3 scripts/kdp-cdc-bridge.py /dev/ttyACM0 --udp-port 41139
-               lldb -o "kdp-remote 127.0.0.1:41139"
-```
-
-KDP 字节直接注入 USB 环，不经过 `_cnputc`，所以不会打到屏幕上；主机桥只接受
-`0xFA..0xFB` 且 CRC32 正确的帧，中间的日志文本被忽略。
-
-`DB_KDP_GETC_ENA (0x200)` 一律不使用 —— 键盘轮询会把协议字节吃掉。
-
-## 7. 触摸
-
-`S6SY761` over QUPv3 SE13（基址 `0xA94000`，wrapper `0xAC0000`，I2C `0x48`，
-GPIO 36/37 mux 到 qup13，reset 38，irq 39）。地址取自设备自己的 DTB，不是猜的。
-
-坐标要经过三个空间：
-
-```
-传感器  0..1079 × 0..2399
-   ↓  kt_transform()
-面板    1080 × 2400
-   ↓  加上显示呈现原点 (22,18)
-逻辑    1125 × 2436     ← 用户态看到的分辨率
-```
-
-事件写进 64 槽静态环，通过 `/dev/kebab_touch` 供 `read(2)` 读取；队列满时覆盖最旧
-并计数丢弃，没有消费者时只丢历史、不丢内存。开机自检会压 192 条验证这一行为。
-
-**内核里没有 HID 框架**：`iokit/hid` 不存在，配置里 `options NO_KERNEL_HID`，
-而且没有 kxld 所以不能加载 kext。要走 `IOHIDFamily` 得先移植整个子系统 ——
-那是独立的工程，不是补丁。
-
-## 8. 用户态提取（P1 前置）
-
-真实 iOS 16.7.16（20H392）的二进制已经从 IPSW 里取出来了，走 HTTP Range，
-不需要下载 6.17 GB：
-
-```
-/usr/lib/dyld         922,912   dyld-1067
-/sbin/launchd         541,600
-/usr/libexec/xpcproxy  96,352   launchd 的 job spawn 入口
-```
-
-iOS 的文件是 `UF_COMPRESSED` + decmpfs **type 4**（64 KiB zlib 分块，存在资源叉里），
-不是 LZFSE。资源叉的 oid 是 inode+1，chunk offset 相对 `0x104`。
-
-根卷需要两块：OS 卷给 `/usr/lib/dyld` 和 `/usr/libexec/xpcproxy`，
-`Cryptex1,SystemOS` 给 44 个分片的共享缓存。**xpcproxy 不在 cryptex**：那个卷的
-`/usr` 下只有 `lib/`。**libSystem 在任何地方都不是文件**，它由共享缓存提供。
-
-签名侧：IPSW 里有独立的 `087-86698-044.dmg.trustcache`（2,760 条），
-内核在 `bsd_init` 从 `/System/Library/Caches/com.apple.kernelcaches/static.trustcache`
-加载，`kebab_cs` 位掩码控制策略（开发用 `kebab_cs=15`）。
-
-细节见 `docs/IOS-USERLAND.md`。
+感谢 [UniXNU](https://github.com/UniXNU/UniXNU)、[UniXNU-sheng](https://github.com/UniXNU/UniXNU-sheng)、Mu-Silicium、[Apple OSS](https://github.com/apple-oss-distributions)、[LineageOS](https://github.com/LineageOS) 及相关上游项目。许可见 [LICENSE](LICENSE) 与 [licenses/](licenses/)；各来源保留其自身许可。

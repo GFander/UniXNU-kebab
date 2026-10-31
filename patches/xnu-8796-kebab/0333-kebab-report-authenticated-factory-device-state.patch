@@ -1,0 +1,106 @@
+--- a/bsd/kern/kebab_file_keys.h
++++ b/bsd/kern/kebab_file_keys.h
+@@ -32,6 +32,15 @@
+ int kebab_device_classbag_create(const uint8_t[16],const uint8_t[16],void *,unsigned);
+ int kebab_device_classbag_open(const uint8_t[16],const uint8_t[16],const void *,unsigned);
+ bool kebab_device_classbag_available(void);
++/* Backend metadata only. This describes the authenticated factory C/D bank,
++ * not Apple SEP, passcode support or availability of other key classes. */
++#define KEBAB_DEVICE_BAG_FACTORY_NO_PASSCODE 1u
++#define KEBAB_DEVICE_BAG_CLASS_C_D_MASK ((1u << 3) | (1u << 4))
++struct kebab_device_classbag_status {
++ uint32_t version, policy, available_classes;
++};
++int kebab_device_classbag_get_status(struct kebab_device_classbag_status *);
++
+ int kebab_device_classbag_export(void *,unsigned);
+ int kebab_device_classbag_cookie(const uint8_t[16],void *,unsigned);
+ int kebab_keybag_d_create(const uint8_t uuid[16], void *, unsigned);
+--- a/bsd/kern/kebab_device_classbag_impl.h
++++ b/bsd/kern/kebab_device_classbag_impl.h
+@@ -95,6 +95,34 @@
+  lck_mtx_lock(&kfk_lock);bool ready=kfk_ready&&kdb_ready;lck_mtx_unlock(&kfk_lock);return ready;
+ }
+ 
++/* Snapshot public policy and actual unwrapped class availability under the
++ * same lock used by authentication/revocation. Unknown policies fail closed.
++ * A status read never generates, loads, modifies or exports any key material. */
++int
++kebab_device_classbag_get_status(struct kebab_device_classbag_status *output)
++{
++ if(!kfk_context()||!kfk_range(output,sizeof(*output))||
++     kfk_overlap(output,sizeof(*output),kdb_record,sizeof(kdb_record))||
++     kfk_overlap(output,sizeof(*output),kdb_class_c,sizeof(kdb_class_c))||
++     kfk_overlap(output,sizeof(*output),kdb_class_d,sizeof(kdb_class_d))||
++     kfk_overlap(output,sizeof(*output),kdb_identifier,sizeof(kdb_identifier)))return (int)kIOReturnBadArgument;
++ struct kebab_device_classbag_status status={0};
++ lck_mtx_lock(&kfk_lock);
++ int error=(kfk_ready&&kdb_ready)?0:(int)kIOReturnNotReady;
++ if(!error){
++  memcpy(&status.version,kdb_record+16,sizeof(status.version));
++  memcpy(&status.policy,kdb_record+60,sizeof(status.policy));
++  if(kdb_nonzero(kdb_class_c,sizeof(kdb_class_c)))status.available_classes|=1u<<3;
++  if(kdb_nonzero(kdb_class_d,sizeof(kdb_class_d)))status.available_classes|=1u<<4;
++  if(status.version!=1||status.policy!=KEBAB_DEVICE_BAG_FACTORY_NO_PASSCODE||
++      status.available_classes!=KEBAB_DEVICE_BAG_CLASS_C_D_MASK||
++      !memcmp(kdb_class_c,kdb_class_d,sizeof(kdb_class_c)))error=(int)kIOReturnNotReady;
++  if(!error)memcpy(output,&status,sizeof(status));
++ }
++ lck_mtx_unlock(&kfk_lock);
++ return error;
++}
++
+ /* Export only the already-authenticated sealed bank, never its plaintext
+  * C/D keys. Root cancellation and failed authentication revoke this copy. */
+ int
+--- a/iokit/Kernel/arm/kebab_aks_userclient_impl.h
++++ b/iokit/Kernel/arm/kebab_aks_userclient_impl.h
+@@ -13,6 +13,39 @@
+ }
+ 
+ #include "kebab_aks_cookie_impl.h"
++
++
++/* Original aks_get_device_state returns a DER SET of UTF8-key/INTEGER
++ * sequences. Only report the two fields established by our real bank:
++ * ss bit2 (provisioned C/D keys available since boot), sls3 (factory no PIN).
++ * Do not claim sls0/all-class unlock or invent SEP/backoff/generation fields.
++ * The original target decoder handles absent optional fields itself. */
++static IOReturn
++kuc_device_state_method(IOExternalMethodArguments *a)
++{
++ if(a->scalarInputCount!=1||!a->scalarInput||a->scalarInput[0]||
++     a->scalarOutputCount||a->structureInputSize||a->structureInputDescriptor||
++     (a->structureOutputDescriptor&&a->structureOutput))return kIOReturnBadArgument;
++ const size_t bytes=21;
++ size_t capacity=a->structureOutputDescriptor?a->structureOutputDescriptor->getLength():a->structureOutputSize;
++ if(capacity<bytes||(!a->structureOutputDescriptor&&!a->structureOutput))return kIOReturnNoSpace;
++ struct kebab_device_classbag_status status={};
++ IOReturn result=(IOReturn)kebab_device_classbag_get_status(&status);
++ if(result!=kIOReturnSuccess)return result;
++ if(status.version!=1||status.policy!=KEBAB_DEVICE_BAG_FACTORY_NO_PASSCODE||
++     status.available_classes!=KEBAB_DEVICE_BAG_CLASS_C_D_MASK)return kIOReturnNotReady;
++ /* Canonical DER SET ordering: the shorter ss entry precedes sls. */
++ const uint8_t state[bytes]={0x31,0x13,
++     0x30,0x07,0x0c,0x02,'s','s',0x02,0x01,0x04,
++     0x30,0x08,0x0c,0x03,'s','l','s',0x02,0x01,0x03};
++ if(a->structureOutputDescriptor){
++  if(a->structureOutputDescriptor->writeBytes(0,state,bytes)!=bytes)return kIOReturnIOError;
++  a->structureOutputDescriptorSize=(uint32_t)bytes;
++ }else{memcpy(a->structureOutput,state,bytes);a->structureOutputSize=bytes;}
++ IOLog("KEBAB AKS STATE: authenticated factory policy=%u available-classes=0x%x sls=3 ss=4; C/D only, no A/B/passcode/SEP\n",
++     status.policy,status.available_classes);
++ return kIOReturnSuccess;
++}
+ 
+ static IOReturn kuc_notify_method(IOService *,uint32_t,IOExternalMethodArguments *);
+ 
+@@ -41,6 +74,8 @@
+   result=kuc_notify_method(getProvider(),selector,a);
+  }else if(selector==65||selector==68){
+   result=kuc_cookie_method(selector,a);
++ }else if(selector==17){
++  result=kuc_device_state_method(a);
+  }else if(selector==14){
+   if(in||out!=1||!a->scalarOutput||si||a->structureInputDescriptor||a->structureOutputSize||a->structureOutputDescriptor)result=kIOReturnBadArgument;
+   else{a->scalarOutput[0]=0;a->scalarOutputCount=1;result=kIOReturnSuccess;}

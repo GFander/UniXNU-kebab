@@ -1,0 +1,62 @@
+--- a/bsd/dev/kebab_data_template_impl.h
++++ b/bsd/dev/kebab_data_template_impl.h
+@@ -219,6 +219,51 @@
+  return error;
+ }
+ 
++/* Repair only the observed impossible legacy directory metadata, before
++ * launchd: the original mobile installer requests Library mode0751/class4.
++ * The existing boot gate authenticates Data/roots/template first. kdi_lookup
++ * refuses every symlink component and requires this exact Data mount. Never
++ * replace the directory, enumerate/delete contents, touch ACLs explicitly,
++ * or override authorization. Ordinary metadata and missing paths are left
++ * for the original container/installer lifecycle. */
++static int
++kdi_installer_library_prepare(mount_t data)
++{
++ static const char path[]="/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.installcoordinationd/Library";
++ vnode_t file=NULLVP;int error=kdi_lookup(path,&file,data,false);
++ if(error==ENOENT){printf("KEBAB INSTALLER LIBRARY: absent; original initializer retained\n");return 0;}
++ if(error)return error;
++ struct vnode_attr a={};VATTR_INIT(&a);
++ VATTR_WANTED(&a,va_uid);VATTR_WANTED(&a,va_gid);VATTR_WANTED(&a,va_mode);
++ VATTR_WANTED(&a,va_flags);VATTR_WANTED(&a,va_dataprotect_class);
++ error=vnode_getattr(file,&a,vfs_context_current());
++ if(!error&&(!vnode_isdir(file)||!VATTR_IS_SUPPORTED(&a,va_uid)||!VATTR_IS_SUPPORTED(&a,va_gid)||
++     !VATTR_IS_SUPPORTED(&a,va_mode)||!VATTR_IS_SUPPORTED(&a,va_flags)||
++     !VATTR_IS_SUPPORTED(&a,va_dataprotect_class)))error=EAUTH;
++ bool legacy=!error&&a.va_uid==(uid_t)-2&&a.va_gid==(gid_t)-2&&
++     (a.va_mode&07777)==0&&a.va_flags==0&&a.va_dataprotect_class==0;
++ if(!error&&legacy){
++  struct vnode_attr desired={};VATTR_INIT(&desired);
++  VATTR_SET(&desired,va_uid,501);VATTR_SET(&desired,va_gid,501);
++  VATTR_SET(&desired,va_mode,0751);VATTR_SET(&desired,va_dataprotect_class,4);
++  error=vnode_setattr(file,&desired,vfs_context_current());
++  if(!error){
++   VATTR_INIT(&a);VATTR_WANTED(&a,va_uid);VATTR_WANTED(&a,va_gid);VATTR_WANTED(&a,va_mode);
++   VATTR_WANTED(&a,va_flags);VATTR_WANTED(&a,va_dataprotect_class);
++   error=vnode_getattr(file,&a,vfs_context_current());
++   if(!error&&(!VATTR_IS_SUPPORTED(&a,va_uid)||!VATTR_IS_SUPPORTED(&a,va_gid)||
++       !VATTR_IS_SUPPORTED(&a,va_mode)||!VATTR_IS_SUPPORTED(&a,va_flags)||
++       !VATTR_IS_SUPPORTED(&a,va_dataprotect_class)||a.va_uid!=501||a.va_gid!=501||
++       (a.va_mode&07777)!=0751||a.va_flags||a.va_dataprotect_class!=4))error=EAUTH;
++  }
++ }
++ vnode_put(file);
++ if(!error&&legacy){error=VFS_SYNC(data,MNT_WAIT,vfs_context_current());if(!error)error=kebab_ufs_sync();}
++ printf("KEBAB INSTALLER LIBRARY: legacy=%u error=%d uid=%u gid=%u mode=0%o class=%u; fixed Data directory only\n",
++     legacy,error,a.va_uid,a.va_gid,a.va_mode&07777,a.va_dataprotect_class);
++ return error;
++}
++
+ int
+ kebab_data_template_prepare(proc_t p,user_addr_t scratch,mount_t data,unsigned action)
+ {
+@@ -264,6 +309,7 @@
+   printf("KEBAB DATA TEMPLATE: final durable filesystem=%d UFS=%d\n",synced,flushed);
+   if(!error)error=synced?synced:flushed;
+  }
++ if(!error&&action==3)error=kdi_installer_library_prepare(data);
+  if(!error)error=koos_identity();
+  printf("KEBAB DATA TEMPLATE: %s %s (%d), entries=%u bytes=%llu; original logical contents +normalized compression, no calibration claim\n",action==3?"ready":(install?"restore":"cold-verify"),error?"FAIL":"PASS",error,action==3?0:KDI_COUNT,bytes);
+  if(w->scan.uio)uio_free(w->scan.uio);if(w->scan.buffer){bzero(w->scan.buffer,KCM_CHUNK);kfree_data(w->scan.buffer,KCM_CHUNK);}bzero(w,sizeof(*w));kfree_data(w,sizeof(*w));return error;

@@ -1,0 +1,37 @@
+{
+  "commit": "98a7970af93b7e01ee77156e7fa0eb7e059a57f0",
+  "all_git_blobs_verified": true,
+  "sources": [
+    {
+      "local": "touch-kona-mtp-reference.dtsi",
+      "git_blob_sha1": "921e69197553a3e4c4f06ebb285976e1b1812232",
+      "sha256": "acc033808bca1600f3bdce7f5a7651850125921768b8b4adba19063f30a84fa6",
+      "url": "https://github.com/LineageOS/android_kernel_oneplus_sm8250/blob/98a7970af93b7e01ee77156e7fa0eb7e059a57f0/arch/arm64/boot/dts/vendor/oplus/kebab/kona-mtp.dtsi"
+    },
+    {
+      "local": "touch-lineage-syna-tcm-oncell.c",
+      "git_blob_sha1": "2e1bc90d3d91a322eb08271281fba69aa52cd8c0",
+      "sha256": "16d0f000bada75707836f23f56bb011708b0da01f9786bb43697f80eff99affb",
+      "url": "https://github.com/LineageOS/android_kernel_oneplus_sm8250/blob/98a7970af93b7e01ee77156e7fa0eb7e059a57f0/drivers/input/touchscreen/oplus_touchscreen/Synaptics/Syna_tcm_oncell/synaptics_tcm_oncell.c"
+    },
+    {
+      "local": "touch-lineage-syna-tcm-oncell.h",
+      "git_blob_sha1": "f46988bc779073ff7b3cc5187203debcc852bd3a",
+      "sha256": "3b42f3d03b9de00e300c486369354886321706f85689954467513d81982b31a5",
+      "url": "https://github.com/LineageOS/android_kernel_oneplus_sm8250/blob/98a7970af93b7e01ee77156e7fa0eb7e059a57f0/drivers/input/touchscreen/oplus_touchscreen/Synaptics/Syna_tcm_oncell/synaptics_tcm_oncell.h"
+    }
+  ],
+  "board_project": 19805,
+  "i2c_address": "0x4b",
+  "gpio_reset": 38,
+  "gpio_irq": 39,
+  "supplies": [
+    "pm8150_l13",
+    "pm8150a_l1"
+  ],
+  "continued_read_prefix": "a5 03",
+  "continued_write_opcode": "01",
+  "native_bus_limit": 64,
+  "controller_actual_identify_write_limit": 1024,
+  "firmware_download_not_required_by_current_evidence": true
+}

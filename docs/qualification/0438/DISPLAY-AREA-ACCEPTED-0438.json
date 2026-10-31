@@ -1,0 +1,224 @@
+{
+  "accepted": true,
+  "scope": "Original selector29 layout/value semantics repaired:8B/twoFloat32, second reported pixel dimension/pitch then first/pitch; NOT physical panel calibration, GPU or GUI acceptance",
+  "version": "0438",
+  "native_sha256": "e6a289cd5e246d6ba45163fc4efa6fb512c82a9191f30508881d99eee69ba0f5",
+  "native_bytes": 18930328,
+  "actual_log_sha256": "b11ce418bdd4765a35838cc7bcb7cdae0e695fee15a8cdb8770264fe828d1b4e",
+  "source_replay": {
+    "common": 304,
+    "host": 4,
+    "files": 5261,
+    "all_equal": true
+  },
+  "actual_original_backboardd_call": {
+    "selector": 29,
+    "scalar_in": 0,
+    "scalar_out": 0,
+    "struct_out": 8,
+    "result": 0
+  },
+  "previous_0437_result": "0xe00002db",
+  "donor_primary_reference": {
+    "donor_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+    "read_only": true,
+    "component": "com.apple.iokit.IOMobileGraphicsFamily",
+    "unique_dispatch_table": "0xfffffff006decb58",
+    "independently_matched_selector_rows": {
+      "8": [
+        0,
+        0,
+        2,
+        0
+      ],
+      "28": [
+        0,
+        0,
+        1,
+        0
+      ],
+      "29": [
+        0,
+        0,
+        0,
+        8
+      ],
+      "57": [
+        0,
+        0,
+        1,
+        0
+      ],
+      "74": [
+        1,
+        0,
+        1,
+        64
+      ]
+    },
+    "provider_vtable": "0xfffffff006def8d0",
+    "provider_class_name_not_independently_recovered": true,
+    "functions": {
+      "selector29_trampoline": {
+        "address": "0xfffffff005c00a98",
+        "bytes": 52,
+        "sha256": "664616ab9ed7efa2b5e3d80f51b6c22ab78f742d42a73fe1edc8b0428795ae6d"
+      },
+      "provider_delegate": {
+        "address": "0xfffffff005bfe82c",
+        "bytes": 56,
+        "sha256": "5a267cfb971afc5d22e80f5bd434c49323a6658bc19c6eaf74bf1c39e96af8cc"
+      },
+      "area_reference_implementation": {
+        "address": "0xfffffff005c1d260",
+        "bytes": 216,
+        "sha256": "089e41b50d6de2b271a095e130e8ede9c9fdfbf33ea2ac6508e33849dfcae29e"
+      },
+      "dot_pitch_reference_implementation": {
+        "address": "0xfffffff005c1d128",
+        "bytes": 312,
+        "sha256": "0b71bd23fd8ca1b720760121d6700a2962f5912d6e8d28cdf8e3995d78da88fe"
+      },
+      "display_size_reference_implementation": {
+        "address": "0xfffffff005c247ac",
+        "bytes": 112,
+        "sha256": "9281b91dafd5c88bce502428114888d579b560dba4fc2b6ab501d5acb591e1c6"
+      }
+    },
+    "area_virtual_offset": "0x5e8",
+    "dot_pitch_virtual_offset": "0x5e0",
+    "display_size_virtual_offset": "0x7b0",
+    "display_size_first_field": "0x1458",
+    "display_size_second_field": "0x145c",
+    "area_first_float_field": "0x145c",
+    "area_second_float_field": "0x1458",
+    "output_layout": "two IEEE754 Float32, second reported pixel dimension/pitch then first reported pixel dimension/pitch",
+    "output_bytes": 8,
+    "pitch_property": "dot-pitch",
+    "older_single_CGFloat_header_not_used_as_abi_proof": true,
+    "reported_logical_dimensions": [
+      1125,
+      2436
+    ],
+    "reported_logical_pitch": 458,
+    "logical_profile_changed": false,
+    "physical_panel_density_or_inches_independently_calibrated": false
+  },
+  "reported_logical_profile_preserved": true,
+  "hardware_panel_density_or_dimensions_newly_calibrated": false,
+  "geometry_helper_uses_integer_encoding": true,
+  "native_no_fp_conversion_or_arithmetic": true,
+  "numeric_cases": 100280,
+  "behavioral_mutants_refused": 5,
+  "descriptor_tests_use_explicit_models": true,
+  "hardware_security_regression": {
+    "version": "0438",
+    "defaults_matching_complete": true,
+    "actual_log_sha256": "b11ce418bdd4765a35838cc7bcb7cdae0e695fee15a8cdb8770264fe828d1b4e",
+    "native_sha256": "e6a289cd5e246d6ba45163fc4efa6fb512c82a9191f30508881d99eee69ba0f5",
+    "real_apple_image4_start_succeeded": true,
+    "actual_busy_reference_released": true,
+    "busy_lifecycle": [
+      [
+        0,
+        0,
+        1,
+        "defaults"
+      ],
+      [
+        11,
+        1,
+        1,
+        "AppleImage4"
+      ],
+      [
+        14,
+        2,
+        -1,
+        "defaults"
+      ],
+      [
+        15,
+        1,
+        -1,
+        "AppleImage4"
+      ]
+    ],
+    "final_busy_state": 0,
+    "actual_waits": [
+      "IOAESAccelerator",
+      "IOResources/IONVRAM",
+      "IODTNVRAM"
+    ],
+    "hardware_nonce_and_data_restored_without_generation": true,
+    "native_nvram_existing_proxy_adopted": true,
+    "nvram_encrypted_data_banks_cold_restored": true,
+    "nvram_restored_bank": 0,
+    "nvram_restored_generation": 303,
+    "nvram_hardware_or_rollback_claim": false,
+    "nvram_durable_write_calls": 2,
+    "watchdog_enabled": true,
+    "original_iokit_monitoring_preserved": true,
+    "watchdog_heartbeat_times": [
+      42.045,
+      42.046,
+      52.051,
+      62.043,
+      72.053,
+      82.085,
+      92.088,
+      102.082,
+      112.067,
+      122.055,
+      132.09,
+      142.086,
+      152.093,
+      162.081,
+      172.106,
+      182.109,
+      192.104
+    ],
+    "original_locked_observations": [
+      [
+        63.862,
+        30,
+        4
+      ],
+      [
+        93.893,
+        60,
+        7
+      ],
+      [
+        123.921,
+        90,
+        10
+      ],
+      [
+        153.964,
+        120,
+        13
+      ],
+      [
+        183.983,
+        150,
+        16
+      ]
+    ],
+    "systembag_and_hardware_c_d_preserved": true,
+    "rtc_record_reused": true,
+    "panic": [],
+    "full_ios_or_springboard": false,
+    "gpu_display_input_started": true
+  },
+  "physical_touch_qualified": false,
+  "manual_touch_deferred_by_user": true,
+  "gpu_qualified": false,
+  "real_presentation_qualified": false,
+  "usable_springboard": false,
+  "bluetooth_deferred": true,
+  "remaining": "SpringBoard laterSIGKILL and crashes; trace accepted signal origin instead of inferring cause from dying threadPC; real GPU/Metal and display presentation",
+  "last_independent_ro_data_fsck": "0416",
+  "last_full_system_systemos_check": "0341",
+  "development_fast": true
+}

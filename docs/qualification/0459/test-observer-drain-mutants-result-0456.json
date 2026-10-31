@@ -1,0 +1,11 @@
+{
+  "passed": true,
+  "fixture_sha256": "ae2a7535e290f51e6f678a2f443ddaa3adc8e7e35aff105d24316d5b8a7258b3",
+  "behavioral_mutations_refused": [
+    "omit-thread-drain",
+    "omit-initial-drain",
+    "omit-final-drain",
+    "drain-under-thread-lock"
+  ],
+  "compile_failures_not_counted": true
+}

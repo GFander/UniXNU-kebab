@@ -1,0 +1,17 @@
+{
+  "passed": true,
+  "source_sha256": "afa001d62876d57c8aea410c0a715b7b60dbdadcb9ab6364b4da6e1c1918f966",
+  "parent_sha256": "1e8628975301eedc90f582eed71b71160655fd38621782d5103eea1946910470",
+  "fixture_sha256": "2af3ea764ea3d461cdea70cc0e49be8cd578748de71a3c5ad93a7061419d7d76",
+  "complete_parent_file_recovered_by_removing_only_trace": true,
+  "complete_kill_body_unchanged": true,
+  "comparison_cases": 592,
+  "concurrent_requests": 1024,
+  "event_cap": 16,
+  "frame_cap": 12,
+  "empty_and_partial_errors_preserve_signal": true,
+  "behavioral_mutants_refused": 4,
+  "host_backtrace_is_explicit_model": true,
+  "not_tsan": true,
+  "all_signal_routes_covered": false
+}

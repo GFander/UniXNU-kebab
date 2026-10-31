@@ -1,0 +1,50 @@
+{
+  "version": "0449",
+  "scope": "Fixed original migration wrapper wait and bounded system-plugin inventory only; not a migration/daemon/GPU repair",
+  "accepted": true,
+  "actual_log_sha256": "79737aab504599ec058e48978b9a3c0438ed530f27a61073e7cfdb1dc142d872",
+  "native_sha256": "bba984bbda4a02fb9a090321ee494ddd7faf4efa7760788b3794b000f0356e2e",
+  "native_bytes": 18914744,
+  "source": {
+    "common_patches": 314,
+    "host_patches": 4,
+    "all_source_files": 5261,
+    "all_source_equal": true
+  },
+  "original_wrapper": {
+    "pid": 198,
+    "uid": 501,
+    "uuid": "a36b14aa98193d1f900ce80b45c8eac7",
+    "samples": [
+      120.298,
+      285.042
+    ]
+  },
+  "systemapp_plugin_uuid": "462f5fa733b037f28aa7aadf09475ac5",
+  "first_wait": "synchronouslyCancelAllAppStoreRequests / timed semaphore",
+  "later_wait": "attemptToInstallSystemApp -> IXAppInstallCoordinator cancelCoordinatorForApp -> synchronous NSXPC reply",
+  "installcoordinationd_crash_observed": true,
+  "crash_root_cause_not_yet_proven": true,
+  "original_watchdog_last_seconds": 334.017,
+  "hardware_roots_nonce_mkb_c_d_defaults_preserved": true,
+  "manual_touch_pending": true,
+  "user_panel_target_hz": 120,
+  "physical_120hz_qualified": false,
+  "gpu_or_usable_springboard": false,
+  "migration_complete": false,
+  "bluetooth_deferred": true,
+  "diagnostic_readout_only": true,
+  "normal_only": true,
+  "no_suspension_or_target_modification": true,
+  "dyld_snapshot_not_atomic": true,
+  "limits": {
+    "processes_each": 512,
+    "threads": 32,
+    "user_frames": 16,
+    "images": 512,
+    "modules": 8,
+    "path_bytes": 256,
+    "load_commands": 128,
+    "load_command_bytes": 16384
+  }
+}

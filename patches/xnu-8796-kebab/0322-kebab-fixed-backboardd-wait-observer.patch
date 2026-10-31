@@ -1,0 +1,135 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -56,4 +56,45 @@
+ 	kebab_pid1_task_report(task);
+ 	task_deallocate(task);
+ }
++
++/* Exact daemon selector, not an arbitrary task/user-memory debugger. The
++ * iterator retains the proc during the callback; take the task reference
++ * before returning and print only after iteration has released its locks. */
++extern void kebab_backboardd_task_report(task_t);
++extern boolean_t ml_at_interrupt_context(void);
++extern int get_preemption_level(void);
++void kebab_backboardd_report(void);
++struct kebab_backboard_snapshot { task_t task; unsigned scanned; int pid; bool found; };
++static int
++kebab_backboard_select(proc_t process, void *argument)
++{
++    struct kebab_backboard_snapshot *snapshot = argument;
++    char name[MAXCOMLEN + 1] = {};
++    ++snapshot->scanned;
++    proc_name(proc_pid(process), name, sizeof(name));
++    if (!strcmp(name, "backboardd") && proc_ppid(process) == 1 && proc_getuid(process) == 0) {
++        snapshot->found = true;snapshot->pid = proc_pid(process);
++        task_t task = proc_task(process);
++        if (task != TASK_NULL) {task_reference(task);snapshot->task = task;}
++        return PROC_RETURNED_DONE;
++    }
++    return snapshot->scanned >= 512 ? PROC_RETURNED_DONE : PROC_RETURNED;
++}
++void
++kebab_backboardd_report(void)
++{
++    /* No allocation, proc access, or console write in unsafe context. */
++    if (ml_at_interrupt_context() || get_preemption_level() != 0) return;
++    struct kebab_backboard_snapshot snapshot = {};
++    proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS, kebab_backboard_select, &snapshot, NULL, NULL);
++    if (snapshot.task == TASK_NULL) {
++        printf("KEBAB BBOARD: no referenced task found=%u scanned=%u (root/parent1/name filter; cap512)\n",
++            snapshot.found, snapshot.scanned);
++    } else {
++        printf("KEBAB BBOARD: fixed daemon pid=%d scanned=%u; read-only kernel waits\n",snapshot.pid,snapshot.scanned);
++        kebab_backboardd_task_report(snapshot.task);
++        task_deallocate(snapshot.task);
++    }
++    printf("KEBAB BBOARD: observer end; no suspension/user-memory/register modification\n");
++}
+ #endif /* KEBAB */
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -37,9 +37,8 @@
+ 	}
+ 	return count;
+ }
+-void kebab_pid1_task_report(task_t task);
+-void
+-kebab_pid1_task_report(task_t task)
++static void
++kebab_task_threads_report(task_t task, const char *label)
+ {
+ 	thread_t observed[32], thread;
+ 	unsigned count = 0, thread_total = 0;
+@@ -53,7 +52,7 @@
+ 		}
+ 	}
+ 	task_unlock(task);
+-	printf("KEBAB PID1: thread snapshot count=%u thread_total=%u (cap32; no suspension)\n", count, thread_total);
++	printf("KEBAB %s: thread snapshot count=%u thread_total=%u (cap32; no suspension)\n", label, count, thread_total);
+ 	for (unsigned i = 0; i < count; i++) {
+ 		thread = observed[i];
+ 		thread_basic_info_data_t basic = {};
+@@ -70,15 +69,20 @@
+ 		unsigned frame_count = kebab_blocked_kernel_trace(thread, frames);
+ 		thread_unlock(thread);
+ 		splx(priority);
+-		printf("KEBAB PID1: tid=%llu info=0x%x state=0x%x run=%d flags=0x%x suspend=%d sleep=%d wait=0x%llx continuation=0x%llx user=%d.%06d sys=%d.%06d\n",
++		printf("KEBAB %s: tid=%llu info=0x%x state=0x%x run=%d flags=0x%x suspend=%d sleep=%d wait=0x%llx continuation=0x%llx user=%d.%06d sys=%d.%06d\n", label,
+ 		    tid, result, state, basic.run_state, basic.flags, basic.suspend_count, basic.sleep_time,
+ 		    event, continuation, basic.user_time.seconds, basic.user_time.microseconds,
+ 		    basic.system_time.seconds, basic.system_time.microseconds);
+ 		for (unsigned frame = 0; frame < frame_count; frame++) {
+-			printf("KEBAB PID1: tid=%llu kframe[%u]=0x%llx\n", tid, frame, frames[frame]);
++			printf("KEBAB %s: tid=%llu kframe[%u]=0x%llx\n", label, tid, frame, frames[frame]);
+ 		}
+ 		thread_deallocate(thread);
+ 	}
+-	printf("KEBAB PID1: snapshot end; addresses name kernel waits, not user PCs\n");
++	printf("KEBAB %s: snapshot end; addresses name kernel waits, not user PCs\n", label);
+ }
++
++void kebab_pid1_task_report(task_t task);
++void kebab_backboardd_task_report(task_t task);
++void kebab_pid1_task_report(task_t task) { kebab_task_threads_report(task, "PID1"); }
++void kebab_backboardd_task_report(task_t task) { kebab_task_threads_report(task, "BBOARD"); }
+ #endif /* KEBAB */
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -277,6 +277,8 @@
+ #define UD_REBOOT_BTUART_LOOPBACK 37u
+ #define UD_REBOOT_BTPWR_REPORT 38u
+ #define UD_REBOOT_BTBOARD_REPORT 39u
++#define UD_REBOOT_BBOARD_REPORT 40u
++extern void kebab_backboardd_report(void);
+ extern void kebab_board_report(void);
+ extern void kebab_bluetooth_power_report(void);
+ extern void kebab_bluetooth_uart_loopback(void);
+@@ -1470,6 +1472,9 @@
+ 		if (ud_command_seen(buf, received, "PROC?\n", sizeof("PROC?\n") - 1)) {
+ 			return UD_REBOOT_PROC_REPORT;
+ 		}
++		if (ud_command_seen(buf, received, "BBOARD?\n", sizeof("BBOARD?\n") - 1)) {
++			return UD_REBOOT_BBOARD_REPORT;
++		}
+ 		if (ud_command_seen(buf, received, "PID1?\n", sizeof("PID1?\n") - 1)) {
+ 			return UD_REBOOT_PID1_REPORT;
+ 		}
+@@ -1593,6 +1598,9 @@
+ 	}
+ 	if (received >= sizeof("PROC?\n") - 1 && !memcmp(buf, "PROC?\n", sizeof("PROC?\n") - 1)) {
+ 		return UD_REBOOT_PROC_REPORT;
++	}
++	if (received >= sizeof("BBOARD?\n") - 1 && !memcmp(buf, "BBOARD?\n", sizeof("BBOARD?\n") - 1)) {
++		return UD_REBOOT_BBOARD_REPORT;
+ 	}
+ 	if (received >= sizeof("PID1?\n") - 1 && !memcmp(buf, "PID1?\n", sizeof("PID1?\n") - 1)) {
+ 		return UD_REBOOT_PID1_REPORT;
+@@ -1740,6 +1748,8 @@
+ 		kebab_process_report();
+ 	} else if (command == UD_REBOOT_PID1_REPORT) {
+ 		kebab_pid1_report();
++	} else if (command == UD_REBOOT_BBOARD_REPORT) {
++		kebab_backboardd_report();
+ 	} else if (command == UD_REBOOT_QSEELOG_REPORT) {
+ 		kebab_qsee_log_report();
+ 	} else if (command == UD_REBOOT_BTBOARD_REPORT) {

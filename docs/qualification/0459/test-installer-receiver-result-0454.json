@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "actual_production_sources": {
+    "osfmk/kern/kebab_bootdiag.c": "c850ac92fa8adf60e14a97a6c9d11d2eaa22e8bcfa35beb0f4c400585e14e366",
+    "bsd/kern/kebab_bootdiag.c": "e1ba99b1433cb0e912241209304b0f91b131e41d4f17e19c80d8cbbd11181654"
+  },
+  "fixture_sha256": "773c59792af956a84dc6572f673c7e317abe11e48f125c4328d0d0420b23ffc5",
+  "fixed_installer_full_name": "installcoordinationd",
+  "actual_uid_preserved": true,
+  "normal_only": true,
+  "legacy_full_observers_and_dyld_and_metadata_regression": true,
+  "explicit_kernel_task_map_vfs_models": true
+}

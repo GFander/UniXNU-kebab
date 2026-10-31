@@ -1,0 +1,11 @@
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -1525,6 +1525,8 @@
+ 	}
+ 	if (PE_parse_boot_argn("kebab_touch_boot", &value, sizeof(value))) {
+ 		boot = value;
++	} else if (kebab_hid_backend_requested(KEBAB_HID_TOUCH)) {
++		boot = 1;
+ 	}
+ 	if (PE_parse_boot_argn("kebab_touch_probe", &value, sizeof(value))) {
+ 		probe = value;

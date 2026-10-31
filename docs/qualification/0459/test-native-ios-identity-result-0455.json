@@ -1,0 +1,45 @@
+{
+  "passed": true,
+  "cases": 10475,
+  "source_sha256": {
+    "bsd/kern/kern_credential.c": "3204b32a7f9b31ae67003b394f5931544de3bfcda88c0edd7cab5e4f6e27664c",
+    "bsd/kern/kern_authorization.c": "a7d9e1bdbb4feacd4edfa2731958471300c7577a0516c4b8031aac22f4655126",
+    "bsd/sys/kauth.h": "900b33e888c7eb436cee0e6c4ea4f5a7e2355c3ae33ac79c1765f6cfff0d1e00"
+  },
+  "production_function_sha256": {
+    "kauth_cred_cache_lookup": "67743de17c2850af8eba633b0be91f06dca6cf5f5e5a1d8c77d221456f911dc6",
+    "kauth_cred_getuid": "24ced549cf5b5256461d9f882d689d126c3fecf1cb02dd7de2cb86b1ee32446a",
+    "kauth_cred_uid2guid": "84199e46f488e0f0b13c5f15b5325bf4052f88739645ae08cb906e694000d3ed",
+    "kauth_cred_gid2guid": "47a830c73c76d6c9a4a14fcdb64c975f9e0a0998ffbc8573b73a20a7c631273f",
+    "kauth_cred_guid2uid": "4360c43895cc92344ba2d154fc5d314eeec06f8c62fa8b51af39b2f435e865b1",
+    "kauth_cred_guid2gid": "3122bf1f534749fddad87b6b0a0e7b62f04193a444fcc2947610f1525fa4ddb0",
+    "kauth_cred_getguid": "15b61bc67f133a4a271898ac038a26319a6c451d864f29d61d5bffab17bc37be",
+    "kauth_guid_equal": "32e5f8a02aa3cc382cd2bcc03329c8020ca9b694b1d1484493edb8aab06e45f3",
+    "kauth_wellknown_guid": "f5e7569ae218fcdab2b19a6052173ed9e3fde06c37c560e5d4f16c0f635292a1",
+    "kauth_cred_ismember_gid": "45ccfa38c74aee4b7778d669a3e515f942c523dba98dd10d51168673854d73fc",
+    "kauth_cred_ismember_guid": "72e7d70c9bd43da26d3d0ed86da9662ea21fc57c1f491b7eebd91d8358760474",
+    "kauth_acl_evaluate": "e30fde883deb1dd4be974ca6a2edf8a71f9c95ad204ef7ce47b453f63c4dc646"
+  },
+  "fixture_sha256": "2d847e5dc226eb4125a0ed67c342472f1753b31bc9673c817c1776c4f02cf022",
+  "production_functions_complete": [
+    "kauth_cred_cache_lookup",
+    "kauth_cred_getuid",
+    "kauth_cred_uid2guid",
+    "kauth_cred_gid2guid",
+    "kauth_cred_guid2uid",
+    "kauth_cred_guid2gid",
+    "kauth_cred_getguid",
+    "kauth_guid_equal",
+    "kauth_wellknown_guid",
+    "kauth_cred_ismember_gid",
+    "kauth_cred_ismember_guid",
+    "kauth_acl_evaluate"
+  ],
+  "config_ext_resolver": 0,
+  "acl_evaluator_unchanged": true,
+  "actual_allow_deny_and_defer_tested": true,
+  "identity_membership_decisions_not_stubbed": true,
+  "credential_carrier_and_libc_models": true,
+  "hardware_execution": false,
+  "original_arm64_oracle": "original-kauth-guid-oracle-0454.json"
+}

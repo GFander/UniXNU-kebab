@@ -1,0 +1,23 @@
+{
+  "boot_version": "0459",
+  "capture_pid": 79148,
+  "capture": "0459-touch-live.log",
+  "native_sha256": "026381abf4219889212f518227ec7dba3058019aa27c2aa33db8022c1631c8f2",
+  "user_returned_and_authorized_physical_sampling": true,
+  "stage1_user_ack": "第一组已完成",
+  "stage1_order": [
+    "top-left",
+    "top-right",
+    "bottom-left",
+    "bottom-right",
+    "center"
+  ],
+  "stage2_requested": "left-to-right3s then top-to-bottom3s, release between",
+  "physical_refresh_120hz_unmeasured": true,
+  "stage2_user_ack": "滑动已完成",
+  "stage3_user_ack": "双指已完成",
+  "stage3_requested": "two real fingers, spread, release first then second",
+  "stage4_user_ack": "保持已完成",
+  "stage4_requested": "two real fingers held approximately10s then sequential release",
+  "test_input_synthesized": false
+}

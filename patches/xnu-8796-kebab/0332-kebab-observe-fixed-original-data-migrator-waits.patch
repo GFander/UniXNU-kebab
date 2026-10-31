@@ -1,0 +1,98 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -149,4 +149,46 @@
+     }
+     printf("KEBAB UI: observer end; no suspension or modification; user frames are best-effort reads\n");
+ }
++
++/* proc_name() reads the truncated p_comm. Select this one fixed launchd
++ * child using its full best name, copied while holding the proc lock.
++ * Mutable names are diagnostic identifiers, never authorization evidence. */
++extern void kebab_migrator_task_report(task_t);
++void kebab_migrator_report(void);
++static int
++kebab_migrator_select(proc_t process, void *argument)
++{
++    struct kebab_backboard_snapshot *snapshot = argument;
++    char name[sizeof(proc_name_t)] = {};
++    ++snapshot->scanned;
++    proc_lock(process);
++    strlcpy(name, proc_best_name(process), sizeof(name));
++    proc_unlock(process);
++    if (!strcmp(name, "com.apple.datamigrator") && proc_ppid(process) == 1) {
++        snapshot->found = true;
++        snapshot->pid = proc_pid(process);snapshot->uid = proc_getuid(process);
++        task_t task = proc_task(process);
++        if (task != TASK_NULL) {task_reference(task);snapshot->task = task;}
++        return PROC_RETURNED_DONE;
++    }
++    return snapshot->scanned >= 512 ? PROC_RETURNED_DONE : PROC_RETURNED;
++}
++void
++kebab_migrator_report(void)
++{
++    if (ml_at_interrupt_context() || get_preemption_level() != 0 ||
++        !ml_get_interrupts_enabled()) return;
++    struct kebab_backboard_snapshot snapshot = {};
++    proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS, kebab_migrator_select, &snapshot, NULL, NULL);
++    if (snapshot.task == TASK_NULL) {
++        printf("KEBAB MIG: no referenced task found=%u scanned=%u (parent1/full-name; cap512)\n",
++            snapshot.found, snapshot.scanned);
++    } else {
++        printf("KEBAB MIG: fixed process pid=%d uid=%u scanned=%u; best-effort wait snapshot\n",
++            snapshot.pid, snapshot.uid, snapshot.scanned);
++        kebab_migrator_task_report(snapshot.task);
++        task_deallocate(snapshot.task);
++    }
++    printf("KEBAB MIG: observer end; no suspension or modification; user frames are best-effort reads\n");
++}
+ #endif /* KEBAB */
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -147,4 +147,6 @@
+ void kebab_preboard_task_report(task_t task);
+ void kebab_springboard_task_report(task_t task) { kebab_task_threads_report(task, "UI-SB", true, 16); }
+ void kebab_preboard_task_report(task_t task) { kebab_task_threads_report(task, "UI-PB", true, 16); }
++void kebab_migrator_task_report(task_t task);
++void kebab_migrator_task_report(task_t task) { kebab_task_threads_report(task, "MIG", true, 16); }
+ #endif /* KEBAB */
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -279,6 +279,8 @@
+ #define UD_REBOOT_BTBOARD_REPORT 39u
+ #define UD_REBOOT_BBOARD_REPORT 40u
+ #define UD_REBOOT_UI_REPORT 41u
++#define UD_REBOOT_MIG_REPORT 42u
++extern void kebab_migrator_report(void);
+ extern void kebab_ui_report(void);
+ extern void kebab_backboardd_report(void);
+ extern void kebab_board_report(void);
+@@ -1474,6 +1476,9 @@
+ 		if (ud_command_seen(buf, received, "PROC?\n", sizeof("PROC?\n") - 1)) {
+ 			return UD_REBOOT_PROC_REPORT;
+ 		}
++		if (ud_command_seen(buf, received, "MIG?\n", sizeof("MIG?\n") - 1)) {
++			return UD_REBOOT_MIG_REPORT;
++		}
+ 		if (ud_command_seen(buf, received, "UI?\n", sizeof("UI?\n") - 1)) {
+ 			return UD_REBOOT_UI_REPORT;
+ 		}
+@@ -1603,6 +1608,9 @@
+ 	}
+ 	if (received >= sizeof("PROC?\n") - 1 && !memcmp(buf, "PROC?\n", sizeof("PROC?\n") - 1)) {
+ 		return UD_REBOOT_PROC_REPORT;
++	}
++	if (received >= sizeof("MIG?\n") - 1 && !memcmp(buf, "MIG?\n", sizeof("MIG?\n") - 1)) {
++		return UD_REBOOT_MIG_REPORT;
+ 	}
+ 	if (received >= sizeof("UI?\n") - 1 && !memcmp(buf, "UI?\n", sizeof("UI?\n") - 1)) {
+ 		return UD_REBOOT_UI_REPORT;
+@@ -1756,6 +1764,8 @@
+ 		kebab_process_report();
+ 	} else if (command == UD_REBOOT_PID1_REPORT) {
+ 		kebab_pid1_report();
++	} else if (command == UD_REBOOT_MIG_REPORT) {
++		kebab_migrator_report();
+ 	} else if (command == UD_REBOOT_UI_REPORT) {
+ 		kebab_ui_report();
+ 	} else if (command == UD_REBOOT_BBOARD_REPORT) {

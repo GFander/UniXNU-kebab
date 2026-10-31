@@ -16,3 +16,9 @@ __pycache__/
 *.tar.gz
 *.log
 !docs/qualification/**/*.log
+
+# Local overrides and generated validation/build outputs.
+/local.toml
+/.cache/
+/out/
+/build/

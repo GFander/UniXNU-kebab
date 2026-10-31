@@ -1,0 +1,64 @@
+{
+  "cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+  "slide": 0,
+  "read_only": true,
+  "matched_assert_pc": "0x19b91abd4",
+  "assert_code_sha256": "53f76759834abc0330f0982ba74e2d812dcb660be589012eb62a435e0612f361",
+  "class_address": "0x1e1dd3380",
+  "class_ro_address": "0x1d71645c8",
+  "instance_size": 73,
+  "isa_mask": "0x0000000ffffffff8",
+  "isa_mask_original_cache_address": "0x1800e8940",
+  "isa_mask_original_cache_value": "0xffffffff8",
+  "apple_reference": "https://github.com/apple-oss-distributions/objc4/blob/objc4-876/runtime/isa.h",
+  "ivars": [
+    {
+      "symbol": "_OBJC_IVAR_$_FBSDisplayMode._width",
+      "address": "0x1dd3e004c",
+      "offset": 8
+    },
+    {
+      "symbol": "_OBJC_IVAR_$_FBSDisplayMode._height",
+      "address": "0x1dd3e0050",
+      "offset": 16
+    },
+    {
+      "symbol": "_OBJC_IVAR_$_FBSDisplayMode._preferredScale",
+      "address": "0x1dd3e0054",
+      "offset": 24
+    },
+    {
+      "symbol": "_OBJC_IVAR_$_FBSDisplayMode._scaleOverride",
+      "address": "0x1dd3e0058",
+      "offset": 32
+    },
+    {
+      "symbol": "_OBJC_IVAR_$_FBSDisplayMode._refreshRate",
+      "address": "0x1dd3e005c",
+      "offset": 40
+    },
+    {
+      "symbol": "_OBJC_IVAR_$_FBSDisplayMode._gamut",
+      "address": "0x1dd3e0060",
+      "offset": 48
+    },
+    {
+      "symbol": "_OBJC_IVAR_$_FBSDisplayMode._hdr",
+      "address": "0x1dd3e0064",
+      "offset": 56
+    },
+    {
+      "symbol": "_OBJC_IVAR_$_FBSDisplayMode._rotation",
+      "address": "0x1dd3e0068",
+      "offset": 64
+    },
+    {
+      "symbol": "_OBJC_IVAR_$_FBSDisplayMode._virtual",
+      "address": "0x1dd3e006c",
+      "offset": 72
+    }
+  ],
+  "trap_path_user_memory_not_read": true,
+  "observation_context": "current task normal BSD exit",
+  "not_a_functional_mode_fix": true
+}

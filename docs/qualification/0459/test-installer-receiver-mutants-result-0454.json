@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "fixture_sha256": "773c59792af956a84dc6572f673c7e317abe11e48f125c4328d0d0420b23ffc5",
+  "behavioral_mutations_refused": [
+    "short-installer-name",
+    "wrong-installer-label",
+    "impose-wrapper-uuid-on-installer",
+    "short-installer-frames",
+    "dispatch-installer-as-wrapper",
+    "leak-task",
+    "unsafe-context",
+    "accept-other-parent",
+    "remove512cap"
+  ],
+  "compile_failures_not_counted": true
+}

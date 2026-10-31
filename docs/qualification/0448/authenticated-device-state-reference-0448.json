@@ -1,0 +1,260 @@
+{
+  "build": "20H392",
+  "cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+  "original_DER_packet": "311330070c02737302010430080c03736c73020103",
+  "meaning": {
+    "ss": "bit2: actual provisioned C/D keys available since boot",
+    "sls": "3: authenticated factory no-passcode policy; not sls0 all-class unlock"
+  },
+  "optional_unestablished_fields_omitted": true,
+  "bank_header": {
+    "version_offset": 16,
+    "policy_offset": 60,
+    "version": 1,
+    "policy": 1
+  },
+  "authenticated_inner_prefix": "DCB1/version1/factory-no-passcode1/class3/class4",
+  "class_mask": "0x18",
+  "underlying_bank_format_and_keys_unchanged": true,
+  "original_decoder_oracles": [
+    {
+      "decoder": "0x1f2eb50f8 _decode_extended_state",
+      "code_hashes": {
+        "0x1f2eb50f8": "5a09ccc3515b5d9177218d658889f62b892826c93b47191b361a387f4e676499",
+        "0x1f2eb3284": "733e8f5f14c062d77fcd085140cc3d569ce5c3a3c4d1b8317c8ecf7eb52cc410"
+      },
+      "result": {
+        "result": 0,
+        "output": "040000000300000000000000000000000000000000000000000000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+        "ss": 4,
+        "sls": 3,
+        "steps": 1717,
+        "libc_models": [
+          "memcmp",
+          "memset_s"
+        ],
+        "cache_pages": 16,
+        "validated_original_branch_pool_thunks": {
+          "0x1f2fb2e1c": {
+            "target": "0x18dc47ec4",
+            "sha256": "ed44f902a43b3c9523ccb52fe0f941b5a2285f3819ef43d7ea032a7a76bbec50"
+          },
+          "0x1f2fb2a68": {
+            "target": "0x1d1b0dd4c",
+            "sha256": "888f503fc2223a15f8d4bc99d57e252578c9d7f51b122d94ae940070562c5bfa"
+          },
+          "0x1f2fb2ab0": {
+            "target": "0x1d1b0dda4",
+            "sha256": "c71f369b696e51e5c2328973a81eabd4d74303e38fd5dd3f539da5a61f2216be"
+          },
+          "0x1f2fb2aa4": {
+            "target": "0x1d1b10810",
+            "sha256": "18dab003ed3dbe60f56c0d63851dda2b17b8e27693ebaeaeb1aa8d1409eb364e"
+          },
+          "0x1f2fb2a74": {
+            "target": "0x1d1b11830",
+            "sha256": "a6fd241664e00403c50c6dd3076e31d3e91f06df38b7c8cb0f91137c0a67b728"
+          }
+        }
+      },
+      "explicit_models": [
+        "libc memset_s",
+        "libc memcmp",
+        "stack-canary binding",
+        "nine audited constant key-pointer relocations"
+      ],
+      "explicit_data_bindings": [
+        {
+          "cell": 8895450136,
+          "raw": 2207393863696,
+          "target": 8370608144,
+          "key": "ss"
+        },
+        {
+          "cell": 8895450144,
+          "raw": 2207393863700,
+          "target": 8370608148,
+          "key": "sls"
+        },
+        {
+          "cell": 8895450152,
+          "raw": 2207393863705,
+          "target": 8370608153,
+          "key": "sb"
+        },
+        {
+          "cell": 8895450168,
+          "raw": 2207393863714,
+          "target": 8370608162,
+          "key": "sfa"
+        },
+        {
+          "cell": 8895450184,
+          "raw": 2207393863725,
+          "target": 8370608173,
+          "key": "sgs"
+        },
+        {
+          "cell": 8895450192,
+          "raw": 2207393863730,
+          "target": 8370608178,
+          "key": "sas"
+        },
+        {
+          "cell": 8895450200,
+          "raw": 2207393863735,
+          "target": 8370608183,
+          "key": "sgpe"
+        },
+        {
+          "cell": 8895450208,
+          "raw": 2207393863741,
+          "target": 8370608189,
+          "key": "srcd"
+        },
+        {
+          "cell": 8895450248,
+          "raw": 2207393863771,
+          "target": 8370608219,
+          "key": "sr"
+        },
+        {
+          "cell": 8849890480,
+          "raw": 2206836204400,
+          "target": 7812948848,
+          "import_symbol": "__platform_memcmp"
+        }
+      ]
+    },
+    {
+      "decoder": "0x1ae3dfbe0 _decode_extended_state",
+      "code_hashes": {
+        "0x1ae3dfbe0": "de56c5a1f7cac0ba3091a961aa1341da54a27dce77c97a18e815f48b78050c00",
+        "0x1ae3dffb4": "a171e668454a570ce3f3b39e9d769f39537a9b9f5fd0fd31f246bd8f856b26c9"
+      },
+      "result": {
+        "result": 0,
+        "output": "040000000300000000000000000000000000000000000000000000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+        "ss": 4,
+        "sls": 3,
+        "steps": 1717,
+        "libc_models": [
+          "memcmp",
+          "memset_s"
+        ],
+        "cache_pages": 17,
+        "validated_original_branch_pool_thunks": {
+          "0x1afb86858": {
+            "target": "0x18dc47ec4",
+            "sha256": "6ca908862c09ac30fc6f08d2a4e80960960d3839868477bdee82abc7454410ce"
+          },
+          "0x1afb86528": {
+            "target": "0x1d1b0dd4c",
+            "sha256": "713e3602af1f6f11d9469adf054cccf86c1b0daa2ec340a1faf3418a183c1421"
+          },
+          "0x1afb86558": {
+            "target": "0x1d1b0dda4",
+            "sha256": "93e2987be6c6bb31d308ad8022462f7c72a2bf31bbf509858b05915c5a63bd9d"
+          },
+          "0x1afb8654c": {
+            "target": "0x1d1b10810",
+            "sha256": "5ff58b18ce65852f6178644d9e3e8589bf50bfd87be9dc608c0cb3626b1723cd"
+          },
+          "0x1afb86534": {
+            "target": "0x1d1b11830",
+            "sha256": "31eff16f522c7ebd0f7bb0a32ce66ba5346688b97f4fee37ec70b6caf7db220f"
+          }
+        }
+      },
+      "explicit_models": [
+        "libc memset_s",
+        "libc memcmp",
+        "stack-canary binding",
+        "nine audited constant key-pointer relocations"
+      ],
+      "explicit_data_bindings": [
+        {
+          "cell": 8015402256,
+          "raw": 2206241718336,
+          "target": 7218462784,
+          "key": "ss"
+        },
+        {
+          "cell": 8015402264,
+          "raw": 2206241718340,
+          "target": 7218462788,
+          "key": "sls"
+        },
+        {
+          "cell": 8015402272,
+          "raw": 2206241718345,
+          "target": 7218462793,
+          "key": "sb"
+        },
+        {
+          "cell": 8015402288,
+          "raw": 2206241718354,
+          "target": 7218462802,
+          "key": "sfa"
+        },
+        {
+          "cell": 8015402304,
+          "raw": 2206241718365,
+          "target": 7218462813,
+          "key": "sgs"
+        },
+        {
+          "cell": 8015402312,
+          "raw": 2206241718370,
+          "target": 7218462818,
+          "key": "sas"
+        },
+        {
+          "cell": 8015402320,
+          "raw": 2206241718375,
+          "target": 7218462823,
+          "key": "sgpe"
+        },
+        {
+          "cell": 8015402328,
+          "raw": 2206241718381,
+          "target": 7218462829,
+          "key": "srcd"
+        },
+        {
+          "cell": 8015402368,
+          "raw": 2206241718411,
+          "target": 7218462859,
+          "key": "sr"
+        },
+        {
+          "cell": 7965625912,
+          "raw": 2206836204400,
+          "target": 7812948848,
+          "import_symbol": "__platform_memcmp"
+        }
+      ]
+    }
+  ],
+  "oracles_execute_original_arm64_parser_and_corecrypto": true,
+  "oracles_not_hardware_execution": true,
+  "public_status_selectors": [
+    0,
+    7,
+    14,
+    17
+  ],
+  "administrative_implemented_selectors": [
+    3,
+    65,
+    68,
+    102,
+    103
+  ],
+  "role_source": "IOUserClient::clientHasPrivilege(task,kIOClientPrivilegeAdministrator)",
+  "role_set_once_after_initWithTask_before_attach": true,
+  "names_not_used_for_access": true,
+  "full_original_entitlement_matrix_claim": false,
+  "selector35_and_other_key_operations_remain_unsupported": true,
+  "original_migration_code_unmodified": true
+}

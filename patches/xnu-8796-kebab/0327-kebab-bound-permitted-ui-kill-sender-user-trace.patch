@@ -1,0 +1,31 @@
+--- a/bsd/kern/kern_sig.c
++++ b/bsd/kern/kern_sig.c
+@@ -96,6 +96,9 @@
+ #include <security/audit/audit.h>
+ 
+ #include <kern/cpu_number.h>
++#if defined(KEBAB)
++#include <kern/backtrace.h>
++#endif
+ 
+ #include <sys/vm.h>
+ #include <sys/user.h>           /* for coredump */
+@@ -1409,6 +1412,18 @@
+     proc_name(proc_pid(sender), sender_name, sizeof(sender_name));
+     printf("KEBAB UI KILL: accepted kill(2) request=%u sender=%s pid=%d target=%s pid=%d signal=%d; permission passed, delivery not proven\n",
+         slot + 1, sender_name, proc_pid(sender), target_name, proc_pid(target), signum);
++    /* This is the current sender's syscall, with interrupts enabled and no
++     * proc/task lock held. Use XNU's bounded user unwinder, not foreign thread
++     * reads. A failed/partial trace is evidence only: still send the signal. */
++    uintptr_t frames[12] = {};
++    struct backtrace_user_info info = BTUINFO_INIT;
++    unsigned count = backtrace_user(frames, 12, NULL, &info);
++    printf("KEBAB UI KILL FRAMES: request=%u sender=%s pid=%d count=%u error=%d; current sender, bounded to12\n",
++        slot + 1, sender_name, proc_pid(sender), count, info.btui_error);
++    for (unsigned i = 0; i < count; i++) {
++        printf("KEBAB UI KILL PC: request=%u sender=%s pid=%d depth=%u pc=0x%llx\n",
++            slot + 1, sender_name, proc_pid(sender), i, (unsigned long long)frames[i]);
++    }
+ }
+ #endif
+ 

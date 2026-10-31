@@ -1,0 +1,308 @@
+{
+  "accepted": true,
+  "boot_version": "0459",
+  "native_sha256": "026381abf4219889212f518227ec7dba3058019aa27c2aa33db8022c1631c8f2",
+  "actual_log_sha256": "f2b89ba4f1db98a7a23215927db50118b9af6c80f0385a9c2028148c217ab7f1",
+  "user_actions": {
+    "boot_version": "0459",
+    "capture_pid": 79148,
+    "capture": "0459-touch-live.log",
+    "native_sha256": "026381abf4219889212f518227ec7dba3058019aa27c2aa33db8022c1631c8f2",
+    "user_returned_and_authorized_physical_sampling": true,
+    "stage1_user_ack": "第一组已完成",
+    "stage1_order": [
+      "top-left",
+      "top-right",
+      "bottom-left",
+      "bottom-right",
+      "center"
+    ],
+    "stage2_requested": "left-to-right3s then top-to-bottom3s, release between",
+    "physical_refresh_120hz_unmeasured": true,
+    "stage2_user_ack": "滑动已完成",
+    "stage3_user_ack": "双指已完成",
+    "stage3_requested": "two real fingers, spread, release first then second",
+    "stage4_user_ack": "保持已完成",
+    "stage4_requested": "two real fingers held approximately10s then sequential release",
+    "test_input_synthesized": false
+  },
+  "source_pins": {
+    "bsd/dev/kebab_touch.c": "5513a40534a592d314719c5dea00b890d63c46f6895b2939b2c9d30000fad9ba",
+    "bsd/dev/kebab_touch_tcm.c": "3cfd0c2a9a6a67f207844efeb032ddeae99b4630726213b5ac15876d257984c0",
+    "bsd/dev/kebab_touch_tcm.h": "83cfffde9c53bca4c17e445142197034aac1b897aff06392aa21e97dbc2cee21",
+    "bsd/dev/kebab_hid_reports.h": "93a08e720d228cdd652dcb97c3acac7be56eb3750da446dca8373f41adf93249",
+    "iokit/Kernel/arm/KebabHIDInput.cpp": "c3036e2eb87861374c0d3c86233cf343aa72fa91aae1c815f87e030930c3f153"
+  },
+  "five_point_contacts": [
+    {
+      "line": 564,
+      "seconds": 46.015,
+      "phase": "down",
+      "slot": 0,
+      "raw": [
+        95,
+        184
+      ],
+      "panel": [
+        95,
+        184
+      ],
+      "logical": [
+        117,
+        202
+      ],
+      "pressure": 55
+    },
+    {
+      "line": 572,
+      "seconds": 46.953,
+      "phase": "down",
+      "slot": 0,
+      "raw": [
+        997,
+        152
+      ],
+      "panel": [
+        997,
+        152
+      ],
+      "logical": [
+        1019,
+        170
+      ],
+      "pressure": 57
+    },
+    {
+      "line": 584,
+      "seconds": 48.218,
+      "phase": "down",
+      "slot": 0,
+      "raw": [
+        96,
+        2274
+      ],
+      "panel": [
+        96,
+        2274
+      ],
+      "logical": [
+        118,
+        2292
+      ],
+      "pressure": 38
+    },
+    {
+      "line": 592,
+      "seconds": 49.151,
+      "phase": "down",
+      "slot": 0,
+      "raw": [
+        983,
+        2287
+      ],
+      "panel": [
+        983,
+        2287
+      ],
+      "logical": [
+        1005,
+        2305
+      ],
+      "pressure": 30
+    },
+    {
+      "line": 605,
+      "seconds": 49.839,
+      "phase": "down",
+      "slot": 0,
+      "raw": [
+        495,
+        1225
+      ],
+      "panel": [
+        495,
+        1225
+      ],
+      "logical": [
+        517,
+        1243
+      ],
+      "pressure": 52
+    }
+  ],
+  "total_decoded_diagnostic_events": 178,
+  "complete_physical_contact_lifecycles": 14,
+  "maximum_simultaneous_contacts_observed": 2,
+  "horizontal_swipe": {
+    "start": {
+      "line": 1099,
+      "seconds": 98.941,
+      "phase": "down",
+      "slot": 0,
+      "raw": [
+        10,
+        1232
+      ],
+      "panel": [
+        10,
+        1232
+      ],
+      "logical": [
+        32,
+        1250
+      ],
+      "pressure": 51
+    },
+    "end": {
+      "line": 1147,
+      "seconds": 102.124,
+      "phase": "up",
+      "slot": 0,
+      "raw": [
+        1068,
+        1189
+      ],
+      "panel": [
+        1068,
+        1189
+      ],
+      "logical": [
+        1090,
+        1207
+      ],
+      "pressure": 0
+    },
+    "printed_points": 17
+  },
+  "vertical_swipe": {
+    "start": {
+      "line": 1184,
+      "seconds": 105.122,
+      "phase": "down",
+      "slot": 0,
+      "raw": [
+        507,
+        42
+      ],
+      "panel": [
+        507,
+        42
+      ],
+      "logical": [
+        529,
+        60
+      ],
+      "pressure": 48
+    },
+    "end": {
+      "line": 1240,
+      "seconds": 109.679,
+      "phase": "up",
+      "slot": 0,
+      "raw": [
+        545,
+        2381
+      ],
+      "panel": [
+        545,
+        2381
+      ],
+      "logical": [
+        567,
+        2399
+      ],
+      "pressure": 0
+    },
+    "printed_points": 24
+  },
+  "overlapping_contacts": [
+    {
+      "start": 172.689,
+      "slots": [
+        0,
+        1
+      ],
+      "first_release": 179.005,
+      "released_first": 0,
+      "remaining": [
+        1
+      ],
+      "end": 180.566,
+      "released_last": 1
+    },
+    {
+      "start": 250.944,
+      "slots": [
+        0,
+        1
+      ],
+      "first_release": 261.624,
+      "released_first": 0,
+      "remaining": [
+        1
+      ],
+      "end": 262.56,
+      "released_last": 1
+    }
+  ],
+  "original_hid_dual_contact_success": [
+    {
+      "line": 2933,
+      "seconds": 259.943,
+      "count": 2048,
+      "timestamp_ns": 1101335007031,
+      "active": 3,
+      "original_result": 0
+    }
+  ],
+  "backend_status": [
+    {
+      "line": 114,
+      "seconds": 0.172,
+      "produced": 156,
+      "sent": 156,
+      "dropped": 0,
+      "result": 0
+    },
+    {
+      "line": 1312,
+      "seconds": 110.157,
+      "produced": 1248,
+      "sent": 1248,
+      "dropped": 0,
+      "result": 0
+    },
+    {
+      "line": 2306,
+      "seconds": 200.17,
+      "produced": 1680,
+      "sent": 1680,
+      "dropped": 0,
+      "result": 0
+    },
+    {
+      "line": 3256,
+      "seconds": 285.68,
+      "produced": 2186,
+      "sent": 2186,
+      "dropped": 0,
+      "result": 0
+    }
+  ],
+  "new_physical_reports_during_capture": 2030,
+  "original_hid_accepted_total": 2186,
+  "queue_drops": 0,
+  "last_original_watchdog": {
+    "line": 3621,
+    "seconds": 323.936,
+    "polls": 1110,
+    "beats": 112
+  },
+  "no_synthetic_events": true,
+  "moves_throttled_not_full_wire_capture": true,
+  "input_chain_qualified": "Real sensor decoded coordinates -> tracker -> native HID report -> original IOHID handleReportWithTime success",
+  "visible_gui_event_delivery_qualified": false,
+  "maximum10contact_capacity_qualified": false,
+  "physical_panel_120hz_qualified": false,
+  "full_goal_complete": false
+}
