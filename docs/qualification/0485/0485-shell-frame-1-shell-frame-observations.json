@@ -1,0 +1,54 @@
+{
+  "input": "0485-shell-frame-1.log",
+  "actual_log_sha256": "1a411c1a537bbf117de69beb5e9946c1fd9ef36d22449eaeb588e5416d6816c9",
+  "shell_snapshots": [
+    {
+      "seconds": 1.119,
+      "result": 0,
+      "state": 2,
+      "completed": 1
+    }
+  ],
+  "frame_snapshots": [
+    {
+      "seconds": 1.366,
+      "queued": 2,
+      "presented": 1,
+      "begun": 485,
+      "completed": 176,
+      "pending": 0,
+      "power_off": 1,
+      "have_frame": 1
+    }
+  ],
+  "first_last_frames": [
+    {
+      "seconds": 1.366,
+      "kind": "first",
+      "id": 176,
+      "mask": 2147483655,
+      "selected": 0,
+      "found": 0,
+      "missing": 0,
+      "self_surface": 0,
+      "rejected": 0,
+      "copied_bytes": 0
+    },
+    {
+      "seconds": 1.366,
+      "kind": "last",
+      "id": 176,
+      "mask": 2147483655,
+      "selected": 0,
+      "found": 0,
+      "missing": 0,
+      "self_surface": 0,
+      "rejected": 0,
+      "copied_bytes": 0
+    }
+  ],
+  "original_success_completion_observed": true,
+  "cpu_pixel_copy_observed": false,
+  "panel_scanout_or_visible_springboard_proven": false,
+  "best_effort_no_suspension_or_atomicity_claim": true
+}

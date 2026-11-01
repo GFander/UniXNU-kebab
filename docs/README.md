@@ -154,3 +154,5 @@
 - [0480 原版 FairPlay 组件装载与初始化边界](MIGRATION-FAIRPLAY-PRELINK-20261101.md)。
 
 - [0481–0482 FairPlay 设备子密钥与迁移 OOL 生命周期](MIGRATION-FAIRPLAY-AES-OOL-20261101.md)。
+
+- [0483/0485 原版迁移与check-in成功状态、首帧复制边界](SHELL-FIRST-FRAME-20261101.md)。

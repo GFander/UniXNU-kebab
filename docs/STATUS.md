@@ -1,4 +1,4 @@
-# 当前状态：0482实机里程碑（FairPlay设备子密钥、迁移内存生命周期与加密回归）
+# 当前状态：0485实机里程碑（原版check-in完成状态与首帧边界）
 
 更新时间：2026-11-01。完整功能总览见[仓库首页](../README.md)，资料入口见[文档索引](README.md)。本页取代此前逐轮追加的“最新状态”；旧页原文保存在[历史归档](history/STATUS-before-0460.txt)。
 
@@ -6,27 +6,27 @@
 
 | 范围 | 当前结论 | 证据 |
 | --- | --- | --- |
-| 正常启动 | 最近正常运行0482，真实2201派生/CBC及原迁移OOL panic不再出现在本轮有限窗口，原版 iOS 用户态运行；原硬件密钥、MKB/systembag、C/D 加密 Data、RTC/NVRAM/defaults 与 watchdog 回归通过 | [0479收据](qualification/0482/0482-fairplay-aes-ool-qualified.json)、[原始日志](qualification/0482/0482-media-boot.log) |
-| 共同源码 | 340个共同补丁 + 4 个 Mac 主机补丁，全部 5,280 个源码文件与实际编译输入一致；固定 Apple OSS 基提交 `1b191cb58250d0705d8a51287127505aa4bc0789` | [公共回放](qualification/0479/public-all-source-replay-0479.json)、[源码清单](qualification/0479/all-mac-source-0479.json) |
+| 正常启动 | 最近正常运行0485，原版check-in成功完成标志和首份帧复制边界已实测，原版 iOS 用户态运行；原硬件密钥、MKB/systembag、C/D 加密 Data、RTC/NVRAM/defaults 与 watchdog 回归通过 | [0485收据](qualification/0485/0485-shell-frame-qualified.json)、[原始日志](qualification/0485/0485-media-boot.log) |
+| 共同源码 | 343个共同补丁 + 4 个 Mac 主机补丁，全部 5,281 个源码文件与实际编译输入一致；固定 Apple OSS 基提交 `1b191cb58250d0705d8a51287127505aa4bc0789` | [公共回放](qualification/0485/public-all-source-replay-0485.json)、[源码清单](qualification/0485/all-mac-source-0485.json) |
 | CPU / 内存 | 8 核与 8 GiB−2 MiB（8,587,837,440 字节，约 7.998 GiB）连续窗口已实测；非完整 12 GiB、AMP 或功耗验收 | [平台历史验收](PLATFORM-BASELINE-20261029.md) |
 | 触摸 | 0459 人工五点、横竖滑动、双指分离/保持与依次抬起通过原版 HID；新增 2,030 份报告，零队列丢失 | [实际记录](TOUCH-PHYSICAL-20261031.md)、[收据](qualification/0459-touch/0459-touch-live-qualified.json) |
 | 音量键 | 真实音量上/下的按下与释放已进入原版 HID；不等于 GUI 消费 | [0429/0430](HID-INPUT-AND-DATA-IDENTITY-20261031.md) |
 | 显示 | GOP 控制台可见；原版显示枚举、显示区域及缩放修复已有实测 | [枚举](GOP-DISPLAY-ENUMERATION-20261031.md)、[区域](DISPLAY-AREA-20261031.md)、[缩放](DISPLAY-SCALE-20261031.md) |
-| 桌面 | **尚未显示可用 SpringBoard**；实际进程进入 system-shell check-in 等待，不把进程存活算作桌面完成 | [UI 等待](FIXED-UI-WAITS-20261031.md)、[迁移现场](CORELOCATION-WAIT-20261031.md) |
+| 桌面 | **尚未显示可用 SpringBoard**；原版check-in成功完成标志已置位，桌面像素尚未进入本后端，不把进程存活算作桌面完成 | [UI 等待](FIXED-UI-WAITS-20261031.md)、[迁移现场](CORELOCATION-WAIT-20261031.md) |
 | 图形 / 120 Hz | A650/Metal、完整合成呈现、DPU/DSI 生命周期与真实面板 120 Hz 尚未验收 | 120 Hz 为用户提供的硬件规格/目标，不能用软件定时器证明 |
 | 蓝牙 | 控制器无线功能不可用；资源、固件与内部 UART 前置证据已归档，按用户安排延期 | [后续入口](BLUETOOTH-DEFERRED-20261031.md) |
 
-0482原生内核：18,966,472字节，SHA-256
-`6819ba4484d94deca28a73c184e237e84e36ab63ff4f3934e9157c067b6b464e`。
+0485原生内核：18,967,016字节，SHA-256
+`638a4491c6ebc77a9a0301782fe0f8c289f0f8cc53cd2b5009b4c47664095fae`。
 0360/0361 只改 NativeAES 和既有 IOSurface OOL 传输；原 nonce KDF、A/B/C/D 与 keychain 代码不变。不是完整 FairPlay、AKS、迁移或桌面完成。
 
 ## 当前直接阻塞
 
-0482 已完成原版 selector 2201 的真实 32 字节加密调用：使用原供体的独立 purpose seed，从既有硬件封装 Root 派生，不借用 nonce key，也不宣称 Apple UID/SEP 或硬件 AES 引擎。0481 随后在迁移进程的现有 IOSurface OOL writeBytes 路径 panic；0361 修复四个传输点的 prepare/copy/complete 和真实失败传播，0482 完成有界无复现回归。
+0485 的固定原版状态读取先得到 `state=0/checkin-completed=0`，封存回归后的独立快照得到 `state=2/checkin-completed=1`。精确20H392代码核对证明nil-error完成回调才signal该原子字节；同时原版迁移偏好仍为success=true/buildVersion=20H392。这里证明原版初始成功完成状态，不保证后台断连/重登的完整生命周期。
 
-原版 FairPlay 继续查询平台属性；完整初始化/请求回复、迁移结束和 system-shell check-in 尚未验收。不能仅凭一次 AES 成功、进程存活或日志减少保证进入桌面。下一步仍追实际原请求、资源与匹配生命周期，保留全部安全和加密功能。
+晚期帧计数为SwapBegin序号485、排队2、present调用1。首份/最后处理记录id176、mask0x80000007，但本后端未选择到非零Surface ID、实际复制0字节。原版null-surface路径也设置掩码位，所以不能把它当作已有显示内容。当前证据把边界限定到有效Surface/桌面图层提交进入CPU复制之前；尚未确定上游只形成此类记录的唯一原因，不能据此宣布GPU或DPU故障。
 
-见[本轮证据与边界](MIGRATION-FAIRPLAY-AES-OOL-20261101.md)。原加密 Data、旧 keychain、Root/nonce/bank/systembag 和 watchdog 已回归；GPU/显示/输入功能未扩展，蓝牙继续延期。
+原版UIKit与CA服务线程仍在运行；watchdog318.586秒、旧A/B/C/D与六类keychain、硬件Root/nonce/bank/systembag/defaults/RTC/NVRAM回归通过。完整密钥/FairPlay、可见桌面、GPU/Metal及真实120Hz未验收，蓝牙延期。详见[源码、实机与边界](SHELL-FIRST-FRAME-20261101.md)。
 
 ## 必须保留的边界
 

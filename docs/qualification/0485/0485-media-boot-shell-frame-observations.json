@@ -1,0 +1,54 @@
+{
+  "input": "0485-media-boot.log",
+  "actual_log_sha256": "a858fe698309b67c47b96460837fffaf00e177bff111ab8efcad473cb97ab1a6",
+  "shell_snapshots": [
+    {
+      "seconds": 95.233,
+      "result": 0,
+      "state": 0,
+      "completed": 0
+    }
+  ],
+  "frame_snapshots": [
+    {
+      "seconds": 94.175,
+      "queued": 0,
+      "presented": 0,
+      "begun": 0,
+      "completed": 0,
+      "pending": 0,
+      "power_off": 0,
+      "have_frame": 0
+    }
+  ],
+  "first_last_frames": [
+    {
+      "seconds": 94.175,
+      "kind": "first",
+      "id": 0,
+      "mask": 0,
+      "selected": 0,
+      "found": 0,
+      "missing": 0,
+      "self_surface": 0,
+      "rejected": 0,
+      "copied_bytes": 0
+    },
+    {
+      "seconds": 94.175,
+      "kind": "last",
+      "id": 0,
+      "mask": 0,
+      "selected": 0,
+      "found": 0,
+      "missing": 0,
+      "self_surface": 0,
+      "rejected": 0,
+      "copied_bytes": 0
+    }
+  ],
+  "original_success_completion_observed": false,
+  "cpu_pixel_copy_observed": false,
+  "panel_scanout_or_visible_springboard_proven": false,
+  "best_effort_no_suspension_or_atomicity_claim": true
+}

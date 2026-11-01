@@ -1,0 +1,7 @@
+{
+  "version": "0484",
+  "flashed": false,
+  "physical_qualified": false,
+  "superseded_by": "0485",
+  "reason": "Pre-flash review found task lifetime did not pin get_bsdtask_info proc lifetime. Capture executable UUID inside referenced proc_iterate callback before dropping the proc reference."
+}

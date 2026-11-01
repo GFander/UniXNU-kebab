@@ -1,0 +1,54 @@
+{
+  "passed": true,
+  "version": "0484",
+  "units": [
+    {
+      "translation_unit": "bsd/kern/kebab_bootdiag.c",
+      "passed": true,
+      "compiler_record_sha256": "726ac5c59ff7040b96a7def0242f62afeb9b259dfa05ed425860a5879915b3c4",
+      "warnings": 21,
+      "errors": 0
+    },
+    {
+      "translation_unit": "osfmk/kern/kebab_bootdiag.c",
+      "passed": true,
+      "compiler_record_sha256": "2ca869e6a2c189e9cd244065c5c6f85d080e42ceaf397c7c4c846b04106b024d",
+      "warnings": 30,
+      "errors": 0
+    },
+    {
+      "translation_unit": "iokit/Kernel/arm/KebabFramebuffer.cpp",
+      "passed": true,
+      "compiler_record_sha256": "1afebfcce659e7ee79835a371f48a235c1a6cadf855af50e7835e6080e385158",
+      "warnings": 13,
+      "errors": 0
+    },
+    {
+      "translation_unit": "iokit/Kernel/arm/KebabDriverDiagnostics.cpp",
+      "passed": true,
+      "compiler_record_sha256": "13d41cc7b016a68af65c42f88a2d4e4cdc925411b526d1dc78df8ca3ab1e818e",
+      "warnings": 12,
+      "errors": 0
+    }
+  ],
+  "source_changes": {
+    "bsd/kern/kebab_bootdiag.c": {
+      "before": "d91797eb5ceaf822deb4c1b76a6cdc62dec25fe97cb72fc7b07a6dbfe9a89d74",
+      "after": "c9f103efaac1b05b08b5326a36b8e7ae397796e4a5a59d23b55c81ff859217a8"
+    },
+    "osfmk/kern/kebab_bootdiag.c": {
+      "before": "6e35be8515e534475006ac42a14dffb603f237b7e1d0c4ccfa9ff852daf2ec6f",
+      "after": "12099b9dc7e88999f7dcb1dd2bd19f213c95456b65e33d313fe6969555e68f67"
+    },
+    "iokit/Kernel/arm/KebabFramebuffer.cpp": {
+      "before": "f7d1ef542218c734c564b4d6af30c68f0cf0a4e3f6ee51005f476e3c616189de",
+      "after": "822e4f39974bda388576f6b4bb47ecffdc2f7edefbe4755fd7328da6e2e7765f"
+    },
+    "iokit/Kernel/arm/KebabDriverDiagnostics.cpp": {
+      "before": "8d21798a0f483ca4a3c8e394edc7c3257cecd41db6068f9d722f7d249618e5cc",
+      "after": "c92173af951db725090fc2305d82b618eaa00c3e6539ca46242ab68feae05cb2"
+    }
+  },
+  "physical_test": false,
+  "whole_native_build": false
+}

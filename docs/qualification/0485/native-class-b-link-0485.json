@@ -1,0 +1,39 @@
+{
+  "passed": true,
+  "version": "0485",
+  "native_sha256": "638a4491c6ebc77a9a0301782fe0f8c289f0f8cc53cd2b5009b4c47664095fae",
+  "native_bytes": 18967016,
+  "actual_native_symbols": [
+    "_kebab_b_file_close",
+    "_kebab_apfs_b_raw_io_available",
+    "_kebab_apfs_b_note_cpx_destroy",
+    "_kebab_device_keybag_bootstrap",
+    "_kebab_device_keybag_get_lock_state",
+    "_kebab_device_keybag_set_locked"
+  ],
+  "actual_direct_call_edges": [
+    {
+      "caller": "_vn_close",
+      "callee": "_kebab_b_file_close",
+      "actual_direct_calls": [
+        "0xfffffe00067191e8"
+      ]
+    },
+    {
+      "caller": "_cpx_free",
+      "callee": "_kebab_apfs_b_note_cpx_destroy",
+      "actual_direct_calls": [
+        "0xfffffe0006728d0c"
+      ]
+    },
+    {
+      "caller": "_cpx_flush",
+      "callee": "_kebab_apfs_b_note_cpx_destroy",
+      "actual_direct_calls": [
+        "0xfffffe0006728f60"
+      ]
+    }
+  ],
+  "source_unchanged_across_full_build": true,
+  "physical_lifecycle_not_yet_proven": true
+}

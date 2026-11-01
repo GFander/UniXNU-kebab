@@ -1,0 +1,18 @@
+{
+  "version": "0483",
+  "parent": "0482",
+  "changes": {
+    "bsd/kern/kebab_bootdiag.c": {
+      "before": "e805210860ad8549e8e34c41eb9dc65bd33453ae3ba8802156e038b145f004de",
+      "after": "d91797eb5ceaf822deb4c1b76a6cdc62dec25fe97cb72fc7b07a6dbfe9a89d74"
+    },
+    "bsd/dev/kebab_usb.c": {
+      "before": "00cfdf81f7ae5540e708c7a312742dd2b2efcbb81ab6eac76af4676831f10bee",
+      "after": "372252c3a7897d39c6d5a2589fba64b245ea765e456b3c9005a9a64179282b88"
+    },
+    "bsd/kern/kebab_migration_status_impl.h": {
+      "before": null,
+      "after": "f78ae6a0317c5daafddfcc8b0d47d7a2581ce7b7a86758b19b50dccc9351bc88"
+    }
+  }
+}

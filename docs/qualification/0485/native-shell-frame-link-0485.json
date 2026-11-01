@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "version": "0485",
+  "native_sha256": "638a4491c6ebc77a9a0301782fe0f8c289f0f8cc53cd2b5009b4c47664095fae",
+  "complete_native_build": true,
+  "exact_all_source_files": 5281,
+  "source_common": 343,
+  "source_host": 4,
+  "only_fixed_shell_ack_and_frame_observation_changed": true,
+  "NativeAES2201_and_nonce_source_unchanged": true,
+  "Root_bank_APFS_A_B_CD_keychain_and_watchdog_sources_unchanged": true,
+  "old_direct_B_callbacks_linked": true,
+  "original_base_ABI_freshly_checked": true,
+  "physical_qualified": false,
+  "source_changes": {
+    "bsd/kern/kebab_bootdiag.c": {
+      "before": "c9f103efaac1b05b08b5326a36b8e7ae397796e4a5a59d23b55c81ff859217a8",
+      "after": "a28ce013d25696804f1f918aec1d7355bf226b2e69fc868a097ccfaa4c0cb850"
+    }
+  }
+}

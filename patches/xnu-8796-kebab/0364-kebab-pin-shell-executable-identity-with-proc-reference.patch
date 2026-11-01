@@ -1,0 +1,29 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -122,7 +122,7 @@
+ extern void kebab_preboard_task_report(task_t);
+ void kebab_ui_report(void);
+ struct kebab_ui_snapshot {
+-    const char *name; task_t task; unsigned scanned; int pid; unsigned uid; bool found;
++    const char *name; task_t task; unsigned scanned; int pid; unsigned uid; bool found; uint8_t uuid[16];
+ };
+ static int
+ kebab_ui_select(proc_t process, void *argument)
+@@ -134,6 +134,7 @@
+     if (!strcmp(name, snapshot->name) && proc_ppid(process) == 1) {
+         snapshot->found = true;
+         snapshot->pid = proc_pid(process);snapshot->uid = proc_getuid(process);
++        proc_getexecutableuuid(process, snapshot->uuid, sizeof(snapshot->uuid));
+         task_t task = proc_task(process);
+         if (task != TASK_NULL) {task_reference(task);snapshot->task = task;}
+         return PROC_RETURNED_DONE;
+@@ -160,8 +161,7 @@
+             else kebab_preboard_task_report(snapshot.task);
+             if (i == 0) {
+                 static const uint8_t original_uuid[16] = {0xe1,0xa4,0xfe,0x7d,0x29,0xff,0x32,0x69,0xb3,0xab,0x50,0xae,0xd4,0x0c,0x44,0x95};
+-                uint8_t uuid[16] = {};proc_getexecutableuuid((proc_t)get_bsdtask_info(snapshot.task), uuid, sizeof(uuid));
+-                if (snapshot.uid == 501 && !memcmp(uuid, original_uuid, sizeof(uuid))) kebab_shell_ack_task_report(snapshot.task);
++                if (snapshot.uid == 501 && !memcmp(snapshot.uuid, original_uuid, sizeof(snapshot.uuid))) kebab_shell_ack_task_report(snapshot.task);
+                 else printf("KEBAB SHELL: original executable UUID/UID mismatch; no user-state read\n");
+             }
+             task_deallocate(snapshot.task);

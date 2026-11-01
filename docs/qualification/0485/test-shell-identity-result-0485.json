@@ -1,0 +1,41 @@
+{
+  "passed": true,
+  "production_bsd_source_sha256": "a28ce013d25696804f1f918aec1d7355bf226b2e69fc868a097ccfaa4c0cb850",
+  "fixture_sha256": "2bc058c8e725a86b7b604fd890812138b617d30c679121dab42efaae85a06cb3",
+  "actual_production_selector_report": true,
+  "proc_task_and_exit_are_models": true,
+  "compiled_behavioral_mutants": 5,
+  "runs": [
+    {
+      "name": "baseline",
+      "compiled": true,
+      "exit_code": 0
+    },
+    {
+      "name": "omit-identity-copy",
+      "compiled": true,
+      "exit_code": -6
+    },
+    {
+      "name": "bypass-uid",
+      "compiled": true,
+      "exit_code": -6
+    },
+    {
+      "name": "bypass-uuid",
+      "compiled": true,
+      "exit_code": -6
+    },
+    {
+      "name": "ignore-parent",
+      "compiled": true,
+      "exit_code": -6
+    },
+    {
+      "name": "late-proc-read",
+      "compiled": true,
+      "exit_code": -6
+    }
+  ],
+  "native_or_physical": false
+}

@@ -1,0 +1,237 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -17,6 +17,7 @@
+ 
+ extern void kebab_pid1_task_report(task_t task);
+ void kebab_process_report(void);
++extern void kebab_usb_log_flush(void);
+ void kebab_pid1_report(void);
+ 
+ static int
+@@ -31,16 +32,22 @@
+ 	proc_unlock(process);
+ 	printf("KEBAB PROC: pid=%d parent=%d state=%u flags=0x%x name=%s\n",
+ 	    pid, parent, state, flags, name);
+-	return ++*count >= 512 ? PROC_RETURNED_DONE : PROC_RETURNED;
++	unsigned observed = ++*count;
++	/* proc_iterate holds only a proc reference here, not a proc/list lock.
++	 * Bound each burst below the 16 KiB nonblocking log ring. */
++	if ((observed & 31) == 0) kebab_usb_log_flush();
++	return observed >= 512 ? PROC_RETURNED_DONE : PROC_RETURNED;
+ }
+ 
+ void
+ kebab_process_report(void)
+ {
+ 	unsigned count = 0;
++	kebab_usb_log_flush();
+ 	printf("KEBAB PROC: active process snapshot begin (cap512)\n");
+ 	proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS, kebab_process_line, &count, NULL, NULL);
+ 	printf("KEBAB PROC: snapshot end count=%u%s\n", count, count == 512 ? "+" : "");
++	kebab_usb_log_flush();
+ }
+ 
+ void
+@@ -384,4 +391,6 @@
+     if (!error) kebab_locationd_fd_result(process, "open", result_fd, 0, 0, 0);
+ }
+ 
++#include "kebab_migration_status_impl.h"
++
+ #endif /* KEBAB */
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -280,7 +280,9 @@
+ #define UD_REBOOT_BBOARD_REPORT 40u
+ #define UD_REBOOT_UI_REPORT 41u
+ #define UD_REBOOT_MIG_REPORT 42u
++#define UD_REBOOT_MIG_STATUS 43u
+ extern void kebab_migrator_report(void);
++extern void kebab_migration_status_report(void);
+ extern void kebab_ui_report(void);
+ extern void kebab_backboardd_report(void);
+ extern void kebab_board_report(void);
+@@ -1476,6 +1478,9 @@
+ 		if (ud_command_seen(buf, received, "PROC?\n", sizeof("PROC?\n") - 1)) {
+ 			return UD_REBOOT_PROC_REPORT;
+ 		}
++		if (ud_command_seen(buf, received, "MIGSTATE?\n", sizeof("MIGSTATE?\n") - 1)) {
++			return UD_REBOOT_MIG_STATUS;
++		}
+ 		if (ud_command_seen(buf, received, "MIG?\n", sizeof("MIG?\n") - 1)) {
+ 			return UD_REBOOT_MIG_REPORT;
+ 		}
+@@ -1608,6 +1613,9 @@
+ 	}
+ 	if (received >= sizeof("PROC?\n") - 1 && !memcmp(buf, "PROC?\n", sizeof("PROC?\n") - 1)) {
+ 		return UD_REBOOT_PROC_REPORT;
++	}
++	if (received >= sizeof("MIGSTATE?\n") - 1 && !memcmp(buf, "MIGSTATE?\n", sizeof("MIGSTATE?\n") - 1)) {
++		return UD_REBOOT_MIG_STATUS;
+ 	}
+ 	if (received >= sizeof("MIG?\n") - 1 && !memcmp(buf, "MIG?\n", sizeof("MIG?\n") - 1)) {
+ 		return UD_REBOOT_MIG_REPORT;
+@@ -1764,6 +1772,8 @@
+ 		kebab_process_report();
+ 	} else if (command == UD_REBOOT_PID1_REPORT) {
+ 		kebab_pid1_report();
++	} else if (command == UD_REBOOT_MIG_STATUS) {
++		kebab_migration_status_report();
+ 	} else if (command == UD_REBOOT_MIG_REPORT) {
+ 		kebab_migrator_report();
+ 	} else if (command == UD_REBOOT_UI_REPORT) {
+--- /dev/null
++++ b/bsd/kern/kebab_migration_status_impl.h
+@@ -0,0 +1,152 @@
++/* Fixed original migration audit. Normal USB diagnostics only, never panic.
++ * No caller-supplied path, creation, write, keybag change or status override.
++ * Raw preference bytes are private diagnostics, not public qualification data. */
++#include <IOKit/IOBSD.h>
++#include <kern/kalloc.h>
++#include <libkern/crypto/sha2.h>
++#include <sys/errno.h>
++
++/* Same private BSD/IOKit ABI declared by bsd/kern/sys_generic.c. */
++extern kern_return_t IOBSDGetPlatformUUID(unsigned char uuid[16], mach_timespec_t timeout);
++void kebab_migration_status_report(void);
++
++#define KEBAB_MGS_MAX_BYTES (64u * 1024u)
++
++static int
++kebab_mgs_host_path(char *out, size_t capacity, const unsigned char uuid[16], bool upper)
++{
++    static const char lower[] = "0123456789abcdef", capitals[] = "0123456789ABCDEF";
++    const char *digits = upper ? capitals : lower;
++    char text[37];unsigned used = 0, nonzero = 0;
++    for (unsigned i = 0; i < 16; ++i) {
++        nonzero |= uuid[i];
++        if (i == 4 || i == 6 || i == 8 || i == 10) text[used++] = '-';
++        text[used++] = digits[uuid[i] >> 4];text[used++] = digits[uuid[i] & 15];
++    }
++    text[used] = 0;
++    if (!nonzero) return EAUTH;
++    int length = snprintf(out, capacity,
++        "/private/var/mobile/Library/Preferences/ByHost/com.apple.migration.%s.plist", text);
++    return length >= 0 && (size_t)length < capacity ? 0 : ENAMETOOLONG;
++}
++
++static bool
++kebab_mgs_plist_magic(const unsigned char *bytes, unsigned length)
++{
++    return (length >= 8 && !memcmp(bytes, "bplist00", 8)) ||
++           (length >= 5 && (!memcmp(bytes, "<?xml", 5) || !memcmp(bytes, "<plis", 5)));
++}
++
++static void
++kebab_mgs_drain(void)
++{
++    extern void kebab_usb_log_flush(void);
++    kebab_usb_log_flush();
++}
++
++static void
++kebab_mgs_file(unsigned index, const char *path, bool metadata_only)
++{
++    vfs_context_t context = vfs_context_current();
++    vnode_t file = NULLVP;unsigned char *bytes = NULL;
++    struct vnode_attr before = {}, after = {};
++    unsigned length = 0;int residual = 0;
++    /* O_NOFOLLOW_ANY excludes both leaf and intermediate symlinks. It must
++     * not be combined with O_NOFOLLOW (vn_open_auth rejects that pairing). */
++    int error = vnode_open(path, FREAD | O_NOFOLLOW_ANY, 0, 0, &file, context);
++    if (!error) {
++        VATTR_INIT(&before);VATTR_WANTED(&before, va_uid);VATTR_WANTED(&before, va_gid);
++        VATTR_WANTED(&before, va_mode);VATTR_WANTED(&before, va_data_size);
++        VATTR_WANTED(&before, va_modify_time);VATTR_WANTED(&before, va_fileid);
++        VATTR_WANTED(&before, va_dataprotect_class);
++        error = vnode_getattr(file, &before, context);
++        if (!error && (!vnode_isreg(file) || !VATTR_IS_SUPPORTED(&before, va_uid) ||
++            !VATTR_IS_SUPPORTED(&before, va_data_size) ||
++            !VATTR_IS_SUPPORTED(&before, va_modify_time) ||
++            !VATTR_IS_SUPPORTED(&before, va_fileid) ||
++            (before.va_uid != 0 && before.va_uid != 501))) error = EAUTH;
++        if (!error && !metadata_only) {
++            if (!before.va_data_size || before.va_data_size > KEBAB_MGS_MAX_BYTES) error = EFBIG;
++            else {
++                length = (unsigned)before.va_data_size;
++                bytes = kalloc_data(length, Z_WAITOK | Z_ZERO);
++                if (!bytes) error = ENOMEM;
++            }
++            if (!error) {
++                residual = (int)length;
++                error = vn_rdwr(UIO_READ, file, (caddr_t)bytes, (int)length, 0,
++                    UIO_SYSSPACE, IO_NOCACHE, vfs_context_ucred(context), &residual, NULL);
++                if (!error && residual) error = EIO;
++            }
++            if (!error && !kebab_mgs_plist_magic(bytes, length)) error = EINVAL;
++        }
++        if (!error) {
++            VATTR_INIT(&after);VATTR_WANTED(&after, va_data_size);
++            VATTR_WANTED(&after, va_modify_time);VATTR_WANTED(&after, va_fileid);
++            error = vnode_getattr(file, &after, context);
++            if (!error && (!VATTR_IS_SUPPORTED(&after, va_data_size) ||
++                !VATTR_IS_SUPPORTED(&after, va_modify_time) || !VATTR_IS_SUPPORTED(&after, va_fileid) ||
++                before.va_data_size != after.va_data_size || before.va_fileid != after.va_fileid ||
++                before.va_modify_time.tv_sec != after.va_modify_time.tv_sec ||
++                before.va_modify_time.tv_nsec != after.va_modify_time.tv_nsec)) error = EAGAIN;
++        }
++        int closed = vnode_close(file, FREAD, context);file = NULLVP;
++        if (!error) error = closed;
++    }
++    /* No vnode or filesystem lock is held while printing/draining. Report
++     * real errors; sentinel ENOENT is absence, never successful file I/O. */
++    unsigned supported = (VATTR_IS_SUPPORTED(&before, va_uid) ? 1u : 0u) |
++        (VATTR_IS_SUPPORTED(&before, va_gid) ? 2u : 0u) | (VATTR_IS_SUPPORTED(&before, va_mode) ? 4u : 0u) |
++        (VATTR_IS_SUPPORTED(&before, va_data_size) ? 8u : 0u) | (VATTR_IS_SUPPORTED(&before, va_modify_time) ? 16u : 0u) |
++        (VATTR_IS_SUPPORTED(&before, va_fileid) ? 32u : 0u) | (VATTR_IS_SUPPORTED(&before, va_dataprotect_class) ? 64u : 0u);
++    printf("KEBAB MGS FILE: index=%u result=%d metadata=%u bytes=%u residual=%d supported=0x%x uid=%u gid=%u mode=0%o class=%u inode=%llu mtime=%lld\n",
++        index, error, metadata_only, error ? 0u : length, residual, supported, before.va_uid, before.va_gid,
++        before.va_mode & 07777, before.va_dataprotect_class,
++        (unsigned long long)before.va_fileid, (long long)before.va_modify_time.tv_sec);
++    kebab_mgs_drain();
++    if (!error && bytes) {
++        unsigned char digest[32];char hash[65];SHA256_CTX state;
++        static const char digits[] = "0123456789abcdef";
++        SHA256_Init(&state);SHA256_Update(&state, bytes, length);SHA256_Final(digest, &state);
++        for (unsigned i = 0; i < 32; ++i) {hash[2*i] = digits[digest[i] >> 4];hash[2*i+1] = digits[digest[i] & 15];}
++        hash[64] = 0;
++        for (unsigned offset = 0; offset < length; offset += 64) {
++            unsigned count = length - offset > 64 ? 64 : length - offset;char hex[129];
++            for (unsigned i = 0; i < count; ++i) {hex[2*i] = digits[bytes[offset+i] >> 4];hex[2*i+1] = digits[bytes[offset+i] & 15];}
++            hex[2*count] = 0;
++            printf("KEBAB MGS DATA: index=%u offset=%u hex=%s\n", index, offset, hex);
++            kebab_mgs_drain();
++        }
++        printf("KEBAB MGS HASH: index=%u bytes=%u sha256=%s\n", index, length, hash);
++        kebab_mgs_drain();
++        bzero(digest, sizeof(digest));bzero(&state, sizeof(state));
++    }
++    if (bytes) {bzero(bytes, length);kfree_data(bytes, length);}
++}
++
++void
++kebab_migration_status_report(void)
++{
++    if (ml_at_interrupt_context() || get_preemption_level() != 0 || !ml_get_interrupts_enabled()) return;
++    printf("KEBAB MGS: begin; fixed migration sentinel and mobile current-host preferences; private bytes, no writes\n");
++    kebab_mgs_drain();
++    kebab_mgs_file(0, "/private/var/datamigrator/migrate", true);
++    unsigned char host[16] = {};
++    /* A zero timespec means infinite wait in IOBSDGetPlatformUUID. Explicit
++     * nonzero timeout keeps a missing platform resource bounded. */
++    mach_timespec_t timeout = {0, 1000000};
++    kern_return_t result = IOBSDGetPlatformUUID(host, timeout);
++    printf("KEBAB MGS HOST: result=%d timeout-nsec=1000000; UUID not printed\n", result);
++    kebab_mgs_drain();
++    for (unsigned i = 1; i <= 2; ++i) {
++        char path[192];int error = result ? ENXIO : kebab_mgs_host_path(path, sizeof(path), host, i == 1);
++        if (error) {
++            printf("KEBAB MGS FILE: index=%u host-path-error=%d; no lookup performed\n", i, error);
++            kebab_mgs_drain();
++        } else kebab_mgs_file(i, path, false);
++    }
++    bzero(host, sizeof(host));
++    kebab_mgs_file(3, "/private/var/mobile/Library/Preferences/com.apple.migration.plist", false);
++    printf("KEBAB MGS: observer end; real read results only; no migration success inferred\n");
++    kebab_mgs_drain();
++}

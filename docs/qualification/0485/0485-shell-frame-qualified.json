@@ -1,0 +1,75 @@
+{
+  "accepted": true,
+  "scope": "Guarded original check-in success completion and observational first/last CPU-frame boundary; no visible desktop, complete server lifetime or GPU/panel qualification",
+  "version": "0485",
+  "native_sha256": "638a4491c6ebc77a9a0301782fe0f8c289f0f8cc53cd2b5009b4c47664095fae",
+  "native_bytes": 18967016,
+  "source_common": 343,
+  "source_host": 4,
+  "source_files": 5281,
+  "sealed_regression_sha256": "a858fe698309b67c47b96460837fffaf00e177bff111ab8efcad473cb97ab1a6",
+  "late_log_sha256": "1a411c1a537bbf117de69beb5e9946c1fd9ef36d22449eaeb588e5416d6816c9",
+  "qualified_watchdog_seconds": 318.586,
+  "old_crypto_preserved": true,
+  "original_migration_20H392_success_read_back": true,
+  "initial_completed_values": [
+    0
+  ],
+  "late_completed_values": [
+    1
+  ],
+  "original_checkin_nil_error_completion_observed": true,
+  "system_shell_checkin_complete": true,
+  "full_backend_registration_lifetime_proven": false,
+  "first_present_records": [
+    {
+      "seconds": 1.366,
+      "kind": "first",
+      "id": 176,
+      "mask": 2147483655,
+      "selected": 0,
+      "found": 0,
+      "missing": 0,
+      "self_surface": 0,
+      "rejected": 0,
+      "copied_bytes": 0
+    }
+  ],
+  "last_present_records": [
+    {
+      "seconds": 1.366,
+      "kind": "last",
+      "id": 176,
+      "mask": 2147483655,
+      "selected": 0,
+      "found": 0,
+      "missing": 0,
+      "self_surface": 0,
+      "rejected": 0,
+      "copied_bytes": 0
+    }
+  ],
+  "frame_snapshots": [
+    {
+      "seconds": 1.366,
+      "queued": 2,
+      "presented": 1,
+      "begun": 485,
+      "completed": 176,
+      "pending": 0,
+      "power_off": 1,
+      "have_frame": 1
+    }
+  ],
+  "cpu_pixel_copy_observed": false,
+  "panel_scanout_proven": false,
+  "usable_springboard": false,
+  "full_goal_complete": false,
+  "source_services_replies_power_draw_and_key_state_not_overridden": true,
+  "readonly_state_is_best_effort_not_atomic": true,
+  "full_indirect_control_flow_proven": false,
+  "physical0484_never_flashed": true,
+  "first_present_has_zero_mask": false,
+  "first_present_selected_no_nonzero_surface": true,
+  "mask_alone_does_not_prove_enabled_content": true
+}

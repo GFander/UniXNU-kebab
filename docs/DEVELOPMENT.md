@@ -4,7 +4,7 @@
 
 ## 实际构建路线
 
-当前验收路线使用 Apple OSS XNU 8796.141.3，16 KiB 页，板级 `KEBAB`，DEVELOPMENT ARM64；共同补丁按 `patches/xnu-8796-kebab/*.patch` 文件名排序，再应用四个 `patches/hosts/macos-dxb-13.5/*.patch` 主机补丁。0482源码的5,280 项源码清单不覆盖外部 Xcode、SDK、KDK、供体二进制和私有设备输入。
+当前验收路线使用 Apple OSS XNU 8796.141.3，16 KiB 页，板级 `KEBAB`，DEVELOPMENT ARM64；共同补丁按 `patches/xnu-8796-kebab/*.patch` 文件名排序，再应用四个 `patches/hosts/macos-dxb-13.5/*.patch` 主机补丁。0485源码的5,281 项源码清单不覆盖外部 Xcode、SDK、KDK、供体二进制和私有设备输入。
 
 Mac 全量构建使用固定主机环境与 prepared-source 流程；prelink 使用固定 20H392 kernelcache、原版组件身份与各次 ABI 资格。Windows 端载荷打包、ADT 变换、策略数据适配、回读及刷机门控另有独立步骤。历史环境与命令保留在 [BUILD-BASELINE-20261029.md](BUILD-BASELINE-20261029.md) 和 [FIRMWARE.md](FIRMWARE.md)，不能直接把旧版本号或旧卷号用于当前设备。
 
@@ -48,3 +48,7 @@ Mac 全量构建使用固定主机环境与 prepared-source 流程；prelink 使
 0360 保留旧 nonce KDF，按固定供体 2201/base2000 的另一 public seed 从既有硬件封装 Root 派生 128-bit 子密钥；不提供 Apple UID/GID、SEP 或硬件 AES 引擎。两个目的密钥成功准备后才发布，取消及复位均清除两份状态。自测只有明确的合成公开向量，没有设备密钥输出。
 
 0361 只修复既有 IOSurface 用户客户端的四个 OOL 传输点，按 Apple IOMemoryDescriptor 契约 prepare/copy/complete，正确处理 prepare 失败、短拷贝及 complete 失败。全局 IOGMD 检查保留；没有新增图形功能。`scripts/tests/run-fairplay-aes-and-ool.py` 通过 --repo/--source/--qualification/--cache 接受路径，重跑实际 C++ 生产体主机模型及编译行为变异，核对固定源码、补丁哈希和封存证据；不接触设备。
+
+## 0485 桌面状态与首帧观察
+
+按文件名顺序同时应用0362–0364；0363的刷前proc退出窗口由0364修复，0484未刷。固定原版UUID/UID、cacheUUID、ISA及地址链只读；UUID须在proc_iterate持proc引用时保存。双读是best-effort，不是暂停线程或ABA证明。Frame计数只证明本CPU后端队列/复制分支，不代表面板扫描或GPU执行。`scripts/qualification/run-shell-frame.py --repo ... --source ... --qualification docs/qualification/0485 --cache ...`重跑343+4/5281源清单、24+6生产模型检查、13+5编译行为变异及封存日志解析，--source 指向本地XNU Git克隆，校验器在临时目录回放全部共同及Mac主机补丁后与native清单逐项比较，不修改输入树；不访问手机/private偏好。原版二进制核对是独立私有输入资格，不能由主机模型代替。

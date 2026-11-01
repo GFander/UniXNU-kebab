@@ -1,0 +1,233 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -17,6 +17,7 @@
+ 
+ extern void kebab_pid1_task_report(task_t task);
+ void kebab_process_report(void);
++extern void kebab_shell_ack_task_report(task_t task);
+ extern void kebab_usb_log_flush(void);
+ void kebab_pid1_report(void);
+ 
+@@ -157,6 +158,12 @@
+                 labels[i], snapshot.pid, snapshot.uid, snapshot.scanned);
+             if (i == 0) kebab_springboard_task_report(snapshot.task);
+             else kebab_preboard_task_report(snapshot.task);
++            if (i == 0) {
++                static const uint8_t original_uuid[16] = {0xe1,0xa4,0xfe,0x7d,0x29,0xff,0x32,0x69,0xb3,0xab,0x50,0xae,0xd4,0x0c,0x44,0x95};
++                uint8_t uuid[16] = {};proc_getexecutableuuid((proc_t)get_bsdtask_info(snapshot.task), uuid, sizeof(uuid));
++                if (snapshot.uid == 501 && !memcmp(uuid, original_uuid, sizeof(uuid))) kebab_shell_ack_task_report(snapshot.task);
++                else printf("KEBAB SHELL: original executable UUID/UID mismatch; no user-state read\n");
++            }
+             task_deallocate(snapshot.task);
+         }
+     }
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -196,6 +196,65 @@
+         vm_map_max(map) - address < bytes) return false;
+     return copyinmap(map, address, out, bytes) == KERN_SUCCESS;
+ }
++/* Fixed original20H392 shell completion audit. Caller pins original executable
++ * UUID/UID and holds task reference; no arbitrary address, invocation or write.
++ * A repeated pointer/status read is best effort, not suspension/ABA proof. */
++struct kebab_shell_ack_state { uint64_t state; unsigned completed; };
++static bool
++kebab_shell_isa(uint64_t isa, uint64_t expected)
++{
++    return isa == expected || ((isa & 0x3f000000001ULL) == 0x1a000000001ULL &&
++        (isa & 0xffffffff8ULL) == expected);
++}
++static int
++kebab_shell_ack_snapshot(vm_map_t map, struct kebab_shell_ack_state *out)
++{
++    static const uint8_t cache_uuid[16] = {0x8f,0x97,0x04,0x52,0xc9,0xe3,0x3e,0x88,0xb1,0x14,0xfe,0xb1,0x86,0x4b,0xc9,0xe0};
++    uint8_t uuid[16] = {}, signal[16] = {}, again_signal = 0;
++    uint64_t mask = 0, instance = 0, again_instance = 0, service_ptr = 0, signal_ptr = 0;
++    uint64_t shell[6] = {}, service[4] = {}, signal_isa = 0;
++    bzero(out, sizeof(*out));
++    if (!kebab_plugin_user_copy(map, 0x180000058ULL, uuid, sizeof(uuid)) ||
++        memcmp(uuid, cache_uuid, sizeof(uuid))) return 1;
++    if (!kebab_plugin_user_copy(map, 0x1800e8940ULL, &mask, sizeof(mask)) || mask != 0xffffffff8ULL) return 2;
++    if (!kebab_plugin_user_copy(map, 0x1dd5f3668ULL, &instance, sizeof(instance)) || !instance || (instance & 7)) return 3;
++    if (!kebab_plugin_user_copy(map, instance, shell, sizeof(shell)) ||
++        !kebab_shell_isa(shell[0], 0x1dd5f2c50ULL)) return 4;
++    if (!shell[5] || (shell[5] & 7) ||
++        !kebab_plugin_user_copy(map, shell[5], service, sizeof(service)) ||
++        !kebab_shell_isa(service[0], 0x1dcffec08ULL)) return 5;
++    if (!service[3] || (service[3] & 7) ||
++        !kebab_plugin_user_copy(map, service[3], signal, sizeof(signal))) return 6;
++    memcpy(&signal_isa, signal, sizeof(signal_isa));
++    if (!kebab_shell_isa(signal_isa, 0x1e1d7f910ULL) || signal[8] > 1 || shell[2] > 2) return 7;
++    if (!kebab_plugin_user_copy(map, 0x1dd5f3668ULL, &again_instance, sizeof(again_instance)) ||
++        !kebab_plugin_user_copy(map, instance + 0x28, &service_ptr, sizeof(service_ptr)) ||
++        !kebab_plugin_user_copy(map, shell[5] + 0x18, &signal_ptr, sizeof(signal_ptr)) ||
++        !kebab_plugin_user_copy(map, service[3] + 8, &again_signal, sizeof(again_signal)) ||
++        again_instance != instance || service_ptr != shell[5] || signal_ptr != service[3] || again_signal != signal[8]) return 8;
++    out->state = shell[2];out->completed = signal[8];return 0;
++}
++void kebab_shell_ack_task_report(task_t task);
++void
++kebab_shell_ack_task_report(task_t task)
++{
++    extern void kebab_usb_log_flush(void);
++    if (task == TASK_NULL || task == kernel_task || ml_at_interrupt_context() ||
++        get_preemption_level() != 0 || !ml_get_interrupts_enabled()) return;
++    vm_map_t map = VM_MAP_NULL;
++    task_lock(task);
++    if (task->map != VM_MAP_NULL && vm_map_pmap(task->map) != pmap_kernel()) {
++        map = task->map;vm_map_reference(map);
++    }
++    task_unlock(task);
++    struct kebab_shell_ack_state state = {};
++    int result = map == VM_MAP_NULL ? 9 : kebab_shell_ack_snapshot(map, &state);
++    if (map != VM_MAP_NULL) vm_map_deallocate(map);
++    printf("KEBAB SHELL: original20H392 result=%d state=%llu checkin-completed=%u; fixed guarded readonly snapshot, no reply override\n",
++        result, state.state, state.completed);
++    kebab_usb_log_flush();
++}
++
+ static bool
+ kebab_plugin_image_uuid(vm_map_t map, uint64_t base, uint8_t uuid[16])
+ {
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -74,6 +74,7 @@
+ #include "KebabUserClientContract.h"
+ #include "KebabFramebufferGeometry.h"
+ #include <IOKit/IOService.h>
++#include <libkern/c++/OSIterator.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+ #include <IOKit/IOLib.h>
+@@ -177,6 +178,13 @@
+ 	uint32_t      fDisplayDevice;
+ 	uint32_t      fColorRemapMode;
+ 	uint32_t      fPowerSavings;
++	struct FrameTrace {
++		uint64_t bytes;
++		uint32_t id, mask, selected, found, missing, self, rejected;
++		uint32_t surfaces[KEBAB_FB_LAYERS], formats[KEBAB_FB_LAYERS];
++	};
++	uint64_t fTraceQueued, fTracePresented;
++	FrameTrace fTraceFirst, fTraceLast;
+ 	uint32_t      fLayerSurface[KEBAB_FB_LAYERS]; /* displayed per layer */
+ 
+ 	bool init(OSDictionary *properties = NULL) APPLE_KEXT_OVERRIDE;
+@@ -328,6 +336,8 @@
+ 		return false;
+ 	}
+ 	fVsyncCount = 0;
++	fTraceQueued = fTracePresented = 0;
++	bzero(&fTraceFirst, sizeof(fTraceFirst));bzero(&fTraceLast, sizeof(fTraceLast));
+ 	fSwapID = 0;
+ 	fQueuedID = 0;
+ 	fCompletedID = 0;
+@@ -521,6 +531,7 @@
+ 	}
+ 	memcpy(fPending, rec, KEBAB_FB_SWAP_REC_SIZE);
+ 	fPendingID = id;
++	fTraceQueued++;
+ 	fPendingValid = true;
+ 	fHaveFrame = true;
+ 	fQueuedID = id;
+@@ -533,6 +544,7 @@
+ {
+ 	uint32_t mask = get32(rec, 0x104);
+ 	uint32_t displayed[KEBAB_FB_LAYERS] = { 0, 0, 0, 0 };
++	FrameTrace trace = {};trace.id = swapID;trace.mask = mask;
+ 
+ 	if (!fConsolePaused) {
+ 		int quiet = 0;
+@@ -555,9 +567,10 @@
+ 		if (!(mask & (1u << layer)) || id == 0) {
+ 			continue;
+ 		}
++		trace.selected++;trace.surfaces[layer] = id;
+ 		KebabSurface *s = kebab_surface_copy(id);
+ 		if (s != NULL) {
+-			displayed[layer] = id;
++			displayed[layer] = id;trace.found++;trace.formats[layer] = s->pixelFormat;
+ 		}
+ 		if ((fDebugFlags & 1) || kebab_fb_swaps_logged < 16) {
+ 			kebab_fb_swaps_logged++;
+@@ -567,6 +580,7 @@
+ 			    get32(a, 12), dx, dy, w, h);
+ 		}
+ 		if (s == NULL || s == fSurface) {
++			if (s == NULL) trace.missing++;else trace.self++;
+ 			OSSafeReleaseNULL(s);
+ 			continue;
+ 		}
+@@ -611,20 +625,53 @@
+ 			src = 0;
+ 		}
+ 		if (src != 0 && bpe == 4) {
++			trace.bytes += (uint64_t)(size_t)w * 4 * (uint64_t)h;
+ 			for (int32_t y = 0; y < h; y++) {
+ 				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+ 				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+ 				    (size_t)w * 4);
+ 			}
+-		}
++		} else trace.rejected++;
+ 		s->release();
+ 	}
+ 
+ 	IOLockLock(fLock);
++	fTracePresented++;fTraceLast = trace;
++	if (fTracePresented == 1) fTraceFirst = trace;
+ 	for (uint32_t layer = 0; layer < KEBAB_FB_LAYERS; layer++) {
+ 		fLayerSurface[layer] = displayed[layer];
+ 	}
+ 	IOLockUnlock(fLock);
++}
++
++extern "C" void kebab_framebuffer_report(void);
++extern "C" void
++kebab_framebuffer_report(void)
++{
++    OSDictionary *matching = IOService::serviceMatching("AppleCLCD");
++    OSIterator *iterator = matching ? IOService::getMatchingServices(matching) : NULL;
++    OSSafeReleaseNULL(matching);
++    IOService *service = iterator ? OSDynamicCast(IOService, iterator->getNextObject()) : NULL;
++    AppleCLCD *fb = OSDynamicCast(AppleCLCD, service);
++    if (fb && fb->fLock) {
++        uint64_t queued, presented;uint32_t begun, completed, pending;
++        bool power, have;AppleCLCD::FrameTrace first, last;
++        IOLockLock(fb->fLock);
++        queued = fb->fTraceQueued;presented = fb->fTracePresented;
++        begun = fb->fSwapID;completed = fb->fCompletedID;pending = fb->fPendingValid;
++        power = fb->fPowerOff;have = fb->fHaveFrame;first = fb->fTraceFirst;last = fb->fTraceLast;
++        IOLockUnlock(fb->fLock);
++        IOLog("KEBAB FRAME: queued=%llu presented=%llu begun=%u completed=%u pending=%u power-off=%u have-frame=%u; CPU-copy counters, no panel scanout proof\n",
++            queued, presented, begun, completed, pending, power, have);
++        for (unsigned i = 0; i < 2; ++i) {
++            AppleCLCD::FrameTrace &t = i ? last : first;
++            IOLog("KEBAB FRAME: %s id=%u mask=0x%x selected=%u found=%u missing=%u self=%u rejected=%u copied-bytes=%llu\n",
++                i ? "last" : "first", t.id, t.mask, t.selected, t.found, t.missing, t.self, t.rejected, t.bytes);
++            IOLog("KEBAB FRAME: %s surfaces=%u,%u,%u,%u formats=%x,%x,%x,%x\n", i ? "last" : "first",
++                t.surfaces[0],t.surfaces[1],t.surfaces[2],t.surfaces[3],t.formats[0],t.formats[1],t.formats[2],t.formats[3]);
++        }
++    } else IOLog("KEBAB FRAME: service-or-lock unavailable; no frame state read\n");
++    OSSafeReleaseNULL(iterator);
+ }
+ 
+ bool
+--- a/iokit/Kernel/arm/KebabDriverDiagnostics.cpp
++++ b/iokit/Kernel/arm/KebabDriverDiagnostics.cpp
+@@ -12,6 +12,7 @@
+ extern "C" boolean_t kebab_cpu_signal_is_enabled(unsigned int);
+ extern "C" boot_args *BootArgs;
+ extern "C" void kebab_hid_input_report(void);
++extern "C" void kebab_framebuffer_report(void);
+ 
+ struct KebabDriverManifestEntry {
+ 	const char *group, *service, *scope;
+@@ -75,6 +76,7 @@
+ 			    entry.group, entry.service, entry.scope);
+ 		}
+ 	}
++	kebab_framebuffer_report();
+ 	kebab_hid_input_report();
+ 	IOLog("KEBAB DRV: end; matched service does not certify user ABI or hardware capability\n");
+ }
