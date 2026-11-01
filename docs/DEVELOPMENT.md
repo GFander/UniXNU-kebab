@@ -36,3 +36,9 @@ Mac 全量构建使用固定主机环境与 prepared-source 流程；prelink 使
 - 显式列出暂存路径，保留既有不相关工作树修改；不要 `git add -A`，不批量提交工作台的未跟踪文件。
 - 发布前审查新增文件、敏感数据、链接、补丁顺序/哈希和与改动相称的检查。推送后从 GitHub 再次确认 `ios16` 的提交哈希。
 - 发布源码、工具和经审阅的证据；不发布 Apple 闭源输入、IPSW、可刷镜像、设备密钥/keyblob 或私人 Data。源码许可与第三方许可分别保留。
+
+## 0480 显式重定位 profile
+
+`scripts/p1-run/prelink-fix/emit_prelink.py` 新增可选 `--relocation-profile`。固定 20H392 的受审元数据位于 `scripts/data/fairplay-relocation-profile-20H392.json`。无参数时仍严格拒绝未解决的外部 PC-relative 编码，并已逐字节复现旧 0479 image/report；该变化不是给任意组件提供通用豁免。
+
+该 profile 逐项固定供体、文字段、符号别名、34 处原始 addend 及 120 处 word/前序转移哈希；所有条目必须恰好消费一次。原组件可执行字节不变。120 处保留为未分类的原字节，完整间接控制流及寄存器数据流未被证明；三组基类 ABI 和一次真实查找/open 不等于完整驱动行为资格。运行 `python3 scripts/tests/prelink-profile/run-tests.py` 可复验 20 组主机测试及 12 个语法有效的 Python 行为变异；这些不是 C 编译或实机测试。

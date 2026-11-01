@@ -1,0 +1,26 @@
+{
+  "default_image_and_report_exact": true,
+  "donor_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "stripped_native_source": "0479",
+  "stripped_native_sha256": "a896b168a87a7cc391eab0cc5c8285a3eb392caf6d9d02e800f7d4a136dfcc6c",
+  "profile_sha256": "58fed01919b3f46ecd3a3c03532b5001f5d41bcdd972b378f2d87ac03aea03ba",
+  "candidate_sha256": "aadc7b17cde5442c8f83092712587058edc63bff0efac249f3e13140319fa0f4",
+  "candidate_bytes": 56967168,
+  "added_components": [
+    "com.apple.IOTextEncryptionFamily",
+    "com.apple.driver.FairPlayIOKit"
+  ],
+  "all_original_executable_bytes_preserved": true,
+  "symbol_relative_sites": 34,
+  "post_transfer_words_preserved": 120,
+  "register_and_indirect_control_flow_qualified": false,
+  "runtime_qualified": false,
+  "ABI_qualified": false,
+  "device_access": false,
+  "production_tools_changed": false,
+  "tool_sha256": {
+    "native_prelink.py": "329719c889b9043ef0bc477904ef4dcadfb4cb234b1ec51ea411526ca48b9692",
+    "emit_prelink.py": "935edd0abceb456e59c520d9ff67d24b4a9775f579d697a473bef5bdf52ea970",
+    "prelink_profile.py": "c3c969dd825360565a50783c59c344c0565bcaef0aa15c602890fac5c2f19b50"
+  }
+}

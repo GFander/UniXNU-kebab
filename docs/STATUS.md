@@ -1,4 +1,4 @@
-# 当前状态：0479实机里程碑（原版FairPlay内核类查询、加密回归）
+# 当前状态：0480实机里程碑（原版FairPlay组件装载、初始化失败与加密回归）
 
 更新时间：2026-11-01。完整功能总览见[仓库首页](../README.md)，资料入口见[文档索引](README.md)。本页取代此前逐轮追加的“最新状态”；旧页原文保存在[历史归档](history/STATUS-before-0460.txt)。
 
@@ -6,7 +6,7 @@
 
 | 范围 | 当前结论 | 证据 |
 | --- | --- | --- |
-| 正常启动 | 最近正常运行0479，原版FairPlay内核类查询结果有界验收，原版 iOS 用户态运行；原硬件密钥、MKB/systembag、C/D 加密 Data、RTC/NVRAM/defaults 与 watchdog 回归通过 | [0479收据](qualification/0479/0479-fairplay-services-qualified.json)、[原始日志](qualification/0479/0479-media-boot.log) |
+| 正常启动 | 最近正常运行0480，原版FairPlayIOKit查找、对象与用户客户端打开有界验收，原版 iOS 用户态运行；原硬件密钥、MKB/systembag、C/D 加密 Data、RTC/NVRAM/defaults 与 watchdog 回归通过 | [0479收据](qualification/0480/0480-fairplay-prelink-qualified.json)、[原始日志](qualification/0480/0480-media-boot.log) |
 | 共同源码 | 338个共同补丁 + 4 个 Mac 主机补丁，全部 5,280 个源码文件与实际编译输入一致；固定 Apple OSS 基提交 `1b191cb58250d0705d8a51287127505aa4bc0789` | [公共回放](qualification/0479/public-all-source-replay-0479.json)、[源码清单](qualification/0479/all-mac-source-0479.json) |
 | CPU / 内存 | 8 核与 8 GiB−2 MiB（8,587,837,440 字节，约 7.998 GiB）连续窗口已实测；非完整 12 GiB、AMP 或功耗验收 | [平台历史验收](PLATFORM-BASELINE-20261029.md) |
 | 触摸 | 0459 人工五点、横竖滑动、双指分离/保持与依次抬起通过原版 HID；新增 2,030 份报告，零队列丢失 | [实际记录](TOUCH-PHYSICAL-20261031.md)、[收据](qualification/0459-touch/0459-touch-live-qualified.json) |
@@ -22,13 +22,11 @@
 
 ## 当前直接阻塞
 
-0479原版FairPlay实际查询com_apple_driver_FairPlayIOKit，原匹配kr0但iterator为NULL，
-随后原进程退出；当前闭包未加载原组件。现有loader对其特殊重定位仍拒绝，下一步
-补严格装载/原初始化和真实回复验证。仅消费证据已确认，未证明唯一因果或修好后
-迁移必定完成；CoreLocation/backboardd/桌面登记等待仍在。
+0480 已装载原版 FairPlayIOKit 与 IOTextEncryptionFamily，真实查询、迭代返回对象及用户客户端打开均成功。下一步是原版初始化需要的 AES selector `2201`：当前后端不支持，原组件在 FairPlayCryptoUtilities.cpp:233 返回包装错误 -22。日志中的 `status == -22` 是失败值打印，不能改成返回 -22 来通过。
 
-[本轮结果与范围](MIGRATION-FAIRPLAY-SERVICES-20261101.md)。原防附加成功，六次
-文件探测非已证明根因；不随意补文件、跳迁移、伪造回复或注册假设备。
+本轮原生内核仍是 0479，338 个共同补丁；0480 仅变更主机 prelink 工具及原版组件闭包，不能称为新原生构建。旧 A/B/C/D、原版 keychain 六类、硬件 Root/nonce/bank/systembag 与 watchdog 314.209 秒回归通过。完整密钥接口、FairPlay 功能、迁移和 system-shell 登记仍未完成，不能保证一个接口修复就能进入桌面。
+
+见[装载与初始化边界](MIGRATION-FAIRPLAY-PRELINK-20261101.md)。正在开发的 0481/0360 候选不属于本页已验收内容。
 
 顺序：真实密钥/数据库接口与迁移等待 → 迁移/system-shell登记 → 图形及GUI输入。
 完整目标继续进行；蓝牙延期至可用SpringBoard之后。
