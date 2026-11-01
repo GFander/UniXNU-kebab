@@ -1,0 +1,14 @@
+{
+  "passed": true,
+  "physical_test": false,
+  "production_helper_tested": true,
+  "compiled_behavioral_mutants": 9,
+  "summary": "PASS 204 actual Mach metadata/receiver-call cases; native IPC/task/scheduler lifetime remains modeled and physically unqualified",
+  "fixture_sha256": "0d40936e5ad39eafcba07a5fd3faa1b6455bda80d5467e1411646e59dd489af0",
+  "models": [
+    "native IPC space and port lookup",
+    "native port lock/receiver helper",
+    "task/thread lifetime and register snapshot integration"
+  ],
+  "atomic_request_reply_pairing_proven": false
+}

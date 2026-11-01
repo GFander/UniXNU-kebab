@@ -97,7 +97,12 @@
 
 - [A类保护、锁定准入与原密钥重启恢复](CLASS-A-STORAGE-20261101.md)
 
+- [迁移IPC端口诊断与原加密回归](MIGRATION-IPC-RECEIVERS-20261101.md)
+
 ## 原始证据与测试
+
+- [0474同步等待完整观察](qualification/0474/)
+- [0472/0473失败与部分结果](qualification/0473/)
 
 - [0471完整重启验收](qualification/0471/)
 - [0470 A类后端、源码与测试](qualification/0470/)
