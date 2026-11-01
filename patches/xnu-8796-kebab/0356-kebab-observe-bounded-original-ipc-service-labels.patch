@@ -1,0 +1,57 @@
+--- a/osfmk/kern/kebab_mach_wait_ipc_impl.h
++++ b/osfmk/kern/kebab_mach_wait_ipc_impl.h
+@@ -1,3 +1,5 @@
++#include <ipc/ipc_service_port.h>
++
+ /* Decode only mach_msg2 trap metadata, never the user message payload.
+  * The waiting thread's register copy and this later IPC lookup are separate
+  * best-effort observations: neither proves an atomic request/reply pairing. */
+@@ -31,6 +33,8 @@
+  uint64_t object,destination;
+  uint32_t kind,flags,link,kotype,queued,limit,receiver_name;
+  pid_t receiver;
++ uint32_t service_present,service_info,launchd_name,label_flags,domain,name_truncated,name_changed;
++ char service_name[64];
+ };
+ 
+ static unsigned
+@@ -52,6 +56,28 @@
+    state->flags=(port->ip_specialreply?1u:0u)|(port->ip_service_port?2u:0u)|
+        (port->ip_sync_bootstrap_checkin?4u:0u)|(port->ip_immovable_receive?8u:0u);
+    state->queued=port->ip_messages.imq_msgcount;state->limit=port->ip_messages.imq_qlimit;
++   /* As in the original IPC wait-owner observer, interpret ip_splabel as a
++    * service label only on an active service port. The label is protected
++    * by this port lock. Copy bounded metadata, never its guard/context or
++    * any user message. CONFIG_SERVICE_PORT_INFO is a real build option. */
++   if(port->ip_service_port&&port->ip_splabel!=NULL){
++    ipc_service_port_label_t label=(ipc_service_port_label_t)port->ip_splabel;
++    state->service_present=1;state->launchd_name=label->ispl_launchd_name;
++    state->label_flags=label->ispl_flags;
++#if CONFIG_SERVICE_PORT_INFO
++    state->service_info=1;state->domain=label->ispl_domain;
++    const char *name=label->ispl_service_name;
++    if(name!=NULL){
++     unsigned i=0;
++     for(;i+1<sizeof(state->service_name)&&name[i]!=0;i++){
++      unsigned char c=(unsigned char)name[i];
++      state->service_name[i]=(c>=0x21&&c<=0x7e)?(char)c:'?';
++      if(c<0x21||c>0x7e)state->name_changed=1;
++     }
++     state->name_truncated=name[i]!=0;
++    }
++#endif
++   }
+    next=ip_get_destination(port);state->destination=(uint64_t)(uintptr_t)next;
+   }
+   bool follow=IP_VALID(next)&&count<KEBAB_IPC_PATH_MAX;
+@@ -103,5 +129,10 @@
+   printf("KEBAB %s IPC-STATE: tid=%llu hop=%u obj=%llx kind=%u pid=%d recv=%x dst=%llx f=%x link=%u kt=%u q=%u/%u\n",
+       label,tid,i,state->object,state->kind,state->receiver,state->receiver_name,
+       state->destination,state->flags,state->link,state->kotype,state->queued,state->limit);
++  if(state->service_present){
++   printf("KEBAB %s IPC-SERVICE: tid=%llu hop=%u name=%s info=%u dom=%u ld=%x flags=%x trunc=%u changed=%u\n",
++       label,tid,i,state->service_name[0]?state->service_name:"-",state->service_info,
++       state->domain,state->launchd_name,state->label_flags,state->name_truncated,state->name_changed);
++  }
+  }
+ }

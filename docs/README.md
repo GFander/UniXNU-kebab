@@ -101,7 +101,11 @@
 
 - [迁移端口转交状态与原加密回归](MIGRATION-IPC-PORT-STATE-20261101.md)
 
+- [原版等待服务身份与FairPlay退出现场](MIGRATION-SERVICE-IDENTITY-20261101.md)
+
 ## 原始证据与测试
+
+- [0476服务身份与原加密回归](qualification/0476/)
 
 - [0475端口状态及转交路径](qualification/0475/)
 

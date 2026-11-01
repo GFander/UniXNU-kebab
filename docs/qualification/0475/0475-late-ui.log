@@ -1,0 +1,118 @@
+[2026-11-01T12:16:51] sending 'UI?' on COM7
+[   0.105] KEBAB UI-SB: fixed process pid=27 uid=501 scanned=208; best-effort wait snapshot
+[   0.105] KEBAB UI-SB: thread snapshot count=5 thread_total=5 (cap32; no suspension)
+[   0.105] KEBAB UI-SB: tid=310 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.190478 sys=0.839568
+[   0.105] KEBAB UI-SB USER: tid=310 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16dc4e9d0; best-effort, target may resume
+[   0.105] KEBAB UI-SB USER: tid=310 frame[0]=0x1c2622db8
+[   0.105] KEBAB UI-SB USER: tid=310 frame[1]=0x1c2611524
+[   0.105] KEBAB UI-SB USER: tid=310 frame[2]=0x18db6a308
+[   0.105] KEBAB UI-SB USER: tid=310 frame[3]=0x18db6a694
+[   0.106] KEBAB UI-SB USER: tid=310 frame[4]=0x1d1bee0ec
+[   0.106] KEBAB UI-SB USER: tid=310 frame[5]=0x19b9af128
+[   0.106] KEBAB UI-SB USER: tid=310 frame[6]=0x19b9b1e78
+[   0.106] KEBAB UI-SB USER: tid=310 frame[7]=0x19b9b1554
+[   0.106] KEBAB UI-SB USER: tid=310 frame[8]=0x18dcf8ce0
+[   0.106] KEBAB UI-SB USER: tid=310 frame[9]=0x1a269c304
+[   0.106] KEBAB UI-SB USER: tid=310 frame[10]=0x1c58655c8
+[   0.106] KEBAB UI-SB USER: tid=310 frame[11]=0x1a4624344
+[   0.106] KEBAB UI-SB IPC: tid=310 opt=40700420e b=0 sz=0 v=0 r=7403 l=0 q=903 id=0 lookup=1
+[   0.106] KEBAB UI-SB IPC-OWNER: tid=310 role=sync name=7403 kr=0 pid=57 recv=a703 object=fffffe1b3b154b80
+[   0.106] KEBAB UI-SB IPC-STATE: tid=310 hop=0 obj=fffffe1b3b154b80 kind=1 pid=57 recv=a703 dst=0 f=0 link=0 kt=0 q=0/6
+[   0.106] KEBAB UI-SB: tid=2322 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2007fffe80 continuation=0xfffffe00069cec3c user=0.016481 sys=0.043953
+[   0.106] KEBAB UI-SB USER: tid=2322 saved pc=0x1c2611ad0 lr=0x18db68128 fp=0x16dcda6b0; best-effort, target may resume
+[   0.106] KEBAB UI-SB USER: tid=2322 frame[0]=0x18db67f10
+[   0.106] KEBAB UI-SB USER: tid=2322 frame[1]=0x18db7acfc
+[   0.106] KEBAB UI-SB USER: tid=2322 frame[2]=0x18db7a8fc
+[   0.106] KEBAB UI-SB USER: tid=2322 frame[3]=0x19c9c4980
+[   0.106] KEBAB UI-SB USER: tid=2322 frame[4]=0x18db977a8
+[   0.106] KEBAB UI-SB USER: tid=2322 frame[5]=0x18db98780
+[   0.106] KEBAB UI-SB USER: tid=2322 frame[6]=0x18db736fc
+[   0.106] KEBAB UI-SB USER: tid=2322 frame[7]=0x18db741e4
+[   0.106] KEBAB UI-SB USER: tid=2322 frame[8]=0x18db7df14
+[   0.106] KEBAB UI-SB USER: tid=2322 frame[9]=0x1d1b9abd0
+[   0.106] KEBAB UI-SB USER: tid=2322 frame[10]=0x1d1b9a720
+[   0.106] KEBAB UI-SB: tid=7965 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24d4fa8bf8 continuation=0xfffffe000694c9f4 user=0.000190 sys=0.000268
+[   0.106] KEBAB UI-SB USER: tid=7965 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16ddf2b50; best-effort, target may resume
+[   0.106] KEBAB UI-SB USER: tid=7965 frame[0]=0x1d1b9a720
+[   0.106] KEBAB UI-SB: tid=7969 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24d5279fe8 continuation=0xfffffe000694c9f4 user=0.000000 sys=0.000010
+[   0.106] KEBAB UI-SB USER: tid=7969 saved pc=0x0 lr=0x0 fp=0x0; best-effort, target may resume
+[   0.106] KEBAB UI-SB: tid=7970 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24d4a0b3d8 continuation=0xfffffe000694c9f4 user=0.000000 sys=0.000000
+[   0.106] KEBAB UI-SB USER: tid=7970 saved pc=0x0 lr=0x0 fp=0x0; best-effort, target may resume
+[   0.106] KEBAB UI-SB: snapshot end; addresses name kernel waits, not user PCs
+[   0.106] KEBAB UI-PB: no referenced task found=0 scanned=210 (parent1/exact-name; cap512)
+[   0.107] KEBAB UI: observer end; no suspension or modification; user frames are best-effort reads
+[   0.352] KEBAB EXEC: pid 1072 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16b138000
+[   0.352] KEBAB EXEC HEADER: pid=1072 main=0x104cc8000
+[   0.352] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.415] KEBAB EXEC: pid 1072 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d224000
+[   0.415] KEBAB EXEC HEADER: pid=1072 main=0x102bdc000
+[   0.415] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   1.420] KEBAB EXEC: pid 1073 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16b1b8000
+[   1.420] KEBAB EXEC HEADER: pid=1073 main=0x104c48000
+[   1.420] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   1.420] KEBAB EXEC: pid 1073 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16dcfc000
+[   1.420] KEBAB EXEC HEADER: pid=1073 main=0x102104000
+[   1.482] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   2.480] KEBAB EXEC: pid 1074 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16dd58000
+[   2.480] KEBAB EXEC HEADER: pid=1074 main=0x1020a8000
+[   2.480] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   2.480] KEBAB EXEC: pid 1074 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d614000
+[   2.480] KEBAB EXEC HEADER: pid=1074 main=0x1027ec000
+[   2.480] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   3.544] KEBAB EXEC: pid 1075 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16efbc000
+[   3.544] KEBAB EXEC HEADER: pid=1075 main=0x100e44000
+[   3.544] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   3.544] KEBAB EXEC: pid 1075 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16f74c000
+[   3.544] KEBAB EXEC HEADER: pid=1075 main=0x1006b4000
+[   3.544] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   4.605] KEBAB WATCHDOG: clients=1 polls=1020 beats=103 enabled=1 remaining=1664494236
+[   4.605] KEBAB EXEC: pid 1076 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16bcc0000
+[   4.605] KEBAB EXEC HEADER: pid=1076 main=0x104140000
+[   4.605] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   4.605] tx_flush:1241: disk1 xid 48290 tx stats: # 140 finish 149 enter 214 wait 2 20850us close 74us flush 28658us
+[   4.605] KEBAB EXEC: pid 1076 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16db98000
+[   4.605] KEBAB EXEC HEADER: pid=1076 main=0x102268000
+[   4.605] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   5.600] KEBAB EXEC: pid 1077 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16fdc8000
+[   5.600] KEBAB EXEC HEADER: pid=1077 main=0x100038000
+[   5.600] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   5.663] KEBAB EXEC: pid 1078 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16aff4000
+[   5.663] KEBAB EXEC HEADER: pid=1078 main=0x104e0c000
+[   5.663] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   5.663] KEBAB EXEC: pid 1077 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16bd28000
+[   5.663] KEBAB EXEC HEADER: pid=1077 main=0x1040d8000
+[   5.663] Allowing spawn of iOS binary fairplayd.H2 since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   5.663] KEBAB EXEC: pid 1078 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d790000
+[   5.663] KEBAB EXEC HEADER: pid=1078 main=0x102670000
+[   5.663] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   6.661] KEBAB EXEC: pid 1079 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16b968000
+[   6.661] KEBAB EXEC HEADER: pid=1079 main=0x104498000
+[   6.661] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   6.723] KEBAB EXEC: pid 1079 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16f450000
+[   6.723] KEBAB EXEC HEADER: pid=1079 main=0x1009b0000
+[   6.723] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   7.722] KEBAB EXEC: pid 1080 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16b310000
+[   7.722] KEBAB EXEC HEADER: pid=1080 main=0x104af0000
+[   7.722] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   7.784] KEBAB EXEC: pid 1080 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16f1c8000
+[   7.784] KEBAB EXEC HEADER: pid=1080 main=0x100c38000
+[   7.784] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   8.786] KEBAB EXEC: pid 1081 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16f5bc000
+[   8.786] KEBAB EXEC HEADER: pid=1081 main=0x100844000
+[   8.786] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   8.849] KEBAB EXEC: pid 1081 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16fa30000
+[   8.849] KEBAB EXEC HEADER: pid=1081 main=0x1003d0000
+[   8.849] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   9.101] KEBAB EXEC: pid 1082 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d6d4000
+[   9.101] KEBAB EXEC HEADER: pid=1082 main=0x10272c000
+[   9.101] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   9.101] KEBAB EXEC: pid 1082 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16bb94000
+[   9.101] KEBAB EXEC HEADER: pid=1082 main=0x10426c000
+[   9.101] Allowing spawn of iOS binary bluetoothd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   9.853] KEBAB EXEC: pid 1083 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d9b8000
+[   9.853] KEBAB EXEC HEADER: pid=1083 main=0x102448000
+[   9.853] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   9.853] KEBAB EXEC: pid 1083 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16ae6c000
+[   9.853] KEBAB EXEC HEADER: pid=1083 main=0x104f94000
+[   9.853] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[2026-11-01T12:17:01] done, 10558 bytes
