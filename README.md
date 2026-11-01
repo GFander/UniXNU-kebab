@@ -11,18 +11,18 @@
 | 实机 | OnePlus 8T，12 GB / 256 GB 机型；实际交给 XNU 的连续内存约 7.998 GiB |
 | CPU / 内核 | 8 核上线；ARM64、16 KiB 页、XNU 8796.141.3 / Darwin 22.6.0 |
 | 用户态来源 | iPhone X / D22AP，iOS 16.7.16，build 20H392；不是对 A11 硬件的完整模拟 |
-| 最近正常启动验收 | **0478**（原版FairPlay资源名现场与加密回归）；最新人工触摸验收 **0459** |
-| 源码核对 | 337 个共同补丁 + 4 个 Mac 主机补丁，5,280 个源码文件与实际构建输入一致 |
+| 最近正常启动验收 | **0479**（原版FairPlay内核类查询现场与加密回归）；最新人工触摸验收 **0459** |
+| 源码核对 | 338 个共同补丁 + 4 个 Mac 主机补丁，5,280 个源码文件与实际构建输入一致 |
 | 当前阻塞 | A/B/C/D加密文件和旧keychain恢复已有有界实测；完整密钥接口、迁移、system-shell check-in 与图形呈现尚未完成 |
 | 桌面 / 刷新率 | SpringBoard 进程已执行，尚无可用桌面；面板目标 120 Hz，真实时序尚未验证 |
 
-最新验收见[原版FairPlay资源名现场与回归](docs/MIGRATION-FAIRPLAY-RESOURCES-20261101.md)。0478原生内核SHA-256：
+最新验收见[原版FairPlay内核类查询与回归](docs/MIGRATION-FAIRPLAY-SERVICES-20261101.md)。0479原生内核SHA-256：
 
 ```text
-5ff6bb402b791f10b1565fef87ce4bd8b9f8d8927d603f0b903a8d2eba53ed6d
+69c31ddc43501bcd7bc15ec2d9b276413a06542acef7117070943b4c33c92cc0
 ```
 
-详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0478封存实机记录](docs/qualification/0478/0478-fairplay-resources-qualified.json)。编译、源码回放、实机测试分别记录，互不替代。
+详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0479封存实机记录](docs/qualification/0479/0479-fairplay-services-qualified.json)。编译、源码回放、实机测试分别记录，互不替代。
 
 ## 已达成的功能
 
@@ -113,6 +113,7 @@
 | 0476服务身份 | 原生服务标签确认locationd/FairPlay等待；加密回归保持，迁移/桌面未完成 |
 | 0477原版FairPlay | PT_DENY_ATTACH成功及原退出返回环实测；根因/迁移/桌面仍待修复 |
 | 0478原版FairPlay | 六份失败文件名现场与加密回归；根因/迁移/桌面仍待修复 |
+| 0479原版FairPlay | 实际查询FairPlayIOKit却无迭代器；原组件装载/初始化及迁移/桌面仍待修复 |
 
 阶段编号是构建/验收序列，表中包含诊断与回归；不表示每个编号都新增了完整功能。更详细的历史与精确边界见[文档索引](docs/README.md)。
 
@@ -136,7 +137,7 @@ docs/qualification/               分阶段固定哈希的验收资料
 docs/history/                     已替代的首页、交接和早期草稿
 ```
 
-本仓库仍保留历史格式的 `board.toml`，其中 standalone、单核等设置不描述目前的完整 prelink 实机流程。**不能把旧入口当作一键重建当前0478的配方。** 官方格式 2、结构化 `porting.toml`/CI 和统一构建入口的迁移仍未完成；详见[仓库整理与规范差距](docs/REPOSITORY-LAYOUT.md)。
+本仓库仍保留历史格式的 `board.toml`，其中 standalone、单核等设置不描述目前的完整 prelink 实机流程。**不能把旧入口当作一键重建当前0479的配方。** 官方格式 2、结构化 `porting.toml`/CI 和统一构建入口的迁移仍未完成；详见[仓库整理与规范差距](docs/REPOSITORY-LAYOUT.md)。
 
 ## 获取源码与验证
 
@@ -152,9 +153,9 @@ git clone https://github.com/apple-oss-distributions/xnu.git ../apple-xnu
 mkdir -p .cache/qualification
 python3 scripts/qualification/replay-xnu.py \
   --repo . --xnu-source ../apple-xnu \
-  --manifest docs/qualification/0478/all-mac-source-0478.json \
-  --receipt .cache/qualification/replay-0478.json \
-  --cache .cache --expected-common 337
+  --manifest docs/qualification/0479/all-mac-source-0479.json \
+  --receipt .cache/qualification/replay-0479.json \
+  --cache .cache --expected-common 338
 ```
 
 校验已公开的真实触摸记录：

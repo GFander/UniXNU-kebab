@@ -1,0 +1,32 @@
+{
+  "passed": true,
+  "version": "0479",
+  "units": [
+    {
+      "translation_unit": "bsd/kern/kern_exit.c",
+      "passed": true,
+      "compiler_record_sha256": "336cfadc3d92e31ee28d59b96dd0bc5f2a4d2a706a41a0352ad478408d08f7ba",
+      "warnings": 36,
+      "errors": 0
+    },
+    {
+      "translation_unit": "iokit/Kernel/IOUserClient.cpp",
+      "passed": true,
+      "compiler_record_sha256": "45b68cc0f0fe82f6c15a34278e68a9f04365b09865c3f437183b53c290f14261",
+      "warnings": 14,
+      "errors": 0
+    }
+  ],
+  "source_changes": {
+    "bsd/kern/kebab_fairplay_bootdiag_impl.h": {
+      "before": "65a91144fdef08cb76625dd04997c4ddbd19cc3588b84f78f64083f55cef5882",
+      "after": "87dd83a82eca3725541a697b1abb0196a71e9ebb9f6e8d7a8503cf173954fb1e"
+    },
+    "iokit/Kernel/IOUserClient.cpp": {
+      "before": "a878992417d88eafb392385b33e6c6c9693892a976832cdb5af7c6c984a8b8e0",
+      "after": "05879d6501c70f0a23dfc8601dcda2cc07d6aa60f999ef924504605178ae0888"
+    }
+  },
+  "physical_test": false,
+  "whole_native_build": false
+}
