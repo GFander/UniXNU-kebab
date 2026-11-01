@@ -11,18 +11,18 @@
 | 实机 | OnePlus 8T，12 GB / 256 GB 机型；实际交给 XNU 的连续内存约 7.998 GiB |
 | CPU / 内核 | 8 核上线；ARM64、16 KiB 页、XNU 8796.141.3 / Darwin 22.6.0 |
 | 用户态来源 | iPhone X / D22AP，iOS 16.7.16，build 20H392；不是对 A11 硬件的完整模拟 |
-| 最近正常启动验收 | **0476**（原版等待服务身份、FairPlay退出现场与加密回归）；最新人工触摸验收 **0459** |
-| 源码核对 | 335 个共同补丁 + 4 个 Mac 主机补丁，5,279 个源码文件与实际构建输入一致 |
+| 最近正常启动验收 | **0477**（原版FairPlay返回现场、防附加状态与加密回归）；最新人工触摸验收 **0459** |
+| 源码核对 | 336 个共同补丁 + 4 个 Mac 主机补丁，5,280 个源码文件与实际构建输入一致 |
 | 当前阻塞 | A/B/C/D加密文件和旧keychain恢复已有有界实测；完整密钥接口、迁移、system-shell check-in 与图形呈现尚未完成 |
 | 桌面 / 刷新率 | SpringBoard 进程已执行，尚无可用桌面；面板目标 120 Hz，真实时序尚未验证 |
 
-最新验收见[原版等待服务身份与回归](docs/MIGRATION-SERVICE-IDENTITY-20261101.md)。0476原生内核SHA-256：
+最新验收见[原版FairPlay返回现场与回归](docs/MIGRATION-FAIRPLAY-SYSCALLS-20261101.md)。0477原生内核SHA-256：
 
 ```text
-be4c67b34abaafa6555862c3577e24236e71a315ede57bb10770d62fc0aafdb8
+2d605e3632671201dc20dd9c67184fd7d6dbda28e0134a02b76f415d0d72d975
 ```
 
-详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0476封存实机记录](docs/qualification/0476/0476-IPC-qualified.json)。编译、源码回放、实机测试分别记录，互不替代。
+详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0477封存实机记录](docs/qualification/0477/0477-fairplay-syscalls-qualified.json)。编译、源码回放、实机测试分别记录，互不替代。
 
 ## 已达成的功能
 
@@ -111,6 +111,7 @@ be4c67b34abaafa6555862c3577e24236e71a315ede57bb10770d62fc0aafdb8
 | 0472–0474 IPC诊断 | 修复同步等待漏查和长行截断；明确CoreLocation等待仍在，迁移/桌面未完成 |
 | 0475端口转交状态 | 确认CoreLocation等待端口处于transit、目的为locationd；迁移/桌面仍未完成 |
 | 0476服务身份 | 原生服务标签确认locationd/FairPlay等待；加密回归保持，迁移/桌面未完成 |
+| 0477原版FairPlay | PT_DENY_ATTACH成功及原退出返回环实测；根因/迁移/桌面仍待修复 |
 
 阶段编号是构建/验收序列，表中包含诊断与回归；不表示每个编号都新增了完整功能。更详细的历史与精确边界见[文档索引](docs/README.md)。
 
@@ -134,7 +135,7 @@ docs/qualification/               分阶段固定哈希的验收资料
 docs/history/                     已替代的首页、交接和早期草稿
 ```
 
-本仓库仍保留历史格式的 `board.toml`，其中 standalone、单核等设置不描述目前的完整 prelink 实机流程。**不能把旧入口当作一键重建当前0476的配方。** 官方格式 2、结构化 `porting.toml`/CI 和统一构建入口的迁移仍未完成；详见[仓库整理与规范差距](docs/REPOSITORY-LAYOUT.md)。
+本仓库仍保留历史格式的 `board.toml`，其中 standalone、单核等设置不描述目前的完整 prelink 实机流程。**不能把旧入口当作一键重建当前0477的配方。** 官方格式 2、结构化 `porting.toml`/CI 和统一构建入口的迁移仍未完成；详见[仓库整理与规范差距](docs/REPOSITORY-LAYOUT.md)。
 
 ## 获取源码与验证
 
@@ -150,9 +151,9 @@ git clone https://github.com/apple-oss-distributions/xnu.git ../apple-xnu
 mkdir -p .cache/qualification
 python3 scripts/qualification/replay-xnu.py \
   --repo . --xnu-source ../apple-xnu \
-  --manifest docs/qualification/0476/all-mac-source-0476.json \
-  --receipt .cache/qualification/replay-0476.json \
-  --cache .cache --expected-common 335
+  --manifest docs/qualification/0477/all-mac-source-0477.json \
+  --receipt .cache/qualification/replay-0477.json \
+  --cache .cache --expected-common 336
 ```
 
 校验已公开的真实触摸记录：

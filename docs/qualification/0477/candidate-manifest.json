@@ -1,0 +1,20 @@
+{
+  "parent_version": "0476",
+  "candidate": "0477",
+  "assembly_only": true,
+  "physical_test": false,
+  "changes": {
+    "bsd/dev/arm/systemcalls.c": {
+      "before": "b554654553a487f703e7ab546d0efc130efbf0f44bdf732043ffa97f5e36223b",
+      "after": "59c7b71a70125886d242463fcd2e0d1a19e249e8d2e6b67b6b0498236d2d1d4a"
+    },
+    "bsd/kern/kern_exit.c": {
+      "before": "2391334d50e84de71a4c7f8d39cf3974836be11713ef83ac1c0f92b0eeac9dae",
+      "after": "b71b46fbeed477b55819383220aa03bd5f58cb7cd835b5dd60b5c017592ff87d"
+    },
+    "bsd/kern/kebab_fairplay_bootdiag_impl.h": {
+      "before": null,
+      "after": "c2ce5c31bf6272524f8ffb72946ae3e70e9b3028ce156d0e7d53b2248af45411"
+    }
+  }
+}

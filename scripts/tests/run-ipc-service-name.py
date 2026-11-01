@@ -50,4 +50,4 @@ with tempfile.TemporaryDirectory(prefix='ipc-port-state-',dir=cache) as director
  for name in ('0476-defaults-qualified.json','0476-systembag-qualified.json'):assert json.loads((q/name).read_text())['actual_log_sha256']==sha(raw)
  assert json.loads((q/'0476-systembag-qualified.json').read_text())['stage_accepted']
  for name in ('0476-migrator-waits-symbolicated.json','0476-backboard-user-symbolicated.json','0476-ui-waits-symbolicated.json'):assert json.loads((q/name).read_text())['actual_log_sha256']==sha(raw)
-print('PASS actual253/config0-245/20 behavioral mutants, reverse0355, fresh335+4/5279source replay, native pins and sealed14states/3transit paths. Original encryption preserved; migration/shell/GUI remain unqualified.')
+print('PASS actual253/config0-245/20 behavioral mutants, reverse0356, fresh335+4/5279source replay, native pins and sealed14states/3transit paths. Original encryption preserved; migration/shell/GUI remain unqualified.')

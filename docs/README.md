@@ -103,7 +103,11 @@
 
 - [原版等待服务身份与FairPlay退出现场](MIGRATION-SERVICE-IDENTITY-20261101.md)
 
+- [原版FairPlay返回现场与加密回归](MIGRATION-FAIRPLAY-SYSCALLS-20261101.md)
+
 ## 原始证据与测试
+
+- [0477有界返回现场](qualification/0477/)
 
 - [0476服务身份与原加密回归](qualification/0476/)
 
