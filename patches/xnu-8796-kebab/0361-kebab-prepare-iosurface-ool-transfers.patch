@@ -1,0 +1,82 @@
+--- a/iokit/Kernel/arm/KebabSurface.cpp
++++ b/iokit/Kernel/arm/KebabSurface.cpp
+@@ -640,6 +640,24 @@
+ 	return v;
+ }
+ 
++/* IOMemoryDescriptor.h requires prepared memory for readBytes/writeBytes.
++ * The descriptor is borrowed from this MIG call; no extra retain or mapping.
++ * Complete every successful prepare, including a short transfer, and return
++ * real prepare/copy/complete failures before publishing an output size. */
++static IOReturn
++kebab_surface_descriptor_copy(IOMemoryDescriptor *memory, void *buffer,
++    IOByteCount length, bool toDescriptor)
++{
++	IOReturn ret = memory->prepare();
++	if (ret != kIOReturnSuccess) {
++		return ret;
++	}
++	IOByteCount copied = toDescriptor ? memory->writeBytes(0, buffer, length) :
++	    memory->readBytes(0, buffer, length);
++	IOReturn completed = memory->complete();
++	return copied == length ? completed : kIOReturnVMError;
++}
++
+ static KebabSurface *kebab_surface_held(IOLock *lock, OSArray *refs, uint32_t id);
+ 
+ /*
+@@ -661,9 +679,10 @@
+ 		if (copy == NULL) {
+ 			return kIOReturnNoMemory;
+ 		}
+-		if (args->structureInputDescriptor->readBytes(0, copy, len) != len) {
++		IOReturn ret = kebab_surface_descriptor_copy(args->structureInputDescriptor, copy, len, false);
++		if (ret != kIOReturnSuccess) {
+ 			IOFreeData(copy, len);
+-			return kIOReturnBadArgument;
++			return ret;
+ 		}
+ 	} else {
+ 		len = args->structureInputSize;
+@@ -946,7 +965,11 @@
+ 		if (len > args->structureOutputDescriptor->getLength()) {
+ 			return kIOReturnNoSpace;
+ 		}
+-		args->structureOutputDescriptor->writeBytes(0, buf, len);
++		IOReturn ret = kebab_surface_descriptor_copy(args->structureOutputDescriptor,
++		    const_cast<void *>(buf), len, true);
++		if (ret != kIOReturnSuccess) {
++			return ret;
++		}
+ 		args->structureOutputDescriptorSize = len;
+ 		return kIOReturnSuccess;
+ 	}
+@@ -1003,7 +1026,11 @@
+ 		if (copy == NULL) {
+ 			return kIOReturnNoMemory;
+ 		}
+-		args->structureInputDescriptor->readBytes(0, copy, len);
++		ret = kebab_surface_descriptor_copy(args->structureInputDescriptor, copy, len, false);
++		if (ret != kIOReturnSuccess) {
++			IOFreeData(copy, len);
++			return ret;
++		}
+ 		buf = copy;
+ 	}
+ 	OSObject *obj = (buf != NULL && len > 0) ? OSUnserializeXML(buf, len) : NULL;
+@@ -1217,11 +1244,11 @@
+ 			if (size < needed) {
+ 				args->structureOutputDescriptorSize = needed;
+ 				ret = kIOReturnNoSpace;
+-			} else if (args->structureOutputDescriptor->writeBytes(0, out, needed) != needed) {
+-				ret = kIOReturnVMError;
+ 			} else {
+-				args->structureOutputDescriptorSize = needed;
+-				ret = kIOReturnSuccess;
++				ret = kebab_surface_descriptor_copy(args->structureOutputDescriptor, out, needed, true);
++				if (ret == kIOReturnSuccess) {
++					args->structureOutputDescriptorSize = needed;
++				}
+ 			}
+ 		} else if (args->structureOutput == NULL || args->structureOutputSize < needed) {
+ 			/* Tell the client how much it needs; it retries. The inband

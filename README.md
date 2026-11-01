@@ -11,18 +11,18 @@
 | 实机 | OnePlus 8T，12 GB / 256 GB 机型；实际交给 XNU 的连续内存约 7.998 GiB |
 | CPU / 内核 | 8 核上线；ARM64、16 KiB 页、XNU 8796.141.3 / Darwin 22.6.0 |
 | 用户态来源 | iPhone X / D22AP，iOS 16.7.16，build 20H392；不是对 A11 硬件的完整模拟 |
-| 最近正常启动验收 | **0480**（原版 FairPlayIOKit 查找、对象与打开实测；初始化仍失败）；最新人工触摸验收 **0459** |
-| 源码核对 | 338 个共同补丁 + 4 个 Mac 主机补丁，5,280 个源码文件与实际构建输入一致 |
+| 最近正常启动验收 | **0482**（真实 FairPlay 2201 派生/CBC 与迁移 OOL 内存修复的有界回归）；最新人工触摸验收 **0459** |
+| 源码核对 | 340 个共同补丁 + 4 个 Mac 主机补丁，5,280 个源码文件与实际构建输入一致 |
 | 当前阻塞 | A/B/C/D加密文件和旧keychain恢复已有有界实测；完整密钥接口、迁移、system-shell check-in 与图形呈现尚未完成 |
 | 桌面 / 刷新率 | SpringBoard 进程已执行，尚无可用桌面；面板目标 120 Hz，真实时序尚未验证 |
 
-最新验收见[原版 FairPlay 组件装载与初始化边界](docs/MIGRATION-FAIRPLAY-PRELINK-20261101.md)。0480 明确复用 0479 已完整构建的原生内核，SHA-256：
+最新验收见[FairPlay 设备子密钥与迁移 OOL 生命周期](docs/MIGRATION-FAIRPLAY-AES-OOL-20261101.md)。0482 完整构建的原生内核 SHA-256：
 
 ```text
-69c31ddc43501bcd7bc15ec2d9b276413a06542acef7117070943b4c33c92cc0
+6819ba4484d94deca28a73c184e237e84e36ab63ff4f3934e9157c067b6b464e
 ```
 
-详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0480 封存实机记录](docs/qualification/0480/0480-fairplay-prelink-qualified.json)。编译、源码回放、实机测试分别记录，互不替代。
+详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0482 封存实机记录](docs/qualification/0482/0482-fairplay-aes-ool-qualified.json)。编译、源码回放、实机测试分别记录，互不替代。
 
 ## 已达成的功能
 

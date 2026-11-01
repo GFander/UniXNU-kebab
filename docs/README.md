@@ -152,3 +152,5 @@
 原始日志/样本保持哈希绑定。源码回放、主机模型和真实硬件各自说明，诊断阶段不自动转化为功能完成。
 
 - [0480 原版 FairPlay 组件装载与初始化边界](MIGRATION-FAIRPLAY-PRELINK-20261101.md)。
+
+- [0481–0482 FairPlay 设备子密钥与迁移 OOL 生命周期](MIGRATION-FAIRPLAY-AES-OOL-20261101.md)。

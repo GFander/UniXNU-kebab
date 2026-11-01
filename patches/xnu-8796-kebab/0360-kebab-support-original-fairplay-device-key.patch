@@ -1,0 +1,151 @@
+--- a/iokit/Kernel/arm/NativeAES.cpp
++++ b/iokit/Kernel/arm/NativeAES.cpp
+@@ -23,10 +23,14 @@
+ volatile uint32_t native_aes_unsupported_key = 0;
+ }
+ 
+-// One board provider, one immutable per-boot nonce key. No Apple UID claim.
++// One board provider, separate immutable nonce/FairPlay purpose keys.
++// HiOS hardware-wrapped Root; no Apple fused UID or hardware AES claim.
+ static unsigned char native_nonce_key[16] __attribute__((aligned(64)));
+ static unsigned native_nonce_state; // 0 unavailable, 1 prepared, 2 published
+ static bool native_nonce_selftest;
++static unsigned char native_fairplay_key[16] __attribute__((aligned(64)));
++static bool native_fairplay_selftest;
++static unsigned native_fairplay_completed;
+ 
+ class NativeAES : public IOAESAccelerator {
+   OSDeclareDefaultStructors(NativeAES)
+@@ -37,7 +41,7 @@
+     return IOService::callPlatformFunction(name, wait, a, b, c, d);
+   }
+   const char *getAlgorithmName() override { return "AES-CBC"; }
+-  bool isKeySupported(unsigned selector) override { return selector == 0 || (selector == 2212 && __atomic_load_n(&native_nonce_state, __ATOMIC_ACQUIRE) == 2); }
++  bool isKeySupported(unsigned selector) override { return selector == 0 || ((selector == 2212 || selector == 2201) && __atomic_load_n(&native_nonce_state, __ATOMIC_ACQUIRE) == 2); }
+   unsigned getSupportedOptions() override { return 1; }
+   IOReturn performAES(void *, void *, task_t, unsigned long long, IOAESIV *,
+                      IOAESOperation, IOAESKeyData *, IOAESCompletion, void *) override;
+@@ -212,6 +216,53 @@
+   return ok;
+ }
+ 
++// Pinned original table: selector 2201 -> base 2000, distinct public seed.
++// Same target one-block CBC KDF as 2212, with the preserved HiOS Root.
++static bool deriveFairPlayKey(const unsigned char root[32], unsigned char output[16])
++{
++  const unsigned char seed[16] = {0xd1,0xe8,0xfc,0xb5,0x39,0x37,0xbf,0x8d,0xef,0xc7,0x4c,0xd1,0xd0,0xf1,0xd4,0xb0};
++  IOAESKeyData key = {256, {}, 0};
++  unsigned char iv[16] = {};
++  memcpy(key.bytes, root, 32);
++  bool ok = !cbc(seed, output, 16, iv, key, IOAESEncrypt);
++  cc_clear(sizeof(key), &key); cc_clear(sizeof(iv), iv);
++  return ok;
++}
++
++static bool fairPlayKnownAnswerTest(NativeAES *provider)
++{
++  unsigned char root[32], derived[16] = {}, input[32], output[32] = {};
++  for (unsigned i=0;i<32;i++) root[i]=input[i]=static_cast<unsigned char>(i);
++  const unsigned char expectedKey[16] = {0x38,0x3d,0x71,0x55,0x85,0x45,0x4a,0x68,0x11,0xa2,0xd8,0x06,0x08,0x43,0xfe,0xeb};
++  const unsigned char expected[32] = {0xb3,0x70,0x7a,0xd4,0xbc,0x04,0xbd,0x4f,0xd8,0x1a,0x5b,0x2f,0xb8,0x00,0x74,0xbd,0x4c,0xfc,0x79,0x24,0x12,0x1e,0x3f,0x25,0xff,0xea,0x2a,0x95,0x54,0xec,0x03,0x0c};
++  bool ok=deriveFairPlayKey(root,derived) && !memcmp(derived,expectedKey,16);
++  IOBufferMemoryDescriptor *source=IOBufferMemoryDescriptor::withCapacity(96,kIODirectionInOut);
++  IOBufferMemoryDescriptor *destination=IOBufferMemoryDescriptor::withCapacity(96,kIODirectionInOut);
++  IOAESKeyData key={128,{},2201}; IOAESIV iv={};
++  struct Completion { unsigned count;int status; } completion={};
++  auto callback=[](void *p,int status){Completion *s=static_cast<Completion *>(p);s->count++;s->status=status;};
++  if(ok && source && destination) {
++    memcpy(native_fairplay_key,derived,16);native_fairplay_selftest=true;
++    ok=!provider->isKeySupported(2201) && source->writeBytes(16,input,32)==32 &&
++      !provider->performAES(source,destination,32,&iv,IOAESEncrypt,&key,16,32,callback,&completion) &&
++      destination->readBytes(32,output,32)==32 && !memcmp(output,expected,32) &&
++      !memcmp(iv.bytes,expected+16,16) && completion.count==1 && completion.status==0;
++    cc_clear(sizeof(iv),&iv);
++    ok=ok && !provider->performAES(destination,destination,32,&iv,IOAESDecrypt,&key,32,32,nullptr,nullptr) &&
++      destination->readBytes(32,output,32)==32 && !memcmp(output,input,32) && !memcmp(iv.bytes,expected+16,16);
++    for(unsigned bits=192;bits<=256;bits+=64) {
++      key.bits=bits;
++      ok=ok && provider->performAES(source,destination,32,&iv,IOAESEncrypt,&key,16,32,callback,&completion)==kIOReturnBadArgument && completion.count==1;
++    }
++  } else ok=false;
++  native_fairplay_selftest=false;
++  cc_clear(sizeof(native_fairplay_key),native_fairplay_key);
++  cc_clear(sizeof(root),root);cc_clear(sizeof(derived),derived);cc_clear(sizeof(output),output);
++  if(source)source->release();if(destination)destination->release();
++  IOLog("KEBAB AES FAIRPLAY: public KDF/selector/CBC/invalid-bits KAT %s\n",ok?"PASS":"FAIL");
++  return ok;
++}
++
+ extern "C" bool kebab_aes_nonce_prepare(const unsigned char *, unsigned);
+ extern "C" bool kebab_aes_nonce_publish(void);
+ extern "C" void kebab_aes_nonce_cancel(void);
+@@ -223,11 +274,11 @@
+      __atomic_load_n(&native_nonce_state,__ATOMIC_ACQUIRE)) return false;
+   unsigned nonzero=0;for(unsigned i=0;i<32;i++)nonzero|=root[i];if(!nonzero)return false;
+   uint32_t negative=0;PE_parse_boot_argn("kebab_nonce_negative_kat",&negative,sizeof(negative));
+-  if(!nonceKnownAnswerTest(native_nonce_provider,negative==1)) return false;
+-  unsigned char derived[16];
+-  bool derivedOK=deriveNonceKey(root,derived);
+-  if(derivedOK)memcpy(native_nonce_key,derived,16);
+-  cc_clear(sizeof(derived),derived);
++  if(!nonceKnownAnswerTest(native_nonce_provider,negative==1) || !fairPlayKnownAnswerTest(native_nonce_provider)) return false;
++  unsigned char derived[16] = {}, fairplay[16] = {};
++  bool derivedOK=deriveNonceKey(root,derived) && deriveFairPlayKey(root,fairplay);
++  if(derivedOK) { memcpy(native_nonce_key,derived,16);memcpy(native_fairplay_key,fairplay,16); }
++  cc_clear(sizeof(derived),derived);cc_clear(sizeof(fairplay),fairplay);
+   if(!derivedOK)return false;
+   __atomic_store_n(&native_nonce_state,1,__ATOMIC_RELEASE);
+   IOLog("KEBAB AES NONCE: hardware-root KDF prepared; service not yet published\n");
+@@ -240,6 +291,7 @@
+   native_nonce_provider->setProperty("NativeAESSoftwareKeysOnly",false);
+   native_nonce_provider->setProperty("HiOSHardwareWrappedNonceRoot",true);
+   native_nonce_provider->setProperty("HiOSNonceSelector",2212,32);
++  native_nonce_provider->setProperty("HiOSFairPlaySelector",2201,32);
+   __atomic_store_n(&native_nonce_state,2,__ATOMIC_RELEASE);
+   native_aes_registered=1;
+   native_nonce_provider->registerService();
+@@ -251,6 +303,7 @@
+ {
+   if(__atomic_load_n(&native_nonce_state,__ATOMIC_ACQUIRE)==2) return;
+   cc_clear(sizeof(native_nonce_key),native_nonce_key);
++  cc_clear(sizeof(native_fairplay_key),native_fairplay_key);
+   __atomic_store_n(&native_nonce_state,0,__ATOMIC_RELEASE);
+ }
+ 
+@@ -259,9 +312,12 @@
+ {
+   volatile unsigned char *bytes=native_nonce_key;
+   for(unsigned i=0;i<sizeof(native_nonce_key);i++)bytes[i]=0;
+-  native_nonce_selftest=false;
++  bytes=native_fairplay_key;
++  for(unsigned i=0;i<sizeof(native_fairplay_key);i++)bytes[i]=0;
++  native_nonce_selftest=false;native_fairplay_selftest=false;
+   __atomic_store_n(&native_nonce_state,0,__ATOMIC_RELEASE);
+   __asm__ volatile("dc civac, %0" :: "r"(native_nonce_key) : "memory");
++  __asm__ volatile("dc civac, %0" :: "r"(native_fairplay_key) : "memory");
+   __asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
+@@ -318,6 +374,10 @@
+     if(key->bits!=128)return kIOReturnBadArgument;
+     selected.value.selector=0;memcpy(selected.value.bytes,native_nonce_key,16);
+   }
++  if(key->selector==2201 && (native_fairplay_selftest || __atomic_load_n(&native_nonce_state,__ATOMIC_ACQUIRE)==2)) {
++    if(key->bits!=128)return kIOReturnBadArgument;
++    selected.value.selector=0;memcpy(selected.value.bytes,native_fairplay_key,16);
++  }
+   if (selected.value.selector || (operation != IOAESEncrypt && operation != IOAESDecrypt)) {
+     IOLog("KEBAB AES: rejected selector=%u bits=%u operation=%u bytes=%llu\n",
+           key->selector, key->bits, static_cast<unsigned>(operation), bytes);
+@@ -354,6 +414,11 @@
+   if (!result) {
+     memcpy(iv->bytes, chaining, 16);
+     __atomic_fetch_add(&native_aes_completed, 1, __ATOMIC_RELAXED);
++    if(key->selector==2201 && !native_fairplay_selftest) {
++      unsigned count=__atomic_add_fetch(&native_fairplay_completed,1,__ATOMIC_RELAXED);
++      if(count<=8)IOLog("KEBAB AES FAIRPLAY: selector=2201 operation=%u bytes=%llu completed=%u result=0\n",
++                       static_cast<unsigned>(operation),bytes,count);
++    }
+   }
+   cc_clear(4096, buffer);
+   IOFree(buffer, 4096);

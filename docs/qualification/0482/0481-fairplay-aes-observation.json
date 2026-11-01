@@ -1,0 +1,20 @@
+{
+  "version": "0481",
+  "accepted": false,
+  "actual_log_sha256": "c1304473c0a923775f17ae2fae069e147d0ce422681cd0f6ea1cf48e852e4faf",
+  "capture_closed": true,
+  "production2201_encrypt_32bytes_result0": true,
+  "original_first_fairplay_PID87_present_at95s": true,
+  "FairPlay_full_initialization_or_requests_qualified": false,
+  "crypto300second_regression_complete": false,
+  "full_fixed_diagnostics_complete": false,
+  "panic": {
+    "seconds": 116.296,
+    "pid": 247,
+    "name": "com.apple.migrat",
+    "reason": "IOGMD: not wired for the IODMACommand",
+    "path": "IOSurfaceRootUserClient::externalMethod -> IOMemoryDescriptor::writeBytes -> getPhysicalSegment -> dmaCommandOperation"
+  },
+  "next_action": "Repair existing IOSurface OOL descriptor prepare/complete lifecycle and real partial-transfer errors; preserve2201 and old Root/nonce/Data",
+  "full_goal_complete": false
+}

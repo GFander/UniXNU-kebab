@@ -4,7 +4,7 @@
 
 ## 实际构建路线
 
-当前验收路线使用 Apple OSS XNU 8796.141.3，16 KiB 页，板级 `KEBAB`，DEVELOPMENT ARM64；共同补丁按 `patches/xnu-8796-kebab/*.patch` 文件名排序，再应用四个 `patches/hosts/macos-dxb-13.5/*.patch` 主机补丁。0479源码的5,280 项源码清单不覆盖外部 Xcode、SDK、KDK、供体二进制和私有设备输入。
+当前验收路线使用 Apple OSS XNU 8796.141.3，16 KiB 页，板级 `KEBAB`，DEVELOPMENT ARM64；共同补丁按 `patches/xnu-8796-kebab/*.patch` 文件名排序，再应用四个 `patches/hosts/macos-dxb-13.5/*.patch` 主机补丁。0482源码的5,280 项源码清单不覆盖外部 Xcode、SDK、KDK、供体二进制和私有设备输入。
 
 Mac 全量构建使用固定主机环境与 prepared-source 流程；prelink 使用固定 20H392 kernelcache、原版组件身份与各次 ABI 资格。Windows 端载荷打包、ADT 变换、策略数据适配、回读及刷机门控另有独立步骤。历史环境与命令保留在 [BUILD-BASELINE-20261029.md](BUILD-BASELINE-20261029.md) 和 [FIRMWARE.md](FIRMWARE.md)，不能直接把旧版本号或旧卷号用于当前设备。
 
@@ -42,3 +42,9 @@ Mac 全量构建使用固定主机环境与 prepared-source 流程；prelink 使
 `scripts/p1-run/prelink-fix/emit_prelink.py` 新增可选 `--relocation-profile`。固定 20H392 的受审元数据位于 `scripts/data/fairplay-relocation-profile-20H392.json`。无参数时仍严格拒绝未解决的外部 PC-relative 编码，并已逐字节复现旧 0479 image/report；该变化不是给任意组件提供通用豁免。
 
 该 profile 逐项固定供体、文字段、符号别名、34 处原始 addend 及 120 处 word/前序转移哈希；所有条目必须恰好消费一次。原组件可执行字节不变。120 处保留为未分类的原字节，完整间接控制流及寄存器数据流未被证明；三组基类 ABI 和一次真实查找/open 不等于完整驱动行为资格。运行 `python3 scripts/tests/prelink-profile/run-tests.py` 可复验 20 组主机测试及 12 个语法有效的 Python 行为变异；这些不是 C 编译或实机测试。
+
+## 0482 设备子密钥与 OOL 回归
+
+0360 保留旧 nonce KDF，按固定供体 2201/base2000 的另一 public seed 从既有硬件封装 Root 派生 128-bit 子密钥；不提供 Apple UID/GID、SEP 或硬件 AES 引擎。两个目的密钥成功准备后才发布，取消及复位均清除两份状态。自测只有明确的合成公开向量，没有设备密钥输出。
+
+0361 只修复既有 IOSurface 用户客户端的四个 OOL 传输点，按 Apple IOMemoryDescriptor 契约 prepare/copy/complete，正确处理 prepare 失败、短拷贝及 complete 失败。全局 IOGMD 检查保留；没有新增图形功能。`scripts/tests/run-fairplay-aes-and-ool.py` 通过 --repo/--source/--qualification/--cache 接受路径，重跑实际 C++ 生产体主机模型及编译行为变异，核对固定源码、补丁哈希和封存证据；不接触设备。
