@@ -99,7 +99,11 @@
 
 - [迁移IPC端口诊断与原加密回归](MIGRATION-IPC-RECEIVERS-20261101.md)
 
+- [迁移端口转交状态与原加密回归](MIGRATION-IPC-PORT-STATE-20261101.md)
+
 ## 原始证据与测试
+
+- [0475端口状态及转交路径](qualification/0475/)
 
 - [0474同步等待完整观察](qualification/0474/)
 - [0472/0473失败与部分结果](qualification/0473/)

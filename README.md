@@ -11,18 +11,18 @@
 | 实机 | OnePlus 8T，12 GB / 256 GB 机型；实际交给 XNU 的连续内存约 7.998 GiB |
 | CPU / 内核 | 8 核上线；ARM64、16 KiB 页、XNU 8796.141.3 / Darwin 22.6.0 |
 | 用户态来源 | iPhone X / D22AP，iOS 16.7.16，build 20H392；不是对 A11 硬件的完整模拟 |
-| 最近正常启动验收 | **0474**（迁移IPC端口诊断、原加密功能回归）；最新人工触摸验收 **0459** |
-| 源码核对 | 333 个共同补丁 + 4 个 Mac 主机补丁，5,279 个源码文件与实际构建输入一致 |
+| 最近正常启动验收 | **0475**（迁移端口转交路径、原加密功能回归）；最新人工触摸验收 **0459** |
+| 源码核对 | 334 个共同补丁 + 4 个 Mac 主机补丁，5,279 个源码文件与实际构建输入一致 |
 | 当前阻塞 | A/B/C/D加密文件和旧keychain恢复已有有界实测；完整密钥接口、迁移、system-shell check-in 与图形呈现尚未完成 |
 | 桌面 / 刷新率 | SpringBoard 进程已执行，尚无可用桌面；面板目标 120 Hz，真实时序尚未验证 |
 
-最新验收见[迁移IPC端口诊断与回归](docs/MIGRATION-IPC-RECEIVERS-20261101.md)。0474原生内核SHA-256：
+最新验收见[迁移端口转交状态与回归](docs/MIGRATION-IPC-PORT-STATE-20261101.md)。0475原生内核SHA-256：
 
 ```text
-d9b15aaa6696841b9a5928e43372dee1d19274febdf968b8f97f19508b0444a2
+1f11a8b8f289021a30c5d79a65248f75b4e88c763db7fa8c1e1294d6de852571
 ```
 
-详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0474封存实机记录](docs/qualification/0474/0474-IPC-qualified.json)。编译、源码回放、实机测试分别记录，互不替代。
+详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0475封存实机记录](docs/qualification/0475/0475-IPC-qualified.json)。编译、源码回放、实机测试分别记录，互不替代。
 
 ## 已达成的功能
 
@@ -52,7 +52,7 @@ d9b15aaa6696841b9a5928e43372dee1d19274febdf968b8f97f19508b0444a2
 | 软件密码学基础 | 内核所需哈希/HMAC、PRNG/DRBG、AES-CBC 与 APFS 所用 XTS 路径接入；X25519/ConcatKDF、B类实际包封与冷恢复通过；B类加密CPX和原版锁定准入已实测，非全RAM擦除验收 | 密钥来源的硬件保护和数据运算实现是两件事，不把软件 AES 称为硬件加速；[密码学基础](docs/CLASS-B-CRYPTO-20261031.md)、[平台与密钥里程碑](docs/PLATFORM-BASELINE-20261029.md)、[加密 Data](docs/LOCAL-IDENTITY-AND-PROTECTED-DATA-LIFECYCLE-20261031.md) |
 | 原版 APFS 密钥接口 | FS/FV、卷控制、metadata/每文件密钥与 CPX I/O 接通；原版工具创建并挂载真实加密 Data | 硬件Root支撑factory无口令C/D及派生B后端，未实现全类别/口令/SEP；B缓存改为内部加密句柄；[Data 与密钥生命周期](docs/LOCAL-IDENTITY-AND-PROTECTED-DATA-LIFECYCLE-20261031.md) |
 | 原版 keychain C/D | 严格 AMFI entitlement，原版 securityd 的 7/8/10/11 类 AES256 密钥真实包封/解封，完整内核重启后从原持久记录恢复 | 此行仅为早期C/D证据；后续AK/AKU见下行，口令/完整keychain/Apple SEP未完成；[0464–0465 验收](docs/KEYCHAIN-CD-20261031.md) |
-| 迁移等待端口诊断 | 29组完整观察、6组同步上下文查到当前接收任务；原加密功能保持 | 非原子RPC配对/依赖环或迁移完成；[0474](docs/MIGRATION-IPC-RECEIVERS-20261101.md) |
+| 迁移等待端口诊断 | 29组完整观察、14条状态、3条转交路径；确认迁移等待目的为locationd服务端口 | 非原子事务/依赖环或迁移完成；[0475](docs/MIGRATION-IPC-PORT-STATE-20261101.md) |
 | A类完整保护（factory无PIN） | 原版APFS真实加密写读、锁定已打开缓存/非缓存读写零传输、解锁恢复及完整重启旧密钥/原密文恢复 | 非口令/SEP或全AKS；[0470–0471](docs/CLASS-A-STORAGE-20261101.md) |
 | B类加密存储与数据库 | 原版APFS真实B文件写读/锁定准入与完整重启恢复，原版locationd B数据库/journal同步成功 | B内部加密CPX与重启恢复通过，迁移未完成；[0468–0469](docs/CLASS-B-CPX-20261101.md) |
 | keychain AK/AKU | 原版AK6包封/解封、AKU9包封及完整重启后类别6–11旧记录恢复 | factory无口令与有限AES密钥profile，非完整keychain或Apple SEP；[实机边界](docs/CLASS-B-STORAGE-20261101.md) |
@@ -109,6 +109,7 @@ d9b15aaa6696841b9a5928e43372dee1d19274febdf968b8f97f19508b0444a2
 | 0468–0469 B加密缓存 | APFS接收opaque64；新旧B文件、锁定准入和六类keychain跨重启恢复；非全RAM/迁移/桌面验收 |
 | 0470–0471 A类保护 | 原版缓存/直接I/O锁定拒绝，原key与原密文完整重启恢复；完整密钥接口/迁移/桌面仍未完成 |
 | 0472–0474 IPC诊断 | 修复同步等待漏查和长行截断；明确CoreLocation等待仍在，迁移/桌面未完成 |
+| 0475端口转交状态 | 确认CoreLocation等待端口处于transit、目的为locationd；迁移/桌面仍未完成 |
 
 阶段编号是构建/验收序列，表中包含诊断与回归；不表示每个编号都新增了完整功能。更详细的历史与精确边界见[文档索引](docs/README.md)。
 
@@ -132,7 +133,7 @@ docs/qualification/               分阶段固定哈希的验收资料
 docs/history/                     已替代的首页、交接和早期草稿
 ```
 
-本仓库仍保留历史格式的 `board.toml`，其中 standalone、单核等设置不描述目前的完整 prelink 实机流程。**不能把旧入口当作一键重建当前0474的配方。** 官方格式 2、结构化 `porting.toml`/CI 和统一构建入口的迁移仍未完成；详见[仓库整理与规范差距](docs/REPOSITORY-LAYOUT.md)。
+本仓库仍保留历史格式的 `board.toml`，其中 standalone、单核等设置不描述目前的完整 prelink 实机流程。**不能把旧入口当作一键重建当前0475的配方。** 官方格式 2、结构化 `porting.toml`/CI 和统一构建入口的迁移仍未完成；详见[仓库整理与规范差距](docs/REPOSITORY-LAYOUT.md)。
 
 ## 获取源码与验证
 
@@ -148,9 +149,9 @@ git clone https://github.com/apple-oss-distributions/xnu.git ../apple-xnu
 mkdir -p .cache/qualification
 python3 scripts/qualification/replay-xnu.py \
   --repo . --xnu-source ../apple-xnu \
-  --manifest docs/qualification/0474/all-mac-source-0474.json \
-  --receipt .cache/qualification/replay-0474.json \
-  --cache .cache --expected-common 333
+  --manifest docs/qualification/0475/all-mac-source-0475.json \
+  --receipt .cache/qualification/replay-0475.json \
+  --cache .cache --expected-common 334
 ```
 
 校验已公开的真实触摸记录：

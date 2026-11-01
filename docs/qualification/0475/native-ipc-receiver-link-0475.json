@@ -1,0 +1,24 @@
+{
+  "passed": true,
+  "version": "0475",
+  "native_sha256": "1f11a8b8f289021a30c5d79a65248f75b4e88c763db7fa8c1e1294d6de852571",
+  "actual_native_IPC_call_edges": [
+    {
+      "caller": "_kebab_task_threads_report",
+      "callee": "_ipc_port_translate_send",
+      "address": "0xfffffe000662871c",
+      "instruction": "bl"
+    },
+    {
+      "caller": "_kebab_task_threads_report",
+      "callee": "_ipc_port_get_receiver_task_locked",
+      "address": "0xfffffe00066288e0",
+      "instruction": "bl"
+    }
+  ],
+  "source_unchanged_across_full_build": true,
+  "exact_source_delta_two_files_only": true,
+  "A_B_CD_keychain_hardware_Root_storage_security_sources_unchanged": true,
+  "physical_test": false,
+  "atomic_pairing_or_dependency_cycle_proven": false
+}

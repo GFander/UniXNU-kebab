@@ -1,0 +1,94 @@
+--- a/osfmk/kern/kebab_mach_wait_ipc_impl.h
++++ b/osfmk/kern/kebab_mach_wait_ipc_impl.h
+@@ -20,6 +20,51 @@
+  *out=value;return true;
+ }
+ 
++
++/* A non-atomic destination ancestry sample, not a message delivery trace.
++ * The caller lends the first active locked port, without a new reference.
++ * ip_destination holds a reference while its parent is locked (ipc_port.h).
++ * Take our own next reference before dropping that lock; never lock two ports.
++ * Thus dead/moved destinations remain safe, but can change between samples. */
++#define KEBAB_IPC_PATH_MAX 8
++struct kebab_mach_port_state {
++ uint64_t object,destination;
++ uint32_t kind,flags,link,kotype,queued,limit,receiver_name;
++ pid_t receiver;
++};
++
++static unsigned
++kebab_mach_wait_port_path_locked(ipc_port_t port,struct kebab_mach_port_state path[KEBAB_IPC_PATH_MAX])
++{
++ unsigned count=0;bool owned=false;
++ while(count<KEBAB_IPC_PATH_MAX){
++  struct kebab_mach_port_state *state=&path[count++];
++  *state=(struct kebab_mach_port_state){.object=(uint64_t)(uintptr_t)port,.receiver=-1};
++  ipc_port_t next=IP_NULL;
++  if(ip_active(port)){
++   bool in_space=ip_in_a_space(port);
++   /* kind: dead0, task-space1, kernel-space2, reply-space3, transit4, limbo5. */
++   state->kind=in_space?(ip_in_space(port,ipc_space_kernel)?2:
++       (ip_in_space(port,ipc_space_reply)?3:1)):(ip_in_transit(port)?4:5);
++   state->receiver=ipc_port_get_receiver_task_locked(port,NULL);
++   state->receiver_name=ip_get_receiver_name(port);
++   state->kotype=ip_kotype(port);state->link=port->ip_sync_link_state;
++   state->flags=(port->ip_specialreply?1u:0u)|(port->ip_service_port?2u:0u)|
++       (port->ip_sync_bootstrap_checkin?4u:0u)|(port->ip_immovable_receive?8u:0u);
++   state->queued=port->ip_messages.imq_msgcount;state->limit=port->ip_messages.imq_qlimit;
++   next=ip_get_destination(port);state->destination=(uint64_t)(uintptr_t)next;
++  }
++  bool follow=IP_VALID(next)&&count<KEBAB_IPC_PATH_MAX;
++  for(unsigned i=0;i<count;i++)if(path[i].object==(uint64_t)(uintptr_t)next)follow=false;
++  if(follow)ip_reference(next);
++  ip_mq_unlock(port);
++  if(owned)ip_release(port);
++  if(!follow)break;
++  port=next;owned=true;ip_mq_lock(port);
++ }
++ return count;
++}
++
+ static void
+ kebab_mach_wait_report(ipc_space_t space,const char *label,uint64_t tid,const struct kebab_saved_user_site *site)
+ {
+@@ -27,6 +72,7 @@
+  if(space==IS_NULL||!kebab_mach_wait_decode(site,&value))return;
+  kern_return_t status=KERN_INVALID_NAME;pid_t receiver=-1;uint32_t receiver_name=0;
+  uint64_t object=0;bool attempted=false;
++ struct kebab_mach_port_state path[KEBAB_IPC_PATH_MAX];unsigned path_count=0;
+  /* In receive-only mach_msg2, XNU uses mr_lp's low word as the sync
+   * send boosting port when RCV_SYNC_WAIT is set (mach_msg.c). This is
+   * receiver context, not proof of delivery or the original message id. */
+@@ -35,14 +81,14 @@
+  const char *role=send?"send":(sync?"sync":"none");
+  if((send||sync)&&MACH_PORT_VALID(value.remote)){
+   ipc_port_t port=IP_NULL;attempted=true;
+-  /* Takes no preexisting locks; success returns an active locked port,
+-   * without a new reference. Read metadata under that lock, then unlock.
+-   * No port dereference, proc lookup or printing after releasing it. */
++  /* No preexisting locks. The helper consumes the borrowed initial lock
++   * and releases only references that it explicitly owns. */
+   status=ipc_port_translate_send(space,value.remote,&port);
+   if(status==KERN_SUCCESS){
+-   receiver=ipc_port_get_receiver_task_locked(port,NULL);
+-   if(receiver>0)receiver_name=port->ip_receiver_name;
+-   object=(uint64_t)(uintptr_t)port;ip_mq_unlock(port);
++   path_count=kebab_mach_wait_port_path_locked(port,path);
++   receiver=path[0].receiver;
++   if(receiver>0)receiver_name=path[0].receiver_name;
++   object=path[0].object;
+   }
+  }
+  /* Keep each printf below the observed transport truncation boundary.
+@@ -52,4 +98,10 @@
+      value.remote,value.local,value.receive,value.message_id,attempted);
+  printf("KEBAB %s IPC-OWNER: tid=%llu role=%s name=%x kr=%x pid=%d recv=%x object=%llx\n",
+      label,tid,role,value.remote,status,receiver,receiver_name,object);
++ for(unsigned i=0;i<path_count;i++){
++  const struct kebab_mach_port_state *state=&path[i];
++  printf("KEBAB %s IPC-STATE: tid=%llu hop=%u obj=%llx kind=%u pid=%d recv=%x dst=%llx f=%x link=%u kt=%u q=%u/%u\n",
++      label,tid,i,state->object,state->kind,state->receiver,state->receiver_name,
++      state->destination,state->flags,state->link,state->kotype,state->queued,state->limit);
++ }
+ }
