@@ -105,7 +105,11 @@
 
 - [原版FairPlay返回现场与加密回归](MIGRATION-FAIRPLAY-SYSCALLS-20261101.md)
 
+- [原版FairPlay资源名现场与加密回归](MIGRATION-FAIRPLAY-RESOURCES-20261101.md)
+
 ## 原始证据与测试
+
+- [0478资源名现场](qualification/0478/)
 
 - [0477有界返回现场](qualification/0477/)
 

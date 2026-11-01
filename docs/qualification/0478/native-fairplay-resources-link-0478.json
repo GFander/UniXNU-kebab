@@ -1,0 +1,71 @@
+{
+  "passed": true,
+  "version": "0478",
+  "native_sha256": "5ff6bb402b791f10b1565fef87ce4bd8b9f8d8927d603f0b903a8d2eba53ed6d",
+  "native_bytes": 18949360,
+  "actual_native_call_edges": [
+    {
+      "caller": "_unix_syscall",
+      "callee": "_kebab_fairplay_syscall_return_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006b023f8"
+      ]
+    },
+    {
+      "caller": "_unix_syscall_return",
+      "callee": "_kebab_fairplay_syscall_return_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006b02830"
+      ]
+    },
+    {
+      "caller": "_proc_prepareexit",
+      "callee": "_kebab_fairplay_exit_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006986b30"
+      ]
+    },
+    {
+      "caller": "_unix_syscall",
+      "callee": "_kebab_fairplay_open_return_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006b0246c"
+      ]
+    },
+    {
+      "caller": "_unix_syscall_return",
+      "callee": "_kebab_fairplay_open_return_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006b0289c"
+      ]
+    },
+    {
+      "caller": "_is_io_registry_entry_from_path",
+      "callee": "_kebab_fairplay_registry_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006bcc454"
+      ]
+    },
+    {
+      "caller": "_is_io_registry_entry_get_property",
+      "callee": "_kebab_fairplay_registry_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006bcce58"
+      ]
+    },
+    {
+      "caller": "_is_io_registry_entry_get_property_bin_buf",
+      "callee": "_kebab_fairplay_registry_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006bcd6bc"
+      ]
+    }
+  ],
+  "source_unchanged_across_full_build": true,
+  "only_expected_three_source_changes": true,
+  "all_original_TU_source_lines_retained": true,
+  "A_B_CD_keychain_hardware_Root_sources_unchanged": true,
+  "original_syscall_ptrace_MACF_exit_logic_preserved": true,
+  "physical_test": false,
+  "scope": "Native callback binding and additive read-only evidence source; actual resource-name requests and failure cause still physically unqualified"
+}
