@@ -1,0 +1,31 @@
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -2468,7 +2468,8 @@
+ {
+     static boolean_t prepared;
+     if (prepared || panic_active() || !vinfo.v_baseaddr || vinfo.v_width!=1080 || vinfo.v_height!=2400 ||
+-        vinfo.v_depth!=32 || vinfo.v_rowbytes<1080*4) return;
++        vinfo.v_depth!=32 || vinfo.v_rowbytes<1080*4 ||
++        (vinfo.v_baseaddr & 3) || (vinfo.v_rowbytes & 3)) return;
+     prepared=TRUE;
+     for(unsigned y=0;y<vinfo.v_height;y++) {
+         if (panic_active()) return;
+@@ -2485,8 +2486,16 @@
+             size==sizeof(h)+h[3]*h[2]) {
+             for(unsigned y=0;y<h[2];y++) {
+                 if (panic_active()) return;
+-                void *to=(void *)(vinfo.v_baseaddr+(uintptr_t)(h[5]+y)*vinfo.v_rowbytes+(uintptr_t)h[4]*4);
+-                memcpy(to,(const uint8_t *)property+sizeof(h)+(uintptr_t)y*h[3],h[3]);
++                /* GOP is device-mapped. Generic memcpy uses paired64-bit
++                 * stores and faults at odd-pixel x coordinates. Each pixel
++                 * is aligned32-bit MMIO; volatile prevents store widening. */
++                volatile uint32_t *to=(volatile uint32_t *)(vinfo.v_baseaddr+(uintptr_t)(h[5]+y)*vinfo.v_rowbytes+(uintptr_t)h[4]*4);
++                const uint8_t *from=(const uint8_t *)property+sizeof(h)+(uintptr_t)y*h[3];
++                for(unsigned x=0;x<h[1];x++) {
++                    uint32_t pixel;
++                    memcpy(&pixel,from+(uintptr_t)x*4,sizeof(pixel));
++                    to[x]=pixel;
++                }
+             }
+             logo=TRUE;
+         }

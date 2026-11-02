@@ -1,0 +1,237 @@
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -101,6 +101,10 @@
+ #include <machine/machine_cpu.h>
+ 
+ #include <pexpert/pexpert.h>
++#if defined(KEBAB)
++#include <pexpert/device_tree.h>
++#include <arm64/kebab_early.h>
++#endif
+ #include <sys/kdebug.h>
+ 
+ #include "iso_font.c"
+@@ -2428,6 +2432,71 @@
+ 	}
+ }
+ 
++/* Keep the original Apple progress-meter shape at the board's actual3x UI
++ * scale. Original art only contains1x/2x tables: expand2x alpha bytes safely
++ * rather than indexing a2x bitmap with a3x stride. Called under progress lock. */
++#if defined(KEBAB) && defined(XNU_TARGET_OS_OSX)
++static unsigned char kebab_progress_left[2][kProgressBarCapWidth*3*kProgressBarHeight*3];
++static unsigned char kebab_progress_right[2][kProgressBarCapWidth*3*kProgressBarHeight*3];
++static unsigned char kebab_progress_middle[2][kProgressBarHeight*3];
++static boolean_t kebab_progress_art_ready;
++static void
++kebab_progress_art3x(void)
++{
++    if (kebab_progress_art_ready) return;
++    for (unsigned state=0;state<2;state++) {
++        for (unsigned y=0;y<kProgressBarHeight*3;y++) {
++            unsigned sy=y*2/3;
++            kebab_progress_middle[state][y]=progressmeter_middle[1][state][sy];
++            for(unsigned x=0;x<kProgressBarCapWidth*3;x++) {
++                unsigned to=y*kProgressBarCapWidth*3+x;
++                unsigned from=sy*kProgressBarCapWidth*2+x*2/3;
++                kebab_progress_left[state][to]=progressmeter_leftcap[1][state][from];
++                kebab_progress_right[state][to]=progressmeter_rightcap[1][state][from];
++            }
++        }
++    }
++    kebab_progress_art_ready=TRUE;
++}
++#endif
++
++#if defined(KEBAB)
++/* A bounded private original-logo bitmap is supplied in the measured ADT,
++ * not compiled into public kernel source. No synthesized desktop content. */
++static void
++kebab_boot_graphics(void)
++{
++    static boolean_t prepared;
++    if (prepared || panic_active() || !vinfo.v_baseaddr || vinfo.v_width!=1080 || vinfo.v_height!=2400 ||
++        vinfo.v_depth!=32 || vinfo.v_rowbytes<1080*4) return;
++    prepared=TRUE;
++    for(unsigned y=0;y<vinfo.v_height;y++) {
++        if (panic_active()) return;
++        volatile uint32_t *row=(volatile uint32_t *)(vinfo.v_baseaddr+(uintptr_t)y*vinfo.v_rowbytes);
++        for(unsigned x=0;x<vinfo.v_width;x++)row[x]=0xff000000;
++    }
++    DTEntry chosen;const void *property=NULL;unsigned size=0;uint32_t h[8]={};boolean_t logo=FALSE;
++    if (SecureDTLookupEntry(NULL,"/chosen",&chosen)==kSuccess &&
++        SecureDTGetProperty(chosen,"hios-boot-logo",&property,&size)==kSuccess && size>=sizeof(h)) {
++        memcpy(h,property,sizeof(h));
++        if(h[0]==0x314c424b && h[1] && h[2] && h[1]<=512 && h[2]<=512 &&
++            h[3]==h[1]*4 && h[6]==vinfo.v_width && h[7]==vinfo.v_height &&
++            h[4]<h[6] && h[5]<h[7] && h[1]<=h[6]-h[4] && h[2]<=h[7]-h[5] &&
++            size==sizeof(h)+h[3]*h[2]) {
++            for(unsigned y=0;y<h[2];y++) {
++                if (panic_active()) return;
++                void *to=(void *)(vinfo.v_baseaddr+(uintptr_t)(h[5]+y)*vinfo.v_rowbytes+(uintptr_t)h[4]*4);
++                memcpy(to,(const uint8_t *)property+sizeof(h)+(uintptr_t)y*h[3],h[3]);
++            }
++            logo=TRUE;
++        }
++    }
++    __asm__ volatile("dsb sy" ::: "memory");
++    printf("KEBAB BOOT ART: debug background cleared; original-logo=%u ui-scale=%u canvas=%ux%u\n",logo,vc_uiscale,vinfo.v_width,vinfo.v_height);
++    kebab_early_flush();
++}
++#endif
++
+ void
+ vc_progress_initialize( vc_progress_element * desc,
+     const unsigned char * data1x,
+@@ -2440,6 +2509,9 @@
+ 	if ((!clut) || (!desc) || (!data1x)) {
+ 		return;
+ 	}
++#if defined(KEBAB)
++    kebab_boot_graphics();
++#endif
+ 	vc_clut = clut;
+ 	vc_clut8 = clut;
+ 
+@@ -3115,6 +3187,9 @@
+ 	int style = (0 == (2 & vc_progress_withmeter));
+ 	// 1 white, 0 greyed out
+ 	int onoff;
++#if defined(KEBAB)
++    if(vc_uiscale==3)kebab_progress_art3x();
++#endif
+ 
+ 	for (i = start; i < end; i += width) {
+ 		onoff       = (i < pos);
+@@ -3127,15 +3202,24 @@
+ 		} else if (i < capWidth) { // drawing the left cap
+ 			width   = (end < capWidth) ? (end - i) : (capWidth - i);
+ 			data    = progressmeter_leftcap[vc_uiscale >= 2][onoff];
++#if defined(KEBAB)
++            if(vc_uiscale==3)data=kebab_progress_left[onoff];
++#endif
+ 			data    += i;
+ 			srcRow  = capWidth;
+ 		} else if (i < endCapStart) { // drawing the middle
+ 			width   = (end < endCapStart) ? (end - i) : (endCapStart - i);
+ 			data    = progressmeter_middle[vc_uiscale >= 2][onoff];
++#if defined(KEBAB)
++            if(vc_uiscale==3)data=kebab_progress_middle[onoff];
++#endif
+ 			srcRow  = 1;
+ 		} else { // drawing the right cap
+ 			width   = endCapPos - i;
+ 			data    = progressmeter_rightcap[vc_uiscale >= 2][onoff];
++#if defined(KEBAB)
++            if(vc_uiscale==3)data=kebab_progress_right[onoff];
++#endif
+ 			data    += i - endCapStart;
+ 			srcRow  = capWidth;
+ 		}
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -413,6 +413,12 @@
+ 			((boot_args_ptr->Video.v_depth >> kBootVideoDepthBootRotateShift)  & kBootVideoDepthMask) // add extra boot rotation
+ 			) % 4;
+ 		PE_state.video.v_scale = ((boot_args_ptr->Video.v_depth >> kBootVideoDepthScaleShift) & kBootVideoDepthMask) + 1;
++#if defined(KEBAB)
++        /* Same3x logical pixel policy as the original system UI; do not
++         * change physical canvas, density, framebuffer address or rotation. */
++        if (PE_state.video.v_width==1080 && PE_state.video.v_height==2400 && PE_state.video.v_depth==32)
++            PE_state.video.v_scale=3;
++#endif
+ 		PE_state.video.v_display = boot_args_ptr->Video.v_display;
+ 		strlcpy(PE_state.video.v_pixelFormat, "BBBBBBBBGGGGGGGGRRRRRRRR", sizeof(PE_state.video.v_pixelFormat));
+ 	}
+--- a/osfmk/arm64/kebab_early.c
++++ b/osfmk/arm64/kebab_early.c
+@@ -10,6 +10,7 @@
+ #if defined(KEBAB)
+ #include <stdint.h>
+ #include <kern/misc_protos.h>
++extern int kebab_console_muted;
+ 
+ /*
+  * kebab: Mu GOP hands over the framebuffer at 0x9C000000 (DarwinBoot
+@@ -35,6 +36,30 @@
+ static unsigned int early_row = 4, early_col;   /* first rows sit under the camera punch-hole */
+ static unsigned int early_started, early_disabled, early_panicking;
+ 
++/* BSP-only checkpoints are retained without allocator, locks or a USB call
++ * before CPU/console initialization. Replay later through the original tee. */
++static struct {unsigned stage;char label[80];} early_records[64];
++static unsigned early_record_count,early_record_dropped;
++static unsigned early_records_flushed;
++static void
++kebab_early_record(unsigned stage,const char *label)
++{
++    if (!label) return;
++    if (early_record_count>=64) {early_record_dropped++;return;}
++    unsigned i=early_record_count++,n=0;early_records[i].stage=stage;
++    while(label[n] && n<sizeof(early_records[i].label)-1){early_records[i].label[n]=label[n];n++;}
++    early_records[i].label[n]=0;
++}
++void
++kebab_early_flush(void)
++{
++    if(early_records_flushed)return;
++    early_records_flushed=1;
++    printf("KEBAB EARLY USB: replay %u checkpoints, overflow=%u\n",early_record_count,early_record_dropped);
++    for(unsigned i=0;i<early_record_count;i++)printf("KEBAB EARLY %u: %s\n",early_records[i].stage,early_records[i].label);
++}
++
++
+ /*
+  * When the text area fills up, wipe it and start again at the top. Copying the
+  * whole area up one row was far too slow on write-combined memory.
+@@ -65,7 +90,7 @@
+ void
+ kebab_early_putc(char c)
+ {
+-	if (early_disabled) {
++	if (early_disabled || (kebab_console_muted && !early_panicking)) {
+ 		return;
+ 	}
+ 	if (!early_started) {
+@@ -124,6 +149,8 @@
+ 	if (early_disabled || stage > 99) {
+ 		return;
+ 	}
++	kebab_early_record(stage, label);
++	if (kebab_console_muted && !early_panicking) return;
+ 	kebab_early_string("KEBAB EARLY ");
+ 	if (stage >= 10) {
+ 		kebab_early_putc((char)('0' + stage / 10));
+--- a/osfmk/arm64/kebab_early.h
++++ b/osfmk/arm64/kebab_early.h
+@@ -13,6 +13,7 @@
+ void kebab_early_relocate(uint64_t base);
+ void kebab_early_hex(uint64_t value);
+ void kebab_early_disable(void);
++void kebab_early_flush(void);
+ #else
+ static inline void kebab_early_mark(unsigned int stage, const char *label)
+ {
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -821,18 +821,8 @@
+ 	MSR_SCTLR_EL1_X0
+ 	isb		sy
+ 
+-	/* kebab: white 60x24 block at row 2280, x=200 - the MMU is on. */
+-	MOV64	x9, (0x9c000000 + 2280 * 4320 + 200 * 4)
+-	mov	w10, #-1
+-	mov	x12, #24
+-79:	mov	x11, #60
+-78:	str	w10, [x9], #4
+-	subs	x11, x11, #1
+-	b.ne	78b
+-	mov	x13, #(4320 - 240)
+-	add	x9, x9, x13
+-	subs	x12, x12, #1
+-	b.ne	79b
++	/* Normal boot leaves the framebuffer to original boot art. Keep the
++	 * existing post-MMU store barrier; CPU checkpoints go to the USB replay. */
+ 	dsb	sy
+ 
+ #if !VMAPPLE && !defined(KEBAB)

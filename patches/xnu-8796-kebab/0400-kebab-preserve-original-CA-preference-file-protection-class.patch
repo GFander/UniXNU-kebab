@@ -1,0 +1,97 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -201,7 +201,26 @@
+  * Preserve the complete old dictionary and its exclusive backup. No path is
+  * supplied by USB; original open/rename/setattr MACF and ACL checks remain. */
+ extern int kebab_ca_preference_move(unsigned);
+-extern int kebab_ca_preference_stage_owner(void);
++/* Same authorized open path as vnode_open, with the original protection class
++ * and mobile owner supplied at creation rather than accepting new defaults. */
++static int
++kebab_ca_preference_stage_create(uint32_t protection, vnode_t *output)
++{
++    *output = NULLVP;
++    if (current_proc() != initproc || initproc->p_textvp != NULLVP) return EPERM;
++    struct nameidata *ndp = kalloc_type(struct nameidata, Z_WAITOK | Z_NOFAIL);
++    vfs_context_t context = vfs_context_current();
++    NDINIT(ndp, LOOKUP, OP_OPEN, NOFOLLOW, UIO_SYSSPACE,
++        CAST_USER_ADDR_T(kebab_mg_cache_paths[7]), context);
++    struct vnode_attr attr; VATTR_INIT(&attr);
++    VATTR_SET(&attr, va_uid, 501); VATTR_SET(&attr, va_gid, 501); VATTR_SET(&attr, va_mode, 0600);
++    VATTR_SET(&attr, va_dataprotect_class, protection);
++    int flags = FREAD | FWRITE | O_CREAT | O_EXCL | O_NOFOLLOW;
++    int error = vn_open_auth(ndp, &flags, &attr, NULLVP);
++    if (!error) *output = ndp->ni_vp;
++    kfree_type(struct nameidata, ndp);
++    return error;
++}
+ int kebab_ca_sdr_preference_once(void);
+ static int
+ kebab_ca_preference_digest(unsigned index, uint32_t length, const uint8_t expected[32])
+@@ -242,11 +261,13 @@
+     struct vnode_attr attr;
+     VATTR_INIT(&attr); VATTR_WANTED(&attr, va_fileid); VATTR_WANTED(&attr, va_data_size);
+     VATTR_WANTED(&attr, va_uid); VATTR_WANTED(&attr, va_gid); VATTR_WANTED(&attr, va_mode);
++    VATTR_WANTED(&attr, va_dataprotect_class);
+     error = vnode_isreg(file) ? vnode_getattr(file, &attr, context) : EINVAL;
+     struct vfsstatfs *stats = vfs_statfs(vnode_mount(file)); char path[MAXPATHLEN] = {}; int path_size = sizeof(path);
+     if (!error) error = vn_getpath(file, path, &path_size);
+     if (!error && (!VATTR_IS_SUPPORTED(&attr, va_fileid) || !VATTR_IS_SUPPORTED(&attr, va_data_size) ||
+         !VATTR_IS_SUPPORTED(&attr, va_uid) || !VATTR_IS_SUPPORTED(&attr, va_gid) || !VATTR_IS_SUPPORTED(&attr, va_mode) ||
++        !VATTR_IS_SUPPORTED(&attr, va_dataprotect_class) ||
+         !stats || strcmp(stats->f_fstypename, "apfs") || strcmp(stats->f_mntonname, "/private/var") ||
+         strcmp(path, kebab_mg_cache_paths[5]) || attr.va_uid != 501 || attr.va_gid != 501 ||
+         (attr.va_mode & 07777) != 0600)) error = EINVAL;
+@@ -267,14 +288,22 @@
+     stats = vfs_statfs(vnode_mount(parent));
+     if (!error && (!vnode_isdir(parent) || !stats || strcmp(stats->f_fstypename, "apfs") ||
+         strcmp(stats->f_mntonname, "/private/var") || strcmp(path, "/private/var/mobile/Library/Preferences"))) error = EINVAL;
+-    if (!error) error = vnode_open(kebab_mg_cache_paths[7], FREAD | FWRITE | O_CREAT | O_EXCL | O_NOFOLLOW,
+-        0600, VNODE_LOOKUP_NOFOLLOW, &file, context);
++    if (!error) error = kebab_ca_preference_stage_create(attr.va_dataprotect_class, &file);
+     if (!error) {
++        struct vnode_attr created; VATTR_INIT(&created);
++        VATTR_WANTED(&created, va_uid); VATTR_WANTED(&created, va_gid); VATTR_WANTED(&created, va_mode);
++        VATTR_WANTED(&created, va_dataprotect_class); VATTR_WANTED(&created, va_data_size);
++        error = vnode_getattr(file, &created, context);
++        if (!error && (!VATTR_IS_SUPPORTED(&created, va_uid) || !VATTR_IS_SUPPORTED(&created, va_gid) ||
++            !VATTR_IS_SUPPORTED(&created, va_mode) || !VATTR_IS_SUPPORTED(&created, va_data_size) ||
++            !VATTR_IS_SUPPORTED(&created, va_dataprotect_class) || created.va_uid != attr.va_uid ||
++            created.va_gid != attr.va_gid || created.va_mode != attr.va_mode || created.va_data_size != 0 ||
++            created.va_dataprotect_class != attr.va_dataprotect_class)) error = EAUTH;
++        if (!error) printf("KEBAB CA PREF: original/stage protection-class=%u exact, uid=501 gid=501 mode=0600; original authorized creation, no class downgrade\n", attr.va_dataprotect_class);
+         int residual = 0;
+-        error = vn_rdwr(UIO_WRITE, file, (caddr_t)payload, new_size, 0, UIO_SYSSPACE, 0,
++        if (!error) error = vn_rdwr(UIO_WRITE, file, (caddr_t)payload, new_size, 0, UIO_SYSSPACE, 0,
+             vfs_context_ucred(context), &residual, NULL);
+         if (!error && residual) error = EIO;
+-        if (!error) error = kebab_ca_preference_stage_owner();
+         if (!error) error = VNOP_FSYNC(file, MNT_WAIT, context);
+         int closed = vnode_close(file, FREAD | FWRITE | FWASWRITTEN, context); file = NULLVP;
+         if (!error) error = closed;
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -7596,22 +7596,7 @@
+ }
+ 
+ 
+-#if defined(KEBAB)
+-int kebab_ca_preference_stage_owner(void);
+-int
+-kebab_ca_preference_stage_owner(void)
+-{
+-    if (current_proc() != initproc || initproc->p_textvp != NULLVP) return EPERM;
+-    vfs_context_t context = vfs_context_current(); vnode_t file = NULLVP;
+-    int error = vnode_lookup("/private/var/mobile/Library/Preferences/com.apple.backboardd.plist.hios-sdr8-stage-20261102",
+-        VNODE_LOOKUP_NOFOLLOW, &file, context);
+-    if (error) return error;
+-    struct vnode_attr attr; VATTR_INIT(&attr);
+-    VATTR_SET(&attr, va_uid, 501); VATTR_SET(&attr, va_gid, 501); VATTR_SET(&attr, va_mode, 0600);
+-    error = vnode_isreg(file) ? chmod_vnode(context, file, &attr) : EINVAL;
+-    vnode_put(file); return error;
+-}
+-#endif
++
+ 
+ 
+ /*

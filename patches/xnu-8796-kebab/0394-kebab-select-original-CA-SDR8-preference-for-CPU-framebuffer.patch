@@ -1,0 +1,72 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6104,6 +6104,60 @@
+  * Apply after the ordinary image loader and security decisions, before the
+  * apple vector. No executable bytes, credentials or security options change.
+  */
++/* The original CA queries this ordinary Boolean application preference even
++ * in retail builds. CF's argument domain accepts this explicit NO override.
++ * Keep MG's real iPhone/wide-color identity; the -cf backend is SDR BGRA8. */
++static int
++kebab_fb_exec_arguments(struct image_params *imgp)
++{
++    static const char key[] = "-CAEnableDeepFramebuffer";
++    static const char arguments[] = "-CAEnableDeepFramebuffer\0NO";
++    if (imgp->ip_argc < 0 || imgp->ip_argc > NCARGS / sizeof(uint64_t) - 2 || imgp->ip_envc < 0 ||
++        imgp->ip_startargv > imgp->ip_endargv || imgp->ip_endargv > imgp->ip_endenvv ||
++        imgp->ip_strendp != imgp->ip_endenvv) return EINVAL;
++    char *cursor = imgp->ip_startargv;
++    for (int i = 0; i < imgp->ip_argc; i++) {
++        size_t space = (size_t)(imgp->ip_endargv - cursor);
++        size_t length = strnlen(cursor, space);
++        if (length == space) return EINVAL;
++        if (length == sizeof(key) - 1 && !memcmp(cursor, key, sizeof(key) - 1)) {
++            printf("KEBAB CA ARGV: explicit original deep-framebuffer preference retained\n");
++            return 0;
++        }
++        cursor += length + 1;
++    }
++    if (cursor != imgp->ip_endargv) return EINVAL;
++    for (int i = 0; i < imgp->ip_envc; i++) {
++        size_t space = (size_t)(imgp->ip_endenvv - cursor);
++        size_t length = strnlen(cursor, space);
++        if (length == space) return EINVAL;
++        cursor += length + 1;
++    }
++    size_t padding = (size_t)(imgp->ip_endenvv - cursor);
++    if (padding >= sizeof(uint64_t) || imgp->ip_strspace < 0 || imgp->ip_argspace < 0) return EINVAL;
++    size_t string_space = (size_t)imgp->ip_strspace + padding;
++    size_t argument_space = (size_t)imgp->ip_argspace + padding;
++    if (string_space < sizeof(arguments)) return E2BIG;
++    size_t new_padding = (string_space - sizeof(arguments)) % sizeof(uint64_t);
++    size_t used = sizeof(arguments) + new_padding;
++    if (string_space < used || argument_space < used + 2 * sizeof(uint64_t)) return E2BIG;
++    /* argv/env strings are still kernel-owned; pointer vectors are constructed
++     * later by exec_copyout_strings. Preserve every existing argument/env byte. */
++    size_t environment_bytes = (size_t)(cursor - imgp->ip_endargv);
++    memmove(imgp->ip_endargv + sizeof(arguments), imgp->ip_endargv, environment_bytes);
++    memcpy(imgp->ip_endargv, arguments, sizeof(arguments));
++    imgp->ip_endargv += sizeof(arguments);
++    imgp->ip_strendp = cursor + sizeof(arguments);
++    memset(imgp->ip_strendp, 0, new_padding);
++    imgp->ip_strendp += new_padding;
++    imgp->ip_endenvv = imgp->ip_strendp;
++    imgp->ip_strspace = (int)(string_space - used);
++    imgp->ip_argspace = (int)(argument_space - used - 2 * sizeof(uint64_t));
++    imgp->ip_argc += 2;
++    printf("KEBAB CA ARGV: original CAEnableDeepFramebuffer=NO; CPU SDR8 output, genuine MG identity unchanged\n");
++    return 0;
++}
++
+ static int
+ kebab_fb_exec_environment(struct image_params *imgp, const load_result_t *load_result)
+ {
+@@ -6118,6 +6172,8 @@
+         memcmp(imgp->ip_ndp->ni_cnd.cn_nameptr, name, sizeof(name) - 1) ||
+         !PE_parse_boot_argn("-cf", &enabled, sizeof(enabled)) || enabled != 1) return 0;
+ 
++    int argument_error = kebab_fb_exec_arguments(imgp);
++    if (argument_error) return argument_error;
+     char *cursor = imgp->ip_endargv;
+     if (imgp->ip_envc < 0 || imgp->ip_endenvv < cursor ||
+         imgp->ip_strendp != imgp->ip_endenvv) return EINVAL;

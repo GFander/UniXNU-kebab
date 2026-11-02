@@ -1,0 +1,39 @@
+--- a/iokit/Kernel/arm/kebab_aks_userclient_impl.h
++++ b/iokit/Kernel/arm/kebab_aks_userclient_impl.h
+@@ -16,7 +16,8 @@
+ #include "kebab_aks_cookie_impl.h"
+ 
+ 
+-/* Original aks_get_device_state returns a DER SET of UTF8-key/INTEGER
++/* Original aks_get_device_state (17) and aks_get_extended_device_state (35)
++ * share the original DER decoder and return a SET of UTF8-key/INTEGER
+  * sequences. Only report the two fields established by our real bank:
+  * ss bit2 (provisioned C/D keys available since boot), sls3 (factory no PIN).
+  * Do not claim sls0/all-class unlock or invent SEP/backoff/generation fields.
+@@ -82,7 +83,7 @@
+  }else if(!opened)result=kIOReturnNotOpen;
+  else if((selector==10||selector==11)&&!keychainAccess)result=kIOReturnNotPrivileged;
+  else if((selector==12||selector==13)&&!deviceAccess)result=kIOReturnNotPrivileged;
+- else if(!administrative&&selector!=7&&selector!=14&&selector!=17&&selector!=10&&selector!=11&&selector!=12&&selector!=13)result=kIOReturnNotPrivileged;
++ else if(!administrative&&selector!=7&&selector!=14&&selector!=17&&selector!=35&&selector!=10&&selector!=11&&selector!=12&&selector!=13)result=kIOReturnNotPrivileged;
+  else if(selector==12||selector==13){result=kuc_device_lock_method(selector,a);}
+  else if(selector==10||selector==11){
+   result=kuc_keychain_method(selector,a);
+@@ -91,7 +92,7 @@
+   result=kuc_notify_method(getProvider(),selector,a);
+  }else if(selector==65||selector==68){
+   result=kuc_cookie_method(selector,a);
+- }else if(selector==17){
++ }else if(selector==17||selector==35){
+   result=kuc_device_state_method(a);
+  }else if(selector==14){
+   if(in||out!=1||!a->scalarOutput||si||a->structureInputDescriptor||a->structureOutputSize||a->structureOutputDescriptor)result=kIOReturnBadArgument;
+@@ -128,7 +129,7 @@
+   IOLog("KEBAB PASSCODE AKS: pid=%d selector=7 lock-state=0x%x DeviceLocked=%u FirstUnlock=%u; original status output, no mutation\n",
+       proc_selfpid(),state,!!(state&1u),!!(state&4u));
+  }
+- if(selector==17)IOLog("KEBAB PASSCODE AKS: pid=%d selector=17 result=%x; status DER only, original decoder decides PasscodeSet\n",proc_selfpid(),result);
++ if(selector==17||selector==35)IOLog("KEBAB PASSCODE AKS: pid=%d selector=%u result=%x; authenticated status DER only, original decoder decides PasscodeSet\n",proc_selfpid(),selector,result);
+  /* Fixed metadata only: key bytes are never logged. */
+  static uint32_t wrap_reports;
+  if((selector==10||selector==11)&&in==2&&a->scalarInput&&

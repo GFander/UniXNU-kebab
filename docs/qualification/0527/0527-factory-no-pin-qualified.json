@@ -1,0 +1,63 @@
+{
+  "accepted": true,
+  "scope": "Erroneous factory no-PIN password request fixed; original Setup WiFi page physically observed, not activation/unlocked desktop/new-PIN support",
+  "version": "0527",
+  "native_sha256": "51c39c759eaad13ef9af6d039f99d46a1e34c9db1a3429edb3c9ea8352884c31",
+  "native_bytes": 19048496,
+  "source": {
+    "common_patches": 384,
+    "host_patches": 4,
+    "files": 5287,
+    "all_source_equal": true
+  },
+  "change": "Only readonly extended device-state35 dispatch/permissions and status caller logging; same authenticated factory state helper and DER17 bytes",
+  "before": {
+    "version": "0526",
+    "extended_error": "0xe00002c1",
+    "original_PasscodeSet": 1,
+    "original_FirstUnlock": 1,
+    "UI": "alphanumeric EnterPasscode"
+  },
+  "after": {
+    "extended_selector": 35,
+    "actual_SpringBoard_pid27_result": 0,
+    "original_PasscodeSet": 0,
+    "original_FirstUnlock": 1,
+    "AKS_DeviceLocked": 0,
+    "AKS_FirstUnlock": 1,
+    "actual_UI": "Chinese original Setup Choose a WiFi Network / Connect Mac or PC",
+    "owner_confirmed_setup": true
+  },
+  "security": {
+    "existing_hardware_Root_bank_systembag_encrypted_Data_preserved": true,
+    "unrelated_operation_permissions_preserved": true,
+    "no_fabricated_authentication_or_user_cache_override": true,
+    "unknown_SEP_fields_absent": true
+  },
+  "tests": {
+    "actual_dispatch_host_cases": 1163,
+    "compiled_runtime_mutants_rejected": 5,
+    "actual_original_decoder_reexecuted": true,
+    "host_models_not_device_IOKit_proof": true,
+    "watchdog_seconds": 304.414
+  },
+  "capture": {
+    "width": 1080,
+    "height": 2400,
+    "bytes": 10368000,
+    "raw_sha256": "a6ea636a6d929d8e1f71c11f3e244e6c823a520f18a7a4902976d0712c4fbf9e",
+    "wire_sha256": "9b90c5e5b8aa55ec796860c3ed6db3063b5fe429114a015c46ef1a551bbd45f5",
+    "independent_CRC_contiguous_bytes_log_demux_PNG_exact": true,
+    "retries": 0,
+    "decoder_errors": [],
+    "log_drop_delta": 0,
+    "entire_boot_no_log_loss_not_claimed": true,
+    "actual_view_reviewed": true
+  },
+  "remaining": [
+    "WiFi/activation and usable unlocked desktop unqualified",
+    "New passcode setup/verification and Apple SEP not implemented",
+    "UIKit red fallback banner remains",
+    "304-second regression does not exclude old2012-second SpringBoard watchdog issue"
+  ]
+}

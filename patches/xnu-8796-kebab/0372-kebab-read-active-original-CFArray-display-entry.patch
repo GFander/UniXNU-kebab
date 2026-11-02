@@ -1,0 +1,63 @@
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -208,7 +208,7 @@
+ }
+ /* Fixed20H392 WindowServer observation. Caller pins original backboardd UUID,
+  * UID501 and task. No arbitrary address arguments, invocation or user writes.
+- * Current array slots/storage candidates are bounded and each resulting wrapper
++ * The exact original CFArray active range is bounded and each resulting wrapper
+  * must have the original CAWindowServerDisplay ISA and exact IOMFB methods. */
+ struct kebab_ca_state {
+     uint32_t array_candidates, displays, renderer_flags, sw_kind, gpu_kind;
+@@ -249,7 +249,7 @@
+     uint8_t uuid[16] = {};
+     uint64_t mask = 0, root = 0, root_words[2] = {}, array = 0, slots[8] = {}, again_slots[8] = {};
+     uint64_t wrapper = 0, private_data = 0, server = 0, display = 0, vtable = 0, method = 0;
+-    uint64_t again = 0, storage[8] = {};
++    uint64_t again = 0;
+     bzero(out, sizeof(*out));
+     if (!kebab_plugin_user_copy(map, 0x180000058ULL, uuid, sizeof(uuid)) ||
+         memcmp(uuid, expected_cache, sizeof(uuid))) return 1;
+@@ -259,24 +259,24 @@
+         !kebab_shell_isa(root_words[0], 0x1dcdf7ce0ULL)) return 3;
+     if (!kebab_ca_u64(map, root_words[1], &array) || !array ||
+         !kebab_plugin_user_copy(map, array, slots, sizeof(slots))) return 4;
+-    /* CF mutable arrays bridge to NSArray. Do not guess one Foundation layout:
+-     * inspect at most7 inline/storage slots and8 entries per storage candidate,
+-     * accepting only original wrapper ISA. No scan of arbitrary address ranges. */
+-    for (unsigned i = 1; i < 8; i++) {
+-        uint64_t candidate = slots[i];
+-        if (kebab_ca_wrapper(map, candidate)) {
+-            if (candidate != wrapper) { wrapper = candidate;out->displays++; }
+-            continue;
+-        }
+-        if (!candidate || (candidate & 7) ||
+-            !kebab_plugin_user_copy(map, candidate, storage, sizeof(storage))) continue;
+-        out->array_candidates++;
+-        for (unsigned j = 0; j < 8; j++) {
+-            if (kebab_ca_wrapper(map, storage[j]) && storage[j] != wrapper) {
+-                wrapper = storage[j];out->displays++;
+-            }
+-        }
+-    }
++    /* Exact original __NSCFArray count/value ABI. Capacity can contain stale
++     * wrapper pointers: only the current logical element is a display. */
++    if (!kebab_shell_isa(slots[0], 0x1e1d47be0ULL) || slots[2] != 1) return 5;
++    uint64_t value_address = 0;
++    if (slots[1] & 3) {
++        uint64_t deque[2] = {};
++        if (!slots[5] || !kebab_plugin_user_copy(map, slots[5], deque, sizeof(deque)) ||
++            !deque[1] || deque[1] > 4096 || deque[0] >= deque[1] ||
++            slots[5] > UINT64_MAX - 16 - deque[0] * 8) return 4;
++        value_address = slots[5] + 16 + deque[0] * 8;
++        out->array_candidates = 1;
++    } else {
++        /* __CFArrayCheckAndGetValueAtIndex: optional custom callbacks enlarge
++         * the immutable header from0x30 to0x58. */
++        value_address = array + ((slots[1] & 0xc) == 0xc ? 0x58 : 0x30);
++    }
++    if (!kebab_ca_u64(map, value_address, &wrapper) || !kebab_ca_wrapper(map, wrapper)) return 5;
++    out->displays = 1;
+     if (!wrapper || out->displays != 1) return 5; /* primary single-display contract */
+     if (!kebab_ca_u64(map, wrapper + 8, &private_data) || !private_data ||
+         !kebab_ca_u64(map, private_data + 0x40, &server) || !server ||

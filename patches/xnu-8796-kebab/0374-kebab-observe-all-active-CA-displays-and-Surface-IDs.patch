@@ -1,0 +1,110 @@
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -212,7 +212,8 @@
+  * must have the original CAWindowServerDisplay ISA and exact IOMFB methods. */
+ struct kebab_ca_state {
+     uint64_t array_class;
+-    uint32_t array_kind, active_count;
++    uint32_t array_kind, active_count, display_index;
++    uint32_t buffer_ids[4], assembly_ids[4], assembly_formats[4];
+     uint32_t array_candidates, displays, renderer_flags, sw_kind, gpu_kind;
+     uint32_t page_count, page_index, software_path, page_ids[4], page_formats[4];
+     uint64_t sw_context, sw_renderer, gpu_context, gpu_renderer, pages[4], page_buffers[4];
+@@ -245,7 +246,7 @@
+     return 3; /* other: never infer a functioning GPU from a nonzero object */
+ }
+ static int
+-kebab_ca_snapshot(vm_map_t map, struct kebab_ca_state *out)
++kebab_ca_snapshot(vm_map_t map, struct kebab_ca_state *out, unsigned index)
+ {
+     static const uint8_t expected_cache[16] = {0x8f,0x97,0x04,0x52,0xc9,0xe3,0x3e,0x88,0xb1,0x14,0xfe,0xb1,0x86,0x4b,0xc9,0xe0};
+     uint8_t uuid[16] = {};
+@@ -253,6 +254,7 @@
+     uint64_t wrapper = 0, private_data = 0, server = 0, display = 0, vtable = 0, method = 0;
+     uint64_t again = 0;
+     bzero(out, sizeof(*out));
++    out->display_index = index;
+     if (!kebab_plugin_user_copy(map, 0x180000058ULL, uuid, sizeof(uuid)) ||
+         memcmp(uuid, expected_cache, sizeof(uuid))) return 1;
+     if (!kebab_ca_u64(map, 0x1800e8940ULL, &mask) || mask != 0xffffffff8ULL) return 2;
+@@ -271,24 +273,24 @@
+         out->array_kind = 2;
+         out->active_count = (uint32_t)(slots[4] >> 32);
+         uint32_t offset = (uint32_t)slots[3], capacity = (uint32_t)(slots[3] >> 32);
+-        if (out->active_count != 1) return 5;
+-        if (!slots[2] || !capacity || capacity > 4096 || offset >= capacity ||
+-            slots[2] > UINT64_MAX - (uint64_t)offset * 8) return 4;
+-        value_address = slots[2] + (uint64_t)offset * 8;
++        if (!out->active_count || out->active_count > 8 || index >= out->active_count) return 5;
++        if (!slots[2] || !capacity || capacity > 4096 || offset >= capacity || out->active_count > capacity ||
++            slots[2] > UINT64_MAX - (uint64_t)(capacity - 1) * 8) return 4;
++        value_address = slots[2] + (uint64_t)((offset + index) % capacity) * 8;
+         out->array_candidates = 1;
+     } else if (kebab_shell_isa(slots[0], 0x1e1d47be0ULL)) {
+         out->array_kind = 1;
+         out->active_count = (uint32_t)slots[2];
+-        if (slots[2] != 1) return 5;
++        if (!slots[2] || slots[2] > 8 || index >= slots[2]) return 5;
+         if (slots[1] & 3) {
+             uint64_t deque[2] = {};
+             if (!slots[5] || !kebab_plugin_user_copy(map, slots[5], deque, sizeof(deque)) ||
+-                !deque[1] || deque[1] > 4096 || deque[0] >= deque[1] ||
+-                slots[5] > UINT64_MAX - 16 - deque[0] * 8) return 4;
+-            value_address = slots[5] + 16 + deque[0] * 8;
++                !deque[1] || deque[1] > 4096 || deque[0] >= deque[1] || slots[2] > deque[1] - deque[0] ||
++                slots[5] > UINT64_MAX - 16 - (deque[0] + index) * 8) return 4;
++            value_address = slots[5] + 16 + (deque[0] + index) * 8;
+             out->array_candidates = 1;
+         } else {
+-            value_address = array + ((slots[1] & 0xc) == 0xc ? 0x58 : 0x30);
++            value_address = array + ((slots[1] & 0xc) == 0xc ? 0x58 : 0x30) + index * 8;
+         }
+     } else return 5;
+     if (!kebab_ca_u64(map, value_address, &wrapper) || !kebab_ca_wrapper(map, wrapper)) return 5;
+@@ -320,6 +322,19 @@
+             !kebab_ca_u64(map, out->pages[i] + 0x20, &out->page_buffers[i])) return 9;
+         if (out->page_buffers[i] &&
+             !kebab_ca_u32(map, out->page_buffers[i] + 0x20, &out->page_formats[i])) return 9;
++        uint64_t assembly = 0, surface_vtable = 0;
++        if (!kebab_ca_u64(map, out->pages[i] + 0x28, &assembly)) return 9;
++        if (out->page_buffers[i]) {
++            if (!kebab_ca_u64(map, out->page_buffers[i], &surface_vtable)) return 9;
++            if (surface_vtable == 0x1d5b2cbf8ULL &&
++                !kebab_ca_u32(map, out->page_buffers[i] + 0x48, &out->buffer_ids[i])) return 9;
++        }
++        if (assembly) {
++            if (!kebab_ca_u32(map, assembly + 0x20, &out->assembly_formats[i]) ||
++                !kebab_ca_u64(map, assembly, &surface_vtable)) return 9;
++            if (surface_vtable == 0x1d5b2cbf8ULL &&
++                !kebab_ca_u32(map, assembly + 0x48, &out->assembly_ids[i])) return 9;
++        }
+     }
+     if (!kebab_ca_u64(map, value_address, &again) || again != wrapper ||
+         !kebab_ca_u64(map, 0x1dcdf8170ULL, &again) || again != root ||
+@@ -340,15 +355,18 @@
+     if (task == TASK_NULL || task == kernel_task || ml_at_interrupt_context() ||
+         get_preemption_level() != 0 || !ml_get_interrupts_enabled()) return;
+     vm_map_t map = get_task_map_reference(task);
+-    struct kebab_ca_state state = {};
+-    int result = map == VM_MAP_NULL || vm_map_pmap(map) == pmap_kernel() ? 11 : kebab_ca_snapshot(map, &state);
++    for (unsigned index = 0, count = 1; index < count; index++) {
++        struct kebab_ca_state state = {};
++        int result = map == VM_MAP_NULL || vm_map_pmap(map) == pmap_kernel() ? 11 : kebab_ca_snapshot(map, &state, index);
++        if (!index && state.active_count > 0 && state.active_count <= 8) count = state.active_count;
++        printf("KEBAB CA ARRAY: class=0x%llx kind=%u active=%u index=%u; pinned Foundation ABI\n", state.array_class, state.array_kind, state.active_count, index);
++        printf("KEBAB CA: result=%d display-index=%u displays=%u storage-candidates=%u renderer-flags=0x%x sw-kind=%u sw-context=%u sw-renderer=%u other-kind=%u other-context=%u other-renderer=%u software-path=%u pages=%u current=%u; fixed20H392 readonly, no producer lock\n",
++            result,index,state.displays,state.array_candidates,state.renderer_flags,state.sw_kind,!!state.sw_context,!!state.sw_renderer,state.gpu_kind,!!state.gpu_context,!!state.gpu_renderer,state.software_path,state.page_count,state.page_index);
++        if (!result) for (unsigned i = 0; i < state.page_count; i++)
++            printf("KEBAB CA PAGE: display-index=%u index=%u present=%u frame-id=%u buffer=%u format=0x%x surface-id=%u assembly-format=0x%x assembly-id=%u\n",index,i,!!state.pages[i],state.page_ids[i],!!state.page_buffers[i],state.page_formats[i],state.buffer_ids[i],state.assembly_formats[i],state.assembly_ids[i]);
++        kebab_usb_log_flush();
++    }
+     if (map != VM_MAP_NULL) vm_map_deallocate(map);
+-    printf("KEBAB CA ARRAY: class=0x%llx kind=%u active=%u; pinned Foundation ABI\n", state.array_class, state.array_kind, state.active_count);
+-    printf("KEBAB CA: result=%d displays=%u storage-candidates=%u renderer-flags=0x%x sw-kind=%u sw-context=%u sw-renderer=%u other-kind=%u other-context=%u other-renderer=%u software-path=%u pages=%u current=%u; fixed20H392 readonly, no producer lock\n",
+-        result,state.displays,state.array_candidates,state.renderer_flags,state.sw_kind,!!state.sw_context,!!state.sw_renderer,state.gpu_kind,!!state.gpu_context,!!state.gpu_renderer,state.software_path,state.page_count,state.page_index);
+-    if (!result) for (unsigned i = 0; i < state.page_count; i++)
+-        printf("KEBAB CA PAGE: index=%u present=%u frame-id=%u buffer=%u format=0x%x\n",i,!!state.pages[i],state.page_ids[i],!!state.page_buffers[i],state.page_formats[i]);
+-    kebab_usb_log_flush();
+ }
+ 
+ static int

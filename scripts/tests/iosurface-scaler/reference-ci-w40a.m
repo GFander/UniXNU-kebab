@@ -1,0 +1,19 @@
+#import <Foundation/Foundation.h>
+#import <CoreImage/CoreImage.h>
+#import <CoreVideo/CoreVideo.h>
+int main(void){@autoreleasepool{
+ CVPixelBufferRef p=NULL;CVReturn e=CVPixelBufferCreate(NULL,1024,1,kCVPixelFormatType_40ARGBLEWideGamut,NULL,&p);
+ if(e||!p){fprintf(stderr,"CV create=%d\n",e);return 1;}
+ CGColorSpaceRef cs=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+ CVBufferSetAttachment(p,kCVImageBufferCGColorSpaceKey,cs,kCVAttachmentMode_ShouldPropagate);
+ CVPixelBufferLockBaseAddress(p,0);uint16_t*src=CVPixelBufferGetBaseAddress(p);
+ for(unsigned x=0;x<1024;x++){src[x*4]=x<<6;src[x*4+1]=384<<6;src[x*4+2]=384<<6;src[x*4+3]=895<<6;}
+ CVPixelBufferUnlockBaseAddress(p,0);
+ CIImage*im=[CIImage imageWithCVPixelBuffer:p options:@{kCIImageColorSpace:(__bridge id)cs}];
+ if(!im){fprintf(stderr,"CI image unavailable\n");return 2;}
+ CIContext*ctx=[CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer:@YES,kCIContextWorkingColorSpace:(__bridge id)cs,kCIContextOutputColorSpace:(__bridge id)cs,kCIContextCacheIntermediates:@NO}];
+ uint8_t dst[4096];memset(dst,0xa5,sizeof(dst));
+ [ctx render:im toBitmap:dst rowBytes:4096 bounds:CGRectMake(0,0,1024,1) format:kCIFormatRGBA8 colorSpace:cs];
+ puts("code,R,G,B,A");for(unsigned x=0;x<1024;x++)printf("%u,%u,%u,%u,%u\n",x,dst[4*x],dst[4*x+1],dst[4*x+2],dst[4*x+3]);
+ return 0;
+}}

@@ -1,0 +1,191 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -19,6 +19,7 @@
+ #include <kern/kalloc.h>
+ #include <libkern/crypto/sha2.h>
+ #include <pexpert/device_tree.h>
++#include <pexpert/pexpert.h>
+ #include <sys/vnode_if.h>
+ 
+ extern void kebab_pid1_task_report(task_t task);
+@@ -59,7 +60,9 @@
+     "/private/var/mobile/Library/Preferences/com.apple.mobilegestalt.plist",
+     "/System/Library/Caches/com.apple.MobileGestalt.plist",
+     "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist.hios-before-iphone-x-20261102",
+-    "/private/var/mobile/Library/Preferences/com.apple.backboardd.plist"
++    "/private/var/mobile/Library/Preferences/com.apple.backboardd.plist",
++    "/private/var/mobile/Library/Preferences/com.apple.backboardd.plist.hios-before-sdr8-20261102",
++    "/private/var/mobile/Library/Preferences/com.apple.backboardd.plist.hios-sdr8-stage-20261102"
+ };
+ 
+ int kebab_identity_cache_snapshot(unsigned, void **, uint32_t *);
+@@ -193,6 +196,106 @@
+     return 0;
+ }
+ 
++
++/* Owner-measured, one-file original CA preference transaction, before PID1.
++ * Preserve the complete old dictionary and its exclusive backup. No path is
++ * supplied by USB; original open/rename/setattr MACF and ACL checks remain. */
++extern int kebab_ca_preference_move(unsigned);
++extern int kebab_ca_preference_stage_owner(void);
++int kebab_ca_sdr_preference_once(void);
++static int
++kebab_ca_preference_digest(unsigned index, uint32_t length, const uint8_t expected[32])
++{
++    void *data = NULL; uint32_t bytes = 0; uint8_t digest[32]; SHA256_CTX hash;
++    int error = kebab_identity_cache_snapshot(index, &data, &bytes);
++    if (error) return error;
++    SHA256_Init(&hash); SHA256_Update(&hash, data, bytes); SHA256_Final(digest, &hash);
++    kebab_identity_cache_release(data, bytes);
++    return bytes == length && !memcmp(digest, expected, sizeof(digest)) ? 0 : EAUTH;
++}
++int
++kebab_ca_sdr_preference_once(void)
++{
++    DTEntry chosen; const void *raw = NULL; unsigned raw_size = 0;
++    if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++        SecureDTGetProperty(chosen, "hios-ca-sdr-preference", &raw, &raw_size) != kSuccess) return 0;
++    if (!raw || raw_size < 112 || raw_size > 4208) return EINVAL;
++    uint32_t header[4], new_size; uint64_t fileid; uint8_t old_hash[32], new_hash[32], reserved[20];
++    memcpy(header, raw, 16); memcpy(&fileid, (const uint8_t *)raw + 16, 8);
++    memcpy(old_hash, (const uint8_t *)raw + 24, 32); memcpy(&new_size, (const uint8_t *)raw + 56, 4);
++    memcpy(new_hash, (const uint8_t *)raw + 60, 32); memcpy(reserved, (const uint8_t *)raw + 92, 20);
++    static const uint8_t zeros[20] = {};
++    if (header[0] != 0x44534143 || header[1] != 1 || header[2] != 5 || !header[3] ||
++        header[3] > KEBAB_MG_CACHE_LIMIT || !fileid || !new_size || new_size > 4096 ||
++        raw_size != 112 + new_size || memcmp(reserved, zeros, sizeof(zeros))) return EINVAL;
++    int cpu = 0;
++    if (current_proc() != initproc || initproc->p_textvp != NULLVP || panic_active() ||
++        ml_at_interrupt_context() || get_preemption_level() != 0 || !ml_get_interrupts_enabled() ||
++        !PE_parse_boot_argn("-cf", &cpu, sizeof(cpu)) || !cpu) return EPERM;
++    const uint8_t *payload = (const uint8_t *)raw + 112;
++    uint8_t digest[32]; SHA256_CTX hash;
++    SHA256_Init(&hash); SHA256_Update(&hash, payload, new_size); SHA256_Final(digest, &hash);
++    if (memcmp(digest, new_hash, 32)) return EAUTH;
++    vfs_context_t context = vfs_context_current(); vnode_t file = NULLVP, parent = NULLVP;
++    int error = vnode_lookup(kebab_mg_cache_paths[5], VNODE_LOOKUP_NOFOLLOW, &file, context);
++    if (error) return error;
++    struct vnode_attr attr;
++    VATTR_INIT(&attr); VATTR_WANTED(&attr, va_fileid); VATTR_WANTED(&attr, va_data_size);
++    VATTR_WANTED(&attr, va_uid); VATTR_WANTED(&attr, va_gid); VATTR_WANTED(&attr, va_mode);
++    error = vnode_isreg(file) ? vnode_getattr(file, &attr, context) : EINVAL;
++    struct vfsstatfs *stats = vfs_statfs(vnode_mount(file)); char path[MAXPATHLEN] = {}; int path_size = sizeof(path);
++    if (!error) error = vn_getpath(file, path, &path_size);
++    if (!error && (!VATTR_IS_SUPPORTED(&attr, va_fileid) || !VATTR_IS_SUPPORTED(&attr, va_data_size) ||
++        !VATTR_IS_SUPPORTED(&attr, va_uid) || !VATTR_IS_SUPPORTED(&attr, va_gid) || !VATTR_IS_SUPPORTED(&attr, va_mode) ||
++        !stats || strcmp(stats->f_fstypename, "apfs") || strcmp(stats->f_mntonname, "/private/var") ||
++        strcmp(path, kebab_mg_cache_paths[5]) || attr.va_uid != 501 || attr.va_gid != 501 ||
++        (attr.va_mode & 07777) != 0600)) error = EINVAL;
++    bool matches = !error && attr.va_fileid == fileid && attr.va_data_size == header[3];
++    vnode_put(file); file = NULLVP;
++    if (error) return error;
++    if (!matches) { printf("KEBAB CA PREF: old inode/size no longer matches; no preferences changed\n"); return 0; }
++    error = kebab_ca_preference_digest(5, header[3], old_hash);
++    if (error) return error;
++    for (unsigned index = 6; index <= 7; index++) {
++        error = vnode_lookup(kebab_mg_cache_paths[index], VNODE_LOOKUP_NOFOLLOW, &file, context);
++        if (!error) { vnode_put(file); return EEXIST; }
++        if (error != ENOENT) return error;
++    }
++    error = vnode_lookup("/private/var/mobile/Library/Preferences", VNODE_LOOKUP_NOFOLLOW, &parent, context);
++    if (error) return error;
++    path_size = sizeof(path); error = vn_getpath(parent, path, &path_size);
++    stats = vfs_statfs(vnode_mount(parent));
++    if (!error && (!vnode_isdir(parent) || !stats || strcmp(stats->f_fstypename, "apfs") ||
++        strcmp(stats->f_mntonname, "/private/var") || strcmp(path, "/private/var/mobile/Library/Preferences"))) error = EINVAL;
++    if (!error) error = vnode_open(kebab_mg_cache_paths[7], FREAD | FWRITE | O_CREAT | O_EXCL | O_NOFOLLOW,
++        0600, VNODE_LOOKUP_NOFOLLOW, &file, context);
++    if (!error) {
++        int residual = 0;
++        error = vn_rdwr(UIO_WRITE, file, (caddr_t)payload, new_size, 0, UIO_SYSSPACE, 0,
++            vfs_context_ucred(context), &residual, NULL);
++        if (!error && residual) error = EIO;
++        if (!error) error = kebab_ca_preference_stage_owner();
++        if (!error) error = VNOP_FSYNC(file, MNT_WAIT, context);
++        int closed = vnode_close(file, FREAD | FWRITE | FWASWRITTEN, context); file = NULLVP;
++        if (!error) error = closed;
++    }
++    if (!error) error = kebab_ca_preference_digest(7, new_size, new_hash);
++    if (!error) error = VNOP_FSYNC(parent, MNT_WAIT, context);
++    if (!error) error = kebab_ca_preference_move(0); /* old -> exclusive backup */
++    if (!error) {
++        error = kebab_ca_preference_digest(6, header[3], old_hash);
++        if (!error) error = kebab_ca_preference_move(1); /* verified stage -> absent final */
++        if (error) {
++            int restored = kebab_ca_preference_move(2); /* exclusive restore, never overwrite */
++            printf("KEBAB CA PREF: publish refused error=%d restore=%d; preserve evidence\n", error, restored);
++        }
++    }
++    if (!error) error = kebab_ca_preference_digest(5, new_size, new_hash);
++    if (!error) error = VNOP_FSYNC(parent, MNT_WAIT, context);
++    vnode_put(parent);
++    if (!error) printf("KEBAB CA PREF: exact old dictionary backed up; owner-measured SDR8 preference published, original CF loader decides; no MG/key/security changes\n");
++    return error;
++}
+ 
+ void
+ kebab_process_report(void)
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7258,6 +7258,9 @@
+    extern int kebab_identity_cache_reset_once(void);
+    int cache_reset_error=kebab_identity_cache_reset_once();
+    if(cache_reset_error)printf("KEBAB MG RESET: exact cache operation refused/incomplete error=%d; original startup continues without pretending success\n",cache_reset_error);
++   extern int kebab_ca_sdr_preference_once(void);
++   int ca_preference_error=kebab_ca_sdr_preference_once();
++   if(ca_preference_error)printf("KEBAB CA PREF: exact configuration transaction refused/incomplete error=%d; original startup continues\n",ca_preference_error);
+   }
+   printf("KEBAB DATA USERLAND: genuine encrypted Data mounted; hardware Root/class bank and native FS/FV services live; original launchd handoff, storage profile verified\n");
+  }
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -7596,6 +7596,24 @@
+ }
+ 
+ 
++#if defined(KEBAB)
++int kebab_ca_preference_stage_owner(void);
++int
++kebab_ca_preference_stage_owner(void)
++{
++    if (current_proc() != initproc || initproc->p_textvp != NULLVP) return EPERM;
++    vfs_context_t context = vfs_context_current(); vnode_t file = NULLVP;
++    int error = vnode_lookup("/private/var/mobile/Library/Preferences/com.apple.backboardd.plist.hios-sdr8-stage-20261102",
++        VNODE_LOOKUP_NOFOLLOW, &file, context);
++    if (error) return error;
++    struct vnode_attr attr; VATTR_INIT(&attr);
++    VATTR_SET(&attr, va_uid, 501); VATTR_SET(&attr, va_gid, 501); VATTR_SET(&attr, va_mode, 0600);
++    error = vnode_isreg(file) ? chmod_vnode(context, file, &attr) : EINVAL;
++    vnode_put(file); return error;
++}
++#endif
++
++
+ /*
+  * Change mode of a file given a path name.
+  *
+@@ -9706,6 +9724,23 @@
+     static const char backup[] = "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist.hios-before-iphone-x-20261102";
+     return renameat_internal(vfs_context_current(), AT_FDCWD, CAST_USER_ADDR_T(source),
+         AT_FDCWD, CAST_USER_ADDR_T(backup), UIO_SYSSPACE, RENAME_EXCL);
++}
++#endif
++
++#if defined(KEBAB)
++int kebab_ca_preference_move(unsigned);
++int
++kebab_ca_preference_move(unsigned operation)
++{
++    if (current_proc() != initproc || initproc->p_textvp != NULLVP) return EPERM;
++    static const char original[] = "/private/var/mobile/Library/Preferences/com.apple.backboardd.plist";
++    static const char backup[] = "/private/var/mobile/Library/Preferences/com.apple.backboardd.plist.hios-before-sdr8-20261102";
++    static const char stage[] = "/private/var/mobile/Library/Preferences/com.apple.backboardd.plist.hios-sdr8-stage-20261102";
++    if (operation > 2) return EINVAL;
++    const char *from = operation == 0 ? original : operation == 1 ? stage : backup;
++    const char *to = operation == 0 ? backup : original;
++    return renameat_internal(vfs_context_current(), AT_FDCWD, CAST_USER_ADDR_T(from),
++        AT_FDCWD, CAST_USER_ADDR_T(to), UIO_SYSSPACE, RENAME_EXCL);
+ }
+ #endif
+ 

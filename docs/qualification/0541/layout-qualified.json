@@ -1,0 +1,35 @@
+{
+  "accepted": true,
+  "version": "0541",
+  "scope": "Source/native and measured boot, real lockscreen surface pixels, finite original substrate regression; full interactive GUI pending",
+  "native_sha256": "4a430f25d2df434f263bdbc38825e79d655adf488c6c856f900bdba645dc21a8",
+  "native_bytes": 19100264,
+  "boot_sha256": "ce061971480740bef0fcb8a15e81ad36f2b5c70e5cd1a5fb7ea2f25ef9393065",
+  "common_patches": 396,
+  "host_patches": 4,
+  "source_files": 5288,
+  "watchdog_seconds": 304.467,
+  "logical_pixels": [
+    1125,
+    2436
+  ],
+  "panel_pixels": [
+    1080,
+    2400
+  ],
+  "panel_stride": 4320,
+  "original_SBH_screen_type_before": 4,
+  "original_SBH_screen_type_after": 3,
+  "original_SBH_cache_not_overwritten": true,
+  "real_retained_Surface_lockframe": true,
+  "GOP_snapshot_was_black_during_off_and_not_UI_acceptance": true,
+  "rdar_banner_absent_in_retained_lockframe": true,
+  "PNG_sha256": "aba56fdc6f1aad4216289c74e6f99e7dad26723807eb7c3f6c279063224cde67",
+  "wire_and_pixels_independently_verified": true,
+  "transfer_log_drop_delta": 0,
+  "watchdog_not_disabled": true,
+  "encrypted_Data_and_hardware_keys_retained": true,
+  "new_manual_Data_preferences_written": false,
+  "manual_scroll_ControlCenter_keyboard_validation": false,
+  "full_Apple_activation_or_SEP_claimed": false
+}

@@ -1,0 +1,93 @@
+--- a/iokit/Kernel/arm/KebabPixelFormat.h
++++ b/iokit/Kernel/arm/KebabPixelFormat.h
+@@ -86,7 +86,10 @@
+ {
+     if(format == KPF_BGRA) return kpf_div_round((int64_t)p[ch]*65536,255);
+     uint32_t code=kpf_word(p+ch*2)>>6;
+-    return ch==3 ? kpf_div_round(((int64_t)code-384)*65536,510) : kpf_xr_linear[code];
++    if(ch!=3)return kpf_xr_linear[code];
++    /* Original CV/CoreImage clamps alpha to [0,1] even though RGB is XR. */
++    if(code<=384)return 0;if(code>=894)return 65536;
++    return kpf_div_round(((int64_t)code-384)*65536,510);
+ }
+ static inline uint8_t kpf_sdr8(int32_t linear)
+ {
+@@ -98,7 +101,10 @@
+ {
+     if(format==KPF_BGRA){p[ch]=kpf_sdr8(linear);return;}
+     int32_t code;
+-    if(ch==3)code=384+kpf_div_round((int64_t)linear*510,65536);
++    if(ch==3) {
++        if(linear<0)linear=0;if(linear>65536)linear=65536;
++        code=384+kpf_div_round((int64_t)linear*510,65536);
++    }
+     else {
+         unsigned lo=0,hi=1023;
+         while(lo<hi){unsigned mid=(lo+hi)/2;if(kpf_xr_linear[mid]<linear)lo=mid+1;else hi=mid;}
+@@ -110,8 +116,8 @@
+ }
+ static inline uint32_t kpf_gop_pixel(const uint8_t *p)
+ {
+-    uint32_t v=0;
+-    for(unsigned ch=0;ch<4;ch++)v|=(uint32_t)kpf_sdr8(kpf_read(p,KPF_W40A,ch))<<(ch*8);
++    uint32_t v=0xff000000u; /* GOP has RGB pixels; its reserved byte is opaque. */
++    for(unsigned ch=0;ch<3;ch++)v|=(uint32_t)kpf_sdr8(kpf_read(p,KPF_W40A,ch))<<(ch*8);
+     return v;
+ }
+ #endif
+--- a/iokit/Kernel/arm/KebabScalerCore.h
++++ b/iokit/Kernel/arm/KebabScalerCore.h
+@@ -73,10 +73,9 @@
+     if(x>hi)x=hi;
+     return x;
+ }
+-/* The currently qualified path is a fully composed, opaque CPU framebuffer.
+- * w40a is straight-alpha; reject transparency before any destination write
+- * until premultiplication-aware wide filtering is implemented. BGRA->BGRA
+- * retains its existing, independently qualified premultiplied byte path. */
++/* Diagnose alpha independently of validity. Original CA supplies composed
++ * linear components; decoded RGB/alpha are filtered separately, as in the
++ * original premultiplied BGRA path. Transparency is not a copy error. */
+ static bool
+ ksc_source_opaque(const struct ksc_image *s,const uint8_t *source,uint32_t *rejected=NULL)
+ {
+@@ -84,7 +83,7 @@
+         const uint8_t *row=source+s->offset+(uint64_t)y*s->stride;
+         for(uint32_t x=0;x<s->width;x++) {
+             const uint8_t *p=row+(uint64_t)x*s->bpe;
+-            if(s->format==KSC_BGRA ? p[3]!=255 : (kpf_word(p+6)>>6)!=894) {
++            if(s->format==KSC_BGRA ? p[3]!=255 : (kpf_word(p+6)>>6)<894) {
+                 if(rejected)*rejected=s->format==KSC_BGRA?p[3]:kpf_word(p+6)>>6;
+                 return false;
+             }
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -729,12 +729,7 @@
+ 		}
+ 		bool wide = bpe == 8 && s->pixelFormat == KPF_W40A;
+ 		if (wide && (s->bytesPerRow < (uint64_t)s->width * bpe || last > s->allocSize)) src = 0;
+-        if (wide && src) {
+-            for (int32_t y=0;y<h && src;y++) {
+-                const uint8_t *row=(const uint8_t *)(src+s->offset+(uint64_t)(sy+y)*s->bytesPerRow+(uint64_t)sx*bpe);
+-                for (int32_t x=0;x<w;x++) if((kpf_word(row+(uint64_t)x*8+6)>>6)!=894){src=0;break;}
+-            }
+-        }
++
+ 		if (src != 0 && ((bpe == 4 && s->pixelFormat == KEBAB_FB_FORMAT_BGRA) || wide) && s->planeCount == 0) {
+             kebab_fb_handoff_console(&fConsolePaused, s->pixelFormat, s->planeCount,
+                 dx == 0 && dy == 0 && w == (int32_t)fWidth && h == (int32_t)fHeight);
+--- a/iokit/Kernel/arm/KebabSoftwareScaler.cpp
++++ b/iokit/Kernel/arm/KebabSoftwareScaler.cpp
+@@ -149,10 +149,8 @@
+     if(!sm || !dm || !sm->getVirtualAddress() || !dm->getVirtualAddress() ||
+         sm->getLength()<si.memory_length || dm->getLength()<di.memory_length){ret=kIOReturnVMError;goto done;}
+     OSMemoryBarrier();
+-    if((si.format==KPF_W40A || di.format==KPF_W40A) &&
+-        !ksc_source_opaque(&si,(const uint8_t *)(uintptr_t)sm->getVirtualAddress(),&alpha_rejected)) {
+-        ret=kIOReturnUnsupported;goto done;
+-    }
++    if(si.format==KPF_W40A || di.format==KPF_W40A)
++        (void)ksc_source_opaque(&si,(const uint8_t *)(uintptr_t)sm->getVirtualAddress(),&alpha_rejected);
+     ksc_run(&plan,&si,&di,(const uint8_t *)(uintptr_t)sm->getVirtualAddress(),(uint8_t *)(uintptr_t)dm->getVirtualAddress());
+     OSMemoryBarrier();
+     kebab_surface_did_write(d);

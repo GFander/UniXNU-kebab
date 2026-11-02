@@ -1,0 +1,153 @@
+--- /dev/null
++++ b/osfmk/arm64/kebab_boot_memory.h
+@@ -0,0 +1,40 @@
++/* SPDX-License-Identifier: BSD-2-Clause */
++#ifndef KEBAB_BOOT_MEMORY_H
++#define KEBAB_BOOT_MEMORY_H
++/* Diagnostic handoff in the loader-owned boot-argument page padding.
++ * The official Darwin22 boot_args structure and primary RAM stay unchanged.
++ * No descriptor conveyed here grants RAM ownership to XNU. */
++#define KBM_MAGIC 0x3150414d4d42454bULL /* KEBMMAP1 */
++#define KBM_OFFSET 0x300
++#define KBM_MAX_RECORDS 512
++typedef struct {
++    unsigned long long magic;
++    unsigned int version;
++    unsigned int count;
++    unsigned long long physical;
++    unsigned long long bytes;
++} kebab_memory_handoff;
++typedef struct {
++    unsigned long long physical;
++    unsigned long long bytes;
++    unsigned long long attributes;
++    unsigned int type;
++    unsigned int reserved;
++} kebab_memory_record;
++typedef char kbm_header_size[(sizeof(kebab_memory_handoff) == 32) ? 1 : -1];
++typedef char kbm_record_size[(sizeof(kebab_memory_record) == 32) ? 1 : -1];
++/* Keep all arithmetic bounded before converting a physical pointer to KVA. */
++static inline int
++kebab_memory_handoff_valid(const kebab_memory_handoff *h,
++    unsigned long long base, unsigned long long used_end)
++{
++    if (h->magic != KBM_MAGIC || h->version != 1 || !h->count ||
++        h->count > KBM_MAX_RECORDS || h->bytes != h->count * sizeof(kebab_memory_record) ||
++        (h->physical & 0x3fff) || used_end < base ||
++        h->physical < base || h->physical > used_end ||
++        h->bytes > used_end - h->physical) {
++        return 0;
++    }
++    return 1;
++}
++#endif
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -57,6 +57,7 @@
+ #include <pexpert/device_tree.h>
+ #include <arm64/proc_reg.h>
+ #include <arm64/kebab_early.h>
++#include <arm64/kebab_boot_memory.h>
+ #include <arm/pmap.h>
+ #include <arm/caches_internal.h>
+ #include <arm/cpu_internal.h>
+@@ -146,6 +147,34 @@
+  */
+ #define XCALL_ACK_TIMEOUT_NS ((uint64_t) 6000000000)
+ uint64_t xcall_ack_timeout_abstime;
++
++/* Captured while the original loader-owned argument page is still available.
++ * These descriptors are never fed to pmap or admitted as free pages here. */
++static kebab_memory_record kebab_boot_memory[KBM_MAX_RECORDS];
++static unsigned int kebab_boot_memory_count;
++static unsigned int kebab_boot_memory_status;
++
++static void
++kebab_boot_memory_capture(const boot_args *args)
++{
++	kebab_memory_handoff h;
++	if (((uintptr_t)args & 0xfff) != 0 || sizeof(*args) > KBM_OFFSET) {
++		kebab_boot_memory_status = 1;
++		return;
++	}
++	__builtin_memcpy(&h, (const char *)args + KBM_OFFSET, sizeof(h));
++	if (!kebab_memory_handoff_valid(&h, args->physBase, args->topOfKernelData) ||
++	    args->topOfKernelData < args->physBase ||
++	    args->topOfKernelData - args->physBase > args->memSize ||
++	    args->virtBase > UINT64_MAX - (h.physical - args->physBase)) {
++		kebab_boot_memory_status = 2;
++		return;
++	}
++	__builtin_memcpy(kebab_boot_memory,
++	    (const void *)(args->virtBase + (h.physical - args->physBase)), h.bytes);
++	kebab_boot_memory_count = h.count;
++	kebab_boot_memory_status = 3;
++}
+ 
+ boot_args const_boot_args __attribute__((section("__DATA, __const")));
+ boot_args      *BootArgs __attribute__((section("__DATA, __const")));
+@@ -330,6 +359,21 @@
+ #endif /* __arm64 */
+ }
+ 
++/* Normal-context diagnostic entry; no allocator or hardware side effects. */
++void kebab_boot_memory_dump(void);
++void
++kebab_boot_memory_dump(void)
++{
++	printf("KEBAB MEMMAP begin status=%u count=%u measurement_only=1\n",
++	    kebab_boot_memory_status, kebab_boot_memory_count);
++	for (unsigned int i = 0; i < kebab_boot_memory_count; i++) {
++		const kebab_memory_record *d = &kebab_boot_memory[i];
++		printf("KEBAB MEMMAP %u type=%u start=0x%llx bytes=0x%llx attr=0x%llx\n",
++		    i, d->type, d->physical, d->bytes, d->attributes);
++	}
++	printf("KEBAB MEMMAP end\n");
++}
++
+ /*
+  *		Routine:		arm_init
+  *		Function:		Runs on the boot CPU, once, on entry from iBoot.
+@@ -373,6 +417,7 @@
+ 	arm_slide_rebase_and_sign_image();
+ 
+ 	/* If kernel integrity is supported, use a constant copy of the boot args. */
++	kebab_boot_memory_capture(args);
+ 	const_boot_args = *args;
+ 	BootArgs = args = &const_boot_args;
+ 
+@@ -562,6 +607,16 @@
+ 	kebab_early_mark(19, "serial_init returned");
+ 	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
+ 	kprintf("kprintf initialized\n");
++	kprintf("KEBAB MEMMAP begin status=%u count=%u primary=0x%llx bytes=0x%llx used_end=0x%llx\n",
++	    kebab_boot_memory_status, kebab_boot_memory_count,
++	    (unsigned long long)args->physBase, (unsigned long long)args->memSize,
++	    (unsigned long long)args->topOfKernelData);
++	for (unsigned int i = 0; i < kebab_boot_memory_count; i++) {
++		const kebab_memory_record *d = &kebab_boot_memory[i];
++		kprintf("KEBAB MEMMAP %u type=%u start=0x%llx bytes=0x%llx attr=0x%llx\n",
++		    i, d->type, d->physical, d->bytes, d->attributes);
++	}
++	kprintf("KEBAB MEMMAP end\n");
+ 	kebab_early_mark(20, "kprintf startup complete");
+ 	if (serial_exists) {
+ 		kebab_early_disable();
+--- a/iokit/Kernel/arm/KebabDriverDiagnostics.cpp
++++ b/iokit/Kernel/arm/KebabDriverDiagnostics.cpp
+@@ -13,6 +13,7 @@
+ extern "C" boot_args *BootArgs;
+ extern "C" void kebab_hid_input_report(void);
+ extern "C" void kebab_framebuffer_report(void);
++extern "C" void kebab_boot_memory_dump(void);
+ 
+ struct KebabDriverManifestEntry {
+ 	const char *group, *service, *scope;
+@@ -76,6 +77,7 @@
+ 			    entry.group, entry.service, entry.scope);
+ 		}
+ 	}
++	kebab_boot_memory_dump();
+ 	kebab_framebuffer_report();
+ 	kebab_hid_input_report();
+ 	IOLog("KEBAB DRV: end; matched service does not certify user ABI or hardware capability\n");

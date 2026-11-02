@@ -1,0 +1,196 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -69,6 +69,8 @@
+ static void kebab_publish_canvas(IOService *provider, uint32_t width, uint32_t height);
+ extern "C" int kebab_display_start(IOService *provider);
+ 
++extern "C" int kebab_boot_logo_matches_framebuffer(uintptr_t, uint32_t, uint32_t, uint32_t);
++extern "C" int kebab_keys_boot_logo_idle_allowed(void);
+ extern "C" int kebab_console_muted;
+ int kebab_console_muted = 1;  /* normal boot logs go to USB; panic still draws */
+ 
+@@ -182,7 +184,8 @@
+ 	uint32_t      fPendingID;
+ 	bool          fConsolePaused;
+ 	bool          fPowerOff;
+-	bool          fBlanked;
++	bool          fOffApplied; /* off policy applied; scanout may retain public boot branding */
++	bool          fBootIdleDecisionUsed, fBootLogoRetained;
+ 	uint32_t      fDebugFlags;
+ 	uint32_t      fDisplayDevice;
+ 	uint32_t      fColorRemapMode;
+@@ -357,7 +360,8 @@
+ 	fPendingID = 0;
+ 	fConsolePaused = false;
+ 	fPowerOff = false;
+-	fBlanked = false;
++	fOffApplied = false;
++	fBootIdleDecisionUsed = fBootLogoRetained = false;
+ 	fDebugFlags = 0;
+ 	fDisplayDevice = 0;
+ 	fColorRemapMode = 0;
+@@ -458,9 +462,15 @@
+ 	if (fb->fPowerOff) {
+ 		/* The panel is self-scan and has no backlight control: "off" is a
+ 		 * black buffer, done once instead of copying frames nobody sees. */
+-		if (!fb->fBlanked) {
++        if (fb->fBootLogoRetained && !kebab_keys_boot_logo_idle_allowed()) {
++            fb->blank();
++            fb->fBootLogoRetained = false;
++            fb->fOffApplied = true;
++            IOLog("KEBAB FB BOOT: physical power activity/invalid keys cancelled boot-logo retention\n");
++        }
++		if (!fb->fOffApplied) {
+ 			fb->blank();
+-			fb->fBlanked = true;
++			fb->fOffApplied = true;
+ 		}
+ 	} else if (present) {
+ 		fb->present(rec, id);
+@@ -515,17 +525,28 @@
+         IOLockUnlock(fb->fLock);
+         IOLog("KEBAB FB POWER QUEUE: actually completed pending swap %u before off\n", id);
+     }
++    bool keep_boot_logo = false;
++    if (off && !fb->fPowerOff && !fb->fBootIdleDecisionUsed) {
++        fb->fBootIdleDecisionUsed = true;
++        keep_boot_logo = kebab_keys_boot_logo_idle_allowed() &&
++            kebab_boot_logo_matches_framebuffer(fb->fPixels, fb->fWidth, fb->fHeight, fb->fRowBytes) &&
++            kebab_keys_boot_logo_idle_allowed();
++    }
+     IOLockLock(fb->fLock);
+     if (off != fb->fPowerOff) {
+         fb->fPowerOff = off;
+         if (!off && !fb->fPendingValid && fb->fHaveFrame) fb->fPendingValid = true;
+-        fb->fBlanked = false;
++        fb->fOffApplied = false;
++        if (!off) fb->fBootLogoRetained = false;
+     }
+     IOLockUnlock(fb->fLock);
+-    if (off && !fb->fBlanked) {
++    if (off && !fb->fOffApplied) {
+         if (panic_active()) return kIOReturnNotReady;
+-        fb->blank();
+-        fb->fBlanked = true;
++        if (keep_boot_logo) {
++            fb->fBootLogoRetained = true;
++            IOLog("KEBAB FB BOOT: exact original logo retained through first render-idle; logical-power-off=1; no panel power operation\n");
++        } else fb->blank();
++        fb->fOffApplied = true;
+     }
+     IOLog("KEBAB FB: display %s\n", off ? "off" : "on");
+     return kIOReturnSuccess;
+@@ -568,6 +589,7 @@
+ void
+ AppleCLCD::blank()
+ {
++    if (panic_active()) return;
+ 	memset((void *)fPixels, 0, (size_t)fRowBytes * fHeight);
+ }
+ 
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -2463,6 +2463,44 @@
+ #if defined(KEBAB)
+ /* A bounded private original-logo bitmap is supplied in the measured ADT,
+  * not compiled into public kernel source. No synthesized desktop content. */
++/* Read-only boot-owner check. Only the exact measured boot logo on black is
++ * public boot branding. Any UI pixel, invalid asset/map or panic fails closed. */
++int
++kebab_boot_logo_matches_framebuffer(uintptr_t base, uint32_t width,
++    uint32_t height, uint32_t rowbytes)
++{
++    if (panic_active() || !base || (base & 3) || (rowbytes & 3) ||
++        width != 1080 || height != 2400 || rowbytes < width * 4) return 0;
++    DTEntry chosen;
++    const void *property = NULL;
++    unsigned size = 0;
++    uint32_t h[8] = {};
++    if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++        SecureDTGetProperty(chosen, "hios-boot-logo", &property, &size) != kSuccess ||
++        size < sizeof(h)) return 0;
++    memcpy(h, property, sizeof(h));
++    if (h[0] != 0x314c424b || !h[1] || !h[2] || h[1] > 512 || h[2] > 512 ||
++        h[3] != h[1] * 4 || h[6] != width || h[7] != height ||
++        h[4] >= width || h[5] >= height || h[1] > width - h[4] ||
++        h[2] > height - h[5] || size != sizeof(h) + h[3] * h[2]) return 0;
++    int nonblack = 0;
++    for (uint32_t y = 0; y < height; y++) {
++        if (panic_active()) return 0;
++        const volatile uint32_t *row = (const volatile uint32_t *)(base + (uintptr_t)y * rowbytes);
++        for (uint32_t x = 0; x < width; x++) {
++            uint32_t expected = 0;
++            if (x >= h[4] && x - h[4] < h[1] && y >= h[5] && y - h[5] < h[2]) {
++                const uint8_t *pixel = (const uint8_t *)property + sizeof(h) +
++                    (uintptr_t)(y - h[5]) * h[3] + (uintptr_t)(x - h[4]) * 4;
++                memcpy(&expected, pixel, sizeof(expected));
++                nonblack |= (expected & 0xffffff) != 0;
++            }
++            if ((row[x] & 0xffffff) != (expected & 0xffffff)) return 0;
++        }
++    }
++    return nonblack && !panic_active();
++}
++
+ static void
+ kebab_boot_graphics(void)
+ {
+--- a/bsd/dev/kebab_keys.c
++++ b/bsd/dev/kebab_keys.c
+@@ -33,6 +33,7 @@
+ #include <kern/clock.h>
+ #include <kern/locks.h>
+ #include <kern/thread.h>
++#include <os/atomic_private.h>
+ #include <libkern/libkern.h>
+ #include <miscfs/devfs/devfs.h>
+ #include <pexpert/pexpert.h>
+@@ -63,6 +64,22 @@
+ void kebab_keys_publish(void);
+ bool kebab_keys_node_selftest(void);
+ static void kk_thread(void *arg, wait_result_t result) __dead2;
++
++/* Read-only eligibility for retaining public boot branding. Validated key
++ * transitions are observed before HID delivery; no PMIC/HID behavior changes. */
++static uint32_t kk_boot_keys_ready, kk_boot_power_seen;
++int
++kebab_keys_boot_logo_idle_allowed(void)
++{
++    return os_atomic_load(&kk_boot_keys_ready, acquire) &&
++        !os_atomic_load(&kk_boot_power_seen, acquire);
++}
++static void
++kk_note_boot_power(const kebab_keys_event *event)
++{
++    if (event->key == KEBAB_KEYS_KEY_POWER && event->pressed)
++        os_atomic_store(&kk_boot_power_seen, 1u, release);
++}
+ 
+ /* ---------------------------------------------------------------- record */
+ 
+@@ -381,6 +398,7 @@
+ 			    "changed\n", kk.errors);
+ 		}
+ 		bzero(&sample, sizeof(sample));
++		os_atomic_store(&kk_boot_keys_ready, 0u, release);
+ 		sample.read_ok = 0;
+ 		(void)kebab_keys_feed(&kk.keys, &sample, kk_now_ns(), events);
+ 		return;
+@@ -421,6 +439,8 @@
+ 
+ 	now_ns = kk_now_ns();
+ 	count = kebab_keys_feed(&kk.keys, &sample, now_ns, events);
++    for (i = 0; i < count; i++) kk_note_boot_power(&events[i]);
++    os_atomic_store(&kk_boot_keys_ready, status == KEBAB_KEYS_SAMPLE_OK, release);
+ 	if (status == KEBAB_KEYS_SAMPLE_OK) {
+ 		struct kebab_hid_frame frame = {0};
+ 		frame.timestamp_ns = now_ns;
+@@ -614,6 +634,8 @@
+ 	 * Publish the node only after the thread exists: the other order would
+ 	 * leave a device that can be opened and then never receives a record.
+ 	 */
++    if (power) os_atomic_store(&kk_boot_power_seen, 1u, release);
++    os_atomic_store(&kk_boot_keys_ready, 1u, release);
+ 	kk.polling = true;
+ 	/* Preserve raw diagnostic policy, but do not advertise all HID keys
+ 	 * when their input configuration has not actually been confirmed. */

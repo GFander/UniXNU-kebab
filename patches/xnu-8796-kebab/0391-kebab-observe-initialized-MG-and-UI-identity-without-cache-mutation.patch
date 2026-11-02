@@ -1,0 +1,134 @@
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -374,33 +374,71 @@
+         !kebab_ca_u64(map, server + 0x60, &again) || again != display) return 10;
+     return 0;
+ }
+-/* Exact20H392 BSPlatform getters return these once-initialized globals.
+- * This observes their real state; it invokes no user code and writes none.
+- * Matching rereads are best effort, not process suspension or ABA proof. */
++/* Exact20H392 initialized storage returned by the original identity getters.
++ * No code invocation, writes, cache invalidation or filesystem access. */
++static bool
++kebab_identity_initialized_u32(vm_map_t map, uint64_t once_address,
++    uint64_t value_address, uint32_t *value)
++{
++    uint64_t once, again_once;
++    uint32_t again;
++    return kebab_ca_u64(map, once_address, &once) && once == UINT64_MAX &&
++        kebab_ca_u32(map, value_address, value) &&
++        kebab_ca_u64(map, once_address, &again_once) && again_once == once &&
++        kebab_ca_u32(map, value_address, &again) && again == *value;
++}
++
+ static void
+ kebab_identity_user_report(vm_map_t map)
+ {
+     static const uint8_t expected[16] = {0x8f,0x97,0x04,0x52,0xc9,0xe3,0x3e,0x88,0xb1,0x14,0xfe,0xb1,0x86,0x4b,0xc9,0xe0};
+     uint8_t uuid[16];
+-    uint64_t class_once, home_once, home, again_class_once, again_home_once, again_home;
+-    uint32_t device_class, again_class;
+-    if (!kebab_plugin_user_copy(map, 0x180000058ULL, uuid, sizeof(uuid)) || memcmp(uuid, expected, sizeof(uuid)) ||
+-        !kebab_ca_u64(map, 0x1e1d80040ULL, &class_once) ||
+-        !kebab_ca_u64(map, 0x1e1d80050ULL, &home_once) ||
+-        class_once != UINT64_MAX || home_once != UINT64_MAX ||
+-        !kebab_ca_u32(map, 0x1e1d7ffccULL, &device_class) ||
+-        !kebab_ca_u64(map, 0x1e1d80048ULL, &home) ||
+-        !kebab_ca_u64(map, 0x1e1d80040ULL, &again_class_once) ||
+-        !kebab_ca_u64(map, 0x1e1d80050ULL, &again_home_once) ||
+-        !kebab_ca_u32(map, 0x1e1d7ffccULL, &again_class) ||
+-        !kebab_ca_u64(map, 0x1e1d80048ULL, &again_home) ||
+-        class_once != again_class_once || home_once != again_home_once ||
+-        device_class != again_class || home != again_home || home > 2) {
+-        printf("KEBAB IDENTITY USER: BSPlatform unavailable/uninitialized/changed; no inferred answer\n");
++    if (!kebab_plugin_user_copy(map, 0x180000058ULL, uuid, sizeof(uuid)) ||
++        memcmp(uuid, expected, sizeof(uuid))) {
++        printf("KEBAB IDENTITY USER: cache UUID refused; no inferred answer\n");
+         return;
+     }
+-    printf("KEBAB IDENTITY USER: BSPlatform device-class=%d home-button-type=%llu; initialized original getter storage; read-only best effort\n",
+-        (int32_t)device_class, home);
++    uint32_t value;
++    if (kebab_identity_initialized_u32(map, 0x1e1d7c7d0ULL, 0x1e1d7c740ULL, &value)) {
++        const char *name = value == 1 || value == 11 ? "iPhone" : value == 2 ? "iPod" : value == 3 ? "iPad" : "other";
++        printf("KEBAB IDENTITY USER: MG initialized DeviceClassNumber=%u DeviceClass=%s; original handler return storage, not an injected API call\n", value, name);
++    } else printf("KEBAB IDENTITY USER: MG class handler uninitialized/unreadable/changed\n");
++    if (kebab_identity_initialized_u32(map, 0x1e1d80040ULL, 0x1e1d7ffccULL, &value))
++        printf("KEBAB IDENTITY USER: BSPlatform initialized device-class=%d\n", (int32_t)value);
++    else printf("KEBAB IDENTITY USER: BSPlatform device-class uninitialized/unreadable/changed\n");
++    uint64_t once, home, again_once, again_home;
++    if (kebab_ca_u64(map, 0x1e1d80050ULL, &once) && once == UINT64_MAX &&
++        kebab_ca_u64(map, 0x1e1d80048ULL, &home) && home <= 2 &&
++        kebab_ca_u64(map, 0x1e1d80050ULL, &again_once) && again_once == once &&
++        kebab_ca_u64(map, 0x1e1d80048ULL, &again_home) && again_home == home)
++        printf("KEBAB IDENTITY USER: BSPlatform initialized home-button-type=%llu; original getter return storage\n", home);
++    else printf("KEBAB IDENTITY USER: BSPlatform home-button-type uninitialized/unreadable/changed\n");
++    /* These two scalar cache cells are independently marked valid by the
++     * original MG cache loader. A handler answer alone does not prove an old
++     * serialized cache has the same answer. Report both without changing it. */
++    uint64_t cache_once, again_cache_once, cached, again_cached;
++    uint8_t valid, again_valid;
++    if (kebab_ca_u64(map, 0x1e1d7c910ULL, &cache_once) && cache_once == UINT64_MAX &&
++        kebab_plugin_user_copy(map, 0x1e1d7df55ULL, &valid, 1) && valid &&
++        kebab_ca_u64(map, 0x1e1d7cf50ULL, &cached) &&
++        kebab_ca_u64(map, 0x1e1d7c910ULL, &again_cache_once) && again_cache_once == cache_once &&
++        kebab_plugin_user_copy(map, 0x1e1d7df55ULL, &again_valid, 1) && again_valid == valid &&
++        kebab_ca_u64(map, 0x1e1d7cf50ULL, &again_cached) && again_cached == cached)
++        printf("KEBAB IDENTITY USER: MG valid cached DeviceClassNumber=%u; raw original scalar cell; best effort\n", (uint32_t)cached);
++    else printf("KEBAB IDENTITY USER: MG DeviceClassNumber cache unset/unreadable/changed; no inferred cached answer\n");
++}
++
++void kebab_identity_task_report(task_t task);
++void
++kebab_identity_task_report(task_t task)
++{
++    if (task == TASK_NULL || task == kernel_task || ml_at_interrupt_context() ||
++        get_preemption_level() != 0 || !ml_get_interrupts_enabled()) return;
++    vm_map_t map = get_task_map_reference(task);
++    if (map != VM_MAP_NULL) {
++        if (vm_map_pmap(map) != pmap_kernel()) kebab_identity_user_report(map);
++        vm_map_deallocate(map);
++    }
+ }
+ 
+ void kebab_ca_task_report(task_t task);
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -124,6 +124,7 @@
+  * names, PIDs and maps are not accepted from the USB command. The iterator
+  * holds the process; retain its task there and print outside its locks. */
+ extern void kebab_springboard_task_report(task_t);
++extern void kebab_identity_task_report(task_t);
+ extern void kebab_preboard_task_report(task_t);
+ void kebab_ui_report(void);
+ struct kebab_ui_snapshot {
+@@ -166,8 +167,12 @@
+             else kebab_preboard_task_report(snapshot.task);
+             if (i == 0) {
+                 static const uint8_t original_uuid[16] = {0xe1,0xa4,0xfe,0x7d,0x29,0xff,0x32,0x69,0xb3,0xab,0x50,0xae,0xd4,0x0c,0x44,0x95};
+-                if (snapshot.uid == 501 && !memcmp(snapshot.uuid, original_uuid, sizeof(snapshot.uuid))) kebab_shell_ack_task_report(snapshot.task);
++                if (snapshot.uid == 501 && !memcmp(snapshot.uuid, original_uuid, sizeof(snapshot.uuid))) { kebab_shell_ack_task_report(snapshot.task); kebab_identity_task_report(snapshot.task); }
+                 else printf("KEBAB SHELL: original executable UUID/UID mismatch; no user-state read\n");
++            } else {
++                static const uint8_t original_preboard_uuid[16] = {0x89,0xbe,0xf9,0xfa,0xa7,0xa4,0x3d,0x03,0x8b,0xe7,0x81,0x58,0xeb,0x9c,0x8a,0x1b};
++                if (snapshot.uid == 501 && !memcmp(snapshot.uuid, original_preboard_uuid, sizeof(original_preboard_uuid))) kebab_identity_task_report(snapshot.task);
++                else printf("KEBAB IDENTITY USER: original PreBoard UUID/UID refused\n");
+             }
+             task_deallocate(snapshot.task);
+         }
+--- a/bsd/kern/kern_mib.c
++++ b/bsd/kern/kern_mib.c
+@@ -286,10 +286,11 @@
+ static int
+ kebab_identity_out(struct sysctl_req *req, int selector, const char *value)
+ {
+-    static unsigned observed;
++    static unsigned observed[3];
++    unsigned slot = selector == HW_MACHINE ? 0 : selector == HW_PRODUCT ? 1 : 2;
+     int error = SYSCTL_OUT(req, value, strlen(value) + 1);
+     if (!error && req->oldptr && req->p != PROC_NULL && proc_pid(req->p) > 0 &&
+-        os_atomic_inc_orig(&observed, relaxed) < 64) {
++        os_atomic_inc_orig(&observed[slot], relaxed) < 8) {
+         printf("KEBAB IDENTITY USER: pid=%d selector=%d value=%s result=0; original sysctl copyout completed\n",
+             proc_pid(req->p), selector, value);
+     }

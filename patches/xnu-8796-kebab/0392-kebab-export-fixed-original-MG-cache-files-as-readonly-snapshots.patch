@@ -1,0 +1,153 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -14,6 +14,9 @@
+ #include <kern/debug.h>
+ #include <sys/fcntl.h>
+ #include <sys/uio.h>
++#include <sys/mount.h>
++#include <sys/kauth.h>
++#include <kern/kalloc.h>
+ 
+ extern void kebab_pid1_task_report(task_t task);
+ void kebab_process_report(void);
+@@ -38,6 +41,86 @@
+ 	 * Bound each burst below the 16 KiB nonblocking log ring. */
+ 	if ((observed & 31) == 0) kebab_usb_log_flush();
+ 	return observed >= 512 ? PROC_RETURNED_DONE : PROC_RETURNED;
++}
++
++/* Fixed MobileGestalt cache audit only. No path supplied by USB, writes,
++ * permission changes or cache invalidation. Called from the unlocked normal
++ * USB worker; panic and unsafe execution contexts are rejected. */
++extern boolean_t ml_at_interrupt_context(void);
++extern boolean_t ml_get_interrupts_enabled(void);
++extern int get_preemption_level(void);
++#define KEBAB_MG_CACHE_LIMIT (1024u * 1024u)
++static const char * const kebab_mg_cache_paths[] = {
++    "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist",
++    "/private/var/mobile/Library/Preferences/com.apple.MobileGestalt.plist",
++    "/private/var/mobile/Library/Preferences/com.apple.mobilegestalt.plist",
++    "/System/Library/Caches/com.apple.MobileGestalt.plist"
++};
++
++int kebab_identity_cache_snapshot(unsigned, void **, uint32_t *);
++void kebab_identity_cache_release(void *, uint32_t);
++void
++kebab_identity_cache_release(void *data, uint32_t size)
++{
++    if (data && size && size <= KEBAB_MG_CACHE_LIMIT) kfree_data(data, size);
++}
++
++int
++kebab_identity_cache_snapshot(unsigned index, void **output, uint32_t *size)
++{
++    if (!output || !size) return EINVAL;
++    *output = NULL; *size = 0;
++    if (index >= sizeof(kebab_mg_cache_paths) / sizeof(kebab_mg_cache_paths[0])) return EINVAL;
++    if (panic_active() || ml_at_interrupt_context() || get_preemption_level() != 0 ||
++        !ml_get_interrupts_enabled()) return EBUSY;
++    vfs_context_t context = vfs_context_current();
++    vnode_t vnode = NULLVP;
++    int error = vnode_lookup(kebab_mg_cache_paths[index], VNODE_LOOKUP_NOFOLLOW, &vnode, context);
++    if (error) return error;
++    struct vnode_attr before, after;
++    VATTR_INIT(&before); VATTR_WANTED(&before, va_data_size); VATTR_WANTED(&before, va_fileid);
++    VATTR_WANTED(&before, va_modify_time); VATTR_WANTED(&before, va_change_time);
++    VATTR_WANTED(&before, va_uid); VATTR_WANTED(&before, va_gid); VATTR_WANTED(&before, va_mode);
++    error = vnode_isreg(vnode) ? vnode_authorize(vnode, NULL, KAUTH_VNODE_READ_DATA, context) : EINVAL;
++    if (!error) error = vnode_getattr(vnode, &before, context);
++    if (!error && (!VATTR_IS_SUPPORTED(&before, va_data_size) || !VATTR_IS_SUPPORTED(&before, va_fileid) ||
++        !VATTR_IS_SUPPORTED(&before, va_modify_time) || !VATTR_IS_SUPPORTED(&before, va_change_time) ||
++        !before.va_data_size || before.va_data_size > KEBAB_MG_CACHE_LIMIT)) error = EINVAL;
++    struct vfsstatfs *stats = vfs_statfs(vnode_mount(vnode));
++    if (!error && (!stats || strcmp(stats->f_fstypename, "apfs"))) error = EINVAL;
++    char path[MAXPATHLEN] = {}, mount_path[MAXPATHLEN] = {};
++    int path_size = sizeof(path);
++    if (!error) error = vn_getpath(vnode, path, &path_size);
++    if (!error) strlcpy(mount_path, stats->f_mntonname, sizeof(mount_path));
++    uint32_t length = error ? 0 : (uint32_t)before.va_data_size;
++    void *data = NULL, *check = NULL;
++    if (!error) {
++        data = kalloc_data(length, Z_WAITOK); check = kalloc_data(length, Z_WAITOK);
++        if (!data || !check) error = ENOMEM;
++    }
++    if (!error) {
++        int residual = 0;
++        error = vn_rdwr(UIO_READ, vnode, data, length, 0, UIO_SYSSPACE, 0,
++            vfs_context_ucred(context), &residual, NULL);
++        if (!error && residual) error = EIO;
++        if (!error) {
++            error = vn_rdwr(UIO_READ, vnode, check, length, 0, UIO_SYSSPACE, 0,
++                vfs_context_ucred(context), &residual, NULL);
++            if (!error && (residual || memcmp(data, check, length))) error = EAGAIN;
++        }
++    }
++    after = before;
++    if (!error) error = vnode_getattr(vnode, &after, context);
++    if (!error && (before.va_fileid != after.va_fileid || before.va_data_size != after.va_data_size ||
++        before.va_modify_time.tv_sec != after.va_modify_time.tv_sec || before.va_modify_time.tv_nsec != after.va_modify_time.tv_nsec ||
++        before.va_change_time.tv_sec != after.va_change_time.tv_sec || before.va_change_time.tv_nsec != after.va_change_time.tv_nsec)) error = EAGAIN;
++    vnode_put(vnode);
++    kebab_identity_cache_release(check, length);
++    if (error) { kebab_identity_cache_release(data, length); return error; }
++    *output = data; *size = length;
++    printf("KEBAB MG CACHE: index=%u bytes=%u fileid=%llu uid=%u gid=%u mode=0%o mount=%s canonical=%s; authorized read-only two-equal-read snapshot, no atomicity claim\n",
++        index, length, before.va_fileid, before.va_uid, before.va_gid, before.va_mode, mount_path, path);
++    return 0;
+ }
+ 
+ void
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -781,9 +781,18 @@
+ 
+ /* Read-only diagnostic provider. The session owns a private immutable copy,
+  * never the display's writable address or a producer's live mapping. */
++extern "C" int kebab_identity_cache_snapshot(unsigned, void **, uint32_t *);
++extern "C" void kebab_identity_cache_release(void *, uint32_t);
+ extern "C" int
+ kebab_capture_open(uint32_t source,uint32_t argument,struct kc_image *image)
+ {
++    if(source==6) {
++        void *data=NULL;uint32_t bytes=0;
++        int error=kebab_identity_cache_snapshot(argument,&data,&bytes);
++        if(error)return error;
++        *image=kc_image{};image->handle=data;image->source=6;image->argument=argument;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
+     if(source==5) {
+         if(argument)return 22;
+         uint32_t bytes=80*13;uint8_t *data=(uint8_t *)IOMalloc(bytes);
+@@ -836,7 +845,8 @@
+ extern "C" void
+ kebab_capture_close(struct kc_image *image)
+ {
+-    if(image->handle && image->total && image->total<=KC_LIMIT)IOFree(image->handle,image->total);
++    if(image->source==6)kebab_identity_cache_release(image->handle,image->total);
++    else if(image->handle && image->total && image->total<=KC_LIMIT)IOFree(image->handle,image->total);
+     memset(image,0,sizeof(*image));
+ }
+ extern "C" int
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>5)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>6)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- a/osfmk/kern/kebab_capture.h
++++ b/osfmk/kern/kebab_capture.h
+@@ -18,7 +18,8 @@
+ #define KC_CLOSE 4u
+ #define KC_REPORT 5u
+ /* Sources: 1 deterministic bytes, 2 GOP, 3 IOSurface id, 4 displayed layer,
+- * 5 private known BGRA image. No capture operation writes the panel. */
++ * 5 private known BGRA image, 6 fixed original MG cache files (raw bytes).
++ * No capture operation writes the panel or filesystem. */
+ struct kc_image {
+     void *handle;
+     uint32_t source, argument, width, height, stride, format, total;

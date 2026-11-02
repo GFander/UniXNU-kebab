@@ -1,0 +1,11 @@
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -301,7 +301,7 @@
+         !kebab_ca_u64(map, vtable + 0x1a0, &method) || method != 0x1882eaf3cULL) return 62;
+     if (!kebab_ca_u64(map, server + 0x60, &display) || !display) return 63;
+     if (!kebab_ca_u64(map, display, &vtable) ||
+-        !kebab_ca_u64(map, vtable + 0x1c8, &method) || method != 0x18853c4ccULL) return 64;
++        !kebab_ca_u64(map, vtable + 0x1c8, &method) || method != 0x18852d9c4ULL /* original update_surface wrapper */) return 64;
+     if (!kebab_ca_u32(map, server + 0xb8, &out->renderer_flags) ||
+         !kebab_ca_u64(map, server + 0xc0, &out->sw_context) ||
+         !kebab_ca_u64(map, server + 0xc8, &out->sw_renderer) ||

@@ -1,0 +1,25 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -70,7 +70,7 @@
+ extern "C" int kebab_display_start(IOService *provider);
+ 
+ extern "C" int kebab_console_muted;
+-int kebab_console_muted;      /* read by the console path */
++int kebab_console_muted = 1;  /* normal boot logs go to USB; panic still draws */
+ 
+ #if defined(KEBAB)
+ #include "KebabUserClientContract.h"
+@@ -1191,6 +1191,13 @@
+ extern "C" int
+ kebab_display_start(IOService *provider)
+ {
++    /* Explicit development override; the normal graphical boot keeps the
++     * screen free of text from kernel entry, while the USB tee is unchanged. */
++    int quiet = 1;
++    if (PE_parse_boot_argn("kebabfb_noconsole", &quiet, sizeof(quiet)) && !quiet) {
++        kebab_console_muted = 0;
++    }
++
+ 	AppleCLCD *fb = new AppleCLCD;
+ 
+ 	if (fb == NULL) {

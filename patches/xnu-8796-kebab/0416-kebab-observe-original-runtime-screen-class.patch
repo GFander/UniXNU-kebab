@@ -1,0 +1,35 @@
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -395,6 +395,8 @@
+ struct kebab_ui_screen_observation {
+     uint64_t bounds[4], reference[4], scale, idiom, pixels[2], exclusion[4], shape_class;
+     uint32_t provider_kind, configuration_kind, shape_kind, fallback, selection_kind;
++    uint64_t cache_address, observed_isa;
++    uint32_t cache_readable, isa_readable;
+ };
+ static int
+ kebab_ui_screen_observe(vm_map_t map, struct kebab_ui_screen_observation *out)
+@@ -405,10 +407,12 @@
+         !kebab_ca_u64(map, 0x19b91ea28ULL, &code) || code != 0xd65f03c06d458400ULL) return 1;
+     uint64_t screen = 0, direct = 0, direct_isa;
+     if (!kebab_ca_u64(map, 0x1e1db7ce0ULL, &direct)) return 2;
++    out->cache_address = direct; out->cache_readable = 1;
+     if (direct) {
+         /* +[UIScreen mainScreen] returns this cache before its array path. */
+-        if (!kebab_ca_u64(map, direct, &direct_isa) ||
+-            !kebab_shell_isa(direct_isa, 0x1e1db2448ULL)) return 3;
++        if (!kebab_ca_u64(map, direct, &direct_isa)) return 3;
++        out->observed_isa = direct_isa; out->isa_readable = 1;
++        if (!kebab_shell_isa(direct_isa, 0x1e1db2448ULL)) return 3;
+         screen = direct; out->selection_kind = 1;
+     } else {
+         if (!kebab_ca_u64(map, 0x1e1db7d58ULL, &once) || once != UINT64_MAX ||
+@@ -470,6 +474,8 @@
+     int error = kebab_ui_screen_observe(map, &state);
+     printf("KEBAB UI SCREEN: result=%d configuration-kind=%u provider-kind=%u shape-kind=%u fallback=%u screen-selection=%u; pinned original fields, readonly best effort, no injected getter\n",
+         error, state.configuration_kind, state.provider_kind, state.shape_kind, state.fallback, state.selection_kind);
++    printf("KEBAB UI SCREEN CACHE: readable=%u object=0x%llx isa-readable=%u isa=0x%llx masked-class=0x%llx expected-class=0x1e1db2448; readonly diagnostic, unsupported objects still refused\n",
++        state.cache_readable, state.cache_address, state.isa_readable, state.observed_isa, state.observed_isa & 0xffffffff8ULL);
+     uint64_t type_once, type_again_once, type, again_type;
+     if (kebab_ca_u64(map, 0x1e23913c8ULL, &type_once) && type_once == UINT64_MAX &&
+         kebab_ca_u64(map, 0x1e23913d0ULL, &type) && type < 1024 &&

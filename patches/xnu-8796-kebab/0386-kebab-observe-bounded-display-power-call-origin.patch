@@ -1,0 +1,54 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -90,6 +90,10 @@
+ #include <console/video_console.h>
+ #include <kern/kern_types.h>
+ #include <sys/proc.h>
++extern "C" {
++#include <arm/thread.h>
++#include <sys/systm.h>
++}
+ 
+ enum {
+ 	kKebabFBGetLayerDefaultSurface  = 3,
+@@ -929,6 +933,32 @@
+ 	}
+ }
+ 
++/* Read only the current caller's bounded frame chain, before changing display
++ * state. This records the real origin of startup blanking, not another power
++ * policy or synthetic completion. No user stack data other than PCs is logged. */
++static void
++kebab_fb_power_origin(uint64_t requested, uintptr_t client)
++{
++    static volatile SInt32 trace_count;
++    if (OSIncrementAtomic(&trace_count) >= 32) return;
++    char name[32] = {};
++    proc_selfname(name, sizeof(name));
++    arm_saved_state_t *state = find_user_regs(current_thread());
++    if (state == NULL || !is_saved_state64(state)) return;
++    uint64_t fp = get_saved_state_fp(state), sp = get_saved_state_sp(state);
++    IOLog("KEBAB FB POWER: request=%llu pid=%d name=%s client=0x%llx pc=0x%llx lr=0x%llx\n",
++        requested, proc_selfpid(), name, (uint64_t)client,
++        (uint64_t)get_saved_state_pc(state), (uint64_t)get_saved_state_lr(state));
++    for (unsigned i = 0; i < 12; i++) {
++        uint64_t pair[2];
++        if ((fp & 15) || fp < sp || fp - sp > 1024 * 1024 ||
++            fp >= (1ULL << 39) - sizeof(pair) || copyin(fp, pair, sizeof(pair))) break;
++        IOLog("KEBAB FB POWER FRAME: depth=%u lr=0x%llx\n", i, pair[1]);
++        if (pair[0] <= fp) break;
++        fp = pair[0];
++    }
++}
++
+ IOReturn
+ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
+     __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target,
+@@ -1044,6 +1074,7 @@
+ 			break;
+ 		}
+ 		{
++			kebab_fb_power_origin(args->scalarInput[0], (uintptr_t)this);
+ 			bool off = args->scalarInput[0] == 0;
+ 			IOLockLock(fFB->fLock);
+ 			if (off != fFB->fPowerOff) {

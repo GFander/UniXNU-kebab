@@ -1,0 +1,89 @@
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1906,6 +1906,78 @@
+         (unsigned long long)mode[8], (unsigned)(mode[9] & 255));
+ }
+ 
++/* Read only pinned original20H392 CrashReporter annotations at an owning
++ * SpringBoard SIGABRT exit. Never invoke user code or change exit handling. */
++static void
++kebab_springboard_abort_evidence(proc_t p, int rv)
++{
++    static const struct {
++        const char *name;
++        uint64_t uuid_address, annotation_address;
++        unsigned char uuid[16];
++    } images[] = {
++        {"Foundation", 0x181173520ULL, 0x1dcd6a3a8ULL,
++         {0xdc,0xe5,0xe5,0x87,0x2a,0x0d,0x34,0xcf,0x82,0x45,0x23,0xe1,0xb1,0x29,0x36,0xa9}},
++        {"CoreFoundation", 0x186de9208ULL, 0x1dcdd68a8ULL,
++         {0x55,0xb9,0xba,0x28,0x4c,0x5c,0x3f,0xe7,0x9c,0x47,0x49,0x83,0x33,0x7d,0x6e,0x83}},
++        {"libcxxabi", 0x1d1acb740ULL, 0x1dee72e20ULL,
++         {0x18,0x16,0xeb,0xa1,0xe1,0x4e,0x39,0x3e,0x9a,0x1d,0x0a,0x0d,0x45,0xd8,0x46,0xe9}}
++    };
++    static uint32_t reported;
++    unsigned slot;
++    if (p != current_proc() || strcmp(p->p_comm, "SpringBoard") ||
++        WTERMSIG(rv) != SIGABRT) return;
++    slot = __atomic_load_n(&reported, __ATOMIC_RELAXED);
++    do {
++        if (slot >= 8) return;
++    } while (!__atomic_compare_exchange_n(&reported, &slot, slot + 1, false,
++        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
++    for (unsigned i = 0; i < sizeof(images) / sizeof(*images); i++) {
++        unsigned char uuid[16];
++        uint64_t first[8] = {}, after[8] = {};
++        int error = copyin(images[i].uuid_address, uuid, sizeof(uuid));
++        if (error || memcmp(uuid, images[i].uuid, sizeof(uuid))) {
++            printf("KEBAB SB ABORT: pid=%d event=%u image=%s uuid-read=%d match=0; no annotation payload read\n",
++                proc_getpid(p), slot + 1, images[i].name, error);
++            continue;
++        }
++        error = copyin(images[i].annotation_address, first, sizeof(first));
++        if (error || first[0] != 5) {
++            printf("KEBAB SB ABORT: pid=%d event=%u image=%s annotation-read=%d supported=0\n",
++                proc_getpid(p), slot + 1, images[i].name, error);
++            continue;
++        }
++        for (unsigned field = 0; field < 2; field++) {
++            uint64_t address = first[field ? 4 : 1];
++            char message[384] = {}, check[384] = {};
++            size_t length = 0, check_length = 0;
++            if (!address) continue;
++            if (address < 0x10000ULL || address > 0x7fffffffffULL - sizeof(message)) {
++                printf("KEBAB SB ABORT: pid=%d image=%s field=%u invalid-user-pointer; no string read\n",
++                    proc_getpid(p), images[i].name, field);
++                continue;
++            }
++            error = copyinstr(address, message, sizeof(message), &length);
++            int check_error = copyinstr(address, check, sizeof(check), &check_length);
++            int annotation_error = copyin(images[i].annotation_address, after, sizeof(after));
++            if (error || check_error || annotation_error || !length ||
++                length > sizeof(message) || length != check_length ||
++                memcmp(message, check, length) || memcmp(first, after, sizeof(first))) {
++                printf("KEBAB SB ABORT: pid=%d image=%s field=%u string-read=%d/%d annotation-read=%d stable=0; no message claimed\n",
++                    proc_getpid(p), images[i].name, field, error, check_error, annotation_error);
++                continue;
++            }
++            for (size_t j = 0; j + 1 < length; j++)
++                if ((unsigned char)message[j] < 32 || (unsigned char)message[j] > 126) message[j] = '?';
++            for (size_t offset = 0; offset + 1 < length; offset += 120)
++                printf("KEBAB SB ABORT MESSAGE: pid=%d event=%u image=%s field=%u offset=%lu text=%.120s\n",
++                    proc_getpid(p), slot + 1, images[i].name, field,
++                    (unsigned long)offset, message + offset);
++        }
++    }
++}
++/* End of bounded original CrashReporter annotation observer. */
++
+ /* First real exit per selected daemon, including ordinary status0/1 exits.
+  * Ordinary signals, exit reasons, critical policy and crash handling remain. */
+ static void
+@@ -1947,6 +2019,7 @@
+ #if defined(KEBAB)
+  kebab_fbs_mode_failure_evidence(p,rv);
+  kebab_fairplay_exit_evidence(p,rv);
++ kebab_springboard_abort_evidence(p,rv);
+  kebab_runtime_exit_evidence(p,rv,ut);
+ #endif
+ 

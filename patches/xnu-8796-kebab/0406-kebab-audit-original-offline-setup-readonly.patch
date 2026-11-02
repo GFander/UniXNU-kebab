@@ -1,0 +1,250 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -62,7 +62,13 @@
+     "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist.hios-before-iphone-x-20261102",
+     "/private/var/mobile/Library/Preferences/com.apple.backboardd.plist",
+     "/private/var/mobile/Library/Preferences/com.apple.backboardd.plist.hios-before-sdr8-20261102",
+-    "/private/var/mobile/Library/Preferences/com.apple.backboardd.plist.hios-sdr8-stage-20261102"
++    "/private/var/mobile/Library/Preferences/com.apple.backboardd.plist.hios-sdr8-stage-20261102",
++    "/private/var/mobile/Library/Preferences/com.apple.purplebuddy.plist",
++    "/private/var/mobile/Library/Preferences/com.apple.purplebuddy.notbackedup.plist",
++    "/private/var/mobile/Library/Preferences/com.apple.managedconfiguration.notbackedup.plist",
++    "/private/var/mobile/Library/Preferences/com.apple.springboard.plist",
++    "/private/var/mobile/Library/Preferences/com.apple.migration.plist",
++    "/private/var/root/Library/Lockdown/data_ark.plist"
+ };
+ 
+ int kebab_identity_cache_snapshot(unsigned, void **, uint32_t *);
+@@ -71,6 +77,33 @@
+ kebab_identity_cache_release(void *data, uint32_t size)
+ {
+     if (data && size && size <= KEBAB_MG_CACHE_LIMIT) kfree_data(data, size);
++}
++
++/* Bounded metadata audit for fixed offline-setup preference paths only.
++ * vn_listxattr uses original MACF/READ_EXTATTRIBUTES checks (options0).
++ * Nonempty ACL/xattrs are reported, never discarded or silently rewritten. */
++static void
++kebab_offline_preference_metadata(vnode_t file, unsigned index, vfs_context_t context)
++{
++    struct vnode_attr attr = {};
++    VATTR_INIT(&attr);
++    VATTR_WANTED(&attr, va_uid); VATTR_WANTED(&attr, va_gid); VATTR_WANTED(&attr, va_mode);
++    VATTR_WANTED(&attr, va_flags); VATTR_WANTED(&attr, va_dataprotect_class);
++    VATTR_WANTED(&attr, va_fileid); VATTR_WANTED(&attr, va_data_size); VATTR_WANTED(&attr, va_acl);
++    VATTR_WANTED(&attr, va_create_time); VATTR_WANTED(&attr, va_access_time);
++    VATTR_WANTED(&attr, va_modify_time); VATTR_WANTED(&attr, va_change_time);
++    int error = vnode_getattr(file, &attr, context);
++    size_t xattrs = 0;
++    int xerror = error ? error : vn_listxattr(file, NULL, &xattrs, 0, context);
++    printf("KEBAB OFFLINE PREF: index=%u error=%d supported=0x%llx fileid=%llu bytes=%llu uid=%u gid=%u mode=0%o flags=0x%x class=%u acl-present=%u acl-entries=%u xattr-error=%d xattr-name-bytes=%lu create=%lld.%09ld access=%lld.%09ld modify=%lld.%09ld change=%lld.%09ld; readonly metadata, no write\n",
++        index,error,(unsigned long long)attr.va_supported,attr.va_fileid,attr.va_data_size,
++        attr.va_uid,attr.va_gid,attr.va_mode,attr.va_flags,attr.va_dataprotect_class,
++        attr.va_acl != NULL,attr.va_acl ? attr.va_acl->acl_entrycount : 0,xerror,(unsigned long)xattrs,
++        (long long)attr.va_create_time.tv_sec,attr.va_create_time.tv_nsec,
++        (long long)attr.va_access_time.tv_sec,attr.va_access_time.tv_nsec,
++        (long long)attr.va_modify_time.tv_sec,attr.va_modify_time.tv_nsec,
++        (long long)attr.va_change_time.tv_sec,attr.va_change_time.tv_nsec);
++    if (attr.va_acl) kauth_acl_free(attr.va_acl);
+ }
+ 
+ int
+@@ -100,6 +133,8 @@
+     int path_size = sizeof(path);
+     if (!error) error = vn_getpath(vnode, path, &path_size);
+     if (!error) strlcpy(mount_path, stats->f_mntonname, sizeof(mount_path));
++    if (!error && index >= 8 && strcmp(path, kebab_mg_cache_paths[index])) error = EINVAL;
++    if (!error && index >= 8) kebab_offline_preference_metadata(vnode, index, context);
+     uint32_t length = error ? 0 : (uint32_t)before.va_data_size;
+     void *data = NULL, *check = NULL;
+     if (!error) {
+@@ -373,9 +408,11 @@
+ kebab_backboard_select(proc_t process, void *argument)
+ {
+     struct kebab_backboard_snapshot *snapshot = argument;
+-    char name[MAXCOMLEN + 1] = {};
++    char name[sizeof(proc_name_t)] = {};
+     ++snapshot->scanned;
+-    proc_name(proc_pid(process), name, sizeof(name));
++    proc_lock(process);
++    strlcpy(name, proc_best_name(process), sizeof(name));
++    proc_unlock(process);
+     if (!strcmp(name, "backboardd") && proc_ppid(process) == 1) {
+         snapshot->found = true;snapshot->pid = proc_pid(process);snapshot->uid = proc_getuid(process);
+         proc_getexecutableuuid(process, snapshot->uuid, sizeof(snapshot->uuid));
+@@ -406,12 +443,13 @@
+     printf("KEBAB BBOARD: observer end; no suspension or modification; user frames are best-effort reads\n");
+ }
+ 
+-/* Only these two fixed launchd children are selected. Report actual UID;
++/* Only these fixed original launchd children are selected. Report actual UID;
+  * names, PIDs and maps are not accepted from the USB command. The iterator
+  * holds the process; retain its task there and print outside its locks. */
+ extern void kebab_springboard_task_report(task_t);
+ extern void kebab_identity_task_report(task_t);
+ extern void kebab_preboard_task_report(task_t);
++extern void kebab_offline_task_report(task_t, unsigned);
+ void kebab_ui_report(void);
+ struct kebab_ui_snapshot {
+     const char *name; task_t task; unsigned scanned; int pid; unsigned uid; bool found; uint8_t uuid[16];
+@@ -438,9 +476,9 @@
+ {
+     if (ml_at_interrupt_context() || get_preemption_level() != 0 ||
+         !ml_get_interrupts_enabled()) return;
+-    static const char *const names[] = {"SpringBoard", "PreBoard"};
+-    static const char *const labels[] = {"UI-SB", "UI-PB"};
+-    for (unsigned i = 0; i < 2; i++) {
++    static const char *const names[] = {"SpringBoard", "PreBoard", "Setup", "mobileactivationd", "lockdownd"};
++    static const char *const labels[] = {"UI-SB", "UI-PB", "OFFLINE-SETUP", "OFFLINE-ACT", "OFFLINE-LOCKDOWN"};
++    for (unsigned i = 0; i < 5; i++) {
+         struct kebab_ui_snapshot snapshot = {};snapshot.name = names[i];
+         proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS, kebab_ui_select, &snapshot, NULL, NULL);
+         if (snapshot.task == TASK_NULL) {
+@@ -449,6 +487,20 @@
+         } else {
+             printf("KEBAB %s: fixed process pid=%d uid=%u scanned=%u; best-effort wait snapshot\n",
+                 labels[i], snapshot.pid, snapshot.uid, snapshot.scanned);
++            if (i >= 2) {
++                static const uint8_t uuids[3][16] = {
++                    {0x9b,0x4d,0x9b,0x5a,0x97,0xc8,0x38,0xd0,0xa6,0x92,0xdc,0x68,0x6f,0xa7,0xbb,0x4b},
++                    {0x00,0x0b,0x12,0x1a,0xe2,0xfe,0x3d,0xa2,0xa4,0x42,0x11,0x64,0xc1,0x81,0xd4,0xec},
++                    {0x7d,0x41,0x06,0x82,0x74,0x7b,0x32,0x6c,0x8e,0xbc,0xe8,0x66,0xe8,0xa9,0xb7,0x4e}
++                };
++                if ((snapshot.uid == 0 || snapshot.uid == 501) &&
++                    !memcmp(snapshot.uuid, uuids[i-2], sizeof(snapshot.uuid)))
++                    kebab_offline_task_report(snapshot.task, i-2);
++                else printf("KEBAB OFFLINE: original executable UUID/UID refused, no user-state read\n");
++                task_deallocate(snapshot.task);
++                kebab_usb_log_flush();
++                continue;
++            }
+             if (i == 0) kebab_springboard_task_report(snapshot.task);
+             else kebab_preboard_task_report(snapshot.task);
+             if (i == 0) {
+@@ -632,6 +684,50 @@
+     if (__atomic_load_n(counter, __ATOMIC_RELAXED) >= cap) return false;
+     return __atomic_fetch_add(counter, 1u, __ATOMIC_RELAXED) < cap;
+ }
++/* Read-only original20H392 setup/activation file-open evidence. Called after
++ * the original open releases its locks. The three exact executable UUIDs,
++ * normal process context, fixed path filters and per-role caps bound this
++ * observer. No activation credentials, file contents or user secrets read. */
++static uint32_t kebab_offline_open_reports[3];
++static void
++kebab_offline_open_result(vfs_context_t context, user_addr_t address, enum uio_seg segment,
++    int flags, int requested_class, int directory_fd, int error, int result_fd)
++{
++    proc_t process = vfs_context_proc(context);
++    if (segment != UIO_USERSPACE || panic_active() || ml_at_interrupt_context() ||
++        get_preemption_level() != 0 || !ml_get_interrupts_enabled() ||
++        process == PROC_NULL || process != current_proc()) return;
++    /* Cheap prefilter before taking a proc lock on the ordinary open path. */
++    if (strcmp(process->p_comm, "Setup") && strcmp(process->p_comm, "lockdownd") &&
++        strncmp(process->p_comm, "mobileactivation", 16)) return;
++    static const char *const names[] = {"Setup", "mobileactivationd", "lockdownd"};
++    static const uint8_t uuids[3][16] = {
++        {0x9b,0x4d,0x9b,0x5a,0x97,0xc8,0x38,0xd0,0xa6,0x92,0xdc,0x68,0x6f,0xa7,0xbb,0x4b},
++        {0x00,0x0b,0x12,0x1a,0xe2,0xfe,0x3d,0xa2,0xa4,0x42,0x11,0x64,0xc1,0x81,0xd4,0xec},
++        {0x7d,0x41,0x06,0x82,0x74,0x7b,0x32,0x6c,0x8e,0xbc,0xe8,0x66,0xe8,0xa9,0xb7,0x4e}
++    };
++    char name[sizeof(proc_name_t)] = {}; uint8_t uuid[16] = {};
++    proc_lock(process);
++    strlcpy(name, proc_best_name(process), sizeof(name));
++    proc_getexecutableuuid(process, uuid, sizeof(uuid));
++    proc_unlock(process);
++    unsigned role;
++    for (role = 0; role < 3; role++)
++        if (!strcmp(name, names[role]) && !memcmp(uuid, uuids[role], sizeof(uuid))) break;
++    if (role == 3 || __atomic_load_n(&kebab_offline_open_reports[role], __ATOMIC_RELAXED) >= 64) return;
++    char path[512] = {}; size_t copied = 0;
++    if (copyinstr(address, path, sizeof(path), &copied) || !copied || copied > sizeof(path)) return;
++    path[sizeof(path)-1] = 0;
++    if (!kebab_location_io_contains(path, "purplebuddy", 11) &&
++        !kebab_location_io_contains(path, "activation", 10) &&
++        !kebab_location_io_contains(path, "data_ark.plist", 14) &&
++        !kebab_location_io_contains(path, "/Lockdown/", 10) &&
++        !kebab_location_io_contains(path, "mobile_container_manager", 24)) return;
++    if (!kebab_location_io_claim(&kebab_offline_open_reports[role], 64)) return;
++    kebab_location_io_sanitize(path);
++    printf("KEBAB OFFLINE OPEN: role=%u pid=%d dirfd=%d flags=0x%x requested-class=%d error=%d fd=%d path=%s; passive metadata only\n",
++        role,proc_pid(process),directory_fd,flags,requested_class,error,error?-1:result_fd,path);
++}
+ void kebab_locationd_fd_result(proc_t, const char *, int, int, int, int);
+ void
+ kebab_locationd_fd_result(proc_t process, const char *operation, int fd, int command, int error, int result)
+@@ -679,6 +775,7 @@
+ kebab_locationd_open_result(vfs_context_t context, user_addr_t address, enum uio_seg segment,
+     int flags, int requested_class, int directory_fd, int error, int result_fd)
+ {
++    kebab_offline_open_result(context,address,segment,flags,requested_class,directory_fd,error,result_fd);
+     proc_t process = vfs_context_proc(context);
+     if (segment != UIO_USERSPACE || !kebab_location_io_selected(process) ||
+         __atomic_load_n(&kebab_location_open_reports, __ATOMIC_RELAXED) >= 64) return;
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -744,4 +744,65 @@
+ {
+     kebab_task_threads_report(task, "MIG-L", true, 16);
+ }
++/* Original20H392 DeviceType singleton decision audit. Only the caller's fixed
++ * original mobileactivationd task is eligible. These bounded copyinmap reads
++ * do not invoke an Objective-C method, change cached state, or report that
++ * activation succeeded. UUID, actual getter instruction, class, initialized
++ * dispatch_once and repeated object/header reads must all agree. */
++static void
++kebab_offline_device_type_report(task_t task)
++{
++    static const uint8_t expected[16] = {0x00,0x0b,0x12,0x1a,0xe2,0xfe,0x3d,0xa2,0xa4,0x42,0x11,0x64,0xc1,0x81,0xd4,0xec};
++    task_dyld_info_data_t info = {};
++    mach_msg_type_number_t size = TASK_DYLD_INFO_COUNT;
++    if (task_info(task,TASK_DYLD_INFO,(task_info_t)&info,&size) != KERN_SUCCESS ||
++        size != TASK_DYLD_INFO_COUNT || info.all_image_info_format != TASK_DYLD_ALL_IMAGE_INFO_64 ||
++        info.all_image_info_size < 16) return;
++    vm_map_t map = get_task_map_reference(task);
++    if (map == VM_MAP_NULL) return;
++    uint64_t head[2],again[2],base = 0;
++    if (!kebab_plugin_user_copy(map,info.all_image_info_addr,head,sizeof(head)) ||
++        (uint32_t)head[0] < 1 || (uint32_t)head[0] > 20 || !head[1]) goto unavailable;
++    unsigned count = (unsigned)(head[0] >> 32);
++    for (unsigned i = 0; i < count && i < 64; i++) {
++        uint64_t record[3],repeat[3]; uint8_t uuid[16];
++        uint64_t offset = (uint64_t)i * sizeof(record);
++        if (head[1] > UINT64_MAX-offset ||
++            !kebab_plugin_user_copy(map,head[1]+offset,record,sizeof(record))) break;
++        if (!kebab_plugin_image_uuid(map,record[0],uuid) || memcmp(uuid,expected,sizeof(uuid))) continue;
++        if (!kebab_plugin_user_copy(map,head[1]+offset,repeat,sizeof(repeat)) ||
++            memcmp(record,repeat,sizeof(record))) goto unavailable;
++        base = record[0];break;
++    }
++    if (!base || base > UINT64_MAX-0x2304c8) goto unavailable;
++    uint64_t code,once,object,isa,once2,object2; uint8_t flags[24],flags2[24];
++    if (!kebab_plugin_user_copy(map,base+0x170d4,&code,sizeof(code)) || code != 0xd65f03c039404800ULL ||
++        !kebab_ca_u64(map,base+0x2304c0,&once) || once != UINT64_MAX ||
++        !kebab_ca_u64(map,base+0x2304b8,&object) || (object & 7) || !object ||
++        !kebab_plugin_user_copy(map,object,flags,sizeof(flags))) goto unavailable;
++    memcpy(&isa,flags,sizeof(isa));
++    if (!kebab_shell_isa(isa,base+0x22f260)) goto unavailable;
++    for (unsigned i = 8; i < 22; i++) if (flags[i] > 1) goto unavailable;
++    if (!kebab_plugin_user_copy(map,object,flags2,sizeof(flags2)) || memcmp(flags,flags2,sizeof(flags)) ||
++        !kebab_ca_u64(map,base+0x2304c0,&once2) || once2 != once ||
++        !kebab_ca_u64(map,base+0x2304b8,&object2) || object2 != object ||
++        !kebab_plugin_user_copy(map,info.all_image_info_addr,again,sizeof(again)) ||
++        memcmp(head,again,sizeof(head))) goto unavailable;
++    printf("KEBAB OFFLINE ACT DECISION: original20H392 DeviceType initialized base=0x%llx should-hactivate=%u prodfused-demoted=%u devfused-undemoted=%u iphone=%u ipad=%u has-baseband=%u internal=%u; cached native decision only, NOT activation-state or server proof\n",
++        base,flags[0x12],flags[9],flags[10],flags[15],flags[14],flags[17],flags[19]);
++    vm_map_deallocate(map);return;
++unavailable:
++    printf("KEBAB OFFLINE ACT DECISION: unavailable/changing/uninitialized original state; no activation status inferred\n");
++    vm_map_deallocate(map);
++}
++void kebab_offline_task_report(task_t task,unsigned role);
++void
++kebab_offline_task_report(task_t task,unsigned role)
++{
++    static const char *const labels[] = {"OFFLINE-SETUP","OFFLINE-ACT","OFFLINE-LOCKDOWN"};
++    if (role >= 3) return;
++    kebab_task_threads_report(task,labels[role],true,8);
++    if (role == 1) kebab_offline_device_type_report(task);
++}
++
+ #endif /* KEBAB */

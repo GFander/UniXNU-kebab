@@ -1,0 +1,40 @@
+--- a/bsd/kern/sys_work_interval.c
++++ b/bsd/kern/sys_work_interval.c
+@@ -94,13 +94,30 @@
+ 			return error;
+ 		}
+ 
+-		error = priv_check_cred(kauth_cred_get(), PRIV_WORK_INTERVAL, 0);
+-#if defined(KEBAB)
+-		kebab_work_interval_create_evidence(p, "privilege", create_params.wicp_create_flags, error);
+-#endif
+-		if (error != 0) {
+-			return error;
+-		}
++#if defined(KEBAB)
++		/* Match fixed20H392 CREATE2 type policy (donor760e00c/e2ec).
++		 * CA_CLIENT needs no extra privilege, but still reaches the real
++		 * scheduler's app-type, group, uniqueness and object checks.
++		 * UNRESTRICTED is valid only with GROUP and DEFAULT/COREAUDIO/CA_CLIENT.
++		 * Every other request retains the original MACF privilege check. */
++		uint32_t type = create_params.wicp_create_flags & WORK_INTERVAL_TYPE_MASK;
++		if (create_params.wicp_create_flags & WORK_INTERVAL_FLAG_UNRESTRICTED) {
++			if (!(create_params.wicp_create_flags & WORK_INTERVAL_FLAG_GROUP) ||
++			    (type != WORK_INTERVAL_TYPE_DEFAULT && type != WORK_INTERVAL_TYPE_COREAUDIO &&
++			    type != WORK_INTERVAL_TYPE_CA_CLIENT)) return EINVAL;
++		} else if (type != WORK_INTERVAL_TYPE_CA_CLIENT)
++#endif
++		{
++			error = priv_check_cred(kauth_cred_get(), PRIV_WORK_INTERVAL, 0);
++#if defined(KEBAB)
++			kebab_work_interval_create_evidence(p, "privilege", create_params.wicp_create_flags, error);
++#endif
++			if (error != 0) return error;
++		}
++#if defined(KEBAB)
++		if (type == WORK_INTERVAL_TYPE_CA_CLIENT)
++			kebab_work_interval_create_evidence(p, "native-type-policy", create_params.wicp_create_flags, 0);
++#endif
+ 
+ 		create_args = (struct kern_work_interval_create_args) {
+ 			.wica_id            = create_params.wicp_id,

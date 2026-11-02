@@ -1,0 +1,43 @@
+{
+  "accepted": true,
+  "scope": "Full original keyboard canvas on physical panel; readonly passcode mismatch diagnosis; not authentication or unlocked desktop",
+  "version": "0526",
+  "native_sha256": "979140703a7f53838b66ccccdd2305c148dbb9f6db8f0481bfc0ebcad4b59af7",
+  "source": {
+    "common_patches": 383,
+    "host_patches": 4,
+    "files": 5287,
+    "all_source_equal": true
+  },
+  "baseline_watchdog_seconds": 304.462,
+  "original_keys_encrypted_Data_and_security_preserved": true,
+  "keyboard": {
+    "width": 1080,
+    "height": 2400,
+    "raw_sha256": "01524c197648d96d14e2906d7e296e4d6733239fd73d0ef5d975c4e7e0ec3236",
+    "wire_sha256": "34fafeafbe0d22f064fac32f390a2b4b3d0da878120c1f64857cf2deee22bcb9",
+    "independent_wire_CRC_contiguous_bytes_and_PNG_replay": true,
+    "log_drop_delta": 0,
+    "actual_visual_review": "Complete q/p/shift/backspace/bottom-side keys, empty alphanumeric passcode field, real QWERTY UI",
+    "physical_swipe_performed_by_owner": true
+  },
+  "passcode": {
+    "AKS_DeviceLocked": 0,
+    "AKS_FirstUnlock": 1,
+    "authenticated_factory_sls": 3,
+    "authenticated_factory_ss": 4,
+    "original_SBF_PasscodeSet": 1,
+    "original_SBF_FirstUnlock": 1,
+    "extended_selector": 35,
+    "extended_error": "0xe00002c1 kIOReturnNotPrivileged",
+    "authentication_or_keybag_response_changed": false,
+    "UI_type_observed": "alphanumeric QWERTY; private enum not read",
+    "per_call_selector35_pid_not_recorded": true
+  },
+  "remaining": [
+    "Implement and validate real readonly extended device-state ABI before any authentication changes",
+    "Original UIKit red status-bar fallback banner",
+    "Old523 SpringBoard180s watchdog timeout at2012s; root cause not proven",
+    "Actual passcode authentication, unlocked SpringBoard and long-run stability unqualified"
+  ]
+}
