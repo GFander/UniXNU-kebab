@@ -1,0 +1,19 @@
+{
+  "version": "0542",
+  "parent": "0541",
+  "changes": {
+    "bsd/dev/kebab_touch_tcm.c": {
+      "before": "3cfd0c2a9a6a67f207844efeb032ddeae99b4630726213b5ac15876d257984c0",
+      "after": "cf6c8313510ddf44a6204e95c0f71d7115436564093912216ef30efdaffb9411"
+    },
+    "bsd/dev/kebab_touch_tcm.h": {
+      "before": "83cfffde9c53bca4c17e445142197034aac1b897aff06392aa21e97dbc2cee21",
+      "after": "3fa4948ea3eb972be5b5516ce803877dded951905c170df97d0b5febb0ae79a8"
+    },
+    "bsd/dev/kebab_touch.c": {
+      "before": "5513a40534a592d314719c5dea00b890d63c46f6895b2939b2c9d30000fad9ba",
+      "after": "201b6d2552456c5fd35df2a56d3380069814db3bb6c248ae07beac55fbabc2b7"
+    }
+  },
+  "scope": "Full logical touch extent; physical panel coordinates, original HID descriptor/parser, display, security and Data unchanged"
+}

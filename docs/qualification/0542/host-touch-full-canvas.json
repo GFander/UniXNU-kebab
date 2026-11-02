@@ -1,0 +1,44 @@
+{
+  "passed": true,
+  "scope": "Host production transform and HID encoder; no hardware/UI gesture claim",
+  "source_sha256": {
+    "kebab_touch_tcm.c": "cf6c8313510ddf44a6204e95c0f71d7115436564093912216ef30efdaffb9411",
+    "kebab_touch_tcm.h": "3fa4948ea3eb972be5b5516ce803877dded951905c170df97d0b5febb0ae79a8",
+    "kebab_hid_bridge.h": "9c518169f4bc9d9092a18666c91f80aad5e4faf22abed93857ce33aec6cfd089",
+    "kebab_hid_queue.h": "2f6c6c34783a76d9906a231e050fd4901ba137bc8ab39137b3f42924482b0428",
+    "kebab_hid_reports.h": "93a08e720d228cdd652dcb97c3acac7be56eb3750da446dca8373f41adf93249"
+  },
+  "fixture_sha256": "ab6faeaa94fe04cdf77ed6a040968f639ff4711b57a2ae3c631740b85e2a717e",
+  "results": [
+    {
+      "name": "production",
+      "compiled": true,
+      "returncode": 0,
+      "expected_pass": true
+    },
+    {
+      "name": "old-centred-crop",
+      "compiled": true,
+      "returncode": -6,
+      "expected_pass": false
+    },
+    {
+      "name": "x-physical-only",
+      "compiled": true,
+      "returncode": -6,
+      "expected_pass": false
+    },
+    {
+      "name": "y-physical-only",
+      "compiled": true,
+      "returncode": -6,
+      "expected_pass": false
+    },
+    {
+      "name": "wrong-inclusive-maximum",
+      "compiled": true,
+      "returncode": -6,
+      "expected_pass": false
+    }
+  ]
+}

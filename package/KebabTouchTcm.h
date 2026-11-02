@@ -92,8 +92,6 @@
 #define KEBAB_TCM_PANEL_H          2400
 #define KEBAB_TCM_LOGICAL_W        1125
 #define KEBAB_TCM_LOGICAL_H        2436
-#define KEBAB_TCM_LOGICAL_ORIGIN_X 22   /* (1125 - 1080) / 2, truncated */
-#define KEBAB_TCM_LOGICAL_ORIGIN_Y 18   /* (2436 - 2400) / 2 */
 
 /* The two fallbacks the device tree fixes when the app info has no answer. */
 #define KEBAB_TCM_SENSOR_MAX_X     1079

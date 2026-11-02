@@ -2,7 +2,7 @@
 
 当前能力以[首页](../README.md)和[STATUS](STATUS.md)为准。阶段文档保留当时状态，必须结合日期、版本和原始收据阅读；不要把较早的“下一步”覆盖到后续验收。
 
-最新主线：[0464–0465 原版 keychain C/D](KEYCHAIN-CD-20261031.md)、[0463 密码学基础与 AKS 调用](CLASS-B-CRYPTO-20261031.md)、[0461–0462 数据库 I/O](LOCATION-DATABASE-IO-20261031.md)及[真实 B 类开发要求](CLASS-B-BACKEND-NEXT-20261031.md)。
+最新主线：[0544真实触点边缘来源](EDGE-GESTURES-0544.md)、[0543屏幕关联与人工失败](EDGE-GESTURES-0543.md)、[0542坐标盲区与人工失败](EDGE-GESTURES-0542.md)、[0541逻辑画布](LAYOUT-SCALING-0541.md)。
 
 ## 当前入口
 

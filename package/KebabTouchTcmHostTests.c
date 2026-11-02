@@ -140,7 +140,7 @@ main(void)
 
 	printf("C2 a message is header + payload + one 0x5a padding byte\n");
 	{
-		uint8_t msg[8];
+		uint8_t msg[15];
 		kebab_tcm_status st;
 
 		n = frame(msg, KEBAB_TCM_STATUS_OK, NULL, 0);
@@ -732,21 +732,21 @@ main(void)
 
 		p = kebab_tcm_transform(0, 0, 1079, 2399);
 		CHECK(p.panel_x == 0 && p.panel_y == 0, "raw 0,0 is panel 0,0");
-		CHECK(p.logical_x == 22 && p.logical_y == 18,
-		    "and logical 22,18, the presentation origin");
+		CHECK(p.logical_x == 0 && p.logical_y == 0,
+		    "and logical 0,0, the displayed canvas origin");
 		CHECK(!p.clamped, "nothing is clamped");
 
 		p = kebab_tcm_transform(1079, 2399, 1079, 2399);
 		CHECK(p.panel_x == 1079 && p.panel_y == 2399,
 		    "raw 1079,2399 is panel 1079,2399");
-		CHECK(p.logical_x == 1101 && p.logical_y == 2417,
-		    "and logical 1101,2417");
+		CHECK(p.logical_x == 1124 && p.logical_y == 2435,
+		    "and logical 1124,2435, the far displayed edges");
 		CHECK(!p.clamped, "nothing is clamped");
 
 		p = kebab_tcm_transform(540, 1200, 1079, 2399);
 		CHECK(p.panel_x == 540 && p.panel_y == 1200, "the middle stays put");
-		CHECK(p.logical_x == 562 && p.logical_y == 1218,
-		    "and is offset by 22,18 in logical space");
+		CHECK(p.logical_x == 563 && p.logical_y == 1218,
+		    "and maps into the full logical canvas");
 
 		p = kebab_tcm_transform(0x0fff, 0x0fff, 1079, 2399);
 		CHECK(p.panel_x == 1079 && p.panel_y == 2399,

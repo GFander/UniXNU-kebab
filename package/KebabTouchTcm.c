@@ -630,9 +630,14 @@ kebab_tcm_transform(uint32_t raw_x, uint32_t raw_y, uint32_t max_x,
 	    max_x / 2u) / max_x);
 	p.panel_y = (int32_t)(((uint64_t)raw_y * (KEBAB_TCM_PANEL_H - 1) +
 	    max_y / 2u) / max_y);
-	p.logical_x = p.panel_x + KEBAB_TCM_LOGICAL_ORIGIN_X;
-	p.logical_y = p.panel_y + KEBAB_TCM_LOGICAL_ORIGIN_Y;
-	/* Defensive only: with the origin above these cannot fire. */
+	/* HID logical maxima are inclusive. Map both sensor endpoints to the
+	 * complete displayed canvas; the old centred crop left all edges blind.
+	 * Scale directly from the sensor to avoid double rounding via panel. */
+	p.logical_x = (int32_t)(((uint64_t)raw_x * (KEBAB_TCM_LOGICAL_W - 1) +
+	    max_x / 2u) / max_x);
+	p.logical_y = (int32_t)(((uint64_t)raw_y * (KEBAB_TCM_LOGICAL_H - 1) +
+	    max_y / 2u) / max_y);
+	/* Defensive only: clamped sensor coordinates already satisfy these. */
 	if (p.logical_x >= KEBAB_TCM_LOGICAL_W) {
 		p.logical_x = KEBAB_TCM_LOGICAL_W - 1;
 		p.clamped = 1;

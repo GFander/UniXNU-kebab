@@ -1,0 +1,62 @@
+{
+  "passed": true,
+  "scope": "Actual native edge classifier and wrapper with explicit original IOKit/event substitutes; no hardware/GUI claim",
+  "source_sha256": "f57ee57282d5e2cf43801286be51e0f29bb684d704b304c574b4b79cb5a237e2",
+  "classifier_sha256": "c044dad0c2f603933f4e47a894512323af3be12c697e1a164225c83b656ee13f",
+  "results": [
+    {
+      "name": "production",
+      "compiled": true,
+      "expected_pass": true,
+      "returncode": 0
+    },
+    {
+      "name": "move-becomes-edge",
+      "compiled": true,
+      "expected_pass": false,
+      "returncode": -6
+    },
+    {
+      "name": "edge-state-after-lift",
+      "compiled": true,
+      "expected_pass": false,
+      "returncode": -6
+    },
+    {
+      "name": "overbroad-side-zone",
+      "compiled": true,
+      "expected_pass": false,
+      "returncode": -6
+    },
+    {
+      "name": "wrong-bottom-zone",
+      "compiled": true,
+      "expected_pass": false,
+      "returncode": -6
+    },
+    {
+      "name": "foreign-ID",
+      "compiled": true,
+      "expected_pass": false,
+      "returncode": -6
+    },
+    {
+      "name": "no-child-edge-bit",
+      "compiled": true,
+      "expected_pass": false,
+      "returncode": -6
+    },
+    {
+      "name": "drop-original-mask",
+      "compiled": true,
+      "expected_pass": false,
+      "returncode": -6
+    },
+    {
+      "name": "cancel-retains-origin",
+      "compiled": true,
+      "expected_pass": false,
+      "returncode": -6
+    }
+  ]
+}

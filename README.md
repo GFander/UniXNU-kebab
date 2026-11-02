@@ -2,7 +2,7 @@
 
 在 **一加 8T（kebab / Qualcomm SM8250）** 上移植 XNU，运行原版 **iOS 16.7.16（20H392）用户态**。项目采用 Mu-Silicium UEFI、DarwinBoot、自编译的 XNU 8796.141.3 和供体原版组件的 prelink 路线，参考 [UniXNU 移植指南](https://unixnu.com/zh/porting/) 与 [UniXNU-sheng](https://github.com/UniXNU/UniXNU-sheng)。
 
-**截至 2026-11-01：原版 iOS 用户态、硬件密钥后端、真实加密 Data、8 核和原版 HID 触摸已经有实机证据；尚未显示可用的 SpringBoard。** 当前主线开发分支为 [`ios16`](https://github.com/GFander/UniXNU-kebab/tree/ios16)。本页汇总立项以来的成果，历史阶段的“已完成”不代表整台手机的对应功能已完成。
+**截至2026-11-02（0544）：原版SpringBoard已显示，布局与滑动已获用户确认；0544补齐真实触点的边缘起始标记，用户确认返回、回桌面和多任务三项边缘手势均恢复；原Root/bank/systembag、已有密钥和加密Data/安全及原watchdog基础回归304.447秒通过。没有Apple官方激活或联网能力。** 主线分支为 [`ios16`](https://github.com/GFander/UniXNU-kebab/tree/ios16)。
 
 ## 当前基线
 
@@ -11,22 +11,22 @@
 | 实机 | OnePlus 8T，12 GB / 256 GB 机型；实际交给 XNU 的连续内存约 7.998 GiB |
 | CPU / 内核 | 8 核上线；ARM64、16 KiB 页、XNU 8796.141.3 / Darwin 22.6.0 |
 | 用户态来源 | iPhone X / D22AP，iOS 16.7.16，build 20H392；不是对 A11 硬件的完整模拟 |
-| 最近正常启动验收 | **0485**（原版 check-in 成功完成标志与首份帧的复制边界实测）；最新人工触摸验收 **0459** |
-| 源码核对 | 343 个共同补丁 + 4 个 Mac 主机补丁，5,281 个源码文件与实际构建输入一致 |
-| 当前阻塞 | A/B/C/D加密文件和旧keychain恢复已有有界实测；原版迁移成功结果已持久读回、check-in 成功完成标志已观察；完整密钥接口、登记生命周期与有效桌面帧尚未完成 |
-| 桌面 / 刷新率 | SpringBoard 已进入 UIKit 主循环且原版 check-in 完成标志置位，尚无可用桌面；面板目标 120 Hz，真实时序尚未验证 |
+| 最近启动 | **0544**：真实触点边缘来源；原Root/bank/systembag、已有密钥和加密Data/安全及原watchdog基础回归304.447秒通过；用户确认返回、回桌面和多任务三项边缘手势均恢复 |
+| 源码核对 | 399个共同补丁 + 4个Mac主机补丁，5,290个源码文件与原生0544构建输入一致 |
+| 交互状态与剩余边界 | 用户确认返回、回桌面和多任务三项边缘手势均恢复；长时稳定性、Wi-Fi、蜂窝、真实Apple激活、口令/SEP未实现或未验收 |
+| 桌面 / 刷新率 | 用户确认布局与滑动正常；用户确认返回、回桌面和多任务三项边缘手势均恢复；长时稳定性及真实120Hz未验证 |
 
-最新验收见[桌面登记完成状态与首帧边界](docs/SHELL-FIRST-FRAME-20261101.md)。0485 完整构建的原生内核 SHA-256：
+最新边缘起始修正见[0544修正与边界](docs/EDGE-GESTURES-0544.md)。最新触屏事件关联见[0543修正与边界](docs/EDGE-GESTURES-0543.md)。最新边缘触摸修正见[0542修正与边界](docs/EDGE-GESTURES-0542.md)。最新布局见[0541画布修正与边界](docs/LAYOUT-SCALING-0541.md)及[真实锁屏Surface](docs/qualification/0541/lockscreen.png)。历史离线阶段见[离线初始化与桌面现场](docs/OFFLINE-SETUP-0536.md)、[分项验收](docs/qualification/0536/offline-setup-qualified.json)及[实际桌面截图](docs/qualification/0536/springboard-desktop.png)。原版服务的本地开发状态与Apple官方激活分开记录，基础回归与GUI稳定性也分开记录。当前0544原生内核为19,124,224字节，SHA-256：
 
 ```text
-638a4491c6ebc77a9a0301782fe0f8c289f0f8cc53cd2b5009b4c47664095fae
+f7ccc57bd3be1bd76017b9d1712f58df561489e0815f8bce5ae71d17b7841ae2
 ```
 
 详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0485 封存实机记录](docs/qualification/0485/0485-shell-frame-qualified.json)。编译、源码回放、实机测试分别记录，互不替代。
 
 ## 已达成的功能
 
-“已验证”仅覆盖表内所写的行为。比如 HID 接收成功不等于桌面已消费触摸，内部 UART 收发成功不等于蓝牙可连接。
+“已验证”仅覆盖表内所写的行为。比如早期 HID 接收验收本身不等于 GUI 已消费触摸，内部 UART 收发成功不等于蓝牙可连接。
 
 ### 启动、内核与调试
 
@@ -74,20 +74,20 @@
 | GENI / S3908 触摸协议 | 实际触摸控制器识别、供电、GENI 传输、TCM 帧与报告配置；修复续读前缀和 FIFO 上限问题 | 不是 Android HAL 转发或合成事件；[触摸协议验收](docs/TOUCH-PROTOCOL-20261031.md) |
 | 原版 HID 音量键 | 实机音量上/下按下、松开，经自制报告生产者进入原版 IOHIDDevice/Interface/EventDriver | GUI 消费、其他键和完整按键策略尚未逐项验收；[0429/0430 验收](docs/HID-INPUT-AND-DATA-IDENTITY-20261031.md) |
 | 原版 HID 真实触摸 | 五点点击、横竖滑动、双指分离、依次抬起及 10 秒双指保持；新增 **2,030** 份报告被原版 HID 接收，队列丢失 **0** | 实测最多 2 指；描述符 10 指容量不等于 10 指实测。GUI 事件消费、像素对齐和采样率仍未验收；[人工实机证据](docs/TOUCH-PHYSICAL-20261031.md) |
-| 物理屏幕与原版显示枚举 | 固件 GOP/控制台可见；真实屏幕 DT 声明、framebuffer 打开与原版显示枚举接通 | 此处不代表已有桌面、CoreAnimation 呈现或 GPU；[显示枚举](docs/GOP-DISPLAY-ENUMERATION-20261031.md) |
+| 物理屏幕与原版显示枚举 | 固件 GOP/控制台可见；真实屏幕 DT 声明、framebuffer 打开与原版显示枚举接通 | 本行仅覆盖初始显示枚举；最新CPU桌面证据见0536，不代表原生GPU；[显示枚举](docs/GOP-DISPLAY-ENUMERATION-20261031.md) |
 | 显示 ABI / 布局修复 | 原版 selector29 显示区域合约修复，3x UI 缩放声明接入，原先主显示/零缩放断言在相应窗口消失 | 未证明完整模式切换与实际刷新；[显示区域](docs/DISPLAY-AREA-20261031.md)、[缩放修复](docs/DISPLAY-SCALE-20261031.md) |
 | 蓝牙开发前置资料 | 原固件只读提取、SE6 时钟/FIFO、真实内部 UART 9 组/1,225 字节收发、Command DB 供电资源及板型读取 | **蓝牙不可用**：未完成控制器供电、固件下载、HCI、扫描/连接/业务数据；按计划延期至可用 SpringBoard 之后；[完整归档](docs/BLUETOOTH-DEFERRED-20261031.md) |
 
 ## 尚未达成
 
-- **可见、可交互 SpringBoard**：进程执行和同 PID 存活不是桌面验收；系统迁移与 shell check-in 仍有等待。
-- **密钥与迁移后续依赖**：A/B/C/D与六类keychain已有有界证据；仍需补实际原版接口并解除迁移/桌面登记等待。见[最新证据与边界](docs/CLASS-A-STORAGE-20261101.md)。
+- **稳定的GUI交互**：图标桌面已经实际显示，但滑动会因work interval创建失败触发未处理异常；布局比例与控制中心居中仍待修。
+- **密钥与系统服务后续依赖**：A/B/C/D与六类keychain已有有界证据；本地无PIN与开发初始化不等于口令/SEP或完整系统服务。见[最新证据与边界](docs/CLASS-A-STORAGE-20261101.md)。
 - **真实图形加速与呈现**：A650/Metal、CoreAnimation 到屏幕的完整链路、DPU/DSI 时序和物理 120 Hz 尚未验收；软件定时器或 FrontBoard 上报值不算物理 vsync。
 - **完整原版keychain**：类别6–11的有限AES密钥profile和旧记录重启恢复通过；口令、其他接口和完整锁生命周期验收仍未完成。见[最新实机报告](docs/CLASS-B-STORAGE-20261101.md)。
 - **完整 AppleKeyStore/安全能力**：锁屏口令、完整keychain/AKS、多用户及SEP兼容尚未完成；A/B限定factory无PIN，非全RAM擦除证明；未知接口真实返回错误。
 - **完整手机外设体验**：蓝牙无线功能、Wi-Fi、蜂窝、音频、相机、传感器、完整充电/电池/热管理与休眠唤醒，没有本项目的完整可用验收。
 
-后续顺序为：硬化B类缓存与补齐实际密钥/I/O依赖 → 完成原版迁移与 shell 登记 → 修复阻塞主线的 daemon 功能 → 推进并验证真实图形呈现和 GUI 输入 → 可用 SpringBoard → 恢复蓝牙任务。不通过隐藏日志、停止 watchdog 或伪造成功缩小问题。
+当前顺序为：修复公共UIKit滑动work interval故障 → 核对屏幕布局与稳定应用交互 → 重启重复验收与后续系统服务 → 可用SpringBoard后恢复蓝牙任务。不通过隐藏日志、停止 watchdog 或伪造成功缩小问题。
 
 ## 从立项到当前的里程碑
 
@@ -114,6 +114,9 @@
 | 0477原版FairPlay | PT_DENY_ATTACH成功及原退出返回环实测；根因/迁移/桌面仍待修复 |
 | 0478原版FairPlay | 六份失败文件名现场与加密回归；根因/迁移/桌面仍待修复 |
 | 0479原版FairPlay | 实际查询FairPlayIOKit却无迭代器；原组件装载/初始化及迁移/桌面仍待修复 |
+| 0480–0536 显示与离线桌面 | 原组件接入、CPU画面复制、iPhone软件身份、无PIN状态与一次性离线初始化；0536真实图标桌面已捕获，滑动异常保留 |
+| 0537–0541 滑动与逻辑画布 | 原版异常取证、CREATE2类型授权匹配、1125×2436逻辑画布统一；用户确认布局与滑动正常 |
+| 0542–0544 边缘手势 | 完整触摸范围、内建屏幕关联、真实触点FromEdgeTip来源；0542/0543人工失败，0544返回/桌面/多任务均获用户确认恢复 |
 
 阶段编号是构建/验收序列，表中包含诊断与回归；不表示每个编号都新增了完整功能。更详细的历史与精确边界见[文档索引](docs/README.md)。
 
@@ -137,7 +140,7 @@ docs/qualification/               分阶段固定哈希的验收资料
 docs/history/                     已替代的首页、交接和早期草稿
 ```
 
-本仓库仍保留历史格式的 `board.toml`，其中 standalone、单核等设置不描述目前的完整 prelink 实机流程。**不能把旧入口当作一键重建当前0479的配方。** 官方格式 2、结构化 `porting.toml`/CI 和统一构建入口的迁移仍未完成；详见[仓库整理与规范差距](docs/REPOSITORY-LAYOUT.md)。
+本仓库仍保留历史格式的 `board.toml`，其中 standalone、单核等设置不描述目前的完整 prelink 实机流程。**不能把旧入口当作一键重建当前0544的配方。** 官方格式 2、结构化 `porting.toml`/CI 和统一构建入口的迁移仍未完成；详见[仓库整理与规范差距](docs/REPOSITORY-LAYOUT.md)。
 
 ## 获取源码与验证
 
@@ -153,9 +156,9 @@ git clone https://github.com/apple-oss-distributions/xnu.git ../apple-xnu
 mkdir -p .cache/qualification
 python3 scripts/qualification/replay-xnu.py \
   --repo . --xnu-source ../apple-xnu \
-  --manifest docs/qualification/0479/all-mac-source-0479.json \
-  --receipt .cache/qualification/replay-0479.json \
-  --cache .cache --expected-common 338
+  --manifest docs/qualification/0544/all-mac-source-0544.json \
+  --receipt .cache/qualification/replay-0544.json \
+  --cache .cache --expected-common 399
 ```
 
 校验已公开的真实触摸记录：

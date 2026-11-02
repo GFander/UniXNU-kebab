@@ -1,0 +1,55 @@
+{
+  "passed": true,
+  "scope": "Actual production wrapper with explicit original IOKit/event stand-ins; no physical GUI proof",
+  "source_sha256": "d5fc90f23f7d202fb377420f2c22f7410f4eee81252ae568ac24ab2a0139a6b8",
+  "results": [
+    {
+      "name": "production",
+      "compiled": true,
+      "expected_pass": true,
+      "returncode": 0
+    },
+    {
+      "name": "foreign-provider",
+      "compiled": true,
+      "expected_pass": false,
+      "returncode": -6
+    },
+    {
+      "name": "foreign-role",
+      "compiled": true,
+      "expected_pass": false,
+      "returncode": -6
+    },
+    {
+      "name": "wrong-event-field",
+      "compiled": true,
+      "expected_pass": false,
+      "returncode": -6
+    },
+    {
+      "name": "all-event-types",
+      "compiled": true,
+      "expected_pass": false,
+      "returncode": -6
+    },
+    {
+      "name": "drop-options",
+      "compiled": true,
+      "expected_pass": false,
+      "returncode": -6
+    },
+    {
+      "name": "drop-original-dispatch",
+      "compiled": true,
+      "expected_pass": false,
+      "returncode": -6
+    },
+    {
+      "name": "hide-start-failure",
+      "compiled": true,
+      "expected_pass": false,
+      "returncode": -6
+    }
+  ]
+}

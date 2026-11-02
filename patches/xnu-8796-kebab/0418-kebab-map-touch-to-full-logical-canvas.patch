@@ -1,0 +1,69 @@
+--- a/bsd/dev/kebab_touch_tcm.c
++++ b/bsd/dev/kebab_touch_tcm.c
+@@ -645,9 +645,14 @@
+ 	    max_x / 2u) / max_x);
+ 	p.panel_y = (int32_t)(((uint64_t)raw_y * (KEBAB_TCM_PANEL_H - 1) +
+ 	    max_y / 2u) / max_y);
+-	p.logical_x = p.panel_x + KEBAB_TCM_LOGICAL_ORIGIN_X;
+-	p.logical_y = p.panel_y + KEBAB_TCM_LOGICAL_ORIGIN_Y;
+-	/* Defensive only: with the origin above these cannot fire. */
++	/* HID logical maxima are inclusive. Map both sensor endpoints to the
++	 * complete displayed canvas; the old centred crop left all edges blind.
++	 * Scale directly from the sensor to avoid double rounding via panel. */
++	p.logical_x = (int32_t)(((uint64_t)raw_x * (KEBAB_TCM_LOGICAL_W - 1) +
++	    max_x / 2u) / max_x);
++	p.logical_y = (int32_t)(((uint64_t)raw_y * (KEBAB_TCM_LOGICAL_H - 1) +
++	    max_y / 2u) / max_y);
++	/* Defensive only: clamped sensor coordinates already satisfy these. */
+ 	if (p.logical_x >= KEBAB_TCM_LOGICAL_W) {
+ 		p.logical_x = KEBAB_TCM_LOGICAL_W - 1;
+ 		p.clamped = 1;
+--- a/bsd/dev/kebab_touch_tcm.h
++++ b/bsd/dev/kebab_touch_tcm.h
+@@ -100,8 +100,6 @@
+ #define KEBAB_TCM_PANEL_H          2400
+ #define KEBAB_TCM_LOGICAL_W        1125
+ #define KEBAB_TCM_LOGICAL_H        2436
+-#define KEBAB_TCM_LOGICAL_ORIGIN_X 22   /* (1125 - 1080) / 2, truncated */
+-#define KEBAB_TCM_LOGICAL_ORIGIN_Y 18   /* (2436 - 2400) / 2 */
+ 
+ /* The two fallbacks the device tree fixes when the app info has no answer. */
+ #define KEBAB_TCM_SENSOR_MAX_X     1079
+--- a/bsd/dev/kebab_touch.c
++++ b/bsd/dev/kebab_touch.c
+@@ -114,11 +114,10 @@
+  *   panel    the physical panel, 1080 x 2400 pixels, the same space as the
+  *            boot framebuffer and IOMobileFramebuffer's default surface. The
+  *            sensor covers the panel exactly, so one step is one pixel.
+- *   logical  what userland draws in: 1125 x 2436 at 3x. The display presents
+- *            logical (22,18) at panel (0,0) and clips the margin, so
+- *            logical = panel + (22,18). The 22 leftmost columns, 23 rightmost
+- *            columns and 18 rows at the top and bottom of the logical display
+- *            have no panel under them and cannot be touched.
++ *   logical  what userland draws in: 1125 x 2436 at 3x. The display maps
++ *            the complete logical canvas onto the physical panel. Touch
++ *            maps sensor endpoints to logical 0..1124 and 0..2435 so every
++ *            displayed edge is reachable, without a centred crop offset.
+  *
+  * kt_transform() is the only place that converts between these three.
+  *
+@@ -240,7 +239,7 @@
+ 	uint64_t timestamp_ns;
+ 	int32_t  raw_x, raw_y;          /* sensor space */
+ 	int32_t  panel_x, panel_y;      /* 0..1079, 0..2399 */
+-	int32_t  logical_x, logical_y;  /* 22..1101, 18..2417 */
++	int32_t  logical_x, logical_y;  /* 0..1124, 0..2435 */
+ 	uint16_t pressure;              /* report z, 0..255 */
+ 	uint8_t  phase;                 /* KT_EVENT_* */
+ 	uint8_t  slot;                  /* contact index from the report */
+@@ -365,8 +364,8 @@
+  *   panel    the physical 1080x2400 panel, the same space as the boot
+  *            framebuffer and IOMobileFramebuffer's default surface.
+  *
+- *   logical  the 1125x2436 display userland draws in, which presents logical
+- *            (22,18) at panel (0,0).
++ *   logical  the complete 1125x2436 display userland draws in, mapped onto
++ *            the physical panel with both axis endpoints reachable.
+  *
+  * A value above the advertised maximum (0xfff from a finger that lifted
+  * mid-transfer is the common case) is clamped to the panel edge and flagged,

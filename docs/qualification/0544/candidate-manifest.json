@@ -1,0 +1,23 @@
+{
+  "version": "0544",
+  "parent": "0543",
+  "changes": {
+    "iokit/Kernel/arm/KebabHIDInput.cpp": {
+      "before": "d5fc90f23f7d202fb377420f2c22f7410f4eee81252ae568ac24ab2a0139a6b8",
+      "after": "f57ee57282d5e2cf43801286be51e0f29bb684d704b304c574b4b79cb5a237e2"
+    },
+    "iokit/Kernel/arm/KebabOriginalHIDBindings.cpp": {
+      "before": "60c65e9948874e8589a0bfa22824a1746fb2ee93b3e2b01eae9a13cfb5377d6f",
+      "after": "49b77122e37298f5aec173b9d441c56bce47f236373df883270bcf5a4f31c95a"
+    },
+    "iokit/Kernel/arm/KebabOriginalHIDEventDriver.h": {
+      "before": "23c0abad13aa7d6b7623327d3d34442197a22eacda5cf8a608a8c95f51df9c60",
+      "after": "66e23698f30dd22d91f241902b5785705835ce398b85f9e9b9192d0aade041b2"
+    },
+    "iokit/Kernel/arm/KebabTouchEdge.h": {
+      "before": null,
+      "after": "c044dad0c2f603933f4e47a894512323af3be12c697e1a164225c83b656ee13f"
+    }
+  },
+  "scope": "Classify real initial contact near physical display edge and retain FromEdgeTip through real lift; preserve original positions, touch lifecycle, parser and recognition"
+}
