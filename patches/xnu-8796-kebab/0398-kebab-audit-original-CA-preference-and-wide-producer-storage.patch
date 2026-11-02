@@ -1,0 +1,68 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -58,7 +58,8 @@
+     "/private/var/mobile/Library/Preferences/com.apple.MobileGestalt.plist",
+     "/private/var/mobile/Library/Preferences/com.apple.mobilegestalt.plist",
+     "/System/Library/Caches/com.apple.MobileGestalt.plist",
+-    "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist.hios-before-iphone-x-20261102"
++    "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist.hios-before-iphone-x-20261102",
++    "/private/var/mobile/Library/Preferences/com.apple.backboardd.plist"
+ };
+ 
+ int kebab_identity_cache_snapshot(unsigned, void **, uint32_t *);
+--- a/iokit/Kernel/arm/KebabSoftwareScaler.cpp
++++ b/iokit/Kernel/arm/KebabSoftwareScaler.cpp
+@@ -62,7 +62,7 @@
+ {
+     if(!AppleM2ScalerCSCDriver::start(provider))return false;
+     setName("KebabSoftwareScaler");
+-    setProperty("KebabBackend","CPU BGRA8 and opaque w40a bilinear/nearest, iOS16 IOSurfaceAccelerator ABI");
++    setProperty("KebabBackend","CPU BGRA8/w40a linear components, SDR GOP; iOS16 IOSurfaceAccelerator ABI");
+     setProperty("KebabHardwareAccelerated",kOSBooleanFalse);
+     OSDictionary *caps=OSDictionary::withCapacity(12);
+     if(!caps){AppleM2ScalerCSCDriver::stop(provider);return false;}
+@@ -77,7 +77,7 @@
+     if(valid)valid=setProperty("IOSurfaceAcceleratorCapabilitiesDict",caps);
+     caps->release();
+     if(!valid){AppleM2ScalerCSCDriver::stop(provider);return false;}
+-    IOLog("KEBAB SCALER: CPU BGRA8/opaque w40a copy/scale registered, no GPU/compressed/HDR display capability\n");
++    IOLog("KEBAB SCALER: CPU BGRA8/w40a copy/scale registered, no GPU/compressed/HDR display capability\n");
+     registerService();return true;
+ }
+ IOReturn
+@@ -125,6 +125,25 @@
+ {
+     return {s->width,s->height,s->bytesPerRow,s->pixelFormat,s->offset,s->allocSize,s->planeCount,
+         s->bytesPerElement,s->elementWidth,s->elementHeight,s->memory?s->memory->getLength():0};
++}
++/* Bounded first-frame storage diagnosis: ranges only, no pixels or addresses.
++ * Caller holds validated mappings. This observes raw producer storage and
++ * does not infer or silently change its declared pixel format. */
++static void
++ksc_report_storage(const struct ksc_image *im,const uint8_t *base,const char *role)
++{
++    if(im->format!=KPF_W40A)return;
++    uint16_t minimum[4]={65535,65535,65535,65535},maximum[4]={};uint64_t low_bits=0;
++    for(uint32_t y=0;y<im->height;y++)for(uint32_t x=0;x<im->width;x++) {
++        const uint8_t *pixel=base+im->offset+(uint64_t)y*im->stride+(uint64_t)x*8;
++        for(unsigned ch=0;ch<4;ch++) {
++            uint16_t word=kpf_word(pixel+ch*2);
++            if(word<minimum[ch])minimum[ch]=word;if(word>maximum[ch])maximum[ch]=word;
++            if(word&63)low_bits++;
++        }
++    }
++    IOLog("KEBAB SCALER STORAGE: %s declared=w40a raw-min=%04x,%04x,%04x,%04x raw-max=%04x,%04x,%04x,%04x low-six-nonzero=%llu; best-effort ranges, not producer-format inference\n",
++        role,minimum[0],minimum[1],minimum[2],minimum[3],maximum[0],maximum[1],maximum[2],maximum[3],low_bits);
+ }
+ IOReturn
+ IOSurfaceAcceleratorClient::transform(const uint8_t *q,size_t size)
+@@ -151,7 +170,9 @@
+     OSMemoryBarrier();
+     if(si.format==KPF_W40A || di.format==KPF_W40A)
+         (void)ksc_source_opaque(&si,(const uint8_t *)(uintptr_t)sm->getVirtualAddress(),&alpha_rejected);
++    if(fCompleted<2)ksc_report_storage(&si,(const uint8_t *)(uintptr_t)sm->getVirtualAddress(),"source");
+     ksc_run(&plan,&si,&di,(const uint8_t *)(uintptr_t)sm->getVirtualAddress(),(uint8_t *)(uintptr_t)dm->getVirtualAddress());
++    if(fCompleted<2)ksc_report_storage(&di,(const uint8_t *)(uintptr_t)dm->getVirtualAddress(),"destination");
+     OSMemoryBarrier();
+     kebab_surface_did_write(d);
+     ret=kIOReturnSuccess;

@@ -1,0 +1,13 @@
+--- a/iokit/Kernel/arm/KebabSoftwareScaler.cpp
++++ b/iokit/Kernel/arm/KebabSoftwareScaler.cpp
+@@ -140,7 +140,9 @@
+     /* Both global IDs are only exposed to the exact original compositor task;
+      * normal IOServiceOpen and per-method MACF/filter checks still run. */
+     if(!s->memory || !d->memory || s->memory==d->memory || s->parentID || d->parentID){ret=kIOReturnUnsupported;goto done;}
+-    if(plan.callback && !(plan.flags&0x400) && fPort==MACH_PORT_NULL){ret=kIOReturnNotReady;goto done;}
++    /* Original IOUserClient::_sendAsyncResult64 explicitly permits a null
++     * reply port. Ordinary original CA supplies its no-op completion without
++     * registering a run-loop port; CPU work still completes synchronously. */
+     sm=s->memory->createMappingInTask(kernel_task,0,kIOMapAnywhere|kIOMapReadOnly|s->mapCache);
+     dm=d->memory->createMappingInTask(kernel_task,0,kIOMapAnywhere|d->mapCache);
+     if(!sm || !dm || !sm->getVirtualAddress() || !dm->getVirtualAddress() ||

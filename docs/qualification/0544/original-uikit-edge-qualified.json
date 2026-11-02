@@ -1,0 +1,71 @@
+{
+  "passed": true,
+  "cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+  "scope": "Actual original20H392 ARM64 edge decoder and fail/recognize feature instructions on synthetic samples; named IOHID getter and ObjC state-setter API stand-ins; not physical GUI proof",
+  "code_sha256": {
+    "0x189193b14": "9c5dfa7ee1c22ad98b379c86c1dcd3864713a9229ee391b04ed18bbb84416ef9",
+    "0x188f60700": "71f5e4946e97ed9f31665bc30977852e2f19733e90685d959b5a271b7dadfc7d",
+    "0x18929d780": "a917de0a55de99dc6efbbbe6a5fb756b5c6e390608b3eaddc6c9f56863450f2c"
+  },
+  "API_standins": [
+    "IOHIDEventGetIntegerValue(field0xb0007)",
+    "objc_msgSend:_setState: records state"
+  ],
+  "decoder_rows": [
+    {
+      "mask": "0x0",
+      "original_edge_type": 0
+    },
+    {
+      "mask": "0x1",
+      "original_edge_type": 0
+    },
+    {
+      "mask": "0x2",
+      "original_edge_type": 0
+    },
+    {
+      "mask": "0x3",
+      "original_edge_type": 0
+    },
+    {
+      "mask": "0x4",
+      "original_edge_type": 0
+    },
+    {
+      "mask": "0x7",
+      "original_edge_type": 0
+    },
+    {
+      "mask": "0x800",
+      "original_edge_type": 1
+    },
+    {
+      "mask": "0x807",
+      "original_edge_type": 1
+    },
+    {
+      "mask": "0x1000",
+      "original_edge_type": 2
+    },
+    {
+      "mask": "0x2000",
+      "original_edge_type": 3
+    },
+    {
+      "mask": "0x40000",
+      "original_edge_type": 4
+    },
+    {
+      "mask": "0x3800",
+      "original_edge_type": 1
+    },
+    {
+      "mask": "0x40800",
+      "original_edge_type": 1
+    }
+  ],
+  "no_edge_initial_sample_originally_fails": true,
+  "FromEdgeTip_initial_sample_originally_accepts": true,
+  "completed_gesture_not_injected": true
+}

@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "native_sha256": "638a4491c6ebc77a9a0301782fe0f8c289f0f8cc53cd2b5009b4c47664095fae",
+  "actual_direct_observer_edges": [
+    {
+      "caller": "_kebab_ui_report",
+      "callee": "_kebab_shell_ack_task_report",
+      "actual_direct_edges": [
+        "0xfffffe0006ae6e24"
+      ]
+    },
+    {
+      "caller": "_kebab_driver_report",
+      "callee": "_kebab_framebuffer_report",
+      "actual_direct_edges": [
+        "0xfffffe0006c31668"
+      ]
+    }
+  ],
+  "physical_results_not_yet_qualified": true
+}

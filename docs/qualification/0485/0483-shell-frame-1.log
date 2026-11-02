@@ -1,0 +1,873 @@
+[2026-11-01T15:33:42] Independent readonly shell/frame snapshots. Last confirmed flash0483; no reset in this capture; same boot as old regression not independently proven. Old log remains sealed.
+[   0.063] pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d4cc000
+[   0.063] KEBAB EXEC HEADER: pid=810 main=0x102934000
+[   0.063] Allowing spawn of iOS binary bluetoothd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.063] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.063] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.064] KEBAB AKS ACCESS: selector=17 role=administrative result=0
+[   0.064] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.064] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.064] KEBAB AKS ACCESS: selector=17 role=administrative result=0
+[   0.064] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.064] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.064] KEBAB AKS ACCESS: selector=17 role=administrative result=0
+[   0.064] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.064] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.064] KEBAB AKS ACCESS: selector=17 role=administrative result=0
+[   0.064] KEBAB EXEC: pid 811 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16ce90000
+[   0.064] KEBAB EXEC HEADER: pid=811 main=0x102f70000
+[   0.064] Allowing spawn of iOS binary PosterBoard since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.064] KEBAB AKS UC: read-only status client opened; original ABI, authenticated durable hardware bag available
+[   0.064] KEBAB AKS UC: selector=0 scalar=0/0 struct-in=0 result=0; hardware factory bag; struct-out=0 desc=0/0
+[   0.064] KEBAB AKS ACCESS: selector=0 role=read-only-status result=0
+[   0.064] KEBAB AKS UC: selector=7 scalar=1/1 struct-in=0 result=0; hardware factory bag; struct-out=0 desc=0/0
+[   0.064] KEBAB AKS ACCESS: selector=7 role=read-only-status result=0
+[   0.064] KEBAB EXEC: pid 812 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d6b4000
+[   0.064] KEBAB EXEC HEADER: pid=812 main=0x10274c000
+[   0.064] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.064] KEBAB EXEC: pid 812 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16fa24000
+[   0.064] KEBAB EXEC HEADER: pid=812 main=0x1003dc000
+[   0.064] Allowing spawn of iOS binary extensionkitservice since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.064] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.064] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.064] KEBAB AKS ACCESS: selector=17 role=administrative result=0
+[   0.064] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.064] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.064] KEBAB AKS ACCESS: selector=17 role=administrative result=0
+[   0.064] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.064] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.064] KEBAB AKS ACCESS: selector=17 role=administrative result=0
+[   0.750] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; deriKEBAB EXEC: pid 1544 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d5e8000
+[   0.750] KEBAB EXEC HEADER: pid=1544 main=0x102818000
+[   0.750] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.750] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.750] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.750] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   0.750] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.750] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.750] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   0.750] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.750] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.750] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   0.750] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.750] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.750] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   0.812] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.812] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.812] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   0.812] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.812] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.812] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   0.812] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.812] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.812] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   0.812] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.812] KEBAB EXEC: pid 1544 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d10c000
+[   0.812] KEBAB EXEC HEADER: pid=1544 main=0x102cf4000
+[   0.812] Allowing spawn of iOS binary betaenrollmentd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.812] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.812] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   0.999] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.999] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.999] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   0.999] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.999] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.999] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.000] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.000] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.000] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.000] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.000] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.000] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.000] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.000] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.000] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.000] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.000] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.000] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.000] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.000] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.000] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.000] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.000] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.000] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.000] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.000] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.000] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.000] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.000] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.000] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.000] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.000] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.000] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.000] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.000] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.000] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.061] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.061] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.061] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.061] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.061] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.061] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.061] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.061] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.061] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.061] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.061] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.061] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.061] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.061] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.061] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.061] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.061] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.061] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.061] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.061] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.061] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.061] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.061] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.061] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[2026-11-01T15:33:43] Sent UI once; awaiting actual marker
+[   1.123] KEBAB UI-SB: fixed process pid=27 uid=501 scanned=252; best-effort wait snapshot
+[   1.123] KEBAB UI-SB: thread snapshot count=15 thread_total=15 (cap32; no suspension)
+[   1.123] KEBAB UI-SB: tid=311 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=8.852350 sys=6.046703
+[   1.124] KEBAB UI-SB USER: tid=311 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16db121e0; best-effort, target may resume
+[   1.124] KEBAB UI-SB USER: tid=311 frame[0]=0x1c2622db8
+[   1.124] KEBAB UI-SB USER: tid=311 frame[1]=0x1c2611524
+[   1.124] KEBAB UI-SB USER: tid=311 frame[2]=0x186e5c148
+[   1.124] KEBAB UI-SB USER: tid=311 frame[3]=0x186e5d2e0
+[   1.124] KEBAB UI-SB USER: tid=311 frame[4]=0x186e61d20
+[   1.124] KEBAB UI-SB USER: tid=311 frame[5]=0x1bef35998
+[   1.124] KEBAB UI-SB USER: tid=311 frame[6]=0x1890f434c
+[   1.124] KEBAB UI-SB USER: tid=311 frame[7]=0x1890f3fc4
+[   1.124] KEBAB UI-SB USER: tid=311 frame[8]=0x1c58655e8
+[   1.124] KEBAB UI-SB USER: tid=311 frame[9]=0x1a4624344
+[   1.124] KEBAB UI-SB IPC: tid=311 opt=507000806 b=0 sz=2 v=1 r=0 l=980b q=980b id=0 lookup=0
+[   1.124] KEBAB UI-SB IPC-OWNER: tid=311 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.124] KEBAB UI-SB: tid=2494 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.003626 sys=0.002929
+[   1.124] KEBAB UI-SB USER: tid=2494 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16e085cc0; best-effort, target may resume
+[   1.124] KEBAB UI-SB USER: tid=2494 frame[0]=0x1c2622db8
+[   1.124] KEBAB UI-SB USER: tid=2494 frame[1]=0x1c2611524
+[   1.124] KEBAB UI-SB USER: tid=2494 frame[2]=0x186e5c148
+[   1.124] KEBAB UI-SB USER: tid=2494 frame[3]=0x186e5d2e0
+[   1.124] KEBAB UI-SB USER: tid=2494 frame[4]=0x186e61d20
+[   1.124] KEBAB UI-SB USER: tid=2494 frame[5]=0x1811b0ef8
+[   1.124] KEBAB UI-SB USER: tid=2494 frame[6]=0x1811b0df4
+[   1.124] KEBAB UI-SB USER: tid=2494 frame[7]=0x189216818
+[   1.124] KEBAB UI-SB USER: tid=2494 frame[8]=0x1811c8a5c
+[   1.124] KEBAB UI-SB USER: tid=2494 frame[9]=0x1d1b9c0ec
+[   1.124] KEBAB UI-SB USER: tid=2494 frame[10]=0x1d1b9a72c
+[   1.124] KEBAB UI-SB IPC: tid=2494 opt=507000806 b=0 sz=2 v=1 r=0 l=9d13 q=9d13 id=0 lookup=0
+[   1.124] KEBAB UI-SB IPC-OWNER: tid=2494 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.124] KEBAB UI-SB: tid=2529 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.008632 sys=0.009831
+[   1.124] KEBAB UI-SB USER: tid=2529 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16e111e90; best-effort, target may resume
+[   1.124] KEBAB UI-SB USER: tid=2529 frame[0]=0x1c2622db8
+[   1.124] KEBAB UI-SB USER: tid=2529 frame[1]=0x1c2611524
+[   1.124] KEBAB UI-SB USER: tid=2529 frame[2]=0x186e5c148
+[   1.124] KEBAB UI-SB USER: tid=2529 frame[3]=0x186e5d2e0
+[   1.124] KEBAB UI-SB USER: tid=2529 frame[4]=0x186e61d20
+[   1.124] KEBAB UI-SB USER: tid=2529 frame[5]=0x186ea0bec
+[   1.124] KEBAB UI-SB USER: tid=2529 frame[6]=0x1919bdfac
+[   1.124] KEBAB UI-SB USER: tid=2529 frame[7]=0x1d1b9c0ec
+[   1.124] KEBAB UI-SB USER: tid=2529 frame[8]=0x1d1b9a72c
+[   1.124] KEBAB UI-SB IPC: tid=2529 opt=507000806 b=0 sz=2 v=1 r=0 l=15203 q=15203 id=0 lookup=0
+[   1.124] KEBAB UI-SB IPC-OWNER: tid=2529 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.124] KEBAB UI-SB: tid=2896 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.000397 sys=0.000376
+[   1.124] KEBAB UI-SB USER: tid=2896 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16e5fdcd0; best-effort, target may resume
+[   1.124] KEBAB UI-SB USER: tid=2896 frame[0]=0x1c2622db8
+[   1.124] KEBAB UI-SB USER: tid=2896 frame[1]=0x1c2611524
+[   1.124] KEBAB UI-SB USER: tid=2896 frame[2]=0x186e5c148
+[   1.124] KEBAB UI-SB USER: tid=2896 frame[3]=0x186e5d2e0
+[   1.124] KEBAB UI-SB USER: tid=2896 frame[4]=0x186e61d20
+[   1.124] KEBAB UI-SB USER: tid=2896 frame[5]=0x1811b0ef8
+[   1.124] KEBAB UI-SB USER: tid=2896 frame[6]=0x1811b0da4
+[   1.124] KEBAB UI-SB USER: tid=2896 frame[7]=0x1c59905b8
+[   1.124] KEBAB UI-SB USER: tid=2896 frame[8]=0x1811c8a5c
+[   1.124] KEBAB UI-SB USER: tid=2896 frame[9]=0x1d1b9c0ec
+[   1.124] KEBAB UI-SB USER: tid=2896 frame[10]=0x1d1b9a72c
+[   1.124] KEBAB UI-SB IPC: tid=2896 opt=507000806 b=0 sz=2 v=1 r=0 l=1bd03 q=1bd03 id=0 lookup=0
+[   1.124] KEBAB UI-SB IPC-OWNER: tid=2896 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.124] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.124] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.124] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.124] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.124] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.124] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.124] KEBAB UI-SB: tid=3071 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.011916 sys=0.008755
+[   1.124] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.124] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.124] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.124] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.124] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.124] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.124] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.124] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.124] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.124] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.124] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.124] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.124] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.124] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.124] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.124] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.124] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.124] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.124] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.124] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.124] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.124] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.124] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.124] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.124] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.124] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.124] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.124] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.124] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.124] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.124] KEBAB UI-SB USER: tid=3071 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16e689cb0; best-effort, target may resume
+[   1.124] KEBAB UI-SB USER: tid=3071 frame[0]=0x1c2622db8
+[   1.124] KEBAB UI-SB USER: tid=3071 frame[1]=0x1c2611524
+[   1.124] KEBAB UI-SB USER: tid=3071 frame[2]=0x186e5c148
+[   1.124] KEBAB UI-SB USER: tid=3071 frame[3]=0x186e5d2e0
+[   1.124] KEBAB UI-SB USER: tid=3071 frame[4]=0x186e61d20
+[   1.124] KEBAB UI-SB USER: tid=3071 frame[5]=0x186ea0bec
+[   1.124] KEBAB UI-SB USER: tid=3071 frame[6]=0x1a061d1b8
+[   1.124] KEBAB UI-SB USER: tid=3071 frame[7]=0x1811c8a5c
+[   1.124] KEBAB UI-SB USER: tid=3071 frame[8]=0x1d1b9c0ec
+[   1.124] KEBAB UI-SB USER: tid=3071 frame[9]=0x1d1b9a72c
+[   1.124] KEBAB UI-SB IPC: tid=3071 opt=507000806 b=0 sz=2 v=1 r=0 l=29b07 q=29b07 id=0 lookup=0
+[   1.124] KEBAB UI-SB IPC-OWNER: tid=3071 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.124] KEBAB UI-SB: tid=3237 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.000462 sys=0.000266
+[   1.124] KEBAB UI-SB USER: tid=3237 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16eae9cd0; best-effort, target may resume
+[   1.124] KEBAB UI-SB USER: tid=3237 frame[0]=0x1c2622db8
+[   1.124] KEBAB UI-SB USER: tid=3237 frame[1]=0x1c2611524
+[   1.124] KEBAB UI-SB USER: tid=3237 frame[2]=0x186e5c148
+[   1.125] KEBAB UI-SB USER: tid=3237 frame[3]=0x186e5d2e0
+[   1.125] KEBAB UI-SB USER: tid=3237 frame[4]=0x186e61d20
+[   1.125] KEBAB UI-SB USER: tid=3237 frame[5]=0x1811b0ef8
+[   1.125] KEBAB UI-SB USER: tid=3237 frame[6]=0x1811b0da4
+[   1.125] KEBAB UI-SB USER: tid=3237 frame[7]=0x1f579a0d4
+[   1.125] KEBAB UI-SB USER: tid=3237 frame[8]=0x1811c8a5c
+[   1.125] KEBAB UI-SB USER: tid=3237 frame[9]=0x1d1b9c0ec
+[   1.125] KEBAB UI-SB USER: tid=3237 frame[10]=0x1d1b9a72c
+[   1.125] KEBAB UI-SB IPC: tid=3237 opt=507000806 b=0 sz=2 v=1 r=0 l=3cc03 q=3cc03 id=0 lookup=0
+[   1.125] KEBAB UI-SB IPC-OWNER: tid=3237 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.125] KEBAB UI-SB: tid=15788 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200d55dfe8 continuation=0xfffffe000694ca64 user=0.222047 sys=0.107156
+[   1.125] KEBAB UI-SB USER: tid=15788 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16dffab50; best-effort, target may resume
+[   1.125] KEBAB UI-SB USER: tid=15788 frame[0]=0x1d1b9a720
+[   1.125] KEBAB UI-SB: tid=16105 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200d0d8bf8 continuation=0xfffffe000694ca64 user=0.092051 sys=0.047443
+[   1.125] KEBAB UI-SB USER: tid=16105 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16dcb2b50; best-effort, target may resume
+[   1.125] KEBAB UI-SB USER: tid=16105 frame[0]=0x1d1b9a720
+[   1.125] KEBAB UI-SB: tid=16107 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200d67dfe8 continuation=0xfffffe000694ca64 user=0.094888 sys=0.062001
+[   1.125] KEBAB UI-SB USER: tid=16107 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16ddcab50; best-effort, target may resume
+[   1.125] KEBAB UI-SB USER: tid=16107 frame[0]=0x1d1b9a720
+[   1.125] KEBAB UI-SB: tid=16199 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200d4073d8 continuation=0xfffffe000694ca64 user=0.068746 sys=0.035208
+[   1.125] KEBAB UI-SB USER: tid=16199 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16de56b50; best-effort, target may resume
+[   1.125] KEBAB UI-SB USER: tid=16199 frame[0]=0x1d1b9a720
+[   1.125] KEBAB UI-SB: tid=16208 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200d489fe8 continuation=0xfffffe000694ca64 user=0.017782 sys=0.014180
+[   1.125] KEBAB UI-SB USER: tid=16208 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16df6eb50; best-effort, target may resume
+[   1.125] KEBAB UI-SB USER: tid=16208 frame[0]=0x1d1b9a720
+[   1.125] KEBAB UI-SB: tid=16342 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200d031fe8 continuation=0xfffffe000694ca64 user=0.054339 sys=0.024612
+[   1.125] KEBAB UI-SB USER: tid=16342 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16db9ab50; best-effort, target may resume
+[   1.125] KEBAB UI-SB USER: tid=16342 frame[0]=0x1d1b9a720
+[   1.125] KEBAB UI-SB: tid=16343 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200d0d1fe8 continuation=0xfffffe000694ca64 user=0.102173 sys=0.049132
+[   1.125] KEBAB UI-SB USER: tid=16343 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16dc26b50; best-effort, target may resume
+[   1.125] KEBAB UI-SB USER: tid=16343 frame[0]=0x1d1b9a720
+[   1.125] KEBAB UI-SB: tid=16430 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200dbff3d8 continuation=0xfffffe000694ca64 user=0.014517 sys=0.008161
+[   1.125] KEBAB UI-SB USER: tid=16430 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16dd3eb50; best-effort, target may resume
+[   1.125] KEBAB UI-SB USER: tid=16430 frame[0]=0x1d1b9a720
+[   1.125] KEBAB UI-SB: tid=16524 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200d48cbf8 continuation=0xfffffe000694ca64 user=0.000000 sys=0.000000
+[   1.125] KEBAB UI-SB USER: tid=16524 saved pc=0x0 lr=0x0 fp=0x0; best-effort, target may resume
+[   1.125] KEBAB UI-SB: snapshot end; addresses name kernel waits, not user PCs
+[   1.125] KEBAB UI-PB: no referenced task found=0 scanned=254 (parent1/exact-name; cap512)
+[   1.125] KEBAB UI: observer end; no suspension or modification; user frames are best-effort reads
+[   1.125] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.125] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.125] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.125] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.125] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.125] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.125] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.125] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.125] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.125] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.125] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.125] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.125] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[2026-11-01T15:33:43] UI actual completion observed
+[2026-11-01T15:33:43] Sent BBOARD once; awaiting actual marker
+[   1.185] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.186] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.186] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.186] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.186] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.186] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.186] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.186] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.186] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.186] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.186] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.186] KEBAB BBOARD: fixed daemon pid=57 uid=501 scanned=228; read-only kernel waits
+[   1.186] KEBAB BBOARD: thread snapshot count=14 thread_total=14 (cap32; no suspension)
+[   1.186] KEBAB BBOARD: tid=401 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.319323 sys=0.812456
+[   1.186] KEBAB BBOARD USER: tid=401 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16f0ce8c0; best-effort, target may resume
+[   1.186] KEBAB BBOARD USER: tid=401 frame[0]=0x1c2622db8
+[   1.186] KEBAB BBOARD USER: tid=401 frame[1]=0x1c2611524
+[   1.186] KEBAB BBOARD USER: tid=401 frame[2]=0x186e5c148
+[   1.186] KEBAB BBOARD USER: tid=401 frame[3]=0x186e5d2e0
+[   1.186] KEBAB BBOARD USER: tid=401 frame[4]=0x186e61d20
+[   1.186] KEBAB BBOARD USER: tid=401 frame[5]=0x100d39e40
+[   1.186] KEBAB BBOARD USER: tid=401 frame[6]=0x1a4624344
+[   1.186] KEBAB BBOARD IPC: tid=401 opt=507000806 b=0 sz=2 v=1 r=0 l=3003 q=3003 id=0 lookup=0
+[   1.186] KEBAB BBOARD IPC-OWNER: tid=401 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.186] KEBAB BBOARD: tid=760 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.000157 sys=0.000193
+[   1.186] KEBAB BBOARD USER: tid=760 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16f2f9f00; best-effort, target may resume
+[   1.186] KEBAB BBOARD USER: tid=760 frame[0]=0x1c2622db8
+[   1.186] KEBAB BBOARD USER: tid=760 frame[1]=0x1c2611524
+[   1.186] KEBAB BBOARD USER: tid=760 frame[2]=0x186e5c148
+[   1.186] KEBAB BBOARD USER: tid=760 frame[3]=0x186e5d2e0
+[   1.186] KEBAB BBOARD USER: tid=760 frame[4]=0x186e61d20
+[   1.186] KEBAB BBOARD USER: tid=760 frame[5]=0x186ea0bec
+[   1.186] KEBAB BBOARD USER: tid=760 frame[6]=0x18e5a2f70
+[   1.186] KEBAB BBOARD USER: tid=760 frame[7]=0x1d1b9c0ec
+[   1.186] KEBAB BBOARD IPC: tid=760 opt=507000806 b=0 sz=2 v=1 r=0 l=3303 q=3303 id=0 lookup=0
+[   1.186] KEBAB BBOARD IPC-OWNER: tid=760 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.186] KEBAB BBOARD: tid=1195 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.512439 sys=0.765210
+[   1.186] KEBAB BBOARD USER: tid=1195 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16f5a6a00; best-effort, target may resume
+[   1.186] KEBAB BBOARD USER: tid=1195 frame[0]=0x1c2622db8
+[   1.186] KEBAB BBOARD USER: tid=1195 frame[1]=0x1c2611524
+[   1.186] KEBAB BBOARD USER: tid=1195 frame[2]=0x1882cc884
+[   1.186] KEBAB BBOARD USER: tid=1195 frame[3]=0x18850b418
+[   1.186] KEBAB BBOARD USER: tid=1195 frame[4]=0x1d1b9c0ec
+[   1.186] KEBAB BBOARD USER: tid=1195 frame[5]=0x1d1b9a72c
+[   1.186] KEBAB BBOARD IPC: tid=1195 opt=50300080e b=0 sz=2 v=1 r=0 l=0 q=770f id=0 lookup=0
+[   1.186] KEBAB BBOARD IPC-OWNER: tid=1195 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.186] KEBAB BBOARD: tid=1287 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=18.601212 sys=1.396355
+[   1.186] KEBAB BBOARD USER: tid=1287 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16f7cdde0; best-effort, target may resume
+[   1.186] KEBAB BBOARD USER: tid=1287 frame[0]=0x1c2622db8
+[   1.186] KEBAB BBOARD USER: tid=1287 frame[1]=0x1c2611524
+[   1.186] KEBAB BBOARD USER: tid=1287 frame[2]=0x186e5c148
+[   1.186] KEBAB BBOARD USER: tid=1287 frame[3]=0x186e5d2e0
+[   1.186] KEBAB BBOARD USER: tid=1287 frame[4]=0x186e61d20
+[   1.186] KEBAB BBOARD USER: tid=1287 frame[5]=0x186ea0bec
+[   1.186] KEBAB BBOARD USER: tid=1287 frame[6]=0x188501ccc
+[   1.186] KEBAB BBOARD USER: tid=1287 frame[7]=0x18850b418
+[   1.186] KEBAB BBOARD IPC: tid=1287 opt=507000806 b=0 sz=2 v=1 r=0 l=a803 q=a803 id=0 lookup=0
+[   1.186] KEBAB BBOARD IPC-OWNER: tid=1287 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.186] KEBAB BBOARD: tid=2441 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.000715 sys=0.000927
+[   1.186] KEBAB BBOARD USER: tid=2441 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16f1d5de0; best-effort, target may resume
+[   1.186] KEBAB BBOARD USER: tid=2441 frame[0]=0x1c2622db8
+[   1.186] KEBAB BBOARD USER: tid=2441 frame[1]=0x1c2611524
+[   1.186] KEBAB BBOARD USER: tid=2441 frame[2]=0x186e5c148
+[   1.186] KEBAB BBOARD USER: tid=2441 frame[3]=0x186e5d2e0
+[   1.186] KEBAB BBOARD USER: tid=2441 frame[4]=0x186e61d20
+[   1.186] KEBAB BBOARD USER: tid=2441 frame[5]=0x186ea0bec
+[   1.186] KEBAB BBOARD USER: tid=2441 frame[6]=0x188501ccc
+[   1.186] KEBAB BBOARD USER: tid=2441 frame[7]=0x18850b418
+[   1.186] KEBAB BBOARD IPC: tid=2441 opt=507000806 b=0 sz=2 v=1 r=0 l=9f0b q=9f0b id=0 lookup=0
+[   1.186] KEBAB BBOARD IPC-OWNER: tid=2441 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.186] KEBAB BBOARD: tid=2442 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.000742 sys=0.000885
+[   1.186] KEBAB BBOARD USER: tid=2442 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16f405de0; best-effort, target may resume
+[   1.186] KEBAB BBOARD USER: tid=2442 frame[0]=0x1c2622db8
+[   1.186] KEBAB BBOARD USER: tid=2442 frame[1]=0x1c2611524
+[   1.186] KEBAB BBOARD USER: tid=2442 frame[2]=0x186e5c148
+[   1.186] KEBAB BBOARD USER: tid=2442 frame[3]=0x186e5d2e0
+[   1.186] KEBAB BBOARD USER: tid=2442 frame[4]=0x186e61d20
+[   1.186] KEBAB BBOARD USER: tid=2442 frame[5]=0x186ea0bec
+[   1.186] KEBAB BBOARD USER: tid=2442 frame[6]=0x188501ccc
+[   1.186] KEBAB BBOARD USER: tid=2442 frame[7]=0x18850b418
+[   1.186] KEBAB BBOARD IPC: tid=2442 opt=507000806 b=0 sz=2 v=1 r=0 l=9603 q=9603 id=0 lookup=0
+[   1.186] KEBAB BBOARD IPC-OWNER: tid=2442 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.186] KEBAB BBOARD: tid=2443 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.000715 sys=0.000948
+[   1.186] KEBAB BBOARD USER: tid=2443 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16f6b5de0; best-effort, target may resume
+[   1.186] KEBAB BBOARD USER: tid=2443 frame[0]=0x1c2622db8
+[   1.186] KEBAB BBOARD USER: tid=2443 frame[1]=0x1c2611524
+[   1.186] KEBAB BBOARD USER: tid=2443 frame[2]=0x186e5c148
+[   1.186] KEBAB BBOARD USER: tid=2443 frame[3]=0x186e5d2e0
+[   1.186] KEBAB BBOARD USER: tid=2443 frame[4]=0x186e61d20
+[   1.186] KEBAB BBOARD USER: tid=2443 frame[5]=0x186ea0bec
+[   1.186] KEBAB BBOARD USER: tid=2443 frame[6]=0x188501ccc
+[   1.186] KEBAB BBOARD USER: tid=2443 frame[7]=0x18850b418
+[   1.186] KEBAB BBOARD IPC: tid=2443 opt=507000806 b=0 sz=2 v=1 r=0 l=9003 q=9003 id=0 lookup=0
+[   1.186] KEBAB BBOARD IPC-OWNER: tid=2443 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.186] KEBAB BBOARD: tid=2444 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.010740 sys=0.018975
+[   1.186] KEBAB BBOARD USER: tid=2444 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16f491e90; best-effort, target may resume
+[   1.186] KEBAB BBOARD USER: tid=2444 frame[0]=0x1c2622db8
+[   1.186] KEBAB BBOARD USER: tid=2444 frame[1]=0x1c2611524
+[   1.186] KEBAB BBOARD USER: tid=2444 frame[2]=0x186e5c148
+[   1.186] KEBAB BBOARD USER: tid=2444 frame[3]=0x186e5d2e0
+[   1.186] KEBAB BBOARD USER: tid=2444 frame[4]=0x186e61d20
+[   1.186] KEBAB BBOARD USER: tid=2444 frame[5]=0x186ea0bec
+[   1.186] KEBAB BBOARD USER: tid=2444 frame[6]=0x1919bdfac
+[   1.186] KEBAB BBOARD USER: tid=2444 frame[7]=0x1d1b9c0ec
+[   1.186] KEBAB BBOARD IPC: tid=2444 opt=507000806 b=0 sz=2 v=1 r=0 l=af03 q=af03 id=0 lookup=0
+[   1.186] KEBAB BBOARD IPC-OWNER: tid=2444 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.186] KEBAB BBOARD: tid=2456 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200e0cc4c0 continuation=0xfffffe00069cf90c user=0.001862 sys=0.002438
+[   1.186] KEBAB BBOARD USER: tid=2456 saved pc=0x1c2611ad0 lr=0x18db68128 fp=0x16fb16880; best-effort, target may resume
+[   1.186] KEBAB BBOARD USER: tid=2456 frame[0]=0x18db684a0
+[   1.186] KEBAB BBOARD USER: tid=2456 frame[1]=0x100d481f8
+[   1.186] KEBAB BBOARD USER: tid=2456 frame[2]=0x18db977a8
+[   1.186] KEBAB BBOARD USER: tid=2456 frame[3]=0x18db98780
+[   1.186] KEBAB BBOARD USER: tid=2456 frame[4]=0x18db736fc
+[   1.186] KEBAB BBOARD USER: tid=2456 frame[5]=0x18db741e4
+[   1.187] KEBAB BBOARD USER: tid=2456 frame[6]=0x18db7df14
+[   1.187] KEBAB BBOARD USER: tid=2456 frame[7]=0x1d1b9abd0
+[   1.187] KEBAB BBOARD: tid=16094 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200d8fb3d8 continuation=0xfffffe000694ca64 user=0.014335 sys=0.016819
+[   1.187] KEBAB BBOARD USER: tid=16094 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16f972af0; best-effort, target may resume
+[   1.187] KEBAB BBOARD USER: tid=16094 frame[0]=0x1d1b9a720
+[   1.187] KEBAB BBOARD: tid=16324 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200d3433d8 continuation=0xfffffe000694ca64 user=0.007059 sys=0.009654
+[   1.187] KEBAB BBOARD USER: tid=16324 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16f8e6b50; best-effort, target may resume
+[   1.187] KEBAB BBOARD USER: tid=16324 frame[0]=0x1d1b9a720
+[   1.187] KEBAB BBOARD: tid=16325 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200d1273d8 continuation=0xfffffe000694ca64 user=0.000021 sys=0.000139
+[   1.187] KEBAB BBOARD USER: tid=16325 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16f9feb50; best-effort, target may resume
+[   1.187] KEBAB BBOARD USER: tid=16325 frame[0]=0x1d1b9a720
+[   1.187] KEBAB BBOARD: tid=16341 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe0006008518 continuation=0xfffffe0006529b4c user=0.022555 sys=0.016274
+[   1.187] KEBAB BBOARD USER: tid=16341 saved pc=0x1c2610fc4 lr=0x18db67d9c fp=0x16fc2ef50; best-effort, target may resume
+[   1.187] KEBAB BBOARD USER: tid=16341 frame[0]=0x18db68328
+[   1.187] KEBAB BBOARD USER: tid=16341 frame[1]=0x18db7ca80
+[   1.187] KEBAB BBOARD USER: tid=16341 frame[2]=0x1d1b9c0ec
+[   1.187] KEBAB BBOARD USER: tid=16341 frame[3]=0x1d1b9a72c
+[   1.187] KEBAB BBOARD: tid=16545 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe0006008518 continuation=0xfffffe0006529b4c user=0.000803 sys=0.000569
+[   1.187] KEBAB BBOARD USER: tid=16545 saved pc=0x1c2610fc4 lr=0x18db67d9c fp=0x16f262f50; best-effort, target may resume
+[   1.187] KEBAB BBOARD USER: tid=16545 frame[0]=0x18db68328
+[   1.187] KEBAB BBOARD USER: tid=16545 frame[1]=0x18db7ca80
+[   1.187] KEBAB BBOARD USER: tid=16545 frame[2]=0x1d1b9c0ec
+[   1.187] KEBAB BBOARD USER: tid=16545 frame[3]=0x1d1b9a72c
+[   1.187] KEBAB BBOARD: snapshot end; addresses name kernel waits, not user PCs
+[   1.187] KEBAB BBOARD: observer end; no suspension or modification; user frames are best-effort reads
+[2026-11-01T15:33:43] BBOARD actual completion observed
+[2026-11-01T15:33:43] Sent MIG once; awaiting actual marker
+[   1.248] KEBAB MIG-DIR: index=0 getattr=0 dir=1 supported=0x1f uid=0 gid=0 mode=0755 flags=0x0 class=0 path=/private/var
+[   1.248] KEBAB MIG-DIR: index=1 getattr=0 dir=1 supported=0x1f uid=0 gid=0 mode=0755 flags=0x0 class=0 path=/private/var/containers
+[   1.248] KEBAB MIG-DIR: index=2 getattr=0 dir=1 supported=0x1f uid=0 gid=0 mode=0755 flags=0x0 class=0 path=/private/var/containers/Shared
+[   1.248] KEBAB MIG-DIR: index=3 getattr=0 dir=1 supported=0x1f uid=0 gid=0 mode=0755 flags=0x0 class=0 path=/private/var/containers/Shared/SystemGroup
+[   1.248] KEBAB MIG-DIR: index=4 getattr=0 dir=1 supported=0x1f uid=0 gid=0 mode=0755 flags=0x0 class=0 path=/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.installcoordinationd
+[   1.248] KEBAB MIG-DIR: index=5 getattr=0 dir=1 supported=0x1f uid=501 gid=501 mode=0751 flags=0x0 class=4 path=/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.installcoordinationd/Library
+[   1.248] KEBAB MIG-DIR: index=6 getattr=0 dir=1 supported=0x1f uid=501 gid=501 mode=0751 flags=0x0 class=4 path=/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.installcoordinationd/Library/InstallCoordination
+[   1.248] KEBAB MIG: no referenced task found=0 scanned=254 uuid-refused=0 (parent1/full-name; cap512)
+[   1.248] KEBAB MIG-W: no referenced task found=0 scanned=254 uuid-refused=0 (parent1/full-name; cap512)
+[   1.248] KEBAB MIG-I: fixed process pid=112 uid=501 scanned=171; best-effort wait snapshot
+[   1.248] KEBAB MIG-I: thread snapshot count=2 thread_total=2 (cap32; no suspension)
+[   1.248] KEBAB MIG-I: tid=658 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.051458 sys=0.094994
+[   1.248] KEBAB MIG-I USER: tid=658 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16d50e260; best-effort, target may resume
+[   1.248] KEBAB MIG-I USER: tid=658 frame[0]=0x1c2622db8
+[   1.248] KEBAB MIG-I USER: tid=658 frame[1]=0x1c2611524
+[   1.248] KEBAB MIG-I USER: tid=658 frame[2]=0x186e5c148
+[   1.248] KEBAB MIG-I USER: tid=658 frame[3]=0x186e5d2e0
+[   1.248] KEBAB MIG-I USER: tid=658 frame[4]=0x186e61d20
+[   1.248] KEBAB MIG-I USER: tid=658 frame[5]=0x1811b0ef8
+[   1.248] KEBAB MIG-I USER: tid=658 frame[6]=0x1811b0da4
+[   1.248] KEBAB MIG-I USER: tid=658 frame[7]=0x1028f4a28
+[   1.248] KEBAB MIG-I USER: tid=658 frame[8]=0x1a4624344
+[   1.248] KEBAB MIG-I IPC: tid=658 opt=507000806 b=0 sz=2 v=1 r=0 l=1303 q=1303 id=0 lookup=0
+[   1.248] KEBAB MIG-I IPC-OWNER: tid=658 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.248] KEBAB MIG-I: tid=3798 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200db75fe8 continuation=0xfffffe000694ca64 user=0.000000 sys=0.000017
+[   1.248] KEBAB MIG-I USER: tid=3798 saved pc=0x0 lr=0x0 fp=0x0; best-effort, target may resume
+[   1.248] KEBAB MIG-I: snapshot end; addresses name kernel waits, not user PCs
+[   1.248] KEBAB MIG-L: fixed process pid=63 uid=0 scanned=227; best-effort wait snapshot
+[   1.248] KEBAB MIG-L: thread snapshot count=9 thread_total=9 (cap32; no suspension)
+[   1.248] KEBAB MIG-L: tid=402 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.413391 sys=2.095199
+[   1.248] KEBAB MIG-L USER: tid=402 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16b832770; best-effort, target may resume
+[   1.248] KEBAB MIG-L USER: tid=402 frame[0]=0x1c2622db8
+[   1.248] KEBAB MIG-L USER: tid=402 frame[1]=0x1c2611524
+[   1.248] KEBAB MIG-L USER: tid=402 frame[2]=0x186e5c148
+[   1.248] KEBAB MIG-L USER: tid=402 frame[3]=0x186e5d2e0
+[   1.248] KEBAB MIG-L USER: tid=402 frame[4]=0x186e61d20
+[   1.248] KEBAB MIG-L USER: tid=402 frame[5]=0x186ea0bec
+[   1.248] KEBAB MIG-L USER: tid=402 frame[6]=0x105882024
+[   1.248] KEBAB MIG-L USER: tid=402 frame[7]=0x105882af0
+[   1.248] KEBAB MIG-L USER: tid=402 frame[8]=0x105886170
+[   1.248] KEBAB MIG-L USER: tid=402 frame[9]=0x1a4624344
+[   1.248] KEBAB MIG-L IPC: tid=402 opt=507000806 b=0 sz=2 v=1 r=0 l=1303 q=1303 id=0 lookup=0
+[   1.248] KEBAB MIG-L IPC-OWNER: tid=402 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.248] KEBAB MIG-L: tid=1341 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.017100 sys=0.094443
+[   1.249] KEBAB MIG-L USER: tid=1341 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16b8b9e90; best-effort, target may resume
+[   1.249] KEBAB MIG-L USER: tid=1341 frame[0]=0x1c2622db8
+[   1.249] KEBAB MIG-L USER: tid=1341 frame[1]=0x1c2611524
+[   1.249] KEBAB MIG-L USER: tid=1341 frame[2]=0x186e5c148
+[   1.249] KEBAB MIG-L USER: tid=1341 frame[3]=0x186e5d2e0
+[   1.249] KEBAB MIG-L USER: tid=1341 frame[4]=0x186e61d20
+[   1.249] KEBAB MIG-L USER: tid=1341 frame[5]=0x186ea0bec
+[   1.249] KEBAB MIG-L USER: tid=1341 frame[6]=0x104c4fba0
+[   1.249] KEBAB MIG-L USER: tid=1341 frame[7]=0x1d1b9c0ec
+[   1.249] KEBAB MIG-L USER: tid=1341 frame[8]=0x1d1b9a72c
+[   1.249] KEBAB MIG-L IPC: tid=1341 opt=507000806 b=0 sz=2 v=1 r=0 l=2903 q=2903 id=0 lookup=0
+[   1.249] KEBAB MIG-L IPC-OWNER: tid=1341 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.249] KEBAB MIG-L: tid=1705 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.006966 sys=0.003797
+[   1.249] KEBAB MIG-L USER: tid=1705 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16c205cb0; best-effort, target may resume
+[   1.249] KEBAB MIG-L USER: tid=1705 frame[0]=0x1c2622db8
+[   1.249] KEBAB MIG-L USER: tid=1705 frame[1]=0x1c2611524
+[   1.249] KEBAB MIG-L USER: tid=1705 frame[2]=0x186e5c148
+[   1.249] KEBAB MIG-L USER: tid=1705 frame[3]=0x186e5d2e0
+[   1.249] KEBAB MIG-L USER: tid=1705 frame[4]=0x186e61d20
+[   1.249] KEBAB MIG-L USER: tid=1705 frame[5]=0x186ea0bec
+[   1.249] KEBAB MIG-L USER: tid=1705 frame[6]=0x1a061d1b8
+[   1.249] KEBAB MIG-L USER: tid=1705 frame[7]=0x1811c8a5c
+[   1.249] KEBAB MIG-L USER: tid=1705 frame[8]=0x1d1b9c0ec
+[   1.249] KEBAB MIG-L USER: tid=1705 frame[9]=0x1d1b9a72c
+[   1.249] KEBAB MIG-L IPC: tid=1705 opt=507000806 b=0 sz=2 v=1 r=0 l=d003 q=d003 id=0 lookup=0
+[   1.249] KEBAB MIG-L IPC-OWNER: tid=1705 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   1.249] KEBAB MIG-L: tid=14039 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200daa5fe8 continuation=0xfffffe000694ca64 user=0.260135 sys=0.118752
+[   1.249] KEBAB MIG-L USER: tid=14039 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16b946b50; best-effort, target may resume
+[   1.249] KEBAB MIG-L USER: tid=14039 frame[0]=0x1d1b9a720
+[   1.249] KEBAB MIG-L: tid=15441 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200d6c1fe8 continuation=0xfffffe000694ca64 user=0.129261 sys=0.055212
+[   1.249] KEBAB MIG-L USER: tid=15441 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16b9d2b50; best-effort, target may resume
+[   1.249] KEBAB MIG-L USER: tid=15441 frame[0]=0x1d1b9a720
+[   1.249] KEBAB MIG-L: tid=16357 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200cf48bf8 continuation=0xfffffe000694ca64 user=0.017239 sys=0.007624
+[   1.249] KEBAB MIG-L USER: tid=16357 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16ba5eb50; best-effort, target may resume
+[   1.249] KEBAB MIG-L USER: tid=16357 frame[0]=0x1d1b9a720
+[   1.249] KEBAB MIG-L: tid=16359 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200d765fe8 continuation=0xfffffe000694ca64 user=0.028761 sys=0.010343
+[   1.249] KEBAB MIG-L USER: tid=16359 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16baeab50; best-effort, target may resume
+[   1.249] KEBAB MIG-L USER: tid=16359 frame[0]=0x1d1b9a720
+[   1.249] KEBAB MIG-L: tid=16458 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200d024bf8 continuation=0xfffffe000694ca64 user=0.014378 sys=0.007144
+[   1.249] KEBAB MIG-L USER: tid=16458 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16bb76b50; best-effort, target may resume
+[   1.249] KEBAB MIG-L USER: tid=16458 frame[0]=0x1d1b9a720
+[   1.249] KEBAB MIG-L: tid=16459 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe200d025fe8 continuation=0xfffffe000694ca64 user=0.000000 sys=0.000018
+[   1.249] KEBAB MIG-L USER: tid=16459 saved pc=0x0 lr=0x0 fp=0x0; best-effort, target may resume
+[   1.249] KEBAB MIG-L: snapshot end; addresses name kernel waits, not user PCs
+[   1.249] KEBAB MIG: observer end; no suspension or modification; user frames are best-effort reads
+[   1.249] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.249] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.249] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.249] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.249] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.249] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.249] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.249] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.249] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.249] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.249] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.249] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.249] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.249] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.249] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   1.249] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   1.249] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   1.249] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[2026-11-01T15:33:44] MIG actual completion observed
+[2026-11-01T15:33:44] Sent PROC once; awaiting actual marker
+[   1.311] KEBAB PROC: active process snapshot begin (cap512)
+[   1.311] KEBAB PROC: pid=1544 parent=1 state=2 flags=0x4004004 name=betaenrollmentd
+[   1.311] KEBAB PROC: pid=1543 parent=1 state=2 flags=0x4004004 name=PhotosPosterProv
+[   1.311] KEBAB PROC: pid=1542 parent=1 state=2 flags=0x4004004 name=UnityPosterExten
+[   1.311] KEBAB PROC: pid=1541 parent=1 state=2 flags=0x4004004 name=PridePosterExten
+[   1.311] KEBAB PROC: pid=1540 parent=1 state=2 flags=0x4004004 name=EmojiPosterExten
+[   1.311] KEBAB PROC: pid=1539 parent=1 state=2 flags=0x4004004 name=WeatherPoster
+[   1.311] KEBAB PROC: pid=1538 parent=1 state=2 flags=0x4004004 name=ExtragalacticPos
+[   1.311] KEBAB PROC: pid=1536 parent=1 state=2 flags=0x4004004 name=GradientPosterEx
+[   1.311] KEBAB PROC: pid=1535 parent=1 state=2 flags=0x4004004 name=extensionkitserv
+[   1.312] KEBAB PROC: pid=1533 parent=1 state=2 flags=0x4004004 name=PhotosPosterProv
+[   1.312] KEBAB PROC: pid=1532 parent=1 state=2 flags=0x4004004 name=UnityPosterExten
+[   1.312] KEBAB PROC: pid=1531 parent=1 state=2 flags=0x4004004 name=PridePosterExten
+[   1.312] KEBAB PROC: pid=1530 parent=1 state=2 flags=0x4004004 name=EmojiPosterExten
+[   1.312] KEBAB PROC: pid=1529 parent=1 state=2 flags=0x4004004 name=WeatherPoster
+[   1.312] KEBAB PROC: pid=1528 parent=1 state=2 flags=0x4004004 name=ExtragalacticPos
+[   1.312] KEBAB PROC: pid=1526 parent=1 state=2 flags=0x4004004 name=GradientPosterEx
+[   1.312] KEBAB PROC: pid=1525 parent=1 state=2 flags=0x4004004 name=extensionkitserv
+[   1.312] KEBAB PROC: pid=1363 parent=1 state=2 flags=0x4004004 name=mediaanalysisd
+[   1.312] KEBAB PROC: pid=1257 parent=1 state=2 flags=0x4004004 name=clipserviced
+[   1.312] KEBAB PROC: pid=1224 parent=1 state=2 flags=0x4004004 name=cloudphotod
+[   1.312] KEBAB PROC: pid=1138 parent=1 state=2 flags=0x4004004 name=DPSubmissionServ
+[   1.312] KEBAB PROC: pid=1130 parent=1 state=2 flags=0x4004004 name=dprivacyd
+[   1.312] KEBAB PROC: pid=1115 parent=1 state=2 flags=0x4004004 name=idcredd
+[   1.312] KEBAB PROC: pid=1073 parent=1 state=2 flags=0x4004004 name=com.apple.SiriTT
+[   1.312] KEBAB PROC: pid=1071 parent=1 state=2 flags=0x4004004 name=bird
+[   1.312] KEBAB PROC: pid=985 parent=1 state=2 flags=0x4004004 name=ASPCarryLog
+[   1.312] KEBAB PROC: pid=984 parent=1 state=2 flags=0x4004004 name=online-auth-agen
+[   1.312] KEBAB PROC: pid=983 parent=1 state=2 flags=0x4004004 name=fitnesscoachingd
+[   1.312] KEBAB PROC: pid=961 parent=1 state=2 flags=0x4004004 name=metrickitd
+[   1.312] KEBAB PROC: pid=939 parent=1 state=2 flags=0x4004004 name=HistoricalAnalyz
+[   1.312] KEBAB PROC: pid=938 parent=1 state=2 flags=0x4004004 name=DayStreamProcess
+[   1.312] KEBAB PROC: pid=917 parent=1 state=2 flags=0x4004004 name=healthappd
+[   1.312] KEBAB PROC: pid=485 parent=1 state=2 flags=0x4004004 name=LegacyProfilesSu
+[   1.312] KEBAB PROC: pid=484 parent=1 state=2 flags=0x4004004 name=AccountSubscribe
+[   1.312] KEBAB PROC: pid=482 parent=1 state=2 flags=0x4004004 name=InteractiveLegac
+[   1.312] KEBAB PROC: pid=481 parent=1 state=2 flags=0x4004004 name=ManagementTestSu
+[   1.312] KEBAB PROC: pid=480 parent=1 state=2 flags=0x4004004 name=PasscodeSettings
+[   1.312] KEBAB PROC: pid=469 parent=1 state=2 flags=0x4004004 name=remotemanagement
+[   1.312] KEBAB PROC: pid=352 parent=1 state=2 flags=0x4004004 name=OTATaskingAgent
+[   1.312] KEBAB PROC: pid=341 parent=1 state=2 flags=0x4004004 name=medialibraryd
+[   1.312] KEBAB PROC: pid=307 parent=1 state=2 flags=0x4004004 name=photoanalysisd
+[   1.312] KEBAB PROC: pid=304 parent=1 state=2 flags=0x4004004 name=AppPredictionInt
+[   1.312] KEBAB PROC: pid=292 parent=1 state=2 flags=0x4004004 name=budd
+[   1.312] KEBAB PROC: pid=291 parent=1 state=2 flags=0x4004004 name=AccessibilityUIS
+[   1.312] KEBAB PROC: pid=284 parent=1 state=2 flags=0x4004004 name=carkitd
+[   1.312] KEBAB PROC: pid=282 parent=1 state=2 flags=0x4004004 name=Setup
+[   1.312] KEBAB PROC: pid=267 parent=1 state=2 flags=0x4004004 name=coresymbolicatio
+[   1.312] KEBAB PROC: pid=265 parent=1 state=2 flags=0x4004004 name=iconservicesagen
+[   1.312] KEBAB PROC: pid=254 parent=1 state=2 flags=0x4004004 name=ReportCrash
+[   1.312] KEBAB PROC: pid=253 parent=1 state=2 flags=0x4004004 name=assetsd
+[   1.312] KEBAB PROC: pid=243 parent=1 state=2 flags=0x4004004 name=UserFontManager
+[   1.312] KEBAB PROC: pid=242 parent=1 state=2 flags=0x4004004 name=CalendarWidgetEx
+[   1.312] KEBAB PROC: pid=241 parent=1 state=2 flags=0x4004004 name=fontservicesd
+[   1.312] KEBAB PROC: pid=240 parent=1 state=2 flags=0x4004004 name=MessagesActionEx
+[   1.312] KEBAB PROC: pid=239 parent=1 state=2 flags=0x4004004 name=MailShortcutsExt
+[   1.312] KEBAB PROC: pid=238 parent=1 state=2 flags=0x4004004 name=SafariLinkExtens
+[   1.312] KEBAB PROC: pid=237 parent=1 state=2 flags=0x4004004 name=CalendarFocusCon
+[   1.312] KEBAB PROC: pid=236 parent=1 state=2 flags=0x4004004 name=extensionkitserv
+[   1.312] KEBAB PROC: pid=234 parent=1 state=2 flags=0x4004004 name=LockScreenPeople
+[   1.312] KEBAB PROC: pid=233 parent=1 state=2 flags=0x4004004 name=FitnessWidget
+[   1.312] KEBAB PROC: pid=232 parent=1 state=2 flags=0x4004004 name=extensionkitserv
+[   1.312] KEBAB PROC: pid=229 parent=1 state=2 flags=0x4004004 name=localizationswit
+[   1.312] KEBAB PROC: pid=228 parent=1 state=2 flags=0x4004004 name=ndoagent
+[   1.312] KEBAB PROC: pid=227 parent=1 state=2 flags=0x4004004 name=diagnosticextens
+[   1.312] KEBAB PROC: pid=226 parent=1 state=2 flags=0x4004004 name=osanalyticshelpe
+[   1.312] KEBAB PROC: pid=224 parent=1 state=2 flags=0x4004004 name=KonaSynthesizer
+[   1.312] KEBAB PROC: pid=223 parent=1 state=2 flags=0x4004004 name=MacinTalkAUSP
+[   1.312] KEBAB PROC: pid=221 parent=1 state=2 flags=0x4004004 name=parsecd
+[   1.312] KEBAB PROC: pid=220 parent=1 state=2 flags=0x4004004 name=linkd
+[   1.312] KEBAB PROC: pid=219 parent=1 state=2 flags=0x4004004 name=pasted
+[   1.312] KEBAB PROC: pid=218 parent=1 state=2 flags=0x4004004 name=UARPUpdaterServi
+[   1.312] KEBAB PROC: pid=217 parent=1 state=2 flags=0x4004004 name=UARPUpdaterServi
+[   1.312] KEBAB PROC: pid=216 parent=1 state=2 flags=0x4004004 name=UARPUpdaterServi
+[   1.312] KEBAB PROC: pid=215 parent=1 state=2 flags=0x4004004 name=UARPUpdaterServi
+[   1.312] KEBAB PROC: pid=214 parent=1 state=2 flags=0x4004004 name=SiriTTSSynthesiz
+[   1.312] KEBAB PROC: pid=213 parent=1 state=2 flags=0x4004004 name=destinationd
+[   1.312] KEBAB PROC: pid=212 parent=1 state=2 flags=0x4004004 name=rtcreportingd
+[   1.312] KEBAB PROC: pid=211 parent=1 state=2 flags=0x4004004 name=HeuristicInterpr
+[   1.312] KEBAB PROC: pid=210 parent=1 state=2 flags=0x4004004 name=sosd
+[   1.312] KEBAB PROC: pid=209 parent=1 state=2 flags=0x4004004 name=CMFSyncAgent
+[   1.312] KEBAB PROC: pid=208 parent=1 state=2 flags=0x4004004 name=ospredictiond
+[   1.312] KEBAB PROC: pid=206 parent=1 state=2 flags=0x4004004 name=mmaintenanced
+[   1.312] KEBAB PROC: pid=205 parent=1 state=2 flags=0x4004004 name=maild
+[   1.312] KEBAB PROC: pid=204 parent=1 state=2 flags=0x4004004 name=financed
+[   1.312] KEBAB PROC: pid=203 parent=1 state=2 flags=0x4004004 name=voiced
+[   1.312] KEBAB PROC: pid=200 parent=1 state=2 flags=0x4004004 name=com.apple.CallKi
+[   1.312] KEBAB PROC: pid=199 parent=1 state=2 flags=0x4004004 name=useractivityd
+[   1.312] KEBAB PROC: pid=198 parent=1 state=2 flags=0x4004004 name=contactsdonation
+[   1.312] KEBAB PROC: pid=197 parent=1 state=2 flags=0x4004004 name=com.apple.FaceTi
+[   1.312] KEBAB PROC: pid=196 parent=1 state=2 flags=0x4004004 name=intelligenceplat
+[   1.312] KEBAB PROC: pid=195 parent=1 state=2 flags=0x4004004 name=itunescloudd
+[   1.312] KEBAB PROC: pid=194 parent=1 state=2 flags=0x4004004 name=countryd
+[   1.312] KEBAB PROC: pid=193 parent=1 state=2 flags=0x4004004 name=deleted
+[   1.312] KEBAB PROC: pid=192 parent=1 state=2 flags=0x4004004 name=parsec-fbf
+[   1.312] KEBAB PROC: pid=191 parent=1 state=2 flags=0x4004004 name=siriinferenced
+[   1.312] KEBAB PROC: pid=190 parent=1 state=2 flags=0x4004004 name=CAReportingServi
+[   1.312] KEBAB PROC: pid=188 parent=1 state=2 flags=0x4004004 name=geod
+[   1.312] KEBAB PROC: pid=187 parent=1 state=2 flags=0x4004004 name=ckdiscretionaryd
+[   1.312] KEBAB PROC: pid=186 parent=1 state=2 flags=0x4004004 name=privacyaccountin
+[   1.312] KEBAB PROC: pid=185 parent=1 state=2 flags=0x4004004 name=announced
+[   1.312] KEBAB PROC: pid=184 parent=1 state=2 flags=0x4004004 name=IMDPersistenceAg
+[   1.312] KEBAB PROC: pid=183 parent=1 state=2 flags=0x4004004 name=fileproviderd
+[   1.312] KEBAB PROC: pid=182 parent=1 state=2 flags=0x4004004 name=contactsd
+[   1.312] KEBAB PROC: pid=181 parent=1 state=2 flags=0x4004004 name=networkservicepr
+[   1.312] KEBAB PROC: pid=180 parent=1 state=2 flags=0x4004004 name=CommCenterMobile
+[   1.312] KEBAB PROC: pid=179 parent=1 state=2 flags=0x4004004 name=fitcored
+[   1.312] KEBAB PROC: pid=178 parent=1 state=2 flags=0x4004004 name=promotedcontentd
+[   1.312] KEBAB PROC: pid=176 parent=1 state=2 flags=0x5004004 name=searchd
+[   1.312] KEBAB PROC: pid=175 parent=1 state=2 flags=0x4004004 name=videosubscriptio
+[   1.312] KEBAB PROC: pid=174 parent=1 state=2 flags=0x4004004 name=suggestd
+[   1.312] KEBAB PROC: pid=173 parent=1 state=2 flags=0x4004004 name=ProtectedCloudKe
+[   1.312] KEBAB PROC: pid=172 parent=1 state=2 flags=0x4004004 name=duetexpertd
+[   1.312] KEBAB PROC: pid=171 parent=1 state=2 flags=0x4004004 name=audioclocksyncd
+[   1.312] KEBAB PROC: pid=170 parent=1 state=2 flags=0x4004004 name=coreauthd
+[   1.312] KEBAB PROC: pid=169 parent=1 state=2 flags=0x4004004 name=ContextService
+[   1.312] KEBAB PROC: pid=167 parent=1 state=2 flags=0x4004004 name=itunesstored
+[   1.313] KEBAB PROC: pid=166 parent=1 state=2 flags=0x4004004 name=pkd
+[   1.313] KEBAB PROC: pid=165 parent=1 state=2 flags=0x4004004 name=homed
+[   1.313] KEBAB PROC: pid=164 parent=1 state=2 flags=0x4004004 name=adid
+[   1.313] KEBAB PROC: pid=163 parent=1 state=2 flags=0x4004004 name=followupd
+[   1.313] KEBAB PROC: pid=161 parent=1 state=2 flags=0x4004004 name=cdpd
+[   1.313] KEBAB PROC: pid=160 parent=1 state=2 flags=0x4004004 name=cryptexd
+[   1.313] KEBAB PROC: pid=159 parent=1 state=2 flags=0x4004004 name=swcd
+[   1.313] KEBAB PROC: pid=158 parent=1 state=2 flags=0x4004004 name=nesessionmanager
+[   1.313] KEBAB PROC: pid=157 parent=1 state=2 flags=0x4004004 name=awdd
+[   1.313] KEBAB PROC: pid=156 parent=1 state=2 flags=0x4004004 name=misagent
+[   1.313] KEBAB PROC: pid=155 parent=1 state=2 flags=0x4004004 name=gamed
+[   1.313] KEBAB PROC: pid=154 parent=1 state=2 flags=0x4004004 name=triald
+[   1.313] KEBAB PROC: pid=153 parent=1 state=2 flags=0x4004004 name=avatarsd
+[   1.313] KEBAB PROC: pid=145 parent=1 state=2 flags=0x4004004 name=UsageTrackingAge
+[   1.313] KEBAB PROC: pid=152 parent=1 state=2 flags=0x4004004 name=nanotimekitcompa
+[   1.313] KEBAB PROC: pid=151 parent=1 state=2 flags=0x4004004 name=familycircled
+[   1.313] KEBAB PROC: pid=150 parent=1 state=2 flags=0x4004004 name=sociallayerd
+[   1.313] KEBAB PROC: pid=149 parent=1 state=2 flags=0x4004004 name=appstored
+[   1.313] KEBAB PROC: pid=148 parent=1 state=2 flags=0x4004004 name=nsurlsessiond
+[   1.313] KEBAB PROC: pid=147 parent=1 state=2 flags=0x4004004 name=kbd
+[   1.313] KEBAB PROC: pid=146 parent=1 state=2 flags=0x4004004 name=fmfd
+[   1.313] KEBAB PROC: pid=144 parent=1 state=2 flags=0x4004004 name=searchpartyd
+[   1.313] KEBAB PROC: pid=143 parent=1 state=2 flags=0x4004004 name=transparencyd
+[   1.313] KEBAB PROC: pid=142 parent=1 state=2 flags=0x4004004 name=FamilyControlsAg
+[   1.313] KEBAB PROC: pid=141 parent=1 state=2 flags=0x4004004 name=bookassetd
+[   1.313] KEBAB PROC: pid=140 parent=1 state=2 flags=0x4004004 name=siriknowledged
+[   1.313] KEBAB PROC: pid=139 parent=1 state=2 flags=0x4004004 name=amsengagementd
+[   1.313] KEBAB PROC: pid=138 parent=1 state=2 flags=0x4004004 name=symptomsd-diag
+[   1.313] KEBAB PROC: pid=137 parent=1 state=2 flags=0x4004004 name=CallHistorySyncH
+[   1.313] KEBAB PROC: pid=136 parent=1 state=2 flags=0x4004004 name=watchlistd
+[   1.313] KEBAB PROC: pid=135 parent=1 state=2 flags=0x4004004 name=coreidvd
+[   1.313] KEBAB PROC: pid=134 parent=1 state=2 flags=0x4004004 name=com.apple.Mobile
+[   1.313] KEBAB PROC: pid=132 parent=1 state=2 flags=0x4004004 name=coreduetd
+[   1.313] KEBAB PROC: pid=131 parent=1 state=2 flags=0x4004004 name=pfd
+[   1.313] KEBAB PROC: pid=130 parent=1 state=2 flags=0x4004004 name=cloudd
+[   1.313] KEBAB PROC: pid=129 parent=1 state=2 flags=0x4004004 name=syncdefaultsd
+[   1.313] KEBAB PROC: pid=128 parent=1 state=2 flags=0x4004004 name=mobileactivation
+[   1.313] KEBAB PROC: pid=127 parent=1 state=2 flags=0x4004004 name=accountsd
+[   1.313] KEBAB PROC: pid=126 parent=1 state=2 flags=0x4004004 name=donotdisturbd
+[   1.313] KEBAB PROC: pid=107 parent=1 state=2 flags=0x4004004 name=callservicesd
+[   1.313] KEBAB PROC: pid=123 parent=1 state=2 flags=0x4004004 name=liveactivitiesd
+[   1.313] KEBAB PROC: pid=119 parent=1 state=2 flags=0x4004004 name=adprivacyd
+[   1.313] KEBAB PROC: pid=125 parent=1 state=2 flags=0x4004004 name=akd
+[   1.313] KEBAB PROC: pid=124 parent=1 state=2 flags=0x4004004 name=chronod
+[   1.313] KEBAB PROC: pid=122 parent=1 state=2 flags=0x4004004 name=CloudKeychainPro
+[   1.313] KEBAB PROC: pid=121 parent=1 state=2 flags=0x4004004 name=mapspushd
+[   1.313] KEBAB PROC: pid=120 parent=1 state=2 flags=0x4004004 name=ScreenTimeAgent
+[   1.313] KEBAB PROC: pid=115 parent=1 state=2 flags=0x4004004 name=dmd
+[   1.313] KEBAB PROC: pid=118 parent=1 state=2 flags=0x4004004 name=appleaccountd
+[   1.313] KEBAB PROC: pid=117 parent=1 state=2 flags=0x4004004 name=calaccessd
+[   1.313] KEBAB PROC: pid=116 parent=1 state=2 flags=0x4004004 name=corespeechd
+[   1.313] KEBAB PROC: pid=114 parent=1 state=2 flags=0x4004004 name=remotepairingdev
+[   1.313] KEBAB PROC: pid=113 parent=1 state=2 flags=0x4004004 name=ind
+[   1.313] KEBAB PROC: pid=111 parent=1 state=2 flags=0x4004004 name=profiled
+[   1.313] KEBAB PROC: pid=112 parent=1 state=2 flags=0x4004004 name=installcoordinat
+[   1.313] KEBAB PROC: pid=109 parent=1 state=2 flags=0x4004004 name=seserviced
+[   1.313] KEBAB PROC: pid=108 parent=1 state=2 flags=0x4004004 name=siriactionsd
+[   1.313] KEBAB PROC: pid=106 parent=1 state=2 flags=0x4004004 name=securityd
+[   1.313] KEBAB PROC: pid=105 parent=1 state=2 flags=0x4004004 name=findmydeviced
+[   1.313] KEBAB PROC: pid=104 parent=1 state=2 flags=0x4004004 name=fmflocatord
+[   1.313] KEBAB PROC: pid=103 parent=1 state=2 flags=0x4004004 name=symptomsd
+[   1.313] KEBAB PROC: pid=102 parent=1 state=2 flags=0x4004004 name=PowerUIAgent
+[   1.313] KEBAB PROC: pid=101 parent=1 state=2 flags=0x4004004 name=apsd
+[   1.313] KEBAB PROC: pid=100 parent=1 state=2 flags=0x4004004 name=mDNSResponder
+[   1.313] KEBAB PROC: pid=99 parent=1 state=2 flags=0x4004004 name=lsd
+[   1.313] KEBAB PROC: pid=98 parent=1 state=2 flags=0x4004004 name=mobileassetd
+[   1.313] KEBAB PROC: pid=97 parent=1 state=2 flags=0x4004004 name=nehelper
+[   1.313] KEBAB PROC: pid=96 parent=1 state=2 flags=0x4004004 name=ACCHWComponentAu
+[   1.313] KEBAB PROC: pid=95 parent=1 state=2 flags=0x4004004 name=MobileGestaltHel
+[   1.313] KEBAB PROC: pid=94 parent=1 state=2 flags=0x4004004 name=analyticsd
+[   1.313] KEBAB PROC: pid=93 parent=1 state=2 flags=0x4004004 name=cfprefsd
+[   1.313] KEBAB PROC: pid=92 parent=1 state=2 flags=0x4004004 name=logd_helper
+[   1.313] KEBAB PROC: pid=40 parent=1 state=2 flags=0x4004004 name=atc
+[   1.313] KEBAB PROC: pid=50 parent=1 state=2 flags=0x4004004 name=softwareupdated
+[   1.313] KEBAB PROC: pid=76 parent=1 state=2 flags=0x4004004 name=aggregated
+[   1.313] KEBAB PROC: pid=48 parent=1 state=2 flags=0x4004004 name=seld
+[   1.313] KEBAB PROC: pid=45 parent=1 state=2 flags=0x4004004 name=familynotificati
+[   1.313] KEBAB PROC: pid=67 parent=1 state=2 flags=0x4004004 name=nanoprefsyncd
+[   1.313] KEBAB PROC: pid=56 parent=1 state=2 flags=0x4004004 name=contextstored
+[   1.313] KEBAB PROC: pid=58 parent=1 state=2 flags=0x4004004 name=askpermissiond
+[   1.313] KEBAB PROC: pid=86 parent=1 state=2 flags=0x4004004 name=amsaccountsd
+[   1.313] KEBAB PROC: pid=54 parent=1 state=2 flags=0x4004004 name=wcd
+[   1.313] KEBAB PROC: pid=42 parent=1 state=2 flags=0x4004004 name=biomed
+[   1.313] KEBAB PROC: pid=79 parent=1 state=2 flags=0x4004004 name=remindd
+[   1.313] KEBAB PROC: pid=81 parent=1 state=2 flags=0x4004004 name=navd
+[   1.313] KEBAB PROC: pid=77 parent=1 state=2 flags=0x4004004 name=OTACrashCopier
+[   1.313] KEBAB PROC: pid=80 parent=1 state=2 flags=0x4004004 name=peakpowermanager
+[   1.313] KEBAB PROC: pid=70 parent=1 state=2 flags=0x4004004 name=bluetoothuserd
+[   1.313] KEBAB PROC: pid=73 parent=1 state=2 flags=0x4004004 name=passd
+[   1.313] KEBAB PROC: pid=66 parent=1 state=2 flags=0x4004004 name=cloudpaird
+[   1.313] KEBAB PROC: pid=59 parent=1 state=2 flags=0x4004004 name=magicswitchd
+[   1.313] KEBAB PROC: pid=69 parent=1 state=2 flags=0x4004004 name=dasd
+[   1.313] KEBAB PROC: pid=62 parent=1 state=2 flags=0x4004004 name=ManagedSettingsA
+[   1.313] KEBAB PROC: pid=41 parent=1 state=2 flags=0x4004004 name=WirelessRadioMan
+[   1.313] KEBAB PROC: pid=88 parent=1 state=2 flags=0x4004004 name=CommCenter
+[   1.313] KEBAB PROC: pid=87 parent=1 state=2 flags=0x4004004 name=fairplayd.H2
+[   1.313] KEBAB PROC: pid=91 parent=1 state=2 flags=0x4004004 name=notifyd
+[   1.313] KEBAB PROC: pid=78 parent=1 state=2 flags=0x4004004 name=AppleCredentialM
+[   1.313] KEBAB PROC: pid=89 parent=1 state=2 flags=0x4004004 name=fseventsd
+[   1.313] KEBAB PROC: pid=84 parent=1 state=2 flags=0x4004004 name=usermanagerd
+[   1.313] KEBAB PROC: pid=82 parent=1 state=2 flags=0x4004004 name=rapportd
+[   1.313] KEBAB PROC: pid=75 parent=1 state=2 flags=0x4004004 name=distnoted
+[   1.313] KEBAB PROC: pid=74 parent=1 state=2 flags=0x4004004 name=lockdownd
+[   1.313] KEBAB PROC: pid=72 parent=1 state=2 flags=0x4004004 name=ptpd
+[   1.314] KEBAB PROC: pid=71 parent=1 state=2 flags=0x4004004 name=sleepd
+[   1.314] KEBAB PROC: pid=61 parent=1 state=2 flags=0x4004004 name=sharingd
+[   1.314] KEBAB PROC: pid=64 parent=1 state=2 flags=0x4004004 name=imagent
+[   1.314] KEBAB PROC: pid=68 parent=1 state=2 flags=0x4004004 name=driverkitd
+[   1.374] KEBAB PROC: pid=60 parent=1 state=2 flags=0x4004004 name=timed
+[   1.374] KEBAB PROC: pid=65 parent=1 state=2 flags=0x4004004 name=containermanager
+[   1.374] KEBAB PROC: pid=63 parent=1 state=2 flags=0x4004004 name=locationd
+[   1.374] KEBAB PROC: pid=57 parent=1 state=2 flags=0x4004004 name=backboardd
+[   1.374] KEBAB PROC: pid=55 parent=1 state=2 flags=0x4004004 name=thermalmonitord
+[   1.374] KEBAB PROC: pid=52 parent=1 state=2 flags=0x4004004 name=nfcd
+[   1.374] KEBAB PROC: pid=53 parent=1 state=2 flags=0x4004004 name=identityservices
+[   1.374] KEBAB PROC: pid=49 parent=1 state=2 flags=0x4004004 name=mobiletimerd
+[   1.374] KEBAB PROC: pid=51 parent=1 state=2 flags=0x4004004 name=watchdogd
+[   1.374] KEBAB PROC: pid=46 parent=1 state=2 flags=0x4004004 name=amfid
+[   1.374] KEBAB PROC: pid=44 parent=1 state=2 flags=0x4004004 name=keybagd
+[   1.374] KEBAB PROC: pid=38 parent=1 state=2 flags=0x4004004 name=tccd
+[   1.374] KEBAB PROC: pid=37 parent=1 state=2 flags=0x4004004 name=accessoryupdater
+[   1.374] KEBAB PROC: pid=43 parent=1 state=2 flags=0x4004004 name=remoted
+[   1.374] KEBAB PROC: pid=33 parent=1 state=2 flags=0x4004004 name=axassetsd
+[   1.374] KEBAB PROC: pid=39 parent=1 state=2 flags=0x4004004 name=powerd
+[   1.374] KEBAB PROC: pid=35 parent=1 state=2 flags=0x4004004 name=healthd
+[   1.374] KEBAB PROC: pid=36 parent=1 state=2 flags=0x400400c name=configd
+[   1.374] KEBAB PROC: pid=34 parent=1 state=2 flags=0x44004004 name=misd
+[   1.374] KEBAB PROC: pid=30 parent=1 state=2 flags=0x4004004 name=assistantd
+[   1.374] KEBAB PROC: pid=32 parent=1 state=2 flags=0x4004004 name=mediaremoted
+[   1.374] KEBAB PROC: pid=31 parent=1 state=2 flags=0x4004004 name=routined
+[   1.374] KEBAB PROC: pid=29 parent=1 state=2 flags=0x4004004 name=mediaserverd
+[   1.374] KEBAB PROC: pid=28 parent=1 state=2 flags=0x4004004 name=peopled
+[   1.374] KEBAB PROC: pid=26 parent=1 state=2 flags=0x4004004 name=runningboardd
+[   1.374] KEBAB PROC: pid=25 parent=1 state=2 flags=0x4004004 name=logd
+[   1.374] KEBAB PROC: pid=24 parent=1 state=2 flags=0x4004004 name=UserEventAgent
+[   1.374] KEBAB PROC: pid=27 parent=1 state=2 flags=0x4004004 name=SpringBoard
+[   1.374] KEBAB PROC: pid=1 parent=0 state=2 flags=0x4004 name=launchd
+[   1.374] KEBAB PROC: pid=0 parent=0 state=2 flags=0x204 name=kernel_task
+[   1.374] KEBAB PROC: snapshot end count=254
+[2026-11-01T15:33:44] PROC actual completion observed
+[2026-11-01T15:33:44] Sent DRV once; awaiting actual marker
+[   1.435] KEBAB SMP: selected=8 limit=8; SMP observation, no AMP/frequency-policy claim
+[   1.435] KEBAB SMP: cpu=0 mpidr=0x0 cluster=0 type=0 signal=1 timer=474392 sgi=254635 valid=1
+[   1.435] KEBAB SMP: cpu=1 mpidr=0x100 cluster=0 type=0 signal=1 timer=467652 sgi=249545 valid=1
+[   1.435] KEBAB SMP: cpu=2 mpidr=0x200 cluster=0 type=0 signal=1 timer=368764 sgi=233355 valid=1
+[   1.435] KEBAB SMP: cpu=3 mpidr=0x300 cluster=0 type=0 signal=1 timer=272712 sgi=221502 valid=1
+[   1.435] KEBAB SMP: cpu=4 mpidr=0x400 cluster=0 type=0 signal=1 timer=247642 sgi=210113 valid=1
+[   1.435] KEBAB SMP: cpu=5 mpidr=0x500 cluster=0 type=0 signal=1 timer=193395 sgi=193368 valid=1
+[   1.435] KEBAB SMP: cpu=6 mpidr=0x600 cluster=0 type=0 signal=1 timer=173565 sgi=185322 valid=1
+[   1.435] KEBAB SMP: cpu=7 mpidr=0x700 cluster=0 type=0 signal=1 timer=186119 sgi=194427 valid=1
+[   1.435] KEBAB MEMORY: physBase=0x200004000 boot_mem=8587837440 actual=8587837440 max_mem=8587837440
+[   1.435] KEBAB DRV: manifest v1; registry state is observed now; C entries have no service
+[   1.435] KEBAB DRV: platform class=KebabPlatformExpert id=100000121 state=0x1e inactive=0 provider=oneplus,kebab
+[   1.435] KEBAB DRV: platform class=KebabPlatformExpert matched=1 valid=1 scope=ADT platform/resources
+[   1.435] KEBAB DRV: image4 class=AppleImage4 id=10000013f state=0x1e inactive=0 provider=defaults
+[   1.435] KEBAB DRV: image4 class=AppleImage4 matched=1 valid=1 scope=original defaults-nub service; startup qualification separate
+[   1.436] KEBAB DRV: aes class=NativeAES id=100000143 state=0x1e inactive=0 provider=IOResources
+[   1.436] KEBAB DRV: aes class=IOAESAccelerator matched=1 valid=1 scope=original crypto-family identity; backend qualification separate
+[   1.436] KEBAB DRV: cpu class=KebabCPU id=10000012f state=0x1e inactive=0 provider=cpu0
+[   1.436] KEBAB DRV: cpu class=KebabCPU id=100000131 state=0x1e inactive=0 provider=cpu1
+[   1.436] KEBAB DRV: cpu class=KebabCPU id=100000133 state=0x1e inactive=0 provider=cpu2
+[   1.436] KEBAB DRV: cpu class=KebabCPU id=100000135 state=0x1e inactive=0 provider=cpu3
+[   1.436] KEBAB DRV: cpu class=KebabCPU id=100000137 state=0x1e inactive=0 provider=cpu4
+[   1.436] KEBAB DRV: cpu class=KebabCPU id=100000139 state=0x1e inactive=0 provider=cpu5
+[   1.436] KEBAB DRV: cpu class=KebabCPU id=10000013b state=0x1e inactive=0 provider=cpu6
+[   1.436] KEBAB DRV: cpu class=KebabCPU id=10000013d state=0x1e inactive=0 provider=cpu7
+[   1.436] KEBAB DRV: cpu class=KebabCPU matched=8+ valid=1 scope=observed topology/counters above; frequency policy separate
+[   1.436] KEBAB DRV: ufs class=KebabBlockStorageDevice id=100000154 state=0x1e inactive=0 provider=oneplus,kebab
+[   1.436] KEBAB DRV: ufs class=KebabBlockStorageDevice id=100000179 state=0x1e inactive=0 provider=oneplus,kebab
+[   1.436] KEBAB DRV: ufs class=KebabBlockStorageDevice matched=2 valid=1 scope=boot C UFS + native storage bridge
+[   1.436] KEBAB DRV: usb backend=C service=none scope=resident DWC3 C core; no normal IOService
+[   1.436] KEBAB DRV: spmi class=KebabSPMIBus id=100000140 state=0x1e inactive=0 provider=kebab-spmi
+[   1.436] KEBAB DRV: spmi class=KebabSPMIBus matched=1 valid=1 scope=ADT arbiter + boot C backend
+[   1.436] KEBAB DRV: pon class=KebabPon id=10000014f state=0x1e inactive=0 provider=pmic-pon
+[   1.436] KEBAB DRV: pon class=KebabPon matched=1 valid=1 scope=scoped PON; panic uses C core directly
+[   1.436] KEBAB DRV: keys class=KebabPmicKeys id=100000150 state=0x1e inactive=0 provider=pmic-keys
+[   1.436] KEBAB DRV: keys class=KebabPmicKeys matched=1 valid=1 scope=raw PMIC sampling; no HID
+[   1.436] KEBAB DRV: rpmh class=KebabVrm id=100000152 state=0x1e inactive=0 provider=rpmh-vrm-policy
+[   1.436] KEBAB DRV: rpmh class=KebabVrm matched=1 valid=1 scope=RSC policy/readback; no IOPM
+[   1.436] KEBAB DRV: geni class=KebabGeniBus id=100000141 state=0x1e inactive=0 provider=kebab-geni13
+[   1.436] KEBAB DRV: geni class=KebabGeniBus matched=1 valid=1 scope=SE13/bitbang transport; boot C mappings
+[   1.436] KEBAB DRV: touch class=KebabTouch id=10000014e state=0x1e inactive=0 provider=synaptics,s3908
+[   1.436] KEBAB DRV: touch class=KebabTouch matched=1 valid=1 scope=typed TCM state; C polling lifetime; no HID
+[   1.436] KEBAB DRV: display class=AppleCLCD id=10000012a state=0x1e inactive=0 provider=KebabPlatformExpert
+[   1.436] KEBAB DRV: display class=AppleCLCD matched=1 valid=1 scope=CPU framebuffer; no GPU/vsync qualification
+[   1.436] KEBAB DRV: surface class=IOCoreSurfaceRoot id=100000144 state=0x1e inactive=0 provider=IOResources
+[   1.436] KEBAB DRV: surface class=IOCoreSurfaceRoot matched=1 valid=1 scope=compatibility selectors; private ABI incomplete
+[   1.436] KEBAB DRV: hid-transport class=KebabHIDTransport id=100000151 state=0x1e inactive=0 provider=KebabTouch
+[   1.436] KEBAB DRV: hid-transport class=KebabHIDTransport id=100000153 state=0x1e inactive=0 provider=KebabPmicKeys
+[   1.436] KEBAB DRV: hid-transport class=KebabHIDTransport matched=2 valid=1 scope=actual backend-ready transport; no synthetic input
+[   1.436] KEBAB DRV: hid-device class=KebabHIDDevice id=100000166 state=0x1e inactive=0 provider=KebabHIDTransport
+[   1.436] KEBAB DRV: hid-device class=KebabHIDDevice id=100000165 state=0x1e inactive=0 provider=KebabHIDTransport
+[   1.436] KEBAB DRV: hid-device class=KebabHIDDevice matched=2 valid=1 scope=original IOHIDDevice subclass; physical reports only
+[   1.436] KEBAB DRV: hid-resource class=IOHIDResource id=100000149 state=0x1e inactive=0 provider=IOResources
+[   1.436] KEBAB DRV: hid-resource class=IOHIDResource matched=1 valid=1 scope=original HIDFamily registry match; not input qualification
+[   1.436] KEBAB DRV: hid-interface class=IOHIDInterface id=100000169 state=0x1e inactive=0 provider=KebabHIDDevice
+[   1.436] KEBAB DRV: hid-interface class=IOHIDInterface id=10000016a state=0x1e inactive=0 provider=KebabHIDDevice
+[   1.436] KEBAB DRV: hid-interface class=IOHIDInterface matched=2 valid=1 scope=actual original interfaces; no invented usage/transport
+[   1.436] KEBAB DRV: hid-event-service class=IOHIDEventDriver id=10000016b state=0x1e inactive=0 provider=IOHIDInterface
+[   1.436] KEBAB DRV: hid-event-service class=IOHIDEventDriver id=10000016c state=0x1e inactive=0 provider=IOHIDInterface
+[   1.436] KEBAB DRV: hid-event-service class=IOHIDEventService matched=2 valid=1 scope=actual published event services; event consumption separate
+[   1.436] KEBAB DRV: hid-event-driver class=IOHIDEventDriver id=10000016b state=0x1e inactive=0 provider=IOHIDInterface
+[   1.436] KEBAB DRV: hid-event-driver class=IOHIDEventDriver id=10000016c state=0x1e inactive=0 provider=IOHIDInterface
+[   1.436] KEBAB DRV: hid-event-driver class=IOHIDEventDriver matched=2 valid=1 scope=actual original report translator matches
+[   1.436] KEBAB HID: role=1 ready=1 interval=16000 contacts=0 backend-error=0 produced=1 dropped=0 sent=1 result=0x0
+[   1.436] KEBAB HID: role=2 ready=1 interval=5000 contacts=10 backend-error=0 produced=0 dropped=0 sent=0 result=0x0
+[   1.436] KEBAB DRV: end; matched service does not certify user ABI or hardware capability
+[2026-11-01T15:33:44] DRV actual completion observed

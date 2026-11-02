@@ -1,0 +1,24 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -1352,8 +1352,9 @@
+ 		fb->release();
+ 		return -1;
+ 	}
+-	/* canvas is the physical panel; GetDisplaySize is the logical display. */
+-	kebab_publish_canvas(provider, (uint32_t)fb->fWidth, (uint32_t)fb->fHeight);
++	/* Original CA selects the last advertised canvas. Keep that canvas in
++	 * logical display pixels; only present() maps it to the real GOP panel. */
++	kebab_publish_canvas(provider, fb->fLogicalW, fb->fLogicalH);
+ 	IOLog("KEBAB FB: started %ux%u, presenting %ux%u\n",
+ 	    (uint32_t)fb->fWidth, (uint32_t)fb->fHeight, fb->fLogicalW, fb->fLogicalH);
+ 	return 0;
+@@ -1362,7 +1363,8 @@
+ /*
+  * The framework reads canvas-width/canvas-height from the service's parent in the
+  * IOService plane as four-byte data, so put them on the platform expert. These
+- * are the physical panel's size; the logical display size comes from selector 8.
++ * describe the logical canvas, consistently with selector 8. Physical panel
++ * dimensions and row bytes remain private to the final GOP copy backend.
+  */
+ static void
+ kebab_publish_canvas(IOService *provider, uint32_t width, uint32_t height)

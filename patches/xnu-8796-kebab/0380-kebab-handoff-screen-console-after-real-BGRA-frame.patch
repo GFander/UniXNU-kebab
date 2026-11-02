@@ -1,0 +1,81 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -58,9 +58,10 @@
+  * Vsync (notification type 5) sends (timestamp, timestamp, 0) as 32-bit
+  * halves to clients that enabled it. The panel memory itself is published
+  * as an IOSurface and returned as the default framebuffer surface. The
+- * kernel text console keeps drawing over the GUI by default: pausing it
+- * (boot-arg kebabfb_noconsole=1, on the first present) mutes the console,
+- * which also hides panics.
++ * normal text console hands the GOP to the first validated full BGRA frame
++ * in measured CPU-framebuffer mode (-cf). The USB tee remains active and
++ * the existing panic_active() console exception still displays panic text.
++ * Explicit kebabfb_noconsole=0 keeps the development screen console.
+  */
+ #include "KebabSurface.h"
+ #include <kern/kebab_capture.h>
+@@ -85,6 +86,7 @@
+ #include <IOKit/system.h>
+ #include <pexpert/pexpert.h>
+ #include <kern/clock.h>
++#include <kern/debug.h>
+ #include <kern/kern_types.h>
+ #include <sys/proc.h>
+ 
+@@ -539,6 +541,24 @@
+ 	IOLockUnlock(fLock);
+ }
+ 
++/* Only a validated real frame may take the screen from normal logging.
++ * serial_console.c tees to USB before this flag and bypasses it for panic. */
++static void
++kebab_fb_handoff_console(bool *paused, uint32_t format, uint32_t planes, bool full)
++{
++    if (*paused || panic_active() || format != KEBAB_FB_FORMAT_BGRA || planes != 0 || !full) return;
++    int quiet = 0;
++    if (!PE_parse_boot_argn("kebabfb_noconsole", &quiet, sizeof(quiet))) {
++        PE_parse_boot_argn("-cf", &quiet, sizeof(quiet));
++    }
++    if (!quiet) return;
++    OSMemoryBarrier();
++    kebab_console_muted = 1;
++    *paused = true;
++    OSMemoryBarrier();
++    IOLog("KEBAB FB CONSOLE: normal-screen=0 usb-tee=1 panic-screen=1; validated full BGRA frame takes GOP\n");
++}
++
+ /* Copy each enabled layer's surface into the panel memory (CPU backend). */
+ void
+ AppleCLCD::present(const uint8_t *rec, uint32_t swapID)
+@@ -547,15 +567,8 @@
+ 	uint32_t displayed[KEBAB_FB_LAYERS] = { 0, 0, 0, 0 };
+ 	FrameTrace trace = {};trace.id = swapID;trace.mask = mask;
+ 
+-	if (!fConsolePaused) {
+-		int quiet = 0;
+-		fConsolePaused = true;
+-		if (PE_parse_boot_argn("kebabfb_noconsole", &quiet, sizeof(quiet)) && quiet != 0) {
+-			/* Not PE_initialize_console(kPEDisableScreen): its console switch
+-			 * writes the read-only-late cons_ops_index and panics on arm64. */
+-			kebab_console_muted = 1;
+-		}
+-	}
++	/* Never overwrite the panic screen with a subsequent queued GUI frame. */
++	if (panic_active()) return;
+ 
+ 	for (uint32_t layer = 0; layer < KEBAB_FB_LAYERS; layer++) {
+ 		uint32_t id = get32(rec, 0x54 + 4 * layer);
+@@ -625,9 +638,12 @@
+ 		    s->memory == NULL || last > s->memory->getLength()) {
+ 			src = 0;
+ 		}
+-		if (src != 0 && bpe == 4) {
++		if (src != 0 && bpe == 4 && s->pixelFormat == KEBAB_FB_FORMAT_BGRA && s->planeCount == 0) {
++            kebab_fb_handoff_console(&fConsolePaused, s->pixelFormat, s->planeCount,
++                dx == 0 && dy == 0 && w == (int32_t)fWidth && h == (int32_t)fHeight);
+ 			trace.bytes += (uint64_t)(size_t)w * 4 * (uint64_t)h;
+ 			for (int32_t y = 0; y < h; y++) {
++                if (panic_active()) { s->release(); return; }
+ 				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+ 				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+ 				    (size_t)w * 4);

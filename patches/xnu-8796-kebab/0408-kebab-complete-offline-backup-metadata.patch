@@ -1,0 +1,29 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -54,7 +54,7 @@
+ extern boolean_t ml_get_interrupts_enabled(void);
+ extern int get_preemption_level(void);
+ #define KEBAB_MG_CACHE_LIMIT (1024u * 1024u)
+-/* Immutable boot-lifetime path, learned only from an original root launchd
++/* Immutable boot-lifetime path, learned only from an original root/mobile launchd
+  * mobileactivationd open. No USB path input or per-device UUID in source. */
+ static char kebab_offline_data_ark_path[160];
+ static uint32_t kebab_offline_data_ark_ready;
+@@ -163,7 +163,7 @@
+     if (!error) error = vn_getpath(vnode, path, &path_size);
+     if (!error) strlcpy(mount_path, stats->f_mntonname, sizeof(mount_path));
+     if (!error && index >= 8 && strcmp(path, kebab_mg_cache_paths[index])) error = EINVAL;
+-    if (!error && index >= 8) kebab_offline_preference_metadata(vnode, index, context);
++    if (!error && (index == 0 || index >= 8)) kebab_offline_preference_metadata(vnode, index, context);
+     uint32_t length = error ? 0 : (uint32_t)before.va_data_size;
+     void *data = NULL, *check = NULL;
+     if (!error) {
+@@ -751,7 +751,7 @@
+     char path[512] = {}; size_t copied = 0;
+     if (copyinstr(address, path, sizeof(path), &copied) || !copied || copied > sizeof(path)) return;
+     path[sizeof(path)-1] = 0;
+-    if (role == 1 && !error && proc_ppid(process) == 1 && proc_getuid(process) == 0)
++    if (role == 1 && !error && proc_ppid(process) == 1 && (proc_getuid(process) == 0 || proc_getuid(process) == 501))
+         kebab_offline_remember_data_ark(path);
+     if (!kebab_location_io_contains(path, "purplebuddy", 11) &&
+         !kebab_location_io_contains(path, "activation", 10) &&

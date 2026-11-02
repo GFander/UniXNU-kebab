@@ -1,0 +1,58 @@
+--- a/bsd/kern/sys_work_interval.c
++++ b/bsd/kern/sys_work_interval.c
+@@ -37,6 +37,32 @@
+ #include <kern/work_interval.h>
+ 
+ #include <libkern/libkern.h>
++#if defined(KEBAB)
++#include <sys/proc.h>
++#include <kern/policy_internal.h>
++#endif
++
++#if defined(KEBAB)
++/* Bounded CREATE2 evidence only; retain original authorization and errors. */
++static void
++kebab_work_interval_create_evidence(proc_t p, const char *phase,
++    uint32_t flags, int result)
++{
++    static uint32_t reported;
++    unsigned slot;
++    if ((flags & WORK_INTERVAL_TYPE_MASK) != WORK_INTERVAL_TYPE_CA_CLIENT) return;
++    slot = __atomic_load_n(&reported, __ATOMIC_RELAXED);
++    do {
++        if (slot >= 32) return;
++    } while (!__atomic_compare_exchange_n(&reported, &slot, slot + 1, false,
++        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
++    char name[32] = {};
++    proc_name(proc_pid(p), name, sizeof(name));
++    printf("KEBAB WORK INTERVAL: pid=%d name=%.31s phase=%s flags=0x%x result=%d app=%u; original create and permission checks retained\n",
++        proc_pid(p), name, phase, flags, result, task_is_app(current_task()));
++}
++#endif
++
+ 
+ int
+ work_interval_ctl(__unused proc_t p, struct work_interval_ctl_args *uap,
+@@ -68,7 +94,11 @@
+ 			return error;
+ 		}
+ 
+-		if ((error = priv_check_cred(kauth_cred_get(), PRIV_WORK_INTERVAL, 0)) != 0) {
++		error = priv_check_cred(kauth_cred_get(), PRIV_WORK_INTERVAL, 0);
++#if defined(KEBAB)
++		kebab_work_interval_create_evidence(p, "privilege", create_params.wicp_create_flags, error);
++#endif
++		if (error != 0) {
+ 			return error;
+ 		}
+ 
+@@ -79,6 +109,9 @@
+ 		};
+ 
+ 		kret = kern_work_interval_create(current_thread(), &create_args);
++#if defined(KEBAB)
++		kebab_work_interval_create_evidence(p, "create", create_params.wicp_create_flags, kret);
++#endif
+ 
+ 		/* thread already has a work interval */
+ 		if (kret == KERN_FAILURE) {

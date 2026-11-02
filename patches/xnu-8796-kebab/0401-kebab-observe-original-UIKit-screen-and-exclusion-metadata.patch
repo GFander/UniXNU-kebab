@@ -1,0 +1,93 @@
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -388,6 +388,82 @@
+         kebab_ca_u32(map, value_address, &again) && again == *value;
+ }
+ 
++/* Fixed20H392 original screen metadata. No API invocation or user writes.
++ * The initialized original screen-array slots are candidates, not an assumed
++ * NSArray ABI: accept one unique exact UIScreen object, otherwise refuse.
++ * Repeated reads are best effort and do not hold an original producer lock. */
++struct kebab_ui_screen_observation {
++    uint64_t bounds[4], scale, idiom, pixels[2], exclusion[4], shape_class;
++    uint32_t provider_kind, configuration_kind, shape_kind, fallback;
++};
++static int
++kebab_ui_screen_observe(vm_map_t map, struct kebab_ui_screen_observation *out)
++{
++    uint64_t once, array, slots[3], again_array, again_once, code;
++    if (!kebab_ca_u64(map, 0x188da09e8ULL, &code) || code != 0xd65f03c0fd402800ULL ||
++        !kebab_ca_u64(map, 0x189b29f68ULL, &code) || code != 0xd65f03c0f9401400ULL ||
++        !kebab_ca_u64(map, 0x19b91ea28ULL, &code) || code != 0xd65f03c06d458400ULL) return 1;
++    if (!kebab_ca_u64(map, 0x1e1db7d58ULL, &once) || once != UINT64_MAX ||
++        !kebab_ca_u64(map, 0x1e1db7d60ULL, &array) || !array ||
++        !kebab_plugin_user_copy(map, array, slots, sizeof(slots))) return 2;
++    uint64_t screen = 0; unsigned found = 0;
++    for (unsigned index = 1; index <= 2; index++) {
++        uint64_t isa;
++        if (!slots[index] || !kebab_ca_u64(map, slots[index], &isa) ||
++            !kebab_shell_isa(isa, 0x1e1db2448ULL)) continue;
++        if (screen != slots[index]) { screen = slots[index]; found++; }
++    }
++    if (found != 1) return 3;
++    uint64_t first[21], second[21];
++    if (!kebab_plugin_user_copy(map, screen, first, sizeof(first)) ||
++        !kebab_plugin_user_copy(map, screen, second, sizeof(second)) ||
++        memcmp(first, second, sizeof(first)) || !kebab_shell_isa(first[0], 0x1e1db2448ULL)) return 4;
++    memcpy(out->bounds, &first[1], sizeof(out->bounds));
++    out->scale = first[10]; out->idiom = first[12];
++    uint64_t provider = first[19], configuration = first[20], isa, shape = 0;
++    if (configuration) {
++        out->configuration_kind = 2;
++        if (kebab_ca_u64(map, configuration, &isa) && kebab_shell_isa(isa, 0x1e1dd3358ULL) &&
++            kebab_plugin_user_copy(map, configuration + 0x58, out->pixels, sizeof(out->pixels)))
++            out->configuration_kind = 1;
++    }
++    if (provider) {
++        out->provider_kind = 2;
++        if (kebab_ca_u64(map, provider, &isa) && kebab_shell_isa(isa, 0x1dce45910ULL) &&
++            kebab_ca_u64(map, provider + 0x28, &shape)) out->provider_kind = 1;
++    }
++    if (shape) {
++        out->shape_kind = 2;
++        uint32_t offset;
++        if (kebab_ca_u64(map, shape, &isa)) {
++            out->shape_class = isa & 0xffffffff8ULL;
++            if (kebab_shell_isa(isa, 0x1e1dda8f8ULL) &&
++                kebab_ca_u32(map, 0x1dd254b34ULL, &offset) && offset == 8 &&
++                kebab_plugin_user_copy(map, shape + offset, out->exclusion, sizeof(out->exclusion)))
++                out->shape_kind = 1;
++        }
++    }
++    uint64_t cached_provider;
++    if (kebab_ca_u64(map, 0x1e1dba130ULL, &cached_provider))
++        out->fallback = cached_provider == 0x1dce2afe8ULL ? 1 : cached_provider ? 2 : 0;
++    if (!kebab_ca_u64(map, 0x1e1db7d58ULL, &again_once) || again_once != once ||
++        !kebab_ca_u64(map, 0x1e1db7d60ULL, &again_array) || again_array != array) return 5;
++    return 0;
++}
++static void
++kebab_ui_screen_report(vm_map_t map)
++{
++    struct kebab_ui_screen_observation state = {};
++    int error = kebab_ui_screen_observe(map, &state);
++    printf("KEBAB UI SCREEN: result=%d configuration-kind=%u provider-kind=%u shape-kind=%u fallback=%u; pinned original fields, readonly best effort, no injected getter\n",
++        error, state.configuration_kind, state.provider_kind, state.shape_kind, state.fallback);
++    if (error) return;
++    printf("KEBAB UI SCREEN BITS: bounds=%llx,%llx,%llx,%llx scale=%llx idiom=%llu native-pixels=%llx,%llx\n",
++        state.bounds[0],state.bounds[1],state.bounds[2],state.bounds[3],state.scale,state.idiom,state.pixels[0],state.pixels[1]);
++    printf("KEBAB UI SCREEN SHAPE: class=0x%llx rect-bits=%llx,%llx,%llx,%llx; kind0=absent kind1=original single-rect kind2=unreadable/unsupported\n",
++        state.shape_class,state.exclusion[0],state.exclusion[1],state.exclusion[2],state.exclusion[3]);
++}
++
+ static void
+ kebab_identity_user_report(vm_map_t map)
+ {
+@@ -398,6 +474,7 @@
+         printf("KEBAB IDENTITY USER: cache UUID refused; no inferred answer\n");
+         return;
+     }
++    kebab_ui_screen_report(map);
+     uint32_t value;
+     if (kebab_identity_initialized_u32(map, 0x1e1d7c7d0ULL, 0x1e1d7c740ULL, &value)) {
+         const char *name = value == 1 || value == 11 ? "iPhone" : value == 2 ? "iPod" : value == 3 ? "iPad" : "other";

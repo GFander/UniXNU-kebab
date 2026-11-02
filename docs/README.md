@@ -2,7 +2,7 @@
 
 当前能力以[首页](../README.md)和[STATUS](STATUS.md)为准。阶段文档保留当时状态，必须结合日期、版本和原始收据阅读；不要把较早的“下一步”覆盖到后续验收。
 
-最新主线：[0464–0465 原版 keychain C/D](KEYCHAIN-CD-20261031.md)、[0463 密码学基础与 AKS 调用](CLASS-B-CRYPTO-20261031.md)、[0461–0462 数据库 I/O](LOCATION-DATABASE-IO-20261031.md)及[真实 B 类开发要求](CLASS-B-BACKEND-NEXT-20261031.md)。
+最新主线：[0544真实触点边缘来源](EDGE-GESTURES-0544.md)、[0543屏幕关联与人工失败](EDGE-GESTURES-0543.md)、[0542坐标盲区与人工失败](EDGE-GESTURES-0542.md)、[0541逻辑画布](LAYOUT-SCALING-0541.md)。
 
 ## 当前入口
 
@@ -97,7 +97,32 @@
 
 - [A类保护、锁定准入与原密钥重启恢复](CLASS-A-STORAGE-20261101.md)
 
+- [迁移IPC端口诊断与原加密回归](MIGRATION-IPC-RECEIVERS-20261101.md)
+
+- [迁移端口转交状态与原加密回归](MIGRATION-IPC-PORT-STATE-20261101.md)
+
+- [原版等待服务身份与FairPlay退出现场](MIGRATION-SERVICE-IDENTITY-20261101.md)
+
+- [原版FairPlay返回现场与加密回归](MIGRATION-FAIRPLAY-SYSCALLS-20261101.md)
+
+- [原版FairPlay资源名现场与加密回归](MIGRATION-FAIRPLAY-RESOURCES-20261101.md)
+
+- [原版FairPlay内核类查询与加密回归](MIGRATION-FAIRPLAY-SERVICES-20261101.md)
+
 ## 原始证据与测试
+
+- [0479原版类查询](qualification/0479/)
+
+- [0478资源名现场](qualification/0478/)
+
+- [0477有界返回现场](qualification/0477/)
+
+- [0476服务身份与原加密回归](qualification/0476/)
+
+- [0475端口状态及转交路径](qualification/0475/)
+
+- [0474同步等待完整观察](qualification/0474/)
+- [0472/0473失败与部分结果](qualification/0473/)
 
 - [0471完整重启验收](qualification/0471/)
 - [0470 A类后端、源码与测试](qualification/0470/)
@@ -125,3 +150,9 @@
 - [原首页、交接和草稿归档](history/README.md)
 
 原始日志/样本保持哈希绑定。源码回放、主机模型和真实硬件各自说明，诊断阶段不自动转化为功能完成。
+
+- [0480 原版 FairPlay 组件装载与初始化边界](MIGRATION-FAIRPLAY-PRELINK-20261101.md)。
+
+- [0481–0482 FairPlay 设备子密钥与迁移 OOL 生命周期](MIGRATION-FAIRPLAY-AES-OOL-20261101.md)。
+
+- [0483/0485 原版迁移与check-in成功状态、首帧复制边界](SHELL-FIRST-FRAME-20261101.md)。

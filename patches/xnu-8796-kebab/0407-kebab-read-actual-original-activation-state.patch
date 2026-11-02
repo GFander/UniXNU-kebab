@@ -1,0 +1,129 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -54,6 +54,10 @@
+ extern boolean_t ml_get_interrupts_enabled(void);
+ extern int get_preemption_level(void);
+ #define KEBAB_MG_CACHE_LIMIT (1024u * 1024u)
++/* Immutable boot-lifetime path, learned only from an original root launchd
++ * mobileactivationd open. No USB path input or per-device UUID in source. */
++static char kebab_offline_data_ark_path[160];
++static uint32_t kebab_offline_data_ark_ready;
+ static const char * const kebab_mg_cache_paths[] = {
+     "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist",
+     "/private/var/mobile/Library/Preferences/com.apple.MobileGestalt.plist",
+@@ -68,8 +72,31 @@
+     "/private/var/mobile/Library/Preferences/com.apple.managedconfiguration.notbackedup.plist",
+     "/private/var/mobile/Library/Preferences/com.apple.springboard.plist",
+     "/private/var/mobile/Library/Preferences/com.apple.migration.plist",
+-    "/private/var/root/Library/Lockdown/data_ark.plist"
++    "/private/var/root/Library/Lockdown/data_ark.plist",
++    kebab_offline_data_ark_path,
++    "/private/var/mobile/Library/Logs/mobileactivationd/mobileactivationd.log.0"
+ };
++
++/* Only the original daemon-discovered system-container data_ark filename is
++ * eligible. Publish once with release/acquire; a failed/relative/unexpected
++ * path is not an arbitrary filesystem escape. Snapshot verifies vn_getpath. */
++static void
++kebab_offline_remember_data_ark(const char *path)
++{
++    static const char prefix[] = "/private/var/containers/Data/System/";
++    static const char suffix[] = "/Library/internal/data_ark.plist";
++    if (strlen(path) != sizeof(prefix)-1 + 36 + sizeof(suffix)-1 ||
++        memcmp(path,prefix,sizeof(prefix)-1) || strcmp(path+sizeof(prefix)-1+36,suffix)) return;
++    const char *uuid = path+sizeof(prefix)-1;
++    for (unsigned i = 0; i < 36; i++) {
++        if (i == 8 || i == 13 || i == 18 || i == 23) { if (uuid[i] != '-') return; }
++        else if (!((uuid[i]>='0'&&uuid[i]<='9')||(uuid[i]>='a'&&uuid[i]<='f')||(uuid[i]>='A'&&uuid[i]<='F'))) return;
++    }
++    uint32_t expected = 0;
++    if (!__atomic_compare_exchange_n(&kebab_offline_data_ark_ready,&expected,1,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) return;
++    strlcpy(kebab_offline_data_ark_path,path,sizeof(kebab_offline_data_ark_path));
++    __atomic_store_n(&kebab_offline_data_ark_ready,2,__ATOMIC_RELEASE);
++}
+ 
+ int kebab_identity_cache_snapshot(unsigned, void **, uint32_t *);
+ void kebab_identity_cache_release(void *, uint32_t);
+@@ -95,11 +122,12 @@
+     int error = vnode_getattr(file, &attr, context);
+     size_t xattrs = 0;
+     int xerror = error ? error : vn_listxattr(file, NULL, &xattrs, 0, context);
+-    printf("KEBAB OFFLINE PREF: index=%u error=%d supported=0x%llx fileid=%llu bytes=%llu uid=%u gid=%u mode=0%o flags=0x%x class=%u acl-present=%u acl-entries=%u xattr-error=%d xattr-name-bytes=%lu create=%lld.%09ld access=%lld.%09ld modify=%lld.%09ld change=%lld.%09ld; readonly metadata, no write\n",
++    printf("KEBAB OFFLINE PREF: index=%u error=%d supported=0x%llx fileid=%llu bytes=%llu uid=%u gid=%u mode=0%o flags=0x%x class=%u acl-present=%u acl-entries=%u xattr-error=%d xattr-name-bytes=%lu; readonly metadata, no write\n",
+         index,error,(unsigned long long)attr.va_supported,attr.va_fileid,attr.va_data_size,
+         attr.va_uid,attr.va_gid,attr.va_mode,attr.va_flags,attr.va_dataprotect_class,
+-        attr.va_acl != NULL,attr.va_acl ? attr.va_acl->acl_entrycount : 0,xerror,(unsigned long)xattrs,
+-        (long long)attr.va_create_time.tv_sec,attr.va_create_time.tv_nsec,
++        attr.va_acl != NULL,attr.va_acl ? attr.va_acl->acl_entrycount : 0,xerror,(unsigned long)xattrs);
++    printf("KEBAB OFFLINE PREF TIMES: index=%u create=%lld.%09ld access=%lld.%09ld modify=%lld.%09ld change=%lld.%09ld; readonly\n",
++        index,(long long)attr.va_create_time.tv_sec,attr.va_create_time.tv_nsec,
+         (long long)attr.va_access_time.tv_sec,attr.va_access_time.tv_nsec,
+         (long long)attr.va_modify_time.tv_sec,attr.va_modify_time.tv_nsec,
+         (long long)attr.va_change_time.tv_sec,attr.va_change_time.tv_nsec);
+@@ -112,6 +140,7 @@
+     if (!output || !size) return EINVAL;
+     *output = NULL; *size = 0;
+     if (index >= sizeof(kebab_mg_cache_paths) / sizeof(kebab_mg_cache_paths[0])) return EINVAL;
++    if (index == 14 && __atomic_load_n(&kebab_offline_data_ark_ready,__ATOMIC_ACQUIRE) != 2) return EAGAIN;
+     if (panic_active() || ml_at_interrupt_context() || get_preemption_level() != 0 ||
+         !ml_get_interrupts_enabled()) return EBUSY;
+     vfs_context_t context = vfs_context_current();
+@@ -452,7 +481,7 @@
+ extern void kebab_offline_task_report(task_t, unsigned);
+ void kebab_ui_report(void);
+ struct kebab_ui_snapshot {
+-    const char *name; task_t task; unsigned scanned; int pid; unsigned uid; bool found; uint8_t uuid[16];
++    const char *name; const uint8_t *expected_uuid; task_t task; unsigned scanned; int pid; unsigned uid; bool found; uint8_t uuid[16];
+ };
+ static int
+ kebab_ui_select(proc_t process, void *argument)
+@@ -461,7 +490,10 @@
+     char name[MAXCOMLEN + 1] = {};
+     ++snapshot->scanned;
+     proc_name(proc_pid(process), name, sizeof(name));
+-    if (!strcmp(name, snapshot->name) && proc_ppid(process) == 1) {
++    uint8_t uuid[16] = {};
++    if (snapshot->expected_uuid) proc_getexecutableuuid(process, uuid, sizeof(uuid));
++    bool matches = snapshot->expected_uuid ? !memcmp(uuid,snapshot->expected_uuid,sizeof(uuid)) : !strcmp(name,snapshot->name);
++    if (matches && proc_ppid(process) == 1) {
+         snapshot->found = true;
+         snapshot->pid = proc_pid(process);snapshot->uid = proc_getuid(process);
+         proc_getexecutableuuid(process, snapshot->uuid, sizeof(snapshot->uuid));
+@@ -478,21 +510,22 @@
+         !ml_get_interrupts_enabled()) return;
+     static const char *const names[] = {"SpringBoard", "PreBoard", "Setup", "mobileactivationd", "lockdownd"};
+     static const char *const labels[] = {"UI-SB", "UI-PB", "OFFLINE-SETUP", "OFFLINE-ACT", "OFFLINE-LOCKDOWN"};
++    static const uint8_t uuids[3][16] = {
++        {0x9b,0x4d,0x9b,0x5a,0x97,0xc8,0x38,0xd0,0xa6,0x92,0xdc,0x68,0x6f,0xa7,0xbb,0x4b},
++        {0x00,0x0b,0x12,0x1a,0xe2,0xfe,0x3d,0xa2,0xa4,0x42,0x11,0x64,0xc1,0x81,0xd4,0xec},
++        {0x7d,0x41,0x06,0x82,0x74,0x7b,0x32,0x6c,0x8e,0xbc,0xe8,0x66,0xe8,0xa9,0xb7,0x4e}
++    };
+     for (unsigned i = 0; i < 5; i++) {
+         struct kebab_ui_snapshot snapshot = {};snapshot.name = names[i];
++        if (i >= 2) snapshot.expected_uuid = uuids[i-2];
+         proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS, kebab_ui_select, &snapshot, NULL, NULL);
+         if (snapshot.task == TASK_NULL) {
+-            printf("KEBAB %s: no referenced task found=%u scanned=%u (parent1/exact-name; cap512)\n",
++            printf("KEBAB %s: no referenced task found=%u scanned=%u (parent1/fixed-name-or-original-UUID; cap512)\n",
+                 labels[i], snapshot.found, snapshot.scanned);
+         } else {
+             printf("KEBAB %s: fixed process pid=%d uid=%u scanned=%u; best-effort wait snapshot\n",
+                 labels[i], snapshot.pid, snapshot.uid, snapshot.scanned);
+             if (i >= 2) {
+-                static const uint8_t uuids[3][16] = {
+-                    {0x9b,0x4d,0x9b,0x5a,0x97,0xc8,0x38,0xd0,0xa6,0x92,0xdc,0x68,0x6f,0xa7,0xbb,0x4b},
+-                    {0x00,0x0b,0x12,0x1a,0xe2,0xfe,0x3d,0xa2,0xa4,0x42,0x11,0x64,0xc1,0x81,0xd4,0xec},
+-                    {0x7d,0x41,0x06,0x82,0x74,0x7b,0x32,0x6c,0x8e,0xbc,0xe8,0x66,0xe8,0xa9,0xb7,0x4e}
+-                };
+                 if ((snapshot.uid == 0 || snapshot.uid == 501) &&
+                     !memcmp(snapshot.uuid, uuids[i-2], sizeof(snapshot.uuid)))
+                     kebab_offline_task_report(snapshot.task, i-2);
+@@ -718,6 +751,8 @@
+     char path[512] = {}; size_t copied = 0;
+     if (copyinstr(address, path, sizeof(path), &copied) || !copied || copied > sizeof(path)) return;
+     path[sizeof(path)-1] = 0;
++    if (role == 1 && !error && proc_ppid(process) == 1 && proc_getuid(process) == 0)
++        kebab_offline_remember_data_ark(path);
+     if (!kebab_location_io_contains(path, "purplebuddy", 11) &&
+         !kebab_location_io_contains(path, "activation", 10) &&
+         !kebab_location_io_contains(path, "data_ark.plist", 14) &&

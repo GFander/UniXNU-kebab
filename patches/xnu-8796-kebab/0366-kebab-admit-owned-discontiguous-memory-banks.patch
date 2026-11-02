@@ -1,0 +1,504 @@
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -58,6 +58,7 @@
+ #include <arm64/proc_reg.h>
+ #include <arm64/kebab_early.h>
+ #include <arm64/kebab_boot_memory.h>
++#include <vm/vm_page.h>
+ #include <arm/pmap.h>
+ #include <arm/caches_internal.h>
+ #include <arm/cpu_internal.h>
+@@ -153,11 +154,22 @@
+ static kebab_memory_record kebab_boot_memory[KBM_MAX_RECORDS];
+ static unsigned int kebab_boot_memory_count;
+ static unsigned int kebab_boot_memory_status;
++SECURITY_READ_ONLY_LATE(static kebab_memory_record) kebab_owned_memory[KBM_MAX_BANKS];
++SECURITY_READ_ONLY_LATE(static unsigned int) kebab_owned_memory_count;
++SECURITY_READ_ONLY_LATE(static unsigned long long) kebab_owned_memory_bytes;
++SECURITY_READ_ONLY_LATE(static unsigned long long) kebab_primary_base;
++SECURITY_READ_ONLY_LATE(static unsigned long long) kebab_primary_size;
++static unsigned long long kebab_admitted_bytes;
++static unsigned long long kebab_tested_bytes;
++
+ 
+ static void
+ kebab_boot_memory_capture(const boot_args *args)
+ {
+ 	kebab_memory_handoff h;
++	kebab_primary_base = args->physBase;
++	kebab_primary_size = args->memSize;
++
+ 	if (((uintptr_t)args & 0xfff) != 0 || sizeof(*args) > KBM_OFFSET) {
+ 		kebab_boot_memory_status = 1;
+ 		return;
+@@ -173,6 +185,19 @@
+ 	__builtin_memcpy(kebab_boot_memory,
+ 	    (const void *)(args->virtBase + (h.physical - args->physBase)), h.bytes);
+ 	kebab_boot_memory_count = h.count;
++	if (h.owned_count) {
++		__builtin_memcpy(kebab_owned_memory,
++		    (const void *)(args->virtBase + h.owned_physical - args->physBase), h.owned_bytes);
++	}
++	unsigned long long total=0;
++	if (!kebab_owned_records_valid(&h, kebab_boot_memory, kebab_owned_memory,
++	    args->physBase, args->memSize, &total) ||
++	    args->memSizeActual != args->memSize+total) {
++		panic("KEBAB XRAM: invalid loader-owned memory records");
++	}
++	kebab_owned_memory_count=h.owned_count;
++	kebab_owned_memory_bytes=total;
++
+ 	kebab_boot_memory_status = 3;
+ }
+ 
+@@ -359,12 +384,101 @@
+ #endif /* __arm64 */
+ }
+ 
++unsigned long long kebab_extra_memory_bytes(void);
++unsigned long long kebab_memory_metadata_base(void);
++int kebab_memory_contains(unsigned long long, unsigned long long);
++int kebab_memory_intersects(unsigned long long, unsigned long long);
++int kebab_extra_memory_bank(unsigned int, unsigned long long *, unsigned long long *);
++void kebab_extra_memory_admit(void);
++
++unsigned long long kebab_extra_memory_bytes(void) { return kebab_owned_memory_bytes; }
++unsigned long long
++kebab_memory_metadata_base(void)
++{
++	unsigned long long first=kebab_primary_base;
++	for (unsigned int i=0; i<kebab_owned_memory_count; i++)
++		if (kebab_owned_memory[i].physical < first) first=kebab_owned_memory[i].physical;
++	return first;
++}
++int
++kebab_extra_memory_bank(unsigned int i, unsigned long long *pa, unsigned long long *n)
++{
++	if (i>=kebab_owned_memory_count) return 0;
++	*pa=kebab_owned_memory[i].physical; *n=kebab_owned_memory[i].bytes;
++	return 1;
++}
++int
++kebab_memory_contains(unsigned long long pa, unsigned long long n)
++{
++	if (!n || pa>~0ULL-n) return 0;
++	if (pa>=kebab_primary_base && pa-kebab_primary_base<=kebab_primary_size &&
++	    n<=kebab_primary_size-(pa-kebab_primary_base)) return 1;
++	for (unsigned int i=0; i<kebab_owned_memory_count; i++) {
++		const kebab_memory_record *d=&kebab_owned_memory[i];
++		if (pa>=d->physical && pa-d->physical<=d->bytes && n<=d->bytes-(pa-d->physical)) return 1;
++	}
++	return 0;
++}
++int
++kebab_memory_intersects(unsigned long long pa, unsigned long long n)
++{
++	if (!n || pa>~0ULL-n) return 0;
++	if (pa<kebab_primary_base+kebab_primary_size && kebab_primary_base<pa+n) return 1;
++	for (unsigned int i=0; i<kebab_owned_memory_count; i++) {
++		const kebab_memory_record *d=&kebab_owned_memory[i];
++		if (pa<d->physical+d->bytes && d->physical<pa+n) return 1;
++	}
++	return 0;
++}
++/* Called from the original machine_lockdown path, after the VM page zone and
++ * scheduler are ready, before userland. Explicit PFNs live outside vm_pages;
++ * its existing contiguous primary-bank layout remains unchanged. */
++void
++kebab_extra_memory_admit(void)
++{
++	if (kebab_admitted_bytes) panic("KEBAB XRAM: duplicate page admission");
++	for (unsigned int i=0; i<kebab_owned_memory_count; i++) {
++		const kebab_memory_record *d=&kebab_owned_memory[i];
++		/* Destructive test only while every page is exclusively loader-owned.
++		 * Write every64-bit word in every bank before verifying any bank, so
++		 * cross-bank address aliases cannot hide behind sequential admission. */
++		for (unsigned long long off=0; off<d->bytes; off+=PAGE_SIZE) {
++			volatile uint64_t *p=(volatile uint64_t *)phystokv(d->physical+off);
++			for (unsigned int j=0; j<PAGE_SIZE/8; j++)
++				p[j]=(d->physical+off+j*8)^0x951af742608ed3bcULL;
++		}
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++	for (unsigned int i=0; i<kebab_owned_memory_count; i++) {
++		const kebab_memory_record *d=&kebab_owned_memory[i];
++		for (unsigned long long off=0; off<d->bytes; off+=PAGE_SIZE) {
++			volatile uint64_t *p=(volatile uint64_t *)phystokv(d->physical+off);
++			if (ml_static_vtop((vm_offset_t)p)!=d->physical+off)
++				panic("KEBAB XRAM: page/address test failed at0x%llx",d->physical+off);
++			for (unsigned int j=0; j<PAGE_SIZE/8; j++) {
++				uint64_t expected=(d->physical+off+j*8)^0x951af742608ed3bcULL;
++				if (p[j]!=expected) panic("KEBAB XRAM: RAM test failed at0x%llx",d->physical+off+j*8);
++				p[j]=0;
++			}
++		}
++		kebab_tested_bytes+=d->bytes;
++	}
++	for (unsigned int i=0; i<kebab_owned_memory_count; i++) {
++		const kebab_memory_record *d=&kebab_owned_memory[i];
++		vm_page_create((ppnum_t)(d->physical>>PAGE_SHIFT),
++		    (ppnum_t)((d->physical+d->bytes)>>PAGE_SHIFT));
++		kebab_admitted_bytes+=d->bytes;
++	}
++	printf("KEBAB XRAM: admitted=%llu tested=%llu banks=%u free_pages=%u page_bytes=%u\n",
++	    kebab_admitted_bytes,kebab_tested_bytes,kebab_owned_memory_count,vm_page_free_count,(unsigned)PAGE_SIZE);
++}
++
+ /* Normal-context diagnostic entry; no allocator or hardware side effects. */
+ void kebab_boot_memory_dump(void);
+ void
+ kebab_boot_memory_dump(void)
+ {
+-	printf("KEBAB MEMMAP begin status=%u count=%u measurement_only=1\n",
++	printf("KEBAB MEMMAP begin status=%u count=%u measurement_only=0\n",
+ 	    kebab_boot_memory_status, kebab_boot_memory_count);
+ 	for (unsigned int i = 0; i < kebab_boot_memory_count; i++) {
+ 		const kebab_memory_record *d = &kebab_boot_memory[i];
+@@ -372,6 +486,11 @@
+ 		    i, d->type, d->physical, d->bytes, d->attributes);
+ 	}
+ 	printf("KEBAB MEMMAP end\n");
++	printf("KEBAB XRAM: owned=%llu admitted=%llu tested=%llu banks=%u metadata_base=0x%llx free_pages=%u\n",
++	    kebab_owned_memory_bytes,kebab_admitted_bytes,kebab_tested_bytes,
++	    kebab_owned_memory_count,kebab_memory_metadata_base(),vm_page_free_count);
++	for (unsigned int i=0; i<kebab_owned_memory_count; i++)
++		printf("KEBAB XRAM bank=%u start=0x%llx bytes=0x%llx\n",i,kebab_owned_memory[i].physical,kebab_owned_memory[i].bytes);
+ }
+ 
+ /*
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -26,6 +26,14 @@
+  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+  */
+ #include <string.h>
++#if defined(KEBAB)
++extern unsigned long long kebab_extra_memory_bytes(void);
++extern unsigned long long kebab_memory_metadata_base(void);
++extern int kebab_memory_contains(unsigned long long, unsigned long long);
++extern int kebab_memory_intersects(unsigned long long, unsigned long long);
++extern int kebab_extra_memory_bank(unsigned int, unsigned long long *, unsigned long long *);
++extern void kebab_extra_memory_admit(void);
++#endif
+ #include <stdlib.h>
+ #include <mach_assert.h>
+ #include <mach_ldebug.h>
+@@ -2286,7 +2294,11 @@
+ 
+ 	memset((char *)phystokv(pmap_struct_start), 0, avail_start - pmap_struct_start);
+ 
++#if defined(KEBAB)
++	vm_first_phys = kebab_memory_metadata_base();
++#else
+ 	vm_first_phys = gPhysBase;
++#endif
+ 	vm_last_phys = trunc_page(avail_end);
+ 
+ 	queue_init(&map_pmap_list);
+@@ -7519,6 +7531,10 @@
+ boolean_t
+ pmap_has_managed_page(ppnum_t first, ppnum_t last)
+ {
++#if defined(KEBAB)
++	if (last < first) return FALSE;
++	return kebab_memory_intersects(ptoa(first),(uint64_t)(last-first+1)*PAGE_SIZE);
++#endif
+ 	if (ptoa(first) >= vm_last_phys) {
+ 		return FALSE;
+ 	}
+--- a/osfmk/arm/pmap/pmap_data.c
++++ b/osfmk/arm/pmap/pmap_data.c
+@@ -26,6 +26,14 @@
+  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+  */
+ #include <arm/cpu_data_internal.h>
++#if defined(KEBAB)
++extern unsigned long long kebab_extra_memory_bytes(void);
++extern unsigned long long kebab_memory_metadata_base(void);
++extern int kebab_memory_contains(unsigned long long, unsigned long long);
++extern int kebab_memory_intersects(unsigned long long, unsigned long long);
++extern int kebab_extra_memory_bank(unsigned int, unsigned long long *, unsigned long long *);
++extern void kebab_extra_memory_admit(void);
++#endif
+ #include <kern/queue.h>
+ #include <libkern/OSAtomic.h>
+ #include <libkern/section_keywords.h>
+@@ -631,7 +639,13 @@
+ 	vm_size_t ptd_root_table_size = num_ptd_pages * PAGE_SIZE;
+ 
+ 	/* Number of VM pages that span all of kernel-managed memory. */
++#if defined(KEBAB)
++	/* PAIs retain their normal arithmetic, including unowned holes. Only the
++	 * validity predicate admits owned pages; bootstrap never frees the holes. */
++	const unsigned int npages = (unsigned int)atop(avail_end-kebab_memory_metadata_base());
++#else
+ 	const unsigned int npages = (unsigned int)atop(mem_size);
++#endif
+ 
+ 	/* The pv_head_table and pp_attr_table both have one entry per VM page. */
+ 	const vm_size_t pp_attr_table_size = npages * sizeof(pp_attr_t);
+@@ -693,6 +707,9 @@
+ 	pt_desc_t *ptd_root_table = (pt_desc_t *)phystokv(avail_start);
+ 	avail_start = round_page(avail_start + ptd_root_table_size);
+ 
++#if defined(KEBAB)
++	if (avail_start>avail_end) panic("KEBAB XRAM: metadata exhausted primary bank");
++#endif
+ 	memset((char *)phystokv(pmap_struct_start), 0, avail_start - pmap_struct_start);
+ 
+ 	/* This function assumes that ptd_root_table has been zeroed out already. */
+--- a/osfmk/arm/pmap/pmap_data.h
++++ b/osfmk/arm/pmap/pmap_data.h
+@@ -35,6 +35,14 @@
+ #define _ARM_PMAP_PMAP_DATA_H_
+ 
+ #include <stdint.h>
++#if defined(KEBAB)
++extern unsigned long long kebab_extra_memory_bytes(void);
++extern unsigned long long kebab_memory_metadata_base(void);
++extern int kebab_memory_contains(unsigned long long, unsigned long long);
++extern int kebab_memory_intersects(unsigned long long, unsigned long long);
++extern int kebab_extra_memory_bank(unsigned int, unsigned long long *, unsigned long long *);
++extern void kebab_extra_memory_admit(void);
++#endif
+ 
+ #include <kern/ledger.h>
+ #include <mach/vm_types.h>
+@@ -74,7 +82,11 @@
+ static inline bool
+ pa_valid(pmap_paddr_t pa)
+ {
++#if defined(KEBAB)
++	return kebab_memory_contains(pa,1);
++#else
+ 	return (pa >= vm_first_phys) && (pa < vm_last_phys);
++#endif
+ }
+ 
+ /**
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -27,6 +27,15 @@
+  */
+ 
+ #include <mach_kdp.h>
++#if defined(KEBAB)
++#include <arm64/kebab_boot_memory.h>
++extern unsigned long long kebab_extra_memory_bytes(void);
++extern unsigned long long kebab_memory_metadata_base(void);
++extern int kebab_memory_contains(unsigned long long, unsigned long long);
++extern int kebab_memory_intersects(unsigned long long, unsigned long long);
++extern int kebab_extra_memory_bank(unsigned int, unsigned long long *, unsigned long long *);
++extern void kebab_extra_memory_admit(void);
++#endif
+ #include <debug.h>
+ 
+ #include <kern/assert.h>
+@@ -362,7 +371,11 @@
+ 	vm_size_t len;
+ } ptov_table_entry;
+ 
++#if defined(KEBAB)
++#define PTOV_TABLE_SIZE 24
++#else
+ #define PTOV_TABLE_SIZE 8
++#endif
+ SECURITY_READ_ONLY_LATE(static ptov_table_entry)        ptov_table[PTOV_TABLE_SIZE];
+ SECURITY_READ_ONLY_LATE(static boolean_t)               kva_active = FALSE;
+ 
+@@ -1026,7 +1039,11 @@
+ 		if ((pa + len) > real_avail_end) {
+ 			_end -= (pa + len - real_avail_end);
+ 		}
++#if defined(KEBAB)
++		assert(kebab_memory_contains(start - gVirtBase + gPhysBase - pa_offset, PAGE_SIZE));
++#else
+ 		assert((start - gVirtBase + gPhysBase - pa_offset) >= gPhysBase);
++#endif
+ 
+ 		/* Round up to the nearest PAGE_SIZE boundary when creating mappings:
+ 		 * PAGE_SIZE may be a multiple of ARM_PGBYTES, and we don't want to leave
+@@ -1576,6 +1593,13 @@
+ 	arm_vm_physmap_slide(temp_ptov_table, (args->topOfKernelData - gPhysBase + gVirtBase),
+ 	    real_avail_end - args->topOfKernelData, AP_RWNA, 0);
+ 
++#if defined(KEBAB)
++	for (unsigned int i=0; i<KBM_MAX_BANKS; i++) {
++		unsigned long long pa,n;
++		if (!kebab_extra_memory_bank(i,&pa,&n)) break;
++		arm_vm_physmap_slide(temp_ptov_table,gVirtBase+(pa-gPhysBase),n,AP_RWNA,0);
++	}
++#endif
+ 	assert((temp_ptov_table[ptov_index - 1].va + temp_ptov_table[ptov_index - 1].len) <= physmap_end);
+ 
+ 	// Sort in descending order of segment length.  LUT traversal is linear, so largest (most likely used)
+@@ -1603,6 +1627,13 @@
+ 	arm_vm_physmap_slide(temp_ptov_table, (args->topOfKernelData - gPhysBase + gVirtBase),
+ 	    real_avail_end - args->topOfKernelData, AP_RWNA, ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT); // rest of physmem
+ 
++#if defined(KEBAB)
++	for (unsigned int i=0; i<KBM_MAX_BANKS; i++) {
++		unsigned long long pa,n;
++		if (!kebab_extra_memory_bank(i,&pa,&n)) break;
++		arm_vm_physmap_slide(temp_ptov_table,gVirtBase+(pa-gPhysBase),n,AP_RWNA,0);
++	}
++#endif
+ 	assert((temp_ptov_table[ptov_index - 1].va + temp_ptov_table[ptov_index - 1].len) <= physmap_end);
+ 
+ 	// Sort in descending order of segment length.  LUT traversal is linear, so largest (most likely used)
+@@ -1648,6 +1679,9 @@
+ 	arm_vm_page_granular_RNX(segPRELINKTEXTB, segSizePRELINKTEXT, ARM64_GRANULE_ALLOW_BLOCK);
+ 	arm_vm_page_granular_RNX(segPLKDATACONSTB, segSizePLKDATACONST, ARM64_GRANULE_ALLOW_BLOCK);
+ 
++#if defined(KEBAB)
++	kebab_extra_memory_admit();
++#endif
+ 	cpu_stack_alloc(&BootCpuData);
+ 	arm64_replace_bootstack(&BootCpuData);
+ 	ml_static_mfree(phystokv(segBOOTDATAB - gVirtBase + gPhysBase), segSizeBOOTDATA);
+@@ -1897,8 +1931,13 @@
+ 		panic("Unsupported memory configuration %lx", mem_size);
+ 	}
+ 
++/* Extra banks have separate page-granular apertures, not a larger linear PA window. */
++	unsigned long long kebab_physmap_extra=0;
++#if defined(KEBAB)
++	kebab_physmap_extra=kebab_extra_memory_bytes();
++#endif
+ #if defined(ARM_LARGE_MEMORY)
+-	unsigned long physmap_l1_entries = ((real_phys_size + ARM64_PHYSMAP_SLIDE_RANGE + ARM64_PHYSMAP_ALIGNMENT_PADDING) >> ARM_TT_L1_SHIFT) + 1;
++	unsigned long physmap_l1_entries = ((real_phys_size + kebab_physmap_extra + ARM64_PHYSMAP_SLIDE_RANGE + ARM64_PHYSMAP_ALIGNMENT_PADDING) >> ARM_TT_L1_SHIFT) + 1;
+ 	physmap_base = VM_MIN_KERNEL_ADDRESS - (physmap_l1_entries << ARM_TT_L1_SHIFT);
+ #else
+ 	physmap_base = phystokv(args->topOfKernelData);
+@@ -1922,10 +1961,10 @@
+ #if defined(ARM_LARGE_MEMORY)
+ 	/* For large memory systems with no PPL such as virtual machines */
+ 	static_memory_end = phystokv(args->topOfKernelData);
+-	physmap_end = physmap_base + real_phys_size + ARM64_PHYSMAP_ALIGNMENT_PADDING;
++	physmap_end = physmap_base + real_phys_size + kebab_physmap_extra + ARM64_PHYSMAP_ALIGNMENT_PADDING;
+ #else
+ 	static_memory_end = physmap_base + mem_size + ARM64_PHYSMAP_ALIGNMENT_PADDING; // worst possible case for block alignment
+-	physmap_end = physmap_base + real_phys_size + ARM64_PHYSMAP_ALIGNMENT_PADDING;
++	physmap_end = physmap_base + real_phys_size + kebab_physmap_extra + ARM64_PHYSMAP_ALIGNMENT_PADDING;
+ #endif // ARM_LARGE_MEMORY
+ #endif
+ 
+@@ -2249,6 +2288,11 @@
+ 		flush_mmu_tlb();
+ 	}
+ 
++#if defined(KEBAB)
++	/* avail_end/gPhysSize remain the primary aperture; accounting is the sum
++	 * of explicitly owned pages. pmap metadata separately spans PA indices. */
++	mem_size += kebab_extra_memory_bytes();
++#endif
+ 	sane_size = mem_size - (avail_start - gPhysBase);
+ 	max_mem = mem_size;
+ 	vm_kernel_slid_base = segLOWESTTEXT;
+--- a/osfmk/arm64/kebab_boot_memory.h
++++ b/osfmk/arm64/kebab_boot_memory.h
+@@ -3,16 +3,22 @@
+ #define KEBAB_BOOT_MEMORY_H
+ /* Diagnostic handoff in the loader-owned boot-argument page padding.
+  * The official Darwin22 boot_args structure and primary RAM stay unchanged.
+- * No descriptor conveyed here grants RAM ownership to XNU. */
++ * Version2 explicitly lists pages successfully claimed by AllocatePages;
++ * the original EFI map alone never grants RAM ownership to XNU. */
+ #define KBM_MAGIC 0x3150414d4d42454bULL /* KEBMMAP1 */
+ #define KBM_OFFSET 0x300
+ #define KBM_MAX_RECORDS 512
++#define KBM_MAX_BANKS 16
+ typedef struct {
+     unsigned long long magic;
+     unsigned int version;
+     unsigned int count;
+     unsigned long long physical;
+     unsigned long long bytes;
++    unsigned int owned_count;
++    unsigned int flags;
++    unsigned long long owned_physical;
++    unsigned long long owned_bytes;
+ } kebab_memory_handoff;
+ typedef struct {
+     unsigned long long physical;
+@@ -21,20 +27,77 @@
+     unsigned int type;
+     unsigned int reserved;
+ } kebab_memory_record;
+-typedef char kbm_header_size[(sizeof(kebab_memory_handoff) == 32) ? 1 : -1];
++typedef char kbm_header_size[(sizeof(kebab_memory_handoff) == 56) ? 1 : -1];
+ typedef char kbm_record_size[(sizeof(kebab_memory_record) == 32) ? 1 : -1];
+ /* Keep all arithmetic bounded before converting a physical pointer to KVA. */
+ static inline int
+ kebab_memory_handoff_valid(const kebab_memory_handoff *h,
+     unsigned long long base, unsigned long long used_end)
+ {
+-    if (h->magic != KBM_MAGIC || h->version != 1 || !h->count ||
++    if (h->magic != KBM_MAGIC || h->version != 2 || !h->count ||
+         h->count > KBM_MAX_RECORDS || h->bytes != h->count * sizeof(kebab_memory_record) ||
+         (h->physical & 0x3fff) || used_end < base ||
+         h->physical < base || h->physical > used_end ||
+         h->bytes > used_end - h->physical) {
+         return 0;
+     }
++    if (h->owned_count > KBM_MAX_BANKS || h->flags != 0 ||
++        h->owned_bytes != h->owned_count * sizeof(kebab_memory_record)) return 0;
++    if (h->owned_count && ((h->owned_physical & 0x3fff) ||
++        h->owned_physical < base || h->owned_physical > used_end ||
++        h->owned_bytes > used_end - h->owned_physical)) return 0;
++    return 1;
++}
++/* Validate every owned page against a WB-capable conventional descriptor,
++ * excluding the primary bank, firmware/runtime carveouts and duplicates. */
++static inline int
++kebab_owned_records_valid(const kebab_memory_handoff *h,
++    const kebab_memory_record *map, const kebab_memory_record *owned,
++    unsigned long long primary, unsigned long long primary_bytes,
++    unsigned long long *total)
++{
++    unsigned long long sum = 0;
++    if (!primary_bytes || primary > ~0ULL - primary_bytes) return 0;
++    for (unsigned int i=0; i<h->owned_count; i++) {
++        unsigned long long pa=owned[i].physical, n=owned[i].bytes;
++        int found=0;
++        if (!n || (pa & 0x3fff) || (n & 0x3fff) || pa > ~0ULL-n ||
++            pa+n > primary || owned[i].type != 2 || owned[i].reserved) return 0;
++        for (unsigned int j=0; j<h->count; j++) {
++            const kebab_memory_record *d=&map[j];
++            if (d->type==7 && (d->attributes & 8) && !(d->attributes >> 63) &&
++                d->physical <= pa && d->bytes <= ~0ULL-d->physical &&
++                pa-d->physical <= d->bytes && n <= d->bytes-(pa-d->physical)) found=1;
++        }
++        if (!found || n > 0x100000000ULL-sum) return 0;
++        for (unsigned int j=0; j<i; j++)
++            if (pa < owned[j].physical+owned[j].bytes && owned[j].physical < pa+n) return 0;
++        sum+=n;
++    }
++    *total=sum;
++    return 1;
++}
++/* xram is an explicit development ladder, in MiB.4096 means all eligible
++ * lower conventional ranges, capped at4GiB, not a promise of4GiB available. */
++static inline int
++kebab_extra_request(const char *line, unsigned long long *bytes)
++{
++    unsigned int seen=0;
++    *bytes=0;
++    while (*line) {
++        while (*line==' ') line++;
++        const char *p=line;
++        while (*line && *line!=' ') line++;
++        if (line-p < 5 || p[0]!='x' || p[1]!='r' || p[2]!='a' || p[3]!='m' || p[4]!='=') continue;
++        unsigned long long n=0;
++        if (seen++ || line-p==5) return 0;
++        for (p+=5; p<line; p++) {
++            if (*p<'0' || *p>'9' || n>4096) return 0;
++            n=n*10+(*p-'0');
++        }
++        if (n>4096 || n%16) return 0;
++        *bytes=n*0x100000ULL;
++    }
+     return 1;
+ }
+ #endif

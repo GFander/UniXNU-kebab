@@ -1,0 +1,111 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6097,6 +6097,69 @@
+ 
+ _Atomic uint64_t libmalloc_experiment_factors = 0;
+ 
++#if defined(KEBAB)
++/* Board-owned CPU framebuffer policy. The original retail CoreAnimation
++ * getenv path supports this setting; its preferences path is internal-build
++ * only. Opt in with -cf (CPU framebuffer), within boot_args'607-byte limit.
++ * Apply after the ordinary image loader and security decisions, before the
++ * apple vector. No executable bytes, credentials or security options change.
++ */
++static int
++kebab_fb_exec_environment(struct image_params *imgp, const load_result_t *load_result)
++{
++    static const uint8_t uuid[16] = {0x70,0xb7,0x23,0x40,0x73,0x7a,0x39,0x73,0x8b,0x47,0x4e,0x99,0x70,0xf4,0xec,0xb9};
++    static const char name[] = "backboardd";
++    static const char key[] = "CA_DISABLE_FRAMEBUFFER_COMPRESSION=";
++    static const char entry[] = "CA_DISABLE_FRAMEBUFFER_COMPRESSION=1";
++    unsigned enabled = 0;
++    if (memcmp(load_result->uuid, uuid, sizeof(uuid)) ||
++        !(imgp->ip_flags & IMGPF_IS_64BIT_ADDR) || !imgp->ip_ndp ||
++        imgp->ip_ndp->ni_cnd.cn_namelen != sizeof(name) - 1 ||
++        memcmp(imgp->ip_ndp->ni_cnd.cn_nameptr, name, sizeof(name) - 1) ||
++        !PE_parse_boot_argn("-cf", &enabled, sizeof(enabled)) || enabled != 1) return 0;
++
++    char *cursor = imgp->ip_endargv;
++    if (imgp->ip_envc < 0 || imgp->ip_endenvv < cursor ||
++        imgp->ip_strendp != imgp->ip_endenvv) return EINVAL;
++    for (int i = 0; i < imgp->ip_envc; i++) {
++        size_t space = (size_t)(imgp->ip_endenvv - cursor);
++        size_t length = strnlen(cursor, space);
++        if (length == space) return EINVAL;
++        if (length >= sizeof(key) - 1 && !memcmp(cursor, key, sizeof(key) - 1)) {
++            printf("KEBAB CA ENV: original backboardd explicit framebuffer setting retained\n");
++            return 0;
++        }
++        cursor += length + 1;
++    }
++    /* exec_extract_strings padded the env tail. Insert before that padding,
++     * otherwise the new env pointer would address an empty string. */
++    size_t padding = (size_t)(imgp->ip_endenvv - cursor);
++    if (padding >= sizeof(uint64_t)) return EINVAL;
++    if (imgp->ip_argspace < 0 || imgp->ip_strspace < 0) return E2BIG;
++    size_t string_space = (size_t)imgp->ip_strspace + padding;
++    size_t argument_space = (size_t)imgp->ip_argspace + padding;
++    if (string_space < sizeof(entry)) return E2BIG;
++    size_t new_padding = (string_space - sizeof(entry)) % sizeof(uint64_t);
++    if (string_space < sizeof(entry) + new_padding ||
++        argument_space < sizeof(entry) + sizeof(uint64_t) + new_padding) return E2BIG;
++    imgp->ip_strendp = cursor;
++    imgp->ip_strspace += (int)padding;
++    imgp->ip_argspace += (int)padding;
++    int error = exec_add_user_string(imgp, CAST_USER_ADDR_T(entry), UIO_SYSSPACE, TRUE);
++    if (error) return error;
++    imgp->ip_argspace -= sizeof(uint64_t);
++    imgp->ip_envc++;
++    while (imgp->ip_strspace % sizeof(uint64_t)) {
++        *imgp->ip_strendp++ = '\0';
++        imgp->ip_strspace--;
++        imgp->ip_argspace--;
++    }
++    imgp->ip_endenvv = imgp->ip_strendp;
++    printf("KEBAB CA ENV: original backboardd CPU framebuffer compression disabled through original environment setting\n");
++    return 0;
++}
++#endif
++
+ static int
+ exec_add_apple_strings(struct image_params *imgp,
+     const load_result_t *load_result)
+@@ -6106,6 +6169,11 @@
+ 	thread_t new_thread;
+ 	ipc_port_t sright;
+ 	uint64_t local_experiment_factors = 0;
++
++#if defined(KEBAB)
++    error = kebab_fb_exec_environment(imgp, load_result);
++    if (error) return error;
++#endif
+ 
+ 	/* exec_save_path stored the first string */
+ 	imgp->ip_applec = 1;
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -212,6 +212,7 @@
+  * must have the original CAWindowServerDisplay ISA and exact IOMFB methods. */
+ struct kebab_ca_state {
+     uint64_t array_class, display_class, compression_method, feature_flags;
++    uint8_t framebuffer_compression_disabled;
+     uint32_t display_flags, copy_context_present, copy_context_kind;
+     uint64_t buffer_flags[4], assembly_flags[4];
+     uint32_t buffer_width[4], buffer_height[4], assembly_width[4], assembly_height[4];
+@@ -317,6 +318,7 @@
+     if (!kebab_ca_u64(map, server + 0x60, &display) || !display) return 63;
+     if (!kebab_ca_u64(map, display, &vtable) ||
+         !kebab_ca_u64(map, vtable + 0x1c8, &method) || method != 0x18852d9c4ULL /* original update_surface wrapper */) return 64;
++    if (!kebab_plugin_user_copy(map, 0x1e1df774dULL, &out->framebuffer_compression_disabled, 1)) return 7;
+     out->display_class = vtable;
+     uint64_t copy_context = 0;
+     if (!kebab_ca_u64(map, vtable + 0x7a0, &out->compression_method) ||
+@@ -387,7 +389,7 @@
+         printf("KEBAB CA ARRAY: class=0x%llx kind=%u active=%u index=%u; pinned Foundation ABI\n", state.array_class, state.array_kind, state.active_count, index);
+         printf("KEBAB CA: result=%d display-index=%u displays=%u storage-candidates=%u renderer-flags=0x%x sw-kind=%u sw-context=%u sw-renderer=%u other-kind=%u other-context=%u other-renderer=%u software-path=%u pages=%u current=%u; fixed20H392 readonly, no producer lock\n",
+             result,index,state.displays,state.array_candidates,state.renderer_flags,state.sw_kind,!!state.sw_context,!!state.sw_renderer,state.gpu_kind,!!state.gpu_context,!!state.gpu_renderer,state.software_path,state.page_count,state.page_index);
+-        if (!result) printf("KEBAB CA POLICY: display-index=%u class=0x%llx compression-method=0x%llx flags=0x%x features=0x%llx copy-context=%u copy-context-kind=%u\n",index,state.display_class,state.compression_method,state.display_flags,state.feature_flags,state.copy_context_present,state.copy_context_kind);
++        if (!result) printf("KEBAB CA POLICY: display-index=%u class=0x%llx compression-method=0x%llx flags=0x%x features=0x%llx copy-context=%u copy-context-kind=%u framebuffer-compression-disabled=%u\n",index,state.display_class,state.compression_method,state.display_flags,state.feature_flags,state.copy_context_present,state.copy_context_kind,state.framebuffer_compression_disabled);
+         if (!result) for (unsigned i = 0; i < state.page_count; i++) {
+             printf("KEBAB CA PAGE: display-index=%u index=%u present=%u frame-id=%u buffer=%u format=0x%x surface-id=%u assembly-format=0x%x assembly-id=%u\n",index,i,!!state.pages[i],state.page_ids[i],!!state.page_buffers[i],state.page_formats[i],state.buffer_ids[i],state.assembly_formats[i],state.assembly_ids[i]);
+             if (state.pages[i]) printf("KEBAB CA COPY: display-index=%u index=%u buffer=%ux%u flags=0x%llx failed=%u assembly=%ux%u flags=0x%llx failed=%u; original copy_surface failure marker bit35\n",index,i,state.buffer_width[i],state.buffer_height[i],state.buffer_flags[i],!!(state.buffer_flags[i] & (1ULL << 35)),state.assembly_width[i],state.assembly_height[i],state.assembly_flags[i],!!(state.assembly_flags[i] & (1ULL << 35)));

@@ -1,0 +1,108 @@
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -15,6 +15,9 @@
+ #include <vm/vm_kern.h>
+ #include <vm/vm_map.h>
+ #include <vm/pmap.h>
++#include <ipc/ipc_space.h>
++#include <ipc/ipc_port.h>
++#include <mach/message.h>
+ 
+ /* Caller holds sched_lock at splsched. Only a waiting, non-runnable thread
+  * with a retained full kernel stack is inspected. A continuation-backed or
+@@ -46,7 +49,8 @@
+ /* Read only a referenced, waiting/non-runnable thread's kernel-owned save area
+  * under sched_lock. Never run backtrace_user on an unsuspended foreign thread.
+  * No user address is dereferenced while holding task/thread/scheduler locks. */
+-struct kebab_saved_user_site { uint64_t pc, lr, fp; };
++struct kebab_saved_user_site { uint64_t pc,lr,fp,trap,options,bits_size,ports,voucher_id,desc_rcv; };
++#include "kebab_mach_wait_ipc_impl.h"
+ static bool
+ kebab_waiting_user_site(thread_t thread, struct kebab_saved_user_site *site)
+ {
+@@ -59,6 +63,9 @@
+     site->pc = get_saved_state_pc(&saved);
+     site->lr = get_saved_state_lr(&saved);
+     site->fp = get_saved_state_fp(&saved);
++    site->trap=get_saved_state_reg(&saved,16);site->options=get_saved_state_reg(&saved,1);
++    site->bits_size=get_saved_state_reg(&saved,2);site->ports=get_saved_state_reg(&saved,3);
++    site->voucher_id=get_saved_state_reg(&saved,4);site->desc_rcv=get_saved_state_reg(&saved,5);
+     return true;
+ }
+ 
+@@ -110,6 +117,11 @@
+ 	thread_t observed[32], thread;
+ 	unsigned count = 0, thread_total = 0;
+ 	vm_map_t map = user_sites ? get_task_map_reference(task) : VM_MAP_NULL;
++    /* The caller's task reference keeps itk_space alive until final task
++     * deallocation (task.c). Keep our own space ref for the whole report;
++     * task exit may terminate rights, which translate_send reports safely. */
++    ipc_space_t space=user_sites?task->itk_space:IS_NULL;
++    if(space!=IS_NULL)is_reference(space);
+ 	task_lock(task);
+ 	if (task->active) {
+ 		thread_total = task->thread_count;
+@@ -147,10 +159,14 @@
+ 		for (unsigned frame = 0; frame < frame_count; frame++) {
+ 			printf("KEBAB %s: tid=%llu kframe[%u]=0x%llx\n", label, tid, frame, frames[frame]);
+ 		}
+-		if (have_site) kebab_user_wait_report(map, label, tid, &site, user_frame_cap);
++        if (have_site) {
++            kebab_user_wait_report(map,label,tid,&site,user_frame_cap);
++            kebab_mach_wait_report(space,label,tid,&site);
++        }
+ 		thread_deallocate(thread);
+ 		kebab_observer_drain();
+ 	}
++	if (space != IS_NULL) is_release(space);
+ 	if (map != VM_MAP_NULL) vm_map_deallocate(map);
+ 	printf("KEBAB %s: snapshot end; addresses name kernel waits, not user PCs\n", label);
+ 	kebab_observer_drain();
+--- /dev/null
++++ b/osfmk/kern/kebab_mach_wait_ipc_impl.h
+@@ -0,0 +1,45 @@
++/* Decode only mach_msg2 trap metadata, never the user message payload.
++ * The waiting thread's register copy and this later IPC lookup are separate
++ * best-effort observations: neither proves an atomic request/reply pairing. */
++struct kebab_mach_wait_metadata {
++ uint64_t options;
++ uint32_t bits,send_size_or_count,remote,local,receive;
++ int32_t message_id;
++};
++
++static bool
++kebab_mach_wait_decode(const struct kebab_saved_user_site *site,struct kebab_mach_wait_metadata *out)
++{
++ /* XNU get_saved_state_svc_number uses only the low signed word. */
++ if((int32_t)(uint32_t)site->trap!=-47||!(site->options&(MACH64_SEND_MSG|MACH64_RCV_MSG)))return false;
++ struct kebab_mach_wait_metadata value={};
++ value.options=site->options;value.bits=(uint32_t)site->bits_size;
++ value.send_size_or_count=(uint32_t)(site->bits_size>>32);
++ value.remote=(uint32_t)site->ports;value.local=(uint32_t)(site->ports>>32);
++ value.receive=(uint32_t)(site->desc_rcv>>32);value.message_id=(int32_t)(uint32_t)(site->voucher_id>>32);
++ *out=value;return true;
++}
++
++static void
++kebab_mach_wait_report(ipc_space_t space,const char *label,uint64_t tid,const struct kebab_saved_user_site *site)
++{
++ struct kebab_mach_wait_metadata value;
++ if(space==IS_NULL||!kebab_mach_wait_decode(site,&value))return;
++ kern_return_t status=KERN_INVALID_NAME;pid_t receiver=-1;uint32_t receiver_name=0;
++ uint64_t object=0;bool attempted=false;
++ if((value.options&MACH64_SEND_MSG)&&MACH_PORT_VALID(value.remote)){
++  ipc_port_t port=IP_NULL;attempted=true;
++  /* Takes no preexisting locks; success returns an active locked port,
++   * without a new reference. Read metadata under that lock, then unlock.
++   * No port dereference, proc lookup or printing after releasing it. */
++  status=ipc_port_translate_send(space,value.remote,&port);
++  if(status==KERN_SUCCESS){
++   receiver=ipc_port_get_receiver_task_locked(port,NULL);
++   if(receiver>0)receiver_name=port->ip_receiver_name;
++   object=(uint64_t)(uintptr_t)port;ip_mq_unlock(port);
++  }
++ }
++ printf("KEBAB %s IPC: tid=%llu trap=mach_msg2 options=0x%llx bits=0x%x send-size-or-count=%u vector=%u remote=0x%x local=0x%x receive=0x%x message-id=%d lookup=%u status=0x%x receiver-pid=%d receiver-name=0x%x object=0x%llx; best-effort metadata, no payload or atomic pairing\n",
++     label,tid,value.options,value.bits,value.send_size_or_count,!!(value.options&MACH64_MSG_VECTOR),
++     value.remote,value.local,value.receive,value.message_id,attempted,status,receiver,receiver_name,object);
++}

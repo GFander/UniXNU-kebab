@@ -1,0 +1,113 @@
+--- a/iokit/Kernel/arm/KebabHIDInput.cpp
++++ b/iokit/Kernel/arm/KebabHIDInput.cpp
+@@ -2,6 +2,7 @@
+ /* Hardware snapshots -> unchanged 20H392 HID parser. No synthetic keys. */
+ #include "KebabOriginalHIDDevice.h"
+ #include "KebabOriginalHIDEventDriver.h"
++#include "KebabTouchEdge.h"
+ #include <IOKit/IOBufferMemoryDescriptor.h>
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOWorkLoop.h>
+@@ -24,6 +25,8 @@
+ class KebabTouchEventDriver : public IOHIDEventDriver {
+     OSDeclareDefaultStructors(KebabTouchEventDriver);
+     uint64_t integratedEvents=0;
++    kebab_touch_edge_state edgeState={};
++    unsigned edgeDiagnostics=0;
+ public:
+     bool handleStart(IOService *provider) override;
+     void dispatchEvent(IOHIDEvent *event,IOOptionBits options=0) override;
+@@ -46,6 +49,41 @@
+         SInt32 before=event->getIntegerValue(0xb0019,0);
+         event->setIntegerValue(0xb0019,1,0);
+         integratedEvents++;
++
++        SInt32 rootMask=event->getIntegerValue(0xb0007,0);
++        unsigned originMask=0;
++        if (rootMask&0x80) edgeState={};
++        else {
++            OSArray *children=event->getChildren();
++            unsigned count=children?children->getCount():0;
++            if (count<=32) for (unsigned index=0;index<count;index++) {
++                OSObject *object=children->getObject(index);
++                if (!object || !object->metaCast("IOHIDEvent")) continue;
++                IOHIDEvent *child=static_cast<IOHIDEvent *>(object);
++                if (child->getType()!=11) continue;
++                unsigned id=(unsigned)child->getIntegerValue(0xb0005,0);
++                if (id>=10) continue;
++                int touch=child->getIntegerValue(0xb0009,0)!=0;
++                int inRange=child->getIntegerValue(0xb0008,0)!=0;
++                int32_t x=child->getFixedValue(0xb0000,0);
++                int32_t y=child->getFixedValue(0xb0001,0);
++                SInt32 mask=child->getIntegerValue(0xb0007,0);
++                int fromEdge=kebab_touch_edge_update(&edgeState,id,touch,inRange,x,y);
++                if (fromEdge) child->setIntegerValue(0xb0007,mask|0x800,0);
++                child->setIntegerValue(0xb0019,1,0);
++                originMask|=(unsigned)(mask|(fromEdge?0x800:0))&0x800;
++                if (integratedEvents<=4 || (fromEdge && edgeDiagnostics<32)) {
++                    if (fromEdge) edgeDiagnostics++;
++                    IOLog("KEBAB HID EDGE: event=%llu id=%u touch=%d range=%d xy=%d,%d mask=0x%x->0x%x first-origin=%d; real child\n",
++                        integratedEvents,id,touch,inRange,x,y,mask,mask|(fromEdge?0x800:0),fromEdge);
++                }
++            }
++        }
++        if (originMask) {
++            event->setIntegerValue(0xb0007,rootMask|(SInt32)originMask,0);
++            event->setIntegerValue(0xb0018,event->getIntegerValue(0xb0018,0)|(SInt32)originMask,0);
++        }
++
+         if (integratedEvents<=16 || !(integratedEvents&(integratedEvents-1)))
+             IOLog("KEBAB HID PANEL: digitizer=%llu display-integrated=%d->%d; same original event\n",
+                 integratedEvents,before,event->getIntegerValue(0xb0019,0));
+--- a/iokit/Kernel/arm/KebabOriginalHIDBindings.cpp
++++ b/iokit/Kernel/arm/KebabOriginalHIDBindings.cpp
+@@ -127,3 +127,6 @@
+ __asm__(".globl __ZNK17IOHIDEventService12handleIsOpenEPK9IOService\n.set __ZNK17IOHIDEventService12handleIsOpenEPK9IOService, 0xfffffe0008972540");
+ __asm__(".globl __ZNK17IOHIDEventService21copyPropertyForClientEPKcPv\n.set __ZNK17IOHIDEventService21copyPropertyForClientEPKcPv, 0xfffffe00089742bc");
+ __asm__(".globl __ZTV16IOHIDEventDriver\n.set __ZTV16IOHIDEventDriver, 0xfffffe0009ef8760");
++
++/* Original nonvirtual IOHIDEvent children accessor; never read private fields. */
++__asm__(".globl __ZN10IOHIDEvent11getChildrenEv\n.set __ZN10IOHIDEvent11getChildrenEv, 0xfffffe0008986b0c");
+--- a/iokit/Kernel/arm/KebabOriginalHIDEventDriver.h
++++ b/iokit/Kernel/arm/KebabOriginalHIDEventDriver.h
+@@ -132,6 +132,7 @@
+  OSDeclareDefaultStructors(IOHIDEvent);
+  uint64_t originalPrivateIOHIDEvent[8];
+ public:
++OSArray *getChildren();
+ virtual void appendChild(IOHIDEvent *childEvent);
+ virtual AbsoluteTime getTimeStamp();
+ virtual void setTimeStamp(AbsoluteTime timeStamp);
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabTouchEdge.h
+@@ -0,0 +1,30 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/* S3908 provides contact positions, not Apple contact-shape edge metadata.
++ * Classify only the real first down; keep its origin until the real lift.
++ * D22 logical points:375x812. This does not recognize a completed gesture. */
++#pragma once
++#ifdef KERNEL
++#include <sys/types.h>
++#else
++#include <stdint.h>
++#endif
++struct kebab_touch_edge_state { uint16_t active, edge; };
++static inline int
++kebab_touch_edge_update(struct kebab_touch_edge_state *state, unsigned id,
++    int touch, int in_range, int32_t x, int32_t y)
++{
++    if (!state || id>=10) return 0;
++    uint16_t bit=(uint16_t)(1u<<id);
++    if (touch && !(state->active&bit)) {
++        int valid=in_range && x>=0 && x<=65536 && y>=0 && y<=65536;
++        int edge=valid && ((int64_t)x*375<16LL*65536 ||
++            (int64_t)(65536-x)*375<16LL*65536 ||
++            (int64_t)y*812<16LL*65536 ||
++            (int64_t)(65536-y)*812<34LL*65536);
++        state->edge=(uint16_t)((state->edge&~bit)|(edge?bit:0));
++    }
++    int from_edge=!!(state->edge&bit);
++    if (touch) state->active|=bit;
++    else { state->active&=(uint16_t)~bit;state->edge&=(uint16_t)~bit; }
++    return from_edge;
++}

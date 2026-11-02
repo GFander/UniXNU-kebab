@@ -1,0 +1,123 @@
+{
+  "accepted": true,
+  "scope": "Original provider class lookup, original iterator object and user-client open only; initialization still fails",
+  "version": "0480",
+  "native_version": "0479",
+  "source_version": "0479",
+  "source_common": 338,
+  "source_host": 4,
+  "source_files": 5280,
+  "native_sha256": "69c31ddc43501bcd7bc15ec2d9b276413a06542acef7117070943b4c33c92cc0",
+  "actual_log_sha256": "07b26e86091f38e1634ec61d2cda1b355a089864cd1dd5c0a48aa93ade4d53f6",
+  "capture_closed": true,
+  "original_provider_find_object_open_proven": true,
+  "service_events": [
+    {
+      "ticket": 7,
+      "pid": 87,
+      "kind": 5,
+      "code": 0,
+      "result": 0,
+      "aux": 1,
+      "copy_error": 0,
+      "truncated": false,
+      "sanitized": false,
+      "name": "com_apple_driver_FairPlayIOKit",
+      "kind_name": "matching-services-iterator",
+      "result_u32": 0
+    },
+    {
+      "ticket": 8,
+      "pid": 87,
+      "kind": 6,
+      "code": 0,
+      "result": 0,
+      "aux": 1,
+      "copy_error": 0,
+      "truncated": false,
+      "sanitized": false,
+      "name": "com_apple_driver_FairPlayIOKit",
+      "kind_name": "iterator-next",
+      "result_u32": 0
+    },
+    {
+      "ticket": 9,
+      "pid": 87,
+      "kind": 4,
+      "code": 0,
+      "result": 0,
+      "aux": 0,
+      "copy_error": 0,
+      "truncated": false,
+      "sanitized": false,
+      "name": "com_apple_driver_FairPlayIOKit",
+      "kind_name": "service-open",
+      "result_u32": 0
+    }
+  ],
+  "original_executable_bytes_preserved": true,
+  "original_crypto_regression": {
+    "accepted": true,
+    "version": "0480",
+    "native_version": "0479",
+    "native_sha256": "69c31ddc43501bcd7bc15ec2d9b276413a06542acef7117070943b4c33c92cc0",
+    "actual_log_sha256": "07b26e86091f38e1634ec61d2cda1b355a089864cd1dd5c0a48aa93ade4d53f6",
+    "scope": "Genuine factory-no-passcode APFS A KF04/HA01; original already-open cached/direct reads and writes deny lock with zero transferred, unlock restores existing material; unchanged B/C/D and original keychain6\u201311",
+    "private_A_crypto_id": 259236,
+    "private_A_payload_sha256": "33f878693a6f08d6c2d226412289b92d17b4cedf043b419eb971497d35f27c2b",
+    "private_A_ciphertext_stripes": {
+      "0": [
+        "67411fe44e76568f794e691eefb96a9c630c917b9c3da3dfc0459b48577a59dd",
+        "67411fe44e76568f794e691eefb96a9c630c917b9c3da3dfc0459b48577a59dd"
+      ],
+      "61440": [
+        "fd222a79a8e430b8c4c3a7f4d49430025135e5e5ad0a4bbdc7117e2ff05e63ac",
+        "fd222a79a8e430b8c4c3a7f4d49430025135e5e5ad0a4bbdc7117e2ff05e63ac"
+      ]
+    },
+    "first_A_operation": "UNWRAP",
+    "A_complete_kernel_restart_proven": true,
+    "original_APFS_cached_nocache_write_denial_proven": true,
+    "locked_closed_reopen_and_new_create_refused": true,
+    "unlock_restores_original_A_payload": true,
+    "old_B_ciphertext_stripes_preserved": true,
+    "cold_keychain_classes_unwrap_before_new": [
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "qualified_watchdog_seconds": 314.209,
+    "old_Root_bank_systembag_CD_RTC_NVRAM_defaults_preserved": true,
+    "APFS_class1_implemented": true,
+    "factory_no_passcode_only": true,
+    "physical_all_RAM_erasure_proven": false,
+    "Apple_SEP_or_hardware_AES_implemented": false,
+    "full_AppleKeyStore_implemented": false,
+    "migration_complete": false,
+    "system_shell_checkin_complete": false,
+    "usable_springboard": false,
+    "full_goal_complete": false
+  },
+  "remaining_failure": {
+    "selector": 2201,
+    "bits": 128,
+    "operation": 0,
+    "bytes": 32,
+    "source_line": 233,
+    "initialization_complete": false
+  },
+  "assertion_semantics": "Original nonzero AES result is wrapped as -22 and printed; -22 is not an expected negative-test result",
+  "indirect_control_flow_or_full_private_ABI_qualified": false,
+  "full_FairPlay_compatibility": false,
+  "migration_complete": false,
+  "system_shell_checkin_complete": false,
+  "usable_springboard": false,
+  "full_goal_complete": false,
+  "actual_profile_sha256": "58fed01919b3f46ecd3a3c03532b5001f5d41bcdd972b378f2d87ac03aea03ba",
+  "published_profile_sha256": "ade093b6998c5de7c0541dd973e35d3139f8c444036173090c48a4829b96df64",
+  "published_profile_semantically_identical": true,
+  "published_JSON_newlines_normalized": true
+}

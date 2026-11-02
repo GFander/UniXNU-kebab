@@ -1,0 +1,90 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -21,6 +21,10 @@
+ #include <pexpert/device_tree.h>
+ #include <pexpert/pexpert.h>
+ #include <sys/vnode_if.h>
++#include <sys/attr.h>
++#if CONFIG_MACF
++#include <security/mac_framework.h>
++#endif
+ 
+ extern void kebab_pid1_task_report(task_t task);
+ void kebab_process_report(void);
+@@ -134,11 +138,76 @@
+     if (attr.va_acl) kauth_acl_free(attr.va_acl);
+ }
+ 
++/* Complete ACL backup for the fixed original activation DataArk only. USB
++ * index16 selects this metadata record, never a filename. Original MACF
++ * getattrlist and READ_SECURITY/READ_ATTRIBUTES authorization remain. */
++static int
++kebab_offline_activation_acl_snapshot(void **output,uint32_t *size)
++{
++    *output = NULL; *size = 0;
++    if (panic_active() || ml_at_interrupt_context() || get_preemption_level() != 0 ||
++        !ml_get_interrupts_enabled()) return EBUSY;
++    if (__atomic_load_n(&kebab_offline_data_ark_ready,__ATOMIC_ACQUIRE) != 2) return EAGAIN;
++    vfs_context_t context = vfs_context_current(); vnode_t file = NULLVP;
++    int error = vnode_lookup(kebab_mg_cache_paths[14],VNODE_LOOKUP_NOFOLLOW,&file,context);
++    if (error) return error;
++    if (!vnode_isreg(file)) error = EINVAL;
++#if CONFIG_MACF
++    struct attrlist requested = {};
++    requested.bitmapcount = ATTR_BIT_MAP_COUNT;
++    requested.commonattr = ATTR_CMN_EXTENDED_SECURITY;
++    if (!error) error = mac_vnode_check_getattrlist(context,file,&requested,0);
++#endif
++    if (!error) error = vnode_authorize(file,NULL,KAUTH_VNODE_READ_SECURITY | KAUTH_VNODE_READ_ATTRIBUTES,context);
++    char path[MAXPATHLEN] = {}; int path_size = sizeof(path);
++    struct vfsstatfs *stats = vfs_statfs(vnode_mount(file));
++    if (!error) error = vn_getpath(file,path,&path_size);
++    if (!error && (!stats || strcmp(stats->f_fstypename,"apfs") ||
++        strcmp(stats->f_mntonname,"/private/var") || strcmp(path,kebab_mg_cache_paths[14]))) error = EINVAL;
++    struct vnode_attr first = {},again = {};
++    VATTR_INIT(&first); VATTR_WANTED(&first,va_acl); VATTR_WANTED(&first,va_fileid);
++    VATTR_WANTED(&first,va_data_size); VATTR_WANTED(&first,va_modify_time); VATTR_WANTED(&first,va_change_time);
++    if (!error) error = vnode_getattr(file,&first,context);
++    if (!error && (!VATTR_IS_SUPPORTED(&first,va_acl) || !VATTR_IS_SUPPORTED(&first,va_fileid) ||
++        !VATTR_IS_SUPPORTED(&first,va_data_size) || !VATTR_IS_SUPPORTED(&first,va_modify_time) ||
++        !VATTR_IS_SUPPORTED(&first,va_change_time) || (first.va_acl && first.va_acl->acl_entrycount > 128))) error = EINVAL;
++    uint32_t acl_bytes = !error && first.va_acl ? (uint32_t)KAUTH_ACL_COPYSIZE(first.va_acl) : 0;
++    uint32_t total = 32 + acl_bytes;
++    void *data = error ? NULL : kalloc_data(total,Z_WAITOK);
++    if (!error && !data) error = ENOMEM;
++    if (!error) {
++        uint32_t header[4] = {0x314c4341,1,14,acl_bytes};
++        uint64_t identity[2] = {first.va_fileid,first.va_data_size};
++        memcpy(data,header,16); memcpy((uint8_t *)data+16,identity,16);
++        if (acl_bytes) memcpy((uint8_t *)data+32,first.va_acl,acl_bytes);
++        VATTR_WANTED(&again,va_acl); VATTR_WANTED(&again,va_fileid); VATTR_WANTED(&again,va_data_size);
++        VATTR_WANTED(&again,va_modify_time); VATTR_WANTED(&again,va_change_time);
++        error = vnode_getattr(file,&again,context);
++        if (!error && (!VATTR_IS_SUPPORTED(&again,va_acl) || !VATTR_IS_SUPPORTED(&again,va_fileid) ||
++            !VATTR_IS_SUPPORTED(&again,va_data_size) || !VATTR_IS_SUPPORTED(&again,va_modify_time) ||
++            !VATTR_IS_SUPPORTED(&again,va_change_time) || first.va_fileid != again.va_fileid ||
++            first.va_data_size != again.va_data_size || first.va_modify_time.tv_sec != again.va_modify_time.tv_sec ||
++            first.va_modify_time.tv_nsec != again.va_modify_time.tv_nsec || first.va_change_time.tv_sec != again.va_change_time.tv_sec ||
++            first.va_change_time.tv_nsec != again.va_change_time.tv_nsec ||
++            (first.va_acl == NULL) != (again.va_acl == NULL) ||
++            (again.va_acl && (again.va_acl->acl_entrycount > 128 || KAUTH_ACL_COPYSIZE(again.va_acl) != acl_bytes ||
++                memcmp((uint8_t *)data+32,again.va_acl,acl_bytes))))) error = EAGAIN;
++    }
++    if (first.va_acl) kauth_acl_free(first.va_acl);
++    if (again.va_acl) kauth_acl_free(again.va_acl);
++    vnode_put(file);
++    if (error) { if (data) kfree_data(data,total);return error; }
++    *output = data;*size = total;
++    printf("KEBAB OFFLINE ACL: source-index=14 bytes=%u; original authorized two-equal-ACL snapshot, no write\n",acl_bytes);
++    return 0;
++}
++
+ int
+ kebab_identity_cache_snapshot(unsigned index, void **output, uint32_t *size)
+ {
+     if (!output || !size) return EINVAL;
+     *output = NULL; *size = 0;
++    if (index == 16) return kebab_offline_activation_acl_snapshot(output,size);
+     if (index >= sizeof(kebab_mg_cache_paths) / sizeof(kebab_mg_cache_paths[0])) return EINVAL;
+     if (index == 14 && __atomic_load_n(&kebab_offline_data_ark_ready,__ATOMIC_ACQUIRE) != 2) return EAGAIN;
+     if (panic_active() || ml_at_interrupt_context() || get_preemption_level() != 0 ||

@@ -1,0 +1,360 @@
+--- a/iokit/Kernel/arm/KebabSurface.cpp
++++ b/iokit/Kernel/arm/KebabSurface.cpp
+@@ -136,6 +136,15 @@
+ 	    KEBAB_SURFACE_STATE_SEED);
+ }
+ 
++/* Publish an actual kernel CPU write with the same atomic seed used by
++ * the original framework's unlock ABI. The caller retains the surface. */
++void
++kebab_surface_did_write(KebabSurface *surface)
++{
++    OSMemoryBarrier();
++    OSIncrementAtomic((volatile SInt32 *)kebab_surface_seed(surface));
++}
++
+ /*
+  * Give the surface an id and a table slot; the table holds one retain and a
+  * user count (creators, client mappings, kernel holders). Lock held.
+--- a/iokit/Kernel/arm/KebabSurface.h
++++ b/iokit/Kernel/arm/KebabSurface.h
+@@ -60,6 +60,8 @@
+ 
+ /* Retained surface for an id, or NULL. */
+ KebabSurface *kebab_surface_copy(uint32_t id);
++/* Publish an actual CPU write before completion notification. */
++void kebab_surface_did_write(KebabSurface *surface);
+ /* Retained physical framebuffer reference under the surface table lock. */
+ KebabSurface *kebab_surface_copy_boot_framebuffer(void);
+ extern "C" void kebab_surface_capture_report(void);
+--- a/iokit/Kernel/arm/KebabPlatformExpert.cpp
++++ b/iokit/Kernel/arm/KebabPlatformExpert.cpp
+@@ -13,6 +13,7 @@
+  * display node, and the driver only needs a provider to attach to. */
+ class AppleCLCD;
+ extern "C" int kebab_display_start(IOService *provider);
++extern "C" int kebab_scaler_start(IOService *provider);
+ #include <kern/debug.h>
+ #include <pexpert/pexpert.h>
+ #include <libkern/c++/OSMetaClass.h>
+@@ -206,6 +207,8 @@
+ 	createNubs(this, IODTFindMatchingEntries(root, kIODTExclusive, excludeList()));
+ 
+ 	/* Bring the panel up so IOMobileFramebuffer.framework finds it. */
++	/* Register the real CPU copy service before the compositor starts. */
++	if (!kebab_scaler_start(this)) IOLog("KEBAB SCALER: CPU service start failed\n");
+ 	kebab_display_start(this);
+ }
+ 
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -6,6 +6,7 @@
+ # SMP
+ iokit/Kernel/arm/KebabSurface.cpp                              optional iokitcpp
+ iokit/Kernel/arm/KebabFramebuffer.cpp                          optional iokitcpp
++iokit/Kernel/arm/KebabSoftwareScaler.cpp                       optional iokitcpp
+ iokit/Kernel/arm/AppleARMSMP.cpp    					optional iokitcpp
+ 
+ # NEGRONI device-tree platform (empty translation unit on other boards)
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabScalerCore.h
+@@ -0,0 +1,101 @@
++/* CPU implementation of the pinned iOS16 IOSurfaceAccelerator linear subset.
++ * No GPU, compressed-surface decoder, color converter or hardware fence. */
++#ifndef _KEBAB_SCALER_CORE_H
++#define _KEBAB_SCALER_CORE_H
++
++#define KSC_REQUEST_BYTES 0x170u
++#define KSC_MAX_DIM 4096u
++#define KSC_BGRA 0x42475241u
++enum ksc_result { KSC_OK, KSC_ARGUMENT, KSC_UNSUPPORTED, KSC_BOUNDS };
++struct ksc_image {
++    uint32_t width, height, stride, format, offset, allocation, planes;
++    uint16_t bpe;
++    uint8_t element_width, element_height;
++    uint64_t memory_length;
++};
++struct ksc_plan {
++    uint32_t source, destination, dx, dy, dw, dh;
++    uint64_t sx, sy, sw, sh, callback, refcon, argument, flags;
++};
++static uint32_t ksc_u32(const uint8_t *p) { uint32_t v; memcpy(&v,p,4); return v; }
++static uint64_t ksc_u64(const uint8_t *p) { uint64_t v; memcpy(&v,p,8); return v; }
++static int
++ksc_extent(const struct ksc_image *im)
++{
++    if (!im || !im->width || !im->height || im->width>KSC_MAX_DIM || im->height>KSC_MAX_DIM)
++        return KSC_ARGUMENT;
++    if (im->format!=KSC_BGRA || im->bpe!=4 || im->element_width!=1 || im->element_height!=1 || im->planes)
++        return KSC_UNSUPPORTED;
++    uint64_t n=(uint64_t)(im->height-1)*im->stride+(uint64_t)im->width*4;
++    if (im->stride<(uint64_t)im->width*4 || im->offset>im->allocation ||
++        n>im->allocation-im->offset || im->offset>im->memory_length || n>im->memory_length-im->offset)
++        return KSC_BOUNDS;
++    return KSC_OK;
++}
++static int
++ksc_prepare(const uint8_t *q, size_t n, const struct ksc_image *s,
++    const struct ksc_image *d, struct ksc_plan *out)
++{
++    if (!q || n!=KSC_REQUEST_BYTES || !out) return KSC_ARGUMENT;
++    struct ksc_plan p={};
++    p.source=ksc_u32(q);p.destination=ksc_u32(q+4);
++    p.callback=ksc_u64(q+8);p.refcon=ksc_u64(q+0x10);p.argument=ksc_u64(q+0x18);p.flags=ksc_u64(q+0x20);
++    if (!p.source || !p.destination || p.source==p.destination) return KSC_ARGUMENT;
++    /* Transform=identity, DitherControl=0/1 (no quantization for BGRA8),
++     * nearest or ordinary bilinear, SkipAsyncCallback. Other flags require
++     * an actual implementation before accepting them. */
++    if (p.flags & ~UINT64_C(0x3480)) return KSC_UNSUPPORTED;
++    if ((p.flags & 0x6000)>0x2000) return KSC_UNSUPPORTED;
++    for (size_t i=0x48;i<0x58;i++) if(q[i]) return KSC_UNSUPPORTED;
++    for (size_t i=0x68;i<n;i++) if(q[i]) return KSC_UNSUPPORTED;
++    int err=ksc_extent(s);if(err)return err;err=ksc_extent(d);if(err)return err;
++    p.sx=ksc_u64(q+0x28);p.sy=ksc_u64(q+0x30);p.sw=ksc_u64(q+0x38);p.sh=ksc_u64(q+0x40);
++    p.dx=ksc_u32(q+0x58);p.dy=ksc_u32(q+0x5c);p.dw=ksc_u32(q+0x60);p.dh=ksc_u32(q+0x64);
++    if (!(p.sx|p.sy|p.sw|p.sh)) { p.sw=(uint64_t)s->width<<16;p.sh=(uint64_t)s->height<<16; }
++    if (!(p.dx|p.dy|p.dw|p.dh)) { p.dw=d->width;p.dh=d->height; }
++    uint64_t sxmax=(uint64_t)s->width<<16,symax=(uint64_t)s->height<<16;
++    if (!p.sw || !p.sh || p.sx>=sxmax || p.sy>=symax || p.sw>sxmax-p.sx || p.sh>symax-p.sy ||
++        !p.dw || !p.dh || p.dx>=d->width || p.dy>=d->height || p.dw>d->width-p.dx || p.dh>d->height-p.dy)
++        return KSC_BOUNDS;
++    *out=p;return KSC_OK;
++}
++/* Pixel-center sampling, clamp to the requested source ROI and image bounds.
++ * Integer arithmetic only: callable with the kernel FP/SIMD context disabled. */
++static uint64_t
++ksc_coordinate(uint64_t origin, uint64_t span, uint32_t position, uint32_t count)
++{
++    uint64_t center=origin+((uint64_t)(2*position+1)*span)/(2*count);
++    uint64_t lo=origin,hi=span>=65536?origin+span-65536:origin;
++    uint64_t x=center>=32768?center-32768:0;
++    if(x<lo)x=lo;
++    if(x>hi)x=hi;
++    return x;
++}
++static void
++ksc_run(const struct ksc_plan *p,const struct ksc_image *s,const struct ksc_image *d,
++    const uint8_t *source,uint8_t *destination)
++{
++    /* The wrapper retains both surfaces and independent CPU mappings, rejects
++     * aliasing and validates every byte extent before entering this function. */
++    for(uint32_t y=0;y<p->dh;y++) {
++        uint64_t fy=ksc_coordinate(p->sy,p->sh,y,p->dh);
++        uint32_t y0=(uint32_t)(fy>>16),y1=y0+1<s->height?y0+1:y0,wy=(uint32_t)fy&65535;
++        if(p->flags&0x80){y0=(uint32_t)((fy+32768)>>16);if(y0>=s->height)y0=s->height-1;y1=y0;wy=0;}
++        uint8_t *row=destination+d->offset+(uint64_t)(p->dy+y)*d->stride+(uint64_t)p->dx*4;
++        for(uint32_t x=0;x<p->dw;x++) {
++            uint64_t fx=ksc_coordinate(p->sx,p->sw,x,p->dw);
++            uint32_t x0=(uint32_t)(fx>>16),x1=x0+1<s->width?x0+1:x0,wx=(uint32_t)fx&65535;
++            if(p->flags&0x80){x0=(uint32_t)((fx+32768)>>16);if(x0>=s->width)x0=s->width-1;x1=x0;wx=0;}
++            const uint8_t *a=source+s->offset+(uint64_t)y0*s->stride+(uint64_t)x0*4;
++            const uint8_t *b=source+s->offset+(uint64_t)y0*s->stride+(uint64_t)x1*4;
++            const uint8_t *c=source+s->offset+(uint64_t)y1*s->stride+(uint64_t)x0*4;
++            const uint8_t *e=source+s->offset+(uint64_t)y1*s->stride+(uint64_t)x1*4;
++            for(unsigned ch=0;ch<4;ch++) {
++                uint64_t top=(uint64_t)a[ch]*(65536-wx)+(uint64_t)b[ch]*wx;
++                uint64_t bottom=(uint64_t)c[ch]*(65536-wx)+(uint64_t)e[ch]*wx;
++                row[4*x+ch]=(uint8_t)((top*(65536-wy)+bottom*wy+UINT64_C(0x80000000))>>32);
++            }
++        }
++    }
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabSoftwareScaler.cpp
+@@ -0,0 +1,195 @@
++/* Original iOS16 IOSurfaceAccelerator API, explicitly backed by CPU pixels.
++ * Matching-family names express a wire ABI, not an Apple hardware device. */
++#include <pexpert/arm64/board_config.h>
++#if defined(KEBAB)
++#include "KebabSurface.h"
++#include "KebabUserClientContract.h"
++#include <IOKit/IOService.h>
++#include <IOKit/IOLib.h>
++#include <IOKit/IOKitKeys.h>
++#include <libkern/c++/OSDictionary.h>
++#include <libkern/c++/OSNumber.h>
++#include <sys/proc.h>
++#include <sys/kauth.h>
++#include <kern/task.h>
++#include "KebabScalerCore.h"
++extern "C" int kebab_scaler_start(IOService *provider);
++
++class AppleM2ScalerCSCDriver : public IOService {
++    OSDeclareDefaultStructors(AppleM2ScalerCSCDriver);
++};
++OSDefineMetaClassAndStructors(AppleM2ScalerCSCDriver,IOService);
++class KebabSoftwareScaler : public AppleM2ScalerCSCDriver {
++    OSDeclareDefaultStructors(KebabSoftwareScaler);
++public:
++    bool start(IOService *) APPLE_KEXT_OVERRIDE;
++    IOReturn newUserClient(task_t,void *,UInt32,OSDictionary *,IOUserClient **) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(KebabSoftwareScaler,AppleM2ScalerCSCDriver);
++
++static bool
++ksc_authorized(task_t task)
++{
++    static const uint8_t uuid[16]={0x70,0xb7,0x23,0x40,0x73,0x7a,0x39,0x73,0x8b,0x47,0x4e,0x99,0x70,0xf4,0xec,0xb9};
++    if(task==TASK_NULL || task!=current_task())return false;
++    proc_t p=current_proc();uint8_t actual[16]={};
++    if(p==NULL || proc_task(p)!=task || kauth_cred_getuid(proc_ucred(p))!=501)return false;
++    proc_getexecutableuuid(p,actual,sizeof(actual));
++    return !memcmp(actual,uuid,sizeof(uuid));
++}
++
++class IOSurfaceAcceleratorClient : public IOUserClient {
++    OSDeclareDefaultStructors(IOSurfaceAcceleratorClient);
++    IOLock *fLock;
++    task_t fTask;
++    mach_port_t fPort;
++    bool fClosed;
++    uint64_t fCompleted;
++    void closeConnection();
++    IOReturn transform(const uint8_t *,size_t);
++public:
++    bool initWithTask(task_t,void *,UInt32) APPLE_KEXT_OVERRIDE;
++    IOReturn clientClose() APPLE_KEXT_OVERRIDE;
++    void stop(IOService *) APPLE_KEXT_OVERRIDE;
++    void free() APPLE_KEXT_OVERRIDE;
++    IOReturn registerNotificationPort(mach_port_t,UInt32,io_user_reference_t) APPLE_KEXT_OVERRIDE;
++    IOReturn externalMethod(uint32_t,IOExternalMethodArguments *,IOExternalMethodDispatch *,OSObject *,void *) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(IOSurfaceAcceleratorClient,IOUserClient);
++
++bool
++KebabSoftwareScaler::start(IOService *provider)
++{
++    if(!AppleM2ScalerCSCDriver::start(provider))return false;
++    setName("KebabSoftwareScaler");
++    setProperty("KebabBackend","CPU BGRA8 bilinear/nearest, iOS16 IOSurfaceAccelerator ABI");
++    setProperty("KebabHardwareAccelerated",kOSBooleanFalse);
++    OSDictionary *caps=OSDictionary::withCapacity(12);
++    if(!caps){AppleM2ScalerCSCDriver::stop(provider);return false;}
++    const char *names[]={"MinSourceWidth","MinSourceHeight","MinDestWidth","MinDestHeight",
++        "MaxSourceWidth","MaxSourceHeight","MaxDestWidth","MaxDestHeight"};
++    bool valid=true;
++    for(unsigned i=0;i<8;i++) {
++        char key[96];snprintf(key,sizeof(key),"IOSurfaceAcceleratorCapabilities%s",names[i]);
++        OSNumber *n=OSNumber::withNumber(i<4?1:KSC_MAX_DIM,32);
++        if(!n){valid=false;break;}valid=caps->setObject(key,n)&&valid;n->release();
++    }
++    if(valid)valid=setProperty("IOSurfaceAcceleratorCapabilitiesDict",caps);
++    caps->release();
++    if(!valid){AppleM2ScalerCSCDriver::stop(provider);return false;}
++    IOLog("KEBAB SCALER: CPU linear BGRA8 copy/scale registered, no GPU/compressed/HDR capability\n");
++    registerService();return true;
++}
++IOReturn
++KebabSoftwareScaler::newUserClient(task_t task,void *security,UInt32 type,OSDictionary *,IOUserClient **out)
++{
++    if(!out)return kIOReturnBadArgument;*out=NULL;
++    if(type || isInactive())return kIOReturnUnsupported;
++    if(!ksc_authorized(task))return kIOReturnNotPermitted;
++    IOSurfaceAcceleratorClient *c=new IOSurfaceAcceleratorClient;
++    if(!c)return kIOReturnNoMemory;
++    if(!c->initWithTask(task,security,type) || !c->attach(this)){c->release();return kIOReturnError;}
++    if(!c->start(this)){c->detach(this);c->release();return kIOReturnError;}
++    *out=c;IOLog("KEBAB SCALER: original backboardd CPU client opened\n");return kIOReturnSuccess;
++}
++bool
++IOSurfaceAcceleratorClient::initWithTask(task_t task,void *security,UInt32 type)
++{
++    if(!IOUserClient::initWithTask(task,security,type))return false;
++    fTask=task;fPort=MACH_PORT_NULL;fClosed=false;fCompleted=0;fLock=IOLockAlloc();return fLock!=NULL;
++}
++void
++IOSurfaceAcceleratorClient::closeConnection()
++{
++    if(!fLock)return;
++    KebabUserClientCall call(fLock);
++    if(fClosed)return;fClosed=true;
++    if(fPort!=MACH_PORT_NULL){releaseNotificationPort(fPort);fPort=MACH_PORT_NULL;}
++}
++IOReturn IOSurfaceAcceleratorClient::clientClose(){closeConnection();terminate();return kIOReturnSuccess;}
++void IOSurfaceAcceleratorClient::stop(IOService *p){closeConnection();IOUserClient::stop(p);}
++void IOSurfaceAcceleratorClient::free(){closeConnection();if(fLock){IOLockFree(fLock);fLock=NULL;}IOUserClient::free();}
++IOReturn
++IOSurfaceAcceleratorClient::registerNotificationPort(mach_port_t port,UInt32 type,io_user_reference_t refcon)
++{
++    KebabUserClientCall call(fLock);
++    if(fClosed || isInactive())return kIOReturnNoDevice;
++    if(!ksc_authorized(fTask))return kIOReturnNotPermitted;
++    if(type || refcon)return kIOReturnBadArgument;
++    mach_port_t old=fPort;fPort=port;
++    if(old!=MACH_PORT_NULL)releaseNotificationPort(old);
++    return kIOReturnSuccess;
++}
++static struct ksc_image
++ksc_description(KebabSurface *s)
++{
++    return {s->width,s->height,s->bytesPerRow,s->pixelFormat,s->offset,s->allocSize,s->planeCount,
++        s->bytesPerElement,s->elementWidth,s->elementHeight,s->memory?s->memory->getLength():0};
++}
++IOReturn
++IOSurfaceAcceleratorClient::transform(const uint8_t *q,size_t size)
++{
++    if(size!=KSC_REQUEST_BYTES)return kIOReturnBadArgument;
++    KebabSurface *s=kebab_surface_copy(ksc_u32(q)),*d=kebab_surface_copy(ksc_u32(q+4));
++    IOMemoryMap *sm=NULL,*dm=NULL;IOReturn ret=kIOReturnNotFound;
++    struct ksc_plan plan={};struct ksc_image si={},di={};
++    if(!s || !d)goto done;
++    si=ksc_description(s);di=ksc_description(d);
++    {int err=ksc_prepare(q,size,&si,&di,&plan);
++    if(err){ret=err==KSC_UNSUPPORTED?kIOReturnUnsupported:kIOReturnBadArgument;goto done;}}
++    /* Both global IDs are only exposed to the exact original compositor task;
++     * normal IOServiceOpen and per-method MACF/filter checks still run. */
++    if(!s->memory || !d->memory || s->memory==d->memory || s->parentID || d->parentID){ret=kIOReturnUnsupported;goto done;}
++    if(plan.callback && !(plan.flags&0x400) && fPort==MACH_PORT_NULL){ret=kIOReturnNotReady;goto done;}
++    sm=s->memory->createMappingInTask(kernel_task,0,kIOMapAnywhere|kIOMapReadOnly|s->mapCache);
++    dm=d->memory->createMappingInTask(kernel_task,0,kIOMapAnywhere|d->mapCache);
++    if(!sm || !dm || !sm->getVirtualAddress() || !dm->getVirtualAddress() ||
++        sm->getLength()<si.memory_length || dm->getLength()<di.memory_length){ret=kIOReturnVMError;goto done;}
++    OSMemoryBarrier();
++    ksc_run(&plan,&si,&di,(const uint8_t *)(uintptr_t)sm->getVirtualAddress(),(uint8_t *)(uintptr_t)dm->getVirtualAddress());
++    OSMemoryBarrier();
++    kebab_surface_did_write(d);
++    ret=kIOReturnSuccess;
++    if(plan.callback && !(plan.flags&0x400)) {
++        OSAsyncReference64 ref={};io_user_reference_t arg=plan.argument;
++        setAsyncReference64(ref,fPort,plan.callback,plan.refcon,fTask);
++        /* One bounded completion message after the real CPU write, never a
++         * timer-based fabricated GPU completion. A full queue is an error. */
++        ret=sendAsyncResult64WithOptions(ref,kIOReturnSuccess,&arg,1,kIOUserNotifyOptionCanDrop);
++    }
++    if(ret==kIOReturnSuccess)fCompleted++;
++done:
++    if(fCompleted<4 || ret!=kIOReturnSuccess || !(fCompleted%120))
++        IOLog("KEBAB SCALER: transfer source=%u destination=%u flags=0x%llx src=%ux%u dst=%ux%u result=0x%x completed=%llu\n",
++            ksc_u32(q),ksc_u32(q+4),ksc_u64(q+0x20),s?s->width:0,s?s->height:0,d?d->width:0,d?d->height:0,ret,fCompleted);
++    OSSafeReleaseNULL(dm);OSSafeReleaseNULL(sm);OSSafeReleaseNULL(d);OSSafeReleaseNULL(s);return ret;
++}
++IOReturn
++IOSurfaceAcceleratorClient::externalMethod(uint32_t selector,IOExternalMethodArguments *a,
++    IOExternalMethodDispatch *,OSObject *,void *)
++{
++    KebabUserClientCall call(fLock);
++    if(fClosed || isInactive())return kIOReturnNoDevice;
++    if(!ksc_authorized(fTask))return kIOReturnNotPermitted;
++    if(!a || a->scalarInputCount || a->scalarOutputCount || a->structureOutputSize ||
++        a->structureOutputDescriptor || a->asyncReferenceCount)return kIOReturnBadArgument;
++    /* Closed and deliberately narrow selector contract: unsupported filters,
++     * counters, swap/fill and hardware controls never receive fake success. */
++    if(selector==2) {
++        if(a->structureInputDescriptor || a->structureInputSize)return kIOReturnBadArgument;
++        return kIOReturnSuccess; /* Calls are synchronous; no pending DMA to abort. */
++    }
++    if(selector!=1){IOLog("KEBAB SCALER: unsupported selector=%u input=%u\n",selector,a->structureInputSize);return kIOReturnUnsupported;}
++    if(a->structureInputDescriptor || !a->structureInput || a->structureInputSize!=KSC_REQUEST_BYTES)return kIOReturnBadArgument;
++    return transform((const uint8_t *)a->structureInput,a->structureInputSize);
++}
++extern "C" int
++kebab_scaler_start(IOService *provider)
++{
++    KebabSoftwareScaler *service=new KebabSoftwareScaler;
++    if(!service)return 0;
++    if(!service->init() || !service->attach(provider)){service->release();return 0;}
++    if(!service->start(provider)){service->detach(provider);service->release();return 0;}
++    service->release();return 1;
++}
++#endif

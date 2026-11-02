@@ -1,0 +1,164 @@
+--- a/bsd/dev/arm/systemcalls.c
++++ b/bsd/dev/arm/systemcalls.c
+@@ -34,6 +34,7 @@
+ 
+ #if defined(KEBAB)
+ extern void kebab_fairplay_syscall_return_evidence(proc_t,unsigned short,int,uint64_t,uint64_t,int32_t);
++extern void kebab_fairplay_open_return_evidence(proc_t,unsigned short,int,uint64_t,int32_t);
+ #endif
+ 
+ #if CONFIG_MACF
+@@ -192,6 +193,10 @@
+ #if defined(KEBAB)
+  kebab_fairplay_syscall_return_evidence(proc,code,error,get_saved_state_pc(state),get_saved_state_lr(state),
+      code==SYS_ptrace&&callp==&sysent[SYS_ptrace]?(int32_t)uthread->uu_arg[0]:-1);
++ if(error==ENOENT&&code==SYS_open&&callp==&sysent[SYS_open])
++  kebab_fairplay_open_return_evidence(proc,code,error,uthread->uu_arg[0],0);
++ if(error==ENOENT&&code==SYS_openat&&callp==&sysent[SYS_openat])
++  kebab_fairplay_open_return_evidence(proc,code,error,uthread->uu_arg[1],(int32_t)uthread->uu_arg[0]);
+ #endif
+ 
+ 	unix_syscall_kprintf("code %d, error %d, results %x, %x (pid %d - %s, tid %lld)\n", code, error,
+@@ -276,6 +281,10 @@
+ #if defined(KEBAB)
+  kebab_fairplay_syscall_return_evidence(proc,code,error,get_saved_state_pc(regs),get_saved_state_lr(regs),
+      code==SYS_ptrace&&callp==&sysent[SYS_ptrace]?(int32_t)uthread->uu_arg[0]:-1);
++ if(error==ENOENT&&code==SYS_open&&callp==&sysent[SYS_open])
++  kebab_fairplay_open_return_evidence(proc,code,error,uthread->uu_arg[0],0);
++ if(error==ENOENT&&code==SYS_openat&&callp==&sysent[SYS_openat])
++  kebab_fairplay_open_return_evidence(proc,code,error,uthread->uu_arg[1],(int32_t)uthread->uu_arg[0]);
+ #endif
+ 	arm_prepare_syscall_return(callp, regs, uthread, error);
+ 
+--- a/bsd/kern/kebab_fairplay_bootdiag_impl.h
++++ b/bsd/kern/kebab_fairplay_bootdiag_impl.h
+@@ -70,3 +70,67 @@
+  for(unsigned i=0;i<kept;i++)kebab_fp_print_call("SC",pid,&snapshot[i]);
+  printf("KEBAB FP-END: pid=%d signal=%d status=%d; original exit preserved\n",pid,WTERMSIG(rv),WEXITSTATUS(rv));
+ }
++
++/* Bounded name-only observations. User paths are post-return best-effort
++ * snapshots; registry names are the live MIG request, never property values.
++ * Reserve under the ring lock; copy/sanitize/print only after unlocking. */
++static unsigned kebab_fp_resource_count;
++
++static unsigned
++kebab_fp_resource_reserve(proc_t p)
++{
++ if(!kebab_fp_original_self(p))return 0;
++ pid_t pid=proc_pid(p);unsigned ticket=0;
++ lck_spin_lock(&kebab_fp_lock);
++ if(kebab_fp_pid==0)kebab_fp_pid=pid;
++ if(kebab_fp_pid==pid&&!kebab_fp_sealed&&kebab_fp_resource_count<32)
++  ticket=++kebab_fp_resource_count;
++ lck_spin_unlock(&kebab_fp_lock);
++ return ticket;
++}
++
++static void
++kebab_fp_resource_print(proc_t p,unsigned ticket,unsigned kind,unsigned code,
++    int result,int aux,char *name,unsigned copied,int copy_error,bool truncated)
++{
++ unsigned changed=0;
++ for(unsigned i=0;i<copied;i++){
++  unsigned char c=(unsigned char)name[i];
++  if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='/'||c=='.'||c=='_'||c=='-'||c==':')){
++   name[i]='?';changed=1;
++  }
++ }
++ name[copied]=0;
++ printf("KEBAB FP-RESOURCE: id=%u pid=%d kind=%u code=%u result=%d aux=%d copy=%d trunc=%u changed=%u\n",
++     ticket,proc_pid(p),kind,code,result,aux,copy_error,truncated,changed);
++ printf("KEBAB FP-NAME: id=%u name=%s\n",ticket,name);
++}
++
++void
++kebab_fairplay_open_return_evidence(proc_t p,unsigned short code,int error,uint64_t address,int32_t dirfd)
++{
++ if(error!=ENOENT||(code!=SYS_open&&code!=SYS_openat))return;
++ unsigned ticket=kebab_fp_resource_reserve(p);if(!ticket)return;
++ char name[128]={};size_t copied=0;
++ int copied_error=copyinstr((user_addr_t)address,name,sizeof(name),&copied);
++ bool truncated=copied_error==ENAMETOOLONG;
++ /* copyinstr's done count is valid on success, not on error. Do not print
++  * partially copied user data on EFAULT or an overlong path. */
++ unsigned length=0;
++ if(!copied_error&&copied>0&&copied<=sizeof(name))length=(unsigned)copied-1;
++ else name[0]=0;
++ kebab_fp_resource_print(p,ticket,0,code,error,code==SYS_openat?dirfd:0,name,length,copied_error,truncated);
++}
++
++void
++kebab_fairplay_registry_evidence(unsigned kind,const char *name,unsigned bound,int result,unsigned found)
++{
++ if((kind!=1&&kind!=2)||!name||!bound)return;
++ proc_t p=current_proc();unsigned ticket=kebab_fp_resource_reserve(p);if(!ticket)return;
++ char snapshot[128]={};unsigned length=0;
++ while(length<sizeof(snapshot)-1&&length<bound&&name[length]){
++  snapshot[length]=name[length];length++;
++ }
++ bool truncated=length==bound||(length==sizeof(snapshot)-1&&name[length]!=0);
++ kebab_fp_resource_print(p,ticket,kind,0,result,found!=0,snapshot,length,0,truncated);
++}
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -31,6 +31,9 @@
+ #include <IOKit/IOKitServer.h>
+ #include <IOKit/IOKitKeysPrivate.h>
+ #include <IOKit/IOUserClient.h>
++#if defined(KEBAB)
++extern "C" void kebab_fairplay_registry_evidence(unsigned,const char *,unsigned,int,unsigned);
++#endif
+ #include <IOKit/IOService.h>
+ #include <IOKit/IORegistryEntry.h>
+ #include <IOKit/IOCatalogue.h>
+@@ -3290,6 +3293,9 @@
+ 	}
+ 
+ 	*registry_entry = entry;
++#if defined(KEBAB)
++ kebab_fairplay_registry_evidence(1,path,sizeof(io_string_t),kIOReturnSuccess,entry!=NULL);
++#endif
+ 
+ 	return kIOReturnSuccess;
+ }
+@@ -3632,6 +3638,9 @@
+ 
+ 	obj = IOCopyPropertyCompatible(entry, property_name);
+ 	if (!obj) {
++#if defined(KEBAB)
++ kebab_fairplay_registry_evidence(2,property_name,sizeof(io_name_t),kIOReturnNotFound,0);
++#endif
+ 		return kIOReturnNotFound;
+ 	}
+ 
+@@ -3652,6 +3661,9 @@
+ 	s->release();
+ 	obj->release();
+ 
++#if defined(KEBAB)
++ kebab_fairplay_registry_evidence(2,property_name,sizeof(io_name_t),err,1);
++#endif
+ 	return err;
+ }
+ 
+@@ -3906,6 +3918,9 @@
+ 
+ 	sym->release();
+ 	if (!obj) {
++#if defined(KEBAB)
++ kebab_fairplay_registry_evidence(2,property_name,sizeof(io_name_t),err,0);
++#endif
+ 		return err;
+ 	}
+ 
+@@ -3940,6 +3955,9 @@
+ 	s->release();
+ 	obj->release();
+ 
++#if defined(KEBAB)
++ kebab_fairplay_registry_evidence(2,property_name,sizeof(io_name_t),err,1);
++#endif
+ 	return err;
+ }
+ 

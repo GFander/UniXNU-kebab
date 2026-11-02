@@ -1,0 +1,24 @@
+{
+  "passed": true,
+  "cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+  "original_SpringBoard_uuid": "e1a4fe7d29ff3269b3ab50aed40c4495",
+  "fixed_global_and_offsets_verified": true,
+  "objc_debug_isa_masks_verified": true,
+  "original_nil_error_completion_is_sole_signal_call_in_indexed_BKS_methods": true,
+  "full_indirect_control_flow_or_atomic_snapshot_proven": false,
+  "physical_checkin_or_frame_proven": false,
+  "reviewed_function_sha256": {
+    "+[FBSystemShell sharedInstance]": "1fd63cc8bbbba061c8ac8d2ac5dcb14b23b65756f816c1cbef5238d581db954e",
+    "-[FBSystemShell _startSystemShellService]": "4cf3a781daf1847a7ccae21c920324ba729d859784c14df4fe318a864810cc5b",
+    "-[FBSystemShell _state]": "dfb556a413c8bda5332942d0202e8d5f1e52f45158aec3676294cf11ad5909cb",
+    "-[BKSSystemShellService _checkIn]": "095387bce82d55ae838956a721b8ad5ae2bcc88163f248e75147d5875ebc3da0",
+    "___33-[BKSSystemShellService _checkIn]_block_invoke": "808d91315ff21fb3cb0fd210f95a0f3859376d341bb0393ceede9cd617a3a1b2",
+    "-[BSAtomicSignal hasBeenSignalled]": "110d6e0503aaed14b3b6a5bad43f87ba1c2b0c73bb2789380611bcabcf7d8893",
+    "-[BSAtomicSignal signal]": "bd689fcccc52eac9b7b051e360e2f463ac31ee1511c24c19bfc34e6267761a83"
+  },
+  "production_osfmk_source_sha256": "12099b9dc7e88999f7dcb1dd2bd19f213c95456b65e33d313fe6969555e68f67",
+  "completion_block_error_x1_retained_to_x0_then_x19_verified": true,
+  "error_retain_export": "_objc_retain_x1",
+  "error_retain_exact_stub": "0x1948ed5e0",
+  "error_retain_exact_target": "0x1800bb4a4"
+}

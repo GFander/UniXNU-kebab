@@ -1,0 +1,143 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -17,6 +17,9 @@
+ #include <sys/mount.h>
+ #include <sys/kauth.h>
+ #include <kern/kalloc.h>
++#include <libkern/crypto/sha2.h>
++#include <pexpert/device_tree.h>
++#include <sys/vnode_if.h>
+ 
+ extern void kebab_pid1_task_report(task_t task);
+ void kebab_process_report(void);
+@@ -54,7 +57,8 @@
+     "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist",
+     "/private/var/mobile/Library/Preferences/com.apple.MobileGestalt.plist",
+     "/private/var/mobile/Library/Preferences/com.apple.mobilegestalt.plist",
+-    "/System/Library/Caches/com.apple.MobileGestalt.plist"
++    "/System/Library/Caches/com.apple.MobileGestalt.plist",
++    "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist.hios-before-iphone-x-20261102"
+ };
+ 
+ int kebab_identity_cache_snapshot(unsigned, void **, uint32_t *);
+@@ -122,6 +126,72 @@
+         index, length, before.va_fileid, before.va_uid, before.va_gid, before.va_mode, mount_path, path);
+     return 0;
+ }
++
++/* Optional owner-measured one-file cache invalidation. The old file is moved
++ * intact, exclusively, only before PID1 executes and only when its exact
++ * inode/size/SHA256 match the backup already verified on the host. No answer
++ * values are invented; the unchanged original MG loader rebuilds its cache. */
++extern int kebab_identity_cache_backup(void);
++int kebab_identity_cache_reset_once(void);
++int
++kebab_identity_cache_reset_once(void)
++{
++    DTEntry chosen;
++    const void *raw = NULL;
++    unsigned raw_size = 0;
++    if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++        SecureDTGetProperty(chosen, "hios-mg-cache-reset", &raw, &raw_size) != kSuccess) return 0;
++    if (!raw || raw_size != 64) return EINVAL;
++    uint32_t header[4]; uint64_t fileid;
++    uint8_t expected[32], reserved[8];
++    memcpy(header, raw, sizeof(header)); memcpy(&fileid, (uint8_t *)raw + 16, sizeof(fileid));
++    memcpy(expected, (uint8_t *)raw + 24, sizeof(expected)); memcpy(reserved, (uint8_t *)raw + 56, sizeof(reserved));
++    static const uint8_t zeros[8] = {};
++    if (header[0] != 0x4449474d || header[1] != 1 || header[2] != 0 ||
++        !header[3] || header[3] > KEBAB_MG_CACHE_LIMIT || !fileid || memcmp(reserved, zeros, sizeof(zeros))) return EINVAL;
++    if (current_proc() != initproc || initproc->p_textvp != NULLVP || panic_active()) return EPERM;
++    vfs_context_t context = vfs_context_current();
++    vnode_t vnode = NULLVP;
++    int error = vnode_lookup(kebab_mg_cache_paths[0], VNODE_LOOKUP_NOFOLLOW, &vnode, context);
++    if (error == ENOENT) { printf("KEBAB MG RESET: target absent; no cache changed\n"); return 0; }
++    if (error) return error;
++    struct vnode_attr attr;
++    VATTR_INIT(&attr); VATTR_WANTED(&attr, va_fileid); VATTR_WANTED(&attr, va_data_size);
++    error = vnode_isreg(vnode) ? vnode_getattr(vnode, &attr, context) : EINVAL;
++    struct vfsstatfs *stats = vfs_statfs(vnode_mount(vnode));
++    if (!error && (!VATTR_IS_SUPPORTED(&attr, va_fileid) || !VATTR_IS_SUPPORTED(&attr, va_data_size) ||
++        !stats || strcmp(stats->f_fstypename, "apfs") || strcmp(stats->f_mntonname, "/private/var"))) error = EINVAL;
++    bool matches = !error && attr.va_fileid == fileid && attr.va_data_size == header[3];
++    vnode_put(vnode);
++    if (error) return error;
++    if (!matches) { printf("KEBAB MG RESET: current inode/size differs from the old backup plan; no cache changed\n"); return 0; }
++    void *data = NULL; uint32_t bytes = 0; uint8_t digest[32]; SHA256_CTX hash;
++    error = kebab_identity_cache_snapshot(0, &data, &bytes);
++    if (error) return error;
++    SHA256_Init(&hash); SHA256_Update(&hash, data, bytes); SHA256_Final(digest, &hash);
++    kebab_identity_cache_release(data, bytes);
++    if (bytes != header[3] || memcmp(digest, expected, sizeof(digest))) return EAUTH;
++    /* No original daemon exists yet to rewrite this path. renameat_internal
++     * still performs the normal per-vnode authorization and exclusive check. */
++    error = kebab_identity_cache_backup();
++    if (error) return error;
++    error = kebab_identity_cache_snapshot(4, &data, &bytes);
++    if (error) return error;
++    SHA256_Init(&hash); SHA256_Update(&hash, data, bytes); SHA256_Final(digest, &hash);
++    kebab_identity_cache_release(data, bytes);
++    if (bytes != header[3] || memcmp(digest, expected, sizeof(digest))) return EAUTH;
++    vnode = NULLVP;
++    error = vnode_lookup(kebab_mg_cache_paths[4], VNODE_LOOKUP_NOFOLLOW, &vnode, context);
++    if (!error) { error = VNOP_FSYNC(vnode, MNT_WAIT, context); vnode_put(vnode); }
++    if (error) return error;
++    vnode = NULLVP;
++    error = vnode_lookup("/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches", VNODE_LOOKUP_NOFOLLOW, &vnode, context);
++    if (!error) { error = VNOP_FSYNC(vnode, MNT_WAIT, context); vnode_put(vnode); }
++    if (error) return error;
++    printf("KEBAB MG RESET: exact old cache moved exclusively; backup digest verified and fsync complete; original MG must rebuild, no class/key values patched\n");
++    return 0;
++}
++
+ 
+ void
+ kebab_process_report(void)
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7255,6 +7255,9 @@
+    extern int kebab_watchdog_prepare(void);
+    checked=kebab_watchdog_prepare();
+    if(checked)panic("KEBAB WATCHDOG: original service/backend prepare failed %d",checked);
++   extern int kebab_identity_cache_reset_once(void);
++   int cache_reset_error=kebab_identity_cache_reset_once();
++   if(cache_reset_error)printf("KEBAB MG RESET: exact cache operation refused/incomplete error=%d; original startup continues without pretending success\n",cache_reset_error);
+   }
+   printf("KEBAB DATA USERLAND: genuine encrypted Data mounted; hardware Root/class bank and native FS/FV services live; original launchd handoff, storage profile verified\n");
+  }
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -9693,6 +9693,22 @@
+ 	return error;
+ }
+ 
++#if defined(KEBAB)
++/* One exact, exclusive backup before the original PID1 image is executed.
++ * The caller first verifies an owner-measured plan and the saved file digest.
++ * Keep the original rename implementation and its MACF/ACL checks intact. */
++int kebab_identity_cache_backup(void);
++int
++kebab_identity_cache_backup(void)
++{
++    if (current_proc() != initproc || initproc->p_textvp != NULLVP) return EPERM;
++    static const char source[] = "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist";
++    static const char backup[] = "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist.hios-before-iphone-x-20261102";
++    return renameat_internal(vfs_context_current(), AT_FDCWD, CAST_USER_ADDR_T(source),
++        AT_FDCWD, CAST_USER_ADDR_T(backup), UIO_SYSSPACE, RENAME_EXCL);
++}
++#endif
++
+ int
+ rename(__unused proc_t p, struct rename_args *uap, __unused int32_t *retval)
+ {
+--- a/osfmk/kern/kebab_capture.h
++++ b/osfmk/kern/kebab_capture.h
+@@ -18,7 +18,7 @@
+ #define KC_CLOSE 4u
+ #define KC_REPORT 5u
+ /* Sources: 1 deterministic bytes, 2 GOP, 3 IOSurface id, 4 displayed layer,
+- * 5 private known BGRA image, 6 fixed original MG cache files (raw bytes).
++ * 5 private known BGRA image, 6 fixed MG cache/backup audit files (raw bytes).
+  * No capture operation writes the panel or filesystem. */
+ struct kc_image {
+     void *handle;

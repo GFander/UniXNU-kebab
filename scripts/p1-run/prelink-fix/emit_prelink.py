@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 
 from native_prelink import (backed_offset, exports, macho, plan, resolve_kernel_imports,
                             unserialize_xml)
+from prelink_profile import RelocationProfile
 
 # Standard SHA-256 round constants, stored as 64 little-endian words. Some
 # assemblers embed these data in executable sections; do not decode as code.
@@ -72,9 +73,15 @@ def pc_relative_target(word, pc):
     return None
 
 
-def instruction_inventory(original_data, parent, modules):
+def instruction_inventory(original_data, parent, modules, relocation_profile=None):
     extents = [s for module in modules.values() for s in module['segments'] if s['size'] and s['name'] != '__LINKEDIT']
     literal_ranges, instruction_count = [], 0
+    profile = RelocationProfile(relocation_profile, original_data) if relocation_profile is not None else None
+    preserved = []
+    if profile:
+        if profile.module not in modules:
+            raise ValueError('Preserved-word module is not selected')
+        profile.verify_module(original_data, parent, modules[profile.module], backed_offset)
     for identifier, module in modules.items():
         for segment in module['segments']:
             if segment['name'] != '__TEXT_EXEC' or not segment['filesize']:
@@ -100,10 +107,26 @@ def instruction_inventory(original_data, parent, modules):
                 if any(start <= offset < end for start, end in literals):
                     continue
                 word, = struct.unpack_from('<I', blob, offset)
-                decoded = pc_relative_target(word, segment['va'] + offset)
+                site = segment['va'] + offset
+                decoded = pc_relative_target(word, site)
+                if profile and site in profile.words:
+                    previous, = struct.unpack_from('<I', blob, offset - 4)
+                    profile.preserve_word(identifier, site, word, previous)
+                    if decoded is None:
+                        raise ValueError('Profile word is not an inspected PC-relative encoding')
+                    target, page = decoded
+                    own = [s for s in module['segments'] if s['size'] and s['name'] != '__LINKEDIT']
+                    if (any((s['va'] & ~4095) <= target < align(s['va'] + s['size']) for s in own)
+                            if page else any(s['va'] <= target < s['va'] + s['size'] for s in own)):
+                        raise ValueError('Profile word targets its own module')
+                    preserved.append({'module': identifier, 'va': site,
+                                      'word_sha256': profile.words[site]['word_sha256']})
+                    continue
                 if decoded is None:
                     continue
                 target, page = decoded
+                if profile and not page and target in profile.words:
+                    raise ValueError('Known PC-relative entry targets a preserved word')
                 if page:
                     internal = any((s['va'] & ~4095) <= target < align(s['va'] + s['size']) for s in extents)
                 else:
@@ -111,13 +134,18 @@ def instruction_inventory(original_data, parent, modules):
                 if not internal:
                     raise ValueError(f'External PC-relative encoding at {segment["va"] + offset:#x}; no instruction rewrite supported')
                 instruction_count += 1
-    return {'pc_relative_encodings_preserved': instruction_count, 'known_inline_data': literal_ranges,
-            'register_dataflow_qualified': False}
+    report = {'pc_relative_encodings_preserved': instruction_count, 'known_inline_data': literal_ranges,
+              'register_dataflow_qualified': False}
+    if profile:
+        profile.require_words_consumed()
+        report['preserved_post_transfer_words'] = preserved
+        report['preserved_word_profile_sha256'] = profile.digest
+    return report
 
 
 def emit(native_data, original_data, roots, slide, early_security_init=None,
-         kernel_imports=None):
-    report = plan(native_data, original_data, roots, slide)
+         kernel_imports=None, relocation_profile=None):
+    report = plan(native_data, original_data, roots, slide, relocation_profile)
     native, original = macho(native_data), macho(original_data)
     marker = [address for address, names in exports(native_data, native).items()
               if '_kalloc_sparse_prelink_index_version' in names]
@@ -135,7 +163,10 @@ def emit(native_data, original_data, roots, slide, early_security_init=None,
     for identifier in report['components']:
         va = entries[identifier]['_PrelinkExecutableLoadAddr']
         modules[identifier] = macho(original_data, backed_offset(parent, va, 32, len(original_data)))
-    report.update(instruction_inventory(original_data, parent, modules))
+    report.update(instruction_inventory(original_data, parent, modules, relocation_profile))
+    if relocation_profile is not None:
+        assert report['relocation_profile']['profile_sha256'] == report['preserved_word_profile_sha256']
+        report['relocation_profile']['preserved_post_transfer_words'] = len(report['preserved_post_transfer_words'])
     early_security_init = early_security_init or {}
     if early_security_init:
         markers = [address for address, names in exports(native_data, native).items()
@@ -334,6 +365,8 @@ def main():
     parser.add_argument('--root', required=True, action='append')
     parser.add_argument('--slide', required=True, type=lambda value: int(value, 0))
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--relocation-profile', type=Path,
+                        help='Opt-in donor/text/site/word pins; no code rewrite or control-flow qualification')
     parser.add_argument('--early-security-init', action='append', default=[], metavar='BUNDLE=ORIGINAL_VA',
                         help='Explicit original void(void) policy initializer, called before lockdown; requires source ABI')
     parser.add_argument('--kernel-import', action='append', default=[],
@@ -355,8 +388,9 @@ def main():
         seen.add(symbol)
         imports.append({'symbol': symbol, 'original_va': int(original, 0),
                         'native_va': int(native, 0) if separator_at else None})
+    profile = json.loads(args.relocation_profile.read_text()) if args.relocation_profile else None
     image, report = emit(args.kernel.read_bytes(), args.prelinked.read_bytes(), args.root,
-                         args.slide, initializers, imports)
+                         args.slide, initializers, imports, profile)
     if args.output.exists():
         raise SystemExit('Refuse to overwrite an existing candidate')
     args.output.parent.mkdir(parents=True, exist_ok=True)

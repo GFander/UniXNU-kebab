@@ -1,0 +1,23 @@
+{
+  "version": "0543",
+  "parent": "0542",
+  "changes": {
+    "iokit/Kernel/arm/KebabHIDInput.cpp": {
+      "before": "c3036e2eb87861374c0d3c86233cf343aa72fa91aae1c815f87e030930c3f153",
+      "after": "d5fc90f23f7d202fb377420f2c22f7410f4eee81252ae568ac24ab2a0139a6b8"
+    },
+    "iokit/Kernel/arm/KebabOriginalHIDBindings.cpp": {
+      "before": "04ccbcfabadd53ad5a5f1b1174aad06e2747a73dd224707c94c1fe36c242d020",
+      "after": "60c65e9948874e8589a0bfa22824a1746fb2ee93b3e2b01eae9a13cfb5377d6f"
+    },
+    "iokit/KernelConfigTables.cpp": {
+      "before": "497f08ad4994239fea4fced8380539c816b889a273afb4b7aa64dbe511033b5d",
+      "after": "3460bbf299be819d00c353d5a6db2e8fe527a0f0389f6d048514b98d51933e84"
+    },
+    "iokit/Kernel/arm/KebabOriginalHIDEventDriver.h": {
+      "before": null,
+      "after": "23c0abad13aa7d6b7623327d3d34442197a22eacda5cf8a608a8c95f51df9c60"
+    }
+  },
+  "scope": "Physical S3908 original parser subclass; add real built-in display association to digitizer event only; original event positions/timestamps/IDs/masks/lifecycle and all display/security/Data retained"
+}

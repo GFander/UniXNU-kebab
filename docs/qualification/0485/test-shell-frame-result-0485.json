@@ -1,0 +1,101 @@
+{
+  "passed": true,
+  "production_source_sha256": {
+    "bsd/kern/kebab_bootdiag.c": "a28ce013d25696804f1f918aec1d7355bf226b2e69fc868a097ccfaa4c0cb850",
+    "osfmk/kern/kebab_bootdiag.c": "12099b9dc7e88999f7dcb1dd2bd19f213c95456b65e33d313fe6969555e68f67",
+    "iokit/Kernel/arm/KebabFramebuffer.cpp": "822e4f39974bda388576f6b4bb47ecffdc2f7edefbe4755fd7328da6e2e7765f",
+    "iokit/Kernel/arm/KebabDriverDiagnostics.cpp": "c92173af951db725090fc2305d82b618eaa00c3e6539ca46242ab68feae05cb2"
+  },
+  "fixture_sha256": "510d78b229fddb6531c3b41834e968c849e852c9ecd3e651899a02836079442c",
+  "compiled_behavioral_mutants": 13,
+  "runs": [
+    {
+      "name": "baseline",
+      "compiled": true,
+      "exit_code": 0,
+      "stdout": "PASS 24 production readonly shell/swap/present checks; user VM/IOKit/pixels are models, no physical ACK or panel claim"
+    },
+    {
+      "name": "ignore-cache-uuid",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "ignore-mask",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "wrong-shell-class",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "ignore-signal-range",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "ignore-state-range",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "ignore-global-reread",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "fake-ack",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "kernel-map-read",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "wrong-layer-mask",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "fake-byte-count",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "missing-not-counted",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "overwrite-first",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "queue-count",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    }
+  ],
+  "actual_production_core_and_swap_present": true,
+  "VM_IOKit_and_pixels_are_models": true,
+  "full_caller_and_registry_integration_host_qualified": false,
+  "native_or_physical_claim": false
+}

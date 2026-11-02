@@ -1,0 +1,370 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6104,60 +6104,6 @@
+  * Apply after the ordinary image loader and security decisions, before the
+  * apple vector. No executable bytes, credentials or security options change.
+  */
+-/* The original CA queries this ordinary Boolean application preference even
+- * in retail builds. CF's argument domain accepts this explicit NO override.
+- * Keep MG's real iPhone/wide-color identity; the -cf backend is SDR BGRA8. */
+-static int
+-kebab_fb_exec_arguments(struct image_params *imgp)
+-{
+-    static const char key[] = "-CAEnableDeepFramebuffer";
+-    static const char arguments[] = "-CAEnableDeepFramebuffer\0NO";
+-    if (imgp->ip_argc < 0 || imgp->ip_argc > NCARGS / sizeof(uint64_t) - 2 || imgp->ip_envc < 0 ||
+-        imgp->ip_startargv > imgp->ip_endargv || imgp->ip_endargv > imgp->ip_endenvv ||
+-        imgp->ip_strendp != imgp->ip_endenvv) return EINVAL;
+-    char *cursor = imgp->ip_startargv;
+-    for (int i = 0; i < imgp->ip_argc; i++) {
+-        size_t space = (size_t)(imgp->ip_endargv - cursor);
+-        size_t length = strnlen(cursor, space);
+-        if (length == space) return EINVAL;
+-        if (length == sizeof(key) - 1 && !memcmp(cursor, key, sizeof(key) - 1)) {
+-            printf("KEBAB CA ARGV: explicit original deep-framebuffer preference retained\n");
+-            return 0;
+-        }
+-        cursor += length + 1;
+-    }
+-    if (cursor != imgp->ip_endargv) return EINVAL;
+-    for (int i = 0; i < imgp->ip_envc; i++) {
+-        size_t space = (size_t)(imgp->ip_endenvv - cursor);
+-        size_t length = strnlen(cursor, space);
+-        if (length == space) return EINVAL;
+-        cursor += length + 1;
+-    }
+-    size_t padding = (size_t)(imgp->ip_endenvv - cursor);
+-    if (padding >= sizeof(uint64_t) || imgp->ip_strspace < 0 || imgp->ip_argspace < 0) return EINVAL;
+-    size_t string_space = (size_t)imgp->ip_strspace + padding;
+-    size_t argument_space = (size_t)imgp->ip_argspace + padding;
+-    if (string_space < sizeof(arguments)) return E2BIG;
+-    size_t new_padding = (string_space - sizeof(arguments)) % sizeof(uint64_t);
+-    size_t used = sizeof(arguments) + new_padding;
+-    if (string_space < used || argument_space < used + 2 * sizeof(uint64_t)) return E2BIG;
+-    /* argv/env strings are still kernel-owned; pointer vectors are constructed
+-     * later by exec_copyout_strings. Preserve every existing argument/env byte. */
+-    size_t environment_bytes = (size_t)(cursor - imgp->ip_endargv);
+-    memmove(imgp->ip_endargv + sizeof(arguments), imgp->ip_endargv, environment_bytes);
+-    memcpy(imgp->ip_endargv, arguments, sizeof(arguments));
+-    imgp->ip_endargv += sizeof(arguments);
+-    imgp->ip_strendp = cursor + sizeof(arguments);
+-    memset(imgp->ip_strendp, 0, new_padding);
+-    imgp->ip_strendp += new_padding;
+-    imgp->ip_endenvv = imgp->ip_strendp;
+-    imgp->ip_strspace = (int)(string_space - used);
+-    imgp->ip_argspace = (int)(argument_space - used - 2 * sizeof(uint64_t));
+-    imgp->ip_argc += 2;
+-    printf("KEBAB CA ARGV: original CAEnableDeepFramebuffer=NO; CPU SDR8 output, genuine MG identity unchanged\n");
+-    return 0;
+-}
+-
+ static int
+ kebab_fb_exec_environment(struct image_params *imgp, const load_result_t *load_result)
+ {
+@@ -6172,8 +6118,6 @@
+         memcmp(imgp->ip_ndp->ni_cnd.cn_nameptr, name, sizeof(name) - 1) ||
+         !PE_parse_boot_argn("-cf", &enabled, sizeof(enabled)) || enabled != 1) return 0;
+ 
+-    int argument_error = kebab_fb_exec_arguments(imgp);
+-    if (argument_error) return argument_error;
+     char *cursor = imgp->ip_endargv;
+     if (imgp->ip_envc < 0 || imgp->ip_endenvv < cursor ||
+         imgp->ip_strendp != imgp->ip_endenvv) return EINVAL;
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabPixelFormat.h
+@@ -0,0 +1,117 @@
++/* CPU storage conversion for CV w40a / Metal BGRA10_XR_sRGB.
++ * LE B,G,R,A 16-bit words, ten significant MSBs. RGB uses signed extended
++ * sRGB; alpha is linear. XR zero=384 and unity=894 (scale510).
++ * Q16 table is generated from the sRGB transfer function and independently
++ * checked against Apple CoreImage. No FP/SIMD, GPU or gamut mapping.
++ * GOP is SDR: only the final presentation clips to the 8-bit range. */
++#ifndef _KEBAB_PIXEL_FORMAT_H
++#define _KEBAB_PIXEL_FORMAT_H
++#define KPF_BGRA 0x42475241u
++#define KPF_W40A 0x77343061u
++static const int32_t kpf_xr_linear[1024] = {
++    -34545,-34344,-34144,-33944,-33746,-33548,-33350,-33153,-32957,-32762,-32567,-32373,-32180,-31987,-31795,-31603,
++    -31413,-31223,-31033,-30845,-30657,-30469,-30283,-30097,-29911,-29727,-29543,-29359,-29177,-28995,-28813,-28633,
++    -28453,-28273,-28095,-27917,-27739,-27563,-27387,-27211,-27036,-26862,-26689,-26516,-26344,-26173,-26002,-25832,
++    -25662,-25493,-25325,-25157,-24991,-24824,-24659,-24494,-24329,-24166,-24003,-23840,-23679,-23517,-23357,-23197,
++    -23038,-22879,-22722,-22564,-22408,-22252,-22096,-21942,-21788,-21634,-21481,-21329,-21178,-21027,-20876,-20727,
++    -20578,-20429,-20281,-20134,-19988,-19842,-19696,-19552,-19408,-19264,-19121,-18979,-18838,-18697,-18556,-18417,
++    -18278,-18139,-18001,-17864,-17727,-17591,-17456,-17321,-17187,-17053,-16920,-16788,-16656,-16525,-16394,-16264,
++    -16135,-16006,-15878,-15751,-15624,-15497,-15372,-15246,-15122,-14998,-14874,-14752,-14629,-14508,-14387,-14266,
++    -14147,-14027,-13909,-13791,-13673,-13556,-13440,-13324,-13209,-13095,-12981,-12867,-12754,-12642,-12531,-12420,
++    -12309,-12199,-12090,-11981,-11873,-11765,-11658,-11552,-11446,-11340,-11236,-11131,-11028,-10925,-10822,-10720,
++    -10619,-10518,-10418,-10318,-10219,-10120,-10022,-9925,-9828,-9731,-9636,-9540,-9446,-9351,-9258,-9165,
++    -9072,-8980,-8889,-8798,-8708,-8618,-8529,-8440,-8352,-8264,-8177,-8090,-8004,-7919,-7834,-7750,
++    -7666,-7582,-7500,-7417,-7336,-7254,-7174,-7094,-7014,-6935,-6856,-6778,-6701,-6623,-6547,-6471,
++    -6395,-6321,-6246,-6172,-6099,-6026,-5953,-5882,-5810,-5739,-5669,-5599,-5530,-5461,-5392,-5325,
++    -5257,-5190,-5124,-5058,-4993,-4928,-4864,-4800,-4736,-4674,-4611,-4549,-4488,-4427,-4366,-4306,
++    -4247,-4188,-4129,-4071,-4014,-3957,-3900,-3844,-3788,-3733,-3678,-3624,-3570,-3517,-3464,-3412,
++    -3360,-3309,-3258,-3207,-3157,-3107,-3058,-3010,-2961,-2914,-2866,-2819,-2773,-2727,-2681,-2636,
++    -2592,-2548,-2504,-2460,-2418,-2375,-2333,-2292,-2250,-2210,-2170,-2130,-2090,-2051,-2013,-1975,
++    -1937,-1900,-1863,-1827,-1791,-1755,-1720,-1685,-1651,-1617,-1583,-1550,-1517,-1485,-1453,-1422,
++    -1391,-1360,-1330,-1300,-1270,-1241,-1212,-1184,-1156,-1129,-1101,-1075,-1048,-1022,-997,-971,
++    -947,-922,-898,-874,-851,-828,-805,-783,-761,-739,-718,-697,-677,-657,-637,-618,
++    -599,-580,-562,-543,-526,-508,-491,-475,-458,-442,-427,-411,-396,-382,-367,-353,
++    -340,-326,-313,-300,-288,-276,-264,-252,-241,-230,-219,-209,-199,-189,-179,-169,
++    -159,-149,-139,-129,-119,-109,-99,-90,-80,-70,-60,-50,-40,-30,-20,-10,
++    0,10,20,30,40,50,60,70,80,90,99,109,119,129,139,149,
++    159,169,179,189,199,209,219,230,241,252,264,276,288,300,313,326,
++    340,353,367,382,396,411,427,442,458,475,491,508,526,543,562,580,
++    599,618,637,657,677,697,718,739,761,783,805,828,851,874,898,922,
++    947,971,997,1022,1048,1075,1101,1129,1156,1184,1212,1241,1270,1300,1330,1360,
++    1391,1422,1453,1485,1517,1550,1583,1617,1651,1685,1720,1755,1791,1827,1863,1900,
++    1937,1975,2013,2051,2090,2130,2170,2210,2250,2292,2333,2375,2418,2460,2504,2548,
++    2592,2636,2681,2727,2773,2819,2866,2914,2961,3010,3058,3107,3157,3207,3258,3309,
++    3360,3412,3464,3517,3570,3624,3678,3733,3788,3844,3900,3957,4014,4071,4129,4188,
++    4247,4306,4366,4427,4488,4549,4611,4674,4736,4800,4864,4928,4993,5058,5124,5190,
++    5257,5325,5392,5461,5530,5599,5669,5739,5810,5882,5953,6026,6099,6172,6246,6321,
++    6395,6471,6547,6623,6701,6778,6856,6935,7014,7094,7174,7254,7336,7417,7500,7582,
++    7666,7750,7834,7919,8004,8090,8177,8264,8352,8440,8529,8618,8708,8798,8889,8980,
++    9072,9165,9258,9351,9446,9540,9636,9731,9828,9925,10022,10120,10219,10318,10418,10518,
++    10619,10720,10822,10925,11028,11131,11236,11340,11446,11552,11658,11765,11873,11981,12090,12199,
++    12309,12420,12531,12642,12754,12867,12981,13095,13209,13324,13440,13556,13673,13791,13909,14027,
++    14147,14266,14387,14508,14629,14752,14874,14998,15122,15246,15372,15497,15624,15751,15878,16006,
++    16135,16264,16394,16525,16656,16788,16920,17053,17187,17321,17456,17591,17727,17864,18001,18139,
++    18278,18417,18556,18697,18838,18979,19121,19264,19408,19552,19696,19842,19988,20134,20281,20429,
++    20578,20727,20876,21027,21178,21329,21481,21634,21788,21942,22096,22252,22408,22564,22722,22879,
++    23038,23197,23357,23517,23679,23840,24003,24166,24329,24494,24659,24824,24991,25157,25325,25493,
++    25662,25832,26002,26173,26344,26516,26689,26862,27036,27211,27387,27563,27739,27917,28095,28273,
++    28453,28633,28813,28995,29177,29359,29543,29727,29911,30097,30283,30469,30657,30845,31033,31223,
++    31413,31603,31795,31987,32180,32373,32567,32762,32957,33153,33350,33548,33746,33944,34144,34344,
++    34545,34747,34949,35152,35355,35560,35765,35970,36177,36384,36591,36800,37009,37219,37429,37640,
++    37852,38065,38278,38492,38707,38922,39138,39355,39572,39791,40009,40229,40449,40670,40892,41114,
++    41337,41561,41786,42011,42237,42463,42691,42919,43147,43377,43607,43838,44069,44302,44534,44768,
++    45003,45238,45474,45710,45947,46185,46424,46664,46904,47145,47386,47628,47871,48115,48360,48605,
++    48851,49097,49345,49593,49842,50091,50342,50593,50844,51097,51350,51604,51859,52114,52370,52627,
++    52884,53143,53402,53662,53922,54183,54445,54708,54972,55236,55501,55766,56033,56300,56568,56837,
++    57106,57376,57647,57919,58191,58464,58738,59013,59288,59564,59841,60118,60397,60676,60956,61236,
++    61518,61800,62083,62366,62651,62936,63222,63508,63796,64084,64373,64662,64953,65244,65536,65829,
++    66122,66416,66711,67007,67304,67601,67899,68198,68497,68798,69099,69401,69703,70007,70311,70616,
++    70922,71228,71535,71843,72152,72462,72772,73083,73395,73708,74021,74336,74651,74966,75283,75600,
++    75918,76237,76557,76877,77199,77521,77844,78167,78492,78817,79143,79469,79797,80125,80454,80784,
++    81115,81446,81778,82111,82445,82780,83115,83451,83788,84126,84465,84804,85144,85485,85827,86170,
++    86513,86857,87202,87548,87894,88241,88590,88939,89288,89639,89990,90342,90695,91049,91403,91759,
++    92115,92472,92830,93188,93547,93908,94269,94630,94993,95356,95721,96086,96452,96818,97186,97554,
++    97923,98293,98664,99035,99407,99781,100155,100529,100905,101281,101659,102037,102416,102795,103176,103557,
++    103939,104322,104706,105091,105476,105862,106250,106637,107026,107416,107806,108197,108589,108982,109376,109771,
++};
++static inline int32_t kpf_div_round(int64_t v, int32_t d)
++{
++    return v < 0 ? -(int32_t)((-v+d/2)/d) : (int32_t)((v+d/2)/d);
++}
++static inline uint16_t kpf_word(const uint8_t *p)
++{
++    return (uint16_t)p[0] | (uint16_t)p[1] << 8;
++}
++static inline int32_t kpf_read(const uint8_t *p, uint32_t format, unsigned ch)
++{
++    if(format == KPF_BGRA) return kpf_div_round((int64_t)p[ch]*65536,255);
++    uint32_t code=kpf_word(p+ch*2)>>6;
++    return ch==3 ? kpf_div_round(((int64_t)code-384)*65536,510) : kpf_xr_linear[code];
++}
++static inline uint8_t kpf_sdr8(int32_t linear)
++{
++    if(linear<=0)return 0;
++    if(linear>=65536)return 255;
++    return (uint8_t)kpf_div_round((int64_t)linear*255,65536);
++}
++static inline void kpf_write(uint8_t *p,uint32_t format,unsigned ch,int32_t linear)
++{
++    if(format==KPF_BGRA){p[ch]=kpf_sdr8(linear);return;}
++    int32_t code;
++    if(ch==3)code=384+kpf_div_round((int64_t)linear*510,65536);
++    else {
++        unsigned lo=0,hi=1023;
++        while(lo<hi){unsigned mid=(lo+hi)/2;if(kpf_xr_linear[mid]<linear)lo=mid+1;else hi=mid;}
++        code=(int32_t)lo;
++        if(lo && (int64_t)linear-kpf_xr_linear[lo-1] < (int64_t)kpf_xr_linear[lo]-linear)code--;
++    }
++    if(code<0)code=0;if(code>1023)code=1023;
++    uint16_t word=(uint16_t)(code<<6);p[ch*2]=(uint8_t)word;p[ch*2+1]=(uint8_t)(word>>8);
++}
++static inline uint32_t kpf_gop_pixel(const uint8_t *p)
++{
++    uint32_t v=0;
++    for(unsigned ch=0;ch<4;ch++)v|=(uint32_t)kpf_sdr8(kpf_read(p,KPF_W40A,ch))<<(ch*8);
++    return v;
++}
++#endif
+--- a/iokit/Kernel/arm/KebabScalerCore.h
++++ b/iokit/Kernel/arm/KebabScalerCore.h
+@@ -1,7 +1,9 @@
+ /* CPU implementation of the pinned iOS16 IOSurfaceAccelerator linear subset.
+- * No GPU, compressed-surface decoder, color converter or hardware fence. */
++ * No GPU, compressed-surface decoder, gamut mapper or hardware fence. */
+ #ifndef _KEBAB_SCALER_CORE_H
+ #define _KEBAB_SCALER_CORE_H
++
++#include "KebabPixelFormat.h"
+ 
+ #define KSC_REQUEST_BYTES 0x170u
+ #define KSC_MAX_DIM 4096u
+@@ -24,10 +26,10 @@
+ {
+     if (!im || !im->width || !im->height || im->width>KSC_MAX_DIM || im->height>KSC_MAX_DIM)
+         return KSC_ARGUMENT;
+-    if (im->format!=KSC_BGRA || im->bpe!=4 || im->element_width!=1 || im->element_height!=1 || im->planes)
++    if (!((im->format==KSC_BGRA && im->bpe==4) || (im->format==KPF_W40A && im->bpe==8)) || im->element_width!=1 || im->element_height!=1 || im->planes)
+         return KSC_UNSUPPORTED;
+-    uint64_t n=(uint64_t)(im->height-1)*im->stride+(uint64_t)im->width*4;
+-    if (im->stride<(uint64_t)im->width*4 || im->offset>im->allocation ||
++    uint64_t n=(uint64_t)(im->height-1)*im->stride+(uint64_t)im->width*im->bpe;
++    if (im->stride<(uint64_t)im->width*im->bpe || im->offset>im->allocation ||
+         n>im->allocation-im->offset || im->offset>im->memory_length || n>im->memory_length-im->offset)
+         return KSC_BOUNDS;
+     return KSC_OK;
+@@ -71,10 +73,57 @@
+     if(x>hi)x=hi;
+     return x;
+ }
++/* The currently qualified path is a fully composed, opaque CPU framebuffer.
++ * w40a is straight-alpha; reject transparency before any destination write
++ * until premultiplication-aware wide filtering is implemented. BGRA->BGRA
++ * retains its existing, independently qualified premultiplied byte path. */
++static bool
++ksc_source_opaque(const struct ksc_image *s,const uint8_t *source)
++{
++    for(uint32_t y=0;y<s->height;y++) {
++        const uint8_t *row=source+s->offset+(uint64_t)y*s->stride;
++        for(uint32_t x=0;x<s->width;x++) {
++            const uint8_t *p=row+(uint64_t)x*s->bpe;
++            if(s->format==KSC_BGRA ? p[3]!=255 : (kpf_word(p+6)>>6)!=894)return false;
++        }
++    }
++    return true;
++}
++static void
++ksc_run_wide(const struct ksc_plan *p,const struct ksc_image *s,const struct ksc_image *d,
++    const uint8_t *source,uint8_t *destination)
++{
++    for(uint32_t y=0;y<p->dh;y++) {
++        uint64_t fy=ksc_coordinate(p->sy,p->sh,y,p->dh);
++        uint32_t y0=(uint32_t)(fy>>16),y1=y0+1<s->height?y0+1:y0,wy=(uint32_t)fy&65535;
++        if(p->flags&0x80){y0=(uint32_t)((fy+32768)>>16);if(y0>=s->height)y0=s->height-1;y1=y0;wy=0;}
++        uint8_t *row=destination+d->offset+(uint64_t)(p->dy+y)*d->stride+(uint64_t)p->dx*d->bpe;
++        for(uint32_t x=0;x<p->dw;x++) {
++            uint64_t fx=ksc_coordinate(p->sx,p->sw,x,p->dw);
++            uint32_t x0=(uint32_t)(fx>>16),x1=x0+1<s->width?x0+1:x0,wx=(uint32_t)fx&65535;
++            if(p->flags&0x80){x0=(uint32_t)((fx+32768)>>16);if(x0>=s->width)x0=s->width-1;x1=x0;wx=0;}
++            const uint8_t *a=source+s->offset+(uint64_t)y0*s->stride+(uint64_t)x0*s->bpe;
++            const uint8_t *b=source+s->offset+(uint64_t)y0*s->stride+(uint64_t)x1*s->bpe;
++            const uint8_t *c=source+s->offset+(uint64_t)y1*s->stride+(uint64_t)x0*s->bpe;
++            const uint8_t *e=source+s->offset+(uint64_t)y1*s->stride+(uint64_t)x1*s->bpe;
++            for(unsigned ch=0;ch<4;ch++) {
++                int64_t top=(int64_t)kpf_read(a,s->format,ch)*(65536-wx)+(int64_t)kpf_read(b,s->format,ch)*wx;
++                int64_t bottom=(int64_t)kpf_read(c,s->format,ch)*(65536-wx)+(int64_t)kpf_read(e,s->format,ch)*wx;
++                int64_t sum=top*(65536-wy)+bottom*wy;
++                int32_t value=sum<0?-(int32_t)((-sum+INT64_C(0x80000000))>>32):(int32_t)((sum+INT64_C(0x80000000))>>32);
++                kpf_write(row+(uint64_t)x*d->bpe,d->format,ch,value);
++            }
++        }
++    }
++}
++
+ static void
+ ksc_run(const struct ksc_plan *p,const struct ksc_image *s,const struct ksc_image *d,
+     const uint8_t *source,uint8_t *destination)
+ {
++    if(s->format==KPF_W40A || d->format==KPF_W40A) {
++        ksc_run_wide(p,s,d,source,destination);return;
++    }
+     /* The wrapper retains both surfaces and independent CPU mappings, rejects
+      * aliasing and validates every byte extent before entering this function. */
+     for(uint32_t y=0;y<p->dh;y++) {
+--- a/iokit/Kernel/arm/KebabSoftwareScaler.cpp
++++ b/iokit/Kernel/arm/KebabSoftwareScaler.cpp
+@@ -62,7 +62,7 @@
+ {
+     if(!AppleM2ScalerCSCDriver::start(provider))return false;
+     setName("KebabSoftwareScaler");
+-    setProperty("KebabBackend","CPU BGRA8 bilinear/nearest, iOS16 IOSurfaceAccelerator ABI");
++    setProperty("KebabBackend","CPU BGRA8 and opaque w40a bilinear/nearest, iOS16 IOSurfaceAccelerator ABI");
+     setProperty("KebabHardwareAccelerated",kOSBooleanFalse);
+     OSDictionary *caps=OSDictionary::withCapacity(12);
+     if(!caps){AppleM2ScalerCSCDriver::stop(provider);return false;}
+@@ -77,7 +77,7 @@
+     if(valid)valid=setProperty("IOSurfaceAcceleratorCapabilitiesDict",caps);
+     caps->release();
+     if(!valid){AppleM2ScalerCSCDriver::stop(provider);return false;}
+-    IOLog("KEBAB SCALER: CPU linear BGRA8 copy/scale registered, no GPU/compressed/HDR capability\n");
++    IOLog("KEBAB SCALER: CPU BGRA8/opaque w40a copy/scale registered, no GPU/compressed/HDR display capability\n");
+     registerService();return true;
+ }
+ IOReturn
+@@ -148,6 +148,10 @@
+     if(!sm || !dm || !sm->getVirtualAddress() || !dm->getVirtualAddress() ||
+         sm->getLength()<si.memory_length || dm->getLength()<di.memory_length){ret=kIOReturnVMError;goto done;}
+     OSMemoryBarrier();
++    if((si.format==KPF_W40A || di.format==KPF_W40A) &&
++        !ksc_source_opaque(&si,(const uint8_t *)(uintptr_t)sm->getVirtualAddress())) {
++        ret=kIOReturnUnsupported;goto done;
++    }
+     ksc_run(&plan,&si,&di,(const uint8_t *)(uintptr_t)sm->getVirtualAddress(),(uint8_t *)(uintptr_t)dm->getVirtualAddress());
+     OSMemoryBarrier();
+     kebab_surface_did_write(d);
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -64,6 +64,7 @@
+  * Explicit kebabfb_noconsole=0 keeps the development screen console.
+  */
+ #include "KebabSurface.h"
++#include "KebabPixelFormat.h"
+ #include <kern/kebab_capture.h>
+ 
+ static void kebab_publish_canvas(IOService *provider, uint32_t width, uint32_t height);
+@@ -631,7 +632,7 @@
+ static void
+ kebab_fb_handoff_console(bool *paused, uint32_t format, uint32_t planes, bool full)
+ {
+-    if (*paused || panic_active() || format != KEBAB_FB_FORMAT_BGRA || planes != 0 || !full) return;
++    if (*paused || panic_active() || (format != KEBAB_FB_FORMAT_BGRA && format != KPF_W40A) || planes != 0 || !full) return;
+     int quiet = 0;
+     if (!PE_parse_boot_argn("kebabfb_noconsole", &quiet, sizeof(quiet))) {
+         PE_parse_boot_argn("-cf", &quiet, sizeof(quiet));
+@@ -644,7 +645,7 @@
+     kebab_console_muted = 1;
+     *paused = true;
+     OSMemoryBarrier();
+-    IOLog("KEBAB FB CONSOLE: normal-screen=0 usb-tee=1 panic-screen=1; validated full BGRA frame takes GOP\n");
++    IOLog("KEBAB FB CONSOLE: normal-screen=0 usb-tee=1 panic-screen=1; validated full CPU frame takes GOP\n");
+ }
+ 
+ /* Copy each enabled layer's surface into the panel memory (CPU backend). */
+@@ -721,17 +722,31 @@
+ 			h = (int32_t)fHeight - dy;
+ 		}
+ 		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
+-		    (uint64_t)(sx + w) * 4;
++		    (uint64_t)(sx + w) * bpe;
+ 		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
+ 		    s->memory == NULL || last > s->memory->getLength()) {
+ 			src = 0;
+ 		}
+-		if (src != 0 && bpe == 4 && s->pixelFormat == KEBAB_FB_FORMAT_BGRA && s->planeCount == 0) {
++		bool wide = bpe == 8 && s->pixelFormat == KPF_W40A;
++		if (wide && (s->bytesPerRow < (uint64_t)s->width * bpe || last > s->allocSize)) src = 0;
++        if (wide && src) {
++            for (int32_t y=0;y<h && src;y++) {
++                const uint8_t *row=(const uint8_t *)(src+s->offset+(uint64_t)(sy+y)*s->bytesPerRow+(uint64_t)sx*bpe);
++                for (int32_t x=0;x<w;x++) if((kpf_word(row+(uint64_t)x*8+6)>>6)!=894){src=0;break;}
++            }
++        }
++		if (src != 0 && ((bpe == 4 && s->pixelFormat == KEBAB_FB_FORMAT_BGRA) || wide) && s->planeCount == 0) {
+             kebab_fb_handoff_console(&fConsolePaused, s->pixelFormat, s->planeCount,
+                 dx == 0 && dy == 0 && w == (int32_t)fWidth && h == (int32_t)fHeight);
+ 			trace.bytes += (uint64_t)(size_t)w * 4 * (uint64_t)h;
+ 			for (int32_t y = 0; y < h; y++) {
+                 if (panic_active()) { s->release(); return; }
++                if (wide) {
++                    volatile uint32_t *to=(volatile uint32_t *)(fPixels+(uint64_t)(dy+y)*fRowBytes+(uint64_t)dx*4);
++                    const uint8_t *from=(const uint8_t *)(src+s->offset+(uint64_t)(sy+y)*s->bytesPerRow+(uint64_t)sx*8);
++                    for(int32_t x=0;x<w;x++)to[x]=kpf_gop_pixel(from+(uint64_t)x*8);
++                    continue;
++                }
+ 				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+ 				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+ 				    (size_t)w * 4);

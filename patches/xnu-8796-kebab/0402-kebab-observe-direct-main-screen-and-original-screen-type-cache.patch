@@ -1,0 +1,92 @@
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -393,32 +393,43 @@
+  * NSArray ABI: accept one unique exact UIScreen object, otherwise refuse.
+  * Repeated reads are best effort and do not hold an original producer lock. */
+ struct kebab_ui_screen_observation {
+-    uint64_t bounds[4], scale, idiom, pixels[2], exclusion[4], shape_class;
+-    uint32_t provider_kind, configuration_kind, shape_kind, fallback;
++    uint64_t bounds[4], reference[4], scale, idiom, pixels[2], exclusion[4], shape_class;
++    uint32_t provider_kind, configuration_kind, shape_kind, fallback, selection_kind;
+ };
+ static int
+ kebab_ui_screen_observe(vm_map_t map, struct kebab_ui_screen_observation *out)
+ {
+-    uint64_t once, array, slots[3], again_array, again_once, code;
++    uint64_t once = 0, array = 0, slots[3], again_array, again_once, code;
+     if (!kebab_ca_u64(map, 0x188da09e8ULL, &code) || code != 0xd65f03c0fd402800ULL ||
+         !kebab_ca_u64(map, 0x189b29f68ULL, &code) || code != 0xd65f03c0f9401400ULL ||
+         !kebab_ca_u64(map, 0x19b91ea28ULL, &code) || code != 0xd65f03c06d458400ULL) return 1;
+-    if (!kebab_ca_u64(map, 0x1e1db7d58ULL, &once) || once != UINT64_MAX ||
+-        !kebab_ca_u64(map, 0x1e1db7d60ULL, &array) || !array ||
+-        !kebab_plugin_user_copy(map, array, slots, sizeof(slots))) return 2;
+-    uint64_t screen = 0; unsigned found = 0;
+-    for (unsigned index = 1; index <= 2; index++) {
+-        uint64_t isa;
+-        if (!slots[index] || !kebab_ca_u64(map, slots[index], &isa) ||
+-            !kebab_shell_isa(isa, 0x1e1db2448ULL)) continue;
+-        if (screen != slots[index]) { screen = slots[index]; found++; }
+-    }
+-    if (found != 1) return 3;
++    uint64_t screen = 0, direct = 0, direct_isa;
++    if (!kebab_ca_u64(map, 0x1e1db7ce0ULL, &direct)) return 2;
++    if (direct) {
++        /* +[UIScreen mainScreen] returns this cache before its array path. */
++        if (!kebab_ca_u64(map, direct, &direct_isa) ||
++            !kebab_shell_isa(direct_isa, 0x1e1db2448ULL)) return 3;
++        screen = direct; out->selection_kind = 1;
++    } else {
++        if (!kebab_ca_u64(map, 0x1e1db7d58ULL, &once) || once != UINT64_MAX ||
++            !kebab_ca_u64(map, 0x1e1db7d60ULL, &array) || !array ||
++            !kebab_plugin_user_copy(map, array, slots, sizeof(slots))) return 2;
++        unsigned found = 0;
++        for (unsigned index = 1; index <= 2; index++) {
++            uint64_t isa;
++            if (!slots[index] || !kebab_ca_u64(map, slots[index], &isa) ||
++                !kebab_shell_isa(isa, 0x1e1db2448ULL)) continue;
++            if (screen != slots[index]) { screen = slots[index]; found++; }
++        }
++        if (found != 1) return 3;
++        out->selection_kind = 2;
++    }
+     uint64_t first[21], second[21];
+     if (!kebab_plugin_user_copy(map, screen, first, sizeof(first)) ||
+         !kebab_plugin_user_copy(map, screen, second, sizeof(second)) ||
+         memcmp(first, second, sizeof(first)) || !kebab_shell_isa(first[0], 0x1e1db2448ULL)) return 4;
+     memcpy(out->bounds, &first[1], sizeof(out->bounds));
++    memcpy(out->reference, &first[5], sizeof(out->reference));
+     out->scale = first[10]; out->idiom = first[12];
+     uint64_t provider = first[19], configuration = first[20], isa, shape = 0;
+     if (configuration) {
+@@ -446,7 +457,9 @@
+     uint64_t cached_provider;
+     if (kebab_ca_u64(map, 0x1e1dba130ULL, &cached_provider))
+         out->fallback = cached_provider == 0x1dce2afe8ULL ? 1 : cached_provider ? 2 : 0;
+-    if (!kebab_ca_u64(map, 0x1e1db7d58ULL, &again_once) || again_once != once ||
++    if (direct) {
++        if (!kebab_ca_u64(map, 0x1e1db7ce0ULL, &again_array) || again_array != direct) return 5;
++    } else if (!kebab_ca_u64(map, 0x1e1db7d58ULL, &again_once) || again_once != once ||
+         !kebab_ca_u64(map, 0x1e1db7d60ULL, &again_array) || again_array != array) return 5;
+     return 0;
+ }
+@@ -455,9 +468,18 @@
+ {
+     struct kebab_ui_screen_observation state = {};
+     int error = kebab_ui_screen_observe(map, &state);
+-    printf("KEBAB UI SCREEN: result=%d configuration-kind=%u provider-kind=%u shape-kind=%u fallback=%u; pinned original fields, readonly best effort, no injected getter\n",
+-        error, state.configuration_kind, state.provider_kind, state.shape_kind, state.fallback);
++    printf("KEBAB UI SCREEN: result=%d configuration-kind=%u provider-kind=%u shape-kind=%u fallback=%u screen-selection=%u; pinned original fields, readonly best effort, no injected getter\n",
++        error, state.configuration_kind, state.provider_kind, state.shape_kind, state.fallback, state.selection_kind);
++    uint64_t type_once, type_again_once, type, again_type;
++    if (kebab_ca_u64(map, 0x1e23913c8ULL, &type_once) && type_once == UINT64_MAX &&
++        kebab_ca_u64(map, 0x1e23913d0ULL, &type) && type < 1024 &&
++        kebab_ca_u64(map, 0x1e23913c8ULL, &type_again_once) && type_again_once == type_once &&
++        kebab_ca_u64(map, 0x1e23913d0ULL, &again_type) && again_type == type)
++        printf("KEBAB UI SCREEN TYPE: original SBHScreenTypeForCurrentDevice=%llu; initialized original factory input, no override\n",type);
++    else printf("KEBAB UI SCREEN TYPE: original factory cache uninitialized/unreadable/changed\n");
+     if (error) return;
++    printf("KEBAB UI SCREEN REFERENCE: bits=%llx,%llx,%llx,%llx; original screen-type lookup inputs\n",
++        state.reference[0],state.reference[1],state.reference[2],state.reference[3]);
+     printf("KEBAB UI SCREEN BITS: bounds=%llx,%llx,%llx,%llx scale=%llx idiom=%llu native-pixels=%llx,%llx\n",
+         state.bounds[0],state.bounds[1],state.bounds[2],state.bounds[3],state.scale,state.idiom,state.pixels[0],state.pixels[1]);
+     printf("KEBAB UI SCREEN SHAPE: class=0x%llx rect-bits=%llx,%llx,%llx,%llx; kind0=absent kind1=original single-rect kind2=unreadable/unsupported\n",

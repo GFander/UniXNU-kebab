@@ -1,0 +1,224 @@
+{
+  "passed": true,
+  "version": "0479",
+  "native_sha256": "69c31ddc43501bcd7bc15ec2d9b276413a06542acef7117070943b4c33c92cc0",
+  "native_bytes": 18965904,
+  "actual_native_call_edges": [
+    {
+      "caller": "_unix_syscall",
+      "callee": "_kebab_fairplay_syscall_return_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006b026a4"
+      ]
+    },
+    {
+      "caller": "_unix_syscall_return",
+      "callee": "_kebab_fairplay_syscall_return_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006b02adc"
+      ]
+    },
+    {
+      "caller": "_proc_prepareexit",
+      "callee": "_kebab_fairplay_exit_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006986ddc"
+      ]
+    },
+    {
+      "caller": "_unix_syscall",
+      "callee": "_kebab_fairplay_open_return_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006b02718"
+      ]
+    },
+    {
+      "caller": "_unix_syscall_return",
+      "callee": "_kebab_fairplay_open_return_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006b02b48"
+      ]
+    },
+    {
+      "caller": "_is_io_registry_entry_from_path",
+      "callee": "_kebab_fairplay_registry_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006bcc844"
+      ]
+    },
+    {
+      "caller": "_is_io_registry_entry_get_property",
+      "callee": "_kebab_fairplay_registry_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006bcd248"
+      ]
+    },
+    {
+      "caller": "_is_io_registry_entry_get_property_bin_buf",
+      "callee": "_kebab_fairplay_registry_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006bcdaac"
+      ]
+    },
+    {
+      "caller": "_is_io_iterator_next",
+      "callee": "_kebab_fairplay_service_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006bcb268"
+      ]
+    },
+    {
+      "caller": "_is_io_service_open_extended",
+      "callee": "_kebab_fairplay_service_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006bce84c",
+        "0xfffffe0006bce8e4"
+      ]
+    }
+  ],
+  "service_observer_references": [
+    {
+      "site": "0xfffffe0006bcb21c",
+      "target": "eligibility",
+      "nearest_caller_symbols": [
+        "_is_io_iterator_next"
+      ],
+      "caller_offset": 140
+    },
+    {
+      "site": "0xfffffe0006bcb248",
+      "target": "eligibility",
+      "nearest_caller_symbols": [
+        "_is_io_iterator_next"
+      ],
+      "caller_offset": 184
+    },
+    {
+      "site": "0xfffffe0006bcb268",
+      "target": "service",
+      "nearest_caller_symbols": [
+        "_is_io_iterator_next"
+      ],
+      "caller_offset": 216
+    },
+    {
+      "site": "0xfffffe0006bcb590",
+      "target": "eligibility",
+      "nearest_caller_symbols": [
+        "__ZL41internal_io_service_get_matching_servicesP8ipc_portPKcjPP8OSObject"
+      ],
+      "caller_offset": 48
+    },
+    {
+      "site": "0xfffffe0006bcb5b4",
+      "target": "service",
+      "nearest_caller_symbols": [
+        "__ZL41internal_io_service_get_matching_servicesP8ipc_portPKcjPP8OSObject"
+      ],
+      "caller_offset": 84
+    },
+    {
+      "site": "0xfffffe0006bcb688",
+      "target": "eligibility",
+      "nearest_caller_symbols": [
+        "__ZL41internal_io_service_get_matching_servicesP8ipc_portPKcjPP8OSObject"
+      ],
+      "caller_offset": 296
+    },
+    {
+      "site": "0xfffffe0006bcb6ac",
+      "target": "service",
+      "nearest_caller_symbols": [
+        "__ZL41internal_io_service_get_matching_servicesP8ipc_portPKcjPP8OSObject"
+      ],
+      "caller_offset": 332
+    },
+    {
+      "site": "0xfffffe0006bcb804",
+      "target": "eligibility",
+      "nearest_caller_symbols": [
+        "__ZL40internal_io_service_get_matching_serviceP8ipc_portPKcjPP8OSObject"
+      ],
+      "caller_offset": 44
+    },
+    {
+      "site": "0xfffffe0006bcb828",
+      "target": "service",
+      "nearest_caller_symbols": [
+        "__ZL40internal_io_service_get_matching_serviceP8ipc_portPKcjPP8OSObject"
+      ],
+      "caller_offset": 80
+    },
+    {
+      "site": "0xfffffe0006bcb8c8",
+      "target": "eligibility",
+      "nearest_caller_symbols": [
+        "__ZL40internal_io_service_get_matching_serviceP8ipc_portPKcjPP8OSObject"
+      ],
+      "caller_offset": 240
+    },
+    {
+      "site": "0xfffffe0006bcb8ec",
+      "target": "service",
+      "nearest_caller_symbols": [
+        "__ZL40internal_io_service_get_matching_serviceP8ipc_portPKcjPP8OSObject"
+      ],
+      "caller_offset": 276
+    },
+    {
+      "site": "0xfffffe0006bce818",
+      "target": "eligibility",
+      "nearest_caller_symbols": [
+        "_is_io_service_open_extended"
+      ],
+      "caller_offset": 544
+    },
+    {
+      "site": "0xfffffe0006bce84c",
+      "target": "service",
+      "nearest_caller_symbols": [
+        "_is_io_service_open_extended"
+      ],
+      "caller_offset": 596
+    },
+    {
+      "site": "0xfffffe0006bce8b4",
+      "target": "eligibility",
+      "nearest_caller_symbols": [
+        "_is_io_service_open_extended"
+      ],
+      "caller_offset": 700
+    },
+    {
+      "site": "0xfffffe0006bce8e4",
+      "target": "service",
+      "nearest_caller_symbols": [
+        "_is_io_service_open_extended"
+      ],
+      "caller_offset": 748
+    },
+    {
+      "site": "0xfffffe0006bd313c",
+      "target": "eligibility",
+      "nearest_caller_symbols": [
+        "__ZL29kebab_fairplay_match_evidencejP12OSDictionaryij"
+      ],
+      "caller_offset": 36
+    },
+    {
+      "site": "0xfffffe0006bd31f0",
+      "target": "service",
+      "nearest_caller_symbols": [
+        "__ZL29kebab_fairplay_match_evidencejP12OSDictionaryij"
+      ],
+      "caller_offset": 216
+    }
+  ],
+  "source_unchanged_across_full_build": true,
+  "only_expected_two_source_changes": true,
+  "all_original_TU_source_lines_retained": true,
+  "A_B_CD_keychain_hardware_Root_sources_unchanged": true,
+  "original_syscall_ptrace_MACF_exit_logic_preserved": true,
+  "physical_test": false,
+  "scope": "Native callback binding and additive read-only evidence source; actual matching/open/iterator request results and failure cause still physically unqualified"
+}

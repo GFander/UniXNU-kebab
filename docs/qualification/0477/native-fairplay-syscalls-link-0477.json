@@ -1,0 +1,36 @@
+{
+  "passed": true,
+  "version": "0477",
+  "native_sha256": "2d605e3632671201dc20dd9c67184fd7d6dbda28e0134a02b76f415d0d72d975",
+  "native_bytes": 18981944,
+  "actual_native_call_edges": [
+    {
+      "caller": "_unix_syscall",
+      "callee": "_kebab_fairplay_syscall_return_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006b01f60"
+      ]
+    },
+    {
+      "caller": "_unix_syscall_return",
+      "callee": "_kebab_fairplay_syscall_return_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006b02324"
+      ]
+    },
+    {
+      "caller": "_proc_prepareexit",
+      "callee": "_kebab_fairplay_exit_evidence",
+      "actual_call_addresses": [
+        "0xfffffe0006986680"
+      ]
+    }
+  ],
+  "source_unchanged_across_full_build": true,
+  "only_expected_three_source_changes": true,
+  "all_original_TU_source_lines_retained": true,
+  "A_B_CD_keychain_hardware_Root_sources_unchanged": true,
+  "original_syscall_ptrace_MACF_exit_logic_preserved": true,
+  "physical_test": false,
+  "scope": "Native callback binding and additive read-only evidence source; actual ring, task identity and failure cause still physically unqualified"
+}

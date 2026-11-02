@@ -1,0 +1,39 @@
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -2437,16 +2437,6 @@
+ {
+ 	uint64_t    abstime;
+ 
+-#if defined(KEBAB)
+-	/*
+-	 * The panel is the only console on this port, and the progress art is
+-	 * drawn into the same framebuffer: it would paint over the kernel log
+-	 * and over anything userland writes to its console. Leave vc_progress
+-	 * NULL so every progress path returns early.
+-	 */
+-	return;
+-#endif
+-
+ 	if ((!clut) || (!desc) || (!data1x)) {
+ 		return;
+ 	}
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -87,6 +87,7 @@
+ #include <pexpert/pexpert.h>
+ #include <kern/clock.h>
+ #include <kern/debug.h>
++#include <console/video_console.h>
+ #include <kern/kern_types.h>
+ #include <sys/proc.h>
+ 
+@@ -552,6 +553,9 @@
+         PE_parse_boot_argn("-cf", &quiet, sizeof(quiet));
+     }
+     if (!quiet) return;
++    /* Original cancellation takes the progress lock, clears enable and
++     * cancels the timer before a complete GUI frame replaces its pixels. */
++    vc_progress_set(FALSE, 0);
+     OSMemoryBarrier();
+     kebab_console_muted = 1;
+     *paused = true;

@@ -79,17 +79,35 @@ def load_product_node(path):
         if kind == 'u64':
             return struct.pack('<Q', value)
         if kind == 'data':
-            return _b64.b64decode(value)
+            return _b64.b64decode(value, validate=True)
         raise SystemExit(f'unknown product property type {kind!r}')
 
+    def properties(entry):
+        values = [(prop['k'], enc(prop)) for prop in entry['props']]
+        keys = [key for key, value in values]
+        if len(keys) != len(set(keys)) or any(not key or key == 'name' or '\0' in key or len(key.encode()) > 31 for key in keys):
+            raise ValueError('Product profile contains duplicate or invalid property names')
+        return values
+
     def build(entry):
-        return node(entry['name'],
-                    [(prop['k'], enc(prop)) for prop in entry['props']],
+        return node(entry['name'], properties(entry),
                     [build(child) for child in entry.get('children', [])])
 
     data = json.loads(Path(path).read_text())
-    return ([(prop['k'], enc(prop)) for prop in data['props']],
-            [build(child) for child in data.get('children', [])])
+    return (properties(data), [build(child) for child in data.get('children', [])])
+
+
+def load_iphone_product_node(path):
+    """Typed static D22AP product traits; no syscfg/private device values."""
+    properties, children = load_product_node(path)
+    values = dict(properties)
+    required = {'product-name': b'iPhone X\0', 'product-description': b'iPhone X\0',
+                'artwork-device-idiom': b'phone\0', 'artwork-scale-factor': struct.pack('<I', 3)}
+    if any(values.get(key) != value for key, value in required.items()):
+        raise ValueError('iPhone identity requires the typed iPhone X / phone / 3x product profile')
+    if 'model' in values:
+        raise ValueError('Product profile must not conflict with the board-specific product model')
+    return properties, children
 
 
 def empty_nvram_proxy():
@@ -135,6 +153,10 @@ def main():
     parser.add_argument('--iphone-identity', action='store_true',
                         help='/product and /buttons describe an iPhone-class device: phone idiom, '
                              'iPhone X (iPhone10,3 / D22AP) identity strings')
+    parser.add_argument('--development-activation-profile', choices=['20H392'], default=None,
+                        help='Opt in to original20H392 guest development activation decision properties; '
+                             'requires --iphone-identity. Does not attest real Apple fuses/SEP, '
+                             'forge activation records, or establish Apple server activation')
     parser.add_argument('--ipad-identity', action='store_true',
                         help='/product and /buttons describe an iPad-class device without a Home button; '
                              'the prelinked kernelcache is an iPad7,1 one, so the identity matches it')
@@ -150,6 +172,10 @@ def main():
                         default=Path(__file__).resolve().parents[1] / 'configs/d22ap-product.json',
                         help='real D22AP /product node as JSON (from ipsw dtree)')
     args = parser.parse_args()
+    if args.iphone_identity and args.ipad_identity:
+        parser.error('Choose exactly one identity mode: iPhone or iPad')
+    if args.development_activation_profile and not args.iphone_identity:
+        parser.error('--development-activation-profile requires --iphone-identity')
     development_nonce = os.urandom(32) if args.development_boot else None
     owner_manifest = None
     owner_domain = None
@@ -191,17 +217,16 @@ def main():
                                    ('bus-frequency', struct.pack('<I', args.timebase))])
             for index, reg in enumerate(cpu_regs)]
 
-    if args.iphone_identity and args.product_file and args.product_file.is_file():
-
-        _pp, _pc = load_product_node(args.product_file)
-
-        product_node = node('product', _pp + [('model', b'oneplus,kebab\0')], _pc)
-
+    if args.iphone_identity:
+        try:
+            if args.product_file is None or not args.product_file.is_file():
+                raise ValueError('The required D22AP product profile is missing')
+            product_properties, product_children = load_iphone_product_node(args.product_file)
+        except (OSError, ValueError, KeyError, TypeError, struct.error, SystemExit) as error:
+            parser.error(f'Invalid iPhone product profile: {error}')
+        product_node = node('product', product_properties + [('model', b'oneplus,kebab\0')], product_children)
     else:
-
-        product_node = node('product', [('product-name', b'OnePlus 8T\0'),
-
-                                            ('model', b'oneplus,kebab\0')])
+        product_node = node('product', [('product-name', b'OnePlus 8T\0'), ('model', b'oneplus,kebab\0')])
 
 
     # Board-native normal-service resource contracts. These root entries use
@@ -225,7 +250,7 @@ def main():
 
     tree = node('device-tree', [
         ('model', b'iPhone10,3\0' if args.iphone_identity else (b'iPad7,1\0' if args.ipad_identity else b'OnePlus 8T\0')),
-        *([('target-type', b'D22AP\0')] if args.iphone_identity else ([('target-type', b'J120\0')] if args.ipad_identity else [])),
+        *([('target-type', b'D22\0')] if args.iphone_identity else ([('target-type', b'J120\0')] if args.ipad_identity else [])),
         # The compiled board DT's own root strings.
         ('compatible', b'oneplus,kebab\0qcom,sm8250\0qcom,kona\0'),
         ('#address-cells', struct.pack('<I', 2)),
@@ -248,7 +273,7 @@ def main():
                            ('effective-production-status-ap', struct.pack('<I', 0)),
                            ('certificate-security-mode', struct.pack('<I', 1)),
                            ('effective-security-mode-sep', struct.pack('<I', 1))]
-                          if args.ipad_identity else []),
+                          if args.ipad_identity or args.development_activation_profile else []),
                         *([('darwinboot-memory-size', struct.pack('<Q', args.owned_memory_size))]
                           if args.owned_memory_size else []),
                         ('embedded-panic-log-size', struct.pack('<I', PANIC_LOG_SIZE)),
@@ -282,7 +307,8 @@ def main():
                             ('button-names', b'hold\0voldown\0volup\0'),
                             ('home-button-type', struct.pack('<I', 2))])] if args.ipad_identity
                            else ([node('buttons', [('compatible', b'buttons\0'), ('device_type', b'buttons\0'),
-                                                   ('button-names', b'hold\0voldown\0volup\0')])]
+                                                   ('button-names', b'hold\0voldown\0volup\0'),
+                                                   ('home-button-type', struct.pack('<I', 2))])]
                                  if args.iphone_identity else [])),
         product_node,
         node('arm-io', [('device_type', b'arm-io\0'),

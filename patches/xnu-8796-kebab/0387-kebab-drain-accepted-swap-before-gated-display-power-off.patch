@@ -1,0 +1,102 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -158,6 +158,7 @@
+ 
+ 	static void vsyncFired(OSObject *owner, IOTimerEventSource *sender);
+ 	static IOReturn stopEventsAction(OSObject *owner, void *, void *, void *, void *);
++	static IOReturn powerChangeAction(OSObject *, void *, void *, void *, void *);
+ 	void stopEvents();
+ 	void releaseResources();
+ 
+@@ -207,6 +208,7 @@
+ 	void swap(const uint8_t *rec);
+ 	void present(const uint8_t *rec, uint32_t swapID);
+ 	void blank();
++	IOReturn requestPower(bool off);
+ };
+ 
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+@@ -471,6 +473,62 @@
+ 		IOLockUnlock(fb->fLock);
+ 	}
+ 	sender->setTimeoutUS(KEBAB_FB_VSYNC_US);
++}
++
++/* Apply power changes on the same gate as the present timer. In particular,
++ * complete the already accepted transaction before blanking; dropping its ID
++ * strands the original SwapWait/CA lifecycle. New concurrent swaps stay queued. */
++IOReturn
++AppleCLCD::requestPower(bool off)
++{
++    return fWorkLoop->runAction(&AppleCLCD::powerChangeAction, this,
++        (void *)(uintptr_t)off);
++}
++
++IOReturn
++AppleCLCD::powerChangeAction(OSObject *owner, void *request, void *, void *, void *)
++{
++    AppleCLCD *fb = static_cast<AppleCLCD *>(owner);
++    bool off = (uintptr_t)request != 0;
++    uint8_t pending[KEBAB_FB_SWAP_REC_SIZE];
++    uint32_t id = 0;
++    bool drain = false;
++    IOLockLock(fb->fLock);
++    if (fb->fStopping || panic_active()) {
++        IOLockUnlock(fb->fLock);
++        return kIOReturnNotReady;
++    }
++    if (off && !fb->fPowerOff && fb->fPendingValid) {
++        memcpy(pending, fb->fPending, sizeof(pending));
++        id = fb->fPendingID;
++        fb->fPendingValid = false;
++        drain = true;
++    }
++    IOLockUnlock(fb->fLock);
++    if (drain) {
++        fb->present(pending, id);
++        if (panic_active()) return kIOReturnNotReady;
++        IOLockLock(fb->fLock);
++        if (id > fb->fCompletedID) fb->fCompletedID = id;
++        fb->fCompletedTime = mach_absolute_time();
++        IOLockWakeup(fb->fLock, &fb->fCompletedID, false);
++        IOLockUnlock(fb->fLock);
++        IOLog("KEBAB FB POWER QUEUE: actually completed pending swap %u before off\n", id);
++    }
++    IOLockLock(fb->fLock);
++    if (off != fb->fPowerOff) {
++        fb->fPowerOff = off;
++        if (!off && !fb->fPendingValid && fb->fHaveFrame) fb->fPendingValid = true;
++        fb->fBlanked = false;
++    }
++    IOLockUnlock(fb->fLock);
++    if (off && !fb->fBlanked) {
++        if (panic_active()) return kIOReturnNotReady;
++        fb->blank();
++        fb->fBlanked = true;
++    }
++    IOLog("KEBAB FB: display %s\n", off ? "off" : "on");
++    return kIOReturnSuccess;
+ }
+ 
+ bool
+@@ -1073,18 +1131,8 @@
+ 			ret = kIOReturnBadArgument;
+ 			break;
+ 		}
+-		{
+-			kebab_fb_power_origin(args->scalarInput[0], (uintptr_t)this);
+-			bool off = args->scalarInput[0] == 0;
+-			IOLockLock(fFB->fLock);
+-			if (off != fFB->fPowerOff) {
+-				fFB->fPowerOff = off;
+-				fFB->fPendingValid = !off && fFB->fHaveFrame;
+-				fFB->fBlanked = false;
+-			}
+-			IOLockUnlock(fFB->fLock);
+-			IOLog("KEBAB FB: display %s\n", off ? "off" : "on");
+-		}
++        kebab_fb_power_origin(args->scalarInput[0], (uintptr_t)this);
++        ret = fFB->requestPower(args->scalarInput[0] == 0);
+ 		break;
+ 	case kKebabFBSetDebugFlags:
+ 		if (args->scalarInputCount < 1) {

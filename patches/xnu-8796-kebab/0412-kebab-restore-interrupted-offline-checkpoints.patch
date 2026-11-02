@@ -1,0 +1,34 @@
+--- a/bsd/kern/kebab_offline_setup_impl.h
++++ b/bsd/kern/kebab_offline_setup_impl.h
+@@ -66,9 +66,19 @@
+     error=io->record(e->index,1,&backup);if(error)return error;
+     if(action==2){
+         if(kebab_offline_same(&current,e,true,false)){*state=4;return 0;}
+-        if(!kebab_offline_same(&backup,e,true,false))return EAUTH;
+-        if(current.exists && (!kebab_offline_same(&current,e,false,false)||current.fileid!=e->current_fileid))return EAUTH;
+-        *state=current.exists?5:6;return 0;
++        if(backup.exists){
++            if(!kebab_offline_same(&backup,e,true,false))return EAUTH;
++            if(current.exists && (!kebab_offline_same(&current,e,false,false)||current.fileid!=e->current_fileid))return EAUTH;
++            *state=current.exists?5:6;return 0;
++        }
++        /* A crash can leave the original inode at the stage name after the
++         * atomic exchange. Restore it directly, without starting services or
++         * pretending that the final backup rename had already completed. */
++        if(e->index==0||!current.exists)return EAUTH;
++        error=io->record(e->index,2,&stage);if(error)return error;
++        if(!kebab_offline_same(&stage,e,true,false)||!kebab_offline_same(&current,e,false,false)||
++            current.fileid!=e->current_fileid)return EAUTH;
++        *state=7;return 0;
+     }
+     if(backup.exists){
+         if(!kebab_offline_same(&backup,e,true,false))return EAUTH;
+@@ -91,7 +101,7 @@
+ {
+     unsigned state=0;int error=kebab_offline_inspect(io,e,action,&state);if(error||state==4)return error;
+     if(action==2){
+-        error=io->move(e->index,state==5?2:4);if(!error)error=io->sync(e->index);if(error)return error;
++        error=io->move(e->index,state==7?0:state==5?2:4);if(!error)error=io->sync(e->index);if(error)return error;
+         struct kebab_offline_record restored={};error=io->record(e->index,0,&restored);
+         return error?error:kebab_offline_same(&restored,e,true,false)?0:EAUTH;
+     }

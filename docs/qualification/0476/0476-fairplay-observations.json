@@ -1,0 +1,120 @@
+{
+  "build": "20H392",
+  "actual_log_sha256": "9b6c3c9e4c2dac998e42ffe95e8ae2bb908d6acc8870c5866115825182d73aef",
+  "original_binary": {
+    "path": "usr/sbin/fairplayd.H2",
+    "bytes": 19316144,
+    "sha256": "e3eab59230aea545ed6a46ec058fa73ac30345c3d1e7adda379116bf818b07bb"
+  },
+  "original_plist": {
+    "path": "System/Library/LaunchDaemons/com.apple.fairplayd.H2.plist",
+    "bytes": 544,
+    "sha256": "88d23f3e1acbea6cb31bee058d04a994f058f27334ac223b085bb37efd57692b"
+  },
+  "source_mount_readonly_verified": true,
+  "job": {
+    "label": "com.apple.fairplayd.H2",
+    "program": "/usr/sbin/fairplayd.H2",
+    "user": "mobile",
+    "group": "mobile",
+    "keep_alive": true,
+    "mach_services": [
+      "com.apple.fairplayd",
+      "com.apple.fairplayd.versioned",
+      "com.apple.unfreed"
+    ]
+  },
+  "first_exit_line": "[  45.075] KEBAB RUNTIME EXIT: name=fairplayd.H2 pid=87 signal=0 status=0 cs=0x26000301 own=1 exception=0 code=0x0 subcode=0x0 reason=0/0x0 desc=none",
+  "only_first_exit_instrumented": true,
+  "spawn_times_seconds": [
+    41.959,
+    52.062,
+    62.432,
+    72.625,
+    83.349,
+    93.447,
+    103.449,
+    113.574,
+    123.582,
+    133.683,
+    143.734,
+    153.804,
+    163.894,
+    173.942,
+    184.04,
+    194.088,
+    204.135,
+    214.204,
+    224.326,
+    234.359,
+    244.436,
+    254.499,
+    264.564,
+    274.604,
+    284.724,
+    294.776,
+    304.843,
+    314.894,
+    324.949,
+    335.014,
+    345.117
+  ],
+  "all_respawn_exit_reasons_independently_proven": false,
+  "exit_frames": [
+    {
+      "name": "fairplayd.H2",
+      "pid": 87,
+      "depth": 0,
+      "pc": "0x1c2616508",
+      "lookup_pc": "0x1c2616508",
+      "return_address_adjusted": false,
+      "image": "/usr/lib/system/libsystem_kernel.dylib",
+      "image_offset": "0x6508",
+      "symbol": "__exit",
+      "symbol_source": "export",
+      "offset": "0x8",
+      "nearest_symbol_only": true
+    },
+    {
+      "name": "fairplayd.H2",
+      "pid": 87,
+      "depth": 1,
+      "pc": "0x1a6c81d38",
+      "lookup_pc": "0x1a6c81d34",
+      "return_address_adjusted": true,
+      "image": "/usr/lib/system/libdyld.dylib",
+      "image_offset": "0x1d34",
+      "symbol": "__ZNK5dyld416LibSystemHelpers4exitEi",
+      "symbol_source": "local",
+      "offset": "0xc",
+      "nearest_symbol_only": true
+    },
+    {
+      "name": "fairplayd.H2",
+      "pid": 87,
+      "depth": 2,
+      "pc": "0x1a462435c",
+      "lookup_pc": "0x1a4624358",
+      "return_address_adjusted": true,
+      "image": "/usr/lib/dyld",
+      "image_offset": "0x14358",
+      "symbol": "start",
+      "symbol_source": "local",
+      "offset": "0x758",
+      "nearest_symbol_only": true
+    },
+    {
+      "name": "fairplayd.H2",
+      "pid": 87,
+      "depth": 3,
+      "pc": "0x0",
+      "lookup_pc": "0x0",
+      "return_address_adjusted": false,
+      "image": null
+    }
+  ],
+  "service_unserved_at_sample": true,
+  "never_checked_in_at_any_time_proven": false,
+  "exact_exit_cause_proven": false,
+  "no_binary_or_guard_context_or_message_payload_published": true
+}

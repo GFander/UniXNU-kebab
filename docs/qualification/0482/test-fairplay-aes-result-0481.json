@@ -1,0 +1,78 @@
+{
+  "passed": true,
+  "production_source_sha256": "216e5da3468a61760a83cdc3563bb0cb97debe10ba31014d8b173b00f57356dd",
+  "fixture_sha256": "782dc624f5255321b5e42c446aef8275aacb5a12088293dcb589cfb949697ec0",
+  "actual_production_CXX_bodies": true,
+  "IOKit_and_cache_are_models": true,
+  "low_level_AES_adapter": "OpenSSL EVP; actual CBC glue/KDF/dispatch body retained; native backend untested here",
+  "original_nonce_KDF_byte_identical": true,
+  "compiled_behavioral_mutants": 10,
+  "runs": [
+    {
+      "name": "baseline",
+      "compiled": true,
+      "exit_code": 0,
+      "stdout": "PASS: 61 actual-C++ CBC/KDF/selector/publish/negative/error/wipe cases; IOKit and cache mocked"
+    },
+    {
+      "name": "fairplay-aliased-to-nonce",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "fairplay-selector-not-supported",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "fairplay-dispatch-unavailable",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "fairplay-bits-unchecked",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "cancel-fairplay-not-cleared",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "reset-fairplay-not-cleared",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "prepare-wrong-purpose",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "original-nonce-key-overwritten",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "fairplay-key-not-published",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "fairplay-cleared-on-published-cancel",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    }
+  ]
+}

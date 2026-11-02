@@ -1,0 +1,506 @@
+[2026-11-01T12:16:39] sending 'MIG?' on COM7
+[   0.110] ed factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.110] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.110] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   0.110] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.110] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.110] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   0.111] KEBAB AKS STATE: authenticated factory policy=1 available-classes=0x18 sls=3 ss=4; persisted C/D policy; derived class readiness and lock queried separately; no passcode/SEP
+[   0.111] KEBAB AKS UC: selector=17 scalar=1/0 struct-in=0 result=0; hardware factory bag; struct-out=21 desc=0/0
+[   0.111] KEBAB AKS ACCESS: selector=17 role=read-only-status result=0
+[   0.111] KEBAB EXEC: pid 297 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16bb38000
+[   0.111] KEBAB EXEC HEADER: pid=297 main=0x1042c8000
+[   0.111] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.111] KEBAB EXEC: pid 297 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16bcfc000
+[   0.111] KEBAB EXEC HEADER: pid=297 main=0x104104000
+[   0.111] Allowing spawn of iOS binary fairplayd.H2 since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.111] KEBAB EXEC: pid 298 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16bba8000
+[   0.111] KEBAB EXEC HEADER: pid=298 main=0x104258000
+[   0.111] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.111] KEBAB EXEC: pid 298 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16b2cc000
+[   0.111] KEBAB EXEC HEADER: pid=298 main=0x104b34000
+[   0.111] Allowing spawn of iOS binary bluetoothd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.111] KEBAB EXEC: pid 299 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16badc000
+[   0.111] KEBAB EXEC HEADER: pid=299 main=0x104324000
+[   0.111] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.111] KEBAB EXEC: pid 299 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16dc3c000
+[   0.111] KEBAB EXEC HEADER: pid=299 main=0x1021c4000
+[   0.111] Allowing spawn of iOS binary fairplayd.H2 since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.111] KEBAB EXEC: pid 300 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16f8d4000
+[   0.111] KEBAB EXEC HEADER: pid=300 main=0x10052c000
+[   0.112] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.112] KEBAB EXEC: pid 300 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d91c000
+[   0.112] KEBAB EXEC HEADER: pid=300 main=0x1024e4000
+[   0.112] Allowing spawn of iOS binary bluetoothd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.112] KEBAB EXEC: pid 301 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16dd04000
+[   0.112] KEBAB EXEC HEADER: pid=301 main=0x1020fc000
+[   0.112] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.112] KEBAB EXEC: pid 301 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16baa8000
+[   0.112] KEBAB EXEC HEADER: pid=301 main=0x104358000
+[   0.112] Allowing spawn of iOS binary fairplayd.H2 since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.112] KEBAB EXEC: pid 302 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16f4cc000
+[   0.112] KEKEBAB MIG-DIR: index=0 getattr=0 dir=1 supported=0x1f uid=0 gid=0 mode=0755 flags=0x0 class=0 path=/private/var
+[   0.112] KEBAB MIG-DIR: index=1 getattr=0 dir=1 supported=0x1f uid=0 gid=0 mode=0755 flags=0x0 class=0 path=/private/var/containers
+[   0.112] KEBAB MIG-DIR: index=2 getattr=0 dir=1 supported=0x1f uid=0 gid=0 mode=0755 flags=0x0 class=0 path=/private/var/containers/Shared
+[   0.112] KEBAB MIG-DIR: index=3 getattr=0 dir=1 supported=0x1f uid=0 gid=0 mode=0755 flags=0x0 class=0 path=/private/var/containers/Shared/SystemGroup
+[   0.112] KEBAB MIG-DIR: index=4 getattr=0 dir=1 supported=0x1f uid=0 gid=0 mode=0755 flags=0x0 class=0 path=/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.installcoordinationd
+[   0.112] KEBAB MIG-DIR: index=5 getattr=0 dir=1 supported=0x1f uid=501 gid=501 mode=0751 flags=0x0 class=4 path=/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.installcoordinationd/Library
+[   0.112] KEBAB MIG-DIR: index=6 getattr=0 dir=1 supported=0x1f uid=501 gid=501 mode=0751 flags=0x0 class=4 path=/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.installcoordinationd/Library/InstallCoordination
+[   0.112] KEBAB MIG: fixed process pid=166 uid=501 scanned=75; best-effort wait snapshot
+[   0.112] KEBAB MIG: thread snapshot count=9 thread_total=9 (cap32; no suspension)
+[   0.112] KEBAB MIG: tid=1235 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=8.805719 sys=4.738423
+[   0.112] KEBAB MIG USER: tid=1235 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16f0528a0; best-effort, target may resume
+[   0.112] KEBAB MIG USER: tid=1235 frame[0]=0x1c2622db8
+[   0.112] KEBAB MIG USER: tid=1235 frame[1]=0x1c2611524
+[   0.112] KEBAB MIG USER: tid=1235 frame[2]=0x186e5c148
+[   0.112] KEBAB MIG USER: tid=1235 frame[3]=0x186e5d2e0
+[   0.112] KEBAB MIG USER: tid=1235 frame[4]=0x186e61d20
+[   0.112] KEBAB MIG USER: tid=1235 frame[5]=0x1811b0ef8
+[   0.112] KEBAB MIG USER: tid=1235 frame[6]=0x1811b0da4
+[   0.112] KEBAB MIG USER: tid=1235 frame[7]=0x1d1bf7840
+[   0.112] KEBAB MIG USER: tid=1235 frame[8]=0x1d1bf9968
+[   0.112] KEBAB MIG USER: tid=1235 frame[9]=0x100daf404
+[   0.112] KEBAB MIG USER: tid=1235 frame[10]=0x1a4624344
+[   0.112] KEBAB MIG IPC: tid=1235 opt=507000806 b=0 sz=2 v=1 r=0 l=1103 q=1103 id=0 lookup=0
+[   0.112] KEBAB MIG IPC-OWNER: tid=1235 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   0.112] KEBAB MIG: tid=1579 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe29a0340c00 continuation=0xfffffe00069754bc user=0.003394 sys=0.005366
+[   0.112] KEBAB MIG USER: tid=1579 saved pc=0x1c2611538 lr=0x18db852cc fp=0x16f0d9fa0; best-effort, target may resume
+[   0.112] KEBAB MIG USER: tid=1579 frame[0]=0x18db85c78
+[   0.112] KEBAB MIG USER: tid=1579 frame[1]=0x18db7ace0
+[   0.112] KEBAB MIG USER: tid=1579 frame[2]=0x18db7a8fc
+[   0.112] KEBAB MIG USER: tid=1579 frame[3]=0x100db1db8
+[   0.112] KEBAB MIG USER: tid=1579 frame[4]=0x100db8364
+[   0.112] KEBAB MIG USER: tid=1579 frame[5]=0x100db4fdc
+[   0.112] KEBAB MIG USER: tid=1579 frame[6]=0x1c79108b0
+[   0.112] KEBAB MIG USER: tid=1579 frame[7]=0x1d1bef788
+[   0.112] KEBAB MIG USER: tid=1579 frame[8]=0x1d1befb68
+[   0.112] KEBAB MIG USER: tid=1579 frame[9]=0x18db98834
+[   0.112] KEBAB MIG USER: tid=1579 frame[10]=0x18db6b65c
+[   0.112] KEBAB MIG USER: tid=1579 frame[11]=0x18db735d4
+[   0.112] KEBAB MIG USER: tid=1579 frame[12]=0x18db6c1f8
+[   0.112] KEBAB MIG USER: tid=1579 frame[13]=0x18db735d4
+[   0.112] KEBAB MIG USER: tid=1579 frame[14]=0x18db741b0
+[   0.112] KEBAB MIG USER: tid=1579 frame[15]=0x18db7df14
+[   0.112] KEBAB MIG: tid=1580 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe299fffd780 continuation=0xfffffe00069754bc user=0.000886 sys=0.000971
+[   0.112] KEBAB MIG USER: tid=1580 saved pc=0x1c2611538 lr=0x18db852cc fp=0x16f165fa0; best-effort, target may resume
+[   0.112] KEBAB MIG USER: tid=1580 frame[0]=0x18db85c78
+[   0.112] KEBAB MIG USER: tid=1580 frame[1]=0x18db7ace0
+[   0.112] KEBAB MIG USER: tid=1580 frame[2]=0x18db7a8fc
+[   0.112] KEBAB MIG USER: tid=1580 frame[3]=0x100db1db8
+[   0.112] KEBAB MIG USER: tid=1580 frame[4]=0x100db8364
+[   0.112] KEBAB MIG USER: tid=1580 frame[5]=0x100db4fdc
+[   0.112] KEBAB MIG USER: tid=1580 frame[6]=0x1c79108b0
+[   0.112] KEBAB MIG USER: tid=1580 frame[7]=0x1d1bef788
+[   0.112] KEBAB MIG USER: tid=1580 frame[8]=0x1d1befb68
+[   0.112] KEBAB MIG USER: tid=1580 frame[9]=0x18db98834
+[   0.112] KEBAB MIG USER: tid=1580 frame[10]=0x18db6b65c
+[   0.112] KEBAB MIG USER: tid=1580 frame[11]=0x18db735d4
+[   0.112] KEBAB MIG USER: tid=1580 frame[12]=0x18db6c1f8
+[   0.112] KEBAB MIG USER: tid=1580 frame[13]=0x18db735d4
+[   0.112] KEBAB MIG USER: tid=1580 frame[14]=0x18db741b0
+[   0.112] KEBAB MIG USER: tid=1580 frame[15]=0x18db7df14
+[   0.112] KEBAB MIG: tid=1581 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.067450 sys=0.110759
+[   0.112] KEBAB MIG USER: tid=1581 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16f1edd40; best-effort, target may resume
+[   0.112] KEBAB MIG USER: tid=1581 frame[0]=0x1c2622db8
+[   0.112] KEBAB MIG USER: tid=1581 frame[1]=0x1c2611524
+[   0.112] KEBAB MIG USER: tid=1581 frame[2]=0x18db6a308
+[   0.112] KEBAB MIG USER: tid=1581 frame[3]=0x18db6a694
+[   0.112] KEBAB MIG USER: tid=1581 frame[4]=0x1d1bee0ec
+[   0.112] KEBAB MIG USER: tid=1581 frame[5]=0x1c790a334
+[   0.112] KEBAB MIG USER: tid=1581 frame[6]=0x1c790e034
+[   0.112] KEBAB MIG USER: tid=1581 frame[7]=0x100db9ac4
+[   0.112] KEBAB MIG USER: tid=1581 frame[8]=0x100db96ac
+[   0.112] KEBAB MIG USER: tid=1581 frame[9]=0x100db744c
+[   0.112] KEBAB MIG USER: tid=1581 frame[10]=0x100db8820
+[   0.112] KEBAB MIG USER: tid=1581 frame[11]=0x100db1fa0
+[   0.112] KEBAB MIG USER: tid=1581 frame[12]=0x18db977a8
+[   0.112] KEBAB MIG USER: tid=1581 frame[13]=0x18db98780
+[   0.113] KEBAB MIG USER: tid=1581 frame[14]=0x18db736fc
+[   0.113] KEBAB MIG USER: tid=1581 frame[15]=0x18db741b0
+[   0.113] KEBAB MIG IPC: tid=1581 opt=40700420e b=0 sz=0 v=0 r=4f47 l=0 q=1807 id=0 lookup=1
+[   0.113] KEBAB MIG IPC-OWNER: tid=1581 role=sync name=4f47 kr=0 pid=242 recv=2d2f object=fffffe1b3b30ec00
+[   0.113] KEBAB MIG IPC-STATE: tid=1581 hop=0 obj=fffffe1b3b30ec00 kind=1 pid=242 recv=2d2f dst=0 f=8 link=0 kt=0 q=0/6
+[   0.113] KEBAB MIG: tid=2158 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe299ff32a00 continuation=0xfffffe00069754bc user=0.002609 sys=0.002996
+[   0.113] KEBAB MIG USER: tid=2158 saved pc=0x1c2611538 lr=0x18db852cc fp=0x16f309fa0; best-effort, target may resume
+[   0.113] KEBAB MIG USER: tid=2158 frame[0]=0x18db85c78
+[   0.113] KEBAB MIG USER: tid=2158 frame[1]=0x18db7ace0
+[   0.113] KEBAB MIG USER: tid=2158 frame[2]=0x18db7a8fc
+[   0.113] KEBAB MIG USER: tid=2158 frame[3]=0x100db1db8
+[   0.113] KEBAB MIG USER: tid=2158 frame[4]=0x100db8364
+[   0.113] KEBAB MIG USER: tid=2158 frame[5]=0x100db4fdc
+[   0.113] KEBAB MIG USER: tid=2158 frame[6]=0x1c79108b0
+[   0.113] KEBAB MIG USER: tid=2158 frame[7]=0x1d1bef788
+[   0.113] KEBAB MIG USER: tid=2158 frame[8]=0x1d1befb68
+[   0.113] KEBAB MIG USER: tid=2158 frame[9]=0x18db98834
+[   0.113] KEBAB MIG USER: tid=2158 frame[10]=0x18db6b65c
+[   0.113] KEBAB MIG USER: tid=2158 frame[11]=0x18db735d4
+[   0.113] KEBAB MIG USER: tid=2158 frame[12]=0x18db6c1f8
+[   0.113] KEBAB MIG USER: tid=2158 frame[13]=0x18db735d4
+[   0.113] KEBAB MIG USER: tid=2158 frame[14]=0x18db741b0
+[   0.113] KEBAB MIG USER: tid=2158 frame[15]=0x18db7df14
+[   0.113] KEBAB MIG: tid=2275 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe299ff3da80 continuation=0xfffffe00069754bc user=0.001067 sys=0.001605
+[   0.113] KEBAB MIG USER: tid=2275 saved pc=0x1c2611538 lr=0x18db852cc fp=0x16f27dfa0; best-effort, target may resume
+[   0.113] KEBAB MIG USER: tid=2275 frame[0]=0x18db85c78
+[   0.113] KEBAB MIG USER: tid=2275 frame[1]=0x18db7ace0
+[   0.113] KEBAB MIG USER: tid=2275 frame[2]=0x18db7a8fc
+[   0.113] KEBAB MIG USER: tid=2275 frame[3]=0x100db1db8
+[   0.113] KEBAB MIG USER: tid=2275 frame[4]=0x100db8364
+[   0.113] KEBAB MIG USER: tid=2275 frame[5]=0x100db4fdc
+[   0.113] KEBAB MIG USER: tid=2275 frame[6]=0x1c79108b0
+[   0.113] KEBAB MIG USER: tid=2275 frame[7]=0x1d1bef788
+[   0.113] KEBAB MIG USER: tid=2275 frame[8]=0x1d1befb68
+[   0.113] KEBAB MIG USER: tid=2275 frame[9]=0x18db98834
+[   0.113] KEBAB MIG USER: tid=2275 frame[10]=0x18db6b65c
+[   0.113] KEBAB MIG USER: tid=2275 frame[11]=0x18db735d4
+[   0.113] KEBAB MIG USER: tid=2275 frame[12]=0x18db6c1f8
+[   0.113] KEBAB MIG USER: tid=2275 frame[13]=0x18db735d4
+[   0.113] KEBAB MIG USER: tid=2275 frame[14]=0x18db741b0
+[   0.113] KEBAB MIG USER: tid=2275 frame[15]=0x18db7df14
+[   0.113] KEBAB MIG: tid=2308 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe299ff11300 continuation=0xfffffe00069754bc user=0.112843 sys=0.422073
+[   0.113] KEBAB MIG USER: tid=2308 saved pc=0x1c2611538 lr=0x18db852cc fp=0x16f395f70; best-effort, target may resume
+[   0.113] KEBAB MIG USER: tid=2308 frame[0]=0x18db85c78
+[   0.113] KEBAB MIG USER: tid=2308 frame[1]=0x18db7ace0
+[   0.113] KEBAB MIG USER: tid=2308 frame[2]=0x18db7a8fc
+[   0.113] KEBAB MIG USER: tid=2308 frame[3]=0x100db1db8
+[   0.113] KEBAB MIG USER: tid=2308 frame[4]=0x100db8364
+[   0.113] KEBAB MIG USER: tid=2308 frame[5]=0x100db4fdc
+[   0.113] KEBAB MIG USER: tid=2308 frame[6]=0x1c79108b0
+[   0.113] KEBAB MIG USER: tid=2308 frame[7]=0x1d1bef788
+[   0.113] KEBAB MIG USER: tid=2308 frame[8]=0x1d1befb68
+[   0.113] KEBAB MIG USER: tid=2308 frame[9]=0x18db98834
+[   0.113] KEBAB MIG USER: tid=2308 frame[10]=0x18db6b65c
+[   0.113] KEBAB MIG USER: tid=2308 frame[11]=0x18db735d4
+[   0.113] KEBAB MIG USER: tid=2308 frame[12]=0x18db6c1f8
+[   0.113] KEBAB MIG USER: tid=2308 frame[13]=0x18db735d4
+[   0.113] KEBAB MIG USER: tid=2308 frame[14]=0x18db741b0
+[   0.113] KEBAB MIG USER: tid=2308 frame[15]=0x18db7df14
+[   0.113] KEBAB MIG: tid=2320 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe299ff3a400 continuation=0xfffffe00069754bc user=0.001417 sys=0.003126
+[   0.113] KEBAB MIG USER: tid=2320 saved pc=0x1c2611538 lr=0x18db852cc fp=0x16f421fa0; best-effort, target may resume
+[   0.113] KEBAB MIG USER: tid=2320 frame[0]=0x18db85c78
+[   0.113] KEBAB MIG USER: tid=2320 frame[1]=0x18db7ace0
+[   0.113] KEBAB MIG USER: tid=2320 frame[2]=0x18db7a8fc
+[   0.113] KEBAB MIG USER: tid=2320 frame[3]=0x100db1db8
+[   0.113] KEBAB MIG USER: tid=2320 frame[4]=0x100db8364
+[   0.113] KEBAB MIG USER: tid=2320 frame[5]=0x100db4fdc
+[   0.113] KEBAB MIG USER: tid=2320 frame[6]=0x1c79108b0
+[   0.113] KEBAB MIG USER: tid=2320 frame[7]=0x1d1bef788
+[   0.113] KEBAB MIG USER: tid=2320 frame[8]=0x1d1befb68
+[   0.113] KEBAB MIG USER: tid=2320 frame[9]=0x18db98834
+[   0.113] KEBAB MIG USER: tid=2320 frame[10]=0x18db6b65c
+[   0.113] KEBAB MIG USER: tid=2320 frame[11]=0x18db735d4
+[   0.113] KEBAB MIG USER: tid=2320 frame[12]=0x18db6c1f8
+[   0.113] KEBAB MIG USER: tid=2320 frame[13]=0x18db735d4
+[   0.113] KEBAB MIG USER: tid=2320 frame[14]=0x18db741b0
+[   0.113] KEBAB MIG USER: tid=2320 frame[15]=0x18db7df14
+[   0.113] KEBAB MIG: tid=6505 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24d4ca0bf8 continuation=0xfffffe000694c9f4 user=0.102473 sys=0.396583
+[   0.113] KEBAB MIG USER: tid=6505 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16f53ab50; best-effort, target may resume
+[   0.113] KEBAB MIG USER: tid=6505 frame[0]=0x1d1b9a720
+[   0.113] KEBAB MIG: snapshot end; addresses name kernel waits, not user PCs
+[   0.113] KEBAB EXEC: pid 1057 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16b2c4000
+[   0.113] KEBAB MIG-W: fixed process pid=242 uid=501 scanned=22; best-effort wait snapshot
+[   0.113] KEBAB EXEC HEADER: pid=1057 main=0x104b3c000
+[   0.113] KEBAB MIG-W: thread snapshot count=3 thread_total=3 (cap32; no suspension)
+[   0.114] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.114] KEBAB MIG-W: tid=2840 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.012332 sys=0.022038
+[   0.114] KEBAB MIG-W USER: tid=2840 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16dd3a870; best-effort, target may resume
+[   0.114] KEBAB MIG-W USER: tid=2840 frame[0]=0x1c2622db8
+[   0.114] KEBAB MIG-W USER: tid=2840 frame[1]=0x1c2611524
+[   0.114] KEBAB MIG-W USER: tid=2840 frame[2]=0x186e5c148
+[   0.114] KEBAB MIG-W USER: tid=2840 frame[3]=0x186e5d2e0
+[   0.114] KEBAB MIG-W USER: tid=2840 frame[4]=0x186e61d20
+[   0.114] KEBAB MIG-W USER: tid=2840 frame[5]=0x1811b0ef8
+[   0.114] KEBAB MIG-W USER: tid=2840 frame[6]=0x1811b0da4
+[   0.114] KEBAB MIG-W USER: tid=2840 frame[7]=0x1d1bf7840
+[   0.114] KEBAB MIG-W USER: tid=2840 frame[8]=0x1d1bf9968
+[   0.114] KEBAB MIG-W USER: tid=2840 frame[9]=0x1020c6c04
+[   0.114] KEBAB MIG-W USER: tid=2840 frame[10]=0x1a4624344
+[   0.114] KEBAB MIG-W IPC: tid=2840 opt=507000806 b=0 sz=2 v=1 r=0 l=1703 q=1703 id=0 lookup=0
+[   0.114] KEBAB MIG-W IPC-OWNER: tid=2840 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   0.114] KEBAB MIG-W: tid=2842 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.311115 sys=0.388134
+[   0.114] KEBAB MIG-W USER: tid=2842 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16de49360; best-effort, target may resume
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[0]=0x1c2622db8
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[1]=0x1c2611524
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[2]=0x18db6a308
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[3]=0x18db6a694
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[4]=0x1d1bee0ec
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[5]=0x18120c224
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[6]=0x1811a5cb0
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[7]=0x1811a46e0
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[8]=0x1811a461c
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[9]=0x191e033c4
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[10]=0x191e0955c
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[11]=0x10482fe0c
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[12]=0x1020c6988
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[13]=0x18db98780
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[14]=0x18db7aa50
+[   0.114] KEBAB MIG-W USER: tid=2842 frame[15]=0x1020c6708
+[   0.114] KEBAB MIG-W IPC: tid=2842 opt=40700420e b=0 sz=0 v=0 r=3403 l=0 q=2e07 id=0 lookup=1
+[   0.114] KEBAB MIG-W IPC-OWNER: tid=2842 role=sync name=3403 kr=0 pid=-1 recv=0 object=fffffe1b3b2a2c00
+[   0.114] KEBAB MIG-W IPC-STATE: tid=2842 hop=0 obj=fffffe1b3b2a2c00 kind=4 pid=-1 recv=0 dst=fffffe1b3b717600 f=0 link=0 kt=0 q=1/6
+[   0.114] KEBAB MIG-W IPC-STATE: tid=2842 hop=1 obj=fffffe1b3b717600 kind=1 pid=63 recv=6c03 dst=0 f=2 link=0 kt=0 q=8/16
+[   0.114] KEBAB MIG-W: tid=3058 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24d4c4b3d8 continuation=0xfffffe000694c9f4 user=0.000912 sys=0.000886
+[   0.114] KEBAB MIG-W USER: tid=3058 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16ddc2b50; best-effort, target may resume
+[   0.114] KEBAB MIG-W USER: tid=3058 frame[0]=0x1d1b9a720
+[   0.114] KEBAB MIG-W: snapshot end; addresses name kernel waits, not user PCs
+[   0.114] KEBAB MIG-W IMAGES: dyld-version=17 count=621 scanned=193 found=8 (cap512/8, best-effort)
+[   0.114] KEBAB MIG-W IMAGE: base=0x1021c0000 uuid-valid=1 uuid=adcce1902e873b5bacd8006cc169a240 path=/System/Library/DataClassMigrators/CoreTimeMigrator.migrator/CoreTimeMigrator
+[   0.114] KEBAB MIG-W IMAGE: base=0x1021e8000 uuid-valid=1 uuid=10657f16e9a73c728af482bd3c4f73cd path=/System/Library/DataClassMigrators/KeychainMigrator.migrator/KeychainMigrator
+[   0.114] KEBAB MIG-W IMAGE: base=0x102a00000 uuid-valid=1 uuid=f504fb36044f3929b127d62abdd3fb87 path=/System/Library/DataClassMigrators/MCProfile.migrator/MCProfile
+[   0.114] KEBAB MIG-W IMAGE: base=0x102a14000 uuid-valid=1 uuid=b53b9a436671346db09f8f0c3b2b747a path=/System/Library/DataClassMigrators/MKBMigrator.migrator/MKBMigrator
+[   0.114] KEBAB MIG-W IMAGE: base=0x102a4c000 uuid-valid=1 uuid=313543a5b28632bea6c9445bd519989b path=/System/Library/DataClassMigrators/MobileActivationMigrator.migrator/MobileActivationMigrator
+[   0.114] KEBAB MIG-W IMAGE: base=0x102a28000 uuid-valid=1 uuid=0bcf68e93dd23d0ca5e6100865081e7d path=/System/Library/DataClassMigrators/MobileGestaltMigrator.migrator/MobileGestaltMigrator
+[   0.114] KEBAB MIG-W IMAGE: base=0x102a70000 uuid-valid=1 uuid=29a96e641d51363b8279b0306ba3a9da path=/System/Library/DataClassMigrators/WiFiDataMigrator.migrator/WiFiDataMigrator
+[   0.114] KEBAB MIG-W IMAGE: base=0x102a84000 uuid-valid=1 uuid=d3f1a6cf4f073bb8bedf67c0dee58479 path=/System/Library/DataClassMigrators/AppUserDataMigrator.migrator/AppUserDataMigrator
+[   0.114] KEBAB EXEC: pid 1057 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d054000
+[   0.114] KEBAB EXEC HEADER: pid=1057 main=0x102dac000
+[   0.114] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   0.114] KEBAB MIG-I: fixed process pid=109 uid=501 scanned=132; best-effort wait snapshot
+[   0.114] KEBAB MIG-I: thread snapshot count=2 thread_total=2 (cap32; no suspension)
+[   0.114] KEBAB MIG-I: tid=635 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.048810 sys=0.083006
+[   0.114] KEBAB MIG-I USER: tid=635 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16cee6260; best-effort, target may resume
+[   0.114] KEBAB MIG-I USER: tid=635 frame[0]=0x1c2622db8
+[   0.114] KEBAB MIG-I USER: tid=635 frame[1]=0x1c2611524
+[   0.114] KEBAB MIG-I USER: tid=635 frame[2]=0x186e5c148
+[   0.114] KEBAB MIG-I USER: tid=635 frame[3]=0x186e5d2e0
+[   0.114] KEBAB MIG-I USER: tid=635 frame[4]=0x186e61d20
+[   0.114] KEBAB MIG-I USER: tid=635 frame[5]=0x1811b0ef8
+[   0.114] KEBAB MIG-I USER: tid=635 frame[6]=0x1811b0da4
+[   0.114] KEBAB MIG-I USER: tid=635 frame[7]=0x102f1ca28
+[   0.114] KEBAB MIG-I USER: tid=635 frame[8]=0x1a4624344
+[   0.114] KEBAB MIG-I IPC: tid=635 opt=507000806 b=0 sz=2 v=1 r=0 l=1303 q=1303 id=0 lookup=0
+[   0.114] KEBAB MIG-I IPC-OWNER: tid=635 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   0.114] KEBAB MIG-I: tid=2819 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24d4afcbf8 continuation=0xfffffe000694c9f4 user=0.000136 sys=0.000146
+[   0.114] KEBAB MIG-I USER: tid=2819 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16cffab50; best-effort, target may resume
+[   0.114] KEBAB MIG-I USER: tid=2819 frame[0]=0x1d1b9a720
+[   0.114] KEBAB MIG-I: snapshot end; addresses name kernel waits, not user PCs
+[   0.114] KEBAB MIG-L: fixed process pid=63 uid=0 scanned=186; best-effort wait snapshot
+[   0.171] KEBAB MIG-L: thread snapshot count=9 thread_total=9 (cap32; no suspension)
+[   0.171] KEBAB MIG-L: tid=400 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe29a0006080 continuation=0xfffffe00069754bc user=0.405952 sys=2.152270
+[   0.171] KEBAB MIG-L USER: tid=400 saved pc=0x1c2611538 lr=0x18db852cc fp=0x16f306590; best-effort, target may resume
+[   0.171] KEBAB MIG-L USER: tid=400 frame[0]=0x18db85c78
+[   0.171] KEBAB MIG-L USER: tid=400 frame[1]=0x18db7ace0
+[   0.171] KEBAB MIG-L USER: tid=400 frame[2]=0x18db7a8fc
+[   0.171] KEBAB MIG-L USER: tid=400 frame[3]=0x1a10a4394
+[   0.171] KEBAB MIG-L USER: tid=400 frame[4]=0x100ded5a4
+[   0.171] KEBAB MIG-L USER: tid=400 frame[5]=0x186eb10e8
+[   0.171] KEBAB MIG-L USER: tid=400 frame[6]=0x186ebcd5c
+[   0.171] KEBAB MIG-L USER: tid=400 frame[7]=0x186e47fc4
+[   0.171] KEBAB MIG-L USER: tid=400 frame[8]=0x186e5d138
+[   0.171] KEBAB MIG-L USER: tid=400 frame[9]=0x186e61d20
+[   0.171] KEBAB MIG-L USER: tid=400 frame[10]=0x186ea0bec
+[   0.171] KEBAB MIG-L USER: tid=400 frame[11]=0x101dae024
+[   0.171] KEBAB MIG-L USER: tid=400 frame[12]=0x101daeaf0
+[   0.171] KEBAB MIG-L USER: tid=400 frame[13]=0x101db2170
+[   0.171] KEBAB MIG-L USER: tid=400 frame[14]=0x1a4624344
+[   0.171] KEBAB MIG-L: tid=1243 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.019488 sys=0.094130
+[   0.171] KEBAB MIG-L USER: tid=1243 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16f38de90; best-effort, target may resume
+[   0.171] KEBAB MIG-L USER: tid=1243 frame[0]=0x1c2622db8
+[   0.171] KEBAB MIG-L USER: tid=1243 frame[1]=0x1c2611524
+[   0.171] KEBAB MIG-L USER: tid=1243 frame[2]=0x186e5c148
+[   0.171] KEBAB MIG-L USER: tid=1243 frame[3]=0x186e5d2e0
+[   0.171] KEBAB MIG-L USER: tid=1243 frame[4]=0x186e61d20
+[   0.171] KEBAB MIG-L USER: tid=1243 frame[5]=0x186ea0bec
+[   0.171] KEBAB MIG-L USER: tid=1243 frame[6]=0x10117bba0
+[   0.172] KEBAB MIG-L USER: tid=1243 frame[7]=0x1d1b9c0ec
+[   0.172] KEBAB MIG-L USER: tid=1243 frame[8]=0x1d1b9a72c
+[   0.172] KEBAB MIG-L IPC: tid=1243 opt=507000806 b=0 sz=2 v=1 r=0 l=2103 q=2103 id=0 lookup=0
+[   0.172] KEBAB MIG-L IPC-OWNER: tid=1243 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   0.172] KEBAB MIG-L: tid=1471 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.047284 sys=0.123472
+[   0.172] KEBAB MIG-L USER: tid=1471 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16f5bc7e0; best-effort, target may resume
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[0]=0x1c2622db8
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[1]=0x1c2611524
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[2]=0x100bbf4f4
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[3]=0x100bcfd34
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[4]=0x100bd2dc8
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[5]=0x100bebdf4
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[6]=0x100cda928
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[7]=0x100c8e01c
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[8]=0x1a10c2dc4
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[9]=0x1a10a45c4
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[10]=0x18db977a8
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[11]=0x18db98780
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[12]=0x18db736fc
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[13]=0x18db741e4
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[14]=0x18db735d4
+[   0.172] KEBAB MIG-L USER: tid=1471 frame[15]=0x18db741b0
+[   0.172] KEBAB MIG-L IPC: tid=1471 opt=500000003 b=131513 sz=2 v=1 r=15207 l=10103 q=10103 id=1203 lookup=1
+[   0.172] KEBAB MIG-L IPC-OWNER: tid=1471 role=send name=15207 kr=0 pid=1 recv=1c503 object=fffffe1b3b6fb7e0
+[   0.172] KEBAB MIG-L IPC-STATE: tid=1471 hop=0 obj=fffffe1b3b6fb7e0 kind=1 pid=1 recv=1c503 dst=0 f=2 link=0 kt=0 q=6/6
+[   0.172] KEBAB MIG-L: tid=1475 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.096480 sys=0.318792
+[   0.172] KEBAB MIG-L USER: tid=1475 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16f644f20; best-effort, target may resume
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[0]=0x1c2622db8
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[1]=0x1c2611524
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[2]=0x18db6a308
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[3]=0x18db6a694
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[4]=0x1d1bee0ec
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[5]=0x18120c224
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[6]=0x1811a5cb0
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[7]=0x1811a483c
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[8]=0x1811a4760
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[9]=0x191d96a6c
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[10]=0x191d95710
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[11]=0x191dbdec0
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[12]=0x1011e7180
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[13]=0x1019a9f50
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[14]=0x1015fb23c
+[   0.172] KEBAB MIG-L USER: tid=1475 frame[15]=0x1015f9e0c
+[   0.172] KEBAB MIG-L IPC: tid=1475 opt=40700420e b=0 sz=0 v=0 r=14c0b l=0 q=8d03 id=0 lookup=1
+[   0.172] KEBAB MIG-L IPC-OWNER: tid=1475 role=sync name=14c0b kr=0 pid=-1 recv=0 object=fffffe1b3b131c60
+[   0.172] KEBAB MIG-L IPC-STATE: tid=1475 hop=0 obj=fffffe1b3b131c60 kind=4 pid=-1 recv=0 dst=fffffe1b3b717600 f=0 link=0 kt=0 q=1/6
+[   0.172] KEBAB MIG-L IPC-STATE: tid=1475 hop=1 obj=fffffe1b3b717600 kind=1 pid=63 recv=6c03 dst=0 f=2 link=0 kt=0 q=8/16
+[   0.172] KEBAB MIG-L: tid=1494 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.003166 sys=0.003019
+[   0.172] KEBAB MIG-L USER: tid=1494 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16f98ded0; best-effort, target may resume
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[0]=0x1c2622db8
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[1]=0x1c2611524
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[2]=0x18db6a308
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[3]=0x18db6a694
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[4]=0x1d1bee0ec
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[5]=0x19b9af128
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[6]=0x19b9b1e78
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[7]=0x19b9b1554
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[8]=0x1ac2000d4
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[9]=0x100f9ee50
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[10]=0x100f9edcc
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[11]=0x18db98780
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[12]=0x18db68ddc
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[13]=0x100f9e964
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[14]=0x100f9e8cc
+[   0.172] KEBAB MIG-L USER: tid=1494 frame[15]=0x1a10c2dc4
+[   0.172] KEBAB MIG-L IPC: tid=1494 opt=40700420e b=0 sz=0 v=0 r=4703 l=0 q=5d03 id=0 lookup=1
+[   0.172] KEBAB MIG-L IPC-OWNER: tid=1494 role=sync name=4703 kr=0 pid=27 recv=7703 object=fffffe1b3b15db20
+[   0.172] KEBAB MIG-L IPC-STATE: tid=1494 hop=0 obj=fffffe1b3b15db20 kind=1 pid=27 recv=7703 dst=0 f=0 link=0 kt=0 q=0/6
+[   0.172] KEBAB MIG-L: tid=1526 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe2007fff700 continuation=0xfffffe00069cec3c user=0.031534 sys=0.277404
+[   0.172] KEBAB MIG-L USER: tid=1526 saved pc=0x1c2611ad0 lr=0x18db68128 fp=0x16faaa6b0; best-effort, target may resume
+[   0.172] KEBAB MIG-L USER: tid=1526 frame[0]=0x18db67f10
+[   0.172] KEBAB MIG-L USER: tid=1526 frame[1]=0x18db7acfc
+[   0.172] KEBAB MIG-L USER: tid=1526 frame[2]=0x18db7a8fc
+[   0.172] KEBAB MIG-L USER: tid=1526 frame[3]=0x19c9c4980
+[   0.172] KEBAB MIG-L USER: tid=1526 frame[4]=0x18db977a8
+[   0.172] KEBAB MIG-L USER: tid=1526 frame[5]=0x18db98780
+[   0.172] KEBAB MIG-L USER: tid=1526 frame[6]=0x18db736fc
+[   0.172] KEBAB MIG-L USER: tid=1526 frame[7]=0x18db741e4
+[   0.172] KEBAB MIG-L USER: tid=1526 frame[8]=0x18db7df14
+[   0.172] KEBAB MIG-L USER: tid=1526 frame[9]=0x1d1b9abd0
+[   0.172] KEBAB MIG-L USER: tid=1526 frame[10]=0x1d1b9a720
+[   0.172] KEBAB MIG-L: tid=1527 info=0x0 state=0x41 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe299ff78000 continuation=0xfffffe00069754bc user=0.040777 sys=0.053163
+[   0.172] KEBAB MIG-L USER: tid=1527 saved pc=0x1c2611538 lr=0x18db852cc fp=0x16fb35880; best-effort, target may resume
+[   0.172] KEBAB MIG-L USER: tid=1527 frame[0]=0x18db85c78
+[   0.172] KEBAB MIG-L USER: tid=1527 frame[1]=0x18db7ace0
+[   0.172] KEBAB MIG-L USER: tid=1527 frame[2]=0x18db7a8fc
+[   0.172] KEBAB MIG-L USER: tid=1527 frame[3]=0x1a10a4394
+[   0.172] KEBAB MIG-L USER: tid=1527 frame[4]=0x100de8fdc
+[   0.172] KEBAB MIG-L USER: tid=1527 frame[5]=0x1a10a5874
+[   0.172] KEBAB MIG-L USER: tid=1527 frame[6]=0x186e06680
+[   0.172] KEBAB MIG-L USER: tid=1527 frame[7]=0x186e688fc
+[   0.172] KEBAB MIG-L USER: tid=1527 frame[8]=0x101dc8af4
+[   0.172] KEBAB MIG-L USER: tid=1527 frame[9]=0x1811e6940
+[   0.172] KEBAB MIG-L USER: tid=1527 frame[10]=0x1816c0f4c
+[   0.173] KEBAB MIG-L USER: tid=1527 frame[11]=0x1816c2584
+[   0.173] KEBAB MIG-L USER: tid=1527 frame[12]=0x1816c2084
+[   0.173] KEBAB MIG-L USER: tid=1527 frame[13]=0x1d1bef788
+[   0.173] KEBAB MIG-L USER: tid=1527 frame[14]=0x1d1befb68
+[   0.173] KEBAB MIG-L USER: tid=1527 frame[15]=0x18db98834
+[   0.173] KEBAB MIG-L: tid=1607 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0x0 continuation=0xfffffe00064c98d8 user=0.007658 sys=0.003704
+[   0.173] KEBAB MIG-L USER: tid=1607 saved pc=0x1c2611030 lr=0x1c2622b18 fp=0x16ff09cb0; best-effort, target may resume
+[   0.173] KEBAB MIG-L USER: tid=1607 frame[0]=0x1c2622db8
+[   0.173] KEBAB MIG-L USER: tid=1607 frame[1]=0x1c2611524
+[   0.173] KEBAB MIG-L USER: tid=1607 frame[2]=0x186e5c148
+[   0.173] KEBAB MIG-L USER: tid=1607 frame[3]=0x186e5d2e0
+[   0.173] KEBAB MIG-L USER: tid=1607 frame[4]=0x186e61d20
+[   0.173] KEBAB MIG-L USER: tid=1607 frame[5]=0x186ea0bec
+[   0.173] KEBAB MIG-L USER: tid=1607 frame[6]=0x1a061d1b8
+[   0.173] KEBAB MIG-L USER: tid=1607 frame[7]=0x1811c8a5c
+[   0.173] KEBAB MIG-L USER: tid=1607 frame[8]=0x1d1b9c0ec
+[   0.173] KEBAB MIG-L USER: tid=1607 frame[9]=0x1d1b9a72c
+[   0.173] KEBAB MIG-L IPC: tid=1607 opt=507000806 b=0 sz=2 v=1 r=0 l=15403 q=15403 id=0 lookup=0
+[   0.173] KEBAB MIG-L IPC-OWNER: tid=1607 role=none name=0 kr=f pid=-1 recv=0 object=0
+[   0.173] KEBAB MIG-L: tid=8209 info=0x0 state=0x1 run=3 flags=0x1 suspend=0 sleep=0 wait=0xfffffe24d4b10bf8 continuation=0xfffffe000694c9f4 user=0.000049 sys=0.000112
+[   0.173] KEBAB MIG-L USER: tid=8209 saved pc=0x1c26114f0 lr=0x1d1b9ac1c fp=0x16f4a6b50; best-effort, target may resume
+[   0.173] KEBAB MIG-L USER: tid=8209 frame[0]=0x1d1b9a720
+[   0.173] KEBAB MIG-L: snapshot end; addresses name kernel waits, not user PCs
+[   0.173] KEBAB MIG: observer end; no suspension or modification; user frames are best-effort reads
+[   1.173] KEBAB EXEC: pid 1058 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16f87c000
+[   1.173] KEBAB EXEC HEADER: pid=1058 main=0x100584000
+[   1.173] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   1.173] KEBAB EXEC: pid 1059 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16efa4000
+[   1.173] KEBAB EXEC HEADER: pid=1059 main=0x100e5c000
+[   1.173] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   1.173] KEBAB EXEC: pid 1058 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d128000
+[   1.173] KEBAB EXEC HEADER: pid=1058 main=0x102cd8000
+[   1.173] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   1.173] KEBAB EXEC: pid 1059 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16b04c000
+[   1.173] KEBAB EXEC HEADER: pid=1059 main=0x104db4000
+[   1.173] Allowing spawn of iOS binary bluetoothd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   2.239] KEBAB EXEC: pid 1060 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d7f4000
+[   2.239] KEBAB EXEC HEADER: pid=1060 main=0x10260c000
+[   2.239] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   2.239] KEBAB EXEC: pid 1060 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16fa58000
+[   2.239] KEBAB EXEC HEADER: pid=1060 main=0x1003a8000
+[   2.239] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   3.300] KEBAB EXEC: pid 1061 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16f508000
+[   3.300] KEBAB EXEC HEADER: pid=1061 main=0x1008f8000
+[   3.300] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   3.300] KEBAB EXEC: pid 1061 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16bbe4000
+[   3.300] KEBAB EXEC HEADER: pid=1061 main=0x10421c000
+[   3.300] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   4.295] KEBAB EXEC: pid 1062 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16ee7c000
+[   4.295] KEBAB EXEC HEADER: pid=1062 main=0x100f84000
+[   4.295] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   4.358] KEBAB EXEC: pid 1062 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16f670000
+[   4.358] KEBAB EXEC HEADER: pid=1062 main=0x100790000
+[   4.358] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   5.352] KEBAB EXEC: pid 1063 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d3d4000
+[   5.353] KEBAB EXEC HEADER: pid=1063 main=0x102a2c000
+[   5.353] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   5.353] KEBAB EXEC: pid 1063 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16b324000
+[   5.353] KEBAB EXEC HEADER: pid=1063 main=0x104adc000
+[   5.353] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   6.405] KEBAB EXEC: pid 1064 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16f9ac000
+[   6.405] KEBAB EXEC HEADER: pid=1064 main=0x100454000
+[   6.405] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   6.405] KEBAB EXEC: pid 1064 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16b604000
+[   6.405] KEBAB EXEC HEADER: pid=1064 main=0x1047fc000
+[   6.405] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   7.466] KEBAB EXEC: pid 1065 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16b7e0000
+[   7.466] KEBAB EXEC HEADER: pid=1065 main=0x104620000
+[   7.466] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   7.466] KEBAB EXEC: pid 1065 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16fba0000
+[   7.466] KEBAB EXEC HEADER: pid=1065 main=0x100260000
+[   7.466] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   7.901] KEBAB EXEC: pid 1066 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16ce4c000
+[   7.901] KEBAB EXEC HEADER: pid=1066 main=0x102fb4000
+[   7.901] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   7.902] KEBAB EXEC: pid 1066 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16f50c000
+[   7.902] KEBAB EXEC HEADER: pid=1066 main=0x1008f4000
+[   7.902] Allowing spawn of iOS binary fairplayd.H2 since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   8.524] KEBAB EXEC: pid 1067 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16f8b4000
+[   8.525] KEBAB EXEC HEADER: pid=1067 main=0x10054c000
+[   8.525] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   8.525] KEBAB EXEC: pid 1067 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16f63c000
+[   8.525] KEBAB EXEC HEADER: pid=1067 main=0x1007c4000
+[   8.525] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   9.525] KEBAB EXEC: pid 1068 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16b99c000
+[   9.525] KEBAB EXEC HEADER: pid=1068 main=0x104464000
+[   9.525] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[   9.586] KEBAB EXEC: pid 1068 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d5dc000
+[   9.586] KEBAB EXEC HEADER: pid=1068 main=0x102824000
+[   9.586] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[  10.584] KEBAB EXEC: pid 1069 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d7dc000
+[  10.584] KEBAB EXEC HEADER: pid=1069 main=0x102624000
+[  10.584] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[  10.584] KEBAB EXEC: pid 1069 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d828000
+[  10.584] KEBAB EXEC HEADER: pid=1069 main=0x1025d8000
+[  10.584] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[  11.270] KEBAB EXEC: pid 1070 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16f760000
+[  11.270] KEBAB EXEC HEADER: pid=1070 main=0x1006a0000
+[  11.270] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[  11.332] KEBAB EXEC: pid 1070 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16b038000
+[  11.332] KEBAB EXEC HEADER: pid=1070 main=0x104dc8000
+[  11.332] Allowing spawn of iOS binary bluetoothd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[  11.643] KEBAB EXEC: pid 1071 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16d3e4000
+[  11.643] KEBAB EXEC HEADER: pid=1071 main=0x102a1c000
+[  11.643] Allowing spawn of iOS binary xpcproxy since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[  11.643] KEBAB EXEC: pid 1071 pre-copyout cs=0x26000301 imgp_cs=0x26000301 load_cs=0x26000203 stack=0x16fbe4000
+[  11.643] KEBAB EXEC HEADER: pid=1071 main=0x10021c000
+[  11.643] Allowing spawn of iOS binary lskdd since it has com.apple.private.security.no-sandbox entitlement or unentitled_ios_sim_launch boot-arg set to true
+[2026-11-01T12:16:51] done, 38454 bytes

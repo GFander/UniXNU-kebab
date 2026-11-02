@@ -1,0 +1,417 @@
+--- /dev/null
++++ b/bsd/dev/kebab_capture_core.h
+@@ -0,0 +1,113 @@
++/* SPDX-License-Identifier: BSD-2-Clause */
++#ifndef KEBAB_CAPTURE_CORE_H
++#define KEBAB_CAPTURE_CORE_H
++#include <kern/kebab_capture.h>
++/* One session and one immutable encoded response; USB publishes a copy only
++ * after this normal-context worker returns. GET never advances the stream. */
++struct kc_core {
++    struct kc_image image;
++    uint32_t session,next_session,ack,last_offset,last_size,last_crc,content_crc;
++    struct kc_command cached;
++    uint32_t cached_length;
++    uint8_t response[KC_HEADER+KC_CHUNK],cache[KC_HEADER+KC_CHUNK];
++    uint64_t touched_ms;
++    int active,cached_valid,have_chunk;
++};
++static uint32_t
++kc_packet(struct kc_core *s,uint32_t kind,uint32_t req,uint32_t offset,uint32_t n,uint32_t flags)
++{
++    uint8_t *p=s->response;
++    static const uint8_t magic[8]={'K','F','B','1',0,0x1a,'\r','\n'};
++    memcpy(p,magic,8);memset(p+8,0,KC_HEADER-8);
++    p[8]=(uint8_t)kind;p[10]=KC_HEADER;
++    kc_put32(p+12,req);kc_put32(p+16,s->session);kc_put32(p+20,offset);
++    kc_put32(p+24,n);kc_put32(p+28,s->image.total);
++    kc_put32(p+32,kc_crc(p+KC_HEADER,n));kc_put32(p+36,flags);
++    kc_put32(p+40,kc_crc(p,KC_HEADER));
++    return KC_HEADER+n;
++}
++static uint32_t
++kc_error(struct kc_core *s,uint32_t req,uint32_t error)
++{
++    kc_put32(s->response+KC_HEADER,error);
++    return kc_packet(s,KC_ERROR,req,s->ack,4,0);
++}
++static void
++kc_cancel(struct kc_core *s,const struct kc_ops *ops)
++{
++    if(s->active)ops->close(&s->image);
++    memset(&s->image,0,sizeof(s->image));
++    s->active=0;s->have_chunk=0;s->cached_valid=0;s->ack=0;
++    memset(s->cache,0,sizeof(s->cache));
++}
++static void
++kc_expire(struct kc_core *s,const struct kc_ops *ops,uint64_t now)
++{
++    if(s->active && now>=s->touched_ms && now-s->touched_ms>=60000)kc_cancel(s,ops);
++}
++static uint32_t
++kc_execute(struct kc_core *s,const struct kc_ops *ops,const char *line,uint32_t length,uint64_t now)
++{
++    struct kc_command cmd;
++    int err=kc_decode(line,length,&cmd);
++    if(err)return kc_error(s,0,(uint32_t)err);
++    kc_expire(s,ops,now);
++    if(s->cached_valid && cmd.request==s->cached.request) {
++        if(memcmp(&cmd,&s->cached,sizeof(cmd)))return kc_error(s,cmd.request,71);
++        memcpy(s->response,s->cache,s->cached_length);s->touched_ms=now;
++        return s->cached_length;
++    }
++    uint32_t result=0;
++    if(cmd.op==KC_OPEN) {
++        kc_cancel(s,ops);
++        if(cmd.c || cmd.a<1 || cmd.a>5)err=22;
++        else err=ops->open(cmd.a,cmd.b,&s->image);
++        if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
++            ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
++        }
++        if(!err) {
++            s->active=1;s->session=++s->next_session;
++            if(!s->session)s->session=++s->next_session;
++            uint32_t crc=~0u;
++            for(uint32_t off=0;off<s->image.total;) {
++                uint32_t n=s->image.total-off;if(n>KC_CHUNK)n=KC_CHUNK;
++                err=ops->read(&s->image,off,s->response+KC_HEADER,n);
++                if(err)break;
++                crc=kc_crc_update(crc,s->response+KC_HEADER,n);off+=n;
++            }
++            if(err)kc_cancel(s,ops);
++            else {
++                s->content_crc=~crc;
++                uint32_t v[12]={1,s->image.source,s->image.argument,s->image.width,s->image.height,s->image.stride,
++                    s->image.format,s->image.total,s->content_crc,s->image.stable,s->image.frame_id,s->image.flags};
++                for(unsigned i=0;i<12;i++)kc_put32(s->response+KC_HEADER+i*4,v[i]);
++                result=kc_packet(s,KC_META,cmd.request,0,48,0);
++            }
++        }
++    } else if(cmd.op==KC_REPORT) {
++        ops->report();result=kc_packet(s,KC_INFO,cmd.request,s->ack,0,0);
++    } else if(!s->active || cmd.a!=s->session)err=2;
++    else if(cmd.op==KC_GET) {
++        if(cmd.c || cmd.b!=s->ack || cmd.b>=s->image.total)err=71;
++        else {
++            uint32_t n=s->image.total-s->ack;if(n>KC_CHUNK)n=KC_CHUNK;
++            err=ops->read(&s->image,s->ack,s->response+KC_HEADER,n);
++            if(!err) {
++                s->last_offset=s->ack;s->last_size=n;s->last_crc=kc_crc(s->response+KC_HEADER,n);s->have_chunk=1;
++                result=kc_packet(s,KC_DATA,cmd.request,s->ack,n,0);
++            }
++        }
++    } else if(cmd.op==KC_COMMIT) {
++        if(!s->have_chunk || cmd.b!=s->last_offset || cmd.c!=s->last_crc)err=74;
++        else if(s->ack!=s->last_offset && s->ack!=s->last_offset+s->last_size)err=71;
++        else {s->ack=s->last_offset+s->last_size;result=kc_packet(s,KC_ACK,cmd.request,s->ack,0,0);}
++    } else if(cmd.op==KC_CLOSE) {
++        if(cmd.b || cmd.c)err=22;
++        else {kc_cancel(s,ops);result=kc_packet(s,KC_CLOSED,cmd.request,0,0,0);}
++    } else err=95;
++    if(err)result=kc_error(s,cmd.request,(uint32_t)err);
++    s->cached=cmd;s->cached_valid=1;s->cached_length=result;s->touched_ms=now;
++    memcpy(s->cache,s->response,result);
++    return result;
++}
++#endif
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -33,6 +33,8 @@
+ #include "kebab_vol.h"
+ #include "kebab_reboot.h"
+ #include "kebab_dma_limits.h"
++#include "kebab_capture_core.h"
++#include <mach/mach_time.h>
+ 
+ /*
+  * The installer and the volume writer share one 64 KiB bulk buffer and one
+@@ -398,11 +400,70 @@
+ 	 * would drop the middle of a debugger request; keep a whole frame here.
+ 	 */
+ 	char        in_ring[4096];
++    /* The event owner only assembles a bounded command mailbox. Provider
++     * operations and CRC generation run in ud_thread with no USB gate held. */
++    char cap_rx[KC_LINE],cap_command[KC_LINE];
++    uint32_t cap_rx_len,cap_command_len;
++    bool cap_pending,cap_rx_overflow,cap_tx_packet,cap_yield_log;
++    uint32_t cap_wire_len,cap_wire_pos,cap_overflows,cap_records;
++    uint8_t cap_wire[KC_HEADER+KC_CHUNK];
++    uint64_t log_dropped;
+ 	uint32_t    log_head;
+ 	uint32_t    log_tail;
+ 	uint32_t    log_busy;
+ 	char        log_ring[LOG_RING_SIZE];
+ } ud;
++
++/* 1A backend: a deterministic binary source. Real framebuffer sources are
++ * explicitly unsupported until the separately qualified snapshot stage. */
++static struct kc_core ud_capture;
++static int
++ud_capture_test_open(uint32_t source,uint32_t argument,struct kc_image *image)
++{
++    if(source!=1)return 95;
++    if(!argument || argument>KC_LIMIT)return 22;
++    memset(image,0,sizeof(*image));image->source=1;image->argument=argument;
++    image->total=argument;image->stable=1;return 0;
++}
++static void ud_capture_test_close(struct kc_image *image) { memset(image,0,sizeof(*image)); }
++static int
++ud_capture_test_read(const struct kc_image *image,uint32_t offset,void *dst,uint32_t n)
++{
++    if(offset>image->total || n>image->total-offset)return 22;
++    uint8_t *p=dst;
++    for(uint32_t i=0;i<n;i++){uint32_t x=offset+i;p[i]=(uint8_t)(x*37+(x>>8)+0x5a);}
++    return 0;
++}
++static void
++ud_capture_test_report(void)
++{
++    printf("KEBAB CAPTURE: protocol=1 chunk=%u records=%u command-overflow=%u log-drop-bytes=%llu; test-source-only, no framebuffer claim\n",
++        KC_CHUNK,ud.cap_records,ud.cap_overflows,os_atomic_load(&ud.log_dropped,relaxed));
++}
++static const struct kc_ops ud_capture_ops={ud_capture_test_open,ud_capture_test_close,ud_capture_test_read,ud_capture_test_report};
++
++/* Called under the existing receive/transport ownership. Keep the first
++ * complete command; an impatient sender cannot overwrite work in flight. */
++static bool
++ud_capture_feed(const char *p,uint32_t n)
++{
++    if(!ud.cap_rx_len && !ud.cap_rx_overflow && (!n || p[0]!='@'))return false;
++    for(uint32_t i=0;i<n;i++) {
++        if(!ud.cap_rx_overflow) {
++            if(ud.cap_rx_len<KC_LINE)ud.cap_rx[ud.cap_rx_len++]=p[i];
++            else ud.cap_rx_overflow=true;
++        }
++        if(p[i]=='\n') {
++            if(!ud.cap_pending) {
++                if(ud.cap_rx_overflow){ud.cap_command[0]='\n';ud.cap_command_len=1;}
++                else {memcpy(ud.cap_command,ud.cap_rx,ud.cap_rx_len);ud.cap_command_len=ud.cap_rx_len;}
++                ud.cap_pending=true;
++            } else ud.cap_overflows++;
++            ud.cap_rx_len=0;ud.cap_rx_overflow=false;
++        }
++    }
++    return true;
++}
+ 
+ enum { EP0_SETUP, EP0_DATA, EP0_STATUS, EP0_WAIT_STATUS, EP0_ABORT };
+ 
+@@ -893,13 +954,16 @@
+ 	boolean_t irq = ml_set_interrupts_enabled(FALSE);
+ 	uint32_t cpu = (uint32_t)cpu_number() + 1;
+ 	if (!os_atomic_cmpxchg(&ud.log_busy, 0u, cpu, acquire)) {
++        os_atomic_add(&ud.log_dropped,(uint64_t)len,relaxed);
+ 		ml_set_interrupts_enabled(irq);
+ 		return;
+ 	}
+ 	for (size_t i = 0; i < len; i++) {
+ 		uint32_t head = os_atomic_load(&ud.log_head, relaxed);
+ 		uint32_t next = (head + 1) % LOG_RING_SIZE;
+-		if (next == os_atomic_load(&ud.log_tail, acquire)) break;
++        if(next==os_atomic_load(&ud.log_tail,acquire)) {
++            os_atomic_add(&ud.log_dropped,(uint64_t)(len-i),relaxed);break;
++        }
+ 		ud.log_ring[head] = buf[i];
+ 		os_atomic_store(&ud.log_head, next, release);
+ 	}
+@@ -1879,6 +1943,8 @@
+ 		return;
+ 	}
+ 	ud_from_dev(UD_BULKOUT, ud.mps);
++    if(!panic_active() && !kebab_usb_kdp_enabled() &&
++        ud_capture_feed(buf,received))return;
+ 	/*
+ 	 * The pre-rewrite driver echoed host bytes to printf() here.  This state
+ 	 * machine gives the input ring one owner (kebab_usb_getc()/KDP) and keeps
+@@ -1922,6 +1988,13 @@
+ static void
+ ud_bulk_in_done(void)
+ {
++    if(ud.cap_tx_packet) {
++        ud.cap_wire_pos+=ud.tx_pending;
++        if(ud.cap_wire_pos==ud.cap_wire_len) {
++            ud.cap_wire_pos=ud.cap_wire_len=0;ud.cap_records++;ud.cap_yield_log=true;
++        }
++        ud.cap_tx_packet=false;
++    }
+ 	ud.tx_bytes += ud.tx_pending;
+ 	ud.tx_pending = 0;
+ 	ud.tx_completed++;
+@@ -2057,8 +2130,22 @@
+ 	if (!ud.configured || !ud.connected || ud.failed || ud.dead ||
+ 	    ud.ep[EP_BULK_IN].busy || ud.ep[EP_BULK_IN].ending ||
+ 	    ud.ep[EP_BULK_IN].halted || ud.halt_pending == EP_BULK_IN) return;
+-	if (!ud.tx_pending)
+-		ud.tx_pending = ud_log_take((char *)(ud.dma + UD_BULKIN), ud.mps - 1);
++    if(!ud.tx_pending) {
++        if(ud.cap_yield_log) {
++            ud.tx_pending=ud_log_take((char *)(ud.dma+UD_BULKIN),ud.mps-1);
++            ud.cap_tx_packet=false;ud.cap_yield_log=false;
++        }
++        if(!ud.tx_pending && ud.cap_wire_len>ud.cap_wire_pos) {
++            uint32_t n=ud.cap_wire_len-ud.cap_wire_pos;
++            if(n>ud.mps-1)n=ud.mps-1;
++            memcpy((void *)(ud.dma+UD_BULKIN),ud.cap_wire+ud.cap_wire_pos,n);
++            ud.tx_pending=n;ud.cap_tx_packet=true;
++        }
++        if(!ud.tx_pending) {
++            ud.tx_pending=ud_log_take((char *)(ud.dma+UD_BULKIN),ud.mps-1);
++            ud.cap_tx_packet=false;
++        }
++    }
+ 	if (!ud.tx_pending) return;
+ 	int rc = ud_start(UD_TRB_BULKIN, EP_BULK_IN, UD_BULKIN, ud.tx_pending, TRBCTL_NORMAL);
+ 	if (rc) ud_fault((unsigned)-rc);
+@@ -2107,6 +2194,7 @@
+ 	for (;;) {
+ 		boolean_t irq;
+ 		bool trigger = false;
++        char cap_line[KC_LINE];uint32_t cap_length=0;
+ 		uint32_t command = 0;
+ 		if (ud_enter(&irq)) {
+ 			if (ud_rx_enter()) {
+@@ -2116,8 +2204,12 @@
+ 			trigger = ud.want_panic;
+ 			ud.want_panic = false;
+ 			command = ud.reboot_command;
+-			ud.reboot_command = 0;
+-			ud_leave(irq);
++            ud.reboot_command = 0;
++            if(ud.cap_pending && !ud.cap_wire_len) {
++                cap_length=ud.cap_command_len;
++                memcpy(cap_line,ud.cap_command,cap_length);ud.cap_pending=false;
++            }
++            ud_leave(irq);
+ 		}
+ 		/* Panic/restart only after releasing the transport and acknowledging events. */
+ 		if (trigger) {
+@@ -2125,6 +2217,19 @@
+ 			panic("kebab usb console test");
+ 		}
+ 		if (command != 0) ud_run_reboot_command(command, FALSE);
++        uint64_t ns;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);
++        if(!ud.connected || !ud.configured || ud.failed || ud.dead || kebab_usb_kdp_enabled()) {
++            kc_cancel(&ud_capture,&ud_capture_ops);
++        } else if(cap_length) {
++            uint32_t length=kc_execute(&ud_capture,&ud_capture_ops,cap_line,cap_length,ns/1000000);
++            if(ud_enter(&irq)) {
++                if(ud.connected && ud.configured && !ud.cap_wire_len) {
++                    memcpy(ud.cap_wire,ud_capture.response,length);
++                    ud.cap_wire_pos=0;ud.cap_wire_len=length;
++                }
++                ud_leave(irq);
++            }
++        } else kc_expire(&ud_capture,&ud_capture_ops,ns/1000000);
+ 		/*
+ 		 * The installer writes to the root filesystem, which can sleep, so
+ 		 * it runs here with no transport gate held.  The chunk is still in
+@@ -2184,7 +2289,9 @@
+ 	ud.line_valid = ud.controls_valid = ud.notify_pending = false;
+ 	ud.config_pending = ud.halt_pending = -1;
+ 	ud.bus_pending = 0;
+-	ud.tx_pending = 0;
++    ud.tx_pending=0;ud.cap_tx_packet=false;
++    ud.cap_wire_len=ud.cap_wire_pos=ud.cap_rx_len=0;
++    ud.cap_pending=false;ud.cap_rx_overflow=false;
+ 	ud.control_lines = 0;
+ 	ud.mps = 512;
+ 	dwc_wr(GCTL, (dwc_rd(GCTL) & ~(3u << 12)) | (2u << 12));
+--- a/osfmk/kern/Makefile
++++ b/osfmk/kern/Makefile
+@@ -118,6 +118,7 @@
+ 	cpu_quiesce.h \
+ 	iotrace.h \
+ 	ipc_kobject.h \
++	kebab_capture.h \
+ 	lock_ptr.h \
+ 	perfmon.h \
+ 	recount.h \
+--- /dev/null
++++ b/osfmk/kern/kebab_capture.h
+@@ -0,0 +1,86 @@
++/* SPDX-License-Identifier: BSD-2-Clause */
++#ifndef KEBAB_CAPTURE_H
++#define KEBAB_CAPTURE_H
++#include <stdint.h>
++#define KC_HEADER 48u
++#define KC_CHUNK 2048u
++#define KC_LIMIT (16u * 1024u * 1024u)
++#define KC_LINE 112u
++#define KC_META 1u
++#define KC_DATA 2u
++#define KC_ACK 3u
++#define KC_CLOSED 4u
++#define KC_ERROR 5u
++#define KC_INFO 6u
++#define KC_OPEN 1u
++#define KC_GET 2u
++#define KC_COMMIT 3u
++#define KC_CLOSE 4u
++#define KC_REPORT 5u
++/* Sources: 1 deterministic bytes, 2 GOP, 3 IOSurface id, 4 displayed layer,
++ * 5 private known BGRA image. No capture operation writes the panel. */
++struct kc_image {
++    void *handle;
++    uint32_t source, argument, width, height, stride, format, total;
++    uint32_t stable, frame_id, flags;
++};
++struct kc_ops {
++    int (*open)(uint32_t, uint32_t, struct kc_image *);
++    void (*close)(struct kc_image *);
++    int (*read)(const struct kc_image *, uint32_t, void *, uint32_t);
++    void (*report)(void);
++};
++struct kc_command { uint32_t request, op, a, b, c; };
++static inline uint32_t
++kc_crc_update(uint32_t crc, const void *data, uint32_t n)
++{
++    static const uint32_t table[16] = {
++        0,0x1db71064,0x3b6e20c8,0x26d930ac,0x76dc4190,0x6b6b51f4,0x4db26158,0x5005713c,
++        0xedb88320,0xf00f9344,0xd6d6a3e8,0xcb61b38c,0x9b64c2b0,0x86d3d2d4,0xa00ae278,0xbdbdf21c
++    };
++    const uint8_t *p=(const uint8_t *)data;
++    while(n--) { crc^=*p++;crc=(crc>>4)^table[crc&15];crc=(crc>>4)^table[crc&15]; }
++    return crc;
++}
++static inline uint32_t kc_crc(const void *p,uint32_t n) { return ~kc_crc_update(~0u,p,n); }
++static inline void kc_put32(uint8_t *p,uint32_t v) { for(unsigned i=0;i<4;i++)p[i]=(uint8_t)(v>>(i*8)); }
++static inline uint32_t kc_get32(const uint8_t *p) { return p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24; }
++/* Every command has an input CRC too. Decimal fields are bounded uint32,
++ * followed by eight lowercase hexadecimal CRC digits and a newline. */
++static inline int
++kc_decode(const char *s,uint32_t n,struct kc_command *out)
++{
++    if(n<23 || n>KC_LINE || s[0]!='@'||s[1]!='F'||s[2]!='1'||s[3]!=' '||s[n-1]!='\n')return 22;
++    uint32_t pos=4,v[5];
++    for(unsigned i=0;i<5;i++) {
++        uint32_t x=0,start=pos;
++        while(pos<n && s[pos]>='0'&&s[pos]<='9') {
++            unsigned digit=(unsigned)(s[pos]-'0');
++            if(x>(UINT32_MAX-digit)/10)return 22;
++            x=x*10+digit;pos++;
++        }
++        if(start==pos || pos>=n || s[pos++]!=' ')return 22;
++        v[i]=x;
++    }
++    if(n-pos!=9)return 22;
++    uint32_t crc=0;
++    for(unsigned i=0;i<8;i++) {
++        char c=s[pos+i];unsigned d=c>='0'&&c<='9'?(unsigned)(c-'0'):c>='a'&&c<='f'?(unsigned)(c-'a'+10):16;
++        if(d==16)return 22;
++        crc=(crc<<4)|d;
++    }
++    if(crc!=kc_crc(s,pos))return 74;
++    *out=(struct kc_command){v[0],v[1],v[2],v[3],v[4]};
++    return 0;
++}
++#ifdef __cplusplus
++extern "C" {
++#endif
++int kebab_capture_open(uint32_t,uint32_t,struct kc_image *);
++void kebab_capture_close(struct kc_image *);
++int kebab_capture_read(const struct kc_image *,uint32_t,void *,uint32_t);
++void kebab_capture_report(void);
++#ifdef __cplusplus
++}
++#endif
++#endif

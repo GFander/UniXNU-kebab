@@ -1,0 +1,408 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -61,6 +61,7 @@
+ /* Immutable boot-lifetime path, learned only from an original root/mobile launchd
+  * mobileactivationd open. No USB path input or per-device UUID in source. */
+ static char kebab_offline_data_ark_path[160];
++static char kebab_offline_data_ark_backup[224],kebab_offline_data_ark_stage[224];
+ static uint32_t kebab_offline_data_ark_ready;
+ static const char * const kebab_mg_cache_paths[] = {
+     "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist",
+@@ -78,7 +79,15 @@
+     "/private/var/mobile/Library/Preferences/com.apple.migration.plist",
+     "/private/var/root/Library/Lockdown/data_ark.plist",
+     kebab_offline_data_ark_path,
+-    "/private/var/mobile/Library/Logs/mobileactivationd/mobileactivationd.log.0"
++    "/private/var/mobile/Library/Logs/mobileactivationd/mobileactivationd.log.0",
++    "", /* index16 is the separately authorized binary ACL snapshot. */
++    "/private/var/mobile/Library/Preferences/com.apple.purplebuddy.plist.hios-before-offline-20H392",
++    "/private/var/mobile/Library/Preferences/com.apple.purplebuddy.plist.hios-offline-stage-20H392",
++    "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist.hios-before-development-20H392",
++    "/private/var/root/Library/Lockdown/data_ark.plist.hios-before-offline-20H392",
++    "/private/var/root/Library/Lockdown/data_ark.plist.hios-offline-stage-20H392",
++    kebab_offline_data_ark_backup,
++    kebab_offline_data_ark_stage
+ };
+ 
+ /* Only the original daemon-discovered system-container data_ark filename is
+@@ -99,6 +108,11 @@
+     uint32_t expected = 0;
+     if (!__atomic_compare_exchange_n(&kebab_offline_data_ark_ready,&expected,1,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) return;
+     strlcpy(kebab_offline_data_ark_path,path,sizeof(kebab_offline_data_ark_path));
++    int backup=snprintf(kebab_offline_data_ark_backup,sizeof(kebab_offline_data_ark_backup),"%s.hios-before-offline-20H392",path);
++    int stage=snprintf(kebab_offline_data_ark_stage,sizeof(kebab_offline_data_ark_stage),"%s.hios-offline-stage-20H392",path);
++    if(backup<0||stage<0||(unsigned)backup>=sizeof(kebab_offline_data_ark_backup)||(unsigned)stage>=sizeof(kebab_offline_data_ark_stage)){
++        __atomic_store_n(&kebab_offline_data_ark_ready,0,__ATOMIC_RELEASE);return;
++    }
+     __atomic_store_n(&kebab_offline_data_ark_ready,2,__ATOMIC_RELEASE);
+ }
+ 
+@@ -896,5 +910,6 @@
+ }
+ 
+ #include "kebab_migration_status_impl.h"
++#include "kebab_offline_setup_impl.h"
+ 
+ #endif /* KEBAB */
+--- /dev/null
++++ b/bsd/kern/kebab_offline_setup_impl.h
+@@ -0,0 +1,322 @@
++/* Owner-measured offline setup transactions. Fixed experiment paths only.
++ * The pure core validates before mutation and recognizes interrupted atomic
++ * exchanges. The native backend retains original MACF/ACL/cprotect checks. */
++#ifndef KEBAB_OFFLINE_SETUP_IMPL_H
++#define KEBAB_OFFLINE_SETUP_IMPL_H
++#define KEBAB_OFFLINE_MAGIC 0x3150534fu
++#define KEBAB_OFFLINE_MAX_PLAN 131072u
++#define KEBAB_OFFLINE_MAX_FILE 65536u
++struct kebab_offline_entry {
++    uint32_t index,new_size,acl_bytes,reserved;
++    uint64_t fileid,old_size;
++    uint8_t old_hash[32],new_hash[32],acl_hash[32];
++    uint32_t uid,gid,mode,flags,protection,reserved2;
++    int64_t times[8];
++    uint64_t current_fileid;
++};
++_Static_assert(sizeof(struct kebab_offline_entry)==224,"offline plan ABI");
++struct kebab_offline_record {
++    bool exists;
++    uint64_t fileid,size;
++    uint8_t hash[32],acl_hash[32];
++    uint32_t uid,gid,mode,flags,protection,acl_bytes;
++    int64_t times[8];
++};
++struct kebab_offline_io {
++    int (*record)(unsigned,unsigned,struct kebab_offline_record *);
++    int (*stage)(const struct kebab_offline_entry *,const uint8_t *);
++    int (*move)(unsigned,unsigned);
++    int (*sync)(unsigned);
++};
++static bool
++kebab_offline_same(const struct kebab_offline_record *r,const struct kebab_offline_entry *e,bool old,bool exact_times)
++{
++    if (!r->exists || r->size!=(old?e->old_size:e->new_size) ||
++        memcmp(r->hash,old?e->old_hash:e->new_hash,32) ||
++        (old && r->fileid!=e->fileid) || r->uid!=e->uid || r->gid!=e->gid ||
++        r->mode!=e->mode || r->flags!=e->flags || r->protection!=e->protection ||
++        r->acl_bytes!=e->acl_bytes || memcmp(r->acl_hash,e->acl_hash,32)) return false;
++    /* Rename legitimately changes ctime. Original full metadata is retained
++     * in the sealed host backup; old inode/ACL/protection and other times must
++     * agree on device. Do not claim forensic ctime restoration. */
++    return exact_times ? !memcmp(r->times,e->times,sizeof(e->times)) :
++        !old || !memcmp(r->times,e->times,6*sizeof(e->times[0]));
++}
++static bool
++kebab_offline_new_stage(const struct kebab_offline_record *r,const struct kebab_offline_entry *e)
++{
++    return kebab_offline_same(r,e,false,false)&&!memcmp(r->times,e->times,6*sizeof(e->times[0]));
++}
++static int
++kebab_offline_inspect(const struct kebab_offline_io *io,const struct kebab_offline_entry *e,unsigned action,unsigned *state)
++{
++    struct kebab_offline_record current={},backup={},stage={};
++    int error=io->record(e->index,0,&current);if(error)return error;
++    error=io->record(e->index,1,&backup);if(error)return error;
++    if(action==2){
++        if(kebab_offline_same(&current,e,true,false)){*state=4;return 0;}
++        if(!kebab_offline_same(&backup,e,true,false))return EAUTH;
++        if(current.exists && (!kebab_offline_same(&current,e,false,false)||current.fileid!=e->current_fileid))return EAUTH;
++        *state=current.exists?5:6;return 0;
++    }
++    if(backup.exists){
++        if(!kebab_offline_same(&backup,e,true,false))return EAUTH;
++        *state=4;return 0; /* Immutable original backup is the once-only marker. */
++    }
++    if(e->index==0){
++        if(!kebab_offline_same(&current,e,true,true))return EAUTH;
++        *state=0;return 0;
++    }
++    error=io->record(e->index,2,&stage);if(error)return error;
++    if(kebab_offline_same(&stage,e,true,false)&&kebab_offline_new_stage(&current,e)){
++        *state=3;return 0; /* Crash after swap, before naming old inode backup. */
++    }
++    if(!kebab_offline_same(&current,e,true,true))return EAUTH;
++    if(stage.exists && !kebab_offline_new_stage(&stage,e))return EEXIST;
++    *state=stage.exists?1:0;return 0;
++}
++static int
++kebab_offline_apply(const struct kebab_offline_io *io,const struct kebab_offline_entry *e,const uint8_t *payload,unsigned action)
++{
++    unsigned state=0;int error=kebab_offline_inspect(io,e,action,&state);if(error||state==4)return error;
++    if(action==2){
++        error=io->move(e->index,state==5?2:4);if(!error)error=io->sync(e->index);if(error)return error;
++        struct kebab_offline_record restored={};error=io->record(e->index,0,&restored);
++        return error?error:kebab_offline_same(&restored,e,true,false)?0:EAUTH;
++    }
++    if(e->index==0){
++        error=io->move(0,3);if(!error)error=io->sync(0);if(error)return error;
++        struct kebab_offline_record saved={},current={};
++        error=io->record(0,1,&saved);if(!error)error=io->record(0,0,&current);
++        return error?error:!current.exists&&kebab_offline_same(&saved,e,true,false)?0:EAUTH;
++    }
++    if(state==0){error=io->stage(e,payload);if(error)return error;error=io->sync(e->index);if(error)return error;
++        error=kebab_offline_inspect(io,e,action,&state);if(error||state!=1)return error?error:EAUTH;}
++    if(state==1){error=io->move(e->index,0);if(error)return error;error=io->sync(e->index);if(error)return error;
++        error=kebab_offline_inspect(io,e,action,&state);if(error||state!=3)return error?error:EAUTH;}
++    if(state==3){error=io->move(e->index,1);if(error)return error;error=io->sync(e->index);if(error)return error;}
++    error=kebab_offline_inspect(io,e,action,&state);return error?error:state==4?0:EAUTH;
++}
++/* Hash callback uses the real SHA256 in both native and host executions. */
++static int
++kebab_offline_plan_run(const void *raw,uint32_t bytes,const struct kebab_offline_io *io,
++    void (*hash)(const void *,size_t,uint8_t[32]))
++{
++    uint32_t head[4];
++    if(!raw||bytes<sizeof(head)||bytes>KEBAB_OFFLINE_MAX_PLAN)return EINVAL;
++    memcpy(head,raw,sizeof(head));
++    if(head[0]!=KEBAB_OFFLINE_MAGIC||head[1]!=1||(head[2]!=1&&head[2]!=2)||!head[3]||head[3]>4)return EINVAL;
++    struct kebab_offline_entry entries[4];const uint8_t *payloads[4]={};unsigned states[4]={};
++    uint32_t offset=sizeof(head),seen=0;
++    for(unsigned i=0;i<head[3];i++){
++        if(bytes-offset<sizeof(entries[i]))return EINVAL;
++        memcpy(&entries[i],(const uint8_t *)raw+offset,sizeof(entries[i]));offset+=sizeof(entries[i]);
++        struct kebab_offline_entry *e=&entries[i];
++        unsigned slot=e->index==0?0:e->index==8?1:e->index==13?2:e->index==14?3:4;
++        if(slot==4||(seen&(1u<<slot))||e->reserved||e->reserved2||!e->fileid||!e->old_size||
++            e->old_size>KEBAB_OFFLINE_MAX_FILE||e->new_size>KEBAB_OFFLINE_MAX_FILE||
++            e->protection!=4||e->flags||e->acl_bytes>4096||
++            e->uid!=(e->index==13?0:501)||(e->mode&0170000)!=0100000)return EINVAL;
++        for(unsigned j=0;j<4;j++)if(e->times[j*2+1]<0||e->times[j*2+1]>=1000000000)return EINVAL;
++        seen|=1u<<slot;uint32_t length=head[2]==1?e->new_size:0;
++        if(head[2]==1&&((e->index==0&&length)||(e->index!=0&&!length)))return EINVAL;
++        if(head[2]==2&&e->new_size&&!e->current_fileid)return EINVAL;
++        if(bytes-offset<length)return EINVAL;
++        payloads[i]=(const uint8_t *)raw+offset;offset+=length;
++        if(length){uint8_t digest[32];hash(payloads[i],length,digest);if(memcmp(digest,e->new_hash,32))return EAUTH;}
++    }
++    if(offset!=bytes)return EINVAL;
++    /* Finish structural and filesystem preflight for every entry before any
++     * stage or rename. There is no cross-file atomicity claim. */
++    for(unsigned i=0;i<head[3];i++){int error=kebab_offline_inspect(io,&entries[i],head[2],&states[i]);if(error)return error;}
++    for(unsigned i=0;i<head[3];i++){int error=kebab_offline_apply(io,&entries[i],payloads[i],head[2]);if(error)return error;}
++    return 0;
++}
++#ifndef KEBAB_OFFLINE_CORE_ONLY
++/* No caller-chosen paths. Exported only to the fixed original VFS wrapper. */
++const char *kebab_offline_plan_path(unsigned,unsigned);
++const char *
++kebab_offline_plan_path(unsigned index,unsigned kind)
++{
++    unsigned mapped;
++    if(kind>2)return NULL;
++    switch(index){
++    case 0:if(kind==2)return NULL;mapped=kind?19:0;break;
++    case 8:mapped=kind==0?8:kind==1?17:18;break;
++    case 13:mapped=kind==0?13:kind==1?20:21;break;
++    case 14:
++        if(__atomic_load_n(&kebab_offline_data_ark_ready,__ATOMIC_ACQUIRE)!=2)return NULL;
++        mapped=kind==0?14:kind==1?22:23;break;
++    default:return NULL;
++    }
++    return kebab_mg_cache_paths[mapped];
++}
++extern int kebab_offline_plan_rename(unsigned,unsigned);
++static void
++kebab_offline_sha(const void *data,size_t size,uint8_t digest[32])
++{
++    SHA256_CTX state;SHA256_Init(&state);SHA256_Update(&state,data,size);SHA256_Final(digest,&state);
++}
++static void
++kebab_offline_want(struct vnode_attr *a)
++{
++    VATTR_INIT(a);VATTR_WANTED(a,va_fileid);VATTR_WANTED(a,va_data_size);VATTR_WANTED(a,va_uid);
++    VATTR_WANTED(a,va_gid);VATTR_WANTED(a,va_mode);VATTR_WANTED(a,va_flags);VATTR_WANTED(a,va_acl);
++    VATTR_WANTED(a,va_dataprotect_class);VATTR_WANTED(a,va_create_time);VATTR_WANTED(a,va_access_time);
++    VATTR_WANTED(a,va_modify_time);VATTR_WANTED(a,va_change_time);
++}
++static bool
++kebab_offline_attributes(struct vnode_attr *a,struct kebab_offline_record *r)
++{
++    if((a->va_supported&a->va_active)!=a->va_active ||
++        (a->va_acl&&a->va_acl->acl_entrycount>128))return false;
++    r->exists=true;r->fileid=a->va_fileid;r->size=a->va_data_size;r->uid=a->va_uid;r->gid=a->va_gid;
++    r->mode=a->va_mode;r->flags=a->va_flags;r->protection=a->va_dataprotect_class;
++    r->acl_bytes=a->va_acl?(uint32_t)KAUTH_ACL_COPYSIZE(a->va_acl):0;
++    kebab_offline_sha(a->va_acl,r->acl_bytes,r->acl_hash);
++    const struct timespec times[]={a->va_create_time,a->va_access_time,a->va_modify_time,a->va_change_time};
++    for(unsigned i=0;i<4;i++){r->times[2*i]=times[i].tv_sec;r->times[2*i+1]=times[i].tv_nsec;}
++    return true;
++}
++static int
++kebab_offline_native_record(unsigned index,unsigned kind,struct kebab_offline_record *output)
++{
++    memset(output,0,sizeof(*output));const char *path=kebab_offline_plan_path(index,kind);if(!path)return EINVAL;
++    vfs_context_t context=vfs_context_current();vnode_t file=NULLVP;
++    int error=vnode_lookup(path,VNODE_LOOKUP_NOFOLLOW,&file,context);
++    if(error==ENOENT)return 0;if(error)return error;
++    struct vnode_attr first={},again={};struct kebab_offline_record a={},b={};
++    if(!vnode_isreg(file))error=EINVAL;
++#if CONFIG_MACF
++    struct attrlist requested={};requested.bitmapcount=ATTR_BIT_MAP_COUNT;requested.commonattr=ATTR_CMN_EXTENDED_SECURITY;
++    if(!error)error=mac_vnode_check_getattrlist(context,file,&requested,0);
++#endif
++#if CONFIG_MACF
++    if(!error)error=mac_vnode_check_read(context,vfs_context_ucred(context),file);
++#endif
++    if(!error)error=vnode_authorize(file,NULL,KAUTH_VNODE_READ_DATA|KAUTH_VNODE_READ_SECURITY|
++        KAUTH_VNODE_READ_ATTRIBUTES|KAUTH_VNODE_READ_EXTATTRIBUTES,context);
++    char canonical[MAXPATHLEN]={};int length=sizeof(canonical);struct vfsstatfs *stats=vfs_statfs(vnode_mount(file));
++    if(!error)error=vn_getpath(file,canonical,&length);
++    if(!error&&(!stats||strcmp(stats->f_fstypename,"apfs")||strcmp(stats->f_mntonname,"/private/var")||strcmp(canonical,path)))error=EINVAL;
++    kebab_offline_want(&first);if(!error)error=vnode_getattr(file,&first,context);
++    if(!error&&!kebab_offline_attributes(&first,&a))error=ENOTSUP;
++    size_t xattr_bytes=0;if(!error)error=vn_listxattr(file,NULL,&xattr_bytes,0,context);
++    if(!error&&xattr_bytes)error=ENOTSUP; /* Never discard unbacked extended attributes. */
++    if(!error&&(!a.size||a.size>KEBAB_OFFLINE_MAX_FILE))error=EINVAL;
++    uint32_t size=error?0:(uint32_t)a.size;void *data=NULL,*check=NULL;
++    if(!error){data=kalloc_data(size,Z_WAITOK);check=kalloc_data(size,Z_WAITOK);if(!data||!check)error=ENOMEM;}
++    for(unsigned i=0;i<2&&!error;i++){
++        int residual=0;error=vn_rdwr(UIO_READ,file,i?check:data,size,0,UIO_SYSSPACE,0,vfs_context_ucred(context),&residual,NULL);
++        if(!error&&residual)error=EIO;
++    }
++    if(!error&&memcmp(data,check,size))error=EAGAIN;
++    kebab_offline_want(&again);if(!error)error=vnode_getattr(file,&again,context);
++    if(!error&&(!kebab_offline_attributes(&again,&b)||a.fileid!=b.fileid||a.size!=b.size||a.uid!=b.uid||
++        a.gid!=b.gid||a.mode!=b.mode||a.flags!=b.flags||a.protection!=b.protection||
++        a.acl_bytes!=b.acl_bytes||memcmp(a.acl_hash,b.acl_hash,32)||memcmp(a.times,b.times,sizeof(a.times))))error=EAGAIN;
++    if(!error){kebab_offline_sha(data,size,a.hash);*output=a;}
++    if(data)kfree_data(data,size);if(check)kfree_data(check,size);
++    if(first.va_acl)kauth_acl_free(first.va_acl);if(again.va_acl)kauth_acl_free(again.va_acl);vnode_put(file);return error;
++}
++static int
++kebab_offline_native_stage(const struct kebab_offline_entry *e,const uint8_t *payload)
++{
++    vfs_context_t context=vfs_context_current();vnode_t original=NULLVP,file=NULLVP;
++    int error=vnode_lookup(kebab_offline_plan_path(e->index,0),VNODE_LOOKUP_NOFOLLOW,&original,context);
++    if(error)return error;
++    struct vnode_attr old={};kebab_offline_want(&old);error=vnode_getattr(original,&old,context);
++    struct kebab_offline_record current={};
++    if(!error)error=kebab_offline_native_record(e->index,0,&current);
++    if(!error&&!kebab_offline_same(&current,e,true,true))error=EAUTH;
++    struct kebab_offline_record original_attributes={};
++    if(!error&&!kebab_offline_attributes(&old,&original_attributes))error=ENOTSUP;
++    memcpy(original_attributes.hash,current.hash,32);
++    if(!error&&!kebab_offline_same(&original_attributes,e,true,true))error=EAUTH;
++    struct nameidata *ndp=NULL;
++    if(!error){
++        ndp=kalloc_type(struct nameidata,Z_WAITOK|Z_NOFAIL);
++        NDINIT(ndp,LOOKUP,OP_OPEN,NOFOLLOW,UIO_SYSSPACE,CAST_USER_ADDR_T(kebab_offline_plan_path(e->index,2)),context);
++        struct vnode_attr create={};VATTR_INIT(&create);
++        VATTR_SET(&create,va_uid,old.va_uid);VATTR_SET(&create,va_gid,old.va_gid);VATTR_SET(&create,va_mode,old.va_mode&07777);
++        VATTR_SET(&create,va_dataprotect_class,old.va_dataprotect_class);VATTR_SET(&create,va_acl,old.va_acl);
++        int flags=FREAD|FWRITE|O_CREAT|O_EXCL|O_NOFOLLOW;
++        error=vn_open_auth(ndp,&flags,&create,NULLVP);if(!error)file=ndp->ni_vp;
++        kfree_type(struct nameidata,ndp);
++    }
++#if CONFIG_MACF
++    if(!error)error=mac_vnode_check_write(context,vfs_context_ucred(context),file);
++#endif
++    if(!error){int residual=0;error=vn_rdwr(UIO_WRITE,file,(caddr_t)payload,e->new_size,0,UIO_SYSSPACE,0,
++        vfs_context_ucred(context),&residual,NULL);if(!error&&residual)error=EIO;}
++    if(!error){
++        struct vnode_attr times={};VATTR_INIT(&times);VATTR_SET(&times,va_create_time,old.va_create_time);
++        VATTR_SET(&times,va_access_time,old.va_access_time);VATTR_SET(&times,va_modify_time,old.va_modify_time);
++#if CONFIG_MACF
++        struct attrlist requested={};requested.bitmapcount=ATTR_BIT_MAP_COUNT;
++        requested.commonattr=ATTR_CMN_CRTIME|ATTR_CMN_ACCTIME|ATTR_CMN_MODTIME;
++        error=mac_vnode_check_setattrlist(context,file,&requested);
++        if(!error)error=mac_vnode_check_setutimes(context,file,old.va_access_time,old.va_modify_time);
++#endif
++        kauth_action_t action=0;if(!error)error=vnode_authattr(file,&times,&action,context);
++        if(!error&&action)error=vnode_authorize(file,NULL,action,context);
++        if(!error)error=vnode_setattr(file,&times,context);
++    }
++    if(!error)error=VNOP_FSYNC(file,MNT_WAIT,context);
++    if(file){int closed=vnode_close(file,FREAD|FWRITE|FWASWRITTEN,context);if(!error)error=closed;}
++    if(old.va_acl)kauth_acl_free(old.va_acl);vnode_put(original);
++    if(!error){struct kebab_offline_record created={};error=kebab_offline_native_record(e->index,2,&created);
++        if(!error&&(!kebab_offline_same(&created,e,false,false)||memcmp(created.times,e->times,6*sizeof(e->times[0]))))error=EAUTH;}
++    return error;
++}
++static int
++kebab_offline_native_sync(unsigned index)
++{
++    const char *target=kebab_offline_plan_path(index,0);if(!target)return EINVAL;
++    /* Flush every existing member, including the old inode retained as backup,
++     * before flushing the containing directory. Preserve all lower errors. */
++    for(unsigned kind=0;kind<3;kind++){
++        const char *path=kebab_offline_plan_path(index,kind);if(!path)continue;
++        vfs_context_t context=vfs_context_current();vnode_t file=NULLVP;
++        int error=vnode_lookup(path,VNODE_LOOKUP_NOFOLLOW,&file,context);
++        if(error==ENOENT)continue;if(error)return error;
++        char canonical[MAXPATHLEN]={};int length=sizeof(canonical);
++        error=vn_getpath(file,canonical,&length);
++        struct vfsstatfs *stats=vfs_statfs(vnode_mount(file));
++        if(!error&&(!vnode_isreg(file)||strcmp(canonical,path)||!stats||strcmp(stats->f_fstypename,"apfs")||
++            strcmp(stats->f_mntonname,"/private/var")))error=EINVAL;
++        if(!error)error=vnode_authorize(file,NULL,KAUTH_VNODE_READ_DATA|KAUTH_VNODE_READ_ATTRIBUTES,context);
++        if(!error)error=VNOP_FSYNC(file,MNT_WAIT,context);vnode_put(file);if(error)return error;
++    }
++    char parent[MAXPATHLEN]={};strlcpy(parent,target,sizeof(parent));char *slash=strrchr(parent,'/');if(!slash)return EINVAL;*slash=0;
++    vfs_context_t context=vfs_context_current();vnode_t directory=NULLVP;
++    int error=vnode_lookup(parent,VNODE_LOOKUP_NOFOLLOW,&directory,context);if(error)return error;
++    char canonical[MAXPATHLEN]={};int size=sizeof(canonical);struct vfsstatfs *stats=vfs_statfs(vnode_mount(directory));
++    error=vn_getpath(directory,canonical,&size);
++    if(!error&&(!vnode_isdir(directory)||strcmp(canonical,parent)||!stats||strcmp(stats->f_fstypename,"apfs")||
++        strcmp(stats->f_mntonname,"/private/var")))error=EINVAL;
++    if(!error)error=VNOP_FSYNC(directory,MNT_WAIT,context);vnode_put(directory);return error;
++}
++int kebab_offline_setup_once(void);
++int
++kebab_offline_setup_once(void)
++{
++    DTEntry chosen;const void *raw=NULL;unsigned bytes=0;
++    if(SecureDTLookupEntry(NULL,"/chosen",&chosen)!=kSuccess||
++        SecureDTGetProperty(chosen,"hios-offline-setup-plan",&raw,&bytes)!=kSuccess)return 0;
++    if(current_proc()!=initproc||initproc->p_textvp!=NULLVP||panic_active()||ml_at_interrupt_context()||
++        get_preemption_level()!=0||!ml_get_interrupts_enabled())return EPERM;
++    const void *path_raw=NULL;unsigned path_bytes=0;
++    if(SecureDTGetProperty(chosen,"hios-offline-dataark-path",&path_raw,&path_bytes)!=kSuccess||
++        !path_raw||!path_bytes||path_bytes>sizeof(kebab_offline_data_ark_path)||
++        ((const char *)path_raw)[path_bytes-1]||strnlen(path_raw,path_bytes)!=path_bytes-1)return EINVAL;
++    kebab_offline_remember_data_ark(path_raw);
++    if(__atomic_load_n(&kebab_offline_data_ark_ready,__ATOMIC_ACQUIRE)!=2||strcmp(path_raw,kebab_offline_data_ark_path))return EINVAL;
++    const struct kebab_offline_io io={kebab_offline_native_record,kebab_offline_native_stage,kebab_offline_plan_rename,kebab_offline_native_sync};
++    int error=kebab_offline_plan_run(raw,bytes,&io,kebab_offline_sha);
++    printf("KEBAB OFFLINE SETUP: measured transaction result=%d; fixed files, original ACL/class preserved; original activation status must be observed separately\n",error);
++    return error;
++}
++
++#endif
++#endif
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7261,6 +7261,9 @@
+    extern int kebab_ca_sdr_preference_once(void);
+    int ca_preference_error=kebab_ca_sdr_preference_once();
+    if(ca_preference_error)printf("KEBAB CA PREF: exact configuration transaction refused/incomplete error=%d; original startup continues\n",ca_preference_error);
++   extern int kebab_offline_setup_once(void);
++   int offline_setup_error=kebab_offline_setup_once();
++   if(offline_setup_error)panic("KEBAB OFFLINE SETUP: measured transaction refused/incomplete %d; original services withheld until checkpoints are safe",offline_setup_error);
+   }
+   printf("KEBAB DATA USERLAND: genuine encrypted Data mounted; hardware Root/class bank and native FS/FV services live; original launchd handoff, storage profile verified\n");
+  }
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -9727,6 +9727,22 @@
+     return renameat_internal(vfs_context_current(), AT_FDCWD, CAST_USER_ADDR_T(from),
+         AT_FDCWD, CAST_USER_ADDR_T(to), UIO_SYSSPACE, RENAME_EXCL);
+ }
++/* Only fixed owner-measured offline experiment paths, before original PID1.
++ * This dispatch preserves the original rename MACF/ACL/filesystem behavior. */
++extern const char *kebab_offline_plan_path(unsigned,unsigned);
++int kebab_offline_plan_rename(unsigned,unsigned);
++int
++kebab_offline_plan_rename(unsigned index,unsigned operation)
++{
++    if(current_proc()!=initproc||initproc->p_textvp!=NULLVP)return EPERM;
++    if(operation>4||(operation==3&&index!=0))return EINVAL;
++    unsigned from_kind=operation==0?2:operation==1?2:operation==2?1:operation==3?0:1;
++    unsigned to_kind=operation==0?0:operation==1?1:operation==2?0:operation==3?1:0;
++    const char *from=kebab_offline_plan_path(index,from_kind),*to=kebab_offline_plan_path(index,to_kind);
++    if(!from||!to)return EINVAL;
++    return renameat_internal(vfs_context_current(),AT_FDCWD,CAST_USER_ADDR_T(from),
++        AT_FDCWD,CAST_USER_ADDR_T(to),UIO_SYSSPACE,(operation==0||operation==2)?RENAME_SWAP:RENAME_EXCL);
++}
+ #endif
+ 
+ int

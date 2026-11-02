@@ -1,0 +1,58 @@
+--- a/osfmk/arm/pmap/pmap_data.h
++++ b/osfmk/arm/pmap/pmap_data.h
+@@ -88,6 +88,20 @@
+ 	return (pa >= vm_first_phys) && (pa < vm_last_phys);
+ #endif
+ }
++
++/* pmap_object keys page-table pages by physical offset. Discontiguous
++ * KEBAB banks can lie below gPhysBase: use the same PA span as the metadata,
++ * and keep insertion and lookup on one checked offset contract. */
++#if defined(KEBAB)
++static inline vm_object_offset_t
++pmap_page_object_offset(pmap_paddr_t pa)
++{
++	assert(pa_valid(pa));
++	return (vm_object_offset_t)(pa-vm_first_phys);
++}
++#else
++#define pmap_page_object_offset(pa) ((vm_object_offset_t)((pa)-gPhysBase))
++#endif
+ 
+ /**
+  * The pmap has a variety of data structures (pv_head_table/pp_attr_table) that
+--- a/osfmk/arm/pmap/pmap_data.c
++++ b/osfmk/arm/pmap/pmap_data.c
+@@ -1239,7 +1239,7 @@
+ 	vm_object_lock(pmap_object);
+ 	while (mem != VM_PAGE_NULL) {
+ 		const vm_object_offset_t offset =
+-		    (vm_object_offset_t) ((ptoa(VM_PAGE_GET_PHYS_PAGE(mem))) - gPhysBase);
++		    pmap_page_object_offset(ptoa(VM_PAGE_GET_PHYS_PAGE(mem)));
+ 
+ 		vm_page_insert_wired(mem, pmap_object, offset, VM_KERN_MEMORY_PTE);
+ 		m_prev = mem;
+@@ -1562,7 +1562,7 @@
+ 		 * Remove the page from the pmap's VM object and return it back to the
+ 		 * VM's global free list of pages.
+ 		 */
+-		mem = vm_page_lookup(pmap_object, (pa - gPhysBase));
++		mem = vm_page_lookup(pmap_object, pmap_page_object_offset(pa));
+ 		assert(mem != VM_PAGE_NULL);
+ 		assert(VM_PAGE_WIRED(mem));
+ 		vm_page_lock_queues();
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -2779,7 +2779,12 @@
+ 	 *	structures for pages we allocate to be page tables in
+ 	 *	pmap_expand().
+ 	 */
++#if defined(KEBAB)
++	/* Sparse object size is the PA index span, not the sum of owned banks. */
++	_vm_object_allocate(vm_last_phys-vm_first_phys, pmap_object);
++#else
+ 	_vm_object_allocate(mem_size, pmap_object);
++#endif
+ 	pmap_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
+ 
+ 	/*

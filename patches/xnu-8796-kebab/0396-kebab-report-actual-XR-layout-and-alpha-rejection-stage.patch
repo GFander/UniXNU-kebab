@@ -1,0 +1,59 @@
+--- a/iokit/Kernel/arm/KebabScalerCore.h
++++ b/iokit/Kernel/arm/KebabScalerCore.h
+@@ -78,13 +78,16 @@
+  * until premultiplication-aware wide filtering is implemented. BGRA->BGRA
+  * retains its existing, independently qualified premultiplied byte path. */
+ static bool
+-ksc_source_opaque(const struct ksc_image *s,const uint8_t *source)
++ksc_source_opaque(const struct ksc_image *s,const uint8_t *source,uint32_t *rejected=NULL)
+ {
+     for(uint32_t y=0;y<s->height;y++) {
+         const uint8_t *row=source+s->offset+(uint64_t)y*s->stride;
+         for(uint32_t x=0;x<s->width;x++) {
+             const uint8_t *p=row+(uint64_t)x*s->bpe;
+-            if(s->format==KSC_BGRA ? p[3]!=255 : (kpf_word(p+6)>>6)!=894)return false;
++            if(s->format==KSC_BGRA ? p[3]!=255 : (kpf_word(p+6)>>6)!=894) {
++                if(rejected)*rejected=s->format==KSC_BGRA?p[3]:kpf_word(p+6)>>6;
++                return false;
++            }
+         }
+     }
+     return true;
+--- a/iokit/Kernel/arm/KebabSoftwareScaler.cpp
++++ b/iokit/Kernel/arm/KebabSoftwareScaler.cpp
+@@ -132,10 +132,11 @@
+     if(size!=KSC_REQUEST_BYTES)return kIOReturnBadArgument;
+     KebabSurface *s=kebab_surface_copy(ksc_u32(q)),*d=kebab_surface_copy(ksc_u32(q+4));
+     IOMemoryMap *sm=NULL,*dm=NULL;IOReturn ret=kIOReturnNotFound;
+-    struct ksc_plan plan={};struct ksc_image si={},di={};
++    struct ksc_plan plan={};struct ksc_image si={},di={};uint32_t alpha_rejected=UINT32_MAX;int validation=0;uint32_t reserved_first=UINT32_MAX;
++    for(size_t i=0x48;i<size;i++) if((i<0x58 || i>=0x68) && q[i]){reserved_first=(uint32_t)i;break;}
+     if(!s || !d)goto done;
+     si=ksc_description(s);di=ksc_description(d);
+-    {int err=ksc_prepare(q,size,&si,&di,&plan);
++    {int err=ksc_prepare(q,size,&si,&di,&plan);validation=err;
+     if(err){ret=err==KSC_UNSUPPORTED?kIOReturnUnsupported:kIOReturnBadArgument;goto done;}}
+     /* Both global IDs are only exposed to the exact original compositor task;
+      * normal IOServiceOpen and per-method MACF/filter checks still run. */
+@@ -149,7 +150,7 @@
+         sm->getLength()<si.memory_length || dm->getLength()<di.memory_length){ret=kIOReturnVMError;goto done;}
+     OSMemoryBarrier();
+     if((si.format==KPF_W40A || di.format==KPF_W40A) &&
+-        !ksc_source_opaque(&si,(const uint8_t *)(uintptr_t)sm->getVirtualAddress())) {
++        !ksc_source_opaque(&si,(const uint8_t *)(uintptr_t)sm->getVirtualAddress(),&alpha_rejected)) {
+         ret=kIOReturnUnsupported;goto done;
+     }
+     ksc_run(&plan,&si,&di,(const uint8_t *)(uintptr_t)sm->getVirtualAddress(),(uint8_t *)(uintptr_t)dm->getVirtualAddress());
+@@ -166,8 +167,10 @@
+     if(ret==kIOReturnSuccess)fCompleted++;
+ done:
+     if(fCompleted<4 || ret!=kIOReturnSuccess || !(fCompleted%120))
+-        IOLog("KEBAB SCALER: transfer source=%u destination=%u flags=0x%llx src=%ux%u dst=%ux%u result=0x%x completed=%llu\n",
+-            ksc_u32(q),ksc_u32(q+4),ksc_u64(q+0x20),s?s->width:0,s?s->height:0,d?d->width:0,d?d->height:0,ret,fCompleted);
++        IOLog("KEBAB SCALER: transfer source=%u destination=%u flags=0x%llx src=%ux%u dst=%ux%u result=0x%x completed=%llu validation=%d alpha-code=%u reserved-first=%u src-layout=%u/%u/%u/%u/%u/%u dst-layout=%u/%u/%u/%u/%u/%u\n",
++            ksc_u32(q),ksc_u32(q+4),ksc_u64(q+0x20),s?s->width:0,s?s->height:0,d?d->width:0,d?d->height:0,ret,fCompleted,validation,alpha_rejected,reserved_first,
++            si.bpe,si.element_width,si.element_height,si.planes,si.offset,si.allocation,
++            di.bpe,di.element_width,di.element_height,di.planes,di.offset,di.allocation);
+     OSSafeReleaseNULL(dm);OSSafeReleaseNULL(sm);OSSafeReleaseNULL(d);OSSafeReleaseNULL(s);return ret;
+ }
+ IOReturn

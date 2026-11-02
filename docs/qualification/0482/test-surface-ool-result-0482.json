@@ -1,0 +1,67 @@
+{
+  "passed": true,
+  "source_sha256": "c322d5ae51b76cf0421a903e11ff2c889786600da141a021db5a6b7d5c033c52",
+  "fixture_sha256": "fa49860ed5d1559178e2b50696d870af2e9f305b077f6d6ae92b72990ae267c6",
+  "actual_three_production_function_bodies": true,
+  "IOKit_memory_model": true,
+  "compiled_behavioral_mutants": 8,
+  "all_four_production_call_sites_present": true,
+  "full_create_and_valuecache_integration_host_qualified": false,
+  "native_or_physical_test": false,
+  "runs": [
+    {
+      "name": "baseline",
+      "compiled": true,
+      "exit_code": 0,
+      "stdout": "PASS 24 actual C++ descriptor-copy/input/output cases; IOKit memory model only"
+    },
+    {
+      "name": "missing-prepare",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "ignore-prepare-failure",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "missing-complete",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "ignore-complete-error",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "ignore-short-transfer",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "reverse-direction",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "output-size-on-error",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    },
+    {
+      "name": "input-error-success",
+      "compiled": true,
+      "exit_code": -6,
+      "stdout": ""
+    }
+  ]
+}

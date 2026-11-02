@@ -1,0 +1,171 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -77,11 +77,12 @@
+  * iterator retains the proc during the callback; take the task reference
+  * before returning and print only after iteration has released its locks. */
+ extern void kebab_backboardd_task_report(task_t);
++extern void kebab_ca_task_report(task_t);
+ extern boolean_t ml_at_interrupt_context(void);
+ extern boolean_t ml_get_interrupts_enabled(void);
+ extern int get_preemption_level(void);
+ void kebab_backboardd_report(void);
+-struct kebab_backboard_snapshot { task_t task; unsigned scanned; int pid; unsigned uid; bool found; };
++struct kebab_backboard_snapshot { task_t task; unsigned scanned; int pid; unsigned uid; bool found; uint8_t uuid[16]; };
+ static int
+ kebab_backboard_select(proc_t process, void *argument)
+ {
+@@ -91,6 +92,7 @@
+     proc_name(proc_pid(process), name, sizeof(name));
+     if (!strcmp(name, "backboardd") && proc_ppid(process) == 1) {
+         snapshot->found = true;snapshot->pid = proc_pid(process);snapshot->uid = proc_getuid(process);
++        proc_getexecutableuuid(process, snapshot->uuid, sizeof(snapshot->uuid));
+         task_t task = proc_task(process);
+         if (task != TASK_NULL) {task_reference(task);snapshot->task = task;}
+         return PROC_RETURNED_DONE;
+@@ -110,6 +112,9 @@
+     } else {
+         printf("KEBAB BBOARD: fixed daemon pid=%d uid=%u scanned=%u; read-only kernel waits\n",snapshot.pid,snapshot.uid,snapshot.scanned);
+         kebab_backboardd_task_report(snapshot.task);
++        static const uint8_t original_uuid[16] = {0x70,0xb7,0x23,0x40,0x73,0x7a,0x39,0x73,0x8b,0x47,0x4e,0x99,0x70,0xf4,0xec,0xb9};
++        if (snapshot.uid == 501 && !memcmp(snapshot.uuid, original_uuid, sizeof(snapshot.uuid))) kebab_ca_task_report(snapshot.task);
++        else printf("KEBAB CA: refused original backboardd UID/UUID mismatch\n");
+         task_deallocate(snapshot.task);
+     }
+     printf("KEBAB BBOARD: observer end; no suspension or modification; user frames are best-effort reads\n");
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -206,6 +206,134 @@
+     return isa == expected || ((isa & 0x3f000000001ULL) == 0x1a000000001ULL &&
+         (isa & 0xffffffff8ULL) == expected);
+ }
++/* Fixed20H392 WindowServer observation. Caller pins original backboardd UUID,
++ * UID501 and task. No arbitrary address arguments, invocation or user writes.
++ * Current array slots/storage candidates are bounded and each resulting wrapper
++ * must have the original CAWindowServerDisplay ISA and exact IOMFB methods. */
++struct kebab_ca_state {
++    uint32_t array_candidates, displays, renderer_flags, sw_kind, gpu_kind;
++    uint32_t page_count, page_index, software_path, page_ids[4], page_formats[4];
++    uint64_t sw_context, sw_renderer, gpu_context, gpu_renderer, pages[4], page_buffers[4];
++};
++static bool
++kebab_ca_u64(vm_map_t map, uint64_t address, uint64_t *value)
++{
++    return !(address & 7) && kebab_plugin_user_copy(map, address, value, sizeof(*value));
++}
++static bool
++kebab_ca_u32(vm_map_t map, uint64_t address, uint32_t *value)
++{
++    return !(address & 3) && kebab_plugin_user_copy(map, address, value, sizeof(*value));
++}
++static bool
++kebab_ca_wrapper(vm_map_t map, uint64_t candidate)
++{
++    uint64_t isa = 0;
++    return candidate && !(candidate & 7) && kebab_ca_u64(map, candidate, &isa) &&
++        kebab_shell_isa(isa, 0x1dcdf7b78ULL);
++}
++static uint32_t
++kebab_ca_context_kind(vm_map_t map, uint64_t context)
++{
++    uint64_t vtable = 0;
++    if (!context) return 0;
++    if (!kebab_ca_u64(map, context, &vtable)) return 4;
++    if (vtable == 0x1d5b317c8ULL) return 1; /* original SWContext */
++    if (vtable == 0x1d5b2fb58ULL) return 2; /* original NullContext */
++    return 3; /* other: never infer a functioning GPU from a nonzero object */
++}
++static int
++kebab_ca_snapshot(vm_map_t map, struct kebab_ca_state *out)
++{
++    static const uint8_t expected_cache[16] = {0x8f,0x97,0x04,0x52,0xc9,0xe3,0x3e,0x88,0xb1,0x14,0xfe,0xb1,0x86,0x4b,0xc9,0xe0};
++    uint8_t uuid[16] = {};
++    uint64_t mask = 0, root = 0, root_words[2] = {}, array = 0, slots[8] = {}, again_slots[8] = {};
++    uint64_t wrapper = 0, private_data = 0, server = 0, display = 0, vtable = 0, method = 0;
++    uint64_t again = 0, storage[8] = {};
++    bzero(out, sizeof(*out));
++    if (!kebab_plugin_user_copy(map, 0x180000058ULL, uuid, sizeof(uuid)) ||
++        memcmp(uuid, expected_cache, sizeof(uuid))) return 1;
++    if (!kebab_ca_u64(map, 0x1800e8940ULL, &mask) || mask != 0xffffffff8ULL) return 2;
++    if (!kebab_ca_u64(map, 0x1dcdf8170ULL, &root) || !root || (root & 7) ||
++        !kebab_plugin_user_copy(map, root, root_words, sizeof(root_words)) ||
++        !kebab_shell_isa(root_words[0], 0x1dcdf7ce0ULL)) return 3;
++    if (!kebab_ca_u64(map, root_words[1], &array) || !array ||
++        !kebab_plugin_user_copy(map, array, slots, sizeof(slots))) return 4;
++    /* CF mutable arrays bridge to NSArray. Do not guess one Foundation layout:
++     * inspect at most7 inline/storage slots and8 entries per storage candidate,
++     * accepting only original wrapper ISA. No scan of arbitrary address ranges. */
++    for (unsigned i = 1; i < 8; i++) {
++        uint64_t candidate = slots[i];
++        if (kebab_ca_wrapper(map, candidate)) {
++            if (candidate != wrapper) { wrapper = candidate;out->displays++; }
++            continue;
++        }
++        if (!candidate || (candidate & 7) ||
++            !kebab_plugin_user_copy(map, candidate, storage, sizeof(storage))) continue;
++        out->array_candidates++;
++        for (unsigned j = 0; j < 8; j++) {
++            if (kebab_ca_wrapper(map, storage[j]) && storage[j] != wrapper) {
++                wrapper = storage[j];out->displays++;
++            }
++        }
++    }
++    if (!wrapper || out->displays != 1) return 5; /* primary single-display contract */
++    if (!kebab_ca_u64(map, wrapper + 8, &private_data) || !private_data ||
++        !kebab_ca_u64(map, private_data + 0x40, &server) || !server ||
++        !kebab_ca_u64(map, server, &vtable) ||
++        !kebab_ca_u64(map, vtable + 0x1a0, &method) || method != 0x1882eaf3cULL ||
++        !kebab_ca_u64(map, server + 0x60, &display) || !display ||
++        !kebab_ca_u64(map, display, &vtable) ||
++        !kebab_ca_u64(map, vtable + 0x1c8, &method) || method != 0x18853c4ccULL) return 6;
++    if (!kebab_ca_u32(map, server + 0xb8, &out->renderer_flags) ||
++        !kebab_ca_u64(map, server + 0xc0, &out->sw_context) ||
++        !kebab_ca_u64(map, server + 0xc8, &out->sw_renderer) ||
++        !kebab_ca_u64(map, server + 0x318, &out->gpu_context) ||
++        !kebab_ca_u64(map, server + 0x320, &out->gpu_renderer) ||
++        !kebab_ca_u32(map, display + 0x358, &out->page_index) ||
++        !kebab_ca_u32(map, display + 0x360, &out->page_count)) return 7;
++    out->sw_kind = kebab_ca_context_kind(map, out->sw_context);
++    out->gpu_kind = kebab_ca_context_kind(map, out->gpu_context);
++    uint16_t flags = 0;
++    if (!kebab_plugin_user_copy(map, display + 0x251, &flags, sizeof(flags))) return 7;
++    out->software_path = !!(flags & 0x80);
++    if (out->page_count > 4 || out->page_index > 3) return 8;
++    for (unsigned i = 0; i < out->page_count; i++) {
++        if (!kebab_ca_u64(map, display + 0x3b0 + i * 0x30, &out->pages[i])) return 9;
++        if (!out->pages[i]) continue;
++        if (!kebab_ca_u32(map, out->pages[i], &out->page_ids[i]) ||
++            !kebab_ca_u64(map, out->pages[i] + 0x20, &out->page_buffers[i])) return 9;
++        if (out->page_buffers[i] &&
++            !kebab_ca_u32(map, out->page_buffers[i] + 0x20, &out->page_formats[i])) return 9;
++    }
++    if (!kebab_ca_u64(map, 0x1dcdf8170ULL, &again) || again != root ||
++        !kebab_ca_u64(map, root + 8, &again) || again != root_words[1] ||
++        !kebab_ca_u64(map, root_words[1], &again) || again != array ||
++        !kebab_plugin_user_copy(map, array, again_slots, sizeof(again_slots)) ||
++        memcmp(slots, again_slots, sizeof(slots)) ||
++        !kebab_ca_u64(map, wrapper + 8, &again) || again != private_data ||
++        !kebab_ca_u64(map, private_data + 0x40, &again) || again != server ||
++        !kebab_ca_u64(map, server + 0x60, &again) || again != display) return 10;
++    return 0;
++}
++void kebab_ca_task_report(task_t task);
++void
++kebab_ca_task_report(task_t task)
++{
++    extern void kebab_usb_log_flush(void);
++    if (task == TASK_NULL || task == kernel_task || ml_at_interrupt_context() ||
++        get_preemption_level() != 0 || !ml_get_interrupts_enabled()) return;
++    vm_map_t map = get_task_map_reference(task);
++    struct kebab_ca_state state = {};
++    int result = map == VM_MAP_NULL || vm_map_pmap(map) == pmap_kernel() ? 11 : kebab_ca_snapshot(map, &state);
++    if (map != VM_MAP_NULL) vm_map_deallocate(map);
++    printf("KEBAB CA: result=%d displays=%u storage-candidates=%u renderer-flags=0x%x sw-kind=%u sw-context=%u sw-renderer=%u other-kind=%u other-context=%u other-renderer=%u software-path=%u pages=%u current=%u; fixed20H392 readonly, no producer lock\n",
++        result,state.displays,state.array_candidates,state.renderer_flags,state.sw_kind,!!state.sw_context,!!state.sw_renderer,state.gpu_kind,!!state.gpu_context,!!state.gpu_renderer,state.software_path,state.page_count,state.page_index);
++    if (!result) for (unsigned i = 0; i < state.page_count; i++)
++        printf("KEBAB CA PAGE: index=%u present=%u frame-id=%u buffer=%u format=0x%x\n",i,!!state.pages[i],state.page_ids[i],!!state.page_buffers[i],state.page_formats[i]);
++    kebab_usb_log_flush();
++}
++
+ static int
+ kebab_shell_ack_snapshot(vm_map_t map, struct kebab_shell_ack_state *out)
+ {

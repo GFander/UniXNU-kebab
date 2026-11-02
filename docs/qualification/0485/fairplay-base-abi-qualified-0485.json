@@ -1,0 +1,147 @@
+{
+  "passed": true,
+  "scope": "Three native/original base object sizes and every base vtable slot; no claim of complete private FairPlay ABI or runtime behavior",
+  "native_source": "0485",
+  "native_sha256": "638a4491c6ebc77a9a0301782fe0f8c289f0f8cc53cd2b5009b4c47664095fae",
+  "donor_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "classes": [
+    {
+      "classname": "IORegistryEntry",
+      "class_size": 40,
+      "vtable_entries_checked": 76,
+      "null_entries": 1,
+      "all_corresponding_entry_contracts_checked": true,
+      "slot0_tombstone_thunk": {
+        "slot": 0,
+        "proof": "same tombstone body after bounded pure-B tail thunks to named ancestor D2; no argument/stack/return-address change",
+        "sha256": "44b1a5b526f6636f1bd3fefe02e1cfcf690bcb266ef2c5b20632d00d872019ff",
+        "native_tail_branches": [
+          {
+            "from_va": "0xfffffe0006b699b4",
+            "to_va": "0xfffffe0006b0a784",
+            "target_D2_symbols": [
+              "__ZN8OSObjectD2Ev"
+            ]
+          },
+          {
+            "from_va": "0xfffffe0006b0a784",
+            "to_va": "0xfffffe0006b08b40",
+            "target_D2_symbols": [
+              "__ZN15OSMetaClassBaseD2Ev"
+            ]
+          }
+        ]
+      },
+      "constructors": {
+        "original": {
+          "class_size": 40,
+          "actual_metaclass_call": "0xfffffff007742f3c"
+        },
+        "native0485": {
+          "class_size": 40,
+          "actual_metaclass_call": "0xfffffe0006b69958"
+        }
+      }
+    },
+    {
+      "classname": "IOService",
+      "class_size": 136,
+      "vtable_entries_checked": 169,
+      "null_entries": 1,
+      "all_corresponding_entry_contracts_checked": true,
+      "slot0_tombstone_thunk": {
+        "slot": 0,
+        "proof": "same tombstone body after bounded pure-B tail thunks to named ancestor D2; no argument/stack/return-address change",
+        "sha256": "44b1a5b526f6636f1bd3fefe02e1cfcf690bcb266ef2c5b20632d00d872019ff",
+        "native_tail_branches": [
+          {
+            "from_va": "0xfffffe0006b6f3c8",
+            "to_va": "0xfffffe0006b699b0",
+            "target_D2_symbols": [
+              "__ZN15IORegistryEntryD2Ev"
+            ]
+          },
+          {
+            "from_va": "0xfffffe0006b699b0",
+            "to_va": "0xfffffe0006b0a784",
+            "target_D2_symbols": [
+              "__ZN8OSObjectD2Ev"
+            ]
+          },
+          {
+            "from_va": "0xfffffe0006b0a784",
+            "to_va": "0xfffffe0006b08b40",
+            "target_D2_symbols": [
+              "__ZN15OSMetaClassBaseD2Ev"
+            ]
+          }
+        ]
+      },
+      "constructors": {
+        "original": {
+          "class_size": 136,
+          "actual_metaclass_call": "0xfffffff007755d5c"
+        },
+        "native0485": {
+          "class_size": 136,
+          "actual_metaclass_call": "0xfffffe0006b6f36c"
+        }
+      }
+    },
+    {
+      "classname": "IOUserClient",
+      "class_size": 216,
+      "vtable_entries_checked": 187,
+      "null_entries": 1,
+      "all_corresponding_entry_contracts_checked": true,
+      "slot0_tombstone_thunk": {
+        "slot": 0,
+        "proof": "same tombstone body after bounded pure-B tail thunks to named ancestor D2; no argument/stack/return-address change",
+        "sha256": "44b1a5b526f6636f1bd3fefe02e1cfcf690bcb266ef2c5b20632d00d872019ff",
+        "native_tail_branches": [
+          {
+            "from_va": "0xfffffe0006bc9ee0",
+            "to_va": "0xfffffe0006b6f3c4",
+            "target_D2_symbols": [
+              "__ZN9IOServiceD2Ev"
+            ]
+          },
+          {
+            "from_va": "0xfffffe0006b6f3c4",
+            "to_va": "0xfffffe0006b699b0",
+            "target_D2_symbols": [
+              "__ZN15IORegistryEntryD2Ev"
+            ]
+          },
+          {
+            "from_va": "0xfffffe0006b699b0",
+            "to_va": "0xfffffe0006b0a784",
+            "target_D2_symbols": [
+              "__ZN8OSObjectD2Ev"
+            ]
+          },
+          {
+            "from_va": "0xfffffe0006b0a784",
+            "to_va": "0xfffffe0006b08b40",
+            "target_D2_symbols": [
+              "__ZN15OSMetaClassBaseD2Ev"
+            ]
+          }
+        ]
+      },
+      "constructors": {
+        "original": {
+          "class_size": 216,
+          "actual_metaclass_call": "0xfffffff0077b0300"
+        },
+        "native0485": {
+          "class_size": 216,
+          "actual_metaclass_call": "0xfffffe0006bc9e84"
+        }
+      }
+    }
+  ],
+  "original_driver_runtime_qualified": false,
+  "full_private_FairPlay_ABI_qualified": false,
+  "device_access": false
+}

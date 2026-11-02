@@ -1,0 +1,17 @@
+--- a/osfmk/console/video_console.c
++++ b/osfmk/console/video_console.c
+@@ -2904,6 +2904,14 @@
+ 			} else if (scale == kPEScaleFactor2x) {
+ 				new_vinfo.v_scale = kPEScaleFactor2x;
+ 			}
++#if defined(KEBAB)
++            else if (scale == 3 && new_vinfo.v_width == 1080 &&
++                new_vinfo.v_height == 2400 && new_vinfo.v_depth == 32) {
++                /* Preserve the board's3x boot-art scale across conversion
++                 * from PE_Video into the generic console's vc_info. */
++                new_vinfo.v_scale = 3;
++            }
++#endif
+ 			else { /* Scale factor not set, default to 1x */
+ 				new_vinfo.v_scale = kPEScaleFactor1x;
+ 			}

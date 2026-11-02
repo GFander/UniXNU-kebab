@@ -1,0 +1,73 @@
+--- a/osfmk/mach/arm/vm_param.h
++++ b/osfmk/mach/arm/vm_param.h
+@@ -289,7 +289,20 @@
+  */
+ extern unsigned long            gVirtBase, gPhysBase, gPhysSize;
+ 
++#if defined(KEBAB) && !defined(ASSEMBLER) && !defined(__ASSEMBLER__)
++#ifdef __cplusplus
++extern "C" {
++#endif
++extern int kebab_memory_contains(unsigned long long, unsigned long long);
++#ifdef __cplusplus
++}
++#endif
++/* RAM cache maintenance must include every explicitly owned bank and exclude
++ * the holes. gPhysBase/gPhysSize still describe only the primary aperture. */
++#define isphysmem(a) (kebab_memory_contains((vm_address_t)(a), 1))
++#else
+ #define isphysmem(a)            (((vm_address_t)(a) - gPhysBase) < gPhysSize)
++#endif
+ #define physmap_enclosed(a)     isphysmem(a)
+ 
+ /*
+--- a/osfmk/arm/caches.c
++++ b/osfmk/arm/caches.c
+@@ -53,6 +53,25 @@
+ #define LWOpDone 1
+ #define BWOpDone 3
+ 
++#if defined(KEBAB)
++void kebab_invalidate_physical_icache(addr64_t, unsigned int);
++void
++kebab_invalidate_physical_icache(addr64_t pa, unsigned int length)
++{
++	/* A physical range may cross distinct aperture entries. Preserve the
++	 * original length while translating and invalidating each mapped piece. */
++	while (length) {
++		vm_size_t count=length;
++		if (!isphysmem(pa)) panic("KEBAB XRAM: icache range outside owned RAM");
++		vm_offset_t va=phystokv_range((pmap_paddr_t)pa,&count);
++		if (!count || count>length) panic("KEBAB XRAM: invalid icache aperture span");
++		InvalidatePoU_IcacheRegion(va,(unsigned int)count);
++		pa+=count;
++		length-=(unsigned int)count;
++	}
++}
++#endif
++
+ #ifndef __ARM_COHERENT_IO__
+ 
+ TUNABLE(bool, up_style_idle_exit, "up_style_idle_exit", false);
+--- a/osfmk/arm64/caches_asm.s
++++ b/osfmk/arm64/caches_asm.s
+@@ -468,6 +468,11 @@
+ LEXT(invalidate_icache)
+ 	cmp     w2, #0								// Is it physical?
+ 	b.eq	Lcall_invalidate_worker
++#if defined(KEBAB)
++	/* Tail-call a range-aware physical aperture translator; VA calls retain
++	 * the original assembly worker and no extra stack frame. */
++	b		EXT(kebab_invalidate_physical_icache)
++#else
+ 	adrp	x2, _gPhysBase@page
+ 	add		x2, x2, _gPhysBase@pageoff
+ 	ldr		x2, [x2]
+@@ -476,6 +481,7 @@
+ 	add		x2, x2, _gVirtBase@pageoff
+ 	ldr		x2, [x2]
+ 	add		x0, x0, x2
++#endif
+ Lcall_invalidate_worker:
+ 	b		EXT(InvalidatePoU_IcacheRegion)
+ 

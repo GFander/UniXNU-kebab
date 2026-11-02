@@ -1,0 +1,96 @@
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -211,6 +211,8 @@
+  * The exact original CFArray active range is bounded and each resulting wrapper
+  * must have the original CAWindowServerDisplay ISA and exact IOMFB methods. */
+ struct kebab_ca_state {
++    uint64_t array_class;
++    uint32_t array_kind, active_count;
+     uint32_t array_candidates, displays, renderer_flags, sw_kind, gpu_kind;
+     uint32_t page_count, page_index, software_path, page_ids[4], page_formats[4];
+     uint64_t sw_context, sw_renderer, gpu_context, gpu_renderer, pages[4], page_buffers[4];
+@@ -259,32 +261,45 @@
+         !kebab_shell_isa(root_words[0], 0x1dcdf7ce0ULL)) return 3;
+     if (!kebab_ca_u64(map, root_words[1], &array) || !array ||
+         !kebab_plugin_user_copy(map, array, slots, sizeof(slots))) return 4;
+-    /* Exact original __NSCFArray count/value ABI. Capacity can contain stale
+-     * wrapper pointers: only the current logical element is a display. */
+-    if (!kebab_shell_isa(slots[0], 0x1e1d47be0ULL) || slots[2] != 1) return 5;
++    /* Pinned original Foundation active-element ABIs. __NSArrayM has its
++     * deque ivar at0x10; a CFArray uses a separate deque representation. */
++    out->array_class = slots[0] & 0xffffffff8ULL;
+     uint64_t value_address = 0;
+-    if (slots[1] & 3) {
+-        uint64_t deque[2] = {};
+-        if (!slots[5] || !kebab_plugin_user_copy(map, slots[5], deque, sizeof(deque)) ||
+-            !deque[1] || deque[1] > 4096 || deque[0] >= deque[1] ||
+-            slots[5] > UINT64_MAX - 16 - deque[0] * 8) return 4;
+-        value_address = slots[5] + 16 + deque[0] * 8;
++    if (kebab_shell_isa(slots[0], 0x1e1d47348ULL)) {
++        uint32_t ivar = 0;
++        if (!kebab_ca_u32(map, 0x1dcdd2b58ULL, &ivar) || ivar != 0x10) return 4;
++        out->array_kind = 2;
++        out->active_count = (uint32_t)(slots[4] >> 32);
++        uint32_t offset = (uint32_t)slots[3], capacity = (uint32_t)(slots[3] >> 32);
++        if (out->active_count != 1) return 5;
++        if (!slots[2] || !capacity || capacity > 4096 || offset >= capacity ||
++            slots[2] > UINT64_MAX - (uint64_t)offset * 8) return 4;
++        value_address = slots[2] + (uint64_t)offset * 8;
+         out->array_candidates = 1;
+-    } else {
+-        /* __CFArrayCheckAndGetValueAtIndex: optional custom callbacks enlarge
+-         * the immutable header from0x30 to0x58. */
+-        value_address = array + ((slots[1] & 0xc) == 0xc ? 0x58 : 0x30);
+-    }
++    } else if (kebab_shell_isa(slots[0], 0x1e1d47be0ULL)) {
++        out->array_kind = 1;
++        out->active_count = (uint32_t)slots[2];
++        if (slots[2] != 1) return 5;
++        if (slots[1] & 3) {
++            uint64_t deque[2] = {};
++            if (!slots[5] || !kebab_plugin_user_copy(map, slots[5], deque, sizeof(deque)) ||
++                !deque[1] || deque[1] > 4096 || deque[0] >= deque[1] ||
++                slots[5] > UINT64_MAX - 16 - deque[0] * 8) return 4;
++            value_address = slots[5] + 16 + deque[0] * 8;
++            out->array_candidates = 1;
++        } else {
++            value_address = array + ((slots[1] & 0xc) == 0xc ? 0x58 : 0x30);
++        }
++    } else return 5;
+     if (!kebab_ca_u64(map, value_address, &wrapper) || !kebab_ca_wrapper(map, wrapper)) return 5;
+     out->displays = 1;
+-    if (!wrapper || out->displays != 1) return 5; /* primary single-display contract */
+     if (!kebab_ca_u64(map, wrapper + 8, &private_data) || !private_data ||
+-        !kebab_ca_u64(map, private_data + 0x40, &server) || !server ||
+-        !kebab_ca_u64(map, server, &vtable) ||
+-        !kebab_ca_u64(map, vtable + 0x1a0, &method) || method != 0x1882eaf3cULL ||
+-        !kebab_ca_u64(map, server + 0x60, &display) || !display ||
+-        !kebab_ca_u64(map, display, &vtable) ||
+-        !kebab_ca_u64(map, vtable + 0x1c8, &method) || method != 0x18853c4ccULL) return 6;
++        !kebab_ca_u64(map, private_data + 0x40, &server) || !server) return 61;
++    if (!kebab_ca_u64(map, server, &vtable) ||
++        !kebab_ca_u64(map, vtable + 0x1a0, &method) || method != 0x1882eaf3cULL) return 62;
++    if (!kebab_ca_u64(map, server + 0x60, &display) || !display) return 63;
++    if (!kebab_ca_u64(map, display, &vtable) ||
++        !kebab_ca_u64(map, vtable + 0x1c8, &method) || method != 0x18853c4ccULL) return 64;
+     if (!kebab_ca_u32(map, server + 0xb8, &out->renderer_flags) ||
+         !kebab_ca_u64(map, server + 0xc0, &out->sw_context) ||
+         !kebab_ca_u64(map, server + 0xc8, &out->sw_renderer) ||
+@@ -306,7 +321,8 @@
+         if (out->page_buffers[i] &&
+             !kebab_ca_u32(map, out->page_buffers[i] + 0x20, &out->page_formats[i])) return 9;
+     }
+-    if (!kebab_ca_u64(map, 0x1dcdf8170ULL, &again) || again != root ||
++    if (!kebab_ca_u64(map, value_address, &again) || again != wrapper ||
++        !kebab_ca_u64(map, 0x1dcdf8170ULL, &again) || again != root ||
+         !kebab_ca_u64(map, root + 8, &again) || again != root_words[1] ||
+         !kebab_ca_u64(map, root_words[1], &again) || again != array ||
+         !kebab_plugin_user_copy(map, array, again_slots, sizeof(again_slots)) ||
+@@ -327,6 +343,7 @@
+     struct kebab_ca_state state = {};
+     int result = map == VM_MAP_NULL || vm_map_pmap(map) == pmap_kernel() ? 11 : kebab_ca_snapshot(map, &state);
+     if (map != VM_MAP_NULL) vm_map_deallocate(map);
++    printf("KEBAB CA ARRAY: class=0x%llx kind=%u active=%u; pinned Foundation ABI\n", state.array_class, state.array_kind, state.active_count);
+     printf("KEBAB CA: result=%d displays=%u storage-candidates=%u renderer-flags=0x%x sw-kind=%u sw-context=%u sw-renderer=%u other-kind=%u other-context=%u other-renderer=%u software-path=%u pages=%u current=%u; fixed20H392 readonly, no producer lock\n",
+         result,state.displays,state.array_candidates,state.renderer_flags,state.sw_kind,!!state.sw_context,!!state.sw_renderer,state.gpu_kind,!!state.gpu_context,!!state.gpu_renderer,state.software_path,state.page_count,state.page_index);
+     if (!result) for (unsigned i = 0; i < state.page_count; i++)

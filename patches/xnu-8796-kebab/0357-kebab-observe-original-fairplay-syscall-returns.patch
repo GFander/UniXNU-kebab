@@ -1,0 +1,133 @@
+--- a/bsd/dev/arm/systemcalls.c
++++ b/bsd/dev/arm/systemcalls.c
+@@ -31,6 +31,10 @@
+ #include <sys/bitstring.h>
+ 
+ #include <security/audit/audit.h>
++
++#if defined(KEBAB)
++extern void kebab_fairplay_syscall_return_evidence(proc_t,unsigned short,int,uint64_t,uint64_t,int32_t);
++#endif
+ 
+ #if CONFIG_MACF
+ #include <security/mac_framework.h>
+@@ -185,6 +189,11 @@
+ skip_syscall:
+ #endif /* CONFIG_MACF */
+ 
++#if defined(KEBAB)
++ kebab_fairplay_syscall_return_evidence(proc,code,error,get_saved_state_pc(state),get_saved_state_lr(state),
++     code==SYS_ptrace&&callp==&sysent[SYS_ptrace]?(int32_t)uthread->uu_arg[0]:-1);
++#endif
++
+ 	unix_syscall_kprintf("code %d, error %d, results %x, %x (pid %d - %s, tid %lld)\n", code, error,
+ 	    uthread->uu_rval[0], uthread->uu_rval[1],
+ 	    pid, get_bsdtask_info(current_task()) ? proc->p_comm : "unknown", thread_tid(current_thread()));
+@@ -264,6 +273,10 @@
+ 	/*
+ 	 * Get index into sysent table
+ 	 */
++#if defined(KEBAB)
++ kebab_fairplay_syscall_return_evidence(proc,code,error,get_saved_state_pc(regs),get_saved_state_lr(regs),
++     code==SYS_ptrace&&callp==&sysent[SYS_ptrace]?(int32_t)uthread->uu_arg[0]:-1);
++#endif
+ 	arm_prepare_syscall_return(callp, regs, uthread, error);
+ 
+ 	uthread->uu_flag &= ~UT_NOTCANCELPT;
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -138,6 +138,11 @@
+ 
+ #include <pexpert/pexpert.h>
+ 
++#if defined(KEBAB)
++#include <sys/syscall.h>
++#include "kebab_fairplay_bootdiag_impl.h"
++#endif
++
+ #include <kdp/kdp_dyld.h>
+ 
+ #if SYSV_SHM
+@@ -1941,6 +1946,7 @@
+ 	}
+ #if defined(KEBAB)
+  kebab_fbs_mode_failure_evidence(p,rv);
++ kebab_fairplay_exit_evidence(p,rv);
+  kebab_runtime_exit_evidence(p,rv,ut);
+ #endif
+ 
+--- /dev/null
++++ b/bsd/kern/kebab_fairplay_bootdiag_impl.h
+@@ -0,0 +1,72 @@
++/* Read-only, first exact original fairplayd.H2 process only. This ring
++ * records completed BSD call metadata, never argument buffers or results.
++ * Proc identity/flags and the ring are separate non-atomic observations.
++ * No printing, proc lock, user access or sleeping under our ring spinlock.
++ * Original syscall/ptrace/MACF/exit behavior is unchanged. */
++#define KEBAB_FP_CALLS 32
++struct kebab_fp_call {
++ uint64_t sequence,tid,pc,lr;
++ uint32_t code,flags,debugger;
++ int32_t error,request;
++};
++static LCK_GRP_DECLARE(kebab_fp_group,"kebab-fairplay-evidence");
++static LCK_SPIN_DECLARE(kebab_fp_lock,&kebab_fp_group);
++static pid_t kebab_fp_pid;
++static uint64_t kebab_fp_total;
++static bool kebab_fp_sealed;
++static struct kebab_fp_call kebab_fp_calls[KEBAB_FP_CALLS],kebab_fp_first_deny;
++
++static bool
++kebab_fp_original_self(proc_t p)
++{
++ static const unsigned char expected[16]={0x30,0x68,0x88,0xad,0xfb,0xc4,0x39,0xc4,0x96,0x1c,0x72,0x1c,0x7f,0xf2,0x30,0xd1};
++ unsigned char uuid[16]={};
++ if(p!=current_proc()||strcmp(p->p_comm,"fairplayd.H2")||proc_getuid(p)!=501)return false;
++ proc_getexecutableuuid(p,uuid,sizeof(uuid));
++ return memcmp(uuid,expected,sizeof(uuid))==0;
++}
++
++void
++kebab_fairplay_syscall_return_evidence(proc_t p,unsigned short code,int error,uint64_t pc,uint64_t lr,int32_t request)
++{
++ if(!kebab_fp_original_self(p))return;
++ pid_t pid=proc_pid(p);uint32_t flags;
++ proc_lock(p);flags=((p->p_lflag&P_LTRACED)?1u:0u)|((p->p_lflag&P_LNOATTACH)?2u:0u);proc_unlock(p);
++ struct kebab_fp_call event={.tid=thread_tid(current_thread()),.pc=pc,.lr=lr,
++     .code=code,.flags=flags,.debugger=PE_i_can_has_debugger(NULL)!=0,.error=error,
++     .request=code==SYS_ptrace?request:-1};
++ lck_spin_lock(&kebab_fp_lock);
++ if(kebab_fp_pid==0)kebab_fp_pid=pid;
++ if(kebab_fp_pid!=pid||kebab_fp_sealed||kebab_fp_total==~(uint64_t)0){
++  lck_spin_unlock(&kebab_fp_lock);return;
++ }
++ event.sequence=++kebab_fp_total;
++ kebab_fp_calls[(event.sequence-1)%KEBAB_FP_CALLS]=event;
++ if(code==SYS_ptrace&&request==31&&kebab_fp_first_deny.sequence==0)kebab_fp_first_deny=event;
++ lck_spin_unlock(&kebab_fp_lock);
++}
++
++static void
++kebab_fp_print_call(const char *kind,pid_t pid,const struct kebab_fp_call *event)
++{
++ printf("KEBAB FP-%s: n=%llu pid=%d tid=%llu call=%u error=%d pc=%llx lr=%llx req=%d flags=%x dbg=%u\n",
++     kind,(unsigned long long)event->sequence,pid,(unsigned long long)event->tid,event->code,event->error,
++     (unsigned long long)event->pc,(unsigned long long)event->lr,event->request,event->flags,event->debugger);
++}
++
++__attribute__((noinline)) static void
++kebab_fairplay_exit_evidence(proc_t p,int rv)
++{
++ if(!kebab_fp_original_self(p))return;
++ struct kebab_fp_call snapshot[KEBAB_FP_CALLS],deny;uint64_t total;unsigned kept;pid_t pid=proc_pid(p);
++ lck_spin_lock(&kebab_fp_lock);
++ if(kebab_fp_pid!=pid||kebab_fp_sealed){lck_spin_unlock(&kebab_fp_lock);return;}
++ kebab_fp_sealed=true;total=kebab_fp_total;kept=total<KEBAB_FP_CALLS?(unsigned)total:KEBAB_FP_CALLS;
++ uint64_t first=total-kept+1;
++ for(unsigned i=0;i<kept;i++)snapshot[i]=kebab_fp_calls[(first+i-1)%KEBAB_FP_CALLS];
++ deny=kebab_fp_first_deny;lck_spin_unlock(&kebab_fp_lock);
++ printf("KEBAB FP-BEGIN: pid=%d total=%llu kept=%u first=%llu deny-seen=%u\n",pid,(unsigned long long)total,kept,(unsigned long long)first,deny.sequence!=0);
++ if(deny.sequence)kebab_fp_print_call("DENY",pid,&deny);
++ for(unsigned i=0;i<kept;i++)kebab_fp_print_call("SC",pid,&snapshot[i]);
++ printf("KEBAB FP-END: pid=%d signal=%d status=%d; original exit preserved\n",pid,WTERMSIG(rv),WEXITSTATUS(rv));
++}

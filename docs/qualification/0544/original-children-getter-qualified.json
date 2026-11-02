@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "donor_sha256": "2ec297bac95bcba01046fd0148e97e7e5885c05a6c18827f39f534ba375c1221",
+  "getter": "0xfffffff00574eb0c",
+  "instructions": [
+    [
+      "ldr",
+      "x0, [x0, #0x18]"
+    ],
+    [
+      "ret",
+      ""
+    ]
+  ],
+  "scope": "Read-only original accessor; object children offset also checked through original appendChild virtual ABI"
+}

@@ -1,0 +1,232 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -16,13 +16,10 @@
+  * neither is changed here. The iPhone X userland identity this port carries
+  * (D22AP, /product artwork-scale-factor 3) describes a 1125x2436 display at
+  * 3x, i.e. 375x812 points. Userland asks the display for that logical size
+- * and lays every frame out in logical pixels, so the driver presents a
+- * 1125x2436 frame on a 1080x2400 panel: the logical origin (22, 18) maps to
+- * panel (0, 0) and the 1080x2400 centre is copied, with the extra logical
+- * margin clipped. That is a deliberate physical/logical split, not a bug;
+- * "fixing" GetDisplaySize back to 1080x2400 breaks FBSDisplayMode and the
+- * UIKit layout for this identity. A real DPU backend would scale or centre
+- * the frame itself; the CPU copy backend clips it the same way.
++ * and lays every frame out in logical pixels. The CPU backend maps the
++ * complete logical canvas to the physical panel, using pixel-centre nearest
++ * sampling. Both axes use the same normalized coordinates as touch input;
++ * no logical edge is discarded and no panel-memory size is overstated.
+  *
+  * User client selectors (all numbers are decimal, as in the framework):
+  *   3  GetLayerDefaultSurface [layer, ?] -> [IOSurface port name]
+@@ -648,6 +645,41 @@
+     IOLog("KEBAB FB CONSOLE: normal-screen=0 usb-tee=1 panic-screen=1; validated full CPU frame takes GOP\n");
+ }
+ 
++/* Pixel centres select the same normalized canvas position used by HID.
++ * Bounds are established before arithmetic or any framebuffer store. */
++static int32_t
++kebab_fb_panel_edge(int32_t edge, uint32_t physical, uint32_t logical)
++{
++    int64_t n = (int64_t)edge * physical * 2 - logical;
++    int64_t d = (int64_t)logical * 2;
++    int64_t value = n > 0 ? (n + d - 1) / d : n / d;
++    return value < 0 ? 0 : value > physical ? (int32_t)physical : (int32_t)value;
++}
++static bool
++kebab_fb_panel_rect(int32_t x, int32_t y, int32_t w, int32_t h,
++    uint32_t lw, uint32_t lh, uint32_t pw, uint32_t ph,
++    int32_t *left, int32_t *top, int32_t *right, int32_t *bottom)
++{
++    if (!lw || !lh || !pw || !ph || lw > 16384 || lh > 16384 ||
++        pw > 16384 || ph > 16384 || w <= 0 || h <= 0 || w > 16384 || h > 16384 ||
++        x < -16384 || y < -16384 || x > 16384 || y > 16384) return false;
++    *left = kebab_fb_panel_edge(x, pw, lw);
++    *right = kebab_fb_panel_edge(x + w, pw, lw);
++    *top = kebab_fb_panel_edge(y, ph, lh);
++    *bottom = kebab_fb_panel_edge(y + h, ph, lh);
++    return *left < *right && *top < *bottom;
++}
++static uint32_t
++kebab_fb_sample(int32_t pixel, uint32_t physical, uint32_t logical,
++    int32_t origin, int32_t span, int32_t source_span)
++{
++    uint64_t numerator = ((int64_t)(2 * pixel + 1) * logical -
++        (int64_t)2 * origin * physical) * source_span;
++    uint64_t denominator = (uint64_t)2 * physical * span;
++    uint64_t index = numerator / denominator;
++    return index < (uint32_t)source_span ? (uint32_t)index : (uint32_t)source_span - 1;
++}
++
+ /* Copy each enabled layer's surface into the panel memory (CPU backend). */
+ void
+ AppleCLCD::present(const uint8_t *rec, uint32_t swapID)
+@@ -687,66 +719,49 @@
+ 			OSSafeReleaseNULL(s);
+ 			continue;
+ 		}
+-		/* Logical (presented) display coordinates -> panel coordinates. */
+-		dx -= fOffX;
+-		dy -= fOffY;
+-		if (dx < 0) {
+-			sx -= dx;
+-			w += dx;
+-			dx = 0;
+-		}
+-		if (dy < 0) {
+-			sy -= dy;
+-			h += dy;
+-			dy = 0;
+-		}
+-		uintptr_t src = s->kernelAddress();
+-		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
+-		if (w <= 0 || h <= 0) {
+-			w = (int32_t)s->width;
+-			h = (int32_t)s->height;
+-		}
+-		if (sx < 0 || sy < 0) {
+-			sx = sy = 0;
+-		}
+-		if (w > (int32_t)s->width - sx) {
+-			w = (int32_t)s->width - sx;
+-		}
+-		if (h > (int32_t)s->height - sy) {
+-			h = (int32_t)s->height - sy;
+-		}
+-		if (w > (int32_t)fWidth - dx) {
+-			w = (int32_t)fWidth - dx;
+-		}
+-		if (h > (int32_t)fHeight - dy) {
+-			h = (int32_t)fHeight - dy;
+-		}
+-		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
+-		    (uint64_t)(sx + w) * bpe;
+-		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
+-		    s->memory == NULL || last > s->memory->getLength()) {
+-			src = 0;
+-		}
+-		bool wide = bpe == 8 && s->pixelFormat == KPF_W40A;
+-		if (wide && (s->bytesPerRow < (uint64_t)s->width * bpe || last > s->allocSize)) src = 0;
+-
+-		if (src != 0 && ((bpe == 4 && s->pixelFormat == KEBAB_FB_FORMAT_BGRA) || wide) && s->planeCount == 0) {
++		/* Validate the entire requested source before taking the console or
++		 * writing device memory. Destination clipping never shifts the source
++		 * origin: every physical pixel maps through the logical rectangle. */
++        uintptr_t src = s->kernelAddress();
++        uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
++        bool wide = bpe == 8 && s->pixelFormat == KPF_W40A;
++        int32_t sw = (int32_t)get32(a, 8), sh = (int32_t)get32(a, 12);
++        if (w == 0 && h == 0) { w = (int32_t)s->width; h = (int32_t)s->height; }
++        if (sw == 0 && sh == 0) { sw = w; sh = h; }
++        int32_t left, top, right, bottom;
++        bool valid = src && s->memory && s->planeCount == 0 &&
++            s->elementWidth == 1 && s->elementHeight == 1 &&
++            ((bpe == 4 && s->pixelFormat == KEBAB_FB_FORMAT_BGRA) || wide) &&
++            s->width && s->height && s->width <= 16384 && s->height <= 16384 &&
++            sx >= 0 && sy >= 0 && sw > 0 && sh > 0 &&
++            (uint64_t)sx + sw <= s->width && (uint64_t)sy + sh <= s->height &&
++            s->bytesPerRow >= (uint64_t)s->width * bpe &&
++            (uint64_t)s->offset + (uint64_t)(sy + sh - 1) * s->bytesPerRow +
++                (uint64_t)(sx + sw) * bpe <= s->memory->getLength() &&
++            (uint64_t)s->offset + (uint64_t)(sy + sh - 1) * s->bytesPerRow +
++                (uint64_t)(sx + sw) * bpe <= s->allocSize &&
++            kebab_fb_panel_rect(dx, dy, w, h, fLogicalW, fLogicalH,
++                fWidth, fHeight, &left, &top, &right, &bottom);
++        if (valid) {
+             kebab_fb_handoff_console(&fConsolePaused, s->pixelFormat, s->planeCount,
+-                dx == 0 && dy == 0 && w == (int32_t)fWidth && h == (int32_t)fHeight);
+-			trace.bytes += (uint64_t)(size_t)w * 4 * (uint64_t)h;
+-			for (int32_t y = 0; y < h; y++) {
++                left == 0 && top == 0 && right == (int32_t)fWidth && bottom == (int32_t)fHeight);
++            for (int32_t y = top; y < bottom; y++) {
+                 if (panic_active()) { s->release(); return; }
+-                if (wide) {
+-                    volatile uint32_t *to=(volatile uint32_t *)(fPixels+(uint64_t)(dy+y)*fRowBytes+(uint64_t)dx*4);
+-                    const uint8_t *from=(const uint8_t *)(src+s->offset+(uint64_t)(sy+y)*s->bytesPerRow+(uint64_t)sx*8);
+-                    for(int32_t x=0;x<w;x++)to[x]=kpf_gop_pixel(from+(uint64_t)x*8);
+-                    continue;
++                uint32_t iy = sy + kebab_fb_sample(y, fHeight, fLogicalH, dy, h, sh);
++                volatile uint32_t *to = (volatile uint32_t *)(fPixels + (uint64_t)y * fRowBytes);
++                const uint8_t *row = (const uint8_t *)(src + s->offset + (uint64_t)iy * s->bytesPerRow);
++                for (int32_t x = left; x < right; x++) {
++                    uint32_t ix = sx + kebab_fb_sample(x, fWidth, fLogicalW, dx, w, sw);
++                    const uint8_t *pixel = row + (uint64_t)ix * bpe;
++                    /* GOP may be Device memory. Keep individual aligned
++                     * 32-bit volatile stores, including the BGRA path. */
++                    to[x] = wide ? kpf_gop_pixel(pixel) :
++                        ((uint32_t)pixel[0] | (uint32_t)pixel[1] << 8 |
++                         (uint32_t)pixel[2] << 16 | (uint32_t)pixel[3] << 24);
+                 }
+-				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+-				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+-				    (size_t)w * 4);
+-			}
+-		} else trace.rejected++;
++                trace.bytes += (uint64_t)(right - left) * 4;
++            }
++        } else trace.rejected++;
+ 		s->release();
+ 	}
+ 
+--- a/iokit/Kernel/arm/kebab_aks_userclient_impl.h
++++ b/iokit/Kernel/arm/kebab_aks_userclient_impl.h
+@@ -122,6 +122,13 @@
+    }
+   }
+  }
++ /* Status observations only; no secret, key, blob, or verification input. */
++ if(selector==7 && result==kIOReturnSuccess && a->scalarOutputCount==1 && a->scalarOutput) {
++  uint32_t state=(uint32_t)a->scalarOutput[0];
++  IOLog("KEBAB PASSCODE AKS: pid=%d selector=7 lock-state=0x%x DeviceLocked=%u FirstUnlock=%u; original status output, no mutation\n",
++      proc_selfpid(),state,!!(state&1u),!!(state&4u));
++ }
++ if(selector==17)IOLog("KEBAB PASSCODE AKS: pid=%d selector=17 result=%x; status DER only, original decoder decides PasscodeSet\n",proc_selfpid(),result);
+  /* Fixed metadata only: key bytes are never logged. */
+  static uint32_t wrap_reports;
+  if((selector==10||selector==11)&&in==2&&a->scalarInput&&
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -486,6 +486,36 @@
+         state.shape_class,state.exclusion[0],state.exclusion[1],state.exclusion[2],state.exclusion[3]);
+ }
+ 
++/* Original20H392 SBFMobileKeyBag singleton. Read only the two boolean
++ * caches used by the original getters, never call a getter or unlock API.
++ * An initialized singleton is not proof its asynchronous update has run. */
++static int
++kebab_passcode_observe(vm_map_t map, uint8_t state[2])
++{
++    uint64_t code, once, instance, isa, again_once, again_instance;
++    uint32_t passcode_offset, unlock_offset;
++    uint8_t again[2];
++    if (!kebab_ca_u64(map, 0x18e60b08cULL, &code) || code != 0x3940c108a9422408ULL ||
++        !kebab_ca_u32(map, 0x1dd020f88ULL, &passcode_offset) || passcode_offset != 0x30 ||
++        !kebab_ca_u32(map, 0x1dd020f8cULL, &unlock_offset) || unlock_offset != 0x31) return 1;
++    if (!kebab_ca_u64(map, 0x1dd025c08ULL, &once) || once != UINT64_MAX ||
++        !kebab_ca_u64(map, 0x1dd025c00ULL, &instance) || !instance || (instance & 7)) return 2;
++    if (!kebab_ca_u64(map, instance, &isa) || !kebab_shell_isa(isa, 0x1dd021d40ULL)) return 3;
++    if (!kebab_plugin_user_copy(map, instance + 0x30, state, 2) || state[0] > 1 || state[1] > 1 ||
++        !kebab_plugin_user_copy(map, instance + 0x30, again, 2) || memcmp(state, again, 2) ||
++        !kebab_ca_u64(map, 0x1dd025c08ULL, &again_once) || again_once != once ||
++        !kebab_ca_u64(map, 0x1dd025c00ULL, &again_instance) || again_instance != instance) return 4;
++    return 0;
++}
++static void
++kebab_passcode_report(vm_map_t map)
++{
++    uint8_t state[2] = {};
++    int error = kebab_passcode_observe(map, state);
++    if (error) printf("KEBAB PASSCODE SBF: result=%d; singleton caches unavailable/changed, no inferred answer\n",error);
++    else printf("KEBAB PASSCODE SBF: result=0 PasscodeSet=%u FirstUnlock=%u; original SBFMobileKeyBag boolean caches, readonly best effort, asynchronous initialization possible\n",state[0],state[1]);
++}
++
+ static void
+ kebab_identity_user_report(vm_map_t map)
+ {
+@@ -497,6 +527,7 @@
+         return;
+     }
+     kebab_ui_screen_report(map);
++    kebab_passcode_report(map);
+     uint32_t value;
+     if (kebab_identity_initialized_u32(map, 0x1e1d7c7d0ULL, 0x1e1d7c740ULL, &value)) {
+         const char *name = value == 1 || value == 11 ? "iPhone" : value == 2 ? "iPod" : value == 3 ? "iPad" : "other";

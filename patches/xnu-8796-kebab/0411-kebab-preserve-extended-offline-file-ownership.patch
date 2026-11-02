@@ -1,0 +1,131 @@
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -137,6 +137,8 @@
+     VATTR_WANTED(&attr, va_fileid); VATTR_WANTED(&attr, va_data_size); VATTR_WANTED(&attr, va_acl);
+     VATTR_WANTED(&attr, va_create_time); VATTR_WANTED(&attr, va_access_time);
+     VATTR_WANTED(&attr, va_modify_time); VATTR_WANTED(&attr, va_change_time);
++    VATTR_WANTED(&attr, va_uuuid); VATTR_WANTED(&attr, va_guuid);
++    VATTR_WANTED(&attr, va_nlink); VATTR_WANTED(&attr, va_backup_time);
+     int error = vnode_getattr(file, &attr, context);
+     size_t xattrs = 0;
+     int xerror = error ? error : vn_listxattr(file, NULL, &xattrs, 0, context);
+@@ -149,6 +151,14 @@
+         (long long)attr.va_access_time.tv_sec,attr.va_access_time.tv_nsec,
+         (long long)attr.va_modify_time.tv_sec,attr.va_modify_time.tv_nsec,
+         (long long)attr.va_change_time.tv_sec,attr.va_change_time.tv_nsec);
++    unsigned metadata_flags=(VATTR_IS_SUPPORTED(&attr,va_uuuid)?1u:0u)|(VATTR_IS_SUPPORTED(&attr,va_guuid)?2u:0u)|(VATTR_IS_SUPPORTED(&attr,va_backup_time)?4u:0u);
++    char owner_uuid[33]={},group_uuid[33]={};static const char hex[]="0123456789abcdef";
++    uint8_t owner[16]={},group[16]={};
++    if(metadata_flags&1)memcpy(owner,&attr.va_uuuid,16);
++    if(metadata_flags&2)memcpy(group,&attr.va_guuid,16);
++    for(unsigned i=0;i<16;i++){owner_uuid[2*i]=hex[owner[i]>>4];owner_uuid[2*i+1]=hex[owner[i]&15];group_uuid[2*i]=hex[group[i]>>4];group_uuid[2*i+1]=hex[group[i]&15];}
++    printf("KEBAB OFFLINE PREF OWNER: index=%u metadata-flags=0x%x nlink=%llu owner-uuid=%s group-uuid=%s backup=%lld.%09ld; readonly\n",
++        index,metadata_flags,attr.va_nlink,owner_uuid,group_uuid,(long long)attr.va_backup_time.tv_sec,attr.va_backup_time.tv_nsec);
+     if (attr.va_acl) kauth_acl_free(attr.va_acl);
+ }
+ 
+--- a/bsd/kern/kebab_offline_setup_impl.h
++++ b/bsd/kern/kebab_offline_setup_impl.h
+@@ -13,14 +13,22 @@
+     uint32_t uid,gid,mode,flags,protection,reserved2;
+     int64_t times[8];
+     uint64_t current_fileid;
++    uint32_t metadata_flags,reserved3;
++    uint8_t owner_uuid[16],group_uuid[16];
++    uint64_t nlink;
++    int64_t backup_time[2];
+ };
+-_Static_assert(sizeof(struct kebab_offline_entry)==224,"offline plan ABI");
++_Static_assert(sizeof(struct kebab_offline_entry)==288,"offline plan ABI");
+ struct kebab_offline_record {
+     bool exists;
+     uint64_t fileid,size;
+     uint8_t hash[32],acl_hash[32];
+     uint32_t uid,gid,mode,flags,protection,acl_bytes;
+     int64_t times[8];
++    uint32_t metadata_flags;
++    uint8_t owner_uuid[16],group_uuid[16];
++    uint64_t nlink;
++    int64_t backup_time[2];
+ };
+ struct kebab_offline_io {
+     int (*record)(unsigned,unsigned,struct kebab_offline_record *);
+@@ -35,7 +43,10 @@
+         memcmp(r->hash,old?e->old_hash:e->new_hash,32) ||
+         (old && r->fileid!=e->fileid) || r->uid!=e->uid || r->gid!=e->gid ||
+         r->mode!=e->mode || r->flags!=e->flags || r->protection!=e->protection ||
+-        r->acl_bytes!=e->acl_bytes || memcmp(r->acl_hash,e->acl_hash,32)) return false;
++        r->acl_bytes!=e->acl_bytes || memcmp(r->acl_hash,e->acl_hash,32) ||
++        r->metadata_flags!=e->metadata_flags || r->nlink!=e->nlink ||
++        memcmp(r->owner_uuid,e->owner_uuid,16)||memcmp(r->group_uuid,e->group_uuid,16)||
++        memcmp(r->backup_time,e->backup_time,sizeof(e->backup_time))) return false;
+     /* Rename legitimately changes ctime. Original full metadata is retained
+      * in the sealed host backup; old inode/ACL/protection and other times must
+      * agree on device. Do not claim forensic ctime restoration. */
+@@ -115,9 +126,10 @@
+         unsigned slot=e->index==0?0:e->index==8?1:e->index==13?2:e->index==14?3:4;
+         if(slot==4||(seen&(1u<<slot))||e->reserved||e->reserved2||!e->fileid||!e->old_size||
+             e->old_size>KEBAB_OFFLINE_MAX_FILE||e->new_size>KEBAB_OFFLINE_MAX_FILE||
+-            e->protection!=4||e->flags||e->acl_bytes>4096||
++            e->protection!=4||e->flags||e->acl_bytes>4096||e->reserved3||(e->metadata_flags&~7u)||e->nlink!=1||
+             e->uid!=(e->index==13?0:501)||(e->mode&0170000)!=0100000)return EINVAL;
+         for(unsigned j=0;j<4;j++)if(e->times[j*2+1]<0||e->times[j*2+1]>=1000000000)return EINVAL;
++        if((e->metadata_flags&4)&&(e->backup_time[1]<0||e->backup_time[1]>=1000000000))return EINVAL;
+         seen|=1u<<slot;uint32_t length=head[2]==1?e->new_size:0;
+         if(head[2]==1&&((e->index==0&&length)||(e->index!=0&&!length)))return EINVAL;
+         if(head[2]==2&&e->new_size&&!e->current_fileid)return EINVAL;
+@@ -164,14 +176,20 @@
+     VATTR_WANTED(a,va_gid);VATTR_WANTED(a,va_mode);VATTR_WANTED(a,va_flags);VATTR_WANTED(a,va_acl);
+     VATTR_WANTED(a,va_dataprotect_class);VATTR_WANTED(a,va_create_time);VATTR_WANTED(a,va_access_time);
+     VATTR_WANTED(a,va_modify_time);VATTR_WANTED(a,va_change_time);
++    VATTR_WANTED(a,va_uuuid);VATTR_WANTED(a,va_guuid);VATTR_WANTED(a,va_nlink);VATTR_WANTED(a,va_backup_time);
+ }
+ static bool
+ kebab_offline_attributes(struct vnode_attr *a,struct kebab_offline_record *r)
+ {
+-    if((a->va_supported&a->va_active)!=a->va_active ||
++    uint64_t required=a->va_active&~(VNODE_ATTR_va_uuuid|VNODE_ATTR_va_guuid|VNODE_ATTR_va_backup_time);
++    if((a->va_supported&required)!=required ||
+         (a->va_acl&&a->va_acl->acl_entrycount>128))return false;
+     r->exists=true;r->fileid=a->va_fileid;r->size=a->va_data_size;r->uid=a->va_uid;r->gid=a->va_gid;
+-    r->mode=a->va_mode;r->flags=a->va_flags;r->protection=a->va_dataprotect_class;
++    r->mode=a->va_mode;r->flags=a->va_flags;r->protection=a->va_dataprotect_class;r->nlink=a->va_nlink;
++    r->metadata_flags=(VATTR_IS_SUPPORTED(a,va_uuuid)?1u:0u)|(VATTR_IS_SUPPORTED(a,va_guuid)?2u:0u)|(VATTR_IS_SUPPORTED(a,va_backup_time)?4u:0u);
++    if(r->metadata_flags&1)memcpy(r->owner_uuid,&a->va_uuuid,16);
++    if(r->metadata_flags&2)memcpy(r->group_uuid,&a->va_guuid,16);
++    if(r->metadata_flags&4){r->backup_time[0]=a->va_backup_time.tv_sec;r->backup_time[1]=a->va_backup_time.tv_nsec;}
+     r->acl_bytes=a->va_acl?(uint32_t)KAUTH_ACL_COPYSIZE(a->va_acl):0;
+     kebab_offline_sha(a->va_acl,r->acl_bytes,r->acl_hash);
+     const struct timespec times[]={a->va_create_time,a->va_access_time,a->va_modify_time,a->va_change_time};
+@@ -214,7 +232,9 @@
+     kebab_offline_want(&again);if(!error)error=vnode_getattr(file,&again,context);
+     if(!error&&(!kebab_offline_attributes(&again,&b)||a.fileid!=b.fileid||a.size!=b.size||a.uid!=b.uid||
+         a.gid!=b.gid||a.mode!=b.mode||a.flags!=b.flags||a.protection!=b.protection||
+-        a.acl_bytes!=b.acl_bytes||memcmp(a.acl_hash,b.acl_hash,32)||memcmp(a.times,b.times,sizeof(a.times))))error=EAGAIN;
++        a.acl_bytes!=b.acl_bytes||memcmp(a.acl_hash,b.acl_hash,32)||memcmp(a.times,b.times,sizeof(a.times))||
++        a.metadata_flags!=b.metadata_flags||a.nlink!=b.nlink||memcmp(a.owner_uuid,b.owner_uuid,16)||
++        memcmp(a.group_uuid,b.group_uuid,16)||memcmp(a.backup_time,b.backup_time,sizeof(a.backup_time))))error=EAGAIN;
+     if(!error){kebab_offline_sha(data,size,a.hash);*output=a;}
+     if(data)kfree_data(data,size);if(check)kfree_data(check,size);
+     if(first.va_acl)kauth_acl_free(first.va_acl);if(again.va_acl)kauth_acl_free(again.va_acl);vnode_put(file);return error;
+@@ -240,6 +260,8 @@
+         struct vnode_attr create={};VATTR_INIT(&create);
+         VATTR_SET(&create,va_uid,old.va_uid);VATTR_SET(&create,va_gid,old.va_gid);VATTR_SET(&create,va_mode,old.va_mode&07777);
+         VATTR_SET(&create,va_dataprotect_class,old.va_dataprotect_class);VATTR_SET(&create,va_acl,old.va_acl);
++        if(e->metadata_flags&1)VATTR_SET(&create,va_uuuid,old.va_uuuid);
++        if(e->metadata_flags&2)VATTR_SET(&create,va_guuid,old.va_guuid);
+         int flags=FREAD|FWRITE|O_CREAT|O_EXCL|O_NOFOLLOW;
+         error=vn_open_auth(ndp,&flags,&create,NULLVP);if(!error)file=ndp->ni_vp;
+         kfree_type(struct nameidata,ndp);
+@@ -252,9 +274,11 @@
+     if(!error){
+         struct vnode_attr times={};VATTR_INIT(&times);VATTR_SET(&times,va_create_time,old.va_create_time);
+         VATTR_SET(&times,va_access_time,old.va_access_time);VATTR_SET(&times,va_modify_time,old.va_modify_time);
++        if(e->metadata_flags&4)VATTR_SET(&times,va_backup_time,old.va_backup_time);
+ #if CONFIG_MACF
+         struct attrlist requested={};requested.bitmapcount=ATTR_BIT_MAP_COUNT;
+         requested.commonattr=ATTR_CMN_CRTIME|ATTR_CMN_ACCTIME|ATTR_CMN_MODTIME;
++        if(e->metadata_flags&4)requested.commonattr|=ATTR_CMN_BKUPTIME;
+         error=mac_vnode_check_setattrlist(context,file,&requested);
+         if(!error)error=mac_vnode_check_setutimes(context,file,old.va_access_time,old.va_modify_time);
+ #endif

@@ -1,0 +1,312 @@
+--- a/iokit/Kernel/arm/KebabHIDInput.cpp
++++ b/iokit/Kernel/arm/KebabHIDInput.cpp
+@@ -1,6 +1,7 @@
+ /* SPDX-License-Identifier: BSD-2-Clause-Patent */
+ /* Hardware snapshots -> unchanged 20H392 HID parser. No synthetic keys. */
+ #include "KebabOriginalHIDDevice.h"
++#include "KebabOriginalHIDEventDriver.h"
+ #include <IOKit/IOBufferMemoryDescriptor.h>
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOWorkLoop.h>
+@@ -14,6 +15,43 @@
+ #include <sys/errno.h>
+ #define KEBAB_HID_KERNEL 1
+ #include "../../../bsd/dev/kebab_hid_reports.h"
++
++
++/* Original generic report parsing does not associate each digitizer event
++ * with the built-in panel. Backboardd tests event field0xb0019 separately
++ * from the service registry property and otherwise routes it as a touchpad.
++ * This subclass adds that physical association to real reports only. */
++class KebabTouchEventDriver : public IOHIDEventDriver {
++    OSDeclareDefaultStructors(KebabTouchEventDriver);
++    uint64_t integratedEvents=0;
++public:
++    bool handleStart(IOService *provider) override;
++    void dispatchEvent(IOHIDEvent *event,IOOptionBits options=0) override;
++};
++OSDefineMetaClassAndStructors(KebabTouchEventDriver,IOHIDEventDriver);
++bool KebabTouchEventDriver::handleStart(IOService *provider)
++{
++    IOService *device=provider?provider->getProvider():nullptr;
++    OSNumber *role=device?OSDynamicCast(OSNumber,device->getProperty("kebab,hid-role")):nullptr;
++    if (!provider || !provider->metaCast("IOHIDInterface") ||
++        !device || !device->metaCast("KebabHIDDevice") || !role ||
++        role->unsigned32BitValue()!=KEBAB_HID_TOUCH) return false;
++    bool result=IOHIDEventDriver::handleStart(provider);
++    IOLog("KEBAB HID PANEL: original translator start=%u; physical touch only\n",result);
++    return result;
++}
++void KebabTouchEventDriver::dispatchEvent(IOHIDEvent *event,IOOptionBits options)
++{
++    if (event && event->getType()==11) {
++        SInt32 before=event->getIntegerValue(0xb0019,0);
++        event->setIntegerValue(0xb0019,1,0);
++        integratedEvents++;
++        if (integratedEvents<=16 || !(integratedEvents&(integratedEvents-1)))
++            IOLog("KEBAB HID PANEL: digitizer=%llu display-integrated=%d->%d; same original event\n",
++                integratedEvents,before,event->getIntegerValue(0xb0019,0));
++    }
++    IOHIDEventDriver::dispatchEvent(event,options);
++}
+ 
+ static LCK_GRP_DECLARE(khid_group,"kebab-hid");
+ static LCK_MTX_DECLARE(khid_lock,&khid_group);
+@@ -240,6 +278,7 @@
+     added=true;
+     if (!claim(role,(uintptr_t)this)) {stopInput();return false;}
+     claimed=true;
++    setProperty("kebab,hid-role",role,32);
+     setProperty("Built-In",true);
+     if (role==KEBAB_HID_TOUCH) {
+         setProperty("DisplayIntegrated",true);setProperty("DigitizerCollectionDispatch",true);
+--- a/iokit/Kernel/arm/KebabOriginalHIDBindings.cpp
++++ b/iokit/Kernel/arm/KebabOriginalHIDBindings.cpp
+@@ -56,3 +56,74 @@
+ __asm__(".globl __ZNK11IOHIDDevice25newPrimaryUsagePageNumberEv\n.set __ZNK11IOHIDDevice25newPrimaryUsagePageNumberEv, 0xfffffe00089626d8");
+ __asm__(".globl __ZNK11IOHIDDevice33getMemoryWithCurrentElementValuesEv\n.set __ZNK11IOHIDDevice33getMemoryWithCurrentElementValuesEv, 0xfffffe00089632bc");
+ __asm__(".globl __ZTV11IOHIDDevice\n.set __ZTV11IOHIDDevice, 0xfffffe0009ef62c0");
++
++/* Exact20H392 report-translator subclass ABI; original code is retained. */
++__asm__(".globl __ZN16IOHIDEventDriver10gMetaClassE\n.set __ZN16IOHIDEventDriver10gMetaClassE, 0xfffffe000ac4ac30");
++__asm__(".globl __ZN16IOHIDEventDriver10getProductEv\n.set __ZN16IOHIDEventDriver10getProductEv, 0xfffffe00089779e0");
++__asm__(".globl __ZN16IOHIDEventDriver10getVersionEv\n.set __ZN16IOHIDEventDriver10getVersionEv, 0xfffffe0008977a90");
++__asm__(".globl __ZN16IOHIDEventDriver10handleStopEP9IOService\n.set __ZN16IOHIDEventDriver10handleStopEP9IOService, 0xfffffe0008977ac8");
++__asm__(".globl __ZN16IOHIDEventDriver11getVendorIDEv\n.set __ZN16IOHIDEventDriver11getVendorIDEv, 0xfffffe0008977a3c");
++__asm__(".globl __ZN16IOHIDEventDriver11handleStartEP9IOService\n.set __ZN16IOHIDEventDriver11handleStartEP9IOService, 0xfffffe00089766b8");
++__asm__(".globl __ZN16IOHIDEventDriver12didTerminateEP9IOServicejPb\n.set __ZN16IOHIDEventDriver12didTerminateEP9IOServicejPb, 0xfffffe0008977acc");
++__asm__(".globl __ZN16IOHIDEventDriver12getProductIDEv\n.set __ZN16IOHIDEventDriver12getProductIDEv, 0xfffffe0008977a74");
++__asm__(".globl __ZN16IOHIDEventDriver12getTransportEv\n.set __ZN16IOHIDEventDriver12getTransportEv, 0xfffffe00089779a0");
++__asm__(".globl __ZN16IOHIDEventDriver13dispatchEventEP10IOHIDEventj\n.set __ZN16IOHIDEventDriver13dispatchEventEP10IOHIDEventj, 0xfffffe000897fff8");
++__asm__(".globl __ZN16IOHIDEventDriver13getLocationIDEv\n.set __ZN16IOHIDEventDriver13getLocationIDEv, 0xfffffe0008977a20");
++__asm__(".globl __ZN16IOHIDEventDriver13setPropertiesEP8OSObject\n.set __ZN16IOHIDEventDriver13setPropertiesEP8OSObject, 0xfffffe000897ad10");
++__asm__(".globl __ZN16IOHIDEventDriver14getCountryCodeEv\n.set __ZN16IOHIDEventDriver14getCountryCodeEv, 0xfffffe0008977aac");
++__asm__(".globl __ZN16IOHIDEventDriver15getElementValueEjj\n.set __ZN16IOHIDEventDriver15getElementValueEjj, 0xfffffe000898020c");
++__asm__(".globl __ZN16IOHIDEventDriver15getManufacturerEv\n.set __ZN16IOHIDEventDriver15getManufacturerEv, 0xfffffe00089779c0");
++__asm__(".globl __ZN16IOHIDEventDriver15getSerialNumberEv\n.set __ZN16IOHIDEventDriver15getSerialNumberEv, 0xfffffe0008977a00");
++__asm__(".globl __ZN16IOHIDEventDriver15setElementValueEjjj\n.set __ZN16IOHIDEventDriver15setElementValueEjjj, 0xfffffe0008980120");
++__asm__(".globl __ZN16IOHIDEventDriver17copyMatchingEventEP12OSDictionary\n.set __ZN16IOHIDEventDriver17copyMatchingEventEP12OSDictionary, 0xfffffe000897bc4c");
++__asm__(".globl __ZN16IOHIDEventDriver17getReportElementsEv\n.set __ZN16IOHIDEventDriver17getReportElementsEv, 0xfffffe000897c4e0");
++__asm__(".globl __ZN16IOHIDEventDriver17getVendorIDSourceEv\n.set __ZN16IOHIDEventDriver17getVendorIDSourceEv, 0xfffffe0008977a58");
++__asm__(".globl __ZN16IOHIDEventDriver21handleInterruptReportEyP18IOMemoryDescriptor15IOHIDReportTypej\n.set __ZN16IOHIDEventDriver21handleInterruptReportEyP18IOMemoryDescriptor15IOHIDReportTypej, 0xfffffe000897c4e8");
++__asm__(".globl __ZN16IOHIDEventDriver4freeEv\n.set __ZN16IOHIDEventDriver4freeEv, 0xfffffe0008976210");
++__asm__(".globl __ZN16IOHIDEventDriver4initEP12OSDictionary\n.set __ZN16IOHIDEventDriver4initEP12OSDictionary, 0xfffffe00089761c0");
++__asm__(".globl __ZN16IOHIDEventDriver9copyEventEjP10IOHIDEventj\n.set __ZN16IOHIDEventDriver9copyEventEjP10IOHIDEventj, 0xfffffe000897b604");
++__asm__(".globl __ZN16IOHIDEventDriverC2EPK11OSMetaClass\n.set __ZN16IOHIDEventDriverC2EPK11OSMetaClass, 0xfffffe0008976028");
++__asm__(".globl __ZN16IOHIDEventDriverD2Ev\n.set __ZN16IOHIDEventDriverD2Ev, 0xfffffe0008976048");
++__asm__(".globl __ZN17IOHIDEventService10handleOpenEP9IOServicejPv\n.set __ZN17IOHIDEventService10handleOpenEP9IOServicejPv, 0xfffffe00089723d4");
++__asm__(".globl __ZN17IOHIDEventService11handleCloseEP9IOServicej\n.set __ZN17IOHIDEventService11handleCloseEP9IOServicej, 0xfffffe00089724a8");
++__asm__(".globl __ZN17IOHIDEventService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient\n.set __ZN17IOHIDEventService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient, 0xfffffe0008974118");
++__asm__(".globl __ZN17IOHIDEventService13openForClientEP9IOServicejP12OSDictionaryPPv\n.set __ZN17IOHIDEventService13openForClientEP9IOServicejP12OSDictionaryPPv, 0xfffffe00089742d0");
++__asm__(".globl __ZN17IOHIDEventService14closeForClientEP9IOServicePvj\n.set __ZN17IOHIDEventService14closeForClientEP9IOServicePvj, 0xfffffe00089742d8");
++__asm__(".globl __ZN17IOHIDEventService14completeSetLEDEP8OSActioniy\n.set __ZN17IOHIDEventService14completeSetLEDEP8OSActioniy, 0xfffffe0008974e4c");
++__asm__(".globl __ZN17IOHIDEventService15getPrimaryUsageEv\n.set __ZN17IOHIDEventService15getPrimaryUsageEv, 0xfffffe000897406c");
++__asm__(".globl __ZN17IOHIDEventService17completeCopyEventEP8OSActionP10IOHIDEventy\n.set __ZN17IOHIDEventService17completeCopyEventEP8OSActionP10IOHIDEventy, 0xfffffe0008974e44");
++__asm__(".globl __ZN17IOHIDEventService17getReportIntervalEv\n.set __ZN17IOHIDEventService17getReportIntervalEv, 0xfffffe0008972f94");
++__asm__(".globl __ZN17IOHIDEventService18copyEventForClientEP8OSObjectjPv\n.set __ZN17IOHIDEventService18copyEventForClientEP8OSObjectjPv, 0xfffffe00089742b4");
++__asm__(".globl __ZN17IOHIDEventService18matchPropertyTableEP12OSDictionaryPi\n.set __ZN17IOHIDEventService18matchPropertyTableEP12OSDictionaryPi, 0xfffffe0008971b2c");
++__asm__(".globl __ZN17IOHIDEventService19getDeviceUsagePairsEv\n.set __ZN17IOHIDEventService19getDeviceUsagePairsEv, 0xfffffe0008972dbc");
++__asm__(".globl __ZN17IOHIDEventService19getPrimaryUsagePageEv\n.set __ZN17IOHIDEventService19getPrimaryUsagePageEv, 0xfffffe0008973fc8");
++__asm__(".globl __ZN17IOHIDEventService19setSystemPropertiesEP12OSDictionary\n.set __ZN17IOHIDEventService19setSystemPropertiesEP12OSDictionary, 0xfffffe0008971bc4");
++__asm__(".globl __ZN17IOHIDEventService20dispatchUnicodeEventEyPhjjij\n.set __ZN17IOHIDEventService20dispatchUnicodeEventEyPhjjij, 0xfffffe000897382c");
++__asm__(".globl __ZN17IOHIDEventService21completeSetPropertiesEP8OSActioniy\n.set __ZN17IOHIDEventService21completeSetPropertiesEP8OSActioniy, 0xfffffe0008974e48");
++__asm__(".globl __ZN17IOHIDEventService21dispatchKeyboardEventEyjjjhhhj\n.set __ZN17IOHIDEventService21dispatchKeyboardEventEyjjjhhhj, 0xfffffe00089744f8");
++__asm__(".globl __ZN17IOHIDEventService21dispatchKeyboardEventEyjjjj\n.set __ZN17IOHIDEventService21dispatchKeyboardEventEyjjjj, 0xfffffe0008972b54");
++__asm__(".globl __ZN17IOHIDEventService22dispatchBiometricEventEyijj\n.set __ZN17IOHIDEventService22dispatchBiometricEventEyijj, 0xfffffe00089739c8");
++__asm__(".globl __ZN17IOHIDEventService22dispatchDigitizerEventEyjjbjiiiiiij\n.set __ZN17IOHIDEventService22dispatchDigitizerEventEyjjbjiiiiiij, 0xfffffe0008973724");
++__asm__(".globl __ZN17IOHIDEventService22setPropertiesForClientEP8OSObjectPv\n.set __ZN17IOHIDEventService22setPropertiesForClientEP8OSObjectPv, 0xfffffe00089742c4");
++__asm__(".globl __ZN17IOHIDEventService24dispatchScrollWheelEventEyiiij\n.set __ZN17IOHIDEventService24dispatchScrollWheelEventEyiiij, 0xfffffe0008972d28");
++__asm__(".globl __ZN17IOHIDEventService26dispatchTabletPointerEventEyjiiiP9IOGBoundsjiiiiiiiijj\n.set __ZN17IOHIDEventService26dispatchTabletPointerEventEyjiiiP9IOGBoundsjiiiiiiiijj, 0xfffffe0008972d40");
++__asm__(".globl __ZN17IOHIDEventService28dispatchAbsolutePointerEventEyiiP9IOGBoundsjbiiij\n.set __ZN17IOHIDEventService28dispatchAbsolutePointerEventEyiiP9IOGBoundsjbiiij, 0xfffffe0008972c7c");
++__asm__(".globl __ZN17IOHIDEventService28dispatchRelativePointerEventEyiijj\n.set __ZN17IOHIDEventService28dispatchRelativePointerEventEyiijj, 0xfffffe0008972c70");
++__asm__(".globl __ZN17IOHIDEventService28dispatchTabletProximityEventEyjbbjjj\n.set __ZN17IOHIDEventService28dispatchTabletProximityEventEyjbbjjj, 0xfffffe0008972d7c");
++__asm__(".globl __ZN17IOHIDEventService29dispatchMultiAxisPointerEventEyjiiiiiij\n.set __ZN17IOHIDEventService29dispatchMultiAxisPointerEventEyjiiiiiij, 0xfffffe000897301c");
++__asm__(".globl __ZN17IOHIDEventService33dispatchScrollWheelEventWithFixedEyiiij\n.set __ZN17IOHIDEventService33dispatchScrollWheelEventWithFixedEyiiij, 0xfffffe00089743d0");
++__asm__(".globl __ZN17IOHIDEventService35dispatchExtendedGameControllerEventEyiiiiiiiiiiiiiiiij\n.set __ZN17IOHIDEventService35dispatchExtendedGameControllerEventEyiiiiiiiiiiiiiiiij, 0xfffffe000897392c");
++__asm__(".globl __ZN17IOHIDEventService35dispatchStandardGameControllerEventEyiiiiiiiiiij\n.set __ZN17IOHIDEventService35dispatchStandardGameControllerEventEyiiiiiiiiiij, 0xfffffe000897389c");
++__asm__(".globl __ZN17IOHIDEventService41dispatchDigitizerEventWithTiltOrientationEyjjbjiiiiiiiij\n.set __ZN17IOHIDEventService41dispatchDigitizerEventWithTiltOrientationEyjjbjiiiiiiiij, 0xfffffe0008973754");
++__asm__(".globl __ZN17IOHIDEventService42dispatchDigitizerEventWithPolarOrientationEyjjbjiiiiiiiij\n.set __ZN17IOHIDEventService42dispatchDigitizerEventWithPolarOrientationEyjjbjiiiiiiiij, 0xfffffe00089737c0");
++__asm__(".globl __ZN17IOHIDEventService4openEP9IOServicejPvPFvP8OSObjectS4_S2_S4_jE\n.set __ZN17IOHIDEventService4openEP9IOServicejPvPFvP8OSObjectS4_S2_S4_jE, 0xfffffe0008973d50");
++__asm__(".globl __ZN17IOHIDEventService4stopEP9IOService\n.set __ZN17IOHIDEventService4stopEP9IOService, 0xfffffe0008971988");
++__asm__(".globl __ZN17IOHIDEventService54dispatchExtendedGameControllerEventWithOptionalButtonsEyiiiiiiiiiiiiiiiiiiiiiij\n.set __ZN17IOHIDEventService54dispatchExtendedGameControllerEventWithOptionalButtonsEyiiiiiiiiiiiiiiiiiiiiiij, 0xfffffe0008974e50");
++__asm__(".globl __ZN17IOHIDEventService56dispatchExtendedGameControllerEventWithThumbstickButtonsEyiiiiiiiiiiiiiiiiiij\n.set __ZN17IOHIDEventService56dispatchExtendedGameControllerEventWithThumbstickButtonsEyiiiiiiiiiiiiiiiiiij, 0xfffffe00089742dc");
++__asm__(".globl __ZN17IOHIDEventService5closeEP9IOServicej\n.set __ZN17IOHIDEventService5closeEP9IOServicej, 0xfffffe0008973a30");
++__asm__(".globl __ZN17IOHIDEventService5startEP9IOService\n.set __ZN17IOHIDEventService5startEP9IOService, 0xfffffe000897068c");
++__asm__(".globl __ZN17IOHIDEventService7messageEjP9IOServicePv\n.set __ZN17IOHIDEventService7messageEjP9IOServicePv, 0xfffffe0008974280");
++__asm__(".globl __ZN17IOHIDEventService8DispatchE5IORPC\n.set __ZN17IOHIDEventService8DispatchE5IORPC, 0xfffffe0008990f00");
++__asm__(".globl __ZNK17IOHIDEventService12handleIsOpenEPK9IOService\n.set __ZNK17IOHIDEventService12handleIsOpenEPK9IOService, 0xfffffe0008972540");
++__asm__(".globl __ZNK17IOHIDEventService21copyPropertyForClientEPKcPv\n.set __ZNK17IOHIDEventService21copyPropertyForClientEPKcPv, 0xfffffe00089742bc");
++__asm__(".globl __ZTV16IOHIDEventDriver\n.set __ZTV16IOHIDEventDriver, 0xfffffe0009ef8760");
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -38,6 +38,7 @@
+     "   { 'IOClass'=KebabHIDTransport; 'IOProviderClass'=KebabPmicKeys; 'kebab,hid-role'=1:32; 'IOMatchCategory'=KebabKeysHIDTransport; },"
+     "   { 'IOClass'=KebabHIDTransport; 'IOProviderClass'=KebabTouch; 'kebab,hid-role'=2:32; 'IOMatchCategory'=KebabTouchHIDTransport; },"
+     "   { 'IOClass'=KebabHIDDevice; 'IOProviderClass'=KebabHIDTransport; },"
++    "   { 'IOClass'=KebabTouchEventDriver; 'IOProviderClass'=IOHIDInterface; 'IOProbeScore'=10000:32; 'IOPropertyMatch'={ 'PrimaryUsagePage'=13:32; 'PrimaryUsage'=4:32; }; },"
+     "   { 'IOClass'=IOHIDEventDriver; 'IOProviderClass'=IOHIDInterface; 'CFBundleIdentifier'='com.apple.iokit.IOHIDFamily'; 'IOPropertyMatch'={ 'Transport'='SPMI'; }; 'DeviceUsagePairs'=({ 'DeviceUsagePage'=12:32; 'DeviceUsage'=1:32; }); 'IOProbeScore'=1000:32; },"
+     "   { 'IOClass'=IOHIDEventDriver; 'IOProviderClass'=IOHIDInterface; 'CFBundleIdentifier'='com.apple.iokit.IOHIDFamily'; 'IOPropertyMatch'={ 'Transport'='I2C'; }; 'DeviceUsagePairs'=({ 'DeviceUsagePage'=13:32; 'DeviceUsage'=4:32; }); 'IOProbeScore'=1000:32; },"
+     "   {"
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabOriginalHIDEventDriver.h
+@@ -0,0 +1,160 @@
++/*
++ *
++ * @APPLE_LICENSE_HEADER_START@
++ * 
++ * Copyright (c) 1999-2009 Apple Computer, Inc.  All Rights Reserved.
++ * 
++ * This file contains Original Code and/or Modifications of Original Code
++ * as defined in and that are subject to the Apple Public Source License
++ * Version 2.0 (the 'License'). You may not use this file except in
++ * compliance with the License. Please obtain a copy of the License at
++ * http://www.opensource.apple.com/apsl/ and read it before using this
++ * file.
++ * 
++ * The Original Code and all software distributed under the License are
++ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
++ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
++ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
++ * Please see the License for the specific language governing rights and
++ * limitations under the License.
++ * 
++ * @APPLE_LICENSE_HEADER_END@
++ */
++
++// Declaration-only recovery. Private fields are never accessed.
++// Exact20H392 object extents and every compiled virtual slot are audited.
++#pragma once
++#include "KebabOriginalHIDDevice.h"
++class OSArray; class OSString; class OSData; class OSAction; class IOHIDEvent;
++typedef uint32_t IOHIDEventType; typedef uint32_t IOHIDBiometricEventType;
++typedef uint32_t IOHIDEventField; typedef uint32_t IOHIDEventPhaseBits;
++typedef uint32_t IOHIDEventTimestampType; typedef double IOHIDDouble;
++struct IOGBounds; typedef UInt32 UnicodeEncodingType;
++class IOHIDEventService : public IOService {
++ OSDeclareDefaultStructors(IOHIDEventService);
++ uint64_t originalPrivateIOHIDEventService[8];
++public:
++typedef UInt32 DigitizerTransducerType; typedef UInt32 DigitizerOrientationType; typedef void (*Action)(OSObject*,OSObject*,void*,OSObject*,IOOptionBits);
++virtual kern_return_t Dispatch(const IORPC rpc) override;
++virtual void free(void) APPLE_KEXT_OVERRIDE;
++virtual bool handleOpen(IOService * client, IOOptionBits options, void * argument) APPLE_KEXT_OVERRIDE;
++virtual void handleClose(IOService * client, IOOptionBits options) APPLE_KEXT_OVERRIDE;
++virtual bool handleIsOpen(const IOService * client) const APPLE_KEXT_OVERRIDE;
++virtual bool handleStart( IOService * provider );
++virtual void handleStop( IOService * provider );
++virtual OSString * getTransport ();
++virtual UInt32 getLocationID ();
++virtual UInt32 getVendorID ();
++virtual UInt32 getVendorIDSource ();
++virtual UInt32 getProductID ();
++virtual UInt32 getVersion ();
++virtual UInt32 getCountryCode ();
++virtual OSString * getManufacturer ();
++virtual OSString * getProduct ();
++virtual OSString * getSerialNumber ();
++virtual OSArray * getReportElements();
++virtual IOReturn setElementValue ( UInt32 usagePage, UInt32 usage, UInt32 value );
++virtual UInt32 getElementValue ( UInt32 usagePage, UInt32 usage );
++virtual void dispatchKeyboardEvent( AbsoluteTime timeStamp, UInt32 usagePage, UInt32 usage, UInt32 value, IOOptionBits options);
++virtual void dispatchRelativePointerEvent( AbsoluteTime timeStamp, SInt32 dx, SInt32 dy, UInt32 buttonState, IOOptionBits options);
++virtual void dispatchAbsolutePointerEvent( AbsoluteTime timeStamp, SInt32 x, SInt32 y, IOGBounds * bounds, UInt32 buttonState, bool inRange, SInt32 tipPressure, SInt32 tipPressureMin, SInt32 tipPressureMax, IOOptionBits options);
++virtual void dispatchScrollWheelEvent( AbsoluteTime timeStamp, SInt32 deltaAxis1, SInt32 deltaAxis2, SInt32 deltaAxis3, IOOptionBits options);
++virtual void dispatchTabletPointerEvent( AbsoluteTime timeStamp, UInt32 transducerID, SInt32 x, SInt32 y, SInt32 z, IOGBounds * bounds, UInt32 buttonState, SInt32 tipPressure, SInt32 tipPressureMin, SInt32 tipPressureMax, SInt32 barrelPressure, SInt32 barrelPressureMin, SInt32 barrelPressureMax, SInt32 tiltX, SInt32 tiltY, UInt32 twist, IOOptionBits options);
++virtual void dispatchTabletProximityEvent( AbsoluteTime timeStamp, UInt32 transducerID, bool inRange, bool invert, UInt32 vendorTransducerUniqueID, UInt32 vendorTransducerSerialNumber, IOOptionBits options);
++virtual bool init(OSDictionary * properties) APPLE_KEXT_OVERRIDE;
++virtual bool start( IOService * provider ) APPLE_KEXT_OVERRIDE;
++virtual void stop( IOService * provider ) APPLE_KEXT_OVERRIDE;
++virtual bool matchPropertyTable(OSDictionary * table, SInt32 * score) APPLE_KEXT_OVERRIDE;
++virtual IOReturn setSystemProperties( OSDictionary * properties );
++virtual IOReturn setProperties( OSObject * properties ) APPLE_KEXT_OVERRIDE;
++virtual IOReturn newUserClient( task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties, IOUserClient ** handler ) APPLE_KEXT_OVERRIDE;
++virtual OSArray * getDeviceUsagePairs();
++virtual UInt32 getReportInterval();
++virtual void dispatchMultiAxisPointerEvent( AbsoluteTime timeStamp, UInt32 buttonState, IOFixed x, IOFixed y, IOFixed z, IOFixed rX, IOFixed rY, IOFixed rZ, IOOptionBits options);
++virtual void dispatchDigitizerEvent( AbsoluteTime timeStamp, UInt32 transducerID, DigitizerTransducerType type, bool inRange, UInt32 buttonState, IOFixed x, IOFixed y, IOFixed z, IOFixed tipPressure, IOFixed auxPressure, IOFixed twist, IOOptionBits options);
++virtual void dispatchDigitizerEventWithTiltOrientation( AbsoluteTime timeStamp, UInt32 ID, DigitizerTransducerType type, bool inRange, UInt32 buttonState, IOFixed x, IOFixed y, IOFixed z, IOFixed tipPressure, IOFixed auxPressure, IOFixed twist, IOFixed tiltX, IOFixed tiltY, IOOptionBits options);
++virtual void dispatchDigitizerEventWithPolarOrientation( AbsoluteTime timeStamp, UInt32 transducerID, DigitizerTransducerType type, bool inRange, UInt32 buttonState, IOFixed x, IOFixed y, IOFixed z, IOFixed tipPressure, IOFixed tanPressure, IOFixed twist, IOFixed altitude, IOFixed azimuth, IOOptionBits options);
++virtual void dispatchUnicodeEvent( AbsoluteTime timeStamp, UInt8 * payload, UInt32 length, UnicodeEncodingType encoding, IOFixed quality, IOOptionBits options);
++virtual bool open( IOService * client, IOOptionBits options, void * context, Action action);
++virtual void dispatchEvent(IOHIDEvent * event, IOOptionBits options);
++virtual UInt32 getPrimaryUsagePage();
++virtual UInt32 getPrimaryUsage();
++virtual IOHIDEvent * copyEvent( IOHIDEventType type, IOHIDEvent * matching, IOOptionBits options);
++virtual void dispatchStandardGameControllerEvent( AbsoluteTime timeStamp, IOFixed dpadUp, IOFixed dpadDown, IOFixed dpadLeft, IOFixed dpadRight, IOFixed faceX, IOFixed faceY, IOFixed faceA, IOFixed faceB, IOFixed shoulderL, IOFixed shoulderR, IOOptionBits options);
++virtual void dispatchExtendedGameControllerEvent( AbsoluteTime timeStamp, IOFixed dpadUp, IOFixed dpadDown, IOFixed dpadLeft, IOFixed dpadRight, IOFixed faceX, IOFixed faceY, IOFixed faceA, IOFixed faceB, IOFixed shoulderL1, IOFixed shoulderR1, IOFixed shoulderL2, IOFixed shoulderR2, IOFixed joystickX, IOFixed joystickY, IOFixed joystickZ, IOFixed joystickRz, IOOptionBits options);
++virtual void dispatchBiometricEvent( AbsoluteTime timeStamp, IOFixed level, IOHIDBiometricEventType eventType, IOOptionBits options);
++virtual IOHIDEvent * copyEventForClient (OSObject * copySpec, IOOptionBits options, void * clientContext);
++virtual OSObject * copyPropertyForClient (const char * aKey, void * clientContext) const;
++virtual IOReturn setPropertiesForClient (OSObject * properties, void * clientContext);
++virtual bool openForClient (IOService * client, IOOptionBits options, OSDictionary *property, void ** clientContext);
++virtual void closeForClient(IOService *client, void *context, IOOptionBits options);
++virtual void dispatchExtendedGameControllerEventWithThumbstickButtons( AbsoluteTime timeStamp, IOFixed dpadUp, IOFixed dpadDown, IOFixed dpadLeft, IOFixed dpadRight, IOFixed faceX, IOFixed faceY, IOFixed faceA, IOFixed faceB, IOFixed shoulderL1, IOFixed shoulderR1, IOFixed shoulderL2, IOFixed shoulderR2, IOFixed joystickX, IOFixed joystickY, IOFixed joystickZ, IOFixed joystickRz, boolean_t thumbstickButtonLeft, boolean_t thumbstickButtonRight, IOOptionBits options);
++virtual IOHIDEvent *copyMatchingEvent(OSDictionary *matching);
++virtual void dispatchScrollWheelEventWithFixed(AbsoluteTime timeStamp, IOFixed deltaAxis1, IOFixed deltaAxis2, IOFixed deltaAxis3, IOOptionBits options);
++virtual void dispatchKeyboardEvent(AbsoluteTime timeStamp, UInt32 usagePage, UInt32 usage, UInt32 value, UInt8 pressCount, UInt8 longPress, UInt8 clickSpeed, IOOptionBits options);
++virtual void completeCopyEvent (OSAction * action, IOHIDEvent * event, uint64_t context);
++virtual void completeSetProperties(OSAction * action, IOReturn status, uint64_t context);
++virtual void completeSetLED(OSAction * action, IOReturn status, uint64_t context);
++virtual void dispatchExtendedGameControllerEventWithOptionalButtons( AbsoluteTime timeStamp, IOFixed dpadUp, IOFixed dpadDown, IOFixed dpadLeft, IOFixed dpadRight, IOFixed faceX, IOFixed faceY, IOFixed faceA, IOFixed faceB, IOFixed shoulderL1, IOFixed shoulderR1, IOFixed shoulderL2, IOFixed shoulderR2, IOFixed joystickX, IOFixed joystickY, IOFixed joystickZ, IOFixed joystickRz, boolean_t thumbstickButtonLeft, boolean_t thumbstickButtonRight, IOFixed buttonL4, IOFixed buttonR4, IOFixed buttonL5, IOFixed buttonR5, IOOptionBits options);
++virtual void close( IOService * forClient, IOOptionBits options) APPLE_KEXT_OVERRIDE;
++virtual IOReturn message(UInt32 type, IOService * provider, void * argument) APPLE_KEXT_OVERRIDE;
++};
++class IOHIDEventDriver : public IOHIDEventService {
++ OSDeclareDefaultStructors(IOHIDEventDriver);
++ uint64_t originalPrivateIOHIDEventDriver[8];
++public:
++virtual void free(void) APPLE_KEXT_OVERRIDE;
++virtual OSArray * getReportElements(void) APPLE_KEXT_OVERRIDE;
++virtual bool handleStart( IOService * provider ) APPLE_KEXT_OVERRIDE;
++virtual void handleStop( IOService * provider ) APPLE_KEXT_OVERRIDE;
++virtual void handleInterruptReport ( AbsoluteTime timeStamp, IOMemoryDescriptor * report, IOHIDReportType reportType, UInt32 reportID);
++virtual OSString * getTransport (void) APPLE_KEXT_OVERRIDE;
++virtual UInt32 getLocationID (void) APPLE_KEXT_OVERRIDE;
++virtual UInt32 getVendorID (void) APPLE_KEXT_OVERRIDE;
++virtual UInt32 getVendorIDSource (void) APPLE_KEXT_OVERRIDE;
++virtual UInt32 getProductID (void) APPLE_KEXT_OVERRIDE;
++virtual UInt32 getVersion (void) APPLE_KEXT_OVERRIDE;
++virtual UInt32 getCountryCode (void) APPLE_KEXT_OVERRIDE;
++virtual OSString * getManufacturer (void) APPLE_KEXT_OVERRIDE;
++virtual OSString * getProduct (void) APPLE_KEXT_OVERRIDE;
++virtual OSString * getSerialNumber (void) APPLE_KEXT_OVERRIDE;
++virtual IOReturn setElementValue ( UInt32 usagePage, UInt32 usage, UInt32 value ) APPLE_KEXT_OVERRIDE;
++virtual UInt32 getElementValue ( UInt32 usagePage, UInt32 usage ) APPLE_KEXT_OVERRIDE;
++virtual void dispatchEvent(IOHIDEvent * event, IOOptionBits options) APPLE_KEXT_OVERRIDE;
++virtual bool init( OSDictionary * dictionary) APPLE_KEXT_OVERRIDE;
++virtual bool didTerminate( IOService * provider, IOOptionBits options, bool * defer ) APPLE_KEXT_OVERRIDE;
++virtual IOReturn setProperties( OSObject * properties ) APPLE_KEXT_OVERRIDE;
++virtual IOHIDEvent * copyEvent( IOHIDEventType type, IOHIDEvent * matching, IOOptionBits options) APPLE_KEXT_OVERRIDE;
++virtual IOHIDEvent *copyMatchingEvent(OSDictionary *matching) APPLE_KEXT_OVERRIDE;
++};
++class IOHIDEvent : public OSObject {
++ OSDeclareDefaultStructors(IOHIDEvent);
++ uint64_t originalPrivateIOHIDEvent[8];
++public:
++virtual void appendChild(IOHIDEvent *childEvent);
++virtual AbsoluteTime getTimeStamp();
++virtual void setTimeStamp(AbsoluteTime timeStamp);
++virtual IOHIDEventType getType();
++virtual void setType(IOHIDEventType type);
++virtual IOHIDEventPhaseBits getPhase();
++virtual void setPhase(IOHIDEventPhaseBits phase);
++virtual IOHIDEvent * getEvent(IOHIDEventType type, IOOptionBits options);
++virtual SInt32 getIntegerValue( IOHIDEventField key, IOOptionBits options);
++virtual void setIntegerValue( IOHIDEventField key, SInt32 value, IOOptionBits options);
++virtual IOFixed getFixedValue(IOHIDEventField key, IOOptionBits options);
++virtual void setFixedValue(IOHIDEventField key, IOFixed value, IOOptionBits options);
++virtual UInt8 * getDataValue(IOHIDEventField key, IOOptionBits options);
++virtual void free(void) APPLE_KEXT_OVERRIDE;
++virtual size_t getLength();
++virtual IOByteCount readBytes(void *bytes, IOByteCount withLength);
++virtual OSData *createBytes();
++virtual void setSenderID(uint64_t senderID);
++virtual uint64_t getLatency(uint32_t scaleFactor);
++virtual IOHIDDouble getDoubleValue( IOHIDEventField key, IOOptionBits options);
++virtual void setDoubleValue( IOHIDEventField key, IOHIDDouble value, IOOptionBits options);
++virtual UInt64 getTimeStampOfType(IOHIDEventTimestampType type);
++virtual void setTimeStampOfType(UInt64 timeStamp, IOHIDEventTimestampType type);
++};
++
++static_assert(sizeof(IOHIDEventService)==200 && sizeof(IOHIDEventDriver)==264 && sizeof(IOHIDEvent)==80,"Wrong original HID layout");

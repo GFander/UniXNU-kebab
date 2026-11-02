@@ -1,0 +1,25 @@
+{
+  "read_at": "2026-11-01",
+  "source_files": [
+    {
+      "url": "https://github.com/UniXNU/UniXNU/blob/main/components.toml",
+      "finding": "XnuPrelink pinned b74ed7c74a07f0eb5f81089c660905ecc4cabb7f"
+    },
+    {
+      "url": "https://github.com/UniXNU/XnuPrelink/blob/b74ed7c74a07f0eb5f81089c660905ecc4cabb7f/native_prelink.py",
+      "finding": "Exact-symbol kernel binding; no symbol-relative addend support found in this snapshot."
+    },
+    {
+      "url": "https://github.com/UniXNU/XnuPrelink/blob/b74ed7c74a07f0eb5f81089c660905ecc4cabb7f/emit_prelink.py",
+      "finding": "Strict external PC-relative encoding rejection; no FairPlay/opaque-encoding handling found."
+    },
+    {
+      "url": "https://github.com/UniXNU/UniXNU/blob/main/profiles/os/ipados-17.7.11-21H461/profile.toml",
+      "branch": "main",
+      "roots_line": "\"roots\" = [\"com.apple.AppleFSCompression.AppleFSCompressionTypeZlib\", \"com.apple.driver.AppleARMPlatform\", \"com.apple.driver.AppleARMWatchdogTimer\", \"com.apple.driver.AppleAudioClockLibs\", \"com.apple.driver.AppleEffaceableStorage\", \"com.apple.driver.AppleIISController\", \"com.apple.driver.AppleM2ScalerCSCDriver\", \"com.apple.driver.AppleMobileFileIntegrity\", \"com.apple.driver.ApplePMGR\", \"com.apple.driver.IODARTFamily\", \"com.apple.filesystems.apfs\", \"com.apple.iokit.CoreAnalyticsFamily\", \"com.apple.iokit.IOAVFamily\", \"com.apple.iokit.IOAudio2Family\", \"com.apple.iokit.IOCECFamily\", \"com.apple.iokit.IOCryptoAcceleratorFamily\", \"com.apple.iokit.IOGPUFamily\", \"com.apple.iokit.IOHDCPFamily\", \"com.apple.iokit.IOMobileGraphicsFamily\", \"com.apple.iokit.IOReportFamily\", \"com.apple.iokit.IOSlowAdaptiveClockingFamily\", \"com.apple.iokit.IOStorageFamily\", \"com.apple.iokit.IOSurface\", \"com.apple.kec.Libm\", \"com.apple.kec.corecrypto\", \"com.apple.kext.AppleMatch\", \"com.apple.kext.CoreTrust\", \"com.apple.security.AppleImage4\", \"com.apple.security.sandbox\", \"com.apple.iokit.IOHIDFamily\", \"com.apple.iokit.IOHIDEventDriver\"]",
+      "finding": "FairPlayIOKit and IOTextEncryptionFamily are not explicit roots. Do not infer current iOS16 exit is caused by their absence or copy incompatible iPadOS17 ABI."
+    }
+  ],
+  "experiment": "Current donor has23 symbol-relative nonzero addends and120 rejected encodings. No production emitter change or module image emitted by inventory. The emission probe was rejected; no prototype flashed.",
+  "conclusion": "Revisit missing-module hypothesis using actual consumer/interface evidence; preserve original daemon, migration, hardware keys and security. No upstream workaround applied."
+}

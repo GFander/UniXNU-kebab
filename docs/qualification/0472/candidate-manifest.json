@@ -1,0 +1,16 @@
+{
+  "parent_version": "0470",
+  "candidate": "0472",
+  "assembly_only": true,
+  "physical_test": false,
+  "changes": {
+    "osfmk/kern/kebab_bootdiag.c": {
+      "before": "94b0e85e4911e275724d1b35d7d9f67fbf4b73adc350e2950f6aeb5693582e7a",
+      "after": "6e35be8515e534475006ac42a14dffb603f237b7e1d0c4ccfa9ff852daf2ec6f"
+    },
+    "osfmk/kern/kebab_mach_wait_ipc_impl.h": {
+      "before": null,
+      "after": "5fc2291b1b54c8fbcef5d0b414ba84bff109a68749c33451ada08914dbdeb8b1"
+    }
+  }
+}

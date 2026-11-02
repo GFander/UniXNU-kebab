@@ -1,0 +1,18 @@
+{
+  "version": "0478",
+  "parent": "0477",
+  "changes": {
+    "bsd/dev/arm/systemcalls.c": {
+      "before": "59c7b71a70125886d242463fcd2e0d1a19e249e8d2e6b67b6b0498236d2d1d4a",
+      "after": "2d98e2b269b159c52591869a2e72106704666b640723cd53d5631116cdf806fa"
+    },
+    "bsd/kern/kebab_fairplay_bootdiag_impl.h": {
+      "before": "c2ce5c31bf6272524f8ffb72946ae3e70e9b3028ce156d0e7d53b2248af45411",
+      "after": "65a91144fdef08cb76625dd04997c4ddbd19cc3588b84f78f64083f55cef5882"
+    },
+    "iokit/Kernel/IOUserClient.cpp": {
+      "before": "1cc1bb5c8e122809d8d2bb5726898ca54d7f15311348cdbd90e48cc5083b4a7f",
+      "after": "a878992417d88eafb392385b33e6c6c9693892a976832cdb5af7c6c984a8b8e0"
+    }
+  }
+}

@@ -1,0 +1,31 @@
+--- a/osfmk/kern/kebab_mach_wait_ipc_impl.h
++++ b/osfmk/kern/kebab_mach_wait_ipc_impl.h
+@@ -27,7 +27,13 @@
+  if(space==IS_NULL||!kebab_mach_wait_decode(site,&value))return;
+  kern_return_t status=KERN_INVALID_NAME;pid_t receiver=-1;uint32_t receiver_name=0;
+  uint64_t object=0;bool attempted=false;
+- if((value.options&MACH64_SEND_MSG)&&MACH_PORT_VALID(value.remote)){
++ /* In receive-only mach_msg2, XNU uses mr_lp's low word as the sync
++  * send boosting port when RCV_SYNC_WAIT is set (mach_msg.c). This is
++  * receiver context, not proof of delivery or the original message id. */
++ bool send=(value.options&MACH64_SEND_MSG)!=0;
++ bool sync=(value.options&MACH64_RCV_MSG)&&(value.options&MACH64_RCV_SYNC_WAIT);
++ const char *role=send?"send":(sync?"sync":"none");
++ if((send||sync)&&MACH_PORT_VALID(value.remote)){
+   ipc_port_t port=IP_NULL;attempted=true;
+   /* Takes no preexisting locks; success returns an active locked port,
+    * without a new reference. Read metadata under that lock, then unlock.
+@@ -39,7 +45,11 @@
+    object=(uint64_t)(uintptr_t)port;ip_mq_unlock(port);
+   }
+  }
+- printf("KEBAB %s IPC: tid=%llu trap=mach_msg2 options=0x%llx bits=0x%x send-size-or-count=%u vector=%u remote=0x%x local=0x%x receive=0x%x message-id=%d lookup=%u status=0x%x receiver-pid=%d receiver-name=0x%x object=0x%llx; best-effort metadata, no payload or atomic pairing\n",
++ /* Keep each printf below the observed transport truncation boundary.
++  * Separate bounded lines retain complete newlines even with max values. */
++ printf("KEBAB %s IPC: tid=%llu opt=%llx b=%x sz=%u v=%u r=%x l=%x q=%x id=%d lookup=%u\n",
+      label,tid,value.options,value.bits,value.send_size_or_count,!!(value.options&MACH64_MSG_VECTOR),
+-     value.remote,value.local,value.receive,value.message_id,attempted,status,receiver,receiver_name,object);
++     value.remote,value.local,value.receive,value.message_id,attempted);
++ printf("KEBAB %s IPC-OWNER: tid=%llu role=%s name=%x kr=%x pid=%d recv=%x object=%llx\n",
++     label,tid,role,value.remote,status,receiver,receiver_name,object);
+ }

@@ -1,0 +1,87 @@
+{
+  "accepted": true,
+  "scope": "Actual original2201/encrypt32 completion and no repeat of0481 IOGMD panic in bounded regression; not full FairPlay/graphics functionality",
+  "version": "0482",
+  "native_sha256": "6819ba4484d94deca28a73c184e237e84e36ab63ff4f3934e9157c067b6b464e",
+  "native_bytes": 18966472,
+  "source_common": 340,
+  "source_host": 4,
+  "source_files": 5280,
+  "actual_log_sha256": "590d121541f3c55ab126985e700fd52ddf6d7556f802f3f268e3521e57df2ecd",
+  "capture_closed": true,
+  "actual_original_2201_completions": [
+    {
+      "operation": 0,
+      "bytes": 32,
+      "count": 1
+    }
+  ],
+  "real_preserved_hardware_Root_KDF": true,
+  "independent_donor_purpose_seed": true,
+  "old_nonce_derivation_unchanged": true,
+  "old_crypto_regression": {
+    "accepted": true,
+    "version": "0482",
+    "native_version": "0482",
+    "native_sha256": "6819ba4484d94deca28a73c184e237e84e36ab63ff4f3934e9157c067b6b464e",
+    "actual_log_sha256": "590d121541f3c55ab126985e700fd52ddf6d7556f802f3f268e3521e57df2ecd",
+    "scope": "Genuine factory-no-passcode APFS A KF04/HA01; original already-open cached/direct reads and writes deny lock with zero transferred, unlock restores existing material; unchanged B/C/D and original keychain6\u201311",
+    "private_A_crypto_id": 259236,
+    "private_A_payload_sha256": "33f878693a6f08d6c2d226412289b92d17b4cedf043b419eb971497d35f27c2b",
+    "private_A_ciphertext_stripes": {
+      "0": [
+        "67411fe44e76568f794e691eefb96a9c630c917b9c3da3dfc0459b48577a59dd",
+        "67411fe44e76568f794e691eefb96a9c630c917b9c3da3dfc0459b48577a59dd"
+      ],
+      "61440": [
+        "fd222a79a8e430b8c4c3a7f4d49430025135e5e5ad0a4bbdc7117e2ff05e63ac",
+        "fd222a79a8e430b8c4c3a7f4d49430025135e5e5ad0a4bbdc7117e2ff05e63ac"
+      ]
+    },
+    "first_A_operation": "UNWRAP",
+    "A_complete_kernel_restart_proven": true,
+    "original_APFS_cached_nocache_write_denial_proven": true,
+    "locked_closed_reopen_and_new_create_refused": true,
+    "unlock_restores_original_A_payload": true,
+    "old_B_ciphertext_stripes_preserved": true,
+    "cold_keychain_classes_unwrap_before_new": [
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "qualified_watchdog_seconds": 321.668,
+    "old_Root_bank_systembag_CD_RTC_NVRAM_defaults_preserved": true,
+    "APFS_class1_implemented": true,
+    "factory_no_passcode_only": true,
+    "physical_all_RAM_erasure_proven": false,
+    "Apple_SEP_or_hardware_AES_implemented": false,
+    "full_AppleKeyStore_implemented": false,
+    "migration_complete": false,
+    "system_shell_checkin_complete": false,
+    "usable_springboard": false,
+    "full_goal_complete": false
+  },
+  "original_FairPlay_service_find_object_open": true,
+  "fairplay_process_snapshots": [
+    [
+      "87",
+      "2"
+    ]
+  ],
+  "first_original_exit_dump_present": false,
+  "registry_resource_budget_reached": true,
+  "all_FairPlay_calls_observed": false,
+  "full_FairPlay_compatibility": false,
+  "IOSurface_OOL_source_four_sites_fixed": true,
+  "all_four_OOL_paths_physically_individually_qualified": false,
+  "no_original_IOGMD_panic_recurrence_in_this_window": true,
+  "no_new_GPU_display_or_input_features": true,
+  "Apple_UID_SEP_or_hardware_AES_engine_claim": false,
+  "migration_complete": false,
+  "system_shell_checkin_complete": false,
+  "usable_springboard": false,
+  "full_goal_complete": false
+}

@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import struct
 import xml.etree.ElementTree as ET
+from prelink_profile import RelocationProfile
 
 
 def macho(data, at=0):
@@ -127,10 +128,11 @@ def unique_kernel_binding(address, original_exports, native_by_name):
     return next(iter(choices))
 
 
-def plan(native_data, original_data, roots, slide):
+def plan(native_data, original_data, roots, slide, relocation_profile=None):
     if slide % 4096:
         raise ValueError('Rebasing must preserve native 4K alignment')
     native, original = macho(native_data), macho(original_data)
+    profile = RelocationProfile(relocation_profile, original_data) if relocation_profile is not None else None
     if native['kind'] != 2 or original['kind'] != 2:
         raise ValueError('Expected MH_EXECUTE kernel images')
     parent = original['segments']
@@ -173,6 +175,10 @@ def plan(native_data, original_data, roots, slide):
             if segment['size'] and segment['name'] != '__LINKEDIT':
                 owned.append((segment['va'], segment['va'] + segment['size'], identifier, segment))
     codeless = selected - modules.keys()
+    if profile:
+        if profile.module not in selected or profile.module not in modules:
+            raise ValueError('Profile module is not in selected executable closure')
+        profile.verify_module(original_data, parent, modules[profile.module], backed_offset)
     for identifier in codeless:
         entry = entries[identifier]
         executable_keys = ('CFBundleExecutable', '_PrelinkExecutableLoadAddr',
@@ -213,12 +219,25 @@ def plan(native_data, original_data, roots, slide):
         target, = struct.unpack_from('<Q', original_data, backed_offset(parent, site, 8, len(original_data)))
         destination = owner(target)
         if destination:
+            if profile and site in profile.bindings:
+                raise ValueError('Profile kernel binding instead targets a component')
             if destination[2] not in selected:
                 raise ValueError(f'Undeclared pointer dependency {destination[2]} from {source[2]}')
             replacement = target + slide
             kind = 'component'
         else:
-            replacement = unique_kernel_binding(target, original_symbols, native_symbols)
+            if profile and site in profile.bindings:
+                replacement = profile.resolve_binding(site, target, source[2], original_symbols,
+                                                       native_symbols, unique_kernel_binding)
+                binding_base = profile.bindings[site]['original_symbol_va']
+                addend = profile.bindings[site]['addend']
+                native_base = replacement - addend
+                if (not any(s['va'] <= binding_base <= target < s['va'] + s['size'] for s in parent) or
+                        not any(s['va'] <= native_base <= replacement < s['va'] + s['size']
+                                for s in native['segments'])):
+                    raise ValueError('Symbol-relative addend crosses mapped kernel extent')
+            else:
+                replacement = unique_kernel_binding(target, original_symbols, native_symbols)
             if not any(s['va'] <= replacement < s['va'] + s['size'] for s in native['segments']):
                 raise ValueError('Native export is outside mapped kernel segments')
             kind = 'kernel'
@@ -239,7 +258,10 @@ def plan(native_data, original_data, roots, slide):
                         'va': start + slide, 'size': end - start})
         original_extents.append({'module': identifier, 'segment': segment['name'],
                                  'va': start, 'size': end - start})
-    return {'native_sha256': hashlib.sha256(native_data).hexdigest(),
+    if profile:
+        profile.require_bindings_consumed()
+        profile.verify_pointer_entries(bindings)
+    report = {'native_sha256': hashlib.sha256(native_data).hexdigest(),
             'original_sha256': hashlib.sha256(original_data).hexdigest(),
             'slide': slide, 'components': sorted(selected - codeless),
             'codeless_components': sorted(codeless), 'kernel_interfaces': sorted(interfaces),
@@ -247,6 +269,9 @@ def plan(native_data, original_data, roots, slide):
             'extents': extents, 'original_extents': original_extents, 'bindings': bindings,
             'images_modified': False,
             'instruction_relocation_complete': False, 'abi_qualified': False, 'loadable': False}
+    if profile:
+        report['relocation_profile'] = profile.summary()
+    return report
 
 
 def _signed(value, bits):
@@ -458,8 +483,11 @@ def main():
     parser.add_argument('--root', required=True, action='append')
     parser.add_argument('--slide', required=True, type=lambda value: int(value, 0))
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--relocation-profile', type=Path,
+                        help='Explicit donor/text/site-pinned nonzero symbol-relative binding metadata')
     args = parser.parse_args()
-    report = plan(args.kernel.read_bytes(), args.prelinked.read_bytes(), args.root, args.slide)
+    profile = json.loads(args.relocation_profile.read_text()) if args.relocation_profile else None
+    report = plan(args.kernel.read_bytes(), args.prelinked.read_bytes(), args.root, args.slide, profile)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps({key: report[key] for key in ('components', 'kernel_interfaces', 'pointer_counts', 'loadable')}, indent=2))

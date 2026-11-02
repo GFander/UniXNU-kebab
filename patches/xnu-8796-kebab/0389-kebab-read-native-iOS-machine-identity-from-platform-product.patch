@@ -1,0 +1,56 @@
+--- a/bsd/kern/kern_mib.c
++++ b/bsd/kern/kern_mib.c
+@@ -525,6 +525,13 @@
+ 
+ 	case HW_MACHINE:
+ 		bzero(dummy, sizeof(dummy));
++#if defined(KEBAB)
++		/* This board runs native iOS, not iOS-on-Mac. Read the measured
++		 * platform product instead of the Mac compatibility placeholder. */
++		if (!PEGetProductName(dummy, 64)) {
++			return EINVAL;
++		}
++#else
+ 		if (proc_platform(req->p) == PLATFORM_IOS) {
+ 			/* iOS-on-Mac processes don't expect the macOS kind of
+ 			 * hw.machine, e.g. "arm64", but are used to seeing
+@@ -541,6 +548,7 @@
+ 		else {
+ 			strlcpy(dummy, "arm64", sizeof(dummy));
+ 		}
++#endif /* KEBAB */
+ 		dummy[64] = 0;
+ 		return SYSCTL_OUT(req, dummy, strlen(dummy) + 1);
+ 	case HW_MODEL:
+--- a/bsd/kern/kebab_bootdiag.c
++++ b/bsd/kern/kebab_bootdiag.c
+@@ -99,11 +99,29 @@
+     }
+     return snapshot->scanned >= 512 ? PROC_RETURNED_DONE : PROC_RETURNED;
+ }
++/* Actual read-only sysctl handlers, not expected ADT values. This does not
++ * execute MobileGestalt queries in userland; those require separate evidence. */
++extern int kernel_sysctlbyname(const char *, void *, size_t *, void *, size_t);
++static void
++kebab_identity_sysctl_report(void)
++{
++    static const char * const names[] = {"hw.product", "hw.machine", "hw.target"};
++    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
++        char value[65] = {};
++        size_t size = sizeof(value);
++        int error = kernel_sysctlbyname(names[i], value, &size, NULL, 0);
++        value[sizeof(value) - 1] = 0;
++        printf("KEBAB IDENTITY: %s error=%d bytes=%lu value=%s; kernel read-only query\n",
++            names[i], error, (unsigned long)size, error ? "<unavailable>" : value);
++    }
++}
++
+ void
+ kebab_backboardd_report(void)
+ {
+     /* No allocation, proc access, or console write in unsafe context. */
+     if (ml_at_interrupt_context() || get_preemption_level() != 0 || !ml_get_interrupts_enabled()) return;
++    kebab_identity_sysctl_report();
+     struct kebab_backboard_snapshot snapshot = {};
+     proc_iterate(PROC_ALLPROCLIST | PROC_NOWAITTRANS, kebab_backboard_select, &snapshot, NULL, NULL);
+     if (snapshot.task == TASK_NULL) {
