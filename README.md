@@ -1,3 +1,5 @@
+# UniXNU-kebab
+
 ## 0609 A650_FIRST_RENDER=PASS — 2026-11-05
 
 Actual609 PAS INIT/MEM_SETUP/AUTH returned0/0, independently qualified by3 identicalCAP45 and frozen memory/17ranges/136pairs/260pages/CP parents. One legal CP_SET_SECURE_MODE(0) completed with its dedicatedGPU fence3; HYP protection and raw secure-mode register remain UNKNOWN. Original605424-word drawing unchanged: two32x32 RGBA8 targets in disjoint views of one64KiBBO, pitch256. Hardware RPTR/shadow248→460, Fence3→4, freshCCU timestamps; every pixel/channel and every padding/guard byte matched. Draw35668us. Three identicalCAP38 f98548e9ce9ccf784c96086e8e810a1f5d1dba1af19bb970f483da135949e7ed. Independent scalar verifier and corrupt-pixel/guard rejection passed.605A5FAIL and608prePAS16 refusal preserved.
@@ -8,7 +10,6 @@ Private complete checkpoint `native-dpu-0609/0609-first-render-qualified.json`; 
 
 SubsequentIRQ/Metal work reached a source/host/cross-compile checkpoint: officialNativeAdrenoClient10304855… exactv2 layout/bounds/error tests underASan/UBSan PASS; productionclient and layouttest compilearm64-ios16.7/sdk17.5 objects. This is not20H392 privateABI qualification or hardwareMetal. CurrentofficialAdrenoMetal e82788dd… provider explicitlyiOS17; cannot copy its privatevtable to20H392. GPU SPI300/INTID332 andA6xx completionbit20 audited; IRQdelivery stillNOT_RUN/mask0. Full nextentry/boundaries: [GPU-METAL-0609-CHECKPOINT.md](docs/GPU-METAL-0609-CHECKPOINT.md). A650_METAL_FIRST_EXECUTION=NOT_RUN. Next: source/host A650-only IRQ and authorized per-clientNativeAdreno v2 BO/VM/submit/wait, then qualifiednewimage with recovery/freshsafety and independentMetal test; no selector tunnel/mailbox/security bypass, no PAS13support-query route.
 
-# UniXNU-kebab / HiOS
 
 在 **一加 8T（kebab / Qualcomm SM8250）** 上移植 XNU，运行原版 **iOS 16.7.16（20H392）用户态**。项目采用 Mu-Silicium UEFI、DarwinBoot、自编译的 XNU 8796.141.3 和供体原版组件的 prelink 路线，参考 [UniXNU 移植指南](https://unixnu.com/zh/porting/) 与 [UniXNU-sheng](https://github.com/UniXNU/UniXNU-sheng)。
 
