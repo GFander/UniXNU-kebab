@@ -1,4 +1,4 @@
-# UniXNU-kebab / HiOS
+# UniXNU-kebab
 
 在 **OnePlus 8T（一加 8T，kebab / Qualcomm SM8250）** 上移植原生 XNU，运行原版 **iOS 16.7.16（20H392）用户态**。
 
