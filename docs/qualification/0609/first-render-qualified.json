@@ -1,0 +1,142 @@
+{
+  "schema": 1,
+  "version": "0609",
+  "recorded_UTC": "2026-11-05T01:59:01.185296+00:00",
+  "A650_FIRST_EXECUTION": "PASS",
+  "actual_ZAP_authentication": "PASS",
+  "legal_secure_exit": "PASS",
+  "A650_FIRST_RENDER": "PASS",
+  "accepted_scope": "Two deterministic A650 2D offscreen targets with hardware completion, NC CPU readback and strict fullBO pixel/guard checks; not shader/Metal/UI acceleration",
+  "native_sha256": "447edd1d920b26d92aba154e830d0f87f560b612f738b345eec37572e6ab22e5",
+  "boot_sha256": "06e6b6fc1cb878dd2777152b0c02b12937e2bb9d92cfe0207a63d93d32efde95",
+  "git_base": "d5c9c62db752f225a288b88959d3754edc94138a",
+  "source_identity": "Git base plus463 common/4host ordered patches and5462 source inventory; no invented clean commit",
+  "latest_formal_patch_sha256": "2f04fbb0add8f6855d1cfddf7c213a17614229fe99be350d1a695276139d6427",
+  "prePAS_original_safety_seconds": 304.384,
+  "prePAS_manual_GUI": "PASS",
+  "post_render_manual_GUI": "NOT_RUN_OWNER_AWAY",
+  "post_render_readonly_observation_seconds": 335.2753231525421,
+  "post_render_original_watchdog": {
+    "first": [
+      1,
+      750,
+      75,
+      1,
+      1567862894
+    ],
+    "last": [
+      1,
+      1050,
+      105,
+      1,
+      1563447456
+    ],
+    "enabled_all": true
+  },
+  "post_render_security_scope": "Extended original watchdog/process/AKS observation; original Root/nonce/bank/systembag/encryptedData/MACF/ACL/Sandbox full regression separately qualified at boot, not rerun by the readonly observer",
+  "PAS_operations": {
+    "INIT": {
+      "status_raw": 0,
+      "value": 0,
+      "type": 0,
+      "data": 0,
+      "cookie": 0,
+      "attempts": 3,
+      "returned": 1,
+      "interrupted_exhausted": 0,
+      "elapsed_us": 18280,
+      "guard": 0,
+      "attempted": 1
+    },
+    "MEM_SETUP": {
+      "status_raw": 0,
+      "value": 0,
+      "type": 0,
+      "data": 0,
+      "cookie": 0,
+      "attempts": 1,
+      "returned": 1,
+      "interrupted_exhausted": 0,
+      "elapsed_us": 189,
+      "guard": 0,
+      "attempted": 1
+    },
+    "AUTH": {
+      "status_raw": 0,
+      "value": 0,
+      "type": 0,
+      "data": 0,
+      "cookie": 0,
+      "attempts": 1,
+      "returned": 1,
+      "interrupted_exhausted": 0,
+      "elapsed_us": 1175,
+      "guard": 0,
+      "attempted": 1
+    }
+  },
+  "metadata_and_firmware": "Frozen and retained; never read/free/reclaim after ownership-changing calls",
+  "HYP_protection": "UNKNOWN",
+  "GPU_secure_mode_register": "UNKNOWN",
+  "secure_exit_completion": "Actual9word CP_SET_SECURE_MODE(0) and dedicatedGPU completion3; globalFence remained2",
+  "CAP45_sha256": "61f725563cc223e5182c2809b7ce85701a67c9afe4f243cad9fff08ce94aecae",
+  "CAP46_sha256": "45d157e6ff42e9a34b9d83a11c0a88e9cff4c8a85e3f525723c6a9c928f24c1b",
+  "CAP38_sha256": "f98548e9ce9ccf784c96086e8e810a1f5d1dba1af19bb970f483da135949e7ed",
+  "draw_words_sha256": "8e7dcbf7c1f3b6e8864185e3e2d1f9ba89bdf878fcd5aa2752aba37f657c0145",
+  "draw_us": 35668,
+  "targets": {
+    "images": 2,
+    "width": 32,
+    "height": 32,
+    "RGBA_channels": 4,
+    "pitch": 256,
+    "allocation": "Two disjoint target views at0x100/0x4100 inside one64KiB BO; not two independent allocations",
+    "mismatched_pixels": 0,
+    "guard_padding_changes": 0,
+    "packed_RGBA8_sha256": "ae2116f4ed8d8494a3559fe4b067eea513fb28c4d1f904d22c5b14407b284a6f",
+    "BO_sha256": [
+      "a216052814dd9042c8d23154bb263358634eb49b8672fa27b98c942d062c5341",
+      "429788895eac07f270fddc565342e7af061598d36e44435071f070fec2526852"
+    ]
+  },
+  "hardware_passes": [
+    {
+      "wptr": 248,
+      "rptr": 248,
+      "shadow": 248,
+      "fence": 3,
+      "CCU_timestamps": [
+        7721083868,
+        7721083873,
+        7721083975
+      ],
+      "polls": 1
+    },
+    {
+      "wptr": 460,
+      "rptr": 460,
+      "shadow": 460,
+      "fence": 4,
+      "CCU_timestamps": [
+        7721317446,
+        7721317450,
+        7721317512
+      ],
+      "polls": 1
+    }
+  ],
+  "SMMU_fault": "No effective fault in all5 contexts; rawFSR400 is format2, not a fault",
+  "GPU_IRQ_delivery": "NOT_RUN; mask0",
+  "A650_METAL_FIRST_EXECUTION": "NOT_RUN",
+  "shader_GMEM_IOSurface_import_multi_client": "NOT_QUALIFIED",
+  "historical605_FAIL_retained": {
+    "CAP38_sha256": "8558766d5dadfed7961da071ea41ff800c33805bb0add722a28c6c2cd72aa479",
+    "rawBO_sha256": "c698b0cead6b55a34759a3a06a19e24b21a81629626f984175c353d5d2b6cc39"
+  },
+  "historical608": "PrePAS lock refusal16; no actual PAS calls; failure retained",
+  "metal_IRQ_checkpoint_sha256": "60d469e29cae207e9209ebe17508a50834f03a9518203d2b63e40df7a1c9de90",
+  "metal_host_contract_sha256": "9c8712ddabec96cd23a0539f07146630bb861b384e807d0d193d519ee65265fb",
+  "next_entry": "Keep609 writes consumed. Continue A650-only IRQ source/host integration and exact20H392 authorized NativeAdreno v2 UserClient. First new hardware candidate needs qualified build/package, owner recovery and fresh full safety. No PAS replay or new support query. Metal path must avoid selector tunnel/mailbox/Sandbox grant bypass.",
+  "private_checkpoint_sha256": "df60d3f6bb763b51f9428d3ee97996c6088b2aea9cc24dbbeea9d839a8d0c776",
+  "raw_bytes_published": false
+}

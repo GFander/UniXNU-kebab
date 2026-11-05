@@ -1,0 +1,51 @@
+{
+  "version": "0607",
+  "status": "NATIVE_BUILD_PASS_NOT_PACKAGED_NOT_FLASHED",
+  "git_head": "d5c9c62db752f225a288b88959d3754edc94138a",
+  "formal_patch": "0482",
+  "source_files": 5460,
+  "common_patches": 461,
+  "host_patches": 4,
+  "changes": 9,
+  "added_private_headers": 2,
+  "paired": {
+    "version": "0607",
+    "passed": true,
+    "artifacts": {
+      "paired-kernel.private.macho": {
+        "bytes": 19537504,
+        "sha256": "b80ad78b70a6e79061709eec3e2ddd90b8681e2d6d5424f9f6e3ed462903ba25"
+      },
+      "paired-HID.private.o": {
+        "bytes": 309608,
+        "sha256": "fc55436750875b2fb156b4dbbed5702616e6de0d4c74779ade8544cf7094f014"
+      }
+    },
+    "source_unchanged": true
+  },
+  "proofs": {
+    "native-dpu-0607\\paired-build.json": "5a9fd4b29d0c03a204a4526b8a46ff48bcff9bcb572a99fb85ab3becc5e164ca",
+    "native-dpu-0607\\all-mac-source-0607.json": "c87a0b3ac8d7d38dc33bd56bec1eb9fa487ddddc45192c3fe1a2df223f02953f",
+    "native-dpu-0607\\native-exported-headers-qualified.json": "da8f5ea0951d9ad98b1513ed315662a3d38d0f52fc740b0af9e55fd769009392",
+    "native-dpu-0607\\native-translation-units-0607.json": "cd5d17600fa07705dd18982a9c6f61cd92f7b78ea6eef2e262273f1b9eabb414",
+    "native-dpu-0607\\native-gpu-linked-qualified.json": "fc66611abcc4005055696e7bdc464bbc5a417087f6f6dd0c01e192dbfc43fb74",
+    "gpu-prereq-20261103\\gpu-zap-0607\\PAS13-lifecycle-source-qualified.json": "1a8bbf495de41c9a1ceb2fa86722eb0a3a908e8e2b9b045eaa1373fbcf214852",
+    "gpu-prereq-20261103\\gpu-zap-0607\\host-auth-qualified.json": "da46c967b7ca177fd12592f3eae348e4119479b5435bc6e1168b2ebca9c8076e",
+    "gpu-prereq-20261103\\gpu-zap-0607\\host-native-auth-qualified.json": "65782b0cdd0c7ce2f80f2884887f11375d3fa637123e84f6b8927f2ad124b676",
+    "gpu-prereq-20261103\\gpu-zap-0607\\host-core-tests.json": "7b19244b163dd3d8558fe468b5dcfced9cc8f8d1f67da76a95aa2f64ad4ca44b",
+    "gpu-prereq-20261103\\combined-0607-stage\\binding-review.json": "2da01ba11477e23ebb526ae3eec9c85e766ca21801cc849281e143dc32b0e3c7",
+    "gpu-prereq-20261103\\combined-0607-stage\\public-all-source-replay-0607.json": "ed0e9d37977ed2ace07bc73df80ea60936e6f1dbbb9266e676cf6f6ae86a80c0",
+    "gpu-prereq-20261103\\combined-0607-stage\\source-strip-proof.json": "48d4253b2b4d0c7fa126fe7e79befcb5ce8c2265c6b82a4b8ac619149a5a1fd5"
+  },
+  "phone": "0606 sealed baseline unchanged",
+  "actual_PAS": "NOT_RUN/UNKNOWN",
+  "A650_FIRST_RENDER": "0605 FAIL retained;0606 staging only",
+  "next": [
+    "CAP45 independent decoder/negative tests and fresh parent bindings",
+    "actual linked auth worker/owner/SCM/freeze/copy/getter qualification",
+    "remaining original ABI/HID/cache/provenance/prelink/package/full-ADT/UTC/boot_b gates",
+    "confirmed recovery availability before first actual ownership-changing PAS calls",
+    "one boot safety regression thenLOWDMA/NC/RAM/STAGE and originalGMU/HFI prefix,oneZAPAUTH; retrieve frozen VM/OOB/CP/45 and independent postAUTH CAP43",
+    "post-PAS original safety/security regression and manualGUI; no retry/secure-exit/render until separately qualified"
+  ]
+}

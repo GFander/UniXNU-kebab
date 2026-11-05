@@ -1,0 +1,37 @@
+{
+  "version": "0606",
+  "recorded": "2026-11-04T22:53:06.081925+08:00",
+  "git": "d5c9c62db752f225a288b88959d3754edc94138a",
+  "branch": "gpu/adreno650-20261103",
+  "common": 460,
+  "host": 4,
+  "files": 5458,
+  "formal_patch": "0481",
+  "source_binding_sha256": "b4ff03b8b059118bd174cd8e384c3fc4a14742cb03bb673964dff0899d97c0b7",
+  "native_sha256": "7336f504bd08ed7bc92d3e942c42181c34eded1280b93180fd73da9aa29cd607",
+  "boot_sha256": "08a18902ab801abfaa2726d5c39d7701218cac7c5038d18270b0141bd2226414",
+  "capture_pid": 87760,
+  "jobs": {
+    "collect-awake-window.py": {
+      "pid": 75744,
+      "log": "D:\\LOS\\HiOS\\boot123-20261029\\native-dpu-0606\\collect-awake-window-output.txt",
+      "started": 1793803935.0394166
+    },
+    "finalize-baseline.py": {
+      "pid": 70340,
+      "log": "D:\\LOS\\HiOS\\boot123-20261029\\native-dpu-0606\\finalize-baseline-output.txt",
+      "started": 1793803935.049633
+    }
+  },
+  "post": {
+    "pid": 90308,
+    "script": "post-baseline-sequential-once.py",
+    "scope": "Wait original safety and capture close, LOWDMA/NC/RAM -> one CPU-only ZAPSTAGE before GPU VM publication -> original fullGPUCP/suffix/SN11. No PAS query/auth/secure-exit/render/retry."
+  },
+  "safety": "PENDING",
+  "manual_GUI": "NOT_RUN",
+  "ZAP_CPU_staging": "PENDING",
+  "ZAP_actual_auth": "NOT_RUN/UNKNOWN",
+  "FirstRender": "NOT_RUN606;605 exact18 register states/Fence3/CPcontrol PASS, actual pixelsFAIL retained",
+  "PAS13_support_route": "CLOSED"
+}

@@ -1,0 +1,2194 @@
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>23)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>25)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- a/bsd/dev/kebab_rpmh_vrm.c
++++ b/bsd/dev/kebab_rpmh_vrm.c
+@@ -682,3 +682,5 @@
+ #include "KebabGmuRootOwner.inc"
+ 
+ #include "KebabGpuBusOwner.inc"
++
++#include "KebabGpuColdOwner.inc"
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -292,6 +292,10 @@
+ #define UD_GMU_ROOT_PREPARE 50u
+ #define UD_GPU_BUS_PREPARE 51u
+ #define UD_GPU_SMMU_OBSERVE 52u
++#define UD_GMU_STAGE 53u
++#define UD_GPU_FIRST_ATTACH 54u
++extern void kebab_gmu_stage(void);
++extern void kebab_gpu_first_prepare(void);
+ extern void kebab_gmu_root_prepare(void);
+ extern void kebab_gpu_bus_prepare(void);
+ extern void kebab_gpu_smmu_observe(void);
+@@ -1478,6 +1482,8 @@
+     if(panicking || !buf)return 0;
+     if(received==8 && !memcmp(buf,"GMUROOT\n",8))return UD_GMU_ROOT_PREPARE;
+     if(received==7 && !memcmp(buf,"GPUBUS\n",7))return UD_GPU_BUS_PREPARE;
++    if(received==9 && !memcmp(buf,"GMUSTAGE\n",9))return UD_GMU_STAGE;
++    if(received==7 && !memcmp(buf,"GMUMAP\n",7))return UD_GPU_FIRST_ATTACH;
+     if(received==8 && !memcmp(buf,"GPUSMMU\n",8))return UD_GPU_SMMU_OBSERVE;
+     if(received!=9)return 0;
+     if(!memcmp(buf,"DCLKTEST\n",9))return UD_DISPLAY_CLOCK_TEST;
+@@ -1907,6 +1913,10 @@
+ 		kebab_gmu_root_prepare();
+ 	} else if (command == UD_GPU_BUS_PREPARE) {
+ 		kebab_gpu_bus_prepare();
++	} else if (command == UD_GMU_STAGE) {
++		kebab_gmu_stage();
++	} else if (command == UD_GPU_FIRST_ATTACH) {
++		kebab_gpu_first_prepare();
+ 	} else if (command == UD_GPU_SMMU_OBSERVE) {
+ 		kebab_gpu_smmu_observe();
+ 	} else if (command == UD_GPU_CC_PREPARE) {
+--- /dev/null
++++ b/bsd/dev/KebabGpuColdOwner.inc
+@@ -0,0 +1,71 @@
++/* SPDX-License-Identifier: MIT */
++/* Include in canonical VRM TU AFTER actual CC/GMU root/Bus Owner.inc.
++ * No second busy lock, child counter, rail owner or hardware writer. */
++#if defined(KERNEL)
++#include <kern/KebabGpuColdOwner.h>
++#include <kern/KebabGpuFirstNativeBinding.h>
++#else
++#include "KebabGpuColdOwner.h"
++#include "KebabGpuFirstNativeBinding.h"
++#endif
++static KebabGpuColdToken *kebab_gpu_cold_identity;
++static KebabGpuColdIo kebab_gpu_cold_io;
++static uint64_t kebab_gpu_cold_generation;
++static uint32_t kebab_gpu_cold_quarantined;
++int kebab_gpu_cold_token_locked(const KebabGpuColdToken *t,unsigned cold)
++{
++ if(!t || t!=kebab_gpu_cold_identity || !t->held || !t->generation ||
++ t->generation!=kebab_gpu_cold_generation || kebab_gpu_cold_quarantined ||
++ !KebabGpuFirstColdBootContract || !KFPolicyBound(&KebabGpuFirstNativePolicy) ||
++ !kebab_gpu_bus_parent_ready() || !kebab_gpu_bus_ledger.held || kebab_gpu_bus_token_locked((KebabGpuBusToken *)&t->bus))return 95;
++ if(cold && t->started)return 95;return 0;
++}
++static int kebab_gpu_cold_verify_locked(KebabGpuColdToken *t,unsigned cold)
++{
++ uint32_t a,b,c,d;int e=kebab_gpu_cold_token_locked(t,cold);if(e)return e;
++ e=kebab_gpu_bus_verify_locked();if(e)return e;
++ if(!cold)return 0;if(!kebab_gpu_cold_io.read32)return 95;
++ e=kebab_gpu_cold_io.read32(kebab_gpu_cold_io.cookie,0x1098,&a);if(e)return e;
++ e=kebab_gpu_cold_io.read32(kebab_gpu_cold_io.cookie,0x1064,&b);if(e)return e;
++ e=kebab_gpu_cold_io.read32(kebab_gpu_cold_io.cookie,0x1098,&c);if(e)return e;
++ e=kebab_gpu_cold_io.read32(kebab_gpu_cold_io.cookie,0x1064,&d);if(e)return e;
++ /* Both GMU producer branches quiet in the supported cold lifecycle. Raw
++  * reserved/control fields are not interpreted as reset or drain status. */
++ if((a&0x80000001u)!=0x80000000u || (b&0x80000001u)!=0x80000000u ||
++ (c&0x80000001u)!=0x80000000u || (d&0x80000001u)!=0x80000000u)return 11;
++ return 0;
++}
++int kebab_rpmh_gpu_cold_acquire(KebabGpuColdToken *t,const KebabGpuColdIo *io)
++{
++ int e=95;if(!t || !io || !io->read32)return 22;
++ if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL))return 16;
++ if(!KFPolicyBound(&KebabGpuFirstNativePolicy) || !KebabGpuFirstColdBootContract || kebab_gpu_cold_quarantined)goto done;
++ if(kebab_gpu_cold_identity || t->held || t->generation || kebab_gpu_cold_generation==UINT64_MAX){e=16;goto done;}
++ e=kebab_gpu_bus_token_locked(&t->bus);if(e)goto done;e=kebab_gpu_bus_verify_locked();if(e)goto done;
++ t->held=1;t->generation=++kebab_gpu_cold_generation;kebab_gpu_cold_identity=t;kebab_gpu_cold_io=*io;
++ e=kebab_gpu_cold_verify_locked(t,1);
++done:__atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return e;
++}
++int kebab_rpmh_gpu_cold_check(KebabGpuColdToken *t,unsigned flags)
++{
++ int e;if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL))return 16;
++ e=kebab_gpu_cold_verify_locked(t,!!(flags&(KF_COLD|KF_DRAINED)));
++ __atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return e;
++}
++int kebab_rpmh_gpu_cold_drain(KebabGpuColdToken *t)
++{
++ /* Only the reviewed never-started cold lifecycle can grant this. Once a
++  * branch start occurs, real GMU stop/drain must be added; no fake reset flag. */
++ return kebab_rpmh_gpu_cold_check(t,KF_ACCESS|KF_COLD|KF_DRAINED);
++}
++int kebab_rpmh_gpu_cold_end(KebabGpuColdToken *t)
++{
++ int e;if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL))return 16;
++ e=kebab_gpu_cold_token_locked(t,1);
++ if(!e){t->held=0;kebab_gpu_cold_identity=NULL;memset(&kebab_gpu_cold_io,0,sizeof kebab_gpu_cold_io);}
++ __atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return e;
++}
++int kebab_gpu_cold_mark_started_locked(KebabGpuColdToken *t)
++{
++ int e=kebab_gpu_cold_token_locked(t,1);if(e)return e;t->started=1;return 0;
++}
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -7,6 +7,7 @@
+ iokit/Kernel/arm/KebabSurface.cpp                              optional iokitcpp
+ iokit/Kernel/arm/KebabFramebuffer.cpp                          optional iokitcpp
+ iokit/Kernel/arm/KebabGpuSmmuNativeCandidate.cpp                optional iokitcpp
++iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp                  optional iokitcpp
+ iokit/Kernel/arm/KebabSoftwareScaler.cpp                       optional iokitcpp
+ iokit/Kernel/arm/AppleARMSMP.cpp    					optional iokitcpp
+ 
+@@ -38,3 +39,5 @@
+ iokit/Kernel/arm/KebabHIDInput.cpp	optional iokitcpp
+ iokit/Kernel/arm/KebabOriginalHIDBindings.cpp	optional iokitcpp
+ iokit/Kernel/arm/KebabVolumeLookup.cpp	optional iokitcpp
++
++iokit/Kernel/arm/KebabA650GmuNativeBacking.cpp	optional iokitcpp
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GmuAdt.h
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GMU_ADT_H
++#define KEBAB_A650_GMU_ADT_H
++#include <stdint.h>
++enum {KAGADT_NOT_RUN=0,KAGADT_WORKER=1,KAGADT_BACKING_STATE=2,KAGADT_LOOKUP=3,
++ KAGADT_PROPERTY=4,KAGADT_LENGTH=5,KAGADT_POINTER=6,KAGADT_STAGE=7,KAGADT_DONE=8};
++typedef struct {
++ uint32_t magic,schema,bytes;int32_t result;
++ int32_t lookup_status,property_status,stage_status;uint32_t reason;
++ uint32_t property_bytes,current_secure_dt,stage_called,firmware_started;
++} KebabA650GmuAdtRecord;
++#ifdef __cplusplus
++static_assert(sizeof(KebabA650GmuAdtRecord)==48,"A650 current SecureDT source v1");
++extern "C" {
++#endif
++int kebab_a650_gmu_backing_stage_current_adt(KebabA650GmuAdtRecord *);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GmuAdt.inc
+@@ -0,0 +1,34 @@
++/* SPDX-License-Identifier: MIT */
++#include <pexpert/device_tree.h>
++#include "KebabA650GmuAdt.h"
++/* Include once after KebabA650GmuNativeBacking.cpp's private owner body.
++ * This resolves the current SecureDT on each invocation; no early DT pointer,
++ * transport/user pointer, public byte dump or alternative property fallback.
++ * The payload producer must include this property in the original full ADT
++ * owner measurement. Lookup itself is not a cryptographic owner attestation. */
++extern "C" int kebab_a650_gmu_backing_stage_current_adt(KebabA650GmuAdtRecord *out)
++{
++ if(!out)return KG_INVALID;memset(out,0,sizeof(*out));
++ out->magic=0x3141474b;out->schema=1;out->bytes=sizeof(*out);
++ out->lookup_status=out->property_status=out->stage_status=INT32_MIN;
++ int e=KGNativeWorker(NULL);if(e){out->reason=KAGADT_WORKER;out->result=e;return e;}
++ if(__atomic_load_n(&kagb_prepare_state,__ATOMIC_ACQUIRE)!=2 || kagb_prepare_result){out->reason=KAGADT_BACKING_STATE;out->result=KG_STATE;return KG_STATE;}
++ if(!KGTry(&kagb_domain)){out->reason=KAGADT_BACKING_STATE;out->result=KG_BUSY;return KG_BUSY;}
++ const int ready=!kagb_closing && kagb_record.phase==KAGB_PREPARED && kagb_domain.receipt.state==KG_PREPARED && !kagb_domain.touched && !kagb_domain.lease.held;
++ KGUnlock(&kagb_domain);
++ if(!ready){out->reason=KAGADT_BACKING_STATE;out->result=KG_STATE;return KG_STATE;}
++ DTEntry entry=NULL;const void *property=NULL;unsigned int bytes=0;
++ out->lookup_status=SecureDTLookupEntry(NULL,"/chosen",&entry);
++ if(out->lookup_status!=kSuccess || !entry){out->reason=KAGADT_LOOKUP;out->result=KG_STATE;return KG_STATE;}
++ out->property_status=SecureDTGetProperty(entry,"kebab-gmu-firmware",&property,&bytes);
++ out->property_bytes=bytes;
++ if(out->property_status!=kSuccess){out->reason=KAGADT_PROPERTY;out->result=KG_STATE;return KG_STATE;}
++ out->current_secure_dt=1;
++ if(bytes!=KebabA650GmuImageBytes){out->reason=KAGADT_LENGTH;out->result=KG_INVALID;return KG_INVALID;}
++ if(!property){out->reason=KAGADT_POINTER;out->result=KG_INVALID;return KG_INVALID;}
++ /* Stage takes exactly one copy of these bytes into its private 64KiB pool,
++  * then hashes and consumes only that snapshot. Caller/source-buffer
++  * stability after the copy is neither assumed nor asserted. */
++ out->stage_called=1;e=kebab_a650_gmu_backing_stage(property,bytes);
++ out->stage_status=e;out->result=e;out->reason=e?KAGADT_STAGE:KAGADT_DONE;return e;
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GmuBacking.h
+@@ -0,0 +1,97 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GMU_BACKING_H
++#define KEBAB_A650_GMU_BACKING_H
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++#include "KebabA650GmuBackingTypes.h"
++/* Caller supplies SHA256_CTX + SHA256_Init/Update/Final (native XNU:
++ * <libkern/crypto/sha2.h>). This is CPU-only preparation of exclusively
++ * owned, non-live extents. It does NOT authorize SMMU publication or MMIO.
++ * Original OTA firmware is SHA-bound, not authenticated through PAS13. */
++enum {KebabA650GmuImageBytes=41548,KebabA650GmuMaxBlocks=64,KebabA650GmuRamExtents=6};
++typedef struct {uint32_t image_offset,address,bytes,region,type,value;} KebabA650GmuBlock;
++typedef struct {uint32_t blocks,payloads,ram_bytes,tcm_bytes,core_version,hfi_version;KebabA650GmuBlock block[64];} KebabA650GmuPlan;
++typedef struct {uint32_t iova,bytes;void *cpu;} KebabA650GmuExtent;
++static inline uint32_t KebabA650GmuU32(const uint8_t *p)
++{return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);}
++static inline void KebabA650GmuPut32(uint8_t *p,uint32_t x)
++{p[0]=(uint8_t)x;p[1]=(uint8_t)(x>>8);p[2]=(uint8_t)(x>>16);p[3]=(uint8_t)(x>>24);}
++static inline void KebabA650GmuDigest(const void *p,size_t n,uint8_t out[32])
++{SHA256_CTX c;SHA256_Init(&c);SHA256_Update(&c,p,n);SHA256_Final(out,&c);}
++static inline int KebabA650GmuRange(uint32_t region,uint32_t *base,uint32_t *bytes)
++{
++ static const uint32_t b[8]={0x4000,0x144000,0x157000,0x60000000,0x60001000,0x60006000,0,0x10004000};
++ static const uint32_t n[8]={0x8000,0x13000,0x9000,0x1000,0x5000,0x1000,0x4000,0x4000};
++ if(region>=8 || !base || !bytes)return 22;*base=b[region];*bytes=n[region];return 0;
++}
++static inline int KebabA650GmuLocate(uint32_t address,uint32_t bytes,uint32_t *region)
++{
++ uint32_t i,b,n;if(!bytes || !region || (uint64_t)address+bytes>UINT64_C(0x100000000))return 22;
++ for(i=0;i<8;i++){(void)KebabA650GmuRange(i,&b,&n);if(address>=b && (uint64_t)address+bytes<=(uint64_t)b+n){*region=i;return 0;}}return 22;
++}
++/* Format parser is independently bounded; trust is established only by
++ * KebabA650GmuBoundPlan below. Metadata is not treated as file payload. */
++static inline int KebabA650GmuParse(const uint8_t *image,size_t bytes,KebabA650GmuPlan *out)
++{
++ size_t at=0;uint32_t i,j;if(!image || !out || !bytes || bytes>2u*1024u*1024u)return 22;memset(out,0,sizeof *out);
++ while(at<bytes){
++  KebabA650GmuBlock *p;uint32_t region,n;if(bytes-at<16 || out->blocks==64)return 22;p=&out->block[out->blocks];
++  p->address=KebabA650GmuU32(image+at);p->bytes=KebabA650GmuU32(image+at+4);p->type=KebabA650GmuU32(image+at+8);p->value=KebabA650GmuU32(image+at+12);p->image_offset=(uint32_t)at+16;
++  if((p->address&3) || (p->bytes&3) || p->bytes>bytes-at-16)return 22;
++  n=p->bytes?p->bytes:p->value;
++  if(p->bytes || p->type==1 || p->type==7){if(KebabA650GmuLocate(p->address,n,&region))return 22;p->region=region;}
++  else p->region=UINT32_MAX;
++  if(p->bytes){if(region==4 || region==5)return 22; /* runtime HFI/log never firmware payload targets */
++   ++out->payloads;if(region<6)out->ram_bytes+=p->bytes;else out->tcm_bytes+=p->bytes;
++   for(i=0;i<out->blocks;i++){KebabA650GmuBlock *q=&out->block[i];if(q->bytes && p->address<(uint64_t)q->address+q->bytes && q->address<(uint64_t)p->address+p->bytes)return 22;}
++  }
++  ++out->blocks;at+=16+p->bytes;
++ }
++ for(i=0;i<out->blocks;i++){
++  const KebabA650GmuBlock *p=&out->block[i];const uint32_t addr[2]={0x10007fe0,0x10007ff0};uint32_t *version[2]={&out->core_version,&out->hfi_version};
++  for(j=0;j<2;j++)if(p->bytes && p->address<=addr[j] && (uint64_t)addr[j]+4<=(uint64_t)p->address+p->bytes)*version[j]=KebabA650GmuU32(image+p->image_offset+addr[j]-p->address);
++ }
++ return 0;
++}
++static inline int KebabA650GmuBoundPlan(const void *image,size_t bytes,KebabA650GmuPlan *out,uint8_t digest[32])
++{
++ static const uint8_t expected[32]={0xdf,0x79,0xfa,0x84,0x82,0xfc,0xc7,0x58,0x7b,0xb2,0x39,0xb9,0xc9,0xe2,0xb2,0x4b,0xce,0x47,0x29,0x89,0x3b,0x99,0x0f,0xe3,0xf8,0x2b,0x30,0xda,0x81,0x75,0xb0,0x1c};
++ uint8_t hash[32];int e;if(!image || !out || bytes!=41548)return 22;KebabA650GmuDigest(image,bytes,hash);if(digest)memcpy(digest,hash,32);if(memcmp(hash,expected,32))return 80;
++ e=KebabA650GmuParse((const uint8_t *)image,bytes,out);if(e)return e;
++ return out->core_version==0x20010008 && out->hfi_version==0x20000001?0:80;
++}
++static inline int KebabA650GmuOverlap(uintptr_t a,size_t n,uintptr_t b,size_t m)
++{if(n>UINTPTR_MAX-a || m>UINTPTR_MAX-b)return 1;return a<b+m && b<a+n;}
++static inline int KebabA650GmuStage(const void *image,size_t bytes,const KebabA650GmuExtent *extent,size_t count,KebabA650GmuBackingRecord *out)
++{
++ KebabA650GmuPlan plan;uint32_t i,j,b,n;uint8_t repeat[32];int e;
++ if(!out)return 22;memset(out,0,sizeof *out);out->result=22;
++ e=KebabA650GmuBoundPlan(image,bytes,&plan,out->sha256);if(e){out->result=(uint32_t)e;return e;}out->image_verified=1;
++ if(!extent || count!=6)return 22;
++ /* Validate the entire destination set before the first memset/copy. This
++  * neither allocates nor changes mappings; the producer must own/pin them. */
++ for(i=0;i<6;i++){
++  (void)KebabA650GmuRange(i,&b,&n);
++  if(extent[i].iova!=b || extent[i].bytes!=n || !extent[i].cpu || ((uintptr_t)extent[i].cpu&15) || KebabA650GmuOverlap((uintptr_t)extent[i].cpu,n,(uintptr_t)image,bytes))return 22;
++  for(j=0;j<i;j++)if(KebabA650GmuOverlap((uintptr_t)extent[i].cpu,n,(uintptr_t)extent[j].cpu,extent[j].bytes))return 22;
++ }
++ for(i=0;i<6;i++)memset(extent[i].cpu,0,extent[i].bytes);
++ for(i=0;i<plan.blocks;i++){
++  const KebabA650GmuBlock *p=&plan.block[i];if(!p->bytes || p->region>=6)continue;
++  memcpy((uint8_t *)extent[p->region].cpu+p->address-extent[p->region].iova,(const uint8_t *)image+p->image_offset,p->bytes);
++ }
++ /* Actual OTA HFI2 layout: table216B, queue start224B, four4KiB slots,
++  * CMD/MSG/DBG enabled, DSP disabled. num_active_q stays source value4. */
++ {
++  uint8_t *h=(uint8_t *)extent[4].cpu;const uint32_t header[6]={0,54,6,12,4,4},priority[4]={10,10,40,20};
++  for(i=0;i<6;i++)KebabA650GmuPut32(h+4*i,header[i]);
++  for(i=0;i<4;i++){
++   uint8_t *q=h+24+48*i;KebabA650GmuPut32(q,i<3?1:0);KebabA650GmuPut32(q+4,extent[4].iova+224+4096*i);
++   KebabA650GmuPut32(q+8,i|(priority[i]<<8));KebabA650GmuPut32(q+12,1024);
++  }
++ }
++ KebabA650GmuDigest(image,bytes,repeat);if(memcmp(repeat,out->sha256,32)){out->result=80;return 80;}
++ out->ram_staged=out->hfi_initialized=1;out->extent_count=6;out->mapped_pages=43;out->ram_bytes=plan.ram_bytes;out->tcm_bytes_pending=plan.tcm_bytes;out->result=0;return 0;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GmuBackingTypes.h
+@@ -0,0 +1,6 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GMU_BACKING_TYPES_H
++#define KEBAB_A650_GMU_BACKING_TYPES_H
++#include <stdint.h>
++typedef struct {uint32_t result,image_verified,ram_staged,hfi_initialized,extent_count,mapped_pages,ram_bytes,tcm_bytes_pending,firmware_started,mmio_writes;uint8_t sha256[32];} KebabA650GmuBackingRecord;
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GmuCache.h
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GMU_CACHE_H
++#define KEBAB_A650_GMU_CACHE_H
++#include <stdint.h>
++typedef struct {
++ uint32_t magic,schema,bytes,result,valid_mask,expected_wimg,cpu_page_bytes,page_count;
++ uint32_t wimg[3],pool_index[3],page_offset[3],async_hfi_ready;
++} KebabA650GmuCacheRecord;
++#ifdef __cplusplus
++static_assert(sizeof(KebabA650GmuCacheRecord)==72,"A650 shared cache record v1");
++extern "C" {
++#endif
++int kebab_a650_gmu_backing_cache_snapshot(KebabA650GmuCacheRecord *);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GmuCache.inc
+@@ -0,0 +1,22 @@
++/* SPDX-License-Identifier: MIT */
++#include "KebabA650GmuCache.h"
++extern "C" int kebab_a650_gmu_backing_cache_snapshot(KebabA650GmuCacheRecord *out)
++{
++ if(!out)return KG_INVALID;memset(out,0,sizeof(*out));out->magic=0x3143474b;out->schema=1;out->bytes=sizeof(*out);
++ out->expected_wimg=VM_WIMG_WCOMB;out->cpu_page_bytes=PAGE_SIZE;
++ int e=KGNativeWorker(NULL);if(e){out->result=e;return e;}
++ if(__atomic_load_n(&kagb_prepare_state,__ATOMIC_ACQUIRE)!=2 || kagb_prepare_result){out->result=KG_STATE;return KG_STATE;}
++ if(!KGTry(&kagb_domain)){out->result=KG_BUSY;return KG_BUSY;}
++ if(kagb_closing || (kagb_record.phase!=KAGB_PREPARED && kagb_record.phase!=KAGB_STAGED) ||
++    kagb_domain.receipt.state!=KG_PREPARED || !kagb_domain.pool[5].handle || !kagb_domain.pool[6].handle){KGUnlock(&kagb_domain);out->result=KG_STATE;return KG_STATE;}
++ if(PAGE_SIZE!=16384 || kagb_domain.pool[5].bytes!=32768 || kagb_domain.pool[6].bytes!=16384){KGUnlock(&kagb_domain);out->result=KG_UNSUPPORTED;return KG_UNSUPPORTED;}
++ const uint32_t index[3]={5,5,6},offset[3]={0,16384,0};e=0;
++ for(uint32_t i=0;i<3;i++){
++  out->pool_index[i]=index[i];out->page_offset[i]=offset[i];
++  out->wimg[i]=pmap_cache_attributes((ppnum_t)((kagb_domain.pool[index[i]].pa+offset[i])>>PAGE_SHIFT))&VM_WIMG_MASK;
++  out->valid_mask|=1u<<i;out->page_count++;
++  if(out->wimg[i]!=VM_WIMG_WCOMB)e=KG_POOL;
++ }
++ /* Cache-mode qualification alone is not a running HFI message protocol. */
++ out->result=e;KGUnlock(&kagb_domain);return e;
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GmuNativeBacking.cpp
+@@ -0,0 +1,181 @@
++/* SPDX-License-Identifier: MIT */
++#include <libkern/crypto/sha2.h>
++#include "KebabA650GmuBacking.h"
++#include "KebabA650GmuNativeBacking.h"
++#include "KebabNativeGpuSmmu.h"
++#ifndef KEBAB_A650_GMU_BACKING_WC_NATIVE
++#error "A650 backing requires its qualified WC native allocator; do not preinclude the old WB adapter"
++#endif
++/* Alternative prepared-domain TU for the full OTA layout. Do not also create
++ * a second active GMU-kernel domain through the old four-region candidate.
++ * This TU intentionally exposes no bind, MMIO mapper, branch or reset API.
++ * All descriptor/PTE operations use the real native allocator and engine.
++ * Compile-time active owner remains NULL, independently of CPU staging. */
++static KGDomain kagb_domain;
++static KGNative kagb_native;
++static uint32_t kagb_prepare_state;
++static int kagb_prepare_result=KG_CLOSED;
++static KebabA650GmuNativeBackingRecord kagb_record;
++static uint32_t kagb_closing;
++static uint64_t kagb_generation;
++struct KAGBHolder {KebabA650GmuBackingToken *identity;uint64_t generation;uint32_t published;};
++static KAGBHolder kagb_holder[8];
++static const KGRegion kagb_regions[]={
++ {0x00004000,0x8000,KG_READ|KG_WRITE|KG_EXEC|KG_PRIV,0,NULL},
++ {0x00144000,0x13000,KG_READ|KG_WRITE|KG_EXEC|KG_PRIV,0,NULL},
++ {0x00157000,0x9000,KG_READ|KG_WRITE|KG_EXEC|KG_PRIV,0,NULL},
++ {0x60000000,0x1000,KG_READ|KG_WRITE|KG_PRIV,0,NULL},
++ {0x60001000,0x5000,KG_READ|KG_WRITE|KG_PRIV,0,NULL},
++ {0x60006000,0x1000,KG_READ|KG_WRITE|KG_PRIV,0,NULL}
++};
++static void kagb_refresh_locked(void)
++{
++ kagb_record.magic=0x3142474b;kagb_record.schema=1;kagb_record.bytes=sizeof(kagb_record);
++ kagb_record.buffers_retained=0;kagb_record.cpu_allocated_bytes=0;
++ for(uint32_t i=0;i<=KG_MAX_REGIONS;i++)if(kagb_domain.pool[i].handle){
++  kagb_record.buffers_retained++;kagb_record.cpu_allocated_bytes+=kagb_domain.pool[i].bytes;
++ }
++ kagb_record.mapped_pages=kagb_domain.receipt.mapped_pages;
++ kagb_record.hardware_touched=kagb_domain.receipt.hardware_touched;
++ kagb_record.cleanup_error=kagb_domain.receipt.cleanup_error;
++ if(kagb_record.cleanup_error){kagb_record.phase=KAGB_FAILED;kagb_record.cleaned_for_device=0;kagb_record.result=kagb_domain.receipt.result;}
++ if(kagb_domain.receipt.state==KG_RELEASED){kagb_record.phase=KAGB_RELEASED;kagb_record.cleaned_for_device=0;}
++}
++extern "C" int kebab_a650_gmu_backing_prepare(void)
++{
++ int e=KGNativeWorker(NULL);if(e)return e;uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kagb_prepare_state,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
++  if(expected!=2)return KG_BUSY;if(kagb_prepare_result)return kagb_prepare_result;
++  if(!KGTry(&kagb_domain))return KG_BUSY;
++  e=!kagb_closing && kagb_domain.receipt.state==KG_PREPARED?0:KG_STATE;KGUnlock(&kagb_domain);return e;
++ }
++ KGOps ops=KGNativeInit(&kagb_native,&kagb_domain,NULL);
++ kagb_prepare_result=KebabGpuSmmuPrepare(&kagb_domain,&ops,KG_GMU_KERNEL,kagb_regions,6);
++ kagb_record.result=(uint32_t)kagb_prepare_result;kagb_record.primary_error=kagb_domain.receipt.primary_error;
++ kagb_record.phase=kagb_prepare_result?KAGB_FAILED:KAGB_PREPARED;
++ kagb_refresh_locked();__atomic_store_n(&kagb_prepare_state,2,__ATOMIC_RELEASE);return kagb_prepare_result;
++}
++extern "C" int kebab_a650_gmu_backing_stage(const void *image,size_t bytes)
++{
++ int e=KGNativeWorker(NULL);if(e)return e;
++ if(__atomic_load_n(&kagb_prepare_state,__ATOMIC_ACQUIRE)!=2 || kagb_prepare_result)return KG_STATE;
++ if(!KGTry(&kagb_domain))return KG_BUSY;
++ /* Only an unbound, never-published domain may be modified. A restored
++  * former device domain is deliberately insufficient for this cold stage. */
++ if(kagb_closing || kagb_record.phase!=KAGB_PREPARED || kagb_domain.receipt.state!=KG_PREPARED ||
++    kagb_domain.count!=6 || kagb_domain.mapped || kagb_domain.touched || kagb_domain.saved_valid ||
++    kagb_domain.lease.held || kagb_domain.receipt.hardware_touched){KGUnlock(&kagb_domain);return KG_STATE;}
++ KebabA650GmuExtent extent[6];KGPool *snapshot=&kagb_domain.pool[7];
++ if(!image || bytes!=KebabA650GmuImageBytes || snapshot->handle){e=KG_INVALID;goto fail;}
++ for(uint32_t i=0;i<=6;i++){
++  e=KGPoolValid(&kagb_domain,&kagb_domain.pool[i],i?((kagb_regions[i-1].bytes+16383)&~16383u):KG_TABLE_BYTES);
++  if(e)goto fail;
++  if(i){
++   const KGRegion *r=&kagb_domain.region[i-1],*b=&kagb_regions[i-1];
++   if(r->iova!=b->iova || r->bytes!=b->bytes || r->permissions!=b->permissions || r->initial_bytes || r->initial){e=KG_STATE;goto fail;}
++   extent[i-1]={kagb_regions[i-1].iova,kagb_regions[i-1].bytes,kagb_domain.pool[i].address};
++  }
++ }
++ /* Take a private retained image snapshot before hashing. A caller's buffer
++  * may change while the one copy runs: only the exact copied bytes are then
++  * checked and consumed. No externally writable pointer to this pool exists.
++  * Pool7 is CPU-only and absent from the six-region translation tables. */
++ e=kagb_domain.ops.alloc(kagb_domain.ops.cookie,7,65536,snapshot);if(e)goto fail;
++ e=KGPoolValid(&kagb_domain,snapshot,65536);if(e)goto fail;
++ for(uint32_t i=0;i<=6;i++)if(KGOverlap(snapshot->pa,65536,kagb_domain.pool[i].pa,kagb_domain.pool[i].bytes) ||
++    KebabA650GmuOverlap((uintptr_t)snapshot->address,65536,(uintptr_t)kagb_domain.pool[i].address,kagb_domain.pool[i].bytes)){e=KG_POOL;goto fail;}
++ memset(snapshot->address,0,65536);memcpy(snapshot->address,image,bytes);
++ e=KebabA650GmuStage(snapshot->address,bytes,extent,6,&kagb_record.backing);if(e)goto fail;
++ /* The descriptor pin check is repeated by each native clean. CPU-only
++  * preparation is complete only after every data pool and table is clean. */
++ for(uint32_t i=0;i<=6;i++){
++  e=kagb_domain.ops.clean_poc(kagb_domain.ops.cookie,&kagb_domain.pool[i]);if(e)goto fail;
++  kagb_record.cleaned_pools++;
++ }
++ kagb_domain.ops.barrier(kagb_domain.ops.cookie);
++ kagb_record.cleaned_for_device=1;kagb_record.phase=KAGB_STAGED;
++ kagb_record.result=kagb_record.primary_error=0;kagb_refresh_locked();KGUnlock(&kagb_domain);return 0;
++fail:
++ /* No device publication exists. Retain descriptors and failure evidence;
++  * no retry is permitted, and only explicit unpublished release may free. */
++ kagb_record.result=kagb_record.primary_error=(uint32_t)e;kagb_record.phase=KAGB_FAILED;
++ kagb_record.cleaned_for_device=0;kagb_refresh_locked();KGUnlock(&kagb_domain);return e;
++}
++extern "C" int kebab_a650_gmu_backing_snapshot(KebabA650GmuNativeBackingRecord *out)
++{
++ if(!out)return KG_INVALID;
++ if(__atomic_load_n(&kagb_prepare_state,__ATOMIC_ACQUIRE)!=2)return KG_STATE;
++ if(!KGTry(&kagb_domain))return KG_BUSY;
++ kagb_refresh_locked();*out=kagb_record;KGUnlock(&kagb_domain);return KG_OK;
++}
++extern "C" int kebab_a650_gmu_backing_release_unpublished(void)
++{
++ int e=KGNativeWorker(NULL);if(e)return e;
++ if(__atomic_load_n(&kagb_prepare_state,__ATOMIC_ACQUIRE)!=2 || kagb_prepare_result)return KG_STATE;
++ if(!KGTry(&kagb_domain))return KG_BUSY;
++ if(kagb_closing){KGUnlock(&kagb_domain);return KG_STATE;}
++ for(uint32_t i=0;i<8;i++)if(kagb_holder[i].identity){KGUnlock(&kagb_domain);return KG_BUSY;}
++ /* Closing is sticky before dropping this lock and entering engine Release.
++  * No new ref can race between the zero-ref check and descriptor disposal.
++  * A BUSY/error from that call retains the pool, with no automatic retry. */
++ kagb_closing=1;KGUnlock(&kagb_domain);
++ return KebabGpuSmmuRelease(&kagb_domain);
++}
++static int kagb_pins_locked(void)
++{
++ if(kagb_closing || kagb_record.phase!=KAGB_STAGED || !kagb_record.cleaned_for_device ||
++    kagb_domain.receipt.state!=KG_PREPARED || kagb_domain.count!=6 || kagb_domain.touched ||
++    kagb_domain.mapped || kagb_domain.lease.held || kagb_domain.receipt.hardware_touched)return KG_STATE;
++ for(uint32_t i=0;i<=7;i++){
++  uint32_t bytes=i==0 || i==7?65536:((kagb_regions[i-1].bytes+16383)&~16383u);
++  int e=KGPoolValid(&kagb_domain,&kagb_domain.pool[i],bytes);if(e)return e;
++ }
++ return 0;
++}
++static int kagb_token_locked(const KebabA650GmuBackingToken *t)
++{
++ if(!t || t->slot>=8 || !t->held || !t->generation)return KG_OWNERSHIP;
++ const KAGBHolder *h=&kagb_holder[t->slot];
++ return h->identity==t && h->generation==t->generation?0:KG_OWNERSHIP;
++}
++extern "C" int kebab_a650_gmu_backing_acquire(KebabA650GmuBackingToken *t,KebabA650GmuBackingDescription *out)
++{
++ int e=KGNativeWorker(NULL);if(e)return e;if(!t || !out)return KG_INVALID;
++ if(__atomic_load_n(&kagb_prepare_state,__ATOMIC_ACQUIRE)!=2 || kagb_prepare_result)return KG_STATE;
++ if(!KGTry(&kagb_domain))return KG_BUSY;
++ uint32_t slot=8;
++ if(t->held){KGUnlock(&kagb_domain);return KG_OWNERSHIP;}
++ for(uint32_t i=0;i<8;i++){if(kagb_holder[i].identity==t){KGUnlock(&kagb_domain);return KG_OWNERSHIP;}if(!kagb_holder[i].identity && slot==8)slot=i;}
++ if(slot==8 || kagb_generation==UINT64_MAX){KGUnlock(&kagb_domain);return KG_BUSY;}
++ e=kagb_pins_locked();if(e){KGUnlock(&kagb_domain);return e;}
++ memset(out,0,sizeof(*out));out->generation=++kagb_generation;
++ out->root_physical=kagb_domain.pool[0].pa;out->table_descriptor_identity=(uintptr_t)kagb_domain.pool[0].handle;
++ out->table_bytes=65536;out->region_count=6;out->mapped_pages=43;out->cleaned_for_device=1;
++ for(uint32_t i=0;i<6;i++){
++  const KGPool *p=&kagb_domain.pool[i+1];const KGRegion *r=&kagb_domain.region[i];
++  out->region[i]={r->iova,r->bytes,r->permissions,p->bytes,p->pa,(uintptr_t)p->handle};
++ }
++ *t={out->generation,slot,1};kagb_holder[slot]={t,t->generation,0};KGUnlock(&kagb_domain);return 0;
++}
++extern "C" int kebab_a650_gmu_backing_check(const KebabA650GmuBackingToken *t)
++{
++ int e=KGNativeWorker(NULL);if(e)return e;if(!KGTry(&kagb_domain))return KG_BUSY;
++ e=kagb_token_locked(t);if(!e)e=kagb_pins_locked();KGUnlock(&kagb_domain);return e;
++}
++extern "C" int kebab_a650_gmu_backing_publish(KebabA650GmuBackingToken *t)
++{
++ int e=KGNativeWorker(NULL);if(e)return e;if(!KGTry(&kagb_domain))return KG_BUSY;
++ e=kagb_token_locked(t);if(!e)e=kagb_pins_locked();
++ if(!e)kagb_holder[t->slot].published=1;KGUnlock(&kagb_domain);return e;
++}
++extern "C" int kebab_a650_gmu_backing_end(KebabA650GmuBackingToken *t)
++{
++ int e=KGNativeWorker(NULL);if(e)return e;if(!KGTry(&kagb_domain))return KG_BUSY;
++ e=kagb_token_locked(t);
++ if(!e){if(kagb_holder[t->slot].published)e=KG_STATE;else{memset(&kagb_holder[t->slot],0,sizeof(KAGBHolder));memset(t,0,sizeof(*t));}}
++ KGUnlock(&kagb_domain);return e;
++}
++
++#include "KebabA650GmuAdt.inc"
++
++#include "KebabA650GmuCache.inc"
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GmuNativeBacking.h
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GMU_NATIVE_BACKING_API_H
++#define KEBAB_A650_GMU_NATIVE_BACKING_API_H
++#include <stdint.h>
++#include <stddef.h>
++#include "KebabA650GmuBackingTypes.h"
++/* CPU-only stages; no state here is a live SMMU/power/reset lease. */
++enum { KAGB_EMPTY=0,KAGB_PREPARED=1,KAGB_STAGED=2,KAGB_FAILED=3,KAGB_RELEASED=4 };
++typedef struct {
++ uint32_t magic,schema,bytes,result,phase,cleaned_for_device,buffers_retained,cleaned_pools;
++ uint32_t cpu_allocated_bytes,mapped_pages,hardware_touched,firmware_started,primary_error,cleanup_error;
++ KebabA650GmuBackingRecord backing;
++} KebabA650GmuNativeBackingRecord;
++/* Kernel-private handles. Never serialize these pointers/PAs into CAP or
++ * accept a reconstructed token from a user/CAP record. No CPU RAM accessor. */
++typedef struct {uint64_t generation;uint32_t slot,held;} KebabA650GmuBackingToken;
++typedef struct {
++ uint32_t iova,bytes,permissions,allocation_bytes;uint64_t physical;uintptr_t descriptor_identity;
++} KebabA650GmuBackingRegion;
++typedef struct {
++ uint64_t generation,root_physical;uintptr_t table_descriptor_identity;
++ uint32_t table_bytes,region_count,mapped_pages,cleaned_for_device;
++ KebabA650GmuBackingRegion region[6];
++} KebabA650GmuBackingDescription;
++#ifdef __cplusplus
++static_assert(sizeof(KebabA650GmuNativeBackingRecord)==128,"A650 native backing record v1");
++extern "C" {
++#endif
++int kebab_a650_gmu_backing_prepare(void);
++int kebab_a650_gmu_backing_stage(const void *image,size_t bytes);
++int kebab_a650_gmu_backing_snapshot(KebabA650GmuNativeBackingRecord *out);
++int kebab_a650_gmu_backing_release_unpublished(void);
++int kebab_a650_gmu_backing_acquire(KebabA650GmuBackingToken *,KebabA650GmuBackingDescription *);
++int kebab_a650_gmu_backing_check(const KebabA650GmuBackingToken *);
++/* Call before the first hardware publication. This first version pins for
++ * the boot lifetime; no generic boolean/callback "drained" can undo it. */
++int kebab_a650_gmu_backing_publish(KebabA650GmuBackingToken *);
++int kebab_a650_gmu_backing_end(KebabA650GmuBackingToken *);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GmuPmapCache.h
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GMU_PMAP_CACHE_H
++#define KEBAB_A650_GMU_PMAP_CACHE_H
++/* These are actual exported XNU kernel types/constants, independently of
++ * MACH_KERNEL_PRIVATE. Do not change that macro for the entire IOKit TU.
++ * vm/pmap.h:335-336 hides this existing C prototype behind the Mach-private
++ * scope; arm/pmap/pmap.c:10164 defines the real read-only implementation. */
++#include <mach/vm_types.h>
++#include <mach/vm_param.h>
++#include <vm/memory_types.h>
++#ifdef __cplusplus
++static_assert(sizeof(ppnum_t)==4,"actual XNU ppnum_t ABI");
++static_assert(VM_WIMG_MASK==0xff && VM_WIMG_WCOMB==6,"actual ARM Normal-NC cache constants");
++extern "C" {
++#endif
++extern unsigned int pmap_cache_attributes(ppnum_t);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -119,6 +119,8 @@
+ #include "KebabNativeGmuRootHold.h"
+ #include "KebabNativeGpuBusHold.h"
+ #include "KebabNativeGpuSmmuObserveHold.h"
++#include "KebabNativeGmuStageHold.h"
++#include "KebabNativeGpuFirstAttachHold.h"
+ #include <kern/kebab_low_dma.h>
+ static_assert(sizeof(struct kebab_low_dma_observation)==256,"fixed lowDMA observation");
+ static_assert(sizeof(KebabGpuCxMxRecord)==11100,"fixed held CX/MX receipt");
+@@ -866,6 +868,26 @@
+ extern "C" int
+ kebab_capture_open(uint32_t source,uint32_t argument,struct kc_image *image)
+ {
++    if(source==24) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabGmuStageObservationRecord);
++        KebabGmuStageObservationRecord *data=(KebabGmuStageObservationRecord *)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_native_gmu_stage_snapshot(data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=24;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
++    if(source==25) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabGpuFirstAttachObservationRecord);
++        KebabGpuFirstAttachObservationRecord *data=(KebabGpuFirstAttachObservationRecord *)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_native_gpu_first_hold_snapshot(data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=25;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
+     if(source==21) {
+         if(argument)return 22;
+         uint32_t bytes=sizeof(KebabGmuRootRecord);
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabGmuStageObservation.h
+@@ -0,0 +1,30 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GMU_STAGE_OBSERVATION_H
++#define KEBAB_GMU_STAGE_OBSERVATION_H
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++#include "KebabA650GmuAdt.h"
++#include "KebabA650GmuNativeBacking.h"
++#include "KebabA650GmuCache.h"
++/* CAP24 contains metadata only. No firmware, physical address or kernel token. */
++typedef struct {
++ uint32_t magic,schema,bytes,result,state,attempts,source,prepare_result;
++ uint32_t adt_result,backing_snapshot_result,cache_snapshot_result,reserved;
++ KebabA650GmuAdtRecord adt;
++ KebabA650GmuNativeBackingRecord backing;
++ KebabA650GmuCacheRecord cache;
++} KebabGmuStageObservationRecord;
++#ifdef __cplusplus
++static_assert(sizeof(KebabGmuStageObservationRecord)==296,"CAP24 fixed record");
++static_assert(offsetof(KebabGmuStageObservationRecord,adt)==48,"CAP24 ADT");
++static_assert(offsetof(KebabGmuStageObservationRecord,backing)==96,"CAP24 backing");
++static_assert(offsetof(KebabGmuStageObservationRecord,cache)==224,"CAP24 cache");
++#endif
++static inline void KebabGmuStageObservationInit(KebabGmuStageObservationRecord *r,uint32_t result)
++{
++ memset(r,0,sizeof *r);r->magic=0x3154474b;r->schema=1;r->bytes=sizeof *r;
++ r->result=result;r->state=2;r->attempts=1;r->source=24;
++ r->prepare_result=r->adt_result=r->backing_snapshot_result=r->cache_snapshot_result=UINT32_MAX;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
+@@ -0,0 +1,68 @@
++/* SPDX-License-Identifier: MIT */
++#include "KebabNativeGpuFirstAttach.h"
++#if defined(KERNEL)
++#include <kern/KebabGpuFirstAttachNative.h>
++#include <kern/KebabGpuFirstNativeBinding.h>
++#else
++#include "KebabGpuFirstAttachNative.h"
++#include "KebabGpuFirstNativeBinding.h"
++#endif
++#include "KebabGpuFirstAttachObservation.h"
++static_assert(sizeof(KFReceipt)==144 && sizeof(KGDiscovery)==1632,"CAP25 source payload ABI");
++static KFNamespace kf_namespace;
++static KFFirstAttach kf_attachment;
++static KFNative kf_native;
++static uint32_t kf_attempt;
++static uint32_t kf_namespace_init_state;
++static int kf_namespace_ensure(void)
++{
++ uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kf_namespace_init_state,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return expected==2?0:KG_BUSY;
++ int e=KFNamespaceInit(&kf_namespace);__atomic_store_n(&kf_namespace_init_state,e?3:2,__ATOMIC_RELEASE);return e;
++}
++extern "C" int kebab_gpu_first_attach_cold(void)
++{
++ int e=KFNativeWorker(NULL);if(e)return e;uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kf_attempt,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return KG_STATE;
++ e=kf_namespace_ensure();if(e)return e;KFOps o=KFNativeInit(&kf_native,&kf_attachment);
++ return KFFirstAttachCold(&kf_attachment,&kf_namespace,&KebabGpuFirstNativePolicy,&o);
++}
++extern "C" int kebab_gpu_first_allow_run(void){return KFFirstAllowRun(&kf_attachment);}
++/* Pure atomic/private comparisons. Safe for the future canonical clock owner
++ * already holding VRM globalbusy; never calls bus/SCM/MMIO or takes engine lock. */
++extern "C" int kebab_gpu_first_ready_locked(const KebabGpuColdToken *identity,uint64_t epoch)
++{
++ if(identity!=&kf_native.cold)return KG_OWNERSHIP;
++ return KFFirstRunCheckPrivate(&kf_attachment,epoch);
++}
++extern "C" const KebabGpuColdToken *kebab_gpu_first_run_lease(uint64_t *epoch)
++{
++ if(!epoch || !__atomic_load_n(&kf_attachment.run_permitted,__ATOMIC_ACQUIRE) || KFFirstRunCheckPrivate(&kf_attachment,kf_attachment.token.epoch))return NULL;
++ *epoch=kf_attachment.token.epoch;return &kf_native.cold;
++}
++extern "C" int kebab_gpu_first_stop_restore(void){return KFFirstStopRestore(&kf_attachment);}
++extern "C" int kebab_gpu_first_fault(void){return KFFirstFault(&kf_attachment);}
++extern "C" int kebab_gpu_first_snapshot(KFReceipt *r){return KFFirstSnapshot(&kf_attachment,r);}
++extern "C" int kebab_gpu_first_observation_copy(KebabGpuFirstAttachObservationRecord *out)
++{
++ if(!out)return KG_INVALID;
++ if(!__atomic_load_n(&kf_attempt,__ATOMIC_ACQUIRE) || !__atomic_load_n(&kf_attachment.magic,__ATOMIC_ACQUIRE))return KG_STATE;
++ if(!KFTry(&kf_attachment.busy))return KG_BUSY;
++ memcpy(out->receipt_words,&kf_attachment.receipt,sizeof(KFReceipt));memcpy(out->discovery_words,&kf_attachment.work,sizeof(KGDiscovery));
++ KFUnlock(&kf_attachment.busy);return 0;
++}
++extern "C" int kebab_gpu_namespace_change_begin(unsigned operation,uint64_t *cookie)
++{
++ if(!cookie || operation>KF_OP_PRODUCER_OWNERSHIP_CHANGE)return KG_INVALID;*cookie=0;
++ if(operation<=KF_OP_OWN_CM3_RESET)return 0;
++ int e=KFNativeWorker(NULL);if(e)return e;e=kf_namespace_ensure();if(e)return e;
++ uint32_t started=0;e=KFMutationBeginFor(&kf_namespace,operation,&started);if(!e && started)*cookie=__atomic_load_n(&kf_namespace.epoch,__ATOMIC_ACQUIRE);return e;
++}
++extern "C" int kebab_gpu_namespace_change_end(uint64_t cookie,unsigned outcome)
++{
++ if(outcome>2)return KG_INVALID;if(!cookie)return 0;int e=KFNativeWorker(NULL);if(e)return e;
++ if(__atomic_load_n(&kf_namespace.epoch,__ATOMIC_ACQUIRE)!=cookie || !__atomic_load_n(&kf_namespace.mutation,__ATOMIC_ACQUIRE))return KG_OWNERSHIP;
++ if(outcome)KFNamespaceRevoke(&kf_namespace);return KFMutationEnd(&kf_namespace);
++}
++/* No USB/userclient/startup hook, active PAS call, firmware execution or DMA
++ * success entry. The compiled production binding above remains CLOSED. */
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabGpuFirstAttachObservation.h
+@@ -0,0 +1,25 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GPU_FIRST_ATTACH_OBSERVATION_H
++#define KEBAB_GPU_FIRST_ATTACH_OBSERVATION_H
++#include <stdint.h>
++#include <string.h>
++typedef struct {
++ uint32_t magic,schema,bytes,result,state,attempts,source,receipt_bytes,discovery_bytes,snapshot_result;
++ uint32_t receipt_words[36],discovery_words[408];
++} KebabGpuFirstAttachObservationRecord;
++static inline void KebabGpuFirstAttachObservationInit(KebabGpuFirstAttachObservationRecord *r,uint32_t result)
++{
++ memset(r,0,sizeof *r);r->magic=0x314f464b;r->schema=1;r->bytes=1816;r->result=result;r->state=2;r->attempts=1;
++ r->source=25;r->receipt_bytes=144;r->discovery_bytes=1632;
++ r->receipt_words[0]=0x3141464b;r->receipt_words[1]=1;r->receipt_words[2]=144;r->receipt_words[3]=result;
++}
++#ifdef __cplusplus
++static_assert(sizeof(KebabGpuFirstAttachObservationRecord)==1816,"CAP25 fixed observation ABI");
++extern "C" {
++#endif
++int kebab_gpu_first_attach_cold(void);
++int kebab_gpu_first_observation_copy(KebabGpuFirstAttachObservationRecord *);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeGmuStageHold.h
+@@ -0,0 +1,51 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_GMU_STAGE_HOLD_H
++#define KEBAB_NATIVE_GMU_STAGE_HOLD_H
++#include <sys/errno.h>
++#include <arm/machine_routines.h>
++#include "KebabGmuStageObservation.h"
++extern "C" int get_preemption_level(void);
++static uint32_t kebab_gmu_stage_state;
++static int kebab_gmu_stage_result=EAGAIN;
++static KebabGmuStageObservationRecord *kebab_gmu_stage_record;
++/* One attempt including context/allocation failures. There is no automatic
++ * release, retry, SMMU mapping, MMIO, clock or firmware execution here. */
++extern "C" void kebab_gmu_stage(void)
++{
++ uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kebab_gmu_stage_state,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
++  int e=expected==2?kebab_gmu_stage_result:EBUSY;
++  printf("KEBAB GMUSTAGE: end; result=%d; state=%u; cached=1\n",e,expected);return;
++ }
++ int result=kebab_gpu_gcc_worker_access(NULL);
++ if(!result && (ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()))result=95;
++ KebabGmuStageObservationRecord *r=NULL;
++ if(!result) {
++  r=(KebabGmuStageObservationRecord *)IOMalloc(sizeof *r);
++  if(!r)result=ENOMEM;
++  else {
++   KebabGmuStageObservationInit(r,95);r->state=1;
++   result=kebab_a650_gmu_backing_prepare();r->prepare_result=(uint32_t)result;
++   if(!result) {
++    result=kebab_a650_gmu_backing_stage_current_adt(&r->adt);r->adt_result=(uint32_t)result;
++    int copied=kebab_a650_gmu_backing_snapshot(&r->backing);r->backing_snapshot_result=(uint32_t)copied;
++    if(!result && copied)result=copied;
++    int cache=kebab_a650_gmu_backing_cache_snapshot(&r->cache);r->cache_snapshot_result=(uint32_t)cache;
++    if(!result && cache)result=cache;
++   }
++   r->result=(uint32_t)result;r->state=2;
++  }
++ }
++ kebab_gmu_stage_record=r;kebab_gmu_stage_result=result;
++ __atomic_store_n(&kebab_gmu_stage_state,2,__ATOMIC_RELEASE);
++ printf("KEBAB GMUSTAGE: end; result=%d; state=2; cached=0; CPU staging only\n",result);
++}
++static int kebab_native_gmu_stage_snapshot(KebabGmuStageObservationRecord *out)
++{
++ if(!out)return EINVAL;
++ if(__atomic_load_n(&kebab_gmu_stage_state,__ATOMIC_ACQUIRE)!=2)return EAGAIN;
++ if(kebab_gmu_stage_record)memcpy(out,kebab_gmu_stage_record,sizeof *out);
++ else KebabGmuStageObservationInit(out,(uint32_t)kebab_gmu_stage_result);
++ return 0;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeGpuFirstAttach.h
+@@ -0,0 +1,158 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_GPU_FIRST_ATTACH_H
++#define KEBAB_NATIVE_GPU_FIRST_ATTACH_H
++#include <IOKit/IOLib.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <arm/machine_routines.h>
++#if defined(KERNEL)
++#include <kern/KebabGpuFirstAttachCore.h>
++#include <kern/KebabGpuColdOwner.h>
++#else
++#include "KebabGpuFirstAttachCore.h"
++#include "KebabGpuColdOwner.h"
++#endif
++#include "KebabA650GmuNativeBacking.h"
++extern "C" int get_preemption_level(void);
++typedef struct {
++ KFFirstAttach *engine;KebabGpuColdToken cold;KebabA650GmuBackingToken backing;
++ KebabA650GmuBackingDescription description;
++ IOMemoryDescriptor *registers,*clock_registers;IOMemoryMap *mapping,*clock_mapping;
++ uintptr_t base,clock_base;uint32_t groups;
++} KFNative;
++static int KFNativeWorker(void *)
++{return ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()?KG_CLOSED:0;}
++static int KFNativeClockRead(void *cookie,uint32_t off,uint32_t *out)
++{
++ KFNative *n=(KFNative *)cookie;
++ if(!n || !out || !n->clock_base || !n->cold.bus.held || (off!=0x1064 && off!=0x1098))return KG_INVALID;
++ int e=KFNativeWorker(n);if(e)return e;uintptr_t address=n->clock_base+off;
++#if defined(__aarch64__)
++ __asm__ volatile("ldr %w0, [%1]":"=r"(*out):"r"(address):"memory");
++#else
++ *out=*(volatile const uint32_t *)address;
++#endif
++ return 0;
++}
++static int KFNativeHold(void *cookie,uint32_t *held)
++{
++ KFNative *n=(KFNative *)cookie;int e=KFNativeWorker(n);if(e)return e;
++ e=kebab_rpmh_gpu_bus_acquire(&n->cold.bus);*held=n->cold.bus.held;if(e)return e;
++ n->clock_registers=IOMemoryDescriptor::withPhysicalAddress(0x03d90000,0x8000,kIODirectionIn);
++ if(!n->clock_registers)return KG_POOL;
++ n->clock_mapping=n->clock_registers->map(kIOMapAnywhere|kIOMapInhibitCache|kIOMapReadOnly);
++ if(!n->clock_mapping || n->clock_mapping->getLength()!=0x8000 || !(n->clock_base=n->clock_mapping->getVirtualAddress()))return KG_POOL;
++ KebabGpuColdIo io={n,KFNativeClockRead};e=kebab_rpmh_gpu_cold_acquire(&n->cold,&io);
++ *held=n->cold.bus.held || n->cold.held;return e;
++}
++static int KFNativeCheck(void *cookie,uint32_t flags)
++{KFNative *n=(KFNative *)cookie;int e=KFNativeWorker(n);return e?e:kebab_rpmh_gpu_cold_check(&n->cold,flags);}
++static int KFNativeDrain(void *cookie)
++{KFNative *n=(KFNative *)cookie;int e=KFNativeWorker(n);return e?e:kebab_rpmh_gpu_cold_drain(&n->cold);}
++static int KFNativeEnd(void *cookie)
++{
++ KFNative *n=(KFNative *)cookie;int e=0;
++ if(n->cold.held){e=kebab_rpmh_gpu_cold_end(&n->cold);if(e)return e;}
++ if(n->cold.bus.held){e=kebab_rpmh_gpu_bus_end(&n->cold.bus);if(e)return e;}
++ n->clock_base=0;
++ if(n->clock_mapping){n->clock_mapping->release();n->clock_mapping=NULL;}
++ if(n->clock_registers){n->clock_registers->release();n->clock_registers=NULL;}
++ return 0;
++}
++static void KFNativeDescription(const KebabA650GmuBackingDescription *d,KFBacking *b)
++{
++ memset(b,0,sizeof *b);b->generation=d->generation;b->root_pa=d->root_physical;b->table_identity=d->table_descriptor_identity;
++ b->table_bytes=d->table_bytes;b->regions=d->region_count;b->pages=d->mapped_pages;b->cleaned=d->cleaned_for_device;
++ for(unsigned i=0;i<6;i++){b->region_iova[i]=d->region[i].iova;b->region_bytes[i]=d->region[i].bytes;
++ b->region_permissions[i]=d->region[i].permissions;b->region_pa[i]=d->region[i].physical;
++ b->region_identity[i]=d->region[i].descriptor_identity;b->allocation_bytes[i]=d->region[i].allocation_bytes;}
++}
++static int KFNativeBackingAcquire(void *cookie,KFBacking *b,uint32_t *held)
++{
++ KFNative *n=(KFNative *)cookie;int e=kebab_a650_gmu_backing_acquire(&n->backing,&n->description);*held=n->backing.held;
++ if(!e)KFNativeDescription(&n->description,b);return e;
++}
++static int KFNativeBackingCheck(void *cookie,const KFBacking *b)
++{
++ KFNative *n=(KFNative *)cookie;if(b!=&n->engine->backing)return KG_OWNERSHIP;
++ int e=kebab_a650_gmu_backing_check(&n->backing);if(e)return e;KFBacking expected;KFNativeDescription(&n->description,&expected);
++ return memcmp(b,&expected,sizeof expected)?KG_OWNERSHIP:0;
++}
++static int KFNativeBackingPublish(void *cookie)
++{return kebab_a650_gmu_backing_publish(&((KFNative *)cookie)->backing);}
++static int KFNativeBackingEnd(void *cookie)
++{return kebab_a650_gmu_backing_end(&((KFNative *)cookie)->backing);}
++static void KFNativeUnmap(void *cookie)
++{
++ KFNative *n=(KFNative *)cookie;n->base=0;n->groups=0;
++ if(n->mapping){n->mapping->release();n->mapping=NULL;}if(n->registers){n->registers->release();n->registers=NULL;}
++}
++static int KFNativeMap(void *cookie)
++{
++ KFNative *n=(KFNative *)cookie;if(n->registers || n->mapping || n->base)return KG_STATE;
++ int e=KFCheck(n->engine,KF_ACCESS|KF_COLD|KF_DRAINED);if(e)return e;
++ n->registers=IOMemoryDescriptor::withPhysicalAddress(KG_BASE,KG_BYTES,kIODirectionInOut);if(!n->registers)return KG_POOL;
++ n->mapping=n->registers->map(kIOMapAnywhere|kIOMapInhibitCache);
++ if(!n->mapping || n->mapping->getLength()!=KG_BYTES || !(n->base=n->mapping->getVirtualAddress())){KFNativeUnmap(n);return KG_POOL;}
++ e=KFCheck(n->engine,KF_ACCESS|KF_COLD|KF_DRAINED);if(e)KFNativeUnmap(n);return e;
++}
++static int KFNativeRead32(void *cookie,uint32_t off,uint32_t *out)
++{
++ KFNative *n=(KFNative *)cookie;if(!n || !out || !n->base || !KGReadAllowed(off,0,31))return KG_INVALID;
++ if(((off>=0x800 && off<0xa00) && (off-0x800)/4>=n->groups) || ((off>=0xc00 && off<0xe00) && (off-0xc00)/4>=n->groups))return KG_INVALID;
++ int e=KFCheck(n->engine,KF_ACCESS);if(e)return e;uintptr_t address=n->base+off;
++#if defined(__aarch64__)
++ __asm__ volatile("ldr %w0, [%1]":"=r"(*out):"r"(address):"memory");
++#else
++ *out=*(volatile const uint32_t *)address;
++#endif
++ if(off==0x20)n->groups=(*out&255)<=128?(*out&255):0;return 0;
++}
++static int KFNativeRead64(void *cookie,uint32_t off,uint64_t *out)
++{
++ KFNative *n=(KFNative *)cookie;if(!n || !out || !n->base || !KGReadAllowed(off,1,31))return KG_INVALID;
++ int e=KFCheck(n->engine,KF_ACCESS);if(e)return e;uintptr_t address=n->base+off;
++#if defined(__aarch64__)
++ __asm__ volatile("ldr %0, [%1]":"=r"(*out):"r"(address):"memory");
++#else
++ *out=*(volatile const uint64_t *)address;
++#endif
++ return 0;
++}
++static int KFNativeWrite32(void *cookie,uint32_t off,uint32_t value)
++{
++ KFNative *n=(KFNative *)cookie;if(!n || !n->base || !KFWriteAllowed(n->engine,off,0))return KG_INVALID;
++ int e=KFCheck(n->engine,KF_ACCESS|KF_COLD|KF_DRAINED);if(e)return e;uintptr_t address=n->base+off;
++#if defined(__aarch64__)
++ __asm__ volatile("str %w0, [%1]":"+r"(value):"r"(address):"memory");
++#else
++ *(volatile uint32_t *)address=value;
++#endif
++ return 0;
++}
++static int KFNativeWrite64(void *cookie,uint32_t off,uint64_t value)
++{
++ KFNative *n=(KFNative *)cookie;if(!n || !n->base || !KFWriteAllowed(n->engine,off,1))return KG_INVALID;
++ int e=KFCheck(n->engine,KF_ACCESS|KF_COLD|KF_DRAINED);if(e)return e;uintptr_t address=n->base+off;
++#if defined(__aarch64__)
++ __asm__ volatile("str %0, [%1]":"+r"(value):"r"(address):"memory");
++#else
++ *(volatile uint64_t *)address=value;
++#endif
++ return 0;
++}
++static void KFNativeBarrier(void *)
++{
++#if defined(__aarch64__)
++ __asm__ volatile("dsb sy":::"memory");
++#else
++ OSMemoryBarrier();
++#endif
++}
++static void KFNativeDelay(void *){IODelay(1);}
++static KFOps KFNativeInit(KFNative *n,KFFirstAttach *engine)
++{
++ n->engine=engine;KFOps o={n,KFNativeWorker,KFNativeHold,KFNativeCheck,KFNativeDrain,KFNativeEnd,
++ KFNativeBackingAcquire,KFNativeBackingCheck,KFNativeBackingPublish,KFNativeBackingEnd,
++ KFNativeMap,KFNativeUnmap,KFNativeRead32,KFNativeRead64,KFNativeWrite32,KFNativeWrite64,KFNativeBarrier,KFNativeDelay};return o;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeGpuFirstAttachHold.h
+@@ -0,0 +1,35 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_GPU_FIRST_ATTACH_HOLD_H
++#define KEBAB_NATIVE_GPU_FIRST_ATTACH_HOLD_H
++#include <sys/errno.h>
++#include <arm/machine_routines.h>
++#include "KebabGpuFirstAttachObservation.h"
++extern "C" int get_preemption_level(void);
++static uint32_t kebab_gpu_first_hold_state;
++static int kebab_gpu_first_hold_result=EAGAIN;
++static KebabGpuFirstAttachObservationRecord *kebab_gpu_first_hold_record;
++/* GMUMAP 7B / UD54. Include once after existing normal GCC worker gate. */
++extern "C" void kebab_gpu_first_prepare(void)
++{
++ uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kebab_gpu_first_hold_state,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
++  int e=expected==2?kebab_gpu_first_hold_result:EBUSY;
++  printf("KEBAB GMUMAP: end; result=%d; state=%u; cached=1\n",e,expected);return;
++ }
++ int e=kebab_gpu_gcc_worker_access(NULL);KebabGpuFirstAttachObservationRecord *r=NULL;
++ if(!e && (ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()))e=95;
++ if(!e){r=(KebabGpuFirstAttachObservationRecord *)IOMalloc(sizeof *r);if(!r)e=ENOMEM;
++  else {KebabGpuFirstAttachObservationInit(r,95);r->state=1;e=kebab_gpu_first_attach_cold();
++   int copy=kebab_gpu_first_observation_copy(r);r->snapshot_result=copy;if(!e && copy)e=copy;r->result=e;r->state=2;}
++ }
++ kebab_gpu_first_hold_record=r;kebab_gpu_first_hold_result=e;__atomic_store_n(&kebab_gpu_first_hold_state,2,__ATOMIC_RELEASE);
++ printf("KEBAB GMUMAP: end; result=%d; state=2; cached=0; first attach only, producer held\n",e);
++}
++/* CAP25 copies one immutable attempt, including failure; no live check/IO. */
++static int kebab_native_gpu_first_hold_snapshot(KebabGpuFirstAttachObservationRecord *out)
++{
++ if(!out)return EINVAL;if(__atomic_load_n(&kebab_gpu_first_hold_state,__ATOMIC_ACQUIRE)!=2)return EAGAIN;
++ if(kebab_gpu_first_hold_record)memcpy(out,kebab_gpu_first_hold_record,sizeof *out);
++ else KebabGpuFirstAttachObservationInit(out,(uint32_t)kebab_gpu_first_hold_result);return 0;
++}
++#endif
+--- a/iokit/Kernel/arm/KebabNativeGpuSmmu.h
++++ b/iokit/Kernel/arm/KebabNativeGpuSmmu.h
+@@ -1,10 +1,12 @@
+ /* SPDX-License-Identifier: MIT */
+ #ifndef KEBAB_NATIVE_GPU_SMMU_H
+ #define KEBAB_NATIVE_GPU_SMMU_H
++#define KEBAB_A650_GMU_BACKING_WC_NATIVE 1
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOMemoryDescriptor.h>
+ #include <IOKit/IOBufferMemoryDescriptor.h>
+ #include <arm/machine_routines.h>
++#include "KebabA650GmuPmapCache.h"
+ #include "KebabGpuSmmuCore.h"
+ static_assert(sizeof(KGReceipt)==120,"GPU SMMU candidate receipt v1");
+ static_assert(sizeof(KGDiscovery)==1632,"bounded GPU SMMU discovery v1");
+@@ -145,11 +147,12 @@
+ #endif
+ }
+ static void KGNativeDelay(void *) { IODelay(1); }
+-static int KGNativeAlloc(void *,uint32_t,uint32_t bytes,KGPool *p)
++static int KGNativeAlloc(void *,uint32_t index,uint32_t bytes,KGPool *p)
+ {
+  if(!p || !bytes || (bytes&16383) || bytes>1048576)return KG_INVALID;
+  auto memory=IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+-  kIODirectionInOut|kIOMemoryPhysicallyContiguous|kIOMemoryMapperNone,bytes,KG_PA_LIMIT-1);
++  kIODirectionInOut|kIOMemoryPhysicallyContiguous|kIOMemoryMapperNone|
++  ((index==5 || index==6)?kIOMapWriteCombineCache:0),bytes,KG_PA_LIMIT-1);
+  if(!memory)return KG_POOL;
+  IOBufferMemoryDescriptor *m;
+ #if defined(IOKIT_ENABLE_SHARED_PTR)
+@@ -165,7 +168,9 @@
+  if(extent<bytes || p->pa<0x20000 || (p->pa&4095) || p->pa>KG_PA_LIMIT-bytes)return KG_POOL;
+  return KG_OK;
+ }
+-static int KGNativePinCheck(void *,const KGPool *p)
++static int KGNativeShared(const KGNative *a,const KGPool *p)
++{ return a && a->domain && (p==&a->domain->pool[5] || p==&a->domain->pool[6]); }
++static int KGNativePinCheck(void *cookie,const KGPool *p)
+ {
+  if(!p || !p->handle || !p->prepared || !p->address || !p->bytes || (p->bytes&16383) ||
+     p->bytes>1048576 || (p->pa&4095) || p->pa<0x20000 || p->pa>KG_PA_LIMIT-p->bytes)return KG_POOL;
+@@ -174,12 +179,21 @@
+  for(uint32_t off=0;off<p->bytes;off+=4096) {
+   IOByteCount extent=0;if(m->getPhysicalSegment(off,&extent,kIOMemoryMapperNone)!=p->pa+off || extent<4096)return KG_POOL;
+  }
++ /* The IOBuffer factory changes the VM object/pmap cache mode. Verify every
++  * native page, including allocation padding, before using this same CPU VA.
++  * No independent NC alias is created and no WB pointer is exported. */
++ if(KGNativeShared((const KGNative *)cookie,p))
++  for(uint32_t off=0;off<p->bytes;off+=PAGE_SIZE)
++   if((pmap_cache_attributes((ppnum_t)((p->pa+off)>>PAGE_SHIFT))&VM_WIMG_MASK)!=VM_WIMG_WCOMB)return KG_POOL;
+  return KG_OK;
+ }
+ static int KGNativeClean(void *cookie,const KGPool *p)
+ {
+  int e=KGNativeWorker(cookie);if(e)return e;e=KGNativePinCheck(cookie,p);if(e)return e;
+- flush_dcache((vm_offset_t)p->address,p->bytes,0);KGNativeBarrier(cookie);return KG_OK;
++ /* Shared HFI/log are Normal-NC from allocation onward. Never CIVAC their
++  * mixed CPU/device-owned cache lines. WB immutable RAM/table still clean. */
++ if(!KGNativeShared((const KGNative *)cookie,p))flush_dcache((vm_offset_t)p->address,p->bytes,0);
++ KGNativeBarrier(cookie);return KG_OK;
+ }
+ static int KGNativeFree(void *cookie,KGPool *p)
+ {
+--- /dev/null
++++ b/osfmk/kern/KebabGpuColdOwner.h
+@@ -0,0 +1,22 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GPU_COLD_OWNER_H
++#define KEBAB_GPU_COLD_OWNER_H
++#include "KebabGpuBusOwner.h"
++/* Owned by first-attach TU; bus token keeps exact pointer identity. */
++typedef struct {KebabGpuBusToken bus;uint64_t generation;uint32_t held,started;} KebabGpuColdToken;
++typedef struct {void *cookie;int (*read32)(void *,uint32_t,uint32_t *);} KebabGpuColdIo;
++#ifdef __cplusplus
++extern "C" {
++#endif
++int kebab_rpmh_gpu_cold_acquire(KebabGpuColdToken *,const KebabGpuColdIo *);
++int kebab_rpmh_gpu_cold_check(KebabGpuColdToken *,unsigned flags);
++int kebab_rpmh_gpu_cold_drain(KebabGpuColdToken *);
++int kebab_rpmh_gpu_cold_end(KebabGpuColdToken *);
++/* Called by the future GMU clock owner inside canonical globalbusy, after its
++ * own finite clock/reset/IRQ requirements and namespace private ready check. */
++int kebab_gpu_cold_token_locked(const KebabGpuColdToken *,unsigned cold);
++int kebab_gpu_cold_mark_started_locked(KebabGpuColdToken *);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabGpuFirstAttachCore.h
+@@ -0,0 +1,463 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GPU_FIRST_ATTACH_CORE_H
++#define KEBAB_GPU_FIRST_ATTACH_CORE_H
++#include "KebabGpuSmmuCore.h"
++
++/* Fixed A650 cold profile: SID5 kernel memory, SID4 deliberately FAULT with
++ * no mirrored RAM. All pins/leases are kernel-private and pointer identified.
++ * No global reset, ATS, CB5..7 access, fault ACK or RESUME exists here. */
++enum { KF_EMPTY=0,KF_RESERVED=1,KF_ATTACHED_QUIET=2,KF_RUN_ALLOWED=3,
++ KF_RESTORED=4,KF_FAILED=5,KF_QUARANTINED=6,KF_PARKED=7 };
++enum { KF_ACCESS=1,KF_COLD=2,KF_DRAINED=4,KF_RUN=8 };
++enum { KF_VENDOR_NG_COMPAT=1,KF_NS_VISIBLE_COMPAT=2 };
++typedef struct {
++ uint32_t schema,ready,id0,id1,id2,cr0,cb,kernel_smr,user_smr,vmid;
++ uint32_t namespace_mode,controlled_cb_mask,absent_cb_mask,no_locked,initialize;
++ uint8_t fdt_sha256[32],source_contract_sha256[32],ro_receipt_sha256[32];
++} KFPolicy;
++typedef struct {uint64_t epoch,sequence;uint32_t slot,held,cb,kernel_smr,user_smr;} KFToken;
++typedef struct {
++ uint32_t busy,initialized,mutation,quarantined;uint64_t epoch,sequence;
++ KFToken *slot[2];uint64_t slot_sequence[2];uint32_t cb_mask,smr_mask[4];
++} KFNamespace;
++typedef struct {
++ uint64_t generation,root_pa;uintptr_t table_identity;
++ uint32_t table_bytes,regions,pages,cleaned;uint64_t region_pa[6];
++ uint32_t region_iova[6],region_bytes[6],region_permissions[6],allocation_bytes[6];
++ uintptr_t region_identity[6];
++} KFBacking;
++typedef struct {
++ void *cookie;int (*worker)(void *);
++ int (*hold)(void *,uint32_t *held);int (*check)(void *,uint32_t);int (*drain)(void *);int (*end)(void *);
++ int (*backing_acquire)(void *,KFBacking *,uint32_t *held);int (*backing_check)(void *,const KFBacking *);
++ int (*backing_publish)(void *);int (*backing_end)(void *);
++ int (*map)(void *);void (*unmap)(void *);
++ int (*read32)(void *,uint32_t,uint32_t *);int (*read64)(void *,uint32_t,uint64_t *);
++ int (*write32)(void *,uint32_t,uint32_t);int (*write64)(void *,uint32_t,uint64_t);
++ void (*barrier)(void *);void (*delay)(void *);
++} KFOps;
++typedef struct {
++ uint32_t magic,schema,bytes,result,state,primary_error,cleanup_error;
++ uint32_t reads,writes,tlb_polls,touched,published,publish_attempted,held,backing_held,reserved;
++ uint32_t cb,kernel_smr,user_smr,asid,vmid,fault,dma_proven,fsynr0,fsynr1,frsynra,fault_last;
++ uint64_t namespace_epoch,backing_generation,root_pa,fault_far;
++} KFReceipt;
++typedef struct {
++ uint32_t busy,magic,mapped,saved,held,backing_held,published,publish_attempted,touched,cb_modified,run_permitted;
++ KFNamespace *space;KFPolicy policy;KFToken token;KFOps ops;KFBacking backing;
++ KFReceipt receipt;KGDiscovery before,work;KGContext programmed;
++ uint32_t expected_smr[2],expected_s2cr[2];
++} KFFirstAttach;
++static int KFTry(uint32_t *v){return __sync_bool_compare_and_swap(v,0,1);}
++static void KFUnlock(uint32_t *v){__sync_lock_release(v);}
++static int KFNonzero(const uint8_t *p){uint8_t v=0;for(unsigned i=0;i<32;i++)v|=p[i];return !!v;}
++static int KFPolicyBound(const KFPolicy *p)
++{
++ return p && p->schema==1 && p->ready==1 && p->cb<5 && p->kernel_smr<128 && p->user_smr<128 &&
++ p->kernel_smr!=p->user_smr && p->vmid<=65535 && p->no_locked==1 && p->initialize<=1 &&
++ (p->namespace_mode==KF_VENDOR_NG_COMPAT || p->namespace_mode==KF_NS_VISIBLE_COMPAT) &&
++ !((p->controlled_cb_mask|p->absent_cb_mask)&~31u) && !(p->controlled_cb_mask&p->absent_cb_mask) &&
++ KFNonzero(p->fdt_sha256) && KFNonzero(p->source_contract_sha256) && KFNonzero(p->ro_receipt_sha256);
++}
++static int KFNamespaceInit(KFNamespace *s)
++{
++ if(!s)return KG_INVALID;if(!KFTry(&s->busy))return KG_BUSY;
++ if(s->initialized){KFUnlock(&s->busy);return KG_STATE;}s->initialized=1;
++ __atomic_store_n(&s->epoch,1,__ATOMIC_RELEASE);KFUnlock(&s->busy);return 0;
++}
++/* Private generation check is safe under canonical VRM globalbusy: no MMIO,
++ * BUS callback or SMMU busy acquisition. It is permission, never DMA proof. */
++static int KFNamespaceCheckPrivate(const KFNamespace *s,const KFToken *t)
++{
++ if(!s || !t || !__atomic_load_n(&t->held,__ATOMIC_ACQUIRE) || t->slot>=2 || !t->epoch || !t->sequence ||
++ __atomic_load_n(&s->quarantined,__ATOMIC_ACQUIRE) || __atomic_load_n(&s->mutation,__ATOMIC_ACQUIRE) ||
++ __atomic_load_n(&s->epoch,__ATOMIC_ACQUIRE)!=t->epoch ||
++ __atomic_load_n(&s->slot[t->slot],__ATOMIC_ACQUIRE)!=t || __atomic_load_n(&s->slot_sequence[t->slot],__ATOMIC_ACQUIRE)!=t->sequence)return KG_OWNERSHIP;
++ return 0;
++}
++static int KFReserve(KFNamespace *s,KFToken *t,const KFPolicy *p)
++{
++ if(!s || !t || !KFPolicyBound(p))return KG_CLOSED;if(!KFTry(&s->busy))return KG_BUSY;
++ int e=KG_CLOSED;unsigned slot;
++ if(!s->initialized || s->mutation || __atomic_load_n(&s->quarantined,__ATOMIC_ACQUIRE) || !__atomic_load_n(&s->epoch,__ATOMIC_ACQUIRE))goto done;
++ if(t->held || t->sequence || (s->cb_mask&(1u<<p->cb)) ||
++ (s->smr_mask[p->kernel_smr/32]&(1u<<(p->kernel_smr%32))) ||
++ (s->smr_mask[p->user_smr/32]&(1u<<(p->user_smr%32)))){e=KG_BUSY;goto done;}
++ for(slot=0;slot<2 && s->slot[slot];slot++){}if(slot==2){e=KG_BUSY;goto done;}
++ if(s->sequence==UINT64_MAX){e=KG_STATE;goto done;}
++ memset(t,0,sizeof *t);t->epoch=__atomic_load_n(&s->epoch,__ATOMIC_ACQUIRE);t->sequence=++s->sequence;t->slot=slot;t->held=1;
++ t->cb=p->cb;t->kernel_smr=p->kernel_smr;t->user_smr=p->user_smr;__atomic_store_n(&s->slot_sequence[slot],t->sequence,__ATOMIC_RELEASE);
++ s->cb_mask|=1u<<p->cb;s->smr_mask[p->kernel_smr/32]|=1u<<(p->kernel_smr%32);
++ s->smr_mask[p->user_smr/32]|=1u<<(p->user_smr%32);
++ __atomic_store_n(&s->slot[slot],t,__ATOMIC_RELEASE);e=0;
++done:KFUnlock(&s->busy);return e;
++}
++static int KFUnreserve(KFNamespace *s,KFToken *t)
++{
++ if(!s || !t)return KG_INVALID;if(!KFTry(&s->busy))return KG_BUSY;
++ int e=KFNamespaceCheckPrivate(s,t);if(!e){
++ __atomic_store_n(&s->slot[t->slot],(KFToken *)NULL,__ATOMIC_RELEASE);__atomic_store_n(&s->slot_sequence[t->slot],0,__ATOMIC_RELEASE);
++ s->cb_mask&=~(1u<<t->cb);s->smr_mask[t->kernel_smr/32]&=~(1u<<(t->kernel_smr%32));
++ s->smr_mask[t->user_smr/32]&=~(1u<<(t->user_smr%32));__atomic_store_n(&t->held,0,__ATOMIC_RELEASE);}
++ KFUnlock(&s->busy);return e;
++}
++/* Only external SMMU configuration/target-memory ownership mutations enter
++ * this gate, BEFORE SCM/VRM locks. Busy has no side effects. */
++static int KFMutationBegin(KFNamespace *s)
++{
++ if(!s)return KG_INVALID;if(!KFTry(&s->busy))return KG_BUSY;int e=KG_BUSY;
++ if(s->initialized && !s->mutation && !__atomic_load_n(&s->quarantined,__ATOMIC_ACQUIRE) && !s->slot[0] && !s->slot[1] && __atomic_load_n(&s->epoch,__ATOMIC_ACQUIRE)<UINT64_MAX){
++  __atomic_store_n(&s->mutation,1,__ATOMIC_RELEASE);__atomic_add_fetch(&s->epoch,1,__ATOMIC_ACQ_REL);e=0;}
++ KFUnlock(&s->busy);return e;
++}
++static int KFMutationEnd(KFNamespace *s)
++{
++ if(!s)return KG_INVALID;if(!KFTry(&s->busy))return KG_BUSY;int e=KG_STATE;
++ if(s->mutation && !s->slot[0] && !s->slot[1]){__atomic_store_n(&s->mutation,0,__ATOMIC_RELEASE);e=0;}
++ KFUnlock(&s->busy);return e;
++}
++enum { KF_OP_INFO=0,KF_OP_ROOT_QSEE=1,KF_OP_PAS13_SEPARATE_IMAGE=2,
++ KF_OP_OWN_CM3_RESET=3,KF_OP_EXTERNAL_SMMU_CONFIG=4,KF_OP_TARGET_MEMORY_REASSIGN=5,
++ KF_OP_PRODUCER_OWNERSHIP_CHANGE=6 };
++static int KFMutationBeginFor(KFNamespace *s,unsigned operation,uint32_t *started)
++{
++ if(!started || operation>KF_OP_PRODUCER_OWNERSHIP_CHANGE)return KG_INVALID;*started=0;
++ /* PAS13 only remains separate if its exact memory intervals do not change
++  * the six backing/table allocations. The caller proves that range fact. */
++ if(operation<=KF_OP_OWN_CM3_RESET)return 0;
++ int e=KFMutationBegin(s);if(!e)*started=1;return e;
++}
++/* Emergency epoch revocation never releases pins or authorizes a reset. */
++static void KFNamespaceRevoke(KFNamespace *s)
++{
++ if(s){__atomic_store_n(&s->quarantined,1,__ATOMIC_RELEASE);uint64_t old=__atomic_load_n(&s->epoch,__ATOMIC_ACQUIRE);
++ if(old<UINT64_MAX)__atomic_compare_exchange_n(&s->epoch,&old,old+1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);}
++}
++static int KFCheck(KFFirstAttach *a,uint32_t flags)
++{
++ int e=KFNamespaceCheckPrivate(a->space,&a->token);if(e)return e;
++ if(!a->held)return KG_CLOSED;e=a->ops.check(a->ops.cookie,flags);if(e)return e;
++ if(a->backing_held)return a->ops.backing_check(a->ops.cookie,&a->backing);return 0;
++}
++static int KFR32(KFFirstAttach *a,uint32_t off,uint32_t *v)
++{
++ if(!KGReadAllowed(off,0,31))return KG_INVALID;int e=KFCheck(a,KF_ACCESS);if(e)return e;
++ a->receipt.reads++;return a->ops.read32(a->ops.cookie,off,v);
++}
++static int KFR64(KFFirstAttach *a,uint32_t off,uint64_t *v)
++{
++ if(!KGReadAllowed(off,1,31))return KG_INVALID;int e=KFCheck(a,KF_ACCESS);if(e)return e;
++ a->receipt.reads++;return a->ops.read64(a->ops.cookie,off,v);
++}
++static int KFWriteAllowed(const KFFirstAttach *a,uint32_t off,uint32_t wide)
++{
++ if(a->policy.cb>=5)return 0;
++ if(!wide && (off==0x800+4*a->policy.kernel_smr || off==0x800+4*a->policy.user_smr ||
++ off==0xc00+4*a->policy.kernel_smr || off==0xc00+4*a->policy.user_smr))return 1;
++ if(a->policy.initialize && !wide && (off==0x1000+4*a->policy.cb || off==0x1800+4*a->policy.cb || off==0x8004+4096*a->policy.cb))return 1;
++ return KGWriteAllowed(off,wide,a->policy.cb) || (!wide && off==0x8618+4096*a->policy.cb);
++}
++static int KFW(KFFirstAttach *a,uint32_t off,uint64_t v,uint32_t wide)
++{
++ if(!KFWriteAllowed(a,off,wide))return KG_INVALID;int e=KFCheck(a,KF_ACCESS|KF_COLD|KF_DRAINED);if(e)return e;
++ a->touched=1;a->receipt.writes++;e=wide?a->ops.write64(a->ops.cookie,off,v):a->ops.write32(a->ops.cookie,off,(uint32_t)v);
++ return e?e:KFCheck(a,KF_ACCESS|KF_COLD|KF_DRAINED);
++}
++#define KF_TRY(x) do{int kf_e=(x);if(kf_e)return kf_e;}while(0)
++static int KFSnapshot(KFFirstAttach *a,KGDiscovery *s)
++{
++ memset(s,0,sizeof *s);KF_TRY(KFR32(a,0x20,&s->id0));KF_TRY(KFR32(a,0x24,&s->id1));KF_TRY(KFR32(a,0x28,&s->id2));
++ s->num_streams=s->id0&255;s->num_cb=s->id1&255;s->num_s2=(s->id1>>16)&255;
++ if(s->id0!=a->policy.id0 || s->id1!=a->policy.id1 || s->id2!=a->policy.id2 ||
++ !(s->id0&(1u<<30)) || !(s->id0&(1u<<27)) || (s->id0&256) || !(s->id2&4096) ||
++ !s->num_streams || s->num_streams>128 || !s->num_cb || s->num_cb>8 || s->num_s2>s->num_cb ||
++ (s->id1&0xf0000000u)!=0x20000000u || ((s->id2>>4)&15)<1 || ((s->id2>>4)&15)>5 || (s->id2&15)<1 || (s->id2&15)>5)return KG_UNSUPPORTED;
++ static const uint32_t widths[6]={32,36,40,42,44,48};
++ s->stride=4096;s->cb_base=0x8000;s->pa_bits=widths[(s->id2>>4)&15];s->ipa_bits=widths[s->id2&15];
++ uint32_t ubs=(s->id2>>8)&15;s->va_bits=ubs<6?widths[ubs]:0;if(s->va_bits<32)return KG_UNSUPPORTED;
++ s->read_mask=((1u<<s->num_cb)-1)&31u;
++ KF_TRY(KFR32(a,0,&s->cr0));if(s->cr0!=a->policy.cr0 || (s->cr0&9))return KG_OWNERSHIP;
++ KF_TRY(KFR32(a,0x48,&s->gfsr));for(unsigned j=0;j<3;j++)KF_TRY(KFR32(a,0x50+4*j,&s->gfsynr[j]));
++ for(unsigned i=0;i<s->num_streams;i++){KF_TRY(KFR32(a,0x800+4*i,&s->stream[i].smr));KF_TRY(KFR32(a,0xc00+4*i,&s->stream[i].s2cr));}
++ for(unsigned i=0;i<5;i++)if(s->read_mask&(1u<<i)){
++  KGContext *c=&s->cb[i];uint32_t b=0x8000+4096*i;c->present=1;
++  KF_TRY(KFR32(a,0x1000+4*i,&c->cbar));KF_TRY(KFR32(a,0x1800+4*i,&c->cba2r));
++  c->type=(c->cbar>>16)&3;c->hypc=(c->cbar>>10)&1;c->monc=(c->cba2r>>1)&1;
++  c->vmid=(s->cr0&0x80000000u)?c->cba2r>>16:c->cbar&255;
++  KF_TRY(KFR32(a,b,&c->sctlr));KF_TRY(KFR32(a,b+4,&c->actlr));KF_TRY(KFR32(a,b+0x10,&c->tcr2));KF_TRY(KFR32(a,b+0x30,&c->tcr));
++  KF_TRY(KFR64(a,b+0x20,&c->ttbr0));KF_TRY(KFR64(a,b+0x28,&c->ttbr1));
++  KF_TRY(KFR32(a,b+0x38,&c->mair0));KF_TRY(KFR32(a,b+0x3c,&c->mair1));KF_TRY(KFR32(a,b+0x58,&c->fsr));
++  KF_TRY(KFR64(a,b+0x60,&c->far));KF_TRY(KFR32(a,b+0x68,&c->fsynr0));KF_TRY(KFR32(a,b+0x6c,&c->fsynr1));KF_TRY(KFR32(a,0x1400+4*i,&c->frsynra));
++ }
++ return 0;
++}
++static int KFIntersects(uint32_t smr,uint32_t sid)
++{return (smr&0x80000000u) && !(((smr&0x7fff)^sid)&~(((smr>>16)&0x7fff)|0x400u)&0x7fff);}
++static int KFValidateSnapshot(KFFirstAttach *a,const KGDiscovery *s)
++{
++ const KFPolicy *p=&a->policy;const KGContext *c=&s->cb[p->cb];
++ if(p->initialize){
++  /* Actual574 has no active NS route and five virgin ordinary CBs. Unknown
++   * disabled-context words are observations, never valid inherited config. */
++  if(s->num_cb>5 || s->num_s2 || p->cb>=s->num_cb || s->gfsr || p->vmid || !(s->cr0&(1u<<10)) ||
++  (s->cr0&0x80000000u) || p->kernel_smr>=s->num_streams || p->user_smr>=s->num_streams)return KG_OWNERSHIP;
++  for(unsigned i=0;i<s->num_streams;i++)if(s->stream[i].smr&0x80000000u)return KG_ROUTE;
++  for(unsigned cb=0;cb<s->num_cb;cb++){
++   const KGContext *o=&s->cb[cb];if(!o->present || o->type || o->hypc || o->monc || (o->cba2r&1) ||
++   o->vmid || (o->sctlr&1) || o->fsr)return KG_OWNERSHIP;
++  }
++  return c->actlr==3?0:KG_OWNERSHIP;
++ }
++ if(p->cb>=s->num_cb || p->cb<s->num_s2 || !c->present || s->gfsr || c->fsr || (c->sctlr&1) ||
++ c->type!=1 || c->hypc || c->monc || (c->cba2r&3)!=1 || c->actlr!=0x32b || c->vmid!=p->vmid ||
++ p->kernel_smr>=s->num_streams || p->user_smr>=s->num_streams)return KG_OWNERSHIP;
++ if(p->namespace_mode==KF_NS_VISIBLE_COMPAT && s->num_cb>5)return KG_OWNERSHIP;
++ for(unsigned cb=0;cb<5;cb++)if(s->read_mask&(1u<<cb)){
++  const KGContext *o=&s->cb[cb];if(cb==p->cb || o->type!=1 || o->hypc || o->monc || o->vmid!=p->vmid)continue;
++  if((o->sctlr&1) && ((o->ttbr0>>48)==p->cb+1 || (o->ttbr1>>48)==p->cb+1))return KG_OWNERSHIP;
++  if(!(p->controlled_cb_mask&(1u<<cb)) && !(p->absent_cb_mask&(1u<<cb)))return KG_OWNERSHIP;
++ }
++ unsigned match[2]={0,0};
++ for(unsigned i=0;i<s->num_streams;i++){
++  uint32_t smr=s->stream[i].smr,s2cr=s->stream[i].s2cr,type=(s2cr>>16)&3;
++  for(unsigned r=0;r<2;r++){
++   uint32_t slot=r?p->user_smr:p->kernel_smr,sid=r?4:5;
++   if(KFIntersects(smr,sid)){
++    if(i!=slot || ((smr>>16)&0x7fff)!=0x400 || ((smr&0x7fff)&~0x400u)!=sid || type==3)return KG_ROUTE;
++    if(type==0 && ((s2cr&255)>=5 || (!r && (s2cr&255)!=p->cb)))return KG_OWNERSHIP;
++    match[r]++;
++   }else if(i==slot && (smr&0x80000000u))return KG_ROUTE;
++  }
++  if((smr&0x80000000u) && type==0 && (s2cr&255)==p->cb && i!=p->kernel_smr)return KG_ROUTE;
++ }
++ if(match[0]>1 || match[1]>1)return KG_ROUTE;return 0;
++}
++static int KFSameUnowned(const KFFirstAttach *a,const KGDiscovery *s)
++{
++ const KGDiscovery *o=&a->before;if(s->id0!=o->id0 || s->id1!=o->id1 || s->id2!=o->id2 || s->cr0!=o->cr0 || s->num_streams!=o->num_streams)return 0;
++ for(unsigned i=0;i<s->num_streams;i++)if(i!=a->policy.kernel_smr && i!=a->policy.user_smr){
++  if(a->policy.initialize){if(s->stream[i].smr&0x80000000u)return 0;}
++  else if(memcmp(&s->stream[i],&o->stream[i],sizeof(KGStream)))return 0;
++ }
++ const KGContext *c=&s->cb[a->policy.cb],*b=&o->cb[a->policy.cb];
++ if(a->policy.initialize){
++  for(unsigned cb=0;cb<s->num_cb;cb++)if(cb!=a->policy.cb){const KGContext *u=&s->cb[cb];
++   if(u->type || u->hypc || u->monc || u->vmid || (u->cba2r&1) || (u->sctlr&1) || u->fsr)return 0;
++  }
++  return !c->hypc && !c->monc && !c->vmid && c->type<=1 && !c->fsr && !s->gfsr;
++ }
++ return c->cbar==b->cbar && c->cba2r==b->cba2r && c->actlr==b->actlr && !c->fsr && !s->gfsr;
++}
++static int KFRouteWrite(KFFirstAttach *a,unsigned which,uint32_t smr,uint32_t s2cr)
++{
++ uint32_t i=which?a->policy.user_smr:a->policy.kernel_smr,v;
++ /* S2CR first; while new matching SMR appears, traffic can only fault. */
++ KF_TRY(KFW(a,0xc00+4*i,s2cr,0));a->ops.barrier(a->ops.cookie);KF_TRY(KFR32(a,0xc00+4*i,&v));if((v^s2cr)&(a->policy.initialize?0x030300ffu:UINT32_MAX))return KG_IO;
++ KF_TRY(KFW(a,0x800+4*i,smr,0));a->ops.barrier(a->ops.cookie);KF_TRY(KFR32(a,0x800+4*i,&v));
++ if((v^smr)&(a->policy.initialize?((smr&0x80000000u)?0xffff7fffu:0x80000000u):UINT32_MAX))return KG_IO;
++ a->expected_smr[which]=smr;a->expected_s2cr[which]=s2cr;return 0;
++}
++static int KFTlb(KFFirstAttach *a)
++{
++ uint32_t b=0x8000+4096*a->policy.cb,v;
++ /* NS VMID-wide ALL clears inherited globals/old ASID; not a CB-local reset. */
++ KF_TRY(KFW(a,b+0x618,0,0));a->ops.barrier(a->ops.cookie);
++ KF_TRY(KFW(a,b+0x7f0,0,0));a->ops.barrier(a->ops.cookie);
++ for(unsigned i=0;i<KG_POLL_LIMIT;i++){KF_TRY(KFR32(a,b+0x7f4,&v));a->receipt.tlb_polls++;if(!(v&1))return 0;a->ops.delay(a->ops.cookie);}return KG_TIMEOUT;
++}
++static int KFContext(KFFirstAttach *a,const KGContext *c)
++{
++ uint32_t b=0x8000+4096*a->policy.cb;
++ KF_TRY(KFW(a,b+0x10,c->tcr2,0));KF_TRY(KFW(a,b+0x30,c->tcr,0));
++ KF_TRY(KFW(a,b+0x20,c->ttbr0,1));KF_TRY(KFW(a,b+0x28,c->ttbr1,1));
++ KF_TRY(KFW(a,b+0x38,c->mair0,0));KF_TRY(KFW(a,b+0x3c,c->mair1,0));
++ a->ops.barrier(a->ops.cookie);return 0;
++}
++static int KFContextVerify(KFFirstAttach *a,const KGContext *c,uint32_t sctlr)
++{
++ uint32_t b=0x8000+4096*a->policy.cb,v;uint64_t q;
++ KF_TRY(KFR32(a,b,&v));if((v^sctlr)&(a->policy.initialize?0x0fdf11f7u:UINT32_MAX))return KG_IO;
++ if(a->policy.initialize){
++  KF_TRY(KFR32(a,b+0x10,&v));if((v^c->tcr2)&0x00038017u)return KG_IO;
++  KF_TRY(KFR32(a,b+0x30,&v));if((v^c->tcr)&0x00c0ffbfu)return KG_IO;
++  KF_TRY(KFR64(a,b+0x20,&q));if((q^c->ttbr0)&(KG_PTE_PA|0xffff000000000000ULL))return KG_IO;
++  KF_TRY(KFR32(a,b+0x38,&v));return ((v^c->mair0)&255)?KG_IO:0;
++ }
++ KF_TRY(KFR32(a,b+0x10,&v));if(v!=c->tcr2)return KG_IO;KF_TRY(KFR32(a,b+0x30,&v));if(v!=c->tcr)return KG_IO;
++ KF_TRY(KFR64(a,b+0x20,&q));if(q!=c->ttbr0)return KG_IO;KF_TRY(KFR64(a,b+0x28,&q));if(q!=c->ttbr1)return KG_IO;
++ KF_TRY(KFR32(a,b+0x38,&v));if(v!=c->mair0)return KG_IO;KF_TRY(KFR32(a,b+0x3c,&v));return v==c->mair1?0:KG_IO;
++}
++static int KFInitializeRegime(KFFirstAttach *a)
++{
++ uint32_t cb=a->policy.cb,b=0x8000+4096*cb,v;
++ /* These fields belong to the virgin CB grant. Write defined software
++  * values; never RMW UNKNOWN disabled TCR/SCTLR/S2CR reset words. */
++ KF_TRY(KFW(a,b,0,0));a->ops.barrier(a->ops.cookie);KF_TRY(KFR32(a,b,&v));if(v&1)return KG_IO;
++ KF_TRY(KFW(a,0x1800+4*cb,1,0));KF_TRY(KFW(a,0x1000+4*cb,0x1f300,0));
++ KF_TRY(KFW(a,b+4,0x32b,0));a->ops.barrier(a->ops.cookie);
++ KF_TRY(KFR32(a,0x1800+4*cb,&v));if((v&3)!=1)return KG_IO;
++ KF_TRY(KFR32(a,0x1000+4*cb,&v));if((v&0x3ffff)!=0x1f300)return KG_IO;
++ KF_TRY(KFR32(a,b+4,&v));if((v&0x32b)!=0x32b)return KG_IO;
++ return 0;
++}
++static int KFParkInitial(KFFirstAttach *a)
++{
++ for(unsigned r=0;r<2;r++)KF_TRY(KFRouteWrite(a,r,0,0x20000));
++ KF_TRY(KFInitializeRegime(a));KF_TRY(KFTlb(a));
++ KGContext parked;memset(&parked,0,sizeof parked);parked.tcr=0x00802020;parked.tcr2=0x38011;
++ parked.ttbr0=parked.ttbr1=(uint64_t)(a->policy.cb+1)<<48;parked.mair0=0x44;
++ parked.sctlr=(1u<<12)|(3u<<22)|(1u<<5)|(1u<<2)|(1u<<1);
++ KF_TRY(KFContext(a,&parked));KF_TRY(KFW(a,0x8000+4096*a->policy.cb,parked.sctlr,0));
++ a->ops.barrier(a->ops.cookie);KF_TRY(KFContextVerify(a,&parked,parked.sctlr));KF_TRY(KFTlb(a));
++ KF_TRY(KFSnapshot(a,&a->work));if(!KFSameUnowned(a,&a->work))return KG_OWNERSHIP;
++ a->touched=0;a->receipt.state=KF_PARKED;return 0;
++}
++static int KFRestore(KFFirstAttach *a)
++{
++ if(!a->saved)return KG_STATE;KF_TRY(a->ops.drain(a->ops.cookie));KF_TRY(KFCheck(a,KF_ACCESS|KF_COLD|KF_DRAINED));
++ KF_TRY(KFSnapshot(a,&a->work));if(!KFSameUnowned(a,&a->work))return KG_OWNERSHIP;
++ if(a->policy.initialize)return KFParkInitial(a);
++ uint32_t cb=a->policy.cb,b=0x8000+4096*cb;
++ for(unsigned r=0;r<2;r++){
++  unsigned i=r?a->policy.user_smr:a->policy.kernel_smr;
++  uint32_t old=a->before.stream[i].s2cr,now=a->work.stream[i].s2cr;
++  /* The only new fields are CBNDX/TYPE/PRIVCFG. Never overwrite a foreign
++   * SHCFG/implementation field or an unexpected StreamID match. */
++  if((now&~0x030300ffu)!=(old&~0x030300ffu))return KG_OWNERSHIP;
++  uint32_t sm=a->work.stream[i].smr,expected=0x84000000u+(r?4:5);
++  if(sm!=a->before.stream[i].smr && sm!=expected)return KG_OWNERSHIP;
++  KF_TRY(KFRouteWrite(a,r,sm,(now&~0x030300ffu)|0x20000u));
++ }
++ uint32_t disabled=a->work.cb[cb].sctlr&~1u;KF_TRY(KFW(a,b,disabled,0));a->ops.barrier(a->ops.cookie);
++ uint32_t v;KF_TRY(KFR32(a,b,&v));if(v!=disabled)return KG_IO;KF_TRY(KFTlb(a));
++ KF_TRY(KFContext(a,&a->before.cb[cb]));KF_TRY(KFW(a,b,a->before.cb[cb].sctlr,0));a->ops.barrier(a->ops.cookie);
++ KF_TRY(KFContextVerify(a,&a->before.cb[cb],a->before.cb[cb].sctlr));KF_TRY(KFTlb(a));
++ for(unsigned r=0;r<2;r++){
++  unsigned i=r?a->policy.user_smr:a->policy.kernel_smr;uint32_t old=a->before.stream[i].s2cr;
++  /* Restore SMR while still faulting; only then restore original routing. */
++  KF_TRY(KFRouteWrite(a,r,a->before.stream[i].smr,(old&~0x030300ffu)|0x20000u));
++  KF_TRY(KFW(a,0xc00+4*i,old,0));a->ops.barrier(a->ops.cookie);KF_TRY(KFR32(a,0xc00+4*i,&v));if(v!=old)return KG_IO;
++ }
++ KF_TRY(KFSnapshot(a,&a->work));if(!KFSameUnowned(a,&a->work))return KG_OWNERSHIP;
++ a->touched=0;a->receipt.state=KF_RESTORED;return 0;
++}
++static int KFFinish(KFFirstAttach *a,int error)
++{
++ if(error)__atomic_store_n(&a->run_permitted,0,__ATOMIC_RELEASE);
++ a->receipt.primary_error=error;
++ if(error && a->touched){int e=KFRestore(a);if(e){a->receipt.cleanup_error=e;a->receipt.state=KF_QUARANTINED;KFNamespaceRevoke(a->space);error=KG_QUARANTINE;}}
++ if(error && !a->publish_attempted && !a->touched){
++  if(a->mapped){a->ops.unmap(a->ops.cookie);a->mapped=0;}
++  if(a->backing_held){int e=a->ops.backing_end(a->ops.cookie);if(e)a->receipt.cleanup_error=e;else a->backing_held=0;}
++  if(a->held){int e=a->ops.end(a->ops.cookie);if(e)a->receipt.cleanup_error=e;else a->held=0;}
++  if(!a->backing_held && !a->held && a->token.held){int e=KFUnreserve(a->space,&a->token);if(e)a->receipt.cleanup_error=e;}
++  if(a->receipt.cleanup_error){a->receipt.state=KF_QUARANTINED;error=KG_QUARANTINE;}else a->receipt.state=KF_FAILED;
++ }
++ if(error && a->receipt.state!=KF_QUARANTINED && a->receipt.state!=KF_RESTORED && a->receipt.state!=KF_PARKED)a->receipt.state=KF_FAILED;
++ a->receipt.result=error;a->receipt.touched=a->touched;a->receipt.published=a->published;a->receipt.publish_attempted=a->publish_attempted;a->receipt.held=a->held;
++ a->receipt.backing_held=a->backing_held;a->receipt.reserved=a->token.held;a->receipt.namespace_epoch=a->token.epoch;
++ KFUnlock(&a->busy);return error;
++}
++static int KFOpsValid(const KFOps *o)
++{
++ return o && o->worker && o->hold && o->check && o->drain && o->end && o->backing_acquire && o->backing_check && o->backing_publish && o->backing_end &&
++ o->map && o->unmap && o->read32 && o->read64 && o->write32 && o->write64 && o->barrier && o->delay;
++}
++static int KFBackingValid(const KFBacking *b)
++{
++ static const uint32_t va[6]={0x4000,0x144000,0x157000,0x60000000,0x60001000,0x60006000};
++ static const uint32_t bytes[6]={0x8000,0x13000,0x9000,0x1000,0x5000,0x1000};
++ if(!b->generation || !b->table_identity || b->table_bytes!=65536 || (b->root_pa&4095) ||
++ b->root_pa<0x20000 || b->root_pa>KG_PA_LIMIT-65536 || b->regions!=6 || b->pages!=43 || b->cleaned!=1)return KG_POOL;
++ for(unsigned i=0;i<6;i++){
++  uint32_t allocation=(bytes[i]+16383)&~16383u,permissions=i<3?15:11;
++  if(b->region_iova[i]!=va[i] || b->region_bytes[i]!=bytes[i] || b->allocation_bytes[i]!=allocation ||
++  b->region_permissions[i]!=permissions || !b->region_identity[i] || b->region_identity[i]==b->table_identity ||
++  (b->region_pa[i]&4095) || b->region_pa[i]<0x20000 || b->region_pa[i]>KG_PA_LIMIT-allocation ||
++  KGOverlap(b->region_pa[i],allocation,b->root_pa,65536))return KG_POOL;
++  for(unsigned j=0;j<i;j++)if(b->region_identity[i]==b->region_identity[j] || KGOverlap(b->region_pa[i],allocation,b->region_pa[j],b->allocation_bytes[j]))return KG_POOL;
++ }
++ return 0;
++}
++static int KFFirstAttachCold(KFFirstAttach *a,KFNamespace *s,const KFPolicy *p,const KFOps *o)
++{
++ if(!a || !s || !p || !KFOpsValid(o))return KG_INVALID;if(!KFTry(&a->busy))return KG_BUSY;
++ if(a->magic){KFUnlock(&a->busy);return KG_STATE;}__atomic_store_n(&a->magic,0x3141464b,__ATOMIC_RELEASE);a->ops=*o;a->policy=*p;a->space=s;
++ a->receipt.magic=a->magic;a->receipt.schema=1;a->receipt.bytes=sizeof a->receipt;a->receipt.state=KF_EMPTY;
++ a->receipt.cb=p->cb;a->receipt.kernel_smr=p->kernel_smr;a->receipt.user_smr=p->user_smr;a->receipt.asid=p->cb+1;a->receipt.vmid=p->vmid;
++ int e=o->worker(o->cookie);if(e)return KFFinish(a,e);e=KFReserve(s,&a->token,p);if(e)return KFFinish(a,e);
++ a->receipt.state=KF_RESERVED;e=o->hold(o->cookie,&a->held);if(e)return KFFinish(a,e);if(!a->held)return KFFinish(a,KG_OWNERSHIP);
++ e=o->backing_acquire(o->cookie,&a->backing,&a->backing_held);if(e)return KFFinish(a,e);if(!a->backing_held)return KFFinish(a,KG_POOL);
++ e=KFBackingValid(&a->backing);if(e)return KFFinish(a,e);
++ e=o->drain(o->cookie);if(e)return KFFinish(a,e);e=KFCheck(a,KF_ACCESS|KF_COLD|KF_DRAINED);if(e)return KFFinish(a,e);
++ e=o->map(o->cookie);if(e)return KFFinish(a,e);a->mapped=1;e=KFSnapshot(a,&a->before);if(e)return KFFinish(a,e);
++ e=KFValidateSnapshot(a,&a->before);if(e)return KFFinish(a,e);a->saved=1;
++ e=KFSnapshot(a,&a->work);if(e)return KFFinish(a,e);e=KFValidateSnapshot(a,&a->work);if(e)return KFFinish(a,e);
++ if(!p->initialize && memcmp(&a->before,&a->work,sizeof a->before))return KFFinish(a,KG_OWNERSHIP);
++ /* Publish is permanent pin in the current real backing implementation.
++  * Mark uncertainty before calling: failure cannot trigger unpublish/free. */
++ a->publish_attempted=1;e=o->backing_publish(o->cookie);if(e)return KFFinish(a,e);a->published=1;
++ for(unsigned r=0;r<2;r++){
++  unsigned i=r?p->user_smr:p->kernel_smr;uint32_t v=p->initialize?0x20000u:(a->before.stream[i].s2cr&~0x030300ffu)|0x20000u;
++  e=KFRouteWrite(a,r,0x84000000u+(r?4:5),v);if(e)return KFFinish(a,e);
++ }
++ uint32_t b=0x8000+4096*p->cb;KGContext next=a->before.cb[p->cb];
++ if(p->initialize){e=KFInitializeRegime(a);if(e)return KFFinish(a,e);}
++ else {e=KFW(a,b,next.sctlr&~1u,0);if(e)return KFFinish(a,e);a->ops.barrier(o->cookie);}
++ e=KFTlb(a);if(e)return KFFinish(a,e);
++ next.tcr=0x00802020;next.tcr2=0x00038011;next.ttbr0=a->backing.root_pa|((uint64_t)(p->cb+1)<<48);
++ next.ttbr1=(uint64_t)(p->cb+1)<<48;next.mair0=0x44;next.mair1=0;
++ next.sctlr=(1u<<12)|(3u<<22)|(1u<<5)|(1u<<2)|(1u<<1);a->programmed=next;
++ e=KFContext(a,&next);if(e)return KFFinish(a,e);e=KFW(a,b,next.sctlr,0);if(e)return KFFinish(a,e);a->ops.barrier(o->cookie);
++ e=KFContextVerify(a,&next,next.sctlr);if(e)return KFFinish(a,e);
++ /* Enable translation before routing the stream to this bank. Producer is
++  * still held; a speculative request can only translate or abort, not bypass. */
++ e=KFW(a,b,next.sctlr|1,0);if(e)return KFFinish(a,e);a->ops.barrier(o->cookie);
++ e=KFContextVerify(a,&next,next.sctlr|1);if(e)return KFFinish(a,e);
++ uint32_t route=p->initialize?p->cb:(a->before.stream[p->kernel_smr].s2cr&~0x030300ffu)|p->cb;
++ e=KFRouteWrite(a,0,0x84000005u,route);if(e)return KFFinish(a,e);
++ e=KFSnapshot(a,&a->work);if(e)return KFFinish(a,e);
++ uint32_t route_mask=p->initialize?0x030300ffu:UINT32_MAX,smr_mask=p->initialize?0xffff7fffu:UINT32_MAX;
++ if(!KFSameUnowned(a,&a->work) || ((a->work.stream[p->kernel_smr].s2cr^route)&route_mask) ||
++ ((a->work.stream[p->user_smr].s2cr^a->expected_s2cr[1])&route_mask) ||
++ ((a->work.stream[p->kernel_smr].smr^0x84000005u)&smr_mask) || ((a->work.stream[p->user_smr].smr^0x84000004u)&smr_mask))return KFFinish(a,KG_OWNERSHIP);
++ e=KFCheck(a,KF_ACCESS|KF_COLD|KF_DRAINED);if(e)return KFFinish(a,e);
++ a->receipt.state=KF_ATTACHED_QUIET;a->receipt.root_pa=a->backing.root_pa;a->receipt.backing_generation=a->backing.generation;
++ return KFFinish(a,0);
++}
++static int KFFirstAllowRun(KFFirstAttach *a)
++{
++ if(!a || !__atomic_load_n(&a->magic,__ATOMIC_ACQUIRE))return KG_STATE;if(!KFTry(&a->busy))return KG_BUSY;
++ if(a->receipt.state!=KF_ATTACHED_QUIET){KFUnlock(&a->busy);return KG_STATE;}
++ int e=KFCheck(a,KF_ACCESS|KF_COLD|KF_DRAINED);if(!e){a->receipt.state=KF_RUN_ALLOWED;__atomic_store_n(&a->run_permitted,1,__ATOMIC_RELEASE);}
++ a->receipt.result=e;KFUnlock(&a->busy);return e;
++}
++static int KFFirstStopRestore(KFFirstAttach *a)
++{
++ if(!a || !__atomic_load_n(&a->magic,__ATOMIC_ACQUIRE))return KG_STATE;if(!KFTry(&a->busy))return KG_BUSY;
++ if(a->receipt.state!=KF_ATTACHED_QUIET && a->receipt.state!=KF_RUN_ALLOWED){KFUnlock(&a->busy);return KG_STATE;}
++ __atomic_store_n(&a->run_permitted,0,__ATOMIC_RELEASE);
++ int e=KFRestore(a);if(e){a->receipt.cleanup_error=e;a->receipt.state=KF_QUARANTINED;KFNamespaceRevoke(a->space);e=KG_QUARANTINE;}
++ a->receipt.result=e;a->receipt.touched=a->touched;KFUnlock(&a->busy);return e;
++}
++static int KFFirstRunCheckPrivate(const KFFirstAttach *a,uint64_t epoch)
++{
++ if(!a || !__atomic_load_n(&a->run_permitted,__ATOMIC_ACQUIRE) || !epoch || epoch!=a->token.epoch)return KG_CLOSED;
++ return KFNamespaceCheckPrivate(a->space,&a->token);
++}
++static int KFFirstSnapshot(KFFirstAttach *a,KFReceipt *r)
++{if(!a || !r)return KG_INVALID;if(!KFTry(&a->busy))return KG_BUSY;*r=a->receipt;KFUnlock(&a->busy);return 0;}
++static int KFFirstFault(KFFirstAttach *a)
++{
++ if(!a || !__atomic_load_n(&a->magic,__ATOMIC_ACQUIRE))return KG_STATE;if(!KFTry(&a->busy))return KG_BUSY;
++ if(a->receipt.state!=KF_ATTACHED_QUIET && a->receipt.state!=KF_RUN_ALLOWED){KFUnlock(&a->busy);return KG_STATE;}
++ uint32_t b=0x8000+4096*a->policy.cb;int e=KFR32(a,b+0x58,&a->receipt.fault);
++ if(!e)e=KFR64(a,b+0x60,&a->receipt.fault_far);if(!e)e=KFR32(a,b+0x68,&a->receipt.fsynr0);
++ if(!e)e=KFR32(a,b+0x6c,&a->receipt.fsynr1);if(!e)e=KFR32(a,0x1400+4*a->policy.cb,&a->receipt.frsynra);
++ if(!e)e=KFR32(a,b+0x58,&a->receipt.fault_last);
++ if(!e && (a->receipt.fault || a->receipt.fault_last))e=KG_FAULT;
++ if(e){__atomic_store_n(&a->run_permitted,0,__ATOMIC_RELEASE);a->receipt.state=KF_QUARANTINED;KFNamespaceRevoke(a->space);}
++ a->receipt.result=e;KFUnlock(&a->busy);return e;
++}
++#undef KF_TRY
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabGpuFirstAttachNative.h
+@@ -0,0 +1,26 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GPU_FIRST_ATTACH_NATIVE_API_H
++#define KEBAB_GPU_FIRST_ATTACH_NATIVE_API_H
++#include "KebabGpuFirstAttachCore.h"
++#include "KebabGpuColdOwner.h"
++#ifdef __cplusplus
++extern "C" {
++#endif
++int kebab_gpu_first_attach_cold(void);
++/* Namespace permission only; caller must separately own HFI NC/coherency,
++ * GMU IRQ/fault monitoring, clocks/reset and firmware execution lifecycle. */
++int kebab_gpu_first_allow_run(void);
++const KebabGpuColdToken *kebab_gpu_first_run_lease(uint64_t *epoch);
++int kebab_gpu_first_ready_locked(const KebabGpuColdToken *,uint64_t epoch);
++int kebab_gpu_first_fault(void);
++int kebab_gpu_first_stop_restore(void);
++int kebab_gpu_first_snapshot(KFReceipt *);
++/* Call only at reviewed external mutator sites, before SCM/VRM/VFS locks.
++ * INFO/Root-QSEE/separate PAS13/owned CM3 reset yield cookie0/no epoch change.
++ * outcome0 means known unchanged; outcome1 changed, outcome2 uncertain. */
++int kebab_gpu_namespace_change_begin(unsigned operation,uint64_t *cookie);
++int kebab_gpu_namespace_change_end(uint64_t cookie,unsigned outcome);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabGpuFirstNativeBinding.h
+@@ -0,0 +1,14 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GPU_FIRST_NATIVE_BINDING_H
++#define KEBAB_GPU_FIRST_NATIVE_BINDING_H
++#include "KebabGpuFirstAttachCore.h"
++/* Actual574 has NS_NUMCB5, six invalid SMRs, M0/type0/VA32/ACTLR3 and no
++ * faults. This unbound source keeps ready0; review-binding.py validates that
++ * exact finite virgin profile and emits a separate reviewed ready1 policy.
++ * Protected banks remain outside every register allowlist. */
++static const KFPolicy KebabGpuFirstNativePolicy={1,1,0x4c017e06,0x20000005,0x5511,0x260406,0,0,1,0,KF_NS_VISIBLE_COMPAT,31,0,1,1,{0xb2,0xeb,0xdc,0x5a,0xd6,0xad,0x53,0xb4,0x72,0x3a,0xe7,0xcb,0x79,0x5d,0xf1,0x66,0x4d,0xc4,0x67,0xb5,0x90,0x6d,0xf1,0xb4,0x16,0xbd,0x70,0x44,0x3f,0xdc,0x4d,0xd0},{0x59,0x9f,0x0e,0xde,0x62,0x11,0x5e,0xdb,0x8b,0x16,0x2a,0x29,0x96,0x1f,0xf7,0x7e,0x2e,0x4a,0x70,0x81,0xe0,0xbf,0x0d,0xef,0x13,0x79,0x4e,0xa8,0x5a,0x47,0xa7,0x17},{0xd8,0xb1,0xa6,0x60,0xb1,0x78,0xb8,0xd6,0x4c,0xca,0x67,0xaa,0xee,0x86,0xfc,0x3b,0x08,0xca,0x0f,0x0d,0xa0,0x57,0xf2,0x36,0xd3,0x05,0x60,0xee,0x33,0x07,0xee,0x5f}};
++/* This is a fixed-board cold lifecycle contract, separately reviewed against
++ * current loader/OS producer inventory. It does not follow merely from M0,
++ * CLK_OFF, a CAP record or successful bus hold. Default CLOSED. */
++static const uint32_t KebabGpuFirstColdBootContract=1;
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabGpuSmmuCore.h
+@@ -0,0 +1,545 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GPU_SMMU_CORE_H
++#define KEBAB_GPU_SMMU_CORE_H
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++
++/* SM8250 GPU unit only. Not a replacement for arm-smmu device_reset().
++ * CB5/6/7, ATS, GR0 writes, routing writes and fault ACK/resume are absent.
++ * KG_NO_GLOBAL: ASID mode needs historical and lifetime absence of conflicting
++ * globals; KG_VM_ALL may retire historical globals but still needs a positive
++ * lifetime namespace compatibility grant. ALL is VMID-wide, never CB-local.
++ * KG_NO_LOCKED is a target namespace contract, not an inference from M==0.
++ * All public APIs require a zero-initialized, boot-lifetime owner object.
++ * Callbacks are trusted kernel bindings, never an ioctl/user-selected vector. */
++enum { KG_OK=0, KG_INVALID=1, KG_CLOSED=2, KG_IO=3, KG_UNSUPPORTED=4,
++ KG_ROUTE=5, KG_OWNERSHIP=6, KG_BUSY=7, KG_TIMEOUT=8, KG_FAULT=9,
++ KG_POOL=10, KG_TABLE_FULL=11, KG_QUARANTINE=12, KG_STATE=13 };
++enum { KG_EMPTY=0, KG_PREPARED=1, KG_CONFIGURED_QUIESCED=2,
++ KG_RESTORED=3, KG_RELEASED=4, KG_QUARANTINED=5, KG_OBSERVER=6 };
++enum { KG_GFX_USER=0, KG_GMU_USER=1, KG_GMU_KERNEL=2 };
++enum { KG_READ=1, KG_WRITE=2, KG_EXEC=4, KG_PRIV=8 };
++enum { KG_POWER=1, KG_GCC=2, KG_AHB=4, KG_BUS=8, KG_EXEC_BLOCKED=16,
++ KG_NS_ACCESS=32, KG_CONTEXT=64, KG_STREAM=128, KG_ASID=256,
++ KG_NO_GLOBAL=512, KG_DRAINED=1024, KG_NO_LOCKED=2048, KG_VM_ALL=4096 };
++/* RO bus access does not require a running GMU core or a CM3 reset owner.
++ * EXEC_BLOCKED is an active-domain producer hold, not a bus clock fact. */
++#define KG_ACCESS (KG_POWER|KG_GCC|KG_AHB|KG_BUS|KG_NS_ACCESS)
++#define KG_EXCLUSIVE (KG_ACCESS|KG_EXEC_BLOCKED|KG_CONTEXT|KG_STREAM|KG_ASID|KG_NO_GLOBAL|KG_NO_LOCKED)
++#define KG_BIND (KG_EXCLUSIVE|KG_DRAINED)
++#define KG_BASE 0x03da0000ULL
++#define KG_BYTES 0x10000u
++#define KG_MAX_STREAMS 128u
++#define KG_MAX_REGIONS 16u
++#define KG_TABLE_BYTES 65536u
++#define KG_PA_LIMIT 0x1000000000ULL
++#define KG_PTE_PA 0xffffff000ULL
++#define KG_POLL_LIMIT 1024u
++
++typedef struct {
++ uint64_t generation; uint32_t flags, held, role, cb, smr, asid, cb_read_mask,uncertain;
++} KGLease;
++typedef struct {
++ void *handle, *address; uint64_t pa; uint32_t bytes, prepared;
++ uint32_t prepare_result, complete_result;
++} KGPool;
++typedef struct {
++ uint32_t iova, bytes, permissions, initial_bytes; const void *initial;
++} KGRegion;
++typedef struct { uint32_t smr,s2cr; } KGStream;
++typedef struct { uint32_t result,cb,smr,protected_cb,owner_proven; } KGObservedRoute;
++typedef struct {
++ uint32_t present,cbar,cba2r,sctlr,actlr,tcr2,tcr,mair0,mair1,vmid,type,hypc,monc;
++ uint32_t fsr,fsynr0,fsynr1,frsynra; uint64_t ttbr0,ttbr1,far;
++} KGContext;
++typedef struct {
++ uint32_t id0,id1,id2,cr0,gfsr,gfsynr[3],num_streams,num_cb,num_s2,pa_bits,ipa_bits,va_bits;
++ uint32_t cb_base,stride,read_mask; KGStream stream[KG_MAX_STREAMS];
++ KGObservedRoute route[3];
++ KGContext cb[5];
++} KGDiscovery;
++typedef struct {
++ void *cookie;
++ int (*worker)(void *);
++ /* Failure with held=1 is uncertain: the core quarantines, never ends it. */
++ int (*acquire)(void *,uint32_t role,uint32_t active,KGLease *);
++ int (*check)(void *,const KGLease *,uint32_t required);
++ /* Must stop every producer of this stream group and drain all transactions,
++  * including stalled ones. Reset assertion alone is insufficient evidence. */
++ int (*quiesce)(void *,KGLease *);
++ int (*end)(void *,KGLease *);
++ int (*map)(void *,const KGLease *); void (*unmap)(void *);
++ int (*read32)(void *,uint32_t,uint32_t *);
++ int (*read64)(void *,uint32_t,uint64_t *);
++ int (*write32)(void *,uint32_t,uint32_t);
++ int (*write64)(void *,uint32_t,uint64_t);
++ void (*barrier)(void *); void (*delay)(void *);
++ /* Alloc returns its partial resource even on failure. Free must retain a
++  * prepared descriptor if complete fails; it must not wipe a published pool. */
++ int (*alloc)(void *,uint32_t index,uint32_t bytes,KGPool *);
++ int (*pin_check)(void *,const KGPool *);
++ int (*clean_poc)(void *,const KGPool *);
++ int (*free_pool)(void *,KGPool *);
++} KGOps;
++typedef struct {
++ uint32_t magic,schema,bytes,result,primary_error,cleanup_error,state,role;
++ uint32_t reads,writes,tlb_polls,pools,table_pages,mapped_pages;
++ uint32_t hardware_touched,dma_proven,lease_held,retained_pools;
++ uint32_t fault_first,fault_last,fsynr0,fsynr1,frsynra,fault_unstable;
++ uint64_t fault_far,root_pa,generation;
++} KGReceipt;
++typedef struct {
++ uint32_t busy,magic; KGOps ops; KGLease lease; KGReceipt receipt;
++ KGPool pool[KG_MAX_REGIONS+1]; KGRegion region[KG_MAX_REGIONS];
++ uint32_t count,mapped,touched,saved_valid;
++ KGDiscovery before,work;
++} KGDomain;
++
++static uint32_t KGTry(KGDomain *d) { return __sync_bool_compare_and_swap(&d->busy,0,1); }
++static void KGUnlock(KGDomain *d) { __sync_lock_release(&d->busy); }
++static int KGOverlap(uint64_t a,uint64_t n,uint64_t b,uint64_t m)
++{ return a<b+m && b<a+n; }
++static int KGRole(uint32_t r) { return r<=KG_GMU_KERNEL; }
++static uint32_t KGSid(uint32_t r) { return r==KG_GFX_USER?0:r==KG_GMU_USER?4:5; }
++static uint32_t KGMask(uint32_t r) { return r==KG_GFX_USER?0x401:0x400; }
++static int KGCheck(KGDomain *d,uint32_t need)
++{
++ if(!d->lease.held || d->lease.uncertain || !d->lease.generation || (d->lease.flags&need)!=need ||
++    (d->lease.cb_read_mask&~31u))return KG_CLOSED;
++ return d->ops.check(d->ops.cookie,&d->lease,need);
++}
++static int KGReadAllowed(uint32_t off,uint32_t wide,uint32_t cbmask)
++{
++ if(!wide && (off==0 || off==0x20 || off==0x24 || off==0x28 || off==0x48 ||
++    off==0x50 || off==0x54 || off==0x58 ||
++    (((off>=0x800 && off<0xa00) || (off>=0xc00 && off<0xe00)) && !(off&3))))return 1;
++ for(uint32_t cb=0;cb<5;cb++)if(cbmask&(1u<<cb)) {
++  if(!wide && (off==0x1000+4*cb || off==0x1400+4*cb || off==0x1800+4*cb))return 1;
++  uint32_t b=0x8000+4096*cb;
++  if(wide && (off==b+0x20 || off==b+0x28 || off==b+0x60))return 1;
++  if(!wide && (off==b || off==b+4 || off==b+0x10 || off==b+0x30 || off==b+0x38 ||
++      off==b+0x3c || off==b+0x58 || off==b+0x68 || off==b+0x6c || off==b+0x7f4))return 1;
++ }
++ return 0;
++}
++static int KGWriteAllowed(uint32_t off,uint32_t wide,uint32_t cb)
++{
++ if(cb>=5)return 0;
++ uint32_t b=0x8000+4096*cb;
++ if(wide)return off==b+0x20 || off==b+0x28;
++ return off==b || off==b+0x10 || off==b+0x30 || off==b+0x38 || off==b+0x3c ||
++  off==b+0x610 || off==b+0x7f0;
++}
++static int KGWriteScope(uint32_t off,uint32_t wide,const KGLease *l)
++{
++ if(!l || l->cb>=5)return 0;
++ if(!wide && (l->flags&KG_VM_ALL) && off==0x8618+l->cb*4096)return 1;
++ return KGWriteAllowed(off,wide,l->cb);
++}
++static int KGR32(KGDomain *d,uint32_t o,uint32_t *v)
++{
++ int e=KGCheck(d,KG_ACCESS);if(e)return e;
++ if(!KGReadAllowed(o,0,d->lease.cb_read_mask))return KG_INVALID;
++ d->receipt.reads++;return d->ops.read32(d->ops.cookie,o,v);
++}
++static int KGR64(KGDomain *d,uint32_t o,uint64_t *v)
++{
++ int e=KGCheck(d,KG_ACCESS);if(e)return e;
++ if(!KGReadAllowed(o,1,d->lease.cb_read_mask))return KG_INVALID;
++ d->receipt.reads++;return d->ops.read64(d->ops.cookie,o,v);
++}
++static int KGW(KGDomain *d,uint32_t o,uint64_t v,uint32_t wide)
++{
++ int e=KGCheck(d,KG_BIND);if(e)return e;
++ if(!KGWriteScope(o,wide,&d->lease))return KG_INVALID;
++ /* A callback may report failure after a completed bus write. Retain first. */
++ d->touched=1;d->receipt.hardware_touched=1;d->receipt.writes++;
++ return wide?d->ops.write64(d->ops.cookie,o,v):d->ops.write32(d->ops.cookie,o,(uint32_t)v);
++}
++#define KG_TRY(x) do { int kg_e=(x);if(kg_e)return kg_e; } while(0)
++static void KGObserveRoutes(KGDiscovery *s)
++{
++ for(uint32_t role=0;role<3;role++) {
++  KGObservedRoute *r=&s->route[role];r->result=KG_ROUTE;r->cb=r->smr=255;
++  uint32_t sid=KGSid(role),mask=KGMask(role),matches=0,bad=0;
++  for(uint32_t i=0;i<s->num_streams;i++) {
++   uint32_t a=s->stream[i].smr,b=s->stream[i].s2cr,m=(a>>16)&0x7fff,id=a&0x7fff;
++   if(!(a&0x80000000u) || ((id^sid)&~(m|mask)&0x7fff))continue;
++   matches++;if(m!=mask || (id&~mask)!=(sid&~mask) || ((b>>16)&3)!=0)bad=1;
++   r->smr=i;r->cb=b&255;
++  }
++  if(matches==1 && !bad && r->cb<s->num_cb) {
++   r->protected_cb=r->cb>=5;r->result=r->protected_cb?KG_CLOSED:KG_OK;
++  }
++  /* Observed routing never reserves a CB, stream or fixed ASID. */
++  r->owner_proven=0;
++ }
++}
++static int KGDiscoverLocked(KGDomain *d,KGDiscovery *s)
++{
++ memset(s,0,sizeof *s);
++ KG_TRY(KGR32(d,0x20,&s->id0));KG_TRY(KGR32(d,0x24,&s->id1));KG_TRY(KGR32(d,0x28,&s->id2));
++ s->num_streams=s->id0&255;s->num_cb=s->id1&255;s->num_s2=(s->id1>>16)&255;
++ s->stride=(s->id1&(1u<<31))?65536:4096;
++ s->cb_base=(1u<<(((s->id1>>28)&7)+1))*s->stride;
++ static const uint32_t bits[6]={32,36,40,42,44,48};uint32_t oas=(s->id2>>4)&15;
++ s->pa_bits=oas<6?bits[oas]:0;
++ uint32_t ias=s->id2&15,ubs=(s->id2>>8)&15;
++ s->ipa_bits=ias<6?bits[ias]:0;s->va_bits=ubs<6?bits[ubs]:0;
++ if(!(s->id0&(1u<<30)) || !(s->id0&(1u<<27)) || (s->id0&(1u<<8)) ||
++    !(s->id2&(1u<<12)) || s->pa_bits<36 || s->ipa_bits<36 || s->va_bits<32 ||
++    s->stride!=4096 || s->cb_base!=KG_BYTES/2 ||
++    !s->num_cb || s->num_cb>8 || s->num_s2>s->num_cb ||
++    !s->num_streams || s->num_streams>KG_MAX_STREAMS)return KG_UNSUPPORTED;
++ KG_TRY(KGR32(d,0,&s->cr0));KG_TRY(KGR32(d,0x48,&s->gfsr));
++ for(uint32_t i=0;i<3;i++)KG_TRY(KGR32(d,0x50+4*i,&s->gfsynr[i]));
++ for(uint32_t i=0;i<s->num_streams;i++) {
++  KG_TRY(KGR32(d,0x800+4*i,&s->stream[i].smr));KG_TRY(KGR32(d,0xc00+4*i,&s->stream[i].s2cr));
++ }
++ KGObserveRoutes(s);
++ s->read_mask=d->lease.cb_read_mask&((1u<<s->num_cb)-1)&31u;
++ for(uint32_t i=0;i<5;i++)if(s->read_mask&(1u<<i)) {
++  KGContext *c=&s->cb[i];uint32_t b=s->cb_base+i*s->stride;c->present=1;
++  KG_TRY(KGR32(d,0x1000+4*i,&c->cbar));KG_TRY(KGR32(d,0x1800+4*i,&c->cba2r));
++  c->type=(c->cbar>>16)&3;c->hypc=(c->cbar>>10)&1;c->monc=(c->cba2r>>1)&1;
++  c->vmid=(s->cr0&0x80000000u)?c->cba2r>>16:c->cbar&255;
++  KG_TRY(KGR32(d,b,&c->sctlr));KG_TRY(KGR32(d,b+4,&c->actlr));
++  KG_TRY(KGR32(d,b+0x10,&c->tcr2));KG_TRY(KGR32(d,b+0x30,&c->tcr));
++  KG_TRY(KGR64(d,b+0x20,&c->ttbr0));KG_TRY(KGR64(d,b+0x28,&c->ttbr1));
++  KG_TRY(KGR32(d,b+0x38,&c->mair0));KG_TRY(KGR32(d,b+0x3c,&c->mair1));
++  KG_TRY(KGR32(d,b+0x58,&c->fsr));KG_TRY(KGR64(d,b+0x60,&c->far));
++  KG_TRY(KGR32(d,b+0x68,&c->fsynr0));KG_TRY(KGR32(d,b+0x6c,&c->fsynr1));
++  KG_TRY(KGR32(d,0x1400+4*i,&c->frsynra));
++ }
++ return KG_OK;
++}
++static int KGRouteCheck(const KGDiscovery *s,const KGLease *l,uint32_t disabled)
++{
++ if(l->cb>=5 || l->cb>=s->num_cb || l->cb<s->num_s2 || l->smr>=s->num_streams ||
++    l->asid!=l->cb+1 || !s->cb[l->cb].present)return KG_OWNERSHIP;
++ uint32_t sid=KGSid(l->role),mask=KGMask(l->role),matches=0;
++ for(uint32_t i=0;i<s->num_streams;i++) {
++  uint32_t a=s->stream[i].smr,b=s->stream[i].s2cr;
++  if(!(a&0x80000000u))continue;
++  uint32_t id=a&0x7fff,m=(a>>16)&0x7fff;
++  /* Intersection of two masked sets. Reject any broader/split/duplicate route.
++   * This deliberately does not reinterpret SID4/5 as a bank index. */
++  if(!((id^sid)&~(m|mask)&0x7fff)) {
++   if(i!=l->smr || m!=mask || (id&~mask)!=(sid&~mask) || ((b>>16)&3)!=0 ||
++      (b&255)!=l->cb)return KG_ROUTE;
++   matches++;
++  } else if(((b>>16)&3)==0 && (b&255)==l->cb)return KG_ROUTE;
++ }
++ const KGContext *c=&s->cb[l->cb];
++ /* TYPE=S1/S2-bypass, no HYPC/E2HC, VA64, no MONC. Existing ACTLR is
++  * validated against the GPU DT's 0x32b contract; it is never rewritten. */
++ if(matches!=1 || ((c->cbar>>16)&3)!=1 || (c->cbar&(1u<<10)) ||
++    (c->cba2r&3)!=1 || c->actlr!=0x32b || (s->cr0&1) || s->gfsr || c->fsr ||
++    (disabled && (c->sctlr&1)))return KG_ROUTE;
++ /* ASID-only invalidation cannot retire inherited tags for another ASID.
++  * VM_ALL is separately authorized VMID-wide maintenance, not CB-local ALL. */
++ if(!(l->flags&KG_VM_ALL) && ((c->ttbr0>>48)!=l->asid || (c->ttbr1>>48)!=l->asid))return KG_ROUTE;
++ return KG_OK;
++}
++static int KGSameRouting(const KGDiscovery *a,const KGDiscovery *b,uint32_t cb)
++{
++ if(a->id0!=b->id0 || a->id1!=b->id1 || a->id2!=b->id2 || a->cr0!=b->cr0 ||
++    a->num_streams!=b->num_streams || a->read_mask!=b->read_mask ||
++    memcmp(a->stream,b->stream,a->num_streams*sizeof(a->stream[0])))return 0;
++ if(cb>=5)return 0;
++ return a->cb[cb].cbar==b->cb[cb].cbar && a->cb[cb].cba2r==b->cb[cb].cba2r &&
++  a->cb[cb].actlr==b->cb[cb].actlr;
++}
++static int KGTlb(KGDomain *d)
++{
++ uint32_t b=0x8000+d->lease.cb*4096,v=1;
++ KG_TRY(KGW(d,b+((d->lease.flags&KG_VM_ALL)?0x618:0x610),
++  (d->lease.flags&KG_VM_ALL)?0:d->lease.asid,0));d->ops.barrier(d->ops.cookie);
++ KG_TRY(KGW(d,b+0x7f0,0,0));d->ops.barrier(d->ops.cookie);
++ for(uint32_t i=0;i<KG_POLL_LIMIT;i++) {
++  KG_TRY(KGR32(d,b+0x7f4,&v));d->receipt.tlb_polls++;
++  if(!(v&1))return KG_OK;
++  d->ops.delay(d->ops.cookie);
++ }
++ return KG_TIMEOUT;
++}
++static int KGProgram(KGDomain *d,const KGContext *c)
++{
++ uint32_t b=0x8000+d->lease.cb*4096;
++ KG_TRY(KGW(d,b+0x10,c->tcr2,0));KG_TRY(KGW(d,b+0x30,c->tcr,0));
++ KG_TRY(KGW(d,b+0x20,c->ttbr0,1));KG_TRY(KGW(d,b+0x28,c->ttbr1,1));
++ KG_TRY(KGW(d,b+0x38,c->mair0,0));KG_TRY(KGW(d,b+0x3c,c->mair1,0));
++ d->ops.barrier(d->ops.cookie);return KG_OK;
++}
++static int KGVerify(KGDomain *d,const KGContext *c,uint32_t sctlr)
++{
++ uint32_t b=0x8000+d->lease.cb*4096,v;uint64_t q;
++ KG_TRY(KGR32(d,b+0x10,&v));if(v!=c->tcr2)return KG_IO;
++ KG_TRY(KGR32(d,b+0x30,&v));if(v!=c->tcr)return KG_IO;
++ KG_TRY(KGR64(d,b+0x20,&q));if(q!=c->ttbr0)return KG_IO;
++ KG_TRY(KGR64(d,b+0x28,&q));if(q!=c->ttbr1)return KG_IO;
++ KG_TRY(KGR32(d,b+0x38,&v));if(v!=c->mair0)return KG_IO;
++ KG_TRY(KGR32(d,b+0x3c,&v));if(v!=c->mair1)return KG_IO;
++ KG_TRY(KGR32(d,b,&v));return v==sctlr?KG_OK:KG_IO;
++}
++static int KGRestoreLocked(KGDomain *d)
++{
++ KG_TRY(KGCheck(d,KG_EXCLUSIVE));KG_TRY(d->ops.quiesce(d->ops.cookie,&d->lease));
++ KG_TRY(KGCheck(d,KG_BIND));KG_TRY(KGDiscoverLocked(d,&d->work));
++ if(!d->saved_valid || !KGSameRouting(&d->before,&d->work,d->lease.cb))return KG_OWNERSHIP;
++ /* A stalled fault cannot be proved drained by TLBSYNC. No ACK, RESUME or
++  * blanket reset here; uncertain resources and all power refs stay retained. */
++ if(d->work.cb[d->lease.cb].fsr || d->work.gfsr)return KG_FAULT;
++ KGContext *old=&d->before.cb[d->lease.cb];uint32_t b=0x8000+d->lease.cb*4096;
++ KG_TRY(KGW(d,b,old->sctlr&~1u,0));d->ops.barrier(d->ops.cookie);
++ uint32_t v;KG_TRY(KGR32(d,b,&v));if(v!=(old->sctlr&~1u))return KG_IO;
++ KG_TRY(KGTlb(d));KG_TRY(KGProgram(d,old));
++ KG_TRY(KGVerify(d,old,old->sctlr&~1u));
++ KG_TRY(KGW(d,b,old->sctlr,0));d->ops.barrier(d->ops.cookie);
++ KG_TRY(KGVerify(d,old,old->sctlr));
++ d->touched=0;d->receipt.state=KG_RESTORED;return KG_OK;
++}
++static int KGEnd(KGDomain *d)
++{
++ if(d->mapped) {d->ops.unmap(d->ops.cookie);d->mapped=0;}
++ if(d->lease.held) {
++  int e=d->ops.end(d->ops.cookie,&d->lease);if(e)return e;
++  d->lease.held=0;
++ }
++ return KG_OK;
++}
++static int KGDispose(KGDomain *d)
++{
++ int e=0;
++ for(uint32_t i=KG_MAX_REGIONS+1;i;i--)if(d->pool[i-1].handle) {
++  int r=d->ops.free_pool(d->ops.cookie,&d->pool[i-1]);if(r)e=r;
++ }
++ return e;
++}
++static int KGFinish(KGDomain *d,int error)
++{
++ d->receipt.primary_error=(uint32_t)error;
++ if(d->lease.uncertain)d->receipt.cleanup_error=KG_OWNERSHIP;
++ if(error && d->touched && d->receipt.state!=KG_QUARANTINED) {
++  int e=KGRestoreLocked(d);if(e)d->receipt.cleanup_error=(uint32_t)e;
++ }
++ if((d->touched && d->receipt.state!=KG_CONFIGURED_QUIESCED) || d->receipt.cleanup_error) {
++  d->receipt.state=KG_QUARANTINED;error=KG_QUARANTINE;
++ } else if(d->receipt.state!=KG_CONFIGURED_QUIESCED) {
++  int e=KGEnd(d);if(e){d->receipt.cleanup_error=(uint32_t)e;d->receipt.state=KG_QUARANTINED;error=KG_QUARANTINE;}
++ }
++ d->receipt.retained_pools=0;
++ for(uint32_t i=0;i<KG_MAX_REGIONS+1;i++)if(d->pool[i].handle)d->receipt.retained_pools++;
++ d->receipt.lease_held=d->lease.held;d->receipt.result=(uint32_t)error;
++ KGUnlock(d);return error;
++}
++static int KGValidOps(const KGOps *o)
++{
++ return o && o->worker && o->acquire && o->check && o->quiesce && o->end && o->map &&
++  o->unmap && o->read32 && o->read64 && o->write32 && o->write64 && o->barrier &&
++  o->delay && o->alloc && o->pin_check && o->clean_poc && o->free_pool;
++}
++static int KGWindow(uint32_t role,uint32_t va,uint32_t bytes)
++{
++ uint64_t end=(uint64_t)va+bytes;
++ if(!KGRole(role) || !bytes || (va&4095) || (bytes&4095) || end>0x100000000ULL)return 0;
++ if(role==KG_GMU_KERNEL)return (va>=0x4000 && end<=0x1000000) || (va>=0x60000000 && end<=0x80000000);
++ if(role==KG_GMU_USER)return va>=0x80000000 && end<=0xc0000000;
++ return va>=0x20000 && end<=0x100000000ULL;
++}
++static int KebabGpuSmmuObserverInit(KGDomain *d,const KGOps *o,uint32_t role)
++{
++ if(!d || !KGValidOps(o) || !KGRole(role))return KG_INVALID;
++ if(!KGTry(d))return KG_BUSY;if(d->magic){KGUnlock(d);return KG_STATE;}
++ d->magic=0x3153474b;d->ops=*o;d->receipt.magic=d->magic;d->receipt.schema=1;
++ d->receipt.bytes=sizeof(d->receipt);d->receipt.role=role;d->receipt.state=KG_OBSERVER;
++ d->receipt.result=KG_CLOSED;KGUnlock(d);return KG_OK;
++}
++static uint64_t KGAttrs(uint32_t p)
++{
++ uint64_t a=3u|0x20u|0x300u|0x400u|0x800u; /* valid, NS, IS, AF, nG */
++ if(!(p&KG_PRIV))a|=0x40;
++ if(!(p&KG_WRITE))a|=0x80;
++ if(!(p&KG_EXEC))a|=0x0060000000000000ULL;
++ return a;
++}
++static uint64_t *KGChild(KGPool *p,uint64_t e)
++{
++ uint64_t a=e&KG_PTE_PA;
++ if((e&~KG_PTE_PA)!=3 || a<p->pa || a-p->pa>p->bytes-4096)return NULL;
++ return (uint64_t *)((uint8_t *)p->address+(a-p->pa));
++}
++static int KGBuild(KGDomain *d)
++{
++ KGPool *p=&d->pool[0];uint64_t *root=(uint64_t *)p->address;uint32_t used=1;
++ d->receipt.mapped_pages=0;d->receipt.table_pages=0;
++ memset(p->address,0,p->bytes);
++ for(uint32_t r=0;r<d->count;r++)for(uint32_t j=0;j<d->region[r].bytes;j+=4096) {
++  uint64_t va=(uint64_t)d->region[r].iova+j;uint32_t i1=(uint32_t)(va>>30),i2=(va>>21)&511,i3=(va>>12)&511;
++  if(!root[i1]){if(used==p->bytes/4096)return KG_TABLE_FULL;root[i1]=(p->pa+4096*used++)|3;}
++  uint64_t *l2=KGChild(p,root[i1]);if(!l2)return KG_POOL;
++  if(!l2[i2]){if(used==p->bytes/4096)return KG_TABLE_FULL;l2[i2]=(p->pa+4096*used++)|3;}
++  uint64_t *l3=KGChild(p,l2[i2]);if(!l3 || l3[i3])return KG_POOL;
++  l3[i3]=(d->pool[r+1].pa+j)|KGAttrs(d->region[r].permissions);d->receipt.mapped_pages++;
++ }
++ d->receipt.table_pages=used;d->receipt.root_pa=p->pa;return KG_OK;
++}
++static int KGTranslate(const KGDomain *d,uint32_t va,uint64_t *pa,uint64_t *attrs)
++{
++ if(!d || !pa || !attrs || !d->pool[0].address)return KG_INVALID;
++ KGPool *p=(KGPool *)&d->pool[0];const uint64_t *root=(const uint64_t *)p->address;
++ const uint64_t *l2=KGChild(p,root[va>>30]);if(!l2)return KG_ROUTE;
++ const uint64_t *l3=KGChild(p,l2[(va>>21)&511]);if(!l3)return KG_ROUTE;
++ uint64_t e=l3[(va>>12)&511];if((e&3)!=3)return KG_ROUTE;
++ *pa=(e&KG_PTE_PA)|(va&4095);*attrs=e&~KG_PTE_PA;return KG_OK;
++}
++static int KGPoolValid(KGDomain *d,KGPool *p,uint32_t bytes)
++{
++ if(!p->handle || !p->prepared || !p->address || ((uintptr_t)p->address&4095) ||
++    p->bytes!=bytes || p->pa<0x20000 || (p->pa&4095) || p->pa>KG_PA_LIMIT-bytes)return KG_POOL;
++ return d->ops.pin_check(d->ops.cookie,p);
++}
++static int KebabGpuSmmuPrepare(KGDomain *d,const KGOps *o,uint32_t role,const KGRegion *r,uint32_t n)
++{
++ if(!d || !KGValidOps(o) || !r || !n || n>KG_MAX_REGIONS || !KGRole(role))return KG_INVALID;
++ if(!KGTry(d))return KG_BUSY;
++ if(d->magic){KGUnlock(d);return KG_STATE;}
++ d->magic=0x3153474b;d->ops=*o;d->receipt.magic=d->magic;d->receipt.schema=1;
++ d->receipt.bytes=sizeof(d->receipt);d->receipt.role=role;d->count=n;int e=o->worker(o->cookie);
++ if(e)return KGFinish(d,e);
++ uint64_t total=0;
++ for(uint32_t i=0;i<n;i++) {
++  if(!KGWindow(role,r[i].iova,r[i].bytes) || r[i].bytes>1048576 || !(r[i].permissions&KG_READ) ||
++     (r[i].permissions&~15u) || r[i].initial_bytes>r[i].bytes || (r[i].initial_bytes && !r[i].initial))return KGFinish(d,KG_INVALID);
++  total+=r[i].bytes;if(total>4194304)return KGFinish(d,KG_INVALID);
++  for(uint32_t j=0;j<i;j++)if(KGOverlap(r[i].iova,r[i].bytes,r[j].iova,r[j].bytes))return KGFinish(d,KG_INVALID);
++  d->region[i]=r[i];
++ }
++ for(uint32_t i=0;i<=n;i++) {
++  uint32_t bytes=i?((r[i-1].bytes+16383)&~16383u):KG_TABLE_BYTES;
++  e=o->alloc(o->cookie,i,bytes,&d->pool[i]);if(e)goto fail;
++  e=KGPoolValid(d,&d->pool[i],bytes);if(e)goto fail;
++  for(uint32_t j=0;j<i;j++)if(KGOverlap(d->pool[i].pa,bytes,d->pool[j].pa,d->pool[j].bytes)){e=KG_POOL;goto fail;}
++  d->receipt.pools++;
++  if(i){memset(d->pool[i].address,0,bytes);if(r[i-1].initial_bytes)memcpy(d->pool[i].address,r[i-1].initial,r[i-1].initial_bytes);}
++ }
++ e=KGBuild(d);if(e)goto fail;
++ for(uint32_t i=0;i<n;i++)for(uint32_t off=0;off<r[i].bytes;off+=4096) {
++  uint64_t pa,attrs;e=KGTranslate(d,r[i].iova+off,&pa,&attrs);
++  if(e || pa!=d->pool[i+1].pa+off || attrs!=KGAttrs(r[i].permissions)){e=KG_POOL;goto fail;}
++ }
++ for(uint32_t i=0;i<=n;i++){e=o->clean_poc(o->cookie,&d->pool[i]);if(e)goto fail;}
++ o->barrier(o->cookie);d->receipt.state=KG_PREPARED;return KGFinish(d,KG_OK);
++fail:
++ d->receipt.cleanup_error=KGDispose(d);return KGFinish(d,e);
++}
++/* Independent read-only acquisition. It never reuses a cached receipt as a lease. */
++static int KebabGpuSmmuDiscover(KGDomain *d)
++{
++ if(!d || d->magic!=0x3153474b)return KG_STATE;
++ if(!KGTry(d))return KG_BUSY;
++ if(d->receipt.state!=KG_PREPARED && d->receipt.state!=KG_RESTORED && d->receipt.state!=KG_OBSERVER){KGUnlock(d);return KG_STATE;}
++ int e=d->ops.worker(d->ops.cookie);if(e)return KGFinish(d,e);
++ e=d->ops.acquire(d->ops.cookie,d->receipt.role,0,&d->lease);
++ if(e){if(d->lease.held)d->receipt.cleanup_error=KG_OWNERSHIP;return KGFinish(d,e);}
++ e=KGCheck(d,KG_ACCESS);if(e)return KGFinish(d,e);
++ e=d->ops.map(d->ops.cookie,&d->lease);if(e)return KGFinish(d,e);d->mapped=1;
++ e=KGDiscoverLocked(d,&d->work);return KGFinish(d,e);
++}
++static int KebabGpuSmmuBind(KGDomain *d)
++{
++ if(!d || d->magic!=0x3153474b)return KG_STATE;
++ if(!KGTry(d))return KG_BUSY;
++ if(d->receipt.state!=KG_PREPARED && d->receipt.state!=KG_RESTORED){KGUnlock(d);return KG_STATE;}
++ int e=d->ops.worker(d->ops.cookie);if(e)return KGFinish(d,e);
++ e=d->ops.acquire(d->ops.cookie,d->receipt.role,1,&d->lease);
++ if(e){if(d->lease.held)d->receipt.cleanup_error=KG_OWNERSHIP;return KGFinish(d,e);}
++ e=KGCheck(d,KG_EXCLUSIVE);if(e)return KGFinish(d,e);
++ if(d->lease.role!=d->receipt.role || d->lease.cb>=5 || d->lease.asid!=d->lease.cb+1)return KGFinish(d,KG_OWNERSHIP);
++ e=d->ops.quiesce(d->ops.cookie,&d->lease);if(e)return KGFinish(d,e);
++ e=KGCheck(d,KG_BIND);if(e)return KGFinish(d,e);
++ e=d->ops.map(d->ops.cookie,&d->lease);if(e)return KGFinish(d,e);d->mapped=1;
++ e=KGDiscoverLocked(d,&d->before);if(e)return KGFinish(d,e);
++ e=KGRouteCheck(&d->before,&d->lease,1);if(e)return KGFinish(d,e);d->saved_valid=1;
++ for(uint32_t i=0;i<=d->count;i++) {
++  e=KGPoolValid(d,&d->pool[i],d->pool[i].bytes);if(e)return KGFinish(d,e);
++ }
++ e=KGBuild(d);if(e)return KGFinish(d,e);
++ for(uint32_t i=0;i<=d->count;i++) {
++  e=d->ops.clean_poc(d->ops.cookie,&d->pool[i]);if(e)return KGFinish(d,e);
++ }
++ d->ops.barrier(d->ops.cookie);
++ e=KGDiscoverLocked(d,&d->work);if(e)return KGFinish(d,e);
++ e=KGRouteCheck(&d->work,&d->lease,1);if(e)return KGFinish(d,e);
++ if(!KGSameRouting(&d->before,&d->work,d->lease.cb) ||
++    memcmp(&d->before.cb[d->lease.cb],&d->work.cb[d->lease.cb],sizeof(KGContext)))return KGFinish(d,KG_OWNERSHIP);
++ /* Previous non-global translations must be gone before changing TTBR/TCR. */
++ e=KGTlb(d);if(e)return KGFinish(d,e);
++ KGContext next=d->before.cb[d->lease.cb];
++ next.tcr=0x00802020; /* EPD1, outer-shareable NC walks, 32-bit IOVA, 4K */
++ next.tcr2=0x00038011; /* 36-bit output, AS16, SEP_UPSTREAM (vendor) */
++ next.ttbr0=d->pool[0].pa|((uint64_t)d->lease.asid<<48);
++ next.ttbr1=(uint64_t)d->lease.asid<<48;next.mair0=0x44;next.mair1=0;
++ /* Abort on fault, no stall and no unowned interrupt handler. */
++ next.sctlr=(1u<<12)|(3u<<22)|(1u<<5)|(1u<<2)|(1u<<1);
++ e=KGProgram(d,&next);if(e)return KGFinish(d,e);
++ e=KGVerify(d,&next,d->before.cb[d->lease.cb].sctlr);if(e)return KGFinish(d,e);
++ e=KGW(d,0x8000+d->lease.cb*4096,next.sctlr|1,0);if(e)return KGFinish(d,e);
++ d->ops.barrier(d->ops.cookie);e=KGVerify(d,&next,next.sctlr|1);if(e)return KGFinish(d,e);
++ uint32_t fsr;e=KGR32(d,0x8058+d->lease.cb*4096,&fsr);if(e)return KGFinish(d,e);
++ if(fsr)return KGFinish(d,KG_FAULT);
++ d->receipt.state=KG_CONFIGURED_QUIESCED;d->receipt.generation=d->lease.generation;
++ return KGFinish(d,KG_OK); /* Retained pinned pools + lease; streams still held. */
++}
++static int KebabGpuSmmuFault(KGDomain *d)
++{
++ if(!d || d->magic!=0x3153474b)return KG_STATE;
++ if(!KGTry(d))return KG_BUSY;
++ if(d->receipt.state!=KG_CONFIGURED_QUIESCED){KGUnlock(d);return KG_STATE;}
++ int e=d->ops.worker(d->ops.cookie);uint32_t b=0x8000+d->lease.cb*4096;
++ if(!e)e=KGR32(d,b+0x58,&d->receipt.fault_first);
++ if(!e)e=KGR64(d,b+0x60,&d->receipt.fault_far);
++ if(!e)e=KGR32(d,b+0x68,&d->receipt.fsynr0);
++ if(!e)e=KGR32(d,b+0x6c,&d->receipt.fsynr1);
++ if(!e)e=KGR32(d,0x1400+4*d->lease.cb,&d->receipt.frsynra);
++ if(!e)e=KGR32(d,b+0x58,&d->receipt.fault_last);
++ d->receipt.fault_unstable=d->receipt.fault_first!=d->receipt.fault_last;
++ if(!e && (d->receipt.fault_first || d->receipt.fault_last))e=KG_FAULT;
++ /* Observation cannot silently recover or free live resources. */
++ d->receipt.result=e;KGUnlock(d);return e;
++}
++static int KebabGpuSmmuStop(KGDomain *d)
++{
++ if(!d || d->magic!=0x3153474b)return KG_STATE;
++ if(!KGTry(d))return KG_BUSY;
++ if(d->receipt.state!=KG_CONFIGURED_QUIESCED){KGUnlock(d);return KG_STATE;}
++ int e=d->ops.worker(d->ops.cookie);if(!e)e=KGRestoreLocked(d);
++ if(e){d->receipt.cleanup_error=e;d->receipt.state=KG_QUARANTINED;}
++ return KGFinish(d,e);
++}
++static int KebabGpuSmmuRelease(KGDomain *d)
++{
++ if(!d || d->magic!=0x3153474b)return KG_STATE;
++ if(!KGTry(d))return KG_BUSY;
++ if((d->receipt.state!=KG_PREPARED && d->receipt.state!=KG_RESTORED) || d->touched || d->lease.held){KGUnlock(d);return KG_STATE;}
++ int e=d->ops.worker(d->ops.cookie);if(e)return KGFinish(d,e);
++ /* Device writes, if a later firmware owner ever unquiesces, must be synced
++  * for the CPU after proven stop. No pool access is exposed while configured. */
++ for(uint32_t i=0;i<=d->count;i++){e=d->ops.clean_poc(d->ops.cookie,&d->pool[i]);if(e)return KGFinish(d,e);}
++ d->receipt.cleanup_error=KGDispose(d);if(d->receipt.cleanup_error)return KGFinish(d,KG_POOL);
++ d->receipt.state=KG_RELEASED;return KGFinish(d,KG_OK);
++}
++static int KebabGpuSmmuSnapshot(KGDomain *d,KGReceipt *r)
++{
++ if(!d || !r)return KG_INVALID;if(!KGTry(d))return KG_BUSY;
++ *r=d->receipt;KGUnlock(d);return KG_OK;
++}
++static int KebabGpuSmmuDiscoverySnapshot(KGDomain *d,KGDiscovery *out)
++{
++ if(!d || !out)return KG_INVALID;if(!KGTry(d))return KG_BUSY;
++ if(!d->work.num_streams){KGUnlock(d);return KG_STATE;}
++ *out=d->work;KGUnlock(d);return KG_OK;
++}
++#undef KG_TRY
++#endif
+--- a/osfmk/kern/Makefile
++++ b/osfmk/kern/Makefile
+@@ -134,6 +134,11 @@
+ 	KebabGpuBusCore.h \
+ 	KebabGpuBusOwner.h \
+ 	KebabGpuBusNativeBinding.h \
++	KebabGpuSmmuCore.h \
++	KebabGpuFirstAttachCore.h \
++	KebabGpuFirstNativeBinding.h \
++	KebabGpuFirstAttachNative.h \
++	KebabGpuColdOwner.h \
+ 	lock_ptr.h \
+ 	perfmon.h \
+ 	recount.h \

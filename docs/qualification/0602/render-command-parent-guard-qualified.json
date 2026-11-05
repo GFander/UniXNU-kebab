@@ -1,0 +1,18 @@
+{
+  "passed": true,
+  "physical_command_sent_before_fix": false,
+  "scope": "Host command prerequisite correction only, no kernel/source/build changes; exact CAP34/35 groups of3, CAP36/37 groups of3, same-boot actual verified immutable receipts required",
+  "before_sha256": "4829f8ea8e951abae7b1b3f1e9b9ac292b2e87dc7f415d93ecb2911ffb91f5e5",
+  "after_sha256": "096d9ea03f86155429fca944330c0764f70c47e0b54df27513608e78db8d0d76",
+  "actual_VM_samples": 6,
+  "VM_sources": [
+    34,
+    35
+  ],
+  "samples_per_source": 3,
+  "actual_VM_OOB_CP_qualified": true,
+  "negative_refusals": 64,
+  "old_failed_before_output_directory_or_serial": true,
+  "no_GPU_writer_retry": true,
+  "prior_error_log_sha256": "344423a4113b0a688ff152ecdc9018b91fe770e50275863927863194372d58e3"
+}

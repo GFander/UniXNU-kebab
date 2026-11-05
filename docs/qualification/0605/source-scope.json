@@ -1,0 +1,24 @@
+{
+  "version": "0605",
+  "parent": "0604",
+  "changes": {
+    "osfmk/kern/KebabA650RenderBinding.h": {
+      "before": "65946048ad071462a36c26494403b4b342198012df3acc8deafe4f0fd51a0fa5",
+      "after": "590761e59eeeaf86417012f1c4c0596b1b100558c5eae2b6202a9c1f7dd4a676"
+    },
+    "osfmk/kern/KebabA650RenderCore.h": {
+      "before": "caaa1aaa5bfab1cce4d9474f59ee9c515e032c314256b4c8e280e6f83deae65a",
+      "after": "f4a2c7a8a97e80df96ce393a9eb01540773a101644a3a8d45614af78d8c507d1"
+    },
+    "iokit/Kernel/arm/KebabA650RenderNative.h": {
+      "before": "2eb332c0360b89b492abf8e9b0d5268e647bcc274cd6cf4f8f315132db83a0e4",
+      "after": "f23462e84ef3f4a7ba2027c85a06b14f8cf765bc3dfd27e27b5fcef56d41918e"
+    },
+    "iokit/Kernel/arm/KebabNativeA650Render.h": {
+      "before": "b79ae97f3f90563d3766fc42e08520758fdbc1aa4033f1706398c4048a492ccc",
+      "after": "362f072bb2f2eeee06a1416c22db630836384fed13b741b8dc50f194d46b164f"
+    }
+  },
+  "no_new_source_files": true,
+  "scope": "Fixed18 source-backed CP_REG_TO_MEM diagnostics to unused owned NC fence scratch; preserve all6042D words, controls, pixels, guards, faults, timeout/quarantine/no retry. No SMC/PAS/TRUST/IRQ/power/SMMU change."
+}

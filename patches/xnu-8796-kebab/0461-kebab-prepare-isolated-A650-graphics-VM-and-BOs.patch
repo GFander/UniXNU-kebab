@@ -1,0 +1,855 @@
+--- /dev/null
++++ b/osfmk/kern/KebabA650GpuVmBinding.h
+@@ -0,0 +1,8 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GPU_VM_BINDING_H
++#define KEBAB_A650_GPU_VM_BINDING_H
++/* Finite 0586 GPU VM attachment scope. The digest binds the Root source
++ * review; actual native, packaging and runtime gates remain mandatory. */
++static const unsigned KebabA650GpuVmNativeQualified=1;
++static const unsigned char KebabA650GpuVmSourceContract[32]={0xe1,0x9c,0x20,0x26,0x83,0x19,0x17,0x2a,0x05,0x0a,0xb2,0xde,0x5d,0xd0,0x19,0x00,0x38,0x56,0x47,0x80,0x50,0x84,0x5f,0xdc,0xdf,0x63,0xe3,0x86,0x6f,0x39,0xc0,0x38};
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabA650GpuVmOwner.h
+@@ -0,0 +1,19 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GPU_VM_OWNER_H
++#define KEBAB_A650_GPU_VM_OWNER_H
++#include "KebabGmuBootOwner.h"
++typedef struct {const KebabGpuColdToken *cold;uint64_t epoch,generation;uint32_t held,published;} KebabA650GpuVmOwnerToken;
++#ifdef __cplusplus
++extern "C" {
++#endif
++int kebab_rpmh_gpu_vm_acquire(KebabA650GpuVmOwnerToken*,const KebabGpuColdToken*,uint64_t,const KebabGmuBootIo*);
++int kebab_rpmh_gpu_vm_check(const KebabA650GpuVmOwnerToken*);
++int kebab_rpmh_gpu_vm_publish(KebabA650GpuVmOwnerToken*);
++int kebab_rpmh_gpu_vm_end(KebabA650GpuVmOwnerToken*);
++/* Exact native object + same private namespace, called only under canonical
++ * VRM busy. Pure comparisons: no recursive VRM lock, mapper or MMIO. */
++int kebab_a650_gpu_vm_ready_locked(const KebabA650GpuVmOwnerToken*);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- a/osfmk/kern/Makefile
++++ b/osfmk/kern/Makefile
+@@ -37,7 +37,7 @@
+ 
+ EXPORT_FILES = \
+ 	KebabGmuResourceObserve.h \
+-	KebabGmuResourceObserveOwner.h \
++	KebabGmuResourceObserveOwner.h KebabA650GpuVmOwner.h KebabA650GpuVmBinding.h \
+ 	KebabGmuHfiInitBinding.h \
+ 	KebabGmuHfiInitCore.h \
+ 	KebabGmuHfiInitOwner.h \
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -41,3 +41,4 @@
+ iokit/Kernel/arm/KebabVolumeLookup.cpp	optional iokitcpp
+ 
+ iokit/Kernel/arm/KebabA650GmuNativeBacking.cpp	optional iokitcpp
++iokit/Kernel/arm/KebabA650GpuBacking.cpp optional iokitcpp
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GpuBacking.cpp
+@@ -0,0 +1,112 @@
++/* SPDX-License-Identifier: MIT */
++#include "KebabA650GpuBacking.h"
++#include "KebabNativeGpuSmmu.h"
++/* Separate graphics allocations; never reuse or mutate live GMU pools. The
++ * existing native adapter allocates 16KiB CPU extents and builds 4KiB nG
++ * leaves. Pools5/6 (readback/fence) are Normal-NC from allocation onward;
++ * the same CPU mapping is verified WIMG6, with no WB/NC alias or later CIVAC.
++ * This TU has no active owner, mapper, bind, MMIO or GPU command entry. */
++static KGDomain kagpu_domain;
++static KGNative kagpu_native;
++static uint32_t kagpu_once,kagpu_closing;
++/* Covers the release interval in which the generic engine drops its own
++ * domain lock. No snapshot or token operation may race its final record. */
++static uint32_t kagpu_operation;
++struct KAGPUGuard {
++ bool held;
++ KAGPUGuard(){uint32_t expected=0;held=__atomic_compare_exchange_n(&kagpu_operation,&expected,1,0,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED);}
++ ~KAGPUGuard(){if(held)__atomic_store_n(&kagpu_operation,0,__ATOMIC_RELEASE);}
++};
++static int kagpu_result=KG_CLOSED;
++static uint64_t kagpu_generation;
++static KebabA650GpuBackingRecord kagpu_record;
++struct KAGPUHolder {KebabA650GpuBackingToken *identity;uint64_t generation;uint32_t published;};
++static KAGPUHolder kagpu_holder[8];
++static const KGRegion kagpu_regions[6]={
++ {0x90000000,0x1000,KG_READ,0,NULL},       /* ring */
++ {0x90004000,0x1000,KG_READ,0,NULL},       /* IB */
++ {0x90008000,0x4000,KG_READ|KG_EXEC,0,NULL}, /* future SQE, not loaded yet */
++ {0x9000c000,0x4000,KG_READ|KG_EXEC,0,NULL}, /* shader/constants */
++ {0x90010000,0x10000,KG_READ|KG_WRITE,0,NULL}, /* 128x128 RGBA8 readback */
++ {0x90020000,0x1000,KG_READ|KG_WRITE,0,NULL} /* real hardware fence later */
++};
++static void kagpu_refresh(void)
++{
++ auto *r=&kagpu_record;r->magic=0x31424741;r->schema=1;r->bytes=sizeof *r;r->pools=r->cpu_bytes=r->holders=r->published=0;
++ r->cpu_page_bytes=PAGE_SIZE;r->gpu_page_bytes=4096;r->table_bytes=65536;r->mapped_pages=kagpu_domain.receipt.mapped_pages;
++ r->hardware_touched=kagpu_domain.receipt.hardware_touched;r->primary_error=kagpu_domain.receipt.primary_error;r->cleanup_error=kagpu_domain.receipt.cleanup_error;
++ for(unsigned n=0;n<7;n++)if(kagpu_domain.pool[n].handle){r->pools++;r->cpu_bytes+=kagpu_domain.pool[n].bytes;}
++ for(unsigned n=0;n<8;n++)if(kagpu_holder[n].identity){r->holders++;r->published|=kagpu_holder[n].published;}
++ for(unsigned n=0;n<6;n++){r->region_iova[n]=kagpu_regions[n].iova;r->region_bytes[n]=kagpu_regions[n].bytes;r->region_allocation_bytes[n]=kagpu_domain.pool[n+1].bytes;r->region_permissions[n]=kagpu_regions[n].permissions;}
++}
++static int kagpu_pins(void)
++{
++ if(kagpu_closing || kagpu_record.phase!=KAGPU_PREPARED || !kagpu_record.cleaned_for_device || kagpu_domain.receipt.state!=KG_PREPARED || kagpu_domain.count!=6 || kagpu_domain.receipt.mapped_pages!=27 || kagpu_domain.touched || kagpu_domain.mapped || kagpu_domain.lease.held)return KG_STATE;
++ for(unsigned n=0;n<7;n++){
++  auto *p=&kagpu_domain.pool[n];uint32_t size=n?((kagpu_regions[n-1].bytes+16383u)&~16383u):65536;
++  int e=KGPoolValid(&kagpu_domain,p,size);if(e)return e;
++  if((p->pa&16383u) || ((uintptr_t)p->address&16383u))return KG_POOL;
++ }
++ return 0;
++}
++static int kagpu_token(const KebabA650GpuBackingToken *t)
++{
++ if(!t || !t->held || t->slot>=8 || !t->generation)return KG_OWNERSHIP;
++ const auto *h=&kagpu_holder[t->slot];return h->identity==t&&h->generation==t->generation?0:KG_OWNERSHIP;
++}
++extern "C" int kebab_a650_gpu_backing_prepare(void)
++{
++ int e=KGNativeWorker(NULL);if(e)return e;KAGPUGuard operation;if(!operation.held)return KG_BUSY;uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kagpu_once,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
++  if(expected!=2)return KG_BUSY;if(kagpu_result)return kagpu_result;
++  if(!KGTry(&kagpu_domain))return KG_BUSY;e=kagpu_pins();KGUnlock(&kagpu_domain);return e;
++ }
++ if(PAGE_SIZE!=16384 || PAGE_SHIFT!=14){kagpu_result=KG_CLOSED;goto done;}
++ {
++  KGOps ops=KGNativeInit(&kagpu_native,&kagpu_domain,NULL);
++  e=KebabGpuSmmuPrepare(&kagpu_domain,&ops,KG_GFX_USER,kagpu_regions,6);kagpu_result=e;
++  if(!e){kagpu_record.phase=KAGPU_PREPARED;kagpu_record.cleaned_for_device=1;kagpu_record.NC_native_pages=5;e=kagpu_pins();kagpu_result=e;}
++ }
++done:
++ kagpu_record.result=(uint32_t)kagpu_result;
++ if(kagpu_result){kagpu_record.phase=KAGPU_FAILED;kagpu_record.cleaned_for_device=0;}
++ kagpu_refresh();__atomic_store_n(&kagpu_once,2,__ATOMIC_RELEASE);return kagpu_result;
++}
++extern "C" int kebab_a650_gpu_backing_snapshot(KebabA650GpuBackingRecord *out)
++{
++ if(!out)return KG_INVALID;KAGPUGuard operation;if(!operation.held)return KG_BUSY;if(__atomic_load_n(&kagpu_once,__ATOMIC_ACQUIRE)!=2)return KG_STATE;
++ if(!KGTry(&kagpu_domain))return KG_BUSY;kagpu_refresh();*out=kagpu_record;KGUnlock(&kagpu_domain);return 0;
++}
++extern "C" int kebab_a650_gpu_backing_acquire(KebabA650GpuBackingToken *t,KebabA650GpuBackingDescription *out)
++{
++ int e=KGNativeWorker(NULL);if(e)return e;KAGPUGuard operation;if(!operation.held)return KG_BUSY;if(!t||!out)return KG_INVALID;
++ if(__atomic_load_n(&kagpu_once,__ATOMIC_ACQUIRE)!=2 || kagpu_result)return KG_STATE;
++ if(!KGTry(&kagpu_domain))return KG_BUSY;unsigned slot=8;
++ if(t->held){KGUnlock(&kagpu_domain);return KG_OWNERSHIP;}
++ for(unsigned n=0;n<8;n++){if(kagpu_holder[n].identity==t){KGUnlock(&kagpu_domain);return KG_OWNERSHIP;}if(!kagpu_holder[n].identity&&slot==8)slot=n;}
++ if(slot==8 || kagpu_generation==UINT64_MAX){KGUnlock(&kagpu_domain);return KG_BUSY;}
++ e=kagpu_pins();if(e){KGUnlock(&kagpu_domain);return e;}
++ memset(out,0,sizeof *out);out->generation=++kagpu_generation;out->root_physical=kagpu_domain.pool[0].pa;out->table_descriptor_identity=(uintptr_t)kagpu_domain.pool[0].handle;
++ out->table_bytes=65536;out->region_count=6;out->mapped_pages=27;out->cleaned_for_device=1;
++ for(unsigned n=0;n<6;n++){const auto*p=&kagpu_domain.pool[n+1];const auto*q=&kagpu_regions[n];out->region[n]={q->iova,q->bytes,q->permissions,p->bytes,p->pa,(uintptr_t)p->handle,(uintptr_t)p->address};}
++ *t={out->generation,slot,1};kagpu_holder[slot]={t,t->generation,0};KGUnlock(&kagpu_domain);return 0;
++}
++extern "C" int kebab_a650_gpu_backing_check(const KebabA650GpuBackingToken *t)
++{int e=KGNativeWorker(NULL);if(e)return e;KAGPUGuard operation;if(!operation.held)return KG_BUSY;if(!KGTry(&kagpu_domain))return KG_BUSY;e=kagpu_token(t);if(!e)e=kagpu_pins();KGUnlock(&kagpu_domain);return e;}
++extern "C" int kebab_a650_gpu_backing_publish(KebabA650GpuBackingToken *t)
++{int e=KGNativeWorker(NULL);if(e)return e;KAGPUGuard operation;if(!operation.held)return KG_BUSY;if(!KGTry(&kagpu_domain))return KG_BUSY;e=kagpu_token(t);if(!e)e=kagpu_pins();if(!e)kagpu_holder[t->slot].published=1;KGUnlock(&kagpu_domain);return e;}
++extern "C" int kebab_a650_gpu_backing_end(KebabA650GpuBackingToken *t)
++{
++ int e=KGNativeWorker(NULL);if(e)return e;KAGPUGuard operation;if(!operation.held)return KG_BUSY;if(!KGTry(&kagpu_domain))return KG_BUSY;e=kagpu_token(t);
++ if(!e){auto*h=&kagpu_holder[t->slot];if(h->published)e=KG_BUSY;else {memset(h,0,sizeof *h);memset(t,0,sizeof *t);}}
++ KGUnlock(&kagpu_domain);return e;
++}
++extern "C" int kebab_a650_gpu_backing_release_unpublished(void)
++{
++ int e=KGNativeWorker(NULL);if(e)return e;KAGPUGuard operation;if(!operation.held)return KG_BUSY;
++ if(__atomic_load_n(&kagpu_once,__ATOMIC_ACQUIRE)!=2)return KG_STATE;
++ if(!KGTry(&kagpu_domain))return KG_BUSY;if(kagpu_closing){KGUnlock(&kagpu_domain);return KG_STATE;}
++ for(unsigned n=0;n<8;n++)if(kagpu_holder[n].identity){KGUnlock(&kagpu_domain);return KG_BUSY;}
++ kagpu_closing=1;KGUnlock(&kagpu_domain);e=KebabGpuSmmuRelease(&kagpu_domain);
++ kagpu_record.result=e;kagpu_record.cleaned_for_device=0;kagpu_record.phase=e?KAGPU_FAILED:KAGPU_RELEASED;return e;
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GpuBacking.h
+@@ -0,0 +1,38 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GPU_BACKING_H
++#define KEBAB_A650_GPU_BACKING_H
++#include <stdint.h>
++#include <stddef.h>
++enum {KAGPU_EMPTY=0,KAGPU_PREPARED=1,KAGPU_FAILED=2,KAGPU_RELEASED=3};
++/* Kernel-only, pointer-identified token. Never accept a CAP/user reconstruction.
++ * Publication permanently retains these allocations for this initial backend;
++ * neither a job count nor a copied observation permits releasing DMA memory. */
++typedef struct {uint64_t generation;uint32_t slot,held;} KebabA650GpuBackingToken;
++typedef struct {uint32_t iova,bytes,permissions,allocation_bytes;uint64_t physical;uintptr_t descriptor_identity,cpu;} KebabA650GpuBackingRegion;
++typedef struct {
++ uint64_t generation,root_physical;uintptr_t table_descriptor_identity;
++ uint32_t table_bytes,region_count,mapped_pages,cleaned_for_device;
++ KebabA650GpuBackingRegion region[6];
++} KebabA650GpuBackingDescription;
++typedef struct {
++ uint32_t magic,schema,bytes,result,phase,pools,cpu_bytes,mapped_pages;
++ uint32_t cpu_page_bytes,gpu_page_bytes,table_bytes,cleaned_for_device;
++ uint32_t NC_native_pages,hardware_touched,GPU_DMA_proven,SQE_loaded;
++ uint32_t primary_error,cleanup_error,published,holders;
++ uint32_t region_iova[6],region_bytes[6],region_allocation_bytes[6],region_permissions[6];
++} KebabA650GpuBackingRecord;
++#ifdef __cplusplus
++static_assert(sizeof(KebabA650GpuBackingRecord)==176,"GPU backing diagnostic ABI");
++extern "C" {
++#endif
++int kebab_a650_gpu_backing_prepare(void);
++int kebab_a650_gpu_backing_snapshot(KebabA650GpuBackingRecord *);
++int kebab_a650_gpu_backing_acquire(KebabA650GpuBackingToken *,KebabA650GpuBackingDescription *);
++int kebab_a650_gpu_backing_check(const KebabA650GpuBackingToken *);
++int kebab_a650_gpu_backing_publish(KebabA650GpuBackingToken *);
++int kebab_a650_gpu_backing_end(KebabA650GpuBackingToken *);
++int kebab_a650_gpu_backing_release_unpublished(void);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GpuVmCore.h
+@@ -0,0 +1,204 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GPU_VM_CORE_H
++#define KEBAB_A650_GPU_VM_CORE_H
++#if defined(KERNEL)
++#include <kern/KebabGpuFirstAttachCore.h>
++#else
++#include "KebabGpuFirstAttachCore.h"
++#endif
++#include "KebabA650GpuBacking.h"
++/* Separate graphics attachment inside the EXISTING namespace. The caller
++ * supplies its real canonical post-HFI clock/Root child and real BO token.
++ * No callback/ready vector originates in a CAP or user request. This header
++ * alone does not grant native MMIO authority. Binding remains separately gated.
++ * Graphics SID0/mask401 follows kona-gpu.dtsi, including SID1/privilege-bit
++ * aliases. SMR2 routes that exact set; reserved SMR3 is never programmed.
++ * CB1/ASID2 only; no VMID-wide ALL, ATS, protected bank, reset, fault ACK. */
++enum {KVG_EMPTY=0,KVG_RESERVED=1,KVG_ATTACHED=2,KVG_FAILED=3,KVG_QUARANTINED=4};
++typedef struct {
++ void *cookie;int (*worker)(void*),(*hold)(void*,uint32_t*),(*check)(void*),(*end)(void*);
++ int (*backing_acquire)(void*,KebabA650GpuBackingDescription*,uint32_t*),(*backing_check)(void*),(*backing_publish)(void*),(*backing_end)(void*);
++ int (*map)(void*);void (*unmap)(void*);
++ int (*read32)(void*,uint32_t,uint32_t*),(*read64)(void*,uint32_t,uint64_t*);
++ int (*write32)(void*,uint32_t,uint32_t),(*write64)(void*,uint32_t,uint64_t);
++ void (*barrier)(void*),(*delay_us)(void*,unsigned);uint64_t (*now_us)(void*);
++ int (*reserve)(void*,KFNamespace*,KFToken*,const KFPolicy*);
++} KVGops;
++typedef struct {
++ uint32_t magic,schema,bytes,result,phase,primary_error,cleanup_error,reads,writes;
++ uint32_t touched,publish_attempted,published,held,backing_held,reserved,tlb_polls,GPU_DMA_proven;
++ uint32_t cb,asid,smr,sid,mask,fsr_first,fsr_last,gfsr;
++ uint64_t epoch,root_physical,elapsed_us,fault_far;
++} KVGRecord;
++typedef struct {
++ uint32_t busy,attempted,mapped,held,backing_held,publish_attempted,published,touched;
++ KFNamespace *space;const KFFirstAttach *parent;KFToken token;KVGops ops;
++ KebabA650GpuBackingDescription backing;KGDiscovery before,after;
++ KVGRecord record;uint64_t begin;uint32_t clock_started;
++} KVGEngine;
++static int KVGParent(const KVGEngine*a)
++{
++ const KFFirstAttach*p=a->parent;
++ if(!p || p->space!=a->space || p->policy.initialize!=1 || p->policy.cb || p->token.cb || p->token.slot ||
++ p->policy.kernel_smr || p->policy.user_smr!=1 || p->token.kernel_smr || p->token.user_smr!=1 ||
++ !p->published || !p->backing_held || !p->held || !p->receipt.tlb_polls || !p->saved ||
++ p->before.num_cb!=5 || p->before.num_s2 || p->before.gfsr || p->before.num_streams!=6 ||
++ p->before.cr0!=0x260406 || p->before.id0!=0x4c017e06 || p->before.id1!=0x20000005 || p->before.id2!=0x5511 ||
++ KFFirstRunCheckPrivate(p,p->token.epoch))return KG_OWNERSHIP;
++ /* Historical globals were retired by the original cold VMID-wide ALL.
++  * All later owned table providers use nG; external mutations are blocked
++  * by the same namespace. Virgin M0 alone would NOT prove this contract. */
++ for(unsigned i=0;i<6;i++)if(p->before.stream[i].smr&0x80000000u)return KG_ROUTE;
++ for(unsigned i=0;i<5;i++){const auto*c=&p->before.cb[i];if(!c->present || c->type || c->hypc || c->monc || c->vmid || (c->cba2r&1) || (c->sctlr&1) || KFContextFaultBits(c->fsr))return KG_OWNERSHIP;}
++ return 0;
++}
++static int KVGCheck(KVGEngine*a)
++{
++ int e=a->ops.worker(a->ops.cookie);if(e)return e;
++ e=KFNamespaceCheckPrivate(a->space,&a->token);if(e)return e;
++ e=KVGParent(a);if(e)return e;e=a->ops.check(a->ops.cookie);if(e)return e;
++ if(a->backing_held){e=a->ops.backing_check(a->ops.cookie);if(e)return e;}
++ if(a->clock_started){uint64_t n=a->ops.now_us(a->ops.cookie);if(n<a->begin || n-a->begin>100000)return KG_TIMEOUT;}
++ return 0;
++}
++static int KVGReadAllowed(uint32_t o,unsigned wide)
++{
++ /* The real ID0 profile exposes SIX rows, not the generic maximum128. */
++ if(!wide&&((o>=0x818&&o<0xa00)||(o>=0xc18&&o<0xe00)))return 0;
++ return KGReadAllowed(o,wide,31)||(!wide&&o==0x97f4);
++}
++static int KVGR32(KVGEngine*a,uint32_t o,uint32_t*v)
++{if(!v || !KVGReadAllowed(o,0))return KG_INVALID;int e=KVGCheck(a);if(e)return e;a->record.reads++;return a->ops.read32(a->ops.cookie,o,v);}
++static int KVGR64(KVGEngine*a,uint32_t o,uint64_t*v)
++{if(!v || !KVGReadAllowed(o,1))return KG_INVALID;int e=KVGCheck(a);if(e)return e;a->record.reads++;return a->ops.read64(a->ops.cookie,o,v);}
++static int KVGWriteAllowed(uint32_t o,unsigned wide)
++{
++ if(wide)return o==0x9020 || o==0x9028;
++ return o==0x808 || o==0xc08 || o==0x1004 || o==0x1804 || o==0x9000 || o==0x9004 || o==0x9010 ||
++ o==0x9030 || o==0x9038 || o==0x903c || o==0x9610 || o==0x97f0;
++}
++static int KVGW(KVGEngine*a,uint32_t o,uint64_t v,unsigned wide=0)
++{
++ if(!KVGWriteAllowed(o,wide) || !a->mapped || !a->published)return KG_CLOSED;
++ int e=KVGCheck(a);if(e)return e;a->touched=1;a->record.writes++;
++ return wide?a->ops.write64(a->ops.cookie,o,v):a->ops.write32(a->ops.cookie,o,(uint32_t)v);
++}
++#define KVG_TRY(x) do{int kvg_e=(x);if(kvg_e)return kvg_e;}while(0)
++static int KVGSnapshot(KVGEngine*a,KGDiscovery*s)
++{
++ memset(s,0,sizeof *s);KVG_TRY(KVGR32(a,0x20,&s->id0));KVG_TRY(KVGR32(a,0x24,&s->id1));KVG_TRY(KVGR32(a,0x28,&s->id2));
++ if(s->id0!=0x4c017e06 || s->id1!=0x20000005 || s->id2!=0x5511)return KG_UNSUPPORTED;
++ s->num_streams=6;s->num_cb=5;s->stride=4096;s->cb_base=0x8000;s->read_mask=31;s->pa_bits=s->ipa_bits=36;s->va_bits=48;
++ KVG_TRY(KVGR32(a,0,&s->cr0));KVG_TRY(KVGR32(a,0x48,&s->gfsr));a->record.gfsr=s->gfsr;
++ for(unsigned i=0;i<3;i++)KVG_TRY(KVGR32(a,0x50+4*i,&s->gfsynr[i]));
++ for(unsigned i=0;i<6;i++){KVG_TRY(KVGR32(a,0x800+4*i,&s->stream[i].smr));KVG_TRY(KVGR32(a,0xc00+4*i,&s->stream[i].s2cr));}
++ for(unsigned i=0;i<5;i++){
++  auto*c=&s->cb[i];unsigned b=0x8000+4096*i;c->present=1;
++  KVG_TRY(KVGR32(a,0x1000+4*i,&c->cbar));KVG_TRY(KVGR32(a,0x1800+4*i,&c->cba2r));
++  c->type=(c->cbar>>16)&3;c->hypc=(c->cbar>>10)&1;c->monc=(c->cba2r>>1)&1;c->vmid=(s->cr0&0x80000000u)?c->cba2r>>16:c->cbar&255;
++  KVG_TRY(KVGR32(a,b,&c->sctlr));KVG_TRY(KVGR32(a,b+4,&c->actlr));KVG_TRY(KVGR32(a,b+0x10,&c->tcr2));KVG_TRY(KVGR32(a,b+0x30,&c->tcr));
++  KVG_TRY(KVGR64(a,b+0x20,&c->ttbr0));KVG_TRY(KVGR64(a,b+0x28,&c->ttbr1));KVG_TRY(KVGR32(a,b+0x38,&c->mair0));KVG_TRY(KVGR32(a,b+0x3c,&c->mair1));
++  KVG_TRY(KVGR32(a,b+0x58,&c->fsr));if(i==1){a->record.fsr_last=c->fsr;if(!a->touched)a->record.fsr_first=c->fsr;}
++  KVG_TRY(KVGR64(a,b+0x60,&c->far));if(i==1)a->record.fault_far=c->far;
++  KVG_TRY(KVGR32(a,b+0x68,&c->fsynr0));KVG_TRY(KVGR32(a,b+0x6c,&c->fsynr1));KVG_TRY(KVGR32(a,0x1400+4*i,&c->frsynra));
++ }
++ return 0;
++}
++static int KVGConfigEqual(const KGContext*a,const KGContext*b)
++{return a->cbar==b->cbar&&a->cba2r==b->cba2r&&a->sctlr==b->sctlr&&a->actlr==b->actlr&&a->tcr==b->tcr&&a->tcr2==b->tcr2&&a->ttbr0==b->ttbr0&&a->ttbr1==b->ttbr1&&a->mair0==b->mair0&&a->mair1==b->mair1;}
++static int KVGValidate(KVGEngine*a,const KGDiscovery*s,unsigned after)
++{
++ if(s->cr0!=0x260406 || s->gfsr || s->num_cb!=5 || s->num_streams!=6)return KG_OWNERSHIP;
++ const auto*p=a->parent;
++ if(!KVGConfigEqual(&s->cb[0],&p->work.cb[0]) || s->stream[0].smr!=0x84000005 || (s->stream[0].s2cr&0x030300ffu) ||
++ s->stream[1].smr!=0x84000004 || (s->stream[1].s2cr&0x030300ffu)!=0x20000)return KG_OWNERSHIP;
++ for(unsigned i=0;i<5;i++)if(KFContextFaultBits(s->cb[i].fsr))return KG_FAULT;
++ for(unsigned i=2;i<6;i++){
++  if(after && i==2){if((s->stream[i].smr^0x84010000u)&0xffff7fffu || ((s->stream[i].s2cr^1u)&0x030300ffu))return KG_ROUTE;}
++  else if(s->stream[i].smr&0x80000000u)return KG_ROUTE;
++  if(after && i!=2 && memcmp(&s->stream[i],&a->before.stream[i],sizeof(KGStream)))return KG_OWNERSHIP;
++ }
++ for(unsigned i=1;i<5;i++){
++  const auto*c=&s->cb[i];if(after&&i==1)continue;
++  if(c->type || c->hypc || c->monc || c->vmid || (c->cba2r&1) || (c->sctlr&1))return KG_OWNERSHIP;
++  if(!after&&i==1&&c->actlr!=3)return KG_OWNERSHIP;
++  if(after && !KVGConfigEqual(c,&a->before.cb[i]))return KG_OWNERSHIP;
++ }
++ return 0;
++}
++static int KVGBackingValid(const KebabA650GpuBackingDescription*b)
++{
++ static const uint32_t va[6]={0x90000000,0x90004000,0x90008000,0x9000c000,0x90010000,0x90020000};
++ static const uint32_t bytes[6]={4096,4096,16384,16384,65536,4096},perms[6]={1,1,5,5,3,3};
++ if(!b->generation || !b->table_descriptor_identity || b->table_bytes!=65536 || b->region_count!=6 || b->mapped_pages!=27 || b->cleaned_for_device!=1 ||
++ (b->root_physical&16383) || b->root_physical<0x20000 || b->root_physical>KG_PA_LIMIT-65536)return KG_POOL;
++ for(unsigned i=0;i<6;i++){const auto*r=&b->region[i];unsigned n=(bytes[i]+16383)&~16383u;
++  if(r->iova!=va[i] || r->bytes!=bytes[i] || r->permissions!=perms[i] || r->allocation_bytes!=n || !r->descriptor_identity || r->descriptor_identity==b->table_descriptor_identity ||
++  !r->cpu || (r->cpu&16383) || (r->physical&16383) || r->physical<0x20000 || r->physical>KG_PA_LIMIT-n || KGOverlap(r->physical,n,b->root_physical,65536))return KG_POOL;
++  for(unsigned j=0;j<i;j++)if(r->descriptor_identity==b->region[j].descriptor_identity || KGOverlap(r->physical,n,b->region[j].physical,b->region[j].allocation_bytes))return KG_POOL;
++ }
++ return 0;
++}
++static int KVGReadback(KVGEngine*a,uint32_t o,uint32_t want,uint32_t mask)
++{uint32_t v;KVG_TRY(KVGR32(a,o,&v));return ((v^want)&mask)?KG_IO:0;}
++static int KVGPut(KVGEngine*a,uint32_t o,uint32_t v,uint32_t mask=UINT32_MAX)
++{KVG_TRY(KVGW(a,o,v));a->ops.barrier(a->ops.cookie);return KVGReadback(a,o,v,mask);}
++static int KVGTlb(KVGEngine*a)
++{
++ KVG_TRY(KVGW(a,0x9610,2));a->ops.barrier(a->ops.cookie);KVG_TRY(KVGW(a,0x97f0,0));a->ops.barrier(a->ops.cookie);
++ for(unsigned i=0;i<2000;i++){uint32_t v;KVG_TRY(KVGR32(a,0x97f4,&v));a->record.tlb_polls++;if(!(v&1))return 0;a->ops.delay_us(a->ops.cookie,1);}return KG_TIMEOUT;
++}
++static int KVGProgram(KVGEngine*a)
++{
++ /* Publish first; every failure from here keeps BOs, namespace and parent
++  * pins. No guessed drain, reset, restore or speculative unpublish exists. */
++ a->publish_attempted=1;KVG_TRY(a->ops.backing_publish(a->ops.cookie));a->published=1;
++ KVG_TRY(KVGPut(a,0xc08,0x20000,0x030300ffu));KVG_TRY(KVGPut(a,0x808,0x84010000,0xffff7fffu));
++ KVG_TRY(KVGPut(a,0x9000,0,0x0fdf11f7u));KVG_TRY(KVGPut(a,0x1804,1,3));KVG_TRY(KVGPut(a,0x1004,0x1f300,0x3ffff));KVG_TRY(KVGPut(a,0x9004,0x32b,0x32b));
++ KVG_TRY(KVGTlb(a));KVG_TRY(KVGPut(a,0x9010,0x38011,0x38017));KVG_TRY(KVGPut(a,0x9030,0x00802020,0x00c0ffbf));
++ uint64_t ttbr=a->backing.root_physical|(2ULL<<48),v;
++ KVG_TRY(KVGW(a,0x9020,ttbr,1));KVG_TRY(KVGW(a,0x9028,2ULL<<48,1));a->ops.barrier(a->ops.cookie);
++ KVG_TRY(KVGR64(a,0x9020,&v));if((v^ttbr)&(KG_PTE_PA|0xffff000000000000ULL))return KG_IO;
++ KVG_TRY(KVGR64(a,0x9028,&v));if((v^(2ULL<<48))&(KG_PTE_PA|0xffff000000000000ULL))return KG_IO;
++ KVG_TRY(KVGPut(a,0x9038,0x44,255));KVG_TRY(KVGPut(a,0x903c,0));
++ KVG_TRY(KVGPut(a,0x9000,0xc00026,0x0fdf11f7u));KVG_TRY(KVGTlb(a));KVG_TRY(KVGPut(a,0x9000,0xc00027,0x0fdf11f7u));
++ KVG_TRY(KVGPut(a,0xc08,1,0x030300ffu));KVG_TRY(KVGSnapshot(a,&a->after));KVG_TRY(KVGValidate(a,&a->after,1));
++ return KVGCheck(a);
++}
++static int KVGFinish(KVGEngine*a,int e)
++{
++ if(a->clock_started){uint64_t n=a->ops.now_us(a->ops.cookie);a->record.elapsed_us=n>=a->begin?n-a->begin:UINT64_MAX;if(!e&&a->record.elapsed_us>100000)e=KG_TIMEOUT;}
++ a->record.primary_error=e;
++ if(e){
++  if(a->publish_attempted){a->record.phase=KVG_QUARANTINED;KFNamespaceRevoke(a->space);}
++  else{
++   int cleanup=0;if(a->mapped){a->ops.unmap(a->ops.cookie);a->mapped=0;}
++   if(a->backing_held){cleanup=a->ops.backing_end(a->ops.cookie);if(!cleanup)a->backing_held=0;}
++   if(a->held&&!cleanup){cleanup=a->ops.end(a->ops.cookie);if(!cleanup)a->held=0;}
++   if(!a->held&&!a->backing_held&&a->token.held&&!cleanup)cleanup=KFUnreserve(a->space,&a->token);
++   a->record.cleanup_error=cleanup;a->record.phase=cleanup?KVG_QUARANTINED:KVG_FAILED;if(cleanup){KFNamespaceRevoke(a->space);e=KG_QUARANTINE;}
++  }
++ }
++ a->record.result=e;a->record.touched=a->touched;a->record.publish_attempted=a->publish_attempted;a->record.published=a->published;a->record.held=a->held;
++ a->record.backing_held=a->backing_held;a->record.reserved=a->token.held;a->record.epoch=a->token.epoch;a->record.root_physical=a->backing.root_physical;
++ KFUnlock(&a->busy);return e;
++}
++static int KVGAttach(KVGEngine*a,KFNamespace*s,const KFFirstAttach*parent,const KFPolicy*p,const KVGops*o)
++{
++ if(!a||!s||!parent||!p||!o||!o->worker||!o->hold||!o->check||!o->end||!o->backing_acquire||!o->backing_check||!o->backing_publish||!o->backing_end||
++ !o->map||!o->unmap||!o->read32||!o->read64||!o->write32||!o->write64||!o->barrier||!o->delay_us||!o->now_us||!o->reserve)return KG_INVALID;
++ if(!KFPolicyBound(p)||p->cb!=1||p->kernel_smr!=2||p->user_smr!=3||p->vmid||!p->initialize||p->id0!=0x4c017e06||p->id1!=0x20000005||p->id2!=0x5511||p->cr0!=0x260406)return KG_CLOSED;
++ if(!KFTry(&a->busy))return KG_BUSY;if(a->attempted){KFUnlock(&a->busy);return KG_STATE;}a->attempted=1;a->space=s;a->parent=parent;a->ops=*o;
++ a->record.magic=0x31564741;a->record.schema=1;a->record.bytes=sizeof a->record;a->record.cb=1;a->record.asid=2;a->record.smr=2;a->record.sid=0;a->record.mask=0x401;
++ int e=o->worker(o->cookie);if(e)return KVGFinish(a,e);e=KVGParent(a);if(e)return KVGFinish(a,e);e=o->reserve(o->cookie,s,&a->token,p);if(e)return KVGFinish(a,e);
++ a->record.phase=KVG_RESERVED;e=o->hold(o->cookie,&a->held);if(e)return KVGFinish(a,e);if(!a->held)return KVGFinish(a,KG_OWNERSHIP);
++ e=o->backing_acquire(o->cookie,&a->backing,&a->backing_held);if(e)return KVGFinish(a,e);if(!a->backing_held)return KVGFinish(a,KG_OWNERSHIP);e=KVGBackingValid(&a->backing);if(e)return KVGFinish(a,e);
++ a->begin=o->now_us(o->cookie);a->clock_started=1;e=KVGCheck(a);if(e)return KVGFinish(a,e);a->mapped=1;e=o->map(o->cookie);if(e)return KVGFinish(a,e);
++ e=KVGSnapshot(a,&a->before);if(e)return KVGFinish(a,e);e=KVGValidate(a,&a->before,0);if(e)return KVGFinish(a,e);
++ e=KVGSnapshot(a,&a->after);if(e)return KVGFinish(a,e);e=KVGValidate(a,&a->after,0);if(e)return KVGFinish(a,e);
++ if(memcmp(a->before.stream,a->after.stream,6*sizeof(KGStream)))return KVGFinish(a,KG_OWNERSHIP);
++ for(unsigned i=0;i<5;i++)if(!KVGConfigEqual(&a->before.cb[i],&a->after.cb[i]))return KVGFinish(a,KG_OWNERSHIP);
++ e=KVGProgram(a);if(!e)a->record.phase=KVG_ATTACHED;return KVGFinish(a,e);
++}
++#undef KVG_TRY
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GpuVmNative.h
+@@ -0,0 +1,10 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GPU_VM_NATIVE_API_H
++#define KEBAB_A650_GPU_VM_NATIVE_API_H
++#include "KebabA650GpuVmCore.h"
++typedef struct {KVGRecord receipt;KGDiscovery before,after;} KebabA650GpuVmObservation;
++static_assert(sizeof(KVGRecord)==136,"GPU VM receipt v1");
++static_assert(sizeof(KebabA650GpuVmObservation)==3400,"GPU VM observation v1");
++extern "C" int kebab_a650_gpu_vm_attach(void);
++extern "C" int kebab_a650_gpu_vm_snapshot(KVGRecord*,KGDiscovery*,KGDiscovery*);
++#endif
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -133,6 +133,9 @@
+ /* BEGIN GMU_RESOURCE33_INCLUDE */
+ #include "KebabNativeGmuResourceSnapshot.h"
+ /* END GMU_RESOURCE33_INCLUDE */
++/* BEGIN A650_GPUVM_INCLUDE */
++#include "KebabNativeA650GpuVmHold.h"
++/* END A650_GPUVM_INCLUDE */
+ /* END FUTURE_GMU_HOLD_INCLUDE */
+ #include "KebabNativeGpuFirstAttachHold.h"
+ #include <kern/kebab_low_dma.h>
+@@ -908,6 +911,28 @@
+         image->total=bytes;image->stable=1;image->flags=2;return 0;
+     }
+ /* END GMU_RESOURCE33_PROVIDER */
++/* BEGIN A650_GPUVM34_35_PROVIDER */
++    if(source==34) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabA650GpuBackingRecord);
++        auto *data=(KebabA650GpuBackingRecord*)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_a650_gpu_backing_snapshot(data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=34;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
++    if(source==35) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabA650GpuVmObservation);
++        auto *data=(KebabA650GpuVmObservation*)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_native_a650_gpu_vm_hold_snapshot(data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=35;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
++/* END A650_GPUVM34_35_PROVIDER */
+     if(source==31) {
+         if(argument)return 22;
+         uint32_t bytes=sizeof(KebabGpuSn11Record);
+--- a/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
++++ b/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
+@@ -14,6 +14,7 @@
+ static KFNative kf_native;
+ static uint32_t kf_attempt;
+ static uint32_t kf_namespace_init_state;
++static uint32_t kf_pas13_gate,kf_pas13_busy;
+ static int kf_namespace_ensure(void)
+ {
+  uint32_t expected=0;
+@@ -40,7 +41,14 @@
+  if(!epoch || !__atomic_load_n(&kf_attachment.run_permitted,__ATOMIC_ACQUIRE) || KFFirstRunCheckPrivate(&kf_attachment,kf_attachment.token.epoch))return NULL;
+  *epoch=kf_attachment.token.epoch;return &kf_native.cold;
+ }
+-extern "C" int kebab_gpu_first_stop_restore(void){return KFFirstStopRestore(&kf_attachment);}
++extern "C" int kebab_gpu_first_stop_restore(void)
++{
++ /* Hold namespace serialization through the old VMID-wide restore path.
++  * A graphics reservation forbids disabling GMU or issuing its old ALL. */
++ if(!KFTry(&kf_namespace.busy))return KG_BUSY;
++ if(kf_namespace.slot[1]){KFUnlock(&kf_namespace.busy);return KG_BUSY;}
++ int e=KFFirstStopRestore(&kf_attachment);KFUnlock(&kf_namespace.busy);return e;
++}
+ extern "C" int kebab_gpu_first_fault(void){return KFFirstFault(&kf_attachment);}
+ extern "C" int kebab_gpu_first_snapshot(KFReceipt *r){return KFFirstSnapshot(&kf_attachment,r);}
+ extern "C" int kebab_gpu_first_observation_copy(KebabGpuFirstAttachObservationRecord *out)
+@@ -54,6 +62,11 @@
+ extern "C" int kebab_gpu_namespace_change_begin(unsigned operation,uint64_t *cookie)
+ {
+  if(!cookie || operation>KF_OP_PRODUCER_OWNERSHIP_CHANGE)return KG_INVALID;*cookie=0;
++ if(operation==KF_OP_PAS13_SEPARATE_IMAGE){
++  if(!KFTry(&kf_pas13_gate))return KG_BUSY;
++  int e=__atomic_load_n(&kf_namespace.slot[1],__ATOMIC_ACQUIRE)||kf_pas13_busy?KG_BUSY:0;
++  if(!e){kf_pas13_busy=1;*cookie=UINT64_MAX;}KFUnlock(&kf_pas13_gate);return e;
++ }
+  if(operation<=KF_OP_OWN_CM3_RESET)return 0;
+  int e=KFNativeWorker(NULL);if(e)return e;e=kf_namespace_ensure();if(e)return e;
+  uint32_t started=0;e=KFMutationBeginFor(&kf_namespace,operation,&started);if(!e && started)*cookie=__atomic_load_n(&kf_namespace.epoch,__ATOMIC_ACQUIRE);return e;
+@@ -61,8 +74,14 @@
+ extern "C" int kebab_gpu_namespace_change_end(uint64_t cookie,unsigned outcome)
+ {
+  if(outcome>2)return KG_INVALID;if(!cookie)return 0;int e=KFNativeWorker(NULL);if(e)return e;
++ if(cookie==UINT64_MAX){
++  if(!KFTry(&kf_pas13_gate))return KG_BUSY;
++  e=kf_pas13_busy?0:KG_STATE;if(!e)kf_pas13_busy=0;KFUnlock(&kf_pas13_gate);return e;
++ }
+  if(__atomic_load_n(&kf_namespace.epoch,__ATOMIC_ACQUIRE)!=cookie || !__atomic_load_n(&kf_namespace.mutation,__ATOMIC_ACQUIRE))return KG_OWNERSHIP;
+  if(outcome)KFNamespaceRevoke(&kf_namespace);return KFMutationEnd(&kf_namespace);
+ }
+ /* No USB/userclient/startup hook, active PAS call, firmware execution or DMA
+  * success entry. The compiled production binding above remains CLOSED. */
++
++#include "KebabNativeA650GpuVm.h"
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeA650GpuVm.h
+@@ -0,0 +1,160 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_A650_GPU_VM_H
++#define KEBAB_NATIVE_A650_GPU_VM_H
++/* Included at END of the real FirstAttach TU, sharing its exact namespace,
++ * parent, native cold token and external mutation gates. No second namespace. */
++#include "KebabA650GpuVmCore.h"
++#if defined(KERNEL)
++#include <kern/KebabA650GpuVmOwner.h>
++#include <kern/KebabA650GpuVmBinding.h>
++#include <kern/KebabGmuRootCore.h>
++#else
++#include "KebabA650GpuVmOwner.h"
++#include "KebabA650GpuVmBinding.h"
++#include "KebabGmuRootCore.h"
++#endif
++#include <kern/clock.h>
++static KVGEngine kvg_engine;
++struct KVGNative {
++ KebabA650GpuVmOwnerToken owner;KebabA650GpuBackingToken bo;
++ IOMemoryDescriptor *clock_memory[4],*registers;IOMemoryMap *clock_mapping[4],*mapping;
++ uintptr_t clock[4],base;
++};
++static KVGNative kvg_native;
++static uint32_t kvg_native_once;
++extern "C" int kebab_a650_gpu_vm_ready_locked(const KebabA650GpuVmOwnerToken*t)
++{
++ if(t!=&kvg_native.owner || kvg_engine.space!=&kf_namespace || kvg_engine.parent!=&kf_attachment ||
++ KFNamespaceCheckPrivate(&kf_namespace,&kvg_engine.token) || KVGParent(&kvg_engine))return 95;
++ if(t->held && (t->cold!=&kf_native.cold || t->epoch!=kvg_engine.token.epoch))return 95;
++ return 0;
++}
++static void KVGNativeClockUnmap(KVGNative*n)
++{
++ for(unsigned i=4;i;){--i;n->clock[i]=0;if(n->clock_mapping[i]){n->clock_mapping[i]->release();n->clock_mapping[i]=NULL;}if(n->clock_memory[i]){n->clock_memory[i]->release();n->clock_memory[i]=NULL;}}
++}
++static int KVGNativeClockRead(void*cookie,unsigned region,uint32_t off,uint32_t*out)
++{
++ auto*n=(KVGNative*)cookie;if(!out || (off&3) || KFNativeWorker(NULL))return 95;
++ unsigned i;uint32_t base;
++ if(region==KGB_CC){if(!KebabGmuRootAllowed(region,off)&&off!=0x109c)return 22;i=3;base=0;}
++ else if(region==KGB_GCC){
++  if(!KebabGmuRootAllowed(region,off)&&off!=0x7100c&&off!=0x71154)return 22;
++  if(off<0x1000){i=1;base=0;}else if(off>=0x52000&&off<0x53000){i=2;base=0x52000;}else {i=0;base=0x70000;}
++ }else return 22;
++ if(!n || !n->clock[i])return 95;*out=*(volatile const uint32_t*)(n->clock[i]+off-base);return 0;
++}
++static int KVGNativeClockBarrier(void*)
++{
++ if(KFNativeWorker(NULL))return 95;
++#if defined(__aarch64__)
++ __asm__ volatile("dsb sy":::"memory");
++#else
++ OSMemoryBarrier();
++#endif
++ return 0;
++}
++static uint64_t KVGNativeNow(void*)
++{uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000;}
++static int KVGNativeHold(void*cookie,uint32_t*held)
++{
++ auto*n=(KVGNative*)cookie;*held=0;if(!KebabA650GpuVmNativeQualified || KFNativeWorker(NULL))return KG_CLOSED;
++ uint64_t epoch=0;auto*cold=kebab_gpu_first_run_lease(&epoch);if(cold!=&kf_native.cold || epoch!=kvg_engine.token.epoch)return KG_OWNERSHIP;
++ const uint64_t pa[4]={0x170000,0x100000,0x152000,0x3d90000};const uint32_t bytes[4]={0x4000,0x1000,0x1000,0x4000};int e=0;
++ for(unsigned i=0;i<4;i++){
++  n->clock_memory[i]=IOMemoryDescriptor::withPhysicalAddress(pa[i],bytes[i],kIODirectionIn);
++  if(!n->clock_memory[i]){e=KG_POOL;break;}n->clock_mapping[i]=n->clock_memory[i]->map(kIOMapAnywhere|kIOMapInhibitCache|kIOMapReadOnly);
++  if(!n->clock_mapping[i] || n->clock_mapping[i]->getLength()!=bytes[i] || !(n->clock[i]=n->clock_mapping[i]->getVirtualAddress())){e=KG_POOL;break;}
++ }
++ if(!e){KebabGmuBootIo io={n,KVGNativeClockRead,NULL,KVGNativeClockBarrier,NULL,KVGNativeNow,NULL,NULL,NULL,NULL};e=kebab_rpmh_gpu_vm_acquire(&n->owner,cold,epoch,&io);}
++ *held=n->owner.held;if(e&&!*held)KVGNativeClockUnmap(n);return e;
++}
++static int KVGNativeCheck(void*cookie)
++{auto*n=(KVGNative*)cookie;return kebab_rpmh_gpu_vm_check(&n->owner);}
++static int KVGNativeEnd(void*cookie)
++{
++ auto*n=(KVGNative*)cookie;
++ /* All new allocations are made AFTER namespace reservation. Before dropping
++  * that reservation, dispose only proven unpublished buffers. Retained failed
++  * prepare/complete keeps the namespace and parent pinned, blocking PAS13. */
++ KebabA650GpuBackingRecord r={};int e=kebab_a650_gpu_backing_snapshot(&r);
++ if(!e&&r.pools){if(r.phase!=KAGPU_PREPARED)return KG_QUARANTINE;e=kebab_a650_gpu_backing_release_unpublished();if(e)return e;}
++ else if(e!=KG_STATE&&e)return e;
++ e=kebab_rpmh_gpu_vm_end(&n->owner);if(!e)KVGNativeClockUnmap(n);return e;
++}
++static int KVGNativeBackingAcquire(void*cookie,KebabA650GpuBackingDescription*d,uint32_t*held)
++{auto*n=(KVGNative*)cookie;*held=0;int e=kebab_a650_gpu_backing_prepare();if(e)return e;e=kebab_a650_gpu_backing_acquire(&n->bo,d);*held=n->bo.held;return e;}
++static int KVGNativeBackingCheck(void*cookie)
++{return kebab_a650_gpu_backing_check(&((KVGNative*)cookie)->bo);}
++static int KVGNativeBackingPublish(void*cookie)
++{auto*n=(KVGNative*)cookie;int e=kebab_rpmh_gpu_vm_publish(&n->owner);return e?e:kebab_a650_gpu_backing_publish(&n->bo);}
++static int KVGNativeBackingEnd(void*cookie)
++{return kebab_a650_gpu_backing_end(&((KVGNative*)cookie)->bo);}
++static int KVGNativeMap(void*cookie)
++{
++ auto*n=(KVGNative*)cookie;int e=KVGNativeCheck(n);if(e)return e;
++ n->registers=IOMemoryDescriptor::withPhysicalAddress(KG_BASE,KG_BYTES,kIODirectionInOut);if(!n->registers)return KG_POOL;
++ n->mapping=n->registers->map(kIOMapAnywhere|kIOMapInhibitCache);
++ if(!n->mapping || n->mapping->getLength()!=KG_BYTES || !(n->base=n->mapping->getVirtualAddress()))return KG_POOL;return 0;
++}
++static void KVGNativeUnmap(void*cookie)
++{auto*n=(KVGNative*)cookie;n->base=0;if(n->mapping){n->mapping->release();n->mapping=NULL;}if(n->registers){n->registers->release();n->registers=NULL;}}
++static int KVGNativeRead32(void*cookie,uint32_t off,uint32_t*out)
++{auto*n=(KVGNative*)cookie;if(!out||!n->base||!KVGReadAllowed(off,0)||kebab_a650_gpu_vm_ready_locked(&n->owner))return KG_CLOSED;*out=*(volatile const uint32_t*)(n->base+off);return 0;}
++static int KVGNativeRead64(void*cookie,uint32_t off,uint64_t*out)
++{auto*n=(KVGNative*)cookie;if(!out||!n->base||!KVGReadAllowed(off,1)||kebab_a650_gpu_vm_ready_locked(&n->owner))return KG_CLOSED;*out=*(volatile const uint64_t*)(n->base+off);return 0;}
++static int KVGNativeWrite32(void*cookie,uint32_t off,uint32_t value)
++{
++ auto*n=(KVGNative*)cookie;if(!KebabA650GpuVmNativeQualified || !n->base || !n->owner.published || !KVGWriteAllowed(off,0) || kebab_a650_gpu_vm_ready_locked(&n->owner))return KG_CLOSED;
++ uintptr_t address=n->base+off;
++#if defined(__aarch64__)
++ __asm__ volatile("str %w0, [%1]":"+r"(value):"r"(address):"memory");
++#else
++ *(volatile uint32_t*)address=value;
++#endif
++ return 0;
++}
++static int KVGNativeWrite64(void*cookie,uint32_t off,uint64_t value)
++{
++ auto*n=(KVGNative*)cookie;if(!KebabA650GpuVmNativeQualified || !n->base || !n->owner.published || !KVGWriteAllowed(off,1) || kebab_a650_gpu_vm_ready_locked(&n->owner))return KG_CLOSED;
++ uintptr_t address=n->base+off;
++#if defined(__aarch64__)
++ __asm__ volatile("str %0, [%1]":"+r"(value):"r"(address):"memory");
++#else
++ *(volatile uint64_t*)address=value;
++#endif
++ return 0;
++}
++static void KVGNativeBarrier(void*)
++{
++ /* The engine's void barrier must always execute, even if worker state
++  * changes. A fallible clock callback must not silently skip this ordering. */
++#if defined(__aarch64__)
++ __asm__ volatile("dsb sy":::"memory");
++#else
++ OSMemoryBarrier();
++#endif
++}
++static void KVGNativeDelay(void*,unsigned us){if(us==1)IODelay(1);}
++static int KVGNativeReserve(void*,KFNamespace*s,KFToken*t,const KFPolicy*p)
++{
++ if(s!=&kf_namespace || t!=&kvg_engine.token)return KG_OWNERSHIP;
++ if(!KFTry(&kf_pas13_gate))return KG_BUSY;
++ int e=kf_pas13_busy?KG_BUSY:KFReserve(s,t,p);KFUnlock(&kf_pas13_gate);return e;
++}
++extern "C" int kebab_a650_gpu_vm_attach(void)
++{
++ if(!KebabA650GpuVmNativeQualified)return KG_CLOSED;
++ int e=KFNativeWorker(NULL);if(e)return e;uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kvg_native_once,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return KG_STATE;
++ KFPolicy p=KebabGpuFirstNativePolicy;p.ready=KebabA650GpuVmNativeQualified;p.cb=1;p.kernel_smr=2;p.user_smr=3;memcpy(p.source_contract_sha256,KebabA650GpuVmSourceContract,32);
++ KVGops o={&kvg_native,KFNativeWorker,KVGNativeHold,KVGNativeCheck,KVGNativeEnd,KVGNativeBackingAcquire,KVGNativeBackingCheck,KVGNativeBackingPublish,KVGNativeBackingEnd,
++ KVGNativeMap,KVGNativeUnmap,KVGNativeRead32,KVGNativeRead64,KVGNativeWrite32,KVGNativeWrite64,KVGNativeBarrier,KVGNativeDelay,KVGNativeNow,KVGNativeReserve};
++ return KVGAttach(&kvg_engine,&kf_namespace,&kf_attachment,&p,&o);
++}
++extern "C" int kebab_a650_gpu_vm_snapshot(KVGRecord*r,KGDiscovery*before,KGDiscovery*after)
++{
++ if(!r||!before||!after)return KG_INVALID;if(!KFTry(&kvg_engine.busy))return KG_BUSY;
++ int e=kvg_engine.attempted?0:KG_STATE;if(!e){*r=kvg_engine.record;*before=kvg_engine.before;*after=kvg_engine.after;}KFUnlock(&kvg_engine.busy);return e;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeA650GpuVmHold.h
+@@ -0,0 +1,37 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_A650_GPU_VM_HOLD_H
++#define KEBAB_NATIVE_A650_GPU_VM_HOLD_H
++/* Same framebuffer TU after the unchanged InitHold. The cache records one
++ * actual attempt; it is neither a native owner token nor a fresh fault poll. */
++#include "KebabNativeGmuHfiInitHold.h"
++#include "KebabA650GpuVmNative.h"
++static uint32_t kebab_gpu_vm_hold_state;
++static int kebab_gpu_vm_hold_result=EAGAIN;
++static KebabA650GpuVmObservation *kebab_gpu_vm_hold_cache;
++extern "C" void kebab_a650_gpu_vm_prepare(void)
++{
++ uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kebab_gpu_vm_hold_state,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
++  int e=expected==2?kebab_gpu_vm_hold_result:EBUSY;printf("KEBAB GPUVM: end; result=%d; state=%u; cached=1\n",e,expected);return;
++ }
++ int e=kebab_gmu_init_hold_worker(NULL);KebabA650GpuVmObservation*r=NULL;
++ if(!e){r=(KebabA650GpuVmObservation*)IOMalloc(sizeof *r);if(!r)e=ENOMEM;else{
++  memset(r,0,sizeof *r);r->receipt.magic=0x31564741;r->receipt.schema=1;r->receipt.bytes=sizeof r->receipt;r->receipt.phase=KVG_FAILED;
++  e=kebab_gmu_init_hold_worker(NULL);
++  /* This is only a normal-worker entry prerequisite. The actual native
++   * namespace/canonical HFI book/Root/clocks/IRQ/resource tokens gate attach. */
++  if(!e&&(__atomic_load_n(&kebab_gmu_init_hold_state,__ATOMIC_ACQUIRE)!=2 || kebab_gmu_init_hold_result ||
++    __atomic_load_n(&kebab_native_gmu_hfi_init_once,__ATOMIC_ACQUIRE)!=2 || kebab_native_gmu_hfi_init_result.io.result))e=95;
++  if(!e){e=kebab_a650_gpu_vm_attach();int snapshot=kebab_a650_gpu_vm_snapshot(&r->receipt,&r->before,&r->after);if(!e&&snapshot)e=snapshot;}
++  r->receipt.result=(uint32_t)e;
++ }}
++ kebab_gpu_vm_hold_cache=r;kebab_gpu_vm_hold_result=e;__atomic_store_n(&kebab_gpu_vm_hold_state,2,__ATOMIC_RELEASE);
++ printf("KEBAB GPUVM: end; result=%d; phase=%u; cached=0\n",e,r?r->receipt.phase:0);
++}
++static int kebab_native_a650_gpu_vm_hold_snapshot(KebabA650GpuVmObservation*out)
++{
++ if(!out)return EINVAL;if(__atomic_load_n(&kebab_gpu_vm_hold_state,__ATOMIC_ACQUIRE)!=2)return EAGAIN;
++ if(kebab_gpu_vm_hold_cache)memcpy(out,kebab_gpu_vm_hold_cache,sizeof *out);
++ else {memset(out,0,sizeof *out);out->receipt.magic=0x31564741;out->receipt.schema=1;out->receipt.bytes=sizeof out->receipt;out->receipt.phase=KVG_FAILED;out->receipt.result=(uint32_t)kebab_gpu_vm_hold_result;}return 0;
++}
++#endif
+--- /dev/null
++++ b/bsd/dev/KebabA650GpuVmOwner.inc
+@@ -0,0 +1,75 @@
++/* SPDX-License-Identifier: MIT */
++/* Append after existing Init/ResourceObserve owners in canonical VRM TU. */
++#if defined(KERNEL) || defined(KEBAB_RPMH_KERNEL)
++#include <kern/KebabA650GpuVmOwner.h>
++#include <kern/KebabA650GpuVmBinding.h>
++#else
++#include "KebabA650GpuVmOwner.h"
++#include "KebabA650GpuVmBinding.h"
++#endif
++static KebabA650GpuVmOwnerToken *kebab_gpu_vm_identity;
++static uint64_t kebab_gpu_vm_generation;
++static KebabGmuBootIo kebab_gpu_vm_io;
++static KebabGmuBootContext kebab_gpu_vm_clocks;
++static KebabGmuBootRecord kebab_gpu_vm_clock_evidence;
++static int kebab_gpu_vm_parent_locked(const KebabGpuColdToken*cold,uint64_t epoch)
++{
++ if(!__atomic_load_n(&kebab_rpmh_global_lock.busy,__ATOMIC_ACQUIRE) || !KebabA650GpuVmNativeQualified ||
++ cold!=kebab_gmu_boot_identity || epoch!=kebab_gmu_boot_ledger.namespace_epoch ||
++ kebab_gmu_hfi_active || !kebab_gmu_hfi_init_book.complete || kebab_gmu_hfi_init_book.quarantined ||
++ kebab_gmu_hfi_session.quarantined || kebab_gmu_hfi_session.sequence<5 || !kebab_gmu_hfi_session.version_verified ||
++ kebab_gmu_boot_ledger.phase!=KGB_HFI_QUEUES_READY)return 95;
++ int e=kebab_gpu_gmu_boot_gate_locked(cold,epoch);if(e)return e;
++ e=kebab_gpu_launch_resources_verify_after_fw_locked(kebab_gmu_firmware_resources,cold,epoch,KLR_NEED_RSC);if(e)return e;
++ return kebab_gpu_gmu_irq_verify_locked(kebab_gmu_firmware_irq,cold,epoch);
++}
++static int kebab_gpu_vm_token_locked(const KebabA650GpuVmOwnerToken*t)
++{
++ if(!t || t!=kebab_gpu_vm_identity || !t->held || !t->generation || t->generation!=kebab_gpu_vm_generation || kebab_gmu_root_children<3)return 95;
++ int e=kebab_a650_gpu_vm_ready_locked(t);if(e)return e;return kebab_gpu_vm_parent_locked(t->cold,t->epoch);
++}
++int kebab_rpmh_gpu_vm_acquire(KebabA650GpuVmOwnerToken*t,const KebabGpuColdToken*cold,uint64_t epoch,const KebabGmuBootIo*io)
++{
++ KebabGmuRootContext root;KebabGmuRootRecord rr;KebabGmuRootIo rio;const uint32_t*v=NULL;int e=95,configured=0;
++ if(!t || !io || !io->read32 || !io->barrier || !io->now_us)return 22;
++ if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL))return 16;
++ if(t->held || t->generation || kebab_gpu_vm_identity || kebab_gpu_vm_generation==UINT64_MAX){e=16;goto done;}
++ e=kebab_gpu_vm_parent_locked(cold,epoch);if(e)goto done;
++ /* Native helper checks the already-reserved graphics namespace object. */
++ e=kebab_a650_gpu_vm_ready_locked(t);if(e)goto done;
++ rio.cookie=io->cookie;rio.read32=io->read32;rio.write32=NULL;rio.barrier=io->barrier;rio.delay_us=NULL;rio.now_us=io->now_us;
++ memset(&root,0,sizeof root);KebabGmuRootInit(&rr,KebabGmuRootObserve);root.io=&rio;root.ledger=&kebab_gmu_root_ledger;root.r=&rr;
++ e=KebabGmuRootSnapshot(&root,0);if(e)goto done;v=rr.before[0];e=KebabGmuRootPllShape(v);if(e)goto done;
++ if((v[7]&0x800000f3u)!=2 || (v[8]&0x10371fu)!=0x100602u || ((v[7]^kebab_gmu_root_ledger.cmd)&KebabGmuRootInvariantMask(7)) ||
++ ((v[8]^kebab_gmu_root_ledger.cfg)&0x10371fu) || !(v[14]&1) || !(v[15]&0x10000) || (v[9]&0xc0000000u)!=0xc0000000u){e=11;goto done;}
++ if(kebab_gmu_root_children==UINT32_MAX){e=75;goto done;}
++ configured=1;kebab_gpu_vm_io=*io;memset(&kebab_gpu_vm_clocks,0,sizeof kebab_gpu_vm_clocks);KebabGmuBootInit(&kebab_gpu_vm_clock_evidence,2);kebab_gpu_vm_clock_evidence.firmware_start_requested=1;
++ kebab_gpu_vm_clocks.io=&kebab_gpu_vm_io;kebab_gpu_vm_clocks.ledger=&kebab_gmu_boot_ledger;kebab_gpu_vm_clocks.r=&kebab_gpu_vm_clock_evidence;
++ kebab_gpu_vm_clocks.gcc_cfg=v[0];kebab_gpu_vm_clocks.gcc_reset=v[1];kebab_gpu_vm_clocks.gdscr=kebab_gpu_cc_ledger.gdscr_control;
++ kebab_gpu_vm_clocks.ahb=kebab_gpu_cc_ledger.ahb_control;kebab_gpu_vm_clocks.gx_gmu=v[6]&0x0fffffffu;
++ e=io->read32(io->cookie,KGB_GCC,0x7100c,&kebab_gpu_vm_clocks.memnoc);if(e)goto done;kebab_gpu_vm_clocks.memnoc&=0x0fffffffu;
++ e=KebabGmuBootClockGates(&kebab_gpu_vm_clocks,1);if(e)goto done;
++ t->cold=cold;t->epoch=epoch;t->generation=++kebab_gpu_vm_generation;t->held=1;t->published=0;kebab_gpu_vm_identity=t;++kebab_gmu_root_children;e=0;
++done:
++ if(e&&!t->held&&configured){memset(&kebab_gpu_vm_io,0,sizeof kebab_gpu_vm_io);kebab_gpu_vm_clocks.io=NULL;}
++ __atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return e;
++}
++int kebab_rpmh_gpu_vm_check(const KebabA650GpuVmOwnerToken*t)
++{
++ if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL))return 16;
++ int e=kebab_gpu_vm_token_locked(t);if(!e)e=KebabGmuBootClockGates(&kebab_gpu_vm_clocks,1);
++ __atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return e;
++}
++int kebab_rpmh_gpu_vm_publish(KebabA650GpuVmOwnerToken*t)
++{
++ if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL))return 16;
++ int e=kebab_gpu_vm_token_locked(t);if(!e)e=KebabGmuBootClockGates(&kebab_gpu_vm_clocks,1);if(!e)t->published=1;
++ __atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return e;
++}
++int kebab_rpmh_gpu_vm_end(KebabA650GpuVmOwnerToken*t)
++{
++ if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL))return 16;
++ int e=kebab_gpu_vm_token_locked(t);if(!e&&t->published)e=16;
++ if(!e){--kebab_gmu_root_children;memset(t,0,sizeof *t);kebab_gpu_vm_identity=NULL;memset(&kebab_gpu_vm_io,0,sizeof kebab_gpu_vm_io);kebab_gpu_vm_clocks.io=NULL;}
++ __atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return e;
++}
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>33)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>35)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- a/bsd/dev/kebab_rpmh_vrm.c
++++ b/bsd/dev/kebab_rpmh_vrm.c
+@@ -699,3 +699,5 @@
+ #include "KebabGmuResourceObserveOwner.inc"
+ /* END GMU_RESOURCE33_CANONICAL */
+ /* END FUTURE_GMU_CANONICAL_OWNERS */
++
++#include "KebabA650GpuVmOwner.inc"
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -303,6 +303,10 @@
+ #define UD_GMU_INIT 59u
+ extern void kebab_gmu_initialize_prepare(void);
+ /* END GMU_INIT32_COMMAND */
++/* BEGIN A650_GPUVM_COMMAND */
++#define UD_GPU_VM 60u
++extern void kebab_a650_gpu_vm_prepare(void);
++/* END A650_GPUVM_COMMAND */
+ extern void kebab_gmu_firmware_prepare(void);
+ extern void kebab_gmu_hfi_prepare(void);
+ /* END FUTURE_GMU_COMMAND_IDS */
+@@ -1506,6 +1510,9 @@
+ /* BEGIN GMU_INIT32_DECODE */
+     if(received==8 && !memcmp(buf,"GMUINIT\n",8))return UD_GMU_INIT;
+ /* END GMU_INIT32_DECODE */
++/* BEGIN A650_GPUVM_DECODE */
++    if(received==6 && !memcmp(buf,"GPUVM\n",6))return UD_GPU_VM;
++/* END A650_GPUVM_DECODE */
+ /* END FUTURE_GMU_COMMAND_DECODE */
+     if(received==8 && !memcmp(buf,"GPUSMMU\n",8))return UD_GPU_SMMU_OBSERVE;
+     if(received!=9)return 0;
+@@ -1953,6 +1960,10 @@
+ 	} else if (command == UD_GMU_INIT) {
+ 		kebab_gmu_initialize_prepare();
+ /* END GMU_INIT32_DISPATCH */
++/* BEGIN A650_GPUVM_DISPATCH */
++	} else if (command == UD_GPU_VM) {
++		kebab_a650_gpu_vm_prepare();
++/* END A650_GPUVM_DISPATCH */
+ /* END FUTURE_GMU_COMMAND_DISPATCH */
+ 	} else if (command == UD_GPU_SMMU_OBSERVE) {
+ 		kebab_gpu_smmu_observe();

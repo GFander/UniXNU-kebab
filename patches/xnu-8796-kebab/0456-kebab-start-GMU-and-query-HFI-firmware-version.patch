@@ -1,0 +1,1709 @@
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>27)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>30)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- a/bsd/dev/kebab_rpmh_vrm.c
++++ b/bsd/dev/kebab_rpmh_vrm.c
+@@ -687,3 +687,9 @@
+ 
+ #include "KebabGmuBootOwner.inc"
+ #include "KebabGmuIrqParent.inc"
++/* BEGIN FUTURE_GMU_CANONICAL_OWNERS */
++#include "KebabGpuLaunchResourceOwner.inc"
++#include "KebabGmuFirmwareOwner.inc"
++#include "KebabGpuLaunchResourceAfterFw.inc"
++#include "KebabGmuHfiOwner.inc"
++/* END FUTURE_GMU_CANONICAL_OWNERS */
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -296,6 +296,12 @@
+ #define UD_GPU_FIRST_ATTACH 54u
+ #define UD_GMU_COLD 55u
+ #define UD_GMU_IRQ 56u
++/* BEGIN FUTURE_GMU_COMMAND_IDS */
++#define UD_GMU_FW 57u
++#define UD_GMU_HFI 58u
++extern void kebab_gmu_firmware_prepare(void);
++extern void kebab_gmu_hfi_prepare(void);
++/* END FUTURE_GMU_COMMAND_IDS */
+ extern void kebab_gmu_cold_prepare(void);
+ extern void kebab_gmu_irq_prepare(void);
+ extern void kebab_gmu_stage(void);
+@@ -1490,6 +1496,10 @@
+     if(received==7 && !memcmp(buf,"GMUMAP\n",7))return UD_GPU_FIRST_ATTACH;
+     if(received==8 && !memcmp(buf,"GMUCOLD\n",8))return UD_GMU_COLD;
+     if(received==7 && !memcmp(buf,"GMUIRQ\n",7))return UD_GMU_IRQ;
++/* BEGIN FUTURE_GMU_COMMAND_DECODE */
++    if(received==6 && !memcmp(buf,"GMUFW\n",6))return UD_GMU_FW;
++    if(received==7 && !memcmp(buf,"GMUHFI\n",7))return UD_GMU_HFI;
++/* END FUTURE_GMU_COMMAND_DECODE */
+     if(received==8 && !memcmp(buf,"GPUSMMU\n",8))return UD_GPU_SMMU_OBSERVE;
+     if(received!=9)return 0;
+     if(!memcmp(buf,"DCLKTEST\n",9))return UD_DISPLAY_CLOCK_TEST;
+@@ -1927,6 +1937,12 @@
+ 		kebab_gmu_cold_prepare();
+ 	} else if (command == UD_GMU_IRQ) {
+ 		kebab_gmu_irq_prepare();
++/* BEGIN FUTURE_GMU_COMMAND_DISPATCH */
++	} else if (command == UD_GMU_FW) {
++		kebab_gmu_firmware_prepare();
++	} else if (command == UD_GMU_HFI) {
++		kebab_gmu_hfi_prepare();
++/* END FUTURE_GMU_COMMAND_DISPATCH */
+ 	} else if (command == UD_GPU_SMMU_OBSERVE) {
+ 		kebab_gpu_smmu_observe();
+ 	} else if (command == UD_GPU_CC_PREPARE) {
+--- /dev/null
++++ b/bsd/dev/KebabGmuFirmwareOwner.inc
+@@ -0,0 +1,88 @@
++/* SPDX-License-Identifier: MIT */
++/* AFTER sealed BootOwner and the real resource/IRQ bridges, same canonical
++ * VRM TU/globalbusy. There is no caller-supplied owned bitmask. */
++#if defined(KEBAB_RPMH_KERNEL)
++#include <kern/KebabGmuFirmwareOwner.h>
++#include <kern/KebabGmuFirmwareBinding.h>
++#else
++#include "KebabGmuFirmwareOwner.h"
++#include "KebabGmuFirmwareBinding.h"
++#endif
++static const KebabGpuLaunchResourceToken *kebab_gmu_firmware_resources;
++static const KebabGmuIrqToken *kebab_gmu_firmware_irq;
++static uint32_t kebab_gmu_firmware_attempted,kebab_gmu_firmware_active;
++static KebabGmuBootRecord kebab_gmu_firmware_evidence;
++int kebab_rpmh_gpu_gmu_firmware_irq_preflight(const KebabGpuColdToken *cold,uint64_t epoch,const KebabGmuIrqToken *irq)
++{
++ if(!cold || !epoch || !irq)return 22;
++ if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL))return 16;
++ int e=kebab_gpu_gmu_boot_reset_held_locked(cold,epoch);
++ if(!e)e=kebab_gpu_gmu_irq_verify_locked(irq,cold,epoch);
++ __atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return e;
++}
++int kebab_gpu_gmu_launch_active_locked(const KebabGpuColdToken *cold,uint64_t epoch)
++{
++ if(!__atomic_load_n(&kebab_gmu_firmware_active,__ATOMIC_ACQUIRE) ||
++    kebab_gpu_gmu_boot_gate_locked(cold,epoch))return 95;
++ return kebab_gpu_gmu_irq_healthy(kebab_gmu_firmware_irq);
++}
++int kebab_gpu_gmu_firmware_write_stage_locked(const KebabGpuColdToken *cold,uint64_t epoch,unsigned stage)
++{
++ int e=kebab_gpu_gmu_launch_active_locked(cold,epoch);if(e)return e;
++ if(stage==1)return kebab_gmu_boot_ledger.phase==KGB_FW_STARTING?0:95;
++ if(stage==2)return kebab_gmu_boot_ledger.phase==KGB_FW_RUNNING?0:95;
++ return 22;
++}
++int kebab_rpmh_gpu_gmu_launch(const KebabGpuColdToken *cold,uint64_t epoch,
++ const KebabGpuLaunchResourceToken *resources,const KebabGmuIrqToken *irq,
++ const KebabGmuBootIo *io,KebabGmuBootRecord *out)
++{
++ KebabGmuBootContext c;KebabGmuRootContext root;KebabGmuRootRecord rr;KebabGmuRootIo rio;
++ int e=95;uint64_t start=0;const uint32_t *v=NULL;
++ if(!out)return 22;KebabGmuBootInit(out,KebabGmuBootLaunch);
++ if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL)){out->result=16;return 16;}
++ if(!KebabGmuFirmwareLaunchQualified)goto done;
++ if(kebab_gmu_firmware_attempted){
++  if(cold!=kebab_gmu_boot_identity || epoch!=kebab_gmu_boot_ledger.namespace_epoch ||
++     resources!=kebab_gmu_firmware_resources || irq!=kebab_gmu_firmware_irq){e=95;goto done;}
++  *out=kebab_gmu_firmware_evidence;out->evidence_replayed=1;e=(int)out->result;goto done;}
++ e=kebab_gpu_gmu_boot_reset_held_locked(cold,epoch);if(e)goto done;
++ if(!resources || !irq || !io || !io->read32 || !io->write32 || !io->barrier || !io->delay_us || !io->now_us){e=22;goto done;}
++ e=kebab_gpu_launch_resources_verify_locked(resources,cold,epoch,KLR_NEED_RSC);if(e)goto done;
++ e=kebab_gpu_gmu_irq_verify_locked(irq,cold,epoch);if(e)goto done;
++ if(resources->bandwidth_mode!=KLR_BW_RETAIN_INHERITED_NO_WRITE || resources->ready_mask!=KLR_NEED_RSC){e=95;goto done;}
++ *out=kebab_gmu_boot_evidence;out->action=KebabGmuBootLaunch;out->evidence_replayed=0;
++ out->reads=out->writes=out->barriers=out->polls=out->delay_us=0;out->primary_error=out->io_error=0;
++ kebab_gmu_firmware_resources=resources;kebab_gmu_firmware_irq=irq;kebab_gmu_firmware_attempted=1;
++ __atomic_store_n(&kebab_gmu_firmware_active,1,__ATOMIC_RELEASE);
++ rio.cookie=io->cookie;rio.read32=io->read32;rio.write32=io->write32;rio.barrier=io->barrier;rio.delay_us=io->delay_us;rio.now_us=io->now_us;
++ memset(&root,0,sizeof root);KebabGmuRootInit(&rr,KebabGmuRootObserve);root.io=&rio;root.ledger=&kebab_gmu_root_ledger;root.r=&rr;
++ /* Prepare is the pre-clock root-programming API and intentionally requires
++  * GMU1098 quiet. Here the same owner has already enabled it: retain the
++  * double raw snapshot + PLL/rate/parent checks, without invoking Prepare's
++  * incompatible pre-clock quiet predicate or changing that sealed API. */
++ e=KebabGmuRootSnapshot(&root,0);if(e)goto failed;v=rr.before[0];
++ e=KebabGmuRootPllShape(v);if(e)goto failed;
++ if((v[7]&0x800000f3u)!=2 || (v[8]&0x10371fu)!=0x100602u ||
++    ((v[7]^kebab_gmu_root_ledger.cmd)&KebabGmuRootInvariantMask(7)) || ((v[8]^kebab_gmu_root_ledger.cfg)&0x10371fu) ||
++    !(v[14]&1) || !(v[15]&0x10000) || (v[9]&0xc0000000u)!=0xc0000000u){e=11;goto failed;}
++ memset(&c,0,sizeof c);c.io=io;c.ledger=&kebab_gmu_boot_ledger;c.r=out;
++ c.gcc_cfg=v[0];c.gcc_reset=v[1];c.gdscr=kebab_gpu_cc_ledger.gdscr_control;c.ahb=kebab_gpu_cc_ledger.ahb_control;
++ c.gx_gmu=v[6]&0x0fffffffu;
++ e=KebabGmuBootRaw(&c,KGB_GCC,0x7100c,&c.memnoc);if(e)goto failed;c.memnoc&=0x0fffffffu;
++ start=c.started_us=io->now_us(io->cookie);
++ /* typed resource verification, not its serialized ready_mask, established
++  * RSC ownership above. Retained BW is deliberately not a bandwidth grant. */
++ e=KebabGmuBootStartFirmwareWithBandwidth(&c,KGB_NEED_RSC|KGB_NEED_IRQ,0x06050200,KGB_BW_RETAIN_INHERITED_NO_WRITE);
++ if(e)goto failed;
++ out->elapsed_us=io->now_us(io->cookie)-start;goto final;
++failed:
++ out->primary_error=e;kebab_gmu_boot_quarantine((unsigned)e);
++final:
++ __atomic_store_n(&kebab_gmu_firmware_active,0,__ATOMIC_RELEASE);
++ out->phase=kebab_gmu_boot_ledger.phase;out->root_children=kebab_gmu_root_children;out->parent_refs=kebab_gpu_cxmx_ledger.refs;
++ out->quarantined=kebab_gmu_boot_ledger.quarantined;out->owner_dead=__atomic_load_n(&kebab_rpmh_global_lock.dead,__ATOMIC_ACQUIRE);
++ out->result=e;kebab_gmu_firmware_evidence=*out;kebab_gmu_boot_evidence=*out;
++done:
++ out->result=e;__atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return e;
++}
+--- /dev/null
++++ b/bsd/dev/KebabGmuHfiOwner.inc
+@@ -0,0 +1,60 @@
++/* SPDX-License-Identifier: MIT */
++/* Same canonical TU, AFTER FirmwareOwner; no extra lock or rail owner. */
++#if defined(KEBAB_RPMH_KERNEL)
++#include <kern/KebabGmuHfiOwner.h>
++#include <kern/KebabGmuHfiBinding.h>
++#else
++#include "KebabGmuHfiOwner.h"
++#include "KebabGmuHfiBinding.h"
++#endif
++static KebabGmuHfiSession kebab_gmu_hfi_session;
++static KebabGmuHfiRecord kebab_gmu_hfi_evidence;
++static KebabGmuBootContext kebab_gmu_hfi_clocks;
++static KebabGmuBootRecord kebab_gmu_hfi_clock_evidence;
++static uint32_t kebab_gmu_hfi_active;
++int kebab_gpu_gmu_hfi_gate_locked(const KebabGpuColdToken *cold,uint64_t epoch)
++{
++ if(!__atomic_load_n(&kebab_gmu_hfi_active,__ATOMIC_ACQUIRE) || cold!=kebab_gmu_boot_identity ||
++    epoch!=kebab_gmu_boot_ledger.namespace_epoch || kebab_gpu_gmu_boot_gate_locked(cold,epoch))return 95;
++ int e=kebab_gpu_gmu_irq_healthy(kebab_gmu_firmware_irq);if(e)return e;
++ return KebabGmuBootClockGates(&kebab_gmu_hfi_clocks,1);
++}
++int kebab_rpmh_gpu_gmu_hfi_version(const KebabGpuColdToken *cold,uint64_t epoch,
++ const KebabGpuLaunchResourceToken *resources,const KebabGmuIrqToken *irq,
++ const KebabGmuBootIo *clock_io,const KebabGmuHfiIo *io,KebabGmuHfiRecord *out)
++{
++ KebabGmuRootContext root;KebabGmuRootRecord rr;KebabGmuRootIo rio;KebabGmuHfiContext c;int e=95;const uint32_t *v=NULL;
++ if(!out)return 22;KebabGmuHfiInit(out);
++ if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL)){out->result=16;return 16;}
++ if(!KebabGmuHfiVersionQualified)goto done;
++ if(cold!=kebab_gmu_boot_identity || epoch!=kebab_gmu_boot_ledger.namespace_epoch ||
++    resources!=kebab_gmu_firmware_resources || irq!=kebab_gmu_firmware_irq)goto done;
++ if(kebab_gmu_hfi_session.attempted){*out=kebab_gmu_hfi_evidence;out->evidence_replayed=1;e=(int)out->result;goto done;}
++ e=kebab_gpu_gmu_boot_gate_locked(cold,epoch);if(e)goto done;
++ if(kebab_gmu_boot_ledger.phase!=KGB_HFI_QUEUES_READY || !kebab_gmu_firmware_evidence.fw_init_ack || !kebab_gmu_firmware_evidence.hfi_ctrl_ack){e=95;goto done;}
++ if(!clock_io || !clock_io->read32 || !clock_io->barrier || !io){e=22;goto done;}
++ /* Dedicated post-FW verification preserves the owned CM3 clock request
++  * without treating its running-status sample as a permanent CSR bus gate. */
++ e=kebab_gpu_launch_resources_verify_after_fw_locked(resources,cold,epoch,KLR_NEED_RSC);if(e)goto done;
++ e=kebab_gpu_gmu_irq_verify_locked(irq,cold,epoch);if(e)goto done;
++ rio.cookie=clock_io->cookie;rio.read32=clock_io->read32;rio.write32=clock_io->write32;rio.barrier=clock_io->barrier;rio.delay_us=clock_io->delay_us;rio.now_us=clock_io->now_us;
++ memset(&root,0,sizeof root);KebabGmuRootInit(&rr,KebabGmuRootObserve);root.io=&rio;root.ledger=&kebab_gmu_root_ledger;root.r=&rr;
++ e=KebabGmuRootSnapshot(&root,0);if(e)goto failed;v=rr.before[0];e=KebabGmuRootPllShape(v);if(e)goto failed;
++ if((v[7]&0x800000f3u)!=2 || (v[8]&0x10371fu)!=0x100602u ||
++    ((v[7]^kebab_gmu_root_ledger.cmd)&KebabGmuRootInvariantMask(7)) || ((v[8]^kebab_gmu_root_ledger.cfg)&0x10371fu) ||
++    !(v[14]&1) || !(v[15]&0x10000) || (v[9]&0xc0000000u)!=0xc0000000u){e=11;goto failed;}
++ memset(&kebab_gmu_hfi_clocks,0,sizeof kebab_gmu_hfi_clocks);KebabGmuBootInit(&kebab_gmu_hfi_clock_evidence,2);kebab_gmu_hfi_clock_evidence.firmware_start_requested=1;
++ kebab_gmu_hfi_clocks.io=clock_io;kebab_gmu_hfi_clocks.ledger=&kebab_gmu_boot_ledger;kebab_gmu_hfi_clocks.r=&kebab_gmu_hfi_clock_evidence;
++ kebab_gmu_hfi_clocks.gcc_cfg=v[0];kebab_gmu_hfi_clocks.gcc_reset=v[1];kebab_gmu_hfi_clocks.gdscr=kebab_gpu_cc_ledger.gdscr_control;
++ kebab_gmu_hfi_clocks.ahb=kebab_gpu_cc_ledger.ahb_control;kebab_gmu_hfi_clocks.gx_gmu=v[6]&0x0fffffffu;
++ e=clock_io->read32(clock_io->cookie,KGB_GCC,0x7100c,&kebab_gmu_hfi_clocks.memnoc);if(e)goto failed;kebab_gmu_hfi_clocks.memnoc&=0x0fffffffu;
++ __atomic_store_n(&kebab_gmu_hfi_active,1,__ATOMIC_RELEASE);
++ memset(&c,0,sizeof c);c.io=io;c.session=&kebab_gmu_hfi_session;c.record=out;
++ e=KebabGmuHfiVersion(&c);
++ __atomic_store_n(&kebab_gmu_hfi_active,0,__ATOMIC_RELEASE);
++ if(e)goto failed;kebab_gmu_hfi_evidence=*out;goto done;
++failed:
++ out->result=e;out->quarantined=1;kebab_gmu_hfi_session.quarantined=1;kebab_gmu_boot_quarantine((unsigned)e);kebab_gmu_hfi_evidence=*out;
++done:
++ kebab_gmu_hfi_clocks.io=NULL;out->result=e;__atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return e;
++}
+--- /dev/null
++++ b/bsd/dev/KebabGpuLaunchResourceAfterFw.inc
+@@ -0,0 +1,48 @@
++/* SPDX-License-Identifier: MIT */
++/* AFTER real FirmwareOwner.inc and BEFORE HfiOwner.inc, SAME canonical TU.
++ * The sealed reset/prelaunch Owner.inc is unchanged. All evidence below is
++ * its and FirmwareOwner's private production ledger, never a CAP argument. */
++#if defined(KEBAB_RPMH_KERNEL)
++#include <kern/KebabGpuLaunchResourceAfterFw.h>
++#else
++#include "KebabGpuLaunchResourceAfterFw.h"
++#endif
++static int kebab_launch_after_fw_clock_gate_locked(void)
++{
++ int e;uint32_t v;
++ if(!__atomic_load_n(&kebab_rpmh_global_lock.busy,__ATOMIC_ACQUIRE) ||
++    __atomic_load_n(&kebab_rpmh_global_lock.dead,__ATOMIC_ACQUIRE) || kebab_launch_ledger.quarantined)return 95;
++ e=kebab_gpu_gmu_boot_gate_locked(kebab_launch_cold,kebab_launch_epoch);if(e)return e;
++ if((e=kebab_gpu_bus_verify_locked()))return e;
++ const unsigned region[3]={KLR_GCC,KLR_CC,KLR_CC};const uint32_t off[3]={0x71154,0x109c,0x1098};
++ for(unsigned i=0;i<3;i++){
++  e=kebab_launch_native_io.read32(kebab_launch_native_io.cookie,region[i],off[i],&v);if(e)return e;
++  /* Only the post-FW CM3 running-status sample is not a permanent CSR gate.
++   * Every owned control bit and request remains exactly held. */
++  if((v&0x0fffffffu)!=kebab_gmu_boot_ledger.control[i] || !(v&1) || (i!=2 && !KebabGmuBootRunning(v)))return 11;
++ }
++ for(unsigned i=0;i<2;i++){
++  const uint32_t off2[2]={0x1120,0x1124};e=kebab_launch_native_io.read32(kebab_launch_native_io.cookie,KLR_CC,off2[i],&v);if(e)return e;
++  if(i?((v&0x10371fu)!=0x100602u || (v&0x3000u)):((v&0x800000f3u)!=2))return 11;
++ }return 0;
++}
++int kebab_gpu_launch_resources_verify_after_fw_locked(const KebabGpuLaunchResourceToken *token,
++ const KebabGpuColdToken *cold,uint64_t epoch,unsigned required)
++{
++ if(!required || (required&~(KLR_NEED_RSC|KLR_NEED_BW)))return 22;
++ if(!__atomic_load_n(&kebab_rpmh_global_lock.busy,__ATOMIC_ACQUIRE) ||
++    __atomic_load_n(&kebab_rpmh_global_lock.dead,__ATOMIC_ACQUIRE))return 95;
++ if(!token || token!=kebab_launch_identity || cold!=kebab_launch_cold || epoch!=kebab_launch_epoch ||
++    !token->held || !token->generation || token->generation!=kebab_launch_generation || token->namespace_epoch!=epoch ||
++    kebab_launch_record.result || kebab_launch_record.state!=KLR_READY || (token->ready_mask&required)!=required ||
++    token->ready_mask!=kebab_launch_ledger.ready_mask || token->bandwidth_mode!=KLR_BW_RETAIN_INHERITED_NO_WRITE)return 95;
++ if(token!=kebab_gmu_firmware_resources || !kebab_gmu_firmware_attempted ||
++    __atomic_load_n(&kebab_gmu_firmware_active,__ATOMIC_ACQUIRE) || !kebab_gmu_firmware_irq ||
++    kebab_gmu_boot_ledger.phase!=KGB_HFI_QUEUES_READY || !kebab_gmu_boot_ledger.started ||
++    kebab_gmu_firmware_evidence.phase!=KGB_HFI_QUEUES_READY || kebab_gmu_firmware_evidence.result ||
++    kebab_gmu_firmware_evidence.owner_dead || kebab_gmu_firmware_evidence.quarantined ||
++    kebab_gmu_firmware_evidence.namespace_epoch!=epoch || !kebab_gmu_firmware_evidence.firmware_start_requested ||
++    !kebab_gmu_firmware_evidence.fw_init_ack || !kebab_gmu_firmware_evidence.hfi_ctrl_ack)return 95;
++ int e=kebab_launch_after_fw_clock_gate_locked();
++ if(e){kebab_launch_ledger.quarantined=1;kebab_gmu_boot_quarantine((unsigned)e);}return e;
++}
+--- /dev/null
++++ b/bsd/dev/KebabGpuLaunchResourceOwner.inc
+@@ -0,0 +1,97 @@
++/* SPDX-License-Identifier: MIT */
++/* Include once AFTER actual GmuBootOwner.inc in the SAME canonical VRM TU.
++ * Uses its globalbusy/dead, RootChild, exact cold identity/namespace/phase,
++ * live bus/clock ledgers. No second RSC lock or owner/rail reference book. */
++#if defined(KEBAB_RPMH_KERNEL)
++#include <kern/KebabGpuLaunchResourceOwner.h>
++#else
++#include "KebabGpuLaunchResourceOwner.h"
++#endif
++static KebabGpuLaunchResourceLedger kebab_launch_ledger;
++static KebabGpuLaunchResourceRecord kebab_launch_record;
++static KebabGpuLaunchResourceToken *kebab_launch_identity;
++static const KebabGpuColdToken *kebab_launch_cold;
++static uint64_t kebab_launch_epoch,kebab_launch_generation;
++static KebabGpuLaunchResourceIo kebab_launch_native_io;
++static int kebab_launch_clock_gate_locked(unsigned reset_held,KebabGpuLaunchResourceRecord *metrics)
++{
++ int e;uint32_t v;
++ if(!__atomic_load_n(&kebab_rpmh_global_lock.busy,__ATOMIC_ACQUIRE) ||
++    __atomic_load_n(&kebab_rpmh_global_lock.dead,__ATOMIC_ACQUIRE) || kebab_launch_ledger.quarantined)return 95;
++ e=reset_held?kebab_gpu_gmu_boot_reset_held_locked(kebab_launch_cold,kebab_launch_epoch):
++  kebab_gpu_gmu_boot_gate_locked(kebab_launch_cold,kebab_launch_epoch);if(e)return e;
++ if((e=kebab_gpu_bus_verify_locked()))return e;
++ const unsigned region[3]={KLR_GCC,KLR_CC,KLR_CC};const uint32_t off[3]={0x71154,0x109c,0x1098};
++ for(unsigned i=0;i<3;i++){
++  if(metrics)metrics->reads++;e=kebab_launch_native_io.read32(kebab_launch_native_io.cookie,region[i],off[i],&v);
++  if(e){if(metrics){metrics->io_error=e;metrics->failed_region=region[i];metrics->failed_offset=off[i];}return e;}
++  if((v&0x0fffffffu)!=kebab_gmu_boot_ledger.control[i] || !(v&1) || !KebabGmuBootRunning(v))return 11;
++ }
++ for(unsigned i=0;i<2;i++){
++  const uint32_t off2[2]={0x1120,0x1124};if(metrics)metrics->reads++;
++  e=kebab_launch_native_io.read32(kebab_launch_native_io.cookie,KLR_CC,off2[i],&v);if(e){if(metrics)metrics->io_error=e;return e;}
++  if(i?((v&0x10371fu)!=0x100602u || (v&0x3000u)):((v&0x800000f3u)!=2))return 11;
++ }return 0;
++}
++static int kebab_launch_reset_gate(void *unused)
++{(void)unused;return kebab_launch_clock_gate_locked(1,&kebab_launch_record);}
++static int kebab_launch_read(void *unused,unsigned region,uint32_t off,uint32_t *out)
++{(void)unused;return kebab_launch_native_io.read32(kebab_launch_native_io.cookie,region,off,out);}
++static int kebab_launch_write(void *unused,unsigned region,uint32_t off,uint32_t value)
++{(void)unused;return kebab_launch_native_io.write32(kebab_launch_native_io.cookie,region,off,value);}
++static int kebab_launch_barrier(void *unused)
++{(void)unused;return kebab_launch_native_io.barrier(kebab_launch_native_io.cookie);}
++static int kebab_launch_delay(void *unused,unsigned us)
++{(void)unused;return kebab_launch_native_io.delay_us(kebab_launch_native_io.cookie,us);}
++static uint64_t kebab_launch_now(void *unused)
++{(void)unused;return kebab_launch_native_io.now_us(kebab_launch_native_io.cookie);}
++int kebab_rpmh_gpu_launch_resources_prepare(const KebabGpuColdToken *cold,uint64_t epoch,
++ KebabGpuLaunchResourceToken *token,const KebabGpuLaunchResourceIo *io,KebabGpuLaunchResourceRecord *out)
++{
++ int e=95;if(!out || !cold || !token || !epoch || !io || !io->read32 || !io->write32 || !io->barrier || !io->delay_us || !io->now_us)return 22;
++ KLRInit(out);if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL)){out->result=16;return 16;}
++ if(kebab_launch_ledger.attempted){
++  if(token==kebab_launch_identity && cold==kebab_launch_cold && epoch==kebab_launch_epoch){*out=kebab_launch_record;e=(int)out->result;}
++  goto done;
++ }
++ if(token->held || token->generation || kebab_launch_generation==UINT64_MAX){e=22;goto done;}
++ kebab_launch_cold=cold;kebab_launch_epoch=epoch;kebab_launch_native_io=*io;
++ e=kebab_launch_clock_gate_locked(1,NULL);if(e)goto done;
++ kebab_launch_identity=token;token->held=1;token->generation=++kebab_launch_generation;token->namespace_epoch=epoch;
++ {
++  KebabGpuLaunchResourceIo actual={NULL,kebab_launch_reset_gate,kebab_launch_read,kebab_launch_write,kebab_launch_barrier,kebab_launch_delay,kebab_launch_now};
++  e=KLRPrepareRsc(&actual,&kebab_launch_ledger,&kebab_launch_record);
++ }
++ if(kebab_launch_ledger.quarantined)kebab_gmu_boot_quarantine((unsigned)e);
++ if(!e){
++  /* Actual source treats initial bootstrap BW as nonfatal. This finite
++   * boot mode preserves every inherited APPS/other-voter vote unchanged.
++   * It does NOT grant NEED_BW or claim any new DDR/CNOC command/ACK. */
++  token->ready_mask=KLR_NEED_RSC;token->bandwidth_mode=KLR_BW_RETAIN_INHERITED_NO_WRITE;
++  kebab_launch_record.bandwidth_mode=KLR_BW_RETAIN_INHERITED_NO_WRITE;
++  kebab_launch_record.bandwidth_qualified=0;kebab_launch_record.initial_bw_level=2;
++  kebab_launch_record.ddr_ib_kbps=1171875;kebab_launch_record.cnoc_ib_kbps=100;
++  kebab_launch_record.state=KLR_READY;
++ }
++ *out=kebab_launch_record;
++done:
++ out->result=e;__atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return e;
++}
++int kebab_gpu_launch_resources_verify_locked(const KebabGpuLaunchResourceToken *token,const KebabGpuColdToken *cold,uint64_t epoch,unsigned required)
++{
++ if(!required || (required&~(KLR_NEED_RSC|KLR_NEED_BW)))return 22;
++ if(!token || token!=kebab_launch_identity || cold!=kebab_launch_cold || epoch!=kebab_launch_epoch ||
++    !token->held || !token->generation || token->generation!=kebab_launch_generation || token->namespace_epoch!=epoch ||
++    kebab_launch_record.result || kebab_launch_record.state!=KLR_READY || (token->ready_mask&required)!=required ||
++    token->ready_mask!=kebab_launch_ledger.ready_mask || token->bandwidth_mode!=KLR_BW_RETAIN_INHERITED_NO_WRITE)return 95;
++ int e=kebab_launch_clock_gate_locked(0,NULL);
++ if(e && __atomic_load_n(&kebab_rpmh_global_lock.busy,__ATOMIC_ACQUIRE)){
++  kebab_launch_ledger.quarantined=1;kebab_gmu_boot_quarantine((unsigned)e);
++ }return e;
++}
++int kebab_rpmh_gpu_launch_resources_snapshot(KebabGpuLaunchResourceRecord *out)
++{
++ if(!out)return 22;if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL))return 16;
++ if(!kebab_launch_ledger.attempted){KLRInit(out);out->result=35;__atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return 35;}
++ *out=kebab_launch_record;__atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return 0;
++}
+--- a/iokit/Kernel/arm/KebabA650GmuNativeBacking.cpp
++++ b/iokit/Kernel/arm/KebabA650GmuNativeBacking.cpp
+@@ -181,3 +181,5 @@
+ #include "KebabA650GmuCache.inc"
+ 
+ #include "KebabA650GmuTcm.inc"
++
++#include "KebabA650GmuShared.inc"
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GmuShared.h
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GMU_SHARED_H
++#define KEBAB_A650_GMU_SHARED_H
++#include "KebabA650GmuNativeBacking.h"
++#ifdef __cplusplus
++extern "C" {
++#endif
++/* Offsets within the already-published 20KiB HFI region, never CPU pointers.
++ * These APIs alone grant no clock, firmware-execution or namespace lease. */
++int kebab_a650_gmu_hfi_read(const KebabA650GmuBackingToken *,uint32_t offset,uint32_t *);
++int kebab_a650_gmu_hfi_write(const KebabA650GmuBackingToken *,uint32_t offset,uint32_t value);
++int kebab_a650_gmu_hfi_barrier(const KebabA650GmuBackingToken *);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GmuShared.inc
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: MIT */
++/* Append AFTER the sealed TCM implementation in the actual backing TU. */
++#include "KebabA650GmuShared.h"
++static int kagb_hfi_gate_locked(const KebabA650GmuBackingToken *token)
++{
++ int e=kagb_token_locked(token);if(e)return e;
++ if(token!=kagb_tcm_identity || token->generation!=kagb_tcm_generation ||
++    !kagb_holder[token->slot].published || kagb_closing || kagb_record.phase!=KAGB_STAGED ||
++    !kagb_domain.pool[5].handle || !kagb_domain.pool[5].prepared || !kagb_domain.pool[5].address)return KG_STATE;
++ return kagb_pins_locked(); /* Includes actual WIMG6 for all shared CPU pages. */
++}
++extern "C" int kebab_a650_gmu_hfi_read(const KebabA650GmuBackingToken *token,uint32_t offset,uint32_t *out)
++{
++ if(!out)return KG_INVALID;*out=0;if((offset&3) || offset>=0x5000)return KG_INVALID;
++ int e=KGNativeWorker(NULL);if(e)return e;if(!KGTry(&kagb_domain))return KG_BUSY;
++ e=kagb_hfi_gate_locked(token);
++ if(!e)*out=*(volatile const uint32_t *)((uintptr_t)kagb_domain.pool[5].address+offset);
++ KGUnlock(&kagb_domain);return e;
++}
++extern "C" int kebab_a650_gmu_hfi_write(const KebabA650GmuBackingToken *token,uint32_t offset,uint32_t value)
++{
++ /* CPU producer owns command data/write_index; CPU consumer owns response
++  * and debug read_index. Firmware-owned indices are NEVER written here. */
++ if((offset&3) || !((offset>=224 && offset<224+4096) || offset==68 || offset==112 || offset==160))return KG_INVALID;
++ if((offset==68 || offset==112 || offset==160) && (value>=1024 || (value&3)))return KG_INVALID;
++ int e=KGNativeWorker(NULL);if(e)return e;if(!KGTry(&kagb_domain))return KG_BUSY;
++ e=kagb_hfi_gate_locked(token);
++ if(!e)*(volatile uint32_t *)((uintptr_t)kagb_domain.pool[5].address+offset)=value;
++ KGUnlock(&kagb_domain);return e;
++}
++extern "C" int kebab_a650_gmu_hfi_barrier(const KebabA650GmuBackingToken *token)
++{
++ int e=KGNativeWorker(NULL);if(e)return e;if(!KGTry(&kagb_domain))return KG_BUSY;e=kagb_hfi_gate_locked(token);
++ if(!e){
++#if defined(__aarch64__)
++  __asm__ volatile("dsb sy" ::: "memory");
++#else
++  OSMemoryBarrier();
++#endif
++ }
++ KGUnlock(&kagb_domain);return e;
++}
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -122,6 +122,9 @@
+ #include "KebabNativeGmuStageHold.h"
+ #include "KebabNativeGmuColdHold.h"
+ #include "KebabNativeGmuIrqHold.h"
++/* BEGIN FUTURE_GMU_HOLD_INCLUDE */
++#include "KebabNativeGmuFirmwareHold.h"
++/* END FUTURE_GMU_HOLD_INCLUDE */
+ #include "KebabNativeGpuFirstAttachHold.h"
+ #include <kern/kebab_low_dma.h>
+ static_assert(sizeof(struct kebab_low_dma_observation)==256,"fixed lowDMA observation");
+@@ -870,6 +873,38 @@
+ extern "C" int
+ kebab_capture_open(uint32_t source,uint32_t argument,struct kc_image *image)
+ {
++/* BEGIN FUTURE_GMU_CAP28_30 */
++    if(source==28) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabGpuLaunchResourceRecord);
++        KebabGpuLaunchResourceRecord *data=(KebabGpuLaunchResourceRecord *)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_native_gmu_resource_hold_snapshot(data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=28;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
++    if(source==29) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabGmuBootRecord);
++        KebabGmuBootRecord *data=(KebabGmuBootRecord *)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_native_gmu_firmware_hold_snapshot(data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=29;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
++    if(source==30) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabGmuHfiRecord);
++        KebabGmuHfiRecord *data=(KebabGmuHfiRecord *)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_native_gmu_hfi_hold_snapshot(data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=30;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
++/* END FUTURE_GMU_CAP28_30 */
+     if(source==26) {
+         if(argument)return 22;
+         uint32_t bytes=sizeof(KebabGmuBootRecord);
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeGmuFirmware.h
+@@ -0,0 +1,155 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_GMU_FIRMWARE_H
++#define KEBAB_NATIVE_GMU_FIRMWARE_H
++/* Include after KebabNativeGmuBoot.h in the SAME normal-worker TU. The
++ * private backing/cold pointers below are the retained reset/load objects. */
++#if defined(KERNEL) || defined(KEBAB_RPMH_KERNEL)
++#include <kern/KebabGmuFirmwareOwner.h>
++#include <kern/KebabGmuFirmwareBinding.h>
++#else
++#include "KebabGmuFirmwareOwner.h"
++#include "KebabGmuFirmwareBinding.h"
++#endif
++#include "KebabNativeGpuLaunchResources.h"
++struct KebabNativeGmuFirmwareAccess {
++ KebabNativeGmuBootAccess *boot;IOMemoryDescriptor *memory[2];IOMemoryMap *mapping[2];uintptr_t address[2];
++ KebabGpuLaunchResourceToken resources;const KebabGmuIrqToken *irq;uint64_t irq_generation;uint32_t reads,writes;
++};
++static KebabNativeGmuFirmwareAccess kebab_native_gmu_firmware;
++static uint32_t kebab_native_gmu_firmware_once;
++static KebabGmuBootRecord kebab_native_gmu_firmware_result;
++static int kebab_native_gmu_firmware_borrowed_irq(const KebabGmuIrqToken *irq,KebabNativeGmuBootAccess *boot,uint64_t generation)
++{
++ /* healthy compares exact registered pointer before dereferencing it. No
++  * reconstructed token or CAP can pass this pure, no-MMIO first check. */
++ if(!boot || !irq || kebab_gpu_gmu_irq_healthy(irq))return 95;
++ if(irq->cold!=boot->cold || irq->epoch!=boot->epoch || !irq->held || !irq->generation ||
++    (generation && irq->generation!=generation))return 95;
++ return 0;
++}
++static int kebab_native_gmu_firmware_resource_worker(void *cookie)
++{
++ auto *a=(KebabNativeGmuFirmwareAccess *)cookie;if(!a)return 95;
++ int e=kebab_native_gmu_boot_worker(a->boot);if(e)return e;
++ /* The real resource adapter invokes this before every RSC/PDC MMIO,
++  * including after a concurrent IRQ-health/namespace revocation. */
++ return kebab_native_gmu_firmware_borrowed_irq(a->irq,a->boot,a->irq_generation);
++}
++static int kebab_native_gmu_firmware_power(KebabNativeGmuFirmwareAccess *a)
++{
++ /* Read only the proven controller pages before ANY downstream access.
++  * The real private root/rail/bus refs are checked separately; these are
++  * positive current bus/clock/reset/rate gates, never a lease substitute. */
++ const unsigned region[11]={0,0,1,1,1,0,0,1,1,1,1};
++ const uint32_t offset[11]={0x71004,0x71000,0x106c,0x1540,0x1078,0x7100c,0x71154,0x109c,0x1098,0x1120,0x1124};
++ uint32_t v[11],pll[16]={};int e;
++ for(unsigned i=0;i<11;i++){e=kebab_native_gmu_boot_read(a->boot,region[i],offset[i],&v[i]);if(e)return e;}
++ if((v[0]&0x80000001u)!=1 || (v[1]&1) || (v[2]&7) || !(v[3]&0x80000000u))return 95;
++ /* ResetLoad already obtained the initial CM3 clock ACK. For CSR access the
++  * held CM3 request/control is required; its later status is not a bus gate.
++  * Real AHB/AXI/CXO/MEMNOC must remain live, as do the rail/root refs. */
++ for(unsigned i=4;i<=8;i++)if(!(v[i]&1) || (i!=8 && !KebabGmuBootRunning(v[i])))return 95;
++ if((v[9]&0x800000f3u)!=2 || (v[10]&0x10371fu)!=0x100602u)return 95;
++ const unsigned slots[6]={9,10,11,13,14,15};
++ for(unsigned i=0;i<6;i++){unsigned r;uint32_t off;KebabGmuRootOffset(slots[i],&r,&off);e=kebab_native_gmu_boot_read(a->boot,r,off,&pll[slots[i]]);if(e)return e;}
++ if(KebabGmuRootPllShape(pll) || (pll[9]&0xc0000000u)!=0xc0000000u || !(pll[14]&1) || !(pll[15]&0x10000))return 95;
++ return 0;
++}
++static int kebab_native_gmu_firmware_check(KebabNativeGmuFirmwareAccess *a)
++{
++ if(!a || !a->boot)return 95;int e=kebab_native_gmu_boot_check(a->boot);if(e)return e;
++ e=kebab_gpu_gmu_launch_active_locked(a->boot->cold,a->boot->epoch);return e?e:kebab_native_gmu_firmware_power(a);
++}
++static int kebab_native_gmu_firmware_address(KebabNativeGmuFirmwareAccess *a,unsigned region,uint32_t off,uintptr_t *address)
++{
++ if(!a || !address || (off&3))return 22;
++ if(region==KGB_GMU){
++  const uint32_t csr[]={0x14000,0x14070,0x14600,0x143a0,0x14648,0x143c4,0x143c0,0x14004,0x14614,0x14610,
++   0x140b4,0x14608,0x14400,0x1303c,0x13000,0x13004,0x14300,0x14404,0x14618};
++  for(unsigned i=0;i<sizeof(csr)/sizeof(csr[0]);i++)if(off==csr[i]){
++   if(!a->boot->address[4])return 95;*address=a->boot->address[4]+(off-0x12000);return 0;}
++  if(off==0x24c14 || off==0x24c20 || off==0x24c1c || off==0x24c44){
++   if(!a->address[0])return 95;*address=a->address[0]+(off-0x24000);return 0;}
++ }else if(region==KGB_RSCC && off==0x404){if(!a->address[1])return 95;*address=a->address[1]+off;return 0;}
++ return 22;
++}
++static int kebab_native_gmu_firmware_read(void *cookie,unsigned region,uint32_t off,uint32_t *v)
++{
++ KebabNativeGmuFirmwareAccess *a=(KebabNativeGmuFirmwareAccess *)cookie;uintptr_t address;int e;
++ if(!v)return 22;if((e=kebab_native_gmu_firmware_check(a)))return e;
++ if(region<=KGB_CC)return kebab_native_gmu_boot_read(a->boot,region,off,v);
++ if((e=kebab_native_gmu_firmware_address(a,region,off,&address)))return e;
++ *v=*(volatile const uint32_t *)address;a->reads++;return 0;
++}
++static int kebab_native_gmu_firmware_write(void *cookie,unsigned region,uint32_t off,uint32_t mask,uint32_t bits,uint32_t expected)
++{
++ KebabNativeGmuFirmwareAccess *a=(KebabNativeGmuFirmwareAccess *)cookie;uintptr_t address;int e;
++ if((e=kebab_native_gmu_firmware_check(a)))return e;if(region!=KGB_GMU)return 22;
++ if((e=kebab_native_gmu_firmware_address(a,region,off,&address)))return e;
++ if(off==0x143a0){
++  if(mask!=0xf11 || bits!=0xf11)return 22;uint32_t current=*(volatile const uint32_t *)address;a->reads++;
++  if((current^expected)&~0xf11u)return 11;*(volatile uint32_t *)address=current|0xf11u;a->writes++;return 0;
++ }
++ if(mask!=UINT32_MAX)return 22;
++ const uint32_t allow[][2]={{0x143c4,1},{0x143c0,1},{0x14070,0},{0x14004,2},{0x14614,0x60001000},{0x14610,1},
++  {0x24c44,0x802800a0},{0x140b4,0x4052},{0x14608,0x06050200},{0x14400,0x60006000},{0x1303c,1},{0x13000,1},
++  {0x13004,1},{0x14300,0x09c40400},{0x14404,0},{0x14618,1},{0x24c1c,2},{0x24c1c,0},{0x14000,0}};
++ unsigned found=0;for(unsigned i=0;i<sizeof(allow)/sizeof(allow[0]);i++)if(off==allow[i][0] && bits==allow[i][1])found=1;
++ if(!found)return 22;
++ if(off==0x14000){
++  /* Fresh real providers at the actual release write, not just at entry. */
++  e=kebab_gpu_gmu_firmware_write_stage_locked(a->boot->cold,a->boot->epoch,1);if(e)return e;
++  e=kebab_gpu_launch_resources_verify_locked(&a->resources,a->boot->cold,a->boot->epoch,KLR_NEED_RSC);if(e)return e;
++  e=kebab_gpu_gmu_irq_verify_locked(a->irq,a->boot->cold,a->boot->epoch);if(e)return e;
++  uint32_t reset=*(volatile const uint32_t *)address;a->reads++;if(!(reset&1))return 11;
++ }
++ if(off==0x14618){e=kebab_gpu_gmu_firmware_write_stage_locked(a->boot->cold,a->boot->epoch,2);if(e)return e;}
++ *(volatile uint32_t *)address=bits;a->writes++;return 0;
++}
++static int kebab_native_gmu_firmware_barrier(void *cookie)
++{KebabNativeGmuFirmwareAccess *a=(KebabNativeGmuFirmwareAccess *)cookie;int e=kebab_native_gmu_firmware_check(a);return e?e:kebab_native_gmu_boot_barrier(a->boot);}
++static int kebab_native_gmu_firmware_delay(void *cookie,uint32_t us)
++{KebabNativeGmuFirmwareAccess *a=(KebabNativeGmuFirmwareAccess *)cookie;int e=kebab_native_gmu_firmware_check(a);return e?e:kebab_native_gmu_boot_delay(a->boot,us);}
++static int kebab_native_gmu_firmware_map(KebabNativeGmuFirmwareAccess *a,unsigned i,uint64_t pa,uint32_t bytes)
++{
++ a->memory[i]=IOMemoryDescriptor::withPhysicalAddress(pa,bytes,i?kIODirectionIn:kIODirectionInOut);if(!a->memory[i])return 12;
++ a->mapping[i]=a->memory[i]->map(kIOMapAnywhere|kIOMapInhibitCache|(i?kIOMapReadOnly:0));
++ if(!a->mapping[i] || a->mapping[i]->getLength()!=bytes || !(a->address[i]=a->mapping[i]->getVirtualAddress()))return 12;return 0;
++}
++static void kebab_native_gmu_firmware_unmap(KebabNativeGmuFirmwareAccess *a)
++{for(unsigned n=2;n;){--n;a->address[n]=0;if(a->mapping[n]){a->mapping[n]->release();a->mapping[n]=NULL;}if(a->memory[n]){a->memory[n]->release();a->memory[n]=NULL;}}kebab_native_gmu_boot_unmap(a->boot);}
++static int kebab_native_gmu_firmware_launch(const KebabGmuIrqToken *borrowed_irq,void *cookie,int(*worker_check)(void *),KebabGmuBootRecord *out)
++{
++ KebabNativeGmuFirmwareAccess *a=&kebab_native_gmu_firmware;uint32_t expected=0;int e=95;
++ if(!out)return 22;KebabGmuBootInit(out,KebabGmuBootLaunch);
++ if(!KebabGmuFirmwareLaunchQualified || !worker_check || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled() || worker_check(cookie))return 95;
++ e=kebab_native_gmu_firmware_borrowed_irq(borrowed_irq,&kebab_native_gmu_boot_access,0);if(e){out->result=e;return e;}
++ if(!__atomic_compare_exchange_n(&kebab_native_gmu_firmware_once,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
++  if(expected!=2){out->result=16;return 16;}if(borrowed_irq!=a->irq){out->result=95;return 95;}*out=kebab_native_gmu_firmware_result;out->evidence_replayed=1;return (int)out->result;}
++ a->boot=&kebab_native_gmu_boot_access;
++ if(kebab_native_gmu_boot_once!=2 || kebab_native_gmu_boot_result.result || kebab_native_gmu_boot_result.phase!=KGB_RESET_HELD_TCM){e=95;goto done;}
++ a->boot->cookie=cookie;a->boot->bus_check=worker_check;
++ a->irq=borrowed_irq;a->irq_generation=borrowed_irq->generation;
++ a->boot->own_reads=a->boot->own_writes=0;
++ /* Pure private epoch check before even allocating resource/IRQ mappings;
++  * the canonical entry will repeat current ownership checks under busy. */
++ e=kebab_gpu_first_ready_locked(a->boot->cold,a->boot->epoch);if(e)goto done;
++ e=kebab_rpmh_gpu_gmu_firmware_irq_preflight(a->boot->cold,a->boot->epoch,a->irq);if(e)goto done;
++ {
++  KebabGpuLaunchResourceRecord resource_record;
++  e=kebab_native_gpu_launch_resources_prepare(a->boot->cold,a->boot->epoch,&a->resources,&resource_record,a,kebab_native_gmu_firmware_resource_worker);if(e)goto done;
++  const uint32_t pa[5]={0x00170000,0x00100000,0x00152000,0x03d90000,0x03d7c000},bytes[5]={0x4000,0x1000,0x1000,0x4000,0x4000};
++  for(unsigned i=0;i<5;i++){e=kebab_native_gmu_boot_map(a->boot,i,pa[i],bytes[i]);if(e)goto done;}
++  e=kebab_native_gmu_firmware_map(a,0,0x03d8e000,0x1000);if(e)goto done;
++  e=kebab_native_gmu_firmware_map(a,1,0x03de0000,0x10000);if(e)goto done;
++  KebabGmuBootIo io={a,kebab_native_gmu_firmware_read,kebab_native_gmu_firmware_write,kebab_native_gmu_firmware_barrier,
++   kebab_native_gmu_firmware_delay,kebab_native_gmu_boot_now,NULL,NULL,NULL,NULL};
++  e=kebab_rpmh_gpu_gmu_launch(a->boot->cold,a->boot->epoch,&a->resources,a->irq,&io,out);
++ }
++done:
++ out->result=e;if(e && !out->primary_error)out->primary_error=e;
++ out->reads=a->reads+a->boot->own_reads;out->writes=a->writes;
++ if(a->boot)kebab_native_gmu_firmware_unmap(a);
++ kebab_native_gmu_firmware_result=*out;__atomic_store_n(&kebab_native_gmu_firmware_once,2,__ATOMIC_RELEASE);return e;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeGmuFirmwareHold.h
+@@ -0,0 +1,95 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_GMU_FIRMWARE_HOLD_H
++#define KEBAB_NATIVE_GMU_FIRMWARE_HOLD_H
++/* Same TU, after the existing ColdHold and IrqHold. These are publication
++ * caches, not the mutable native owners or an authorization source. */
++#include "KebabNativeGmuFirmware.h"
++#include "KebabNativeGmuHfi.h"
++struct KebabGmuFirmwareHoldCache {
++ KebabGmuBootRecord firmware;
++ KebabGpuLaunchResourceRecord resource;
++};
++static uint32_t kebab_gmu_fw_hold_state,kebab_gmu_hfi_hold_state;
++static int kebab_gmu_fw_hold_result=EAGAIN,kebab_gmu_hfi_hold_result=EAGAIN;
++static KebabGmuFirmwareHoldCache *kebab_gmu_fw_hold_cache;
++static KebabGmuHfiRecord *kebab_gmu_hfi_hold_cache;
++static int kebab_gmu_fw_hold_worker(void *cookie)
++{
++ int e=kebab_gpu_gcc_worker_access(cookie);
++ if(!e && (ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()))e=95;
++ return e;
++}
++static void kebab_gmu_fw_resource_not_run(KebabGpuLaunchResourceRecord *r)
++{KLRInit(r);r->result=EAGAIN;r->state=KLR_EMPTY;}
++static void kebab_gmu_fw_resource_cache(KebabGpuLaunchResourceRecord *r)
++{
++ /* No public snapshot, lock, mapping or resource execution here. Native
++  * prepare publishes its result before once=2; never copy its live book. */
++ uint32_t state=__atomic_load_n(&klr_native_once,__ATOMIC_ACQUIRE);
++ if(state==2)memcpy(r,&klr_native_result,sizeof *r);
++ else {kebab_gmu_fw_resource_not_run(r);if(state==1){r->result=EBUSY;r->state=KLR_PREPARING;}}
++}
++extern "C" void kebab_gmu_firmware_prepare(void)
++{
++ uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kebab_gmu_fw_hold_state,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
++  int e=expected==2?kebab_gmu_fw_hold_result:EBUSY;
++  const KebabGmuFirmwareHoldCache *r=expected==2?kebab_gmu_fw_hold_cache:NULL;
++  printf("KEBAB GMUFW: end; result=%d; phase=%u; state=%u; cached=1\n",e,r?r->firmware.phase:0,expected);return;
++ }
++ int e=kebab_gmu_fw_hold_worker(NULL);KebabGmuFirmwareHoldCache *r=NULL;
++ if(!e){r=(KebabGmuFirmwareHoldCache *)IOMalloc(sizeof *r);if(!r)e=ENOMEM;else {
++  KebabGmuBootInit(&r->firmware,KebabGmuBootLaunch);kebab_gmu_fw_resource_not_run(&r->resource);
++  /* Borrow the registered stable object. A copied record/token, CAP result,
++   * or a second acquire cannot substitute for this private IRQ identity. */
++  if(__atomic_load_n(&kebab_gmu_irq_hold_state,__ATOMIC_ACQUIRE)!=2 || kebab_gmu_irq_hold_result ||
++     kebab_gpu_gmu_irq_healthy(&kebab_gmu_irq_hold_token))e=95;
++  else e=kebab_native_gmu_firmware_launch(&kebab_gmu_irq_hold_token,NULL,kebab_gmu_fw_hold_worker,&r->firmware);
++  r->firmware.result=e;kebab_gmu_fw_resource_cache(&r->resource);
++ }}
++ kebab_gmu_fw_hold_cache=r;kebab_gmu_fw_hold_result=e;
++ __atomic_store_n(&kebab_gmu_fw_hold_state,2,__ATOMIC_RELEASE);
++ printf("KEBAB GMUFW: end; result=%d; phase=%u; cached=0\n",e,r?r->firmware.phase:0);
++}
++extern "C" void kebab_gmu_hfi_prepare(void)
++{
++ uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kebab_gmu_hfi_hold_state,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
++  int e=expected==2?kebab_gmu_hfi_hold_result:EBUSY;
++  printf("KEBAB GMUHFI: end; result=%d; state=%u; cached=1\n",e,expected);return;
++ }
++ int e=kebab_gmu_fw_hold_worker(NULL);KebabGmuHfiRecord *r=NULL;
++ if(!e){r=(KebabGmuHfiRecord *)IOMalloc(sizeof *r);if(!r)e=ENOMEM;else {
++  KebabGmuHfiInit(r);
++  if(__atomic_load_n(&kebab_gmu_fw_hold_state,__ATOMIC_ACQUIRE)!=2 || kebab_gmu_fw_hold_result ||
++     !kebab_gmu_fw_hold_cache || kebab_gmu_fw_hold_cache->firmware.phase!=KGB_HFI_QUEUES_READY ||
++     __atomic_load_n(&kebab_gmu_irq_hold_state,__ATOMIC_ACQUIRE)!=2 || kebab_gmu_irq_hold_result ||
++     kebab_gpu_gmu_irq_healthy(&kebab_gmu_irq_hold_token))e=95;
++  else e=kebab_native_gmu_hfi_version(NULL,kebab_gmu_fw_hold_worker,r);
++  r->result=e;
++ }}
++ /* The FW/resource publication is immutable even if HFI updates or faults
++  * the private live firmware/resource evidence. */
++ kebab_gmu_hfi_hold_cache=r;kebab_gmu_hfi_hold_result=e;
++ __atomic_store_n(&kebab_gmu_hfi_hold_state,2,__ATOMIC_RELEASE);
++ printf("KEBAB GMUHFI: end; result=%d; cached=0\n",e);
++}
++static int kebab_native_gmu_firmware_hold_snapshot(KebabGmuBootRecord *out)
++{
++ if(!out)return EINVAL;if(__atomic_load_n(&kebab_gmu_fw_hold_state,__ATOMIC_ACQUIRE)!=2)return EAGAIN;
++ if(kebab_gmu_fw_hold_cache)memcpy(out,&kebab_gmu_fw_hold_cache->firmware,sizeof *out);
++ else {KebabGmuBootInit(out,KebabGmuBootLaunch);out->result=kebab_gmu_fw_hold_result;}return 0;
++}
++static int kebab_native_gmu_resource_hold_snapshot(KebabGpuLaunchResourceRecord *out)
++{
++ if(!out)return EINVAL;if(__atomic_load_n(&kebab_gmu_fw_hold_state,__ATOMIC_ACQUIRE)!=2)return EAGAIN;
++ if(kebab_gmu_fw_hold_cache)memcpy(out,&kebab_gmu_fw_hold_cache->resource,sizeof *out);
++ else kebab_gmu_fw_resource_not_run(out);return 0;
++}
++static int kebab_native_gmu_hfi_hold_snapshot(KebabGmuHfiRecord *out)
++{
++ if(!out)return EINVAL;if(__atomic_load_n(&kebab_gmu_hfi_hold_state,__ATOMIC_ACQUIRE)!=2)return EAGAIN;
++ if(kebab_gmu_hfi_hold_cache)memcpy(out,kebab_gmu_hfi_hold_cache,sizeof *out);
++ else {KebabGmuHfiInit(out);out->result=kebab_gmu_hfi_hold_result;}return 0;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeGmuHfi.h
+@@ -0,0 +1,71 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_GMU_HFI_H
++#define KEBAB_NATIVE_GMU_HFI_H
++/* Same normal-worker TU after NativeGmuFirmware. No CPU shared pointer or
++ * user-supplied queue byte is exported or accepted. */
++#if defined(KERNEL) || defined(KEBAB_RPMH_KERNEL)
++#include <kern/KebabGmuHfiOwner.h>
++#include <kern/KebabGmuHfiBinding.h>
++#else
++#include "KebabGmuHfiOwner.h"
++#include "KebabGmuHfiBinding.h"
++#endif
++#include "KebabA650GmuShared.h"
++struct KebabNativeGmuHfiAccess {KebabNativeGmuFirmwareAccess *firmware;IOMemoryDescriptor *memory[2];IOMemoryMap *mapping[2];uintptr_t address[2];};
++static KebabNativeGmuHfiAccess kebab_native_gmu_hfi;
++static uint32_t kebab_native_gmu_hfi_once;
++static KebabGmuHfiRecord kebab_native_gmu_hfi_result;
++static int kebab_native_gmu_hfi_gate(void *cookie)
++{
++ auto *a=(KebabNativeGmuHfiAccess *)cookie;if(!a || !a->firmware || !a->firmware->boot)return 95;
++ int e=kebab_native_gmu_boot_worker(a->firmware->boot);if(e)return e;
++ return kebab_gpu_gmu_hfi_gate_locked(a->firmware->boot->cold,a->firmware->boot->epoch);
++}
++static int kebab_native_gmu_hfi_read_shared(void *cookie,uint32_t off,uint32_t *v)
++{auto *a=(KebabNativeGmuHfiAccess *)cookie;return kebab_a650_gmu_hfi_read(&a->firmware->boot->source,off,v);}
++static int kebab_native_gmu_hfi_write_shared(void *cookie,uint32_t off,uint32_t v)
++{auto *a=(KebabNativeGmuHfiAccess *)cookie;return kebab_a650_gmu_hfi_write(&a->firmware->boot->source,off,v);}
++static int kebab_native_gmu_hfi_read_reg(void *cookie,uint32_t off,uint32_t *v)
++{
++ auto *a=(KebabNativeGmuHfiAccess *)cookie;if(!v || (off!=0x14648 && off!=0x24c14))return 22;int e=kebab_native_gmu_hfi_gate(a);if(e)return e;
++ unsigned i=off==0x14648?0:1;uint32_t base=i?0x24000:0x12000;if(!a->address[i])return 95;*v=*(volatile const uint32_t *)(a->address[i]+(off-base));return 0;
++}
++static int kebab_native_gmu_hfi_write_reg(void *cookie,uint32_t off,uint32_t v)
++{
++ auto *a=(KebabNativeGmuHfiAccess *)cookie;if(v!=1 || (off!=0x14644 && off!=0x14650))return 22;int e=kebab_native_gmu_hfi_gate(a);if(e)return e;
++ if(!a->address[0])return 95;*(volatile uint32_t *)(a->address[0]+(off-0x12000))=1;return 0;
++}
++static int kebab_native_gmu_hfi_barrier(void *cookie)
++{auto *a=(KebabNativeGmuHfiAccess *)cookie;int e=kebab_native_gmu_hfi_gate(a);return e?e:kebab_a650_gmu_hfi_barrier(&a->firmware->boot->source);}
++static int kebab_native_gmu_hfi_delay(void *cookie,uint32_t us)
++{int e=kebab_native_gmu_hfi_gate(cookie);if(e)return e;if(us!=100)return 22;IODelay(us);return 0;}
++static void kebab_native_gmu_hfi_unmap(KebabNativeGmuHfiAccess *a)
++{for(unsigned n=2;n;){--n;a->address[n]=0;if(a->mapping[n]){a->mapping[n]->release();a->mapping[n]=NULL;}if(a->memory[n]){a->memory[n]->release();a->memory[n]=NULL;}}if(a->firmware && a->firmware->boot)kebab_native_gmu_boot_unmap(a->firmware->boot);}
++static int kebab_native_gmu_hfi_version(void *cookie,int(*worker_check)(void *),KebabGmuHfiRecord *out)
++{
++ auto *a=&kebab_native_gmu_hfi;uint32_t expected=0;int e=95;if(!out)return 22;KebabGmuHfiInit(out);
++ if(!KebabGmuHfiVersionQualified || !worker_check || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled() || worker_check(cookie))return 95;
++ if(!__atomic_compare_exchange_n(&kebab_native_gmu_hfi_once,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
++  if(expected!=2){out->result=16;return 16;}*out=kebab_native_gmu_hfi_result;out->evidence_replayed=1;return (int)out->result;}
++ a->firmware=&kebab_native_gmu_firmware;
++ if(kebab_native_gmu_firmware_once!=2 || kebab_native_gmu_firmware_result.result || kebab_native_gmu_firmware_result.phase!=KGB_HFI_QUEUES_READY)goto done;
++ a->firmware->boot->cookie=cookie;a->firmware->boot->bus_check=worker_check;
++ e=kebab_gpu_first_ready_locked(a->firmware->boot->cold,a->firmware->boot->epoch);if(e)goto done;
++ {
++  const uint32_t pa[4]={0x00170000,0x00100000,0x00152000,0x03d90000},bytes[4]={0x4000,0x1000,0x1000,0x4000};
++  for(unsigned i=0;i<4;i++){e=kebab_native_gmu_boot_map(a->firmware->boot,i,pa[i],bytes[i]);if(e)goto done;}
++  for(unsigned i=0;i<2;i++){
++   const uint32_t base[2]={0x03d7c000,0x03d8e000},bytes2[2]={0x4000,0x1000};
++   a->memory[i]=IOMemoryDescriptor::withPhysicalAddress(base[i],bytes2[i],i?kIODirectionIn:kIODirectionInOut);if(!a->memory[i]){e=12;goto done;}
++   a->mapping[i]=a->memory[i]->map(kIOMapAnywhere|kIOMapInhibitCache|(i?kIOMapReadOnly:0));
++   if(!a->mapping[i] || a->mapping[i]->getLength()!=bytes2[i] || !(a->address[i]=a->mapping[i]->getVirtualAddress())){e=12;goto done;}
++  }
++  auto *b=a->firmware->boot;
++  KebabGmuBootIo clocks={b,kebab_native_gmu_boot_read,kebab_native_gmu_boot_write,kebab_native_gmu_boot_barrier,kebab_native_gmu_boot_delay,kebab_native_gmu_boot_now,NULL,NULL,NULL,NULL};
++  KebabGmuHfiIo io={a,kebab_native_gmu_hfi_gate,kebab_native_gmu_hfi_read_shared,kebab_native_gmu_hfi_write_shared,kebab_native_gmu_hfi_read_reg,kebab_native_gmu_hfi_write_reg,kebab_native_gmu_hfi_barrier,kebab_native_gmu_hfi_delay,kebab_native_gmu_boot_now};
++  e=kebab_rpmh_gpu_gmu_hfi_version(b->cold,b->epoch,&a->firmware->resources,a->firmware->irq,&clocks,&io,out);
++ }
++done:
++ out->result=e;if(e && !out->io_error)out->io_error=e;kebab_native_gmu_hfi_unmap(a);kebab_native_gmu_hfi_result=*out;__atomic_store_n(&kebab_native_gmu_hfi_once,2,__ATOMIC_RELEASE);return e;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeGpuLaunchResources.h
+@@ -0,0 +1,96 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_GPU_LAUNCH_RESOURCES_H
++#define KEBAB_NATIVE_GPU_LAUNCH_RESOURCES_H
++#include <IOKit/IOLib.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <arm/machine_routines.h>
++#include <kern/clock.h>
++#if defined(KERNEL) || defined(KEBAB_RPMH_KERNEL)
++#include <kern/KebabGpuLaunchResourceOwner.h>
++#else
++#include "KebabGpuLaunchResourceOwner.h"
++#endif
++extern "C" int get_preemption_level(void);
++struct KLRNative {
++ IOMemoryDescriptor *memory[5];IOMemoryMap *mapping[5];uintptr_t address[5];
++ void *worker_cookie;int (*worker_check)(void *);
++};
++static KLRNative *klr_native;
++static uint32_t klr_native_once;
++static KebabGpuLaunchResourceRecord klr_native_result;
++static const KebabGpuColdToken *klr_native_cold;
++static KebabGpuLaunchResourceToken *klr_native_token;
++static uint64_t klr_native_epoch;
++static int KLRNativeWorker(KLRNative *a)
++{
++ if(!a || !a->worker_check || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled())return 95;
++ return a->worker_check(a->worker_cookie);
++}
++static int KLRNativeAddress(KLRNative *a,unsigned region,uint32_t off,uintptr_t *address)
++{
++ const uint32_t base[5]={0,0,0,0,0x71000};if(!a || region>=5 || !address || !a->address[region] || !KLRReadAllowed(region,off))return 22;
++ int e=KLRNativeWorker(a);if(e)return e;*address=a->address[region]+off-base[region];return 0;
++}
++static int KLRNativeRead(void *cookie,unsigned region,uint32_t off,uint32_t *out)
++{
++ if(!out)return 22;uintptr_t address;int e=KLRNativeAddress((KLRNative *)cookie,region,off,&address);if(e)return e;
++#if defined(__aarch64__)
++ __asm__ volatile("ldr %w0, [%1]":"=r"(*out):"r"(address):"memory");
++#else
++ *out=*(volatile const uint32_t *)address;
++#endif
++ return 0;
++}
++static int KLRNativeWrite(void *cookie,unsigned region,uint32_t off,uint32_t value)
++{
++ if(!KLRWriteAllowed(region,off,value))return 22;uintptr_t address;int e=KLRNativeAddress((KLRNative *)cookie,region,off,&address);if(e)return e;
++#if defined(__aarch64__)
++ __asm__ volatile("str %w0, [%1]"::"r"(value),"r"(address):"memory");
++#else
++ *(volatile uint32_t *)address=value;
++#endif
++ return 0;
++}
++static int KLRNativeBarrier(void *cookie)
++{int e=KLRNativeWorker((KLRNative *)cookie);if(e)return e;
++#if defined(__aarch64__)
++ __asm__ volatile("dsb sy":::"memory");
++#endif
++ return 0;}
++static int KLRNativeDelay(void *cookie,unsigned us)
++{int e=KLRNativeWorker((KLRNative *)cookie);if(e)return e;if(us!=100)return 22;IODelay(us);return 0;}
++static uint64_t KLRNativeNow(void *)
++{uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000;}
++/* Kernel worker only. Map allocations happen BEFORE canonical busy. Every
++ * successful/uncertain access and all RootChild refs stay pinned for the boot;
++ * no release/restore/reset/standalone userspace/CAP trigger is exposed. */
++static int kebab_native_gpu_launch_resources_prepare(const KebabGpuColdToken *cold,uint64_t epoch,
++ KebabGpuLaunchResourceToken *token,KebabGpuLaunchResourceRecord *out,void *worker_cookie,int (*worker_check)(void *))
++{
++ if(!out || !token || !cold || !worker_check)return 22;KLRInit(out);uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&klr_native_once,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
++  if(expected!=2){out->result=16;return 16;}
++  if(cold!=klr_native_cold || token!=klr_native_token || epoch!=klr_native_epoch){out->result=95;return 95;}
++  *out=klr_native_result;return (int)out->result;
++ }
++ klr_native_cold=cold;klr_native_token=token;klr_native_epoch=epoch;
++ int e=95;KLRNative probe={};probe.worker_cookie=worker_cookie;probe.worker_check=worker_check;
++ if((e=KLRNativeWorker(&probe)))goto done;
++ klr_native=(KLRNative *)IOMalloc(sizeof *klr_native);if(!klr_native){e=12;goto done;}memset(klr_native,0,sizeof *klr_native);
++ klr_native->worker_cookie=worker_cookie;klr_native->worker_check=worker_check;
++ {
++  const uint64_t pa[5]={0x03de0000,0x0b290000,0x03d6a000,0x03d90000,0x00171000};
++  const uint32_t bytes[5]={0x10000,0x10000,0x30000,0x8000,0x1000};
++  for(unsigned i=0;i<5;i++){
++   klr_native->memory[i]=IOMemoryDescriptor::withPhysicalAddress(pa[i],bytes[i],i<3?kIODirectionInOut:kIODirectionIn);
++   if(!klr_native->memory[i]){e=12;goto done;}
++   klr_native->mapping[i]=klr_native->memory[i]->map(kIOMapAnywhere|kIOMapInhibitCache|(i>=3?kIOMapReadOnly:0));
++   if(!klr_native->mapping[i] || klr_native->mapping[i]->getLength()!=bytes[i] || !(klr_native->address[i]=klr_native->mapping[i]->getVirtualAddress())){e=12;goto done;}
++  }
++  KebabGpuLaunchResourceIo io={klr_native,NULL,KLRNativeRead,KLRNativeWrite,KLRNativeBarrier,KLRNativeDelay,KLRNativeNow};
++  e=kebab_rpmh_gpu_launch_resources_prepare(cold,epoch,token,&io,out);
++ }
++done:
++ out->result=e;klr_native_result=*out;__atomic_store_n(&klr_native_once,2,__ATOMIC_RELEASE);return e;
++}
++#endif
+--- a/osfmk/kern/KebabGmuBootCore.h
++++ b/osfmk/kern/KebabGmuBootCore.h
+@@ -1,204 +1,206 @@
+-/* SPDX-License-Identifier: MIT */
+-#ifndef KEBAB_GMU_BOOT_CORE_H
+-#define KEBAB_GMU_BOOT_CORE_H
+-#include <stdint.h>
+-#include <stddef.h>
+-#include <string.h>
+-#include "KebabGpuCcCore.h"
+-enum {KGB_EMPTY=0,KGB_CLOCKS_READY=1,KGB_RESET_ASSERTED=2,KGB_RESET_HELD_TCM=3,
+- KGB_FW_RUNNING=4,KGB_HFI_QUEUES_READY=5,KGB_QUARANTINED=6,KGB_FW_STARTING=7};
+-enum {KGB_NEED_RSC=1,KGB_NEED_BANDWIDTH=2,KGB_NEED_IRQ=4};
+-/* Explicit adaptation for the SHA-bound OTA HFI2.0.1 image: fixed vendor
+- * kgsl_hfi.h uses bit15. Upstream's bit23 is a different firmware profile. */
+-enum {KGB_OTA_HFI_CM3_FAULT=0x8000};
+-enum {KGB_BW_REQUIRE_QUALIFIED=0,KGB_BW_RETAIN_INHERITED_NO_WRITE=1};
+-enum {KGB_GCC=0,KGB_CC=1,KGB_GMU=2,KGB_RSCC=3};
+-typedef struct {
+- void *cookie;
+- int (*read32)(void *,unsigned,uint32_t,uint32_t *);
+- int (*write32)(void *,unsigned,uint32_t,uint32_t,uint32_t,uint32_t);
+- int (*barrier)(void *);int (*delay_us)(void *,uint32_t);uint64_t (*now_us)(void *);
+- /* Concrete canonical helper, called under its existing globalbusy. */
+- int (*mark_started)(void *);
+- /* Concrete mapper opens the two finite TCM/CSR windows only after clocks. */
+- int (*open_gmu)(void *);
+- int (*source_check)(void *);
+- int (*tcm_word)(void *,uint32_t,uint32_t *,uint32_t *);
+-} KebabGmuBootIo;
+-typedef struct {
+- uint32_t phase,attempted,pinned,quarantined,started,reset_issued,tcm_verified,added_mask;
+- uint32_t control[3],root_cfg,root_cmd,tcm_crc;
+- uint64_t namespace_epoch;
+-} KebabGmuBootLedger;
+-typedef struct {
+- uint32_t magic,schema,bytes,result,phase,action,primary_error,missing_owners;
+- uint32_t reads,writes,barriers,polls,delay_us,failed_region,failed_offset,io_error;
+- uint32_t before_valid,after_valid,before[3],after[3],added_mask,mark_started,reset_write_issued,reset_readback;
+- uint32_t reset_physical_ack,tcm_written_words,tcm_verified_words,tcm_crc,read_crc,failed_word;
+- uint32_t firmware_start_requested,fw_init_fresh_zero,fw_init_result,fw_init_ack,hfi_status,hfi_ctrl_ack;
+- uint32_t rsc_ack,rsc_busy,irq_ao_status,irq_hfi_status,root_children,parent_refs,owner_dead,quarantined;
+- uint32_t hfi_messages_initialized,gx_qualified,dma_proven,retained_bandwidth;
+- uint32_t evidence_replayed,root_qualified,source_qualified,child_pinned;
+- uint32_t bandwidth_qualified;
+- uint64_t namespace_epoch,elapsed_us;
+-} KebabGmuBootRecord;
+-typedef struct {const KebabGmuBootIo *io;KebabGmuBootLedger *ledger;KebabGmuBootRecord *r;
+- uint32_t gcc_cfg,gcc_reset,gdscr,ahb,gx_gmu,memnoc;uint64_t started_us;} KebabGmuBootContext;
+-static inline void KebabGmuBootInit(KebabGmuBootRecord *r,unsigned action)
+-{memset(r,0,sizeof *r);r->magic=0x424d474b;r->schema=1;r->bytes=sizeof *r;r->action=action;r->result=95;r->failed_word=UINT32_MAX;}
+-static inline int KebabGmuBootRunning(uint32_t v)
+-{return !(v&0x80000000u) || (v&0x70000000u)==0x20000000u;}
+-static inline uint32_t KebabGmuBootCrcWord(uint32_t crc,uint32_t word)
+-{for(unsigned b=0;b<4;b++){crc^=(word>>(8*b))&255;for(unsigned k=0;k<8;k++)crc=(crc>>1)^((0u-(crc&1))&0xedb88320u);}return crc;}
+-static inline int KebabGmuBootRaw(KebabGmuBootContext *c,unsigned region,uint32_t off,uint32_t *v)
+-{int e;++c->r->reads;e=c->io->read32(c->io->cookie,region,off,v);if(e){c->r->failed_region=region;c->r->failed_offset=off;c->r->io_error=e;return 5;}return 0;}
+-static inline int KebabGmuBootBarrier(KebabGmuBootContext *c)
+-{int e;++c->r->barriers;e=c->io->barrier(c->io->cookie);if(e){c->r->io_error=e;return 5;}return 0;}
+-static inline int KebabGmuBootDelay(KebabGmuBootContext *c,uint32_t us)
+-{int e;if(us!=1 && us!=100)return 22;c->r->delay_us+=us;e=c->io->delay_us(c->io->cookie,us);if(e){c->r->io_error=e;return 5;}return 0;}
+-static inline int KebabGmuBootClockGates(KebabGmuBootContext *c,unsigned branches)
+-{
+- uint32_t v;int e;
+- if((e=KebabGmuBootRaw(c,0,0x71004,&v)))return e;if(v!=c->gcc_cfg || !(v&1) || (v&0x80000000u))return 11;
+- if((e=KebabGmuBootRaw(c,0,0x71000,&v)))return e;if(v!=c->gcc_reset || (v&1))return 11;
+- if((e=KebabGmuBootRaw(c,1,0x106c,&v)))return e;if((v&KebabGpuCcControlMask(2))!=c->gdscr)return 11;
+- if((e=KebabGmuBootRaw(c,1,0x1540,&v)))return e;if(!(v&0x80000000u))return 11;
+- if((e=KebabGmuBootRaw(c,1,0x1078,&v)))return e;if((v&0x0fffffffu)!=c->ahb || !(v&1))return 11;
+- if((e=KebabGmuBootRaw(c,0,0x7100c,&v)))return e;if((v&0x0fffffffu)!=c->memnoc || !(v&1) || !KebabGmuBootRunning(v))return 11;
+- if((e=KebabGmuBootRaw(c,1,0x1064,&v)))return e;
+- if((v&0x0fffffffu)!=c->gx_gmu || (!c->r->firmware_start_requested && (v&0x80000001u)!=0x80000000u))return 11;
+- if((e=KebabGmuBootRaw(c,1,0x1120,&v)))return e;if((v&0x800000f3u)!=2)return 11;
+- if((e=KebabGmuBootRaw(c,1,0x1124,&v)))return e;if((v&0x10371fu)!=0x100602u || (v&0x3000u))return 11;
+- if(branches){
+-  const unsigned reg[3]={0,1,1};const uint32_t off[3]={0x71154,0x109c,0x1098};
+-  for(unsigned i=0;i<3;i++){if((e=KebabGmuBootRaw(c,reg[i],off[i],&v)))return e;
+-   if((v&0x0fffffffu)!=c->ledger->control[i] || !(v&1) || !KebabGmuBootRunning(v))return 11;}
+- }
+- return KebabGmuBootBarrier(c);
+-}
+-static inline int KebabGmuBootWrite(KebabGmuBootContext *c,unsigned region,uint32_t off,uint32_t mask,uint32_t bits,uint32_t expected)
+-{
+- int e;/* All successful writes have already passed same-owner gate. */
+- ++c->r->writes;e=c->io->write32(c->io->cookie,region,off,mask,bits,expected);
+- if(e){c->r->failed_region=region;c->r->failed_offset=off;c->r->io_error=e;return 5;}return KebabGmuBootBarrier(c);
+-}
+-static inline int KebabGmuBootEnable(KebabGmuBootContext *c,unsigned which)
+-{
+- const unsigned reg[3]={0,1,1};const uint32_t off[3]={0x71154,0x109c,0x1098};uint32_t v;int e;
+- if(which>2)return 22;if((e=KebabGmuBootClockGates(c,0)))return e;
+- if((e=KebabGmuBootRaw(c,reg[which],off[which],&v)))return e;
+- if(((v^c->r->before[which])&0x0fffffffu)!=0)return 11;
+- c->ledger->control[which]=(v|1)&0x0fffffffu;
+- if(which==2){e=c->io->mark_started(c->io->cookie);if(e){c->r->io_error=e;return 95;}c->ledger->started=1;c->r->mark_started=1;}
+- if(!(v&1)){
+-  c->ledger->added_mask|=1u<<which;c->r->added_mask=c->ledger->added_mask;
+-  if((e=KebabGmuBootWrite(c,reg[which],off[which],1,1,v)))return e;
+- }
+- for(unsigned n=0;n<200;n++){
+-  if((e=KebabGmuBootClockGates(c,0)))return e;
+-  if((e=KebabGmuBootRaw(c,reg[which],off[which],&v)))return e;c->r->polls++;
+-  if((v&0x0fffffffu)!=c->ledger->control[which])return 11;
+-  if((v&1) && KebabGmuBootRunning(v)){c->r->after[which]=v;c->r->after_valid|=1u<<which;return 0;}
+-  if((e=KebabGmuBootDelay(c,1)))return e;
+- }
+- return 110;
+-}
+-static inline int KebabGmuBootLoadTcm(KebabGmuBootContext *c)
+-{
+- uint32_t off,value,actual,crc=~0u,read_crc=~0u;int e;
+- for(unsigned pass=0;pass<2;pass++)for(uint32_t i=0;i<8192;i++){
+-  if(!(i&63)){
+-   if((e=KebabGmuBootClockGates(c,1)))return e;
+-   if((e=KebabGmuBootRaw(c,2,0x14000,&actual)))return e;
+-   if(!(actual&1))return 11;
+-   uint64_t now=c->io->now_us(c->io->cookie);if(now<c->started_us || now-c->started_us>500000)return 110;
+-  }
+-  e=c->io->tcm_word(c->io->cookie,i,&off,&value);if(e){c->r->io_error=e;c->r->failed_word=i;return 5;}
+-  if(off!=(i<4096?0x3000+4*i:0x7000+4*(i-4096))){c->r->failed_word=i;return 22;}
+-  if(!pass){
+-   ++c->r->writes;e=c->io->write32(c->io->cookie,2,off,UINT32_MAX,value,0);
+-   if(e){c->r->io_error=e;c->r->failed_word=i;return 5;}c->r->tcm_written_words++;crc=KebabGmuBootCrcWord(crc,value);
+-   if((i&63)==63 && (e=KebabGmuBootBarrier(c)))return e;
+-  }else{
+-   if((e=KebabGmuBootRaw(c,2,off,&actual))){c->r->failed_word=i;return e;}
+-   if(actual!=value){c->r->failed_word=i;return 11;}c->r->tcm_verified_words++;read_crc=KebabGmuBootCrcWord(read_crc,actual);
+-  }
+- }
+- c->r->tcm_crc=~crc;c->r->read_crc=~read_crc;if(crc!=read_crc)return 11;
+- c->ledger->tcm_verified=1;c->ledger->tcm_crc=~crc;return KebabGmuBootBarrier(c);
+-}
+-static inline int KebabGmuBootResetAndLoad(KebabGmuBootContext *c)
+-{
+- const unsigned reg[3]={0,1,1};const uint32_t off[3]={0x71154,0x109c,0x1098};uint32_t v;int e;
+- if(c->ledger->attempted)return 95;
+- for(unsigned i=0;i<3;i++){if((e=KebabGmuBootRaw(c,reg[i],off[i],&c->r->before[i])))return e;c->r->before_valid|=1u<<i;}
+- if((c->r->before[2]&0x80000001u)!=0x80000000u)return 95;
+- if((e=KebabGmuBootClockGates(c,0)))return e;c->ledger->attempted=1;
+- /* AHB and MEMNOC are already genuinely held by CC/bus; AXI/CXO next,
+-  * GMU1098 is the last producer clock. No optional trace vote or111c. */
+- for(unsigned i=0;i<3;i++)if((e=KebabGmuBootEnable(c,i)))return e;
+- c->ledger->phase=KGB_CLOCKS_READY;if((e=KebabGmuBootClockGates(c,1)))return e;
+- if((e=c->io->open_gmu(c->io->cookie))){c->r->io_error=e;return 5;}
+- if((e=KebabGmuBootWrite(c,2,0x14000,UINT32_MAX,1,0)))return e;
+- c->ledger->reset_issued=1;c->r->reset_write_issued=1;
+- if((e=KebabGmuBootRaw(c,2,0x14000,&v)))return e;c->r->reset_readback=v;
+- if(!(v&1))return 11;/* controller readback, not a fictional physical ACK */
+- c->ledger->phase=KGB_RESET_ASSERTED;
+- if((e=KebabGmuBootWrite(c,2,0x14730,UINT32_MAX,1,0)))return e;
+- if((e=KebabGmuBootRaw(c,2,0x14730,&v)))return e;if(v!=1)return 11;
+- if((e=KebabGmuBootLoadTcm(c)))return e;c->ledger->phase=KGB_RESET_HELD_TCM;return 0;
+-}
+-/* Next launch stage is fully bounded, but native entry remains closed until
+- * actual GPU-local RSC, bandwidth and IRQ owners are integrated. No CAP bool
+- * grants them. Queues-ready is NOT HFI messages initialized or GPU ready. */
+-static inline int KebabGmuBootPoll(KebabGmuBootContext *c,unsigned region,uint32_t off,uint32_t mask,uint32_t desired,uint32_t *last)
+-{
+- int e;uint32_t v;
+- for(unsigned i=0;i<100;i++){
+-  if((e=KebabGmuBootClockGates(c,1)))return e;
+-  if((e=KebabGmuBootRaw(c,2,0x24c14,&v)))return e;c->r->irq_ao_status=v;if(v&0x29)return 5;
+-  if((e=KebabGmuBootRaw(c,2,0x14648,&v)))return e;c->r->irq_hfi_status=v;if(v&KGB_OTA_HFI_CM3_FAULT)return 5;
+-  if((e=KebabGmuBootRaw(c,region,off,&v)))return e;*last=v;c->r->polls++;
+-  if((v&mask)==desired)return 0;if((e=KebabGmuBootDelay(c,100)))return e;
+- }return 110;
+-}
+-static inline int KebabGmuBootLaunchReady(uint32_t owned_mask,uint32_t chipid,unsigned bw_mode)
+-{
+- return bw_mode<=KGB_BW_RETAIN_INHERITED_NO_WRITE && chipid==0x06050200u &&
+-  (owned_mask&(KGB_NEED_RSC|KGB_NEED_IRQ))==(KGB_NEED_RSC|KGB_NEED_IRQ) &&
+-  ((owned_mask&KGB_NEED_BANDWIDTH) || bw_mode==KGB_BW_RETAIN_INHERITED_NO_WRITE);
+-}
+-static inline int KebabGmuBootStartFirmwareWithBandwidth(KebabGmuBootContext *c,uint32_t owned_mask,uint32_t chipid,unsigned bw_mode)
+-{
+- uint32_t v;int e;c->r->missing_owners=(KGB_NEED_RSC|KGB_NEED_BANDWIDTH|KGB_NEED_IRQ)&~owned_mask;
+- if(!KebabGmuBootLaunchReady(owned_mask,chipid,bw_mode))return 95;
+- c->r->bandwidth_qualified=!!(owned_mask&KGB_NEED_BANDWIDTH);
+- c->r->retained_bandwidth=!c->r->bandwidth_qualified;
+- if(c->ledger->phase!=KGB_RESET_HELD_TCM || !c->ledger->tcm_verified)return 95;
+- if((e=KebabGmuBootClockGates(c,1)))return e;
+- if((e=KebabGmuBootRaw(c,2,0x14000,&v)))return e;if(!(v&1))return 11;
+- if((e=KebabGmuBootRaw(c,2,0x14600,&v)))return e;if(v&1)return 16; /* reject stale queues-ready */
+- if((e=KebabGmuBootRaw(c,2,0x24c20,&v)))return e;if(v&2)return 16; /* require fresh RSC ack */
+- if((e=KebabGmuBootWrite(c,2,0x24c1c,UINT32_MAX,2,0)))return e;
+- if((e=KebabGmuBootPoll(c,2,0x24c20,2,2,&c->r->rsc_ack)))return e;
+- if((e=KebabGmuBootPoll(c,3,0x404,UINT32_MAX,0,&c->r->rsc_busy)))return e;
+- if((e=KebabGmuBootWrite(c,2,0x24c1c,UINT32_MAX,0,0)))return e;
+- const uint32_t init[][2]={{0x143c4,1},{0x143c0,1},{0x14070,0},{0x14004,2},{0x14614,0x60001000},{0x14610,1},
+-  {0x24c44,0x802800a0},{0x140b4,0x4052},{0x14608,0x06050200},{0x14400,0x60006000},
+-  {0x1303c,1},{0x13000,1},{0x13004,1},{0x14300,0x09c40400}};
+- for(unsigned i=0;i<sizeof(init)/sizeof(init[0]);i++)if((e=KebabGmuBootWrite(c,2,init[i][0],UINT32_MAX,init[i][1],0)))return e;
+- if((e=KebabGmuBootRaw(c,2,0x14070,&v)))return e;if(v)return 11;c->r->fw_init_fresh_zero=1;
+- if((e=KebabGmuBootRaw(c,2,0x143a0,&v)))return e;
+- if((e=KebabGmuBootWrite(c,2,0x143a0,0xf11,0xf11,v)))return e;
+- if((e=KebabGmuBootWrite(c,2,0x14404,UINT32_MAX,0,0)))return e;
+- c->r->firmware_start_requested=1;c->ledger->phase=KGB_FW_STARTING;
+- if((e=KebabGmuBootWrite(c,2,0x14000,UINT32_MAX,0,0)))return e;
+- if((e=KebabGmuBootPoll(c,2,0x14070,0x1ff,0x100,&c->r->fw_init_result)))return e;
+- c->r->fw_init_ack=1;c->ledger->phase=KGB_FW_RUNNING;
+- if((e=KebabGmuBootWrite(c,2,0x14618,UINT32_MAX,1,0)))return e;
+- if((e=KebabGmuBootPoll(c,2,0x14600,1,1,&c->r->hfi_status)))return e;
+- c->r->hfi_ctrl_ack=1;c->ledger->phase=KGB_HFI_QUEUES_READY;return 0;
+-}
+-static inline int KebabGmuBootStartFirmware(KebabGmuBootContext *c,uint32_t owned_mask,uint32_t chipid)
+-{return KebabGmuBootStartFirmwareWithBandwidth(c,owned_mask,chipid,KGB_BW_REQUIRE_QUALIFIED);}
+-#endif
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GMU_BOOT_CORE_H
++#define KEBAB_GMU_BOOT_CORE_H
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++#include "KebabGpuCcCore.h"
++enum {KGB_EMPTY=0,KGB_CLOCKS_READY=1,KGB_RESET_ASSERTED=2,KGB_RESET_HELD_TCM=3,
++ KGB_FW_RUNNING=4,KGB_HFI_QUEUES_READY=5,KGB_QUARANTINED=6,KGB_FW_STARTING=7};
++enum {KGB_NEED_RSC=1,KGB_NEED_BANDWIDTH=2,KGB_NEED_IRQ=4};
++/* Explicit adaptation for the SHA-bound OTA HFI2.0.1 image: fixed vendor
++ * kgsl_hfi.h uses bit15. Upstream's bit23 is a different firmware profile. */
++enum {KGB_OTA_HFI_CM3_FAULT=0x8000};
++enum {KGB_BW_REQUIRE_QUALIFIED=0,KGB_BW_RETAIN_INHERITED_NO_WRITE=1};
++enum {KGB_GCC=0,KGB_CC=1,KGB_GMU=2,KGB_RSCC=3};
++typedef struct {
++ void *cookie;
++ int (*read32)(void *,unsigned,uint32_t,uint32_t *);
++ int (*write32)(void *,unsigned,uint32_t,uint32_t,uint32_t,uint32_t);
++ int (*barrier)(void *);int (*delay_us)(void *,uint32_t);uint64_t (*now_us)(void *);
++ /* Concrete canonical helper, called under its existing globalbusy. */
++ int (*mark_started)(void *);
++ /* Concrete mapper opens the two finite TCM/CSR windows only after clocks. */
++ int (*open_gmu)(void *);
++ int (*source_check)(void *);
++ int (*tcm_word)(void *,uint32_t,uint32_t *,uint32_t *);
++} KebabGmuBootIo;
++typedef struct {
++ uint32_t phase,attempted,pinned,quarantined,started,reset_issued,tcm_verified,added_mask;
++ uint32_t control[3],root_cfg,root_cmd,tcm_crc;
++ uint64_t namespace_epoch;
++} KebabGmuBootLedger;
++typedef struct {
++ uint32_t magic,schema,bytes,result,phase,action,primary_error,missing_owners;
++ uint32_t reads,writes,barriers,polls,delay_us,failed_region,failed_offset,io_error;
++ uint32_t before_valid,after_valid,before[3],after[3],added_mask,mark_started,reset_write_issued,reset_readback;
++ uint32_t reset_physical_ack,tcm_written_words,tcm_verified_words,tcm_crc,read_crc,failed_word;
++ uint32_t firmware_start_requested,fw_init_fresh_zero,fw_init_result,fw_init_ack,hfi_status,hfi_ctrl_ack;
++ uint32_t rsc_ack,rsc_busy,irq_ao_status,irq_hfi_status,root_children,parent_refs,owner_dead,quarantined;
++ uint32_t hfi_messages_initialized,gx_qualified,dma_proven,retained_bandwidth;
++ uint32_t evidence_replayed,root_qualified,source_qualified,child_pinned;
++ uint32_t bandwidth_qualified;
++ uint64_t namespace_epoch,elapsed_us;
++} KebabGmuBootRecord;
++typedef struct {const KebabGmuBootIo *io;KebabGmuBootLedger *ledger;KebabGmuBootRecord *r;
++ uint32_t gcc_cfg,gcc_reset,gdscr,ahb,gx_gmu,memnoc;uint64_t started_us;} KebabGmuBootContext;
++static inline void KebabGmuBootInit(KebabGmuBootRecord *r,unsigned action)
++{memset(r,0,sizeof *r);r->magic=0x424d474b;r->schema=1;r->bytes=sizeof *r;r->action=action;r->result=95;r->failed_word=UINT32_MAX;}
++static inline int KebabGmuBootRunning(uint32_t v)
++{return !(v&0x80000000u) || (v&0x70000000u)==0x20000000u;}
++static inline uint32_t KebabGmuBootCrcWord(uint32_t crc,uint32_t word)
++{for(unsigned b=0;b<4;b++){crc^=(word>>(8*b))&255;for(unsigned k=0;k<8;k++)crc=(crc>>1)^((0u-(crc&1))&0xedb88320u);}return crc;}
++static inline int KebabGmuBootRaw(KebabGmuBootContext *c,unsigned region,uint32_t off,uint32_t *v)
++{int e;++c->r->reads;e=c->io->read32(c->io->cookie,region,off,v);if(e){c->r->failed_region=region;c->r->failed_offset=off;c->r->io_error=e;return 5;}return 0;}
++static inline int KebabGmuBootBarrier(KebabGmuBootContext *c)
++{int e;++c->r->barriers;e=c->io->barrier(c->io->cookie);if(e){c->r->io_error=e;return 5;}return 0;}
++static inline int KebabGmuBootDelay(KebabGmuBootContext *c,uint32_t us)
++{int e;if(us!=1 && us!=100)return 22;c->r->delay_us+=us;e=c->io->delay_us(c->io->cookie,us);if(e){c->r->io_error=e;return 5;}return 0;}
++static inline int KebabGmuBootClockGates(KebabGmuBootContext *c,unsigned branches)
++{
++ uint32_t v;int e;
++ if((e=KebabGmuBootRaw(c,0,0x71004,&v)))return e;if(v!=c->gcc_cfg || !(v&1) || (v&0x80000000u))return 11;
++ if((e=KebabGmuBootRaw(c,0,0x71000,&v)))return e;if(v!=c->gcc_reset || (v&1))return 11;
++ if((e=KebabGmuBootRaw(c,1,0x106c,&v)))return e;if((v&KebabGpuCcControlMask(2))!=c->gdscr)return 11;
++ if((e=KebabGmuBootRaw(c,1,0x1540,&v)))return e;if(!(v&0x80000000u))return 11;
++ if((e=KebabGmuBootRaw(c,1,0x1078,&v)))return e;if((v&0x0fffffffu)!=c->ahb || !(v&1))return 11;
++ if((e=KebabGmuBootRaw(c,0,0x7100c,&v)))return e;if((v&0x0fffffffu)!=c->memnoc || !(v&1) || !KebabGmuBootRunning(v))return 11;
++ if((e=KebabGmuBootRaw(c,1,0x1064,&v)))return e;
++ if((v&0x0fffffffu)!=c->gx_gmu || (!c->r->firmware_start_requested && (v&0x80000001u)!=0x80000000u))return 11;
++ if((e=KebabGmuBootRaw(c,1,0x1120,&v)))return e;if((v&0x800000f3u)!=2)return 11;
++ if((e=KebabGmuBootRaw(c,1,0x1124,&v)))return e;if((v&0x10371fu)!=0x100602u || (v&0x3000u))return 11;
++ if(branches){
++  const unsigned reg[3]={0,1,1};const uint32_t off[3]={0x71154,0x109c,0x1098};
++  for(unsigned i=0;i<3;i++){if((e=KebabGmuBootRaw(c,reg[i],off[i],&v)))return e;
++   if((v&0x0fffffffu)!=c->ledger->control[i] || !(v&1) || (!KebabGmuBootRunning(v) && !(i==2 && c->r->firmware_start_requested)))return 11;}
++ }
++ return KebabGmuBootBarrier(c);
++}
++static inline int KebabGmuBootWrite(KebabGmuBootContext *c,unsigned region,uint32_t off,uint32_t mask,uint32_t bits,uint32_t expected)
++{
++ int e;/* All successful writes have already passed same-owner gate. */
++ ++c->r->writes;e=c->io->write32(c->io->cookie,region,off,mask,bits,expected);
++ if(e){c->r->failed_region=region;c->r->failed_offset=off;c->r->io_error=e;return 5;}return KebabGmuBootBarrier(c);
++}
++static inline int KebabGmuBootEnable(KebabGmuBootContext *c,unsigned which)
++{
++ const unsigned reg[3]={0,1,1};const uint32_t off[3]={0x71154,0x109c,0x1098};uint32_t v;int e;
++ if(which>2)return 22;if((e=KebabGmuBootClockGates(c,0)))return e;
++ if((e=KebabGmuBootRaw(c,reg[which],off[which],&v)))return e;
++ if(((v^c->r->before[which])&0x0fffffffu)!=0)return 11;
++ c->ledger->control[which]=(v|1)&0x0fffffffu;
++ if(which==2){e=c->io->mark_started(c->io->cookie);if(e){c->r->io_error=e;return 95;}c->ledger->started=1;c->r->mark_started=1;}
++ if(!(v&1)){
++  c->ledger->added_mask|=1u<<which;c->r->added_mask=c->ledger->added_mask;
++  if((e=KebabGmuBootWrite(c,reg[which],off[which],1,1,v)))return e;
++ }
++ for(unsigned n=0;n<200;n++){
++  if((e=KebabGmuBootClockGates(c,0)))return e;
++  if((e=KebabGmuBootRaw(c,reg[which],off[which],&v)))return e;c->r->polls++;
++  if((v&0x0fffffffu)!=c->ledger->control[which])return 11;
++  if((v&1) && KebabGmuBootRunning(v)){c->r->after[which]=v;c->r->after_valid|=1u<<which;return 0;}
++  if((e=KebabGmuBootDelay(c,1)))return e;
++ }
++ return 110;
++}
++static inline int KebabGmuBootLoadTcm(KebabGmuBootContext *c)
++{
++ uint32_t off,value,actual,crc=~0u,read_crc=~0u;int e;
++ for(unsigned pass=0;pass<2;pass++)for(uint32_t i=0;i<8192;i++){
++  if(!(i&63)){
++   if((e=KebabGmuBootClockGates(c,1)))return e;
++   if((e=KebabGmuBootRaw(c,2,0x14000,&actual)))return e;
++   if(!(actual&1))return 11;
++   uint64_t now=c->io->now_us(c->io->cookie);if(now<c->started_us || now-c->started_us>500000)return 110;
++  }
++  e=c->io->tcm_word(c->io->cookie,i,&off,&value);if(e){c->r->io_error=e;c->r->failed_word=i;return 5;}
++  if(off!=(i<4096?0x3000+4*i:0x7000+4*(i-4096))){c->r->failed_word=i;return 22;}
++  if(!pass){
++   ++c->r->writes;e=c->io->write32(c->io->cookie,2,off,UINT32_MAX,value,0);
++   if(e){c->r->io_error=e;c->r->failed_word=i;return 5;}c->r->tcm_written_words++;crc=KebabGmuBootCrcWord(crc,value);
++   if((i&63)==63 && (e=KebabGmuBootBarrier(c)))return e;
++  }else{
++   if((e=KebabGmuBootRaw(c,2,off,&actual))){c->r->failed_word=i;return e;}
++   if(actual!=value){c->r->failed_word=i;return 11;}c->r->tcm_verified_words++;read_crc=KebabGmuBootCrcWord(read_crc,actual);
++  }
++ }
++ c->r->tcm_crc=~crc;c->r->read_crc=~read_crc;if(crc!=read_crc)return 11;
++ c->ledger->tcm_verified=1;c->ledger->tcm_crc=~crc;return KebabGmuBootBarrier(c);
++}
++static inline int KebabGmuBootResetAndLoad(KebabGmuBootContext *c)
++{
++ const unsigned reg[3]={0,1,1};const uint32_t off[3]={0x71154,0x109c,0x1098};uint32_t v;int e;
++ if(c->ledger->attempted)return 95;
++ for(unsigned i=0;i<3;i++){if((e=KebabGmuBootRaw(c,reg[i],off[i],&c->r->before[i])))return e;c->r->before_valid|=1u<<i;}
++ if((c->r->before[2]&0x80000001u)!=0x80000000u)return 95;
++ if((e=KebabGmuBootClockGates(c,0)))return e;c->ledger->attempted=1;
++ /* AHB and MEMNOC are already genuinely held by CC/bus; AXI/CXO next,
++  * GMU1098 is the last producer clock. No optional trace vote or111c. */
++ for(unsigned i=0;i<3;i++)if((e=KebabGmuBootEnable(c,i)))return e;
++ c->ledger->phase=KGB_CLOCKS_READY;if((e=KebabGmuBootClockGates(c,1)))return e;
++ if((e=c->io->open_gmu(c->io->cookie))){c->r->io_error=e;return 5;}
++ if((e=KebabGmuBootWrite(c,2,0x14000,UINT32_MAX,1,0)))return e;
++ c->ledger->reset_issued=1;c->r->reset_write_issued=1;
++ if((e=KebabGmuBootRaw(c,2,0x14000,&v)))return e;c->r->reset_readback=v;
++ if(!(v&1))return 11;/* controller readback, not a fictional physical ACK */
++ c->ledger->phase=KGB_RESET_ASSERTED;
++ if((e=KebabGmuBootWrite(c,2,0x14730,UINT32_MAX,1,0)))return e;
++ if((e=KebabGmuBootRaw(c,2,0x14730,&v)))return e;if(v!=1)return 11;
++ if((e=KebabGmuBootLoadTcm(c)))return e;c->ledger->phase=KGB_RESET_HELD_TCM;return 0;
++}
++/* Next launch stage is fully bounded, but native entry remains closed until
++ * actual GPU-local RSC, bandwidth and IRQ owners are integrated. No CAP bool
++ * grants them. Queues-ready is NOT HFI messages initialized or GPU ready. */
++static inline int KebabGmuBootPoll(KebabGmuBootContext *c,unsigned region,uint32_t off,uint32_t mask,uint32_t desired,uint32_t *last)
++{
++ int e;uint32_t v;uint64_t poll_start=c->io->now_us(c->io->cookie);
++ for(unsigned i=0;i<100;i++){
++  uint64_t poll_now=c->io->now_us(c->io->cookie);if(poll_now<poll_start || poll_now-poll_start>=10000)return 110;
++  if((e=KebabGmuBootClockGates(c,1)))return e;
++  if((e=KebabGmuBootRaw(c,2,0x24c14,&v)))return e;c->r->irq_ao_status=v;if(v&0x29)return 5;
++  if((e=KebabGmuBootRaw(c,2,0x14648,&v)))return e;c->r->irq_hfi_status=v;if(v&KGB_OTA_HFI_CM3_FAULT)return 5;
++  if((e=KebabGmuBootRaw(c,region,off,&v)))return e;*last=v;c->r->polls++;
++  poll_now=c->io->now_us(c->io->cookie);if(poll_now<poll_start || poll_now-poll_start>=10000)return 110;
++  if((v&mask)==desired)return 0;if((e=KebabGmuBootDelay(c,100)))return e;
++ }return 110;
++}
++static inline int KebabGmuBootLaunchReady(uint32_t owned_mask,uint32_t chipid,unsigned bw_mode)
++{
++ return bw_mode<=KGB_BW_RETAIN_INHERITED_NO_WRITE && chipid==0x06050200u &&
++  (owned_mask&(KGB_NEED_RSC|KGB_NEED_IRQ))==(KGB_NEED_RSC|KGB_NEED_IRQ) &&
++  ((owned_mask&KGB_NEED_BANDWIDTH) || bw_mode==KGB_BW_RETAIN_INHERITED_NO_WRITE);
++}
++static inline int KebabGmuBootStartFirmwareWithBandwidth(KebabGmuBootContext *c,uint32_t owned_mask,uint32_t chipid,unsigned bw_mode)
++{
++ uint32_t v;int e;c->r->missing_owners=(KGB_NEED_RSC|KGB_NEED_BANDWIDTH|KGB_NEED_IRQ)&~owned_mask;
++ if(!KebabGmuBootLaunchReady(owned_mask,chipid,bw_mode))return 95;
++ c->r->bandwidth_qualified=!!(owned_mask&KGB_NEED_BANDWIDTH);
++ c->r->retained_bandwidth=!c->r->bandwidth_qualified;
++ if(c->ledger->phase!=KGB_RESET_HELD_TCM || !c->ledger->tcm_verified)return 95;
++ if((e=KebabGmuBootClockGates(c,1)))return e;
++ if((e=KebabGmuBootRaw(c,2,0x14000,&v)))return e;if(!(v&1))return 11;
++ if((e=KebabGmuBootRaw(c,2,0x14600,&v)))return e;if(v&1)return 16; /* reject stale queues-ready */
++ if((e=KebabGmuBootRaw(c,2,0x24c20,&v)))return e;if(v&2)return 16; /* require fresh RSC ack */
++ if((e=KebabGmuBootWrite(c,2,0x24c1c,UINT32_MAX,2,0)))return e;
++ if((e=KebabGmuBootPoll(c,2,0x24c20,2,2,&c->r->rsc_ack)))return e;
++ if((e=KebabGmuBootPoll(c,3,0x404,UINT32_MAX,0,&c->r->rsc_busy)))return e;
++ if((e=KebabGmuBootWrite(c,2,0x24c1c,UINT32_MAX,0,0)))return e;
++ const uint32_t init[][2]={{0x143c4,1},{0x143c0,1},{0x14070,0},{0x14004,2},{0x14614,0x60001000},{0x14610,1},
++  {0x24c44,0x802800a0},{0x140b4,0x4052},{0x14608,0x06050200},{0x14400,0x60006000},
++  {0x1303c,1},{0x13000,1},{0x13004,1},{0x14300,0x09c40400}};
++ for(unsigned i=0;i<sizeof(init)/sizeof(init[0]);i++)if((e=KebabGmuBootWrite(c,2,init[i][0],UINT32_MAX,init[i][1],0)))return e;
++ if((e=KebabGmuBootRaw(c,2,0x14070,&v)))return e;if(v)return 11;c->r->fw_init_fresh_zero=1;
++ if((e=KebabGmuBootRaw(c,2,0x143a0,&v)))return e;
++ if((e=KebabGmuBootWrite(c,2,0x143a0,0xf11,0xf11,v)))return e;
++ if((e=KebabGmuBootWrite(c,2,0x14404,UINT32_MAX,0,0)))return e;
++ c->r->firmware_start_requested=1;c->ledger->phase=KGB_FW_STARTING;
++ if((e=KebabGmuBootWrite(c,2,0x14000,UINT32_MAX,0,0)))return e;
++ if((e=KebabGmuBootPoll(c,2,0x14070,0x1ff,0x100,&c->r->fw_init_result)))return e;
++ c->r->fw_init_ack=1;c->ledger->phase=KGB_FW_RUNNING;
++ if((e=KebabGmuBootWrite(c,2,0x14618,UINT32_MAX,1,0)))return e;
++ if((e=KebabGmuBootPoll(c,2,0x14600,1,1,&c->r->hfi_status)))return e;
++ c->r->hfi_ctrl_ack=1;c->ledger->phase=KGB_HFI_QUEUES_READY;return 0;
++}
++static inline int KebabGmuBootStartFirmware(KebabGmuBootContext *c,uint32_t owned_mask,uint32_t chipid)
++{return KebabGmuBootStartFirmwareWithBandwidth(c,owned_mask,chipid,KGB_BW_REQUIRE_QUALIFIED);}
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabGmuFirmwareBinding.h
+@@ -0,0 +1,7 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GMU_FIRMWARE_BINDING_H
++#define KEBAB_GMU_FIRMWARE_BINDING_H
++/* Only a fresh real RESET_HELD_TCM + current namespace epoch + actual IRQ
++ * and RSC owners can qualify the future reviewed native entry. */
++static const unsigned KebabGmuFirmwareLaunchQualified=1;
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabGmuFirmwareOwner.h
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GMU_FIRMWARE_OWNER_H
++#define KEBAB_GMU_FIRMWARE_OWNER_H
++#include "KebabGmuBootOwner.h"
++#include "KebabGpuLaunchResourceOwner.h"
++#include "KebabGmuIrqOwner.h"
++#ifdef __cplusplus
++extern "C" {
++#endif
++int kebab_rpmh_gpu_gmu_launch(const KebabGpuColdToken *,uint64_t,
++ const KebabGpuLaunchResourceToken *,const KebabGmuIrqToken *,const KebabGmuBootIo *,KebabGmuBootRecord *);
++int kebab_gpu_gmu_launch_active_locked(const KebabGpuColdToken *,uint64_t);
++int kebab_gpu_gmu_firmware_write_stage_locked(const KebabGpuColdToken *,uint64_t,unsigned stage);
++/* Before any resource allocation/write: borrow the existing real IRQ owner,
++ * without acquire, copying, extra child refs or weakening its identity API. */
++int kebab_rpmh_gpu_gmu_firmware_irq_preflight(const KebabGpuColdToken *,uint64_t,const KebabGmuIrqToken *);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabGmuHfiBinding.h
+@@ -0,0 +1,7 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GMU_HFI_BINDING_H
++#define KEBAB_GMU_HFI_BINDING_H
++/* A future real FW_INIT/HFI_CTRL + current owners/backing is required.
++ * The present candidate and host results grant no device execution. */
++static const unsigned KebabGmuHfiVersionQualified=1;
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabGmuHfiCore.h
+@@ -0,0 +1,109 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GMU_HFI_CORE_H
++#define KEBAB_GMU_HFI_CORE_H
++#include <stdint.h>
++#include <string.h>
++typedef struct {
++ void *cookie;int(*gate)(void *);
++ int(*read_shared)(void *,uint32_t,uint32_t *);int(*write_shared)(void *,uint32_t,uint32_t);
++ int(*read_reg)(void *,uint32_t,uint32_t *);int(*write_reg)(void *,uint32_t,uint32_t);
++ int(*barrier)(void *);int(*delay_us)(void *,uint32_t);uint64_t(*now_us)(void *);
++} KebabGmuHfiIo;
++typedef struct {uint32_t attempted,quarantined,sequence,version_verified;} KebabGmuHfiSession;
++typedef struct {
++ uint32_t magic,schema,bytes,result,stage,io_error,failed_offset,shared_reads,shared_writes,register_reads,register_writes;
++ uint32_t barriers,polls,delay_us,request_header,response_header,response_request,response_error,returned_version;
++ uint32_t cmd_read,cmd_write,response_read,response_write,irq_info,ao_status,packet_published,doorbell_issued,ack_consumed;
++ uint32_t version_verified,hfi_initialized,dma_observed,quarantined,evidence_replayed;
++ uint64_t elapsed_us;
++} KebabGmuHfiRecord;
++typedef struct {const KebabGmuHfiIo *io;KebabGmuHfiSession *session;KebabGmuHfiRecord *record;uint64_t start;} KebabGmuHfiContext;
++static inline void KebabGmuHfiInit(KebabGmuHfiRecord *r)
++{memset(r,0,sizeof *r);r->magic=0x4946484b;r->schema=1;r->bytes=sizeof *r;r->result=95;}
++static inline int KebabGmuHfiGate(KebabGmuHfiContext *c)
++{int e=c->io->gate(c->io->cookie);if(e)c->record->io_error=e;return e?95:0;}
++static inline int KebabGmuHfiRead(KebabGmuHfiContext *c,unsigned reg,uint32_t off,uint32_t *v)
++{int e=KebabGmuHfiGate(c);if(e)return e;if(reg)c->record->register_reads++;else c->record->shared_reads++;
++ e=reg?c->io->read_reg(c->io->cookie,off,v):c->io->read_shared(c->io->cookie,off,v);
++ if(e){c->record->io_error=e;c->record->failed_offset=off;}return e?5:0;}
++static inline int KebabGmuHfiWrite(KebabGmuHfiContext *c,unsigned reg,uint32_t off,uint32_t v)
++{int e=KebabGmuHfiGate(c);if(e)return e;if(reg)c->record->register_writes++;else c->record->shared_writes++;
++ e=reg?c->io->write_reg(c->io->cookie,off,v):c->io->write_shared(c->io->cookie,off,v);
++ if(e){c->record->io_error=e;c->record->failed_offset=off;}return e?5:0;}
++static inline int KebabGmuHfiBarrier(KebabGmuHfiContext *c)
++{int e=KebabGmuHfiGate(c);if(e)return e;c->record->barriers++;e=c->io->barrier(c->io->cookie);if(e)c->record->io_error=e;return e?5:0;}
++static inline int KebabGmuHfiFaults(KebabGmuHfiContext *c)
++{int e;if((e=KebabGmuHfiRead(c,1,0x24c14,&c->record->ao_status)))return e;
++ if((e=KebabGmuHfiRead(c,1,0x14648,&c->record->irq_info)))return e;
++ return (c->record->ao_status&0x29) || (c->record->irq_info&0x8000)?5:0;}
++static inline int KebabGmuHfiTable(KebabGmuHfiContext *c)
++{
++ const uint32_t table[6]={0,54,6,12,4,4};uint32_t v;int e;
++ for(unsigned i=0;i<6;i++){if((e=KebabGmuHfiRead(c,0,i*4,&v)))return e;if(v!=table[i])return 11;}
++ const uint32_t types[4]={0xa00,0xa01,0x2802,0x1403};
++ for(unsigned q=0;q<4;q++){
++  const uint32_t expect[5]={q<3?1u:0u,0x60001000u+224+4096*q,types[q],1024,0};
++  for(unsigned i=0;i<5;i++){if((e=KebabGmuHfiRead(c,0,24+48*q+4*i,&v)))return e;if(v!=expect[i])return 11;}
++ }return 0;
++}
++static inline int KebabGmuHfiIndices(KebabGmuHfiContext *c)
++{
++ KebabGmuHfiRecord *r=c->record;int e;
++ if((e=KebabGmuHfiRead(c,0,64,&r->cmd_read)))return e;
++ if((e=KebabGmuHfiRead(c,0,68,&r->cmd_write)))return e;
++ if((e=KebabGmuHfiRead(c,0,112,&r->response_read)))return e;
++ if((e=KebabGmuHfiRead(c,0,116,&r->response_write)))return e;
++ if((r->cmd_read|r->cmd_write|r->response_read|r->response_write)&3)return 11;
++ return r->cmd_read<1024 && r->cmd_write<1024 && r->response_read<1024 && r->response_write<1024?0:11;
++}
++/* One native bring-up probe: a real OTA HFI2 FW_VERSION command and matching
++ * ACK. It is NOT the PERF/BW/CORE_FW_START initialization sequence. */
++static inline int KebabGmuHfiVersion(KebabGmuHfiContext *c)
++{
++ KebabGmuHfiRecord *r=c->record;KebabGmuHfiSession *s=c->session;uint32_t v,packet[19],size,used,idx;int e=95;
++ if(s->attempted || s->quarantined)return 95;
++ if(!c->io || !c->io->gate || !c->io->read_shared || !c->io->write_shared || !c->io->read_reg || !c->io->write_reg ||
++    !c->io->barrier || !c->io->delay_us || !c->io->now_us)return 22;
++ if((e=KebabGmuHfiTable(c)))goto done;if((e=KebabGmuHfiIndices(c)))goto done;
++ if(r->cmd_read!=r->cmd_write || r->response_read!=r->response_write){e=16;goto done;}
++ if((e=KebabGmuHfiFaults(c)))goto done;if(r->irq_info&1){e=16;goto done;}
++ if(s->sequence || s->version_verified){e=95;goto done;}
++ s->attempted=1;s->sequence=1;c->start=c->io->now_us(c->io->cookie);
++ r->request_header=(1u<<20)|(2u<<8)|1;r->stage=1;idx=r->cmd_write;
++ if((e=KebabGmuHfiWrite(c,0,224+4*idx,r->request_header)))goto done;idx=(idx+1)&1023;
++ if((e=KebabGmuHfiWrite(c,0,224+4*idx,0x20000000)))goto done;idx=(idx+1)&1023;
++ for(unsigned n=0;n<2;n++){if((e=KebabGmuHfiWrite(c,0,224+4*idx,0xfafafafa)))goto done;idx=(idx+1)&1023;}
++ if((e=KebabGmuHfiBarrier(c)))goto done;
++ if((e=KebabGmuHfiWrite(c,0,68,idx)))goto done;r->packet_published=1;
++ if((e=KebabGmuHfiBarrier(c)))goto done;
++ if((e=KebabGmuHfiWrite(c,1,0x14650,1)))goto done;r->doorbell_issued=1;r->stage=2;
++ for(unsigned n=0;n<50;n++){
++  if((e=KebabGmuHfiFaults(c)))goto done;r->polls++;
++  uint64_t now=c->io->now_us(c->io->cookie);if(now<c->start || now-c->start>=5000){e=110;goto done;}
++  if(r->irq_info&1)break;
++  if((e=KebabGmuHfiGate(c)))goto done;r->delay_us+=100;e=c->io->delay_us(c->io->cookie,100);if(e){r->io_error=e;e=5;goto done;}
++ }
++ if(!(r->irq_info&1)){e=110;goto done;}
++ if((e=KebabGmuHfiBarrier(c)))goto done;
++ if((e=KebabGmuHfiIndices(c)))goto done;
++ if(r->cmd_read!=idx || r->cmd_write!=idx){e=11;goto done;}
++ used=(r->response_write-r->response_read)&1023;if(!used){e=11;goto done;}
++ if((e=KebabGmuHfiRead(c,0,224+4096+4*r->response_read,&v)))goto done;
++ size=(v>>8)&255;r->response_header=v;
++ if(size<4 || size>19 || used<((size+3)&~3u) || ((v>>16)&15)!=1){e=11;goto done;}
++ idx=r->response_read;memset(packet,0,sizeof packet);
++ for(unsigned i=0;i<size;i++){if((e=KebabGmuHfiRead(c,0,224+4096+4*idx,&packet[i])))goto done;idx=(idx+1)&1023;}
++ r->response_request=packet[1];r->response_error=packet[2];r->returned_version=packet[3];
++ if(packet[1]!=r->request_header || packet[2] || packet[3]!=0x20010008){e=11;goto done;}
++ {uint64_t now=c->io->now_us(c->io->cookie);if(now<c->start || now-c->start>=5000){e=110;goto done;}}
++ idx=(idx+3)&~3u;idx&=1023;
++ if((e=KebabGmuHfiWrite(c,1,0x14644,1)))goto done;/* Only owned MSGQ0; OOB/fault bits preserved. */
++ if((e=KebabGmuHfiWrite(c,0,112,idx)))goto done;r->ack_consumed=1;
++ if((e=KebabGmuHfiBarrier(c)))goto done;
++ s->version_verified=1;r->version_verified=1;r->dma_observed=1;r->stage=3;e=0;
++done:
++ if(s->attempted && e){s->quarantined=1;r->quarantined=1;}
++ if(s->attempted)r->elapsed_us=c->io->now_us(c->io->cookie)-c->start;
++ r->result=e;return e;
++}
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabGmuHfiOwner.h
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GMU_HFI_OWNER_H
++#define KEBAB_GMU_HFI_OWNER_H
++#include "KebabGmuFirmwareOwner.h"
++#include "KebabGpuLaunchResourceAfterFw.h"
++#include "KebabGmuHfiCore.h"
++#ifdef __cplusplus
++extern "C" {
++#endif
++int kebab_rpmh_gpu_gmu_hfi_version(const KebabGpuColdToken *,uint64_t,
++ const KebabGpuLaunchResourceToken *,const KebabGmuIrqToken *,const KebabGmuBootIo *,const KebabGmuHfiIo *,KebabGmuHfiRecord *);
++int kebab_gpu_gmu_hfi_gate_locked(const KebabGpuColdToken *,uint64_t);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabGpuLaunchResourceAfterFw.h
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GPU_LAUNCH_RESOURCE_AFTER_FW_H
++#define KEBAB_GPU_LAUNCH_RESOURCE_AFTER_FW_H
++#include "KebabGpuLaunchResourceOwner.h"
++#ifdef __cplusplus
++extern "C" {
++#endif
++/* Same canonical busy, real private FW_INIT/HFI_CTRL ACKs and queues-ready
++ * phase only. Not a substitute for the strict reset/prelaunch verifier. */
++int kebab_gpu_launch_resources_verify_after_fw_locked(
++ const KebabGpuLaunchResourceToken *,const KebabGpuColdToken *,uint64_t,unsigned required_mask);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabGpuLaunchResourceCore.h
+@@ -0,0 +1,140 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GPU_LAUNCH_RESOURCE_CORE_H
++#define KEBAB_GPU_LAUNCH_RESOURCE_CORE_H
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++/* A650 named rscc03de0000/10000 and PDCcfg0b290000/10000 only.
++ * Facts from fixed7c2b vendor + v6.12. No legacy GMU+23000 fallback,
++ * PDC-seq/TCS programming, CM3 release, IRQ, QMP/ACD or PAS operation.
++ * Run under the ONE canonical RPMh busy lock with a private reset-held gate.
++ * Transport callbacks below are native kernel peers, never user/CAP inputs. */
++enum {KLR_RSC=0,KLR_PDC=1,KLR_GMU=2,KLR_CC=3,KLR_GCC=4,KLR_NEED_RSC=1,KLR_NEED_BW=2};
++enum {KLR_BW_RETAIN_INHERITED_NO_WRITE=1};
++enum {KLR_EMPTY=0,KLR_PREPARING=1,KLR_RSC_SLEEPING=2,KLR_READY=3,KLR_QUARANTINED=4};
++typedef struct {
++ uint32_t magic,schema,bytes,result,state,attempts,ready_mask,quarantined;
++ uint32_t reads,writes,barriers,delays,polls,failed_region,failed_offset,failed_operation;
++ int32_t io_error;uint32_t last_read,last_write,reset_readback,req,ack,busy,status0;
++ uint32_t pdc_enable,pdc_start,sequence_verified,initial_bw_level,ddr_ib_kbps,cnoc_ib_kbps;
++ uint32_t bw_commands,bw_acked,bw_uncertain,firmware_started,async_hfi_ready,reserved;
++ uint32_t bandwidth_mode,bandwidth_qualified;int32_t bootstrap_vote_result;
++ uint64_t elapsed_us;
++} KebabGpuLaunchResourceRecord;
++typedef struct {uint32_t attempted,ready_mask,quarantined,touched;} KebabGpuLaunchResourceLedger;
++typedef struct {
++ void *cookie;
++ int (*gate_reset_held_locked)(void *);
++ int (*read32)(void *,unsigned,uint32_t,uint32_t *);
++ int (*write32)(void *,unsigned,uint32_t,uint32_t);
++ int (*barrier)(void *);
++ int (*delay_us)(void *,unsigned);
++ uint64_t (*now_us)(void *);
++} KebabGpuLaunchResourceIo;
++typedef struct {
++ const KebabGpuLaunchResourceIo *io;KebabGpuLaunchResourceLedger *ledger;
++ KebabGpuLaunchResourceRecord *r;uint64_t begin;
++} KebabGpuLaunchResourceContext;
++typedef struct {uint32_t offset,value;} KLRSetting;
++static const KLRSetting KLRRscSetup[]={
++ {0x10,0x01000000},{0x2c,1},{0x38,0},{0x34,0},{0x40,0},{0x3c,0},
++ {0x48,0x80000000},{0x44,0},{0x400,0},{0x20,0x4520},{0x24,0x4510},{0x28,0x4514},
++ {0x600,0xeaaae5a0},{0x604,0xe1a1ebab},{0x608,0xa2e0a581},{0x60c,0xecac82e2},{0x610,0x0020edad}
++};
++static inline void KLRInit(KebabGpuLaunchResourceRecord *r)
++{memset(r,0,sizeof *r);r->magic=0x31524c4b;r->schema=1;r->bytes=sizeof *r;r->result=95;r->failed_region=r->failed_offset=UINT32_MAX;r->bootstrap_vote_result=INT32_MIN;}
++static inline int KLRReadAllowed(unsigned region,uint32_t off)
++{
++ if(region==KLR_GMU)return off==0x14000 || off==0x24c1c || off==0x24c20;
++ if(region==KLR_PDC)return off==0x4500 || off==0x4520;
++ if(region==KLR_CC)return off==0x1098 || off==0x109c || off==0x1120 || off==0x1124;
++ if(region==KLR_GCC)return off==0x71154;
++ if(region!=KLR_RSC)return 0;if(off==0x404)return 1;
++ for(unsigned i=0;i<sizeof(KLRRscSetup)/sizeof(KLRRscSetup[0]);i++)if(off==KLRRscSetup[i].offset)return 1;return 0;
++}
++static inline int KLRWriteAllowed(unsigned region,uint32_t off,uint32_t value)
++{
++ if(region==KLR_PDC)return (off==0x4500 && value==0x80000001) || (off==0x4520 && !value);
++ if(region==KLR_GMU)return off==0x24c1c && value<=1;
++ if(region!=KLR_RSC)return 0;
++ for(unsigned i=0;i<sizeof(KLRRscSetup)/sizeof(KLRRscSetup[0]);i++)if(off==KLRRscSetup[i].offset && value==KLRRscSetup[i].value)return 1;return 0;
++}
++static inline int KLRGate(KebabGpuLaunchResourceContext *c)
++{
++ int e=c->io->gate_reset_held_locked(c->io->cookie);if(e)return e;
++ uint64_t now=c->io->now_us(c->io->cookie);if(now<c->begin || now-c->begin>=100000)return 110;return 0;
++}
++static inline int KLRRead(KebabGpuLaunchResourceContext *c,unsigned region,uint32_t off,uint32_t *value)
++{
++ int e;if(!value || !KLRReadAllowed(region,off))return 22;if((e=KLRGate(c)))return e;
++ c->r->reads++;e=c->io->read32(c->io->cookie,region,off,value);
++ if(e){c->r->failed_region=region;c->r->failed_offset=off;c->r->failed_operation=1;c->r->io_error=e;return e;}
++ c->r->last_read=*value;return 0;
++}
++static inline int KLRWrite(KebabGpuLaunchResourceContext *c,unsigned region,uint32_t off,uint32_t value)
++{
++ int e;if(!KLRWriteAllowed(region,off,value))return 22;if((e=KLRGate(c)))return e;
++ c->ledger->touched=1;c->r->writes++;c->r->last_write=value;
++ e=c->io->write32(c->io->cookie,region,off,value);
++ if(e){c->r->failed_region=region;c->r->failed_offset=off;c->r->failed_operation=2;c->r->io_error=e;return e;}
++ c->r->barriers++;e=c->io->barrier(c->io->cookie);
++ if(e){c->r->failed_operation=3;c->r->io_error=e;}return e;
++}
++static inline int KLRSync(KebabGpuLaunchResourceContext *c,unsigned region,uint32_t off,uint32_t value,uint32_t mask)
++{
++ uint32_t got;int e;if((e=KLRWrite(c,region,off,value)))return e;
++ uint64_t begin=c->io->now_us(c->io->cookie);
++ for(unsigned i=0;i<1000;i++){
++  if((e=KLRRead(c,region,off,&got)))return e;
++  if((got&mask)==(value&mask))return 0;
++  uint64_t now=c->io->now_us(c->io->cookie);if(now<begin || now-begin>=10000)break;
++ }c->r->failed_region=region;c->r->failed_offset=off;c->r->failed_operation=4;return 110;
++}
++static inline int KLRPoll(KebabGpuLaunchResourceContext *c,unsigned region,uint32_t off,uint32_t mask,uint32_t wanted,uint32_t *last)
++{
++ int e;uint64_t begin=c->io->now_us(c->io->cookie);
++ for(unsigned i=0;i<100;i++){
++  if((e=KLRRead(c,region,off,last)))return e;c->r->polls++;
++  if((*last&mask)==wanted)return 0;
++  uint64_t now=c->io->now_us(c->io->cookie);if(now<begin || now-begin>=10000)break;
++  c->r->delays++;if((e=c->io->delay_us(c->io->cookie,100))){c->r->io_error=e;c->r->failed_operation=5;return e;}
++ }c->r->failed_region=region;c->r->failed_offset=off;c->r->failed_operation=6;return 110;
++}
++static inline int KLRConfigureRsc(KebabGpuLaunchResourceContext *c)
++{
++ uint32_t v;int e;
++ if((e=KLRRead(c,KLR_GMU,0x14000,&v)))return e;c->r->reset_readback=v;if(!(v&1))return 95;
++ if((e=KLRRead(c,KLR_GMU,0x24c1c,&v)))return e;c->r->req=v;if(v)return 16;
++ if((e=KLRRead(c,KLR_GMU,0x24c20,&v)))return e;c->r->ack=v;if(v&2)return 16;
++ if((e=KLRRead(c,KLR_RSC,0x404,&v)))return e;c->r->busy=v;if(v)return 16;
++ for(unsigned i=0;i<sizeof(KLRRscSetup)/sizeof(KLRRscSetup[0]);i++){
++  const KLRSetting *w=&KLRRscSetup[i];uint32_t mask=w->offset==0x10?0x01000000u:UINT32_MAX;
++  if((e=KLRSync(c,KLR_RSC,w->offset,w->value,mask)))return e;
++ }c->r->sequence_verified=1;
++ /* A650 pdc_in_aop=true: only these two config registers. The AOP owns
++  * sequence/TCS scripts. Never map or write the PDC sequence resource. */
++ if((e=KLRSync(c,KLR_PDC,0x4520,0,UINT32_MAX)))return e;c->r->pdc_start=0;
++ if((e=KLRSync(c,KLR_PDC,0x4500,0x80000001,0x80000001)))return e;c->r->pdc_enable=0x80000001;
++ /* Source-backed initial stop leaves a known sleeping RSC. The separate
++  * GMU launch core later performs fresh REQ2/ACK2/BUSY0/REQ0 wake. */
++ if((e=KLRSync(c,KLR_GMU,0x24c1c,1,UINT32_MAX)))return e;c->r->req=1;
++ if((e=KLRPoll(c,KLR_RSC,0x10,1u<<16,1u<<16,&c->r->status0)))return e;
++ if((e=KLRSync(c,KLR_GMU,0x24c1c,0,UINT32_MAX)))return e;c->r->req=0;
++ if((e=KLRPoll(c,KLR_GMU,0x24c20,2,0,&c->r->ack)))return e;
++ if((e=KLRPoll(c,KLR_RSC,0x404,UINT32_MAX,0,&c->r->busy)))return e;
++ c->ledger->ready_mask|=KLR_NEED_RSC;c->r->ready_mask=c->ledger->ready_mask;c->r->state=KLR_RSC_SLEEPING;return 0;
++}
++/* Caller claims its private one-shot ledger before invoking this function.
++ * Unknown writes/timeouts quarantine and retain all parent/map resources.
++ * There are no retry, restore, disable, release or sleep fallbacks here. */
++static inline int KLRPrepareRsc(const KebabGpuLaunchResourceIo *io,KebabGpuLaunchResourceLedger *ledger,KebabGpuLaunchResourceRecord *r)
++{
++ if(!io || !ledger || !r || !io->gate_reset_held_locked || !io->read32 || !io->write32 || !io->barrier || !io->delay_us || !io->now_us)return 22;
++ KLRInit(r);if(ledger->attempted){r->ready_mask=ledger->ready_mask;r->quarantined=ledger->quarantined;return r->result=ledger->quarantined?5:16;}
++ ledger->attempted=1;r->attempts=1;r->state=KLR_PREPARING;
++ KebabGpuLaunchResourceContext c={io,ledger,r,io->now_us(io->cookie)};int e=KLRConfigureRsc(&c);
++ uint64_t now=io->now_us(io->cookie);r->elapsed_us=now>=c.begin?now-c.begin:0;
++ if(e && ledger->touched){ledger->quarantined=1;r->quarantined=1;r->state=KLR_QUARANTINED;}
++ r->result=(uint32_t)e;return e;
++}
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabGpuLaunchResourceOwner.h
+@@ -0,0 +1,22 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GPU_LAUNCH_RESOURCE_OWNER_H
++#define KEBAB_GPU_LAUNCH_RESOURCE_OWNER_H
++#include "KebabGpuLaunchResourceCore.h"
++#include "KebabGpuColdOwner.h"
++/* Kernel-private identity. Never serialize/reconstruct it from a CAP, and
++ * never use a caller-provided ready bit as an owner/namespace proof. */
++typedef struct {
++ uint64_t generation,namespace_epoch;uint32_t held,ready_mask,bandwidth_mode,reserved;
++} KebabGpuLaunchResourceToken;
++#ifdef __cplusplus
++static_assert(sizeof(KebabGpuLaunchResourceRecord)==168,"launch resources record v1");
++extern "C" {
++#endif
++int kebab_rpmh_gpu_launch_resources_prepare(const KebabGpuColdToken *,uint64_t,
++ KebabGpuLaunchResourceToken *,const KebabGpuLaunchResourceIo *,KebabGpuLaunchResourceRecord *);
++int kebab_gpu_launch_resources_verify_locked(const KebabGpuLaunchResourceToken *,const KebabGpuColdToken *,uint64_t,unsigned required_mask);
++int kebab_rpmh_gpu_launch_resources_snapshot(KebabGpuLaunchResourceRecord *);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- a/osfmk/kern/Makefile
++++ b/osfmk/kern/Makefile
+@@ -36,6 +36,14 @@
+ 	kern_private.modulemap
+ 
+ EXPORT_FILES = \
++	KebabGmuFirmwareOwner.h \
++	KebabGmuFirmwareBinding.h \
++	KebabGpuLaunchResourceCore.h \
++	KebabGpuLaunchResourceOwner.h \
++	KebabGpuLaunchResourceAfterFw.h \
++	KebabGmuHfiCore.h \
++	KebabGmuHfiOwner.h \
++	KebabGmuHfiBinding.h \
+ 	affinity.h \
+ 	assert.h \
+ 	audit_sessionport.h \

@@ -1,0 +1,43 @@
+--- a/osfmk/kern/KebabGpuCcCore.h
++++ b/osfmk/kern/KebabGpuCcCore.h
+@@ -51,6 +51,9 @@
+ static inline uint32_t KebabGpuCcControlMask(unsigned slot)
+ {/* CBCR31 CLK_OFF and28..30 NOC_FSM are RO status, not control bits. */
+  return slot==4 || slot==5?0x0fffffffu:0x7fffffffu;}
++static inline int KebabGpuCcGmuClockQuiet(uint32_t value)
++{/* No owned CM3 reset exists: require branch disabled AND reported halted. */
++ return (value&0x80000001u)==0x80000000u;}
+ static inline int KebabGpuCcRaw(KebabGpuCcContext *c,unsigned slot,uint32_t *out)
+ {
+  unsigned region=0;uint32_t offset=0,value=0;int e;if(!out || !KebabGpuCcOffset(slot,&region,&offset))return 22;
+@@ -131,7 +134,7 @@
+ {
+  int e=KebabGpuCcSnapshot(c,0);if(e)return e;
+  /* Probe normally clears HW_CONTROL/SW_OVERRIDE; native must not seize it. */
+- if(c->r->action==KebabGpuCcEnableHold && (c->r->before[0][2]&6))return 95;
++ if(c->r->action==KebabGpuCcEnableHold && ((c->r->before[0][2]&6) || !KebabGpuCcGmuClockQuiet(c->r->before[0][5])))return 95;
+  return 0;
+ }
+ static inline int KebabGpuCcEnable(KebabGpuCcContext *c)
+@@ -151,16 +154,17 @@
+  e=KebabGpuCcUpdate(c,4,1,1,b->ahb_control);if(e)return e;b->ahb_control|=1;
+  if((e=KebabGpuCcDelay(c,10)) || (e=KebabGpuCcSnapshot(c,1)))return e;
+  if((r->after[0][2]&0x7fffffffu)!=b->gdscr_control || !(r->after[0][3]&0x80000000u) ||
+- (r->after[0][4]&KebabGpuCcControlMask(4))!=b->ahb_control || (r->after[0][5]&KebabGpuCcControlMask(5))!=(b->original_gmu&KebabGpuCcControlMask(5)))return 11;
++ (r->after[0][4]&KebabGpuCcControlMask(4))!=b->ahb_control || (r->after[0][5]&KebabGpuCcControlMask(5))!=(b->original_gmu&KebabGpuCcControlMask(5)) ||
++ !KebabGpuCcGmuClockQuiet(r->after[0][5]))return 11;
+  r->ahb_request_ack=1;r->ahb_reported_running=(r->after[0][4]&0x80000000u)==0;
+  b->held=1;r->retention_added=b->retention_added;return 0;
+ }
+ static inline int KebabGpuCcRestoreSaved(KebabGpuCcContext *c)
+ {
+  KebabGpuCcLedger *b=c->ledger;KebabGpuCcRecord *r=c->r;int e;
+- /* No GMU execution/quiesce owner exists in this phase. If restoring an
+-  * originally collapsed domain, do not collapse it with GMU clock enabled. */
+- if((b->original_gdscr&1) && (r->before[0][5]&1))return 95;
++ /* No GMU execution/quiesce owner exists in this phase. Do not withdraw
++  * any controller hold while this branch is enabled or not reported halted. */
++ if(!KebabGpuCcGmuClockQuiet(r->before[0][5]))return 95;
+  if((r->before[0][2]&0x7fffffffu)!=b->gdscr_control || (r->before[0][4]&KebabGpuCcControlMask(4))!=b->ahb_control ||
+  (r->before[0][5]&KebabGpuCcControlMask(5))!=(b->original_gmu&KebabGpuCcControlMask(5)))return 11;
+  e=KebabGpuCcUpdate(c,4,1,b->original_ahb&1,b->ahb_control);if(e)return e;

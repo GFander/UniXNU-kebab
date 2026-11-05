@@ -1,0 +1,81 @@
+--- a/iokit/Kernel/arm/KebabSmmu4K.h
++++ b/iokit/Kernel/arm/KebabSmmu4K.h
+@@ -4,7 +4,7 @@
+ #include <stdint.h>
+ #include <stddef.h>
+ #include <string.h>
+-/* Authored AArch64 stage1 32-bit IOVA/PA, 4KiB tables, read-only non-executable
++/* Authored AArch64 stage1 32-bit IOVA/36-bit PA, 4KiB tables, read-only non-executable
+  * normal-NC data (MAIR index0 must separately be configured to0x44). This is a
+  * builder, not a hardware domain: no MMIO, DMA, TLB or cache maintenance. The
+  * caller must pin, clean and retain the pool before any hardware publication. */
+@@ -12,17 +12,17 @@
+ typedef struct {uint64_t root_pa,map_bytes;uint32_t pages_used,mapped_pages;} KebabSmmu4KInfo;
+ static uint64_t *kebab_io4k_child(uint64_t *pool,size_t bytes,uint64_t pa,uint64_t entry)
+ {
+- uint64_t address=entry&0xfffff000ULL;
+- if((entry&~0xfffff003ULL) || (entry&3)!=3 || address<pa || address-pa>bytes-4096)return NULL;
++ uint64_t address=entry&0xffffff000ULL;
++ if((entry&~0xffffff003ULL) || (entry&3)!=3 || address<pa || address-pa>bytes-4096)return NULL;
+  return pool+(address-pa)/8;
+ }
+ static int KebabSmmu4KBuild(uint64_t *pool,size_t bytes,uint64_t pool_pa,uint64_t iova,uint64_t physical,uint64_t length,KebabSmmu4KInfo *out)
+ {
+  if(out)memset(out,0,sizeof *out);
+  if(!pool || !out || ((uintptr_t)pool&7) || bytes<4096 || bytes>65536 || (bytes&4095) ||
+-    (pool_pa&4095) || pool_pa<0x20000 || pool_pa>0x100000000ULL-bytes ||
++    (pool_pa&4095) || pool_pa<0x20000 || pool_pa>0x1000000000ULL-bytes ||
+     (iova&4095) || (physical&4095) || (length&4095) || !length || length>0x1000000 ||
+-    iova<0x20000 || physical<0x20000 || iova>0x100000000ULL-length || physical>0x100000000ULL-length ||
++    iova<0x20000 || physical<0x20000 || iova>0x100000000ULL-length || physical>0x1000000000ULL-length ||
+     (physical<pool_pa+bytes && pool_pa<physical+length))return 1;
+  memset(pool,0,bytes);unsigned used=1;
+  for(uint64_t offset=0;offset<length;offset+=4096) {
+@@ -42,10 +42,10 @@
+ static int KebabSmmu4KTranslate(const uint64_t *pool,size_t bytes,uint64_t pool_pa,uint64_t iova,uint64_t *physical)
+ {
+  if(!pool || !physical || ((uintptr_t)pool&7) || bytes<4096 || bytes>65536 || (bytes&4095) || (pool_pa&4095) ||
+-    pool_pa>0x100000000ULL-bytes || iova>=0x100000000ULL)return 1;
++    pool_pa>0x1000000000ULL-bytes || iova>=0x100000000ULL)return 1;
+  const uint64_t *middle=kebab_io4k_child((uint64_t *)pool,bytes,pool_pa,pool[iova>>30]);if(!middle)return 2;
+  const uint64_t *leaf=kebab_io4k_child((uint64_t *)pool,bytes,pool_pa,middle[(iova>>21)&511]);if(!leaf)return 2;
+- uint64_t entry=leaf[(iova>>12)&511];if((entry&~0xfffff000ULL)!=KEBAB_IO4K_ATTRS)return 2;
+- *physical=(entry&0xfffff000ULL)|(iova&4095);return 0;
++ uint64_t entry=leaf[(iova>>12)&511];if((entry&~0xffffff000ULL)!=KEBAB_IO4K_ATTRS)return 2;
++ *physical=(entry&0xffffff000ULL)|(iova&4095);return 0;
+ }
+ #endif
+--- a/iokit/Kernel/arm/KebabNativeIovaProbe.h
++++ b/iokit/Kernel/arm/KebabNativeIovaProbe.h
+@@ -16,19 +16,26 @@
+ static int kebab_native_iova_probe(uint64_t physical,uint64_t length,KebabNativeIovaProbe *out)
+ {
+  if(!out)return 22;
+- memset(out,0,sizeof *out);out->magic=0x34564f49;out->schema=1;out->bytes=sizeof *out;out->table_bytes=65536;out->granule=4096;out->result=22;
++ memset(out,0,sizeof *out);out->magic=0x34564f49;out->schema=2;out->bytes=sizeof *out;out->table_bytes=65536;out->granule=4096;out->result=22;
+  if(!length || length>0x1000000 || (physical&4095) || physical<0x20000 || physical>0x100000000ULL-length)return 0;
+  uint64_t span=(length+4095)&~4095ULL;
+  if(physical>0x100000000ULL-span)return 0;
+  out->iova_low=(uint32_t)physical;out->iova_high=(uint32_t)(physical>>32);out->span_low=(uint32_t)span;out->span_high=(uint32_t)(span>>32);
+- auto memory=IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,kIODirectionOut|kIOMemoryPhysicallyContiguous|kIOMemoryMapperNone,65536,0xffffffffULL);
+- out->result=12;if(!memory || memory->getLength()<65536)return 0;
+- uint64_t *pool=(uint64_t *)memory->getBytesNoCopy();if(!pool || ((uintptr_t)pool&7))return 0;
++ /* IOVA width is independent of the physical page-table address width.
++  * The primary XNU RAM begins above8GiB; require the live board's4K/36-bit
++  * SMMU capability rather than requesting an impossible sub4GiB pool. */
++ KebabNativeDisplaySnapshot hardware={};
++ out->result=95;
++ if(kebab_native_display_snapshot(physical,&hardware) || hardware.smmu_result ||
++    !(hardware.smmu.id2&(1u<<12)) || ((hardware.smmu.id2>>4)&15)!=1)return 0;
++ auto memory=IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,kIODirectionOut|kIOMemoryPhysicallyContiguous|kIOMemoryMapperNone,65536,0xfffffffffULL);
++ out->result=12;if(!memory)return 0;out->result=75;if(memory->getLength()<65536)return 0;
++ out->result=14;uint64_t *pool=(uint64_t *)memory->getBytesNoCopy();if(!pool || ((uintptr_t)pool&7))return 0;
+  out->prepare_result=memory->prepare(kIODirectionOut);if(out->prepare_result){out->result=5;return 0;}
+  {
+   IOByteCount extent=0;uint64_t pa=memory->getPhysicalSegment(0,&extent,kIOMemoryMapperNone);
+   out->result=5;
+-  if(!pa || (pa&4095) || pa>0x100000000ULL-65536 || extent<65536)goto complete;
++  if(!pa || (pa&4095) || pa>0x1000000000ULL-65536 || extent<65536)goto complete;
+   for(unsigned offset=0;offset<65536;offset+=4096) {
+    extent=0;uint64_t actual=memory->getPhysicalSegment(offset,&extent,kIOMemoryMapperNone);
+    if(actual!=pa+offset || extent<4096)goto complete;

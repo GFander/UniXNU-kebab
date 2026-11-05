@@ -1,0 +1,155 @@
+{
+  "version": "0592",
+  "recorded": "2026-11-04T13:48:12.877663+08:00",
+  "accepted": false,
+  "original_safety_accepted": true,
+  "safety": {
+    "accepted": true,
+    "version": "0592",
+    "normal_primary_bytes": 8587837440,
+    "extra_memory_admitted": 0,
+    "original_crypto_defaults_RTC_NVRAM_watchdog_preserved": true,
+    "watchdog_seconds": 304.489,
+    "capture_closed": true,
+    "frame_transport_physical_not_yet_qualified": true
+  },
+  "lowdma_failure": {
+    "accepted": false,
+    "failure_evidence_captured": true,
+    "samples": [
+      {
+        "metadata": {
+          "schema": 2,
+          "source": 20,
+          "argument": 0,
+          "width": 0,
+          "height": 0,
+          "stride": 0,
+          "format": 0,
+          "total": 256,
+          "content_crc": 3992809198,
+          "stable": 1,
+          "frame_id": 0,
+          "flags": 2,
+          "surface_id": 0,
+          "generation": 0,
+          "session": 2,
+          "exercised": [
+            "input-crc",
+            "out-of-order-get",
+            "wrong-ack-crc",
+            "repeat-get-identical"
+          ]
+        },
+        "sha256": "698575ca81c3a6957621d89ef973d4e0521f39328e4577745b43eb14eb9dc804"
+      },
+      {
+        "metadata": {
+          "schema": 2,
+          "source": 20,
+          "argument": 0,
+          "width": 0,
+          "height": 0,
+          "stride": 0,
+          "format": 0,
+          "total": 256,
+          "content_crc": 3992809198,
+          "stable": 1,
+          "frame_id": 0,
+          "flags": 2,
+          "surface_id": 0,
+          "generation": 0,
+          "session": 3,
+          "exercised": []
+        },
+        "sha256": "698575ca81c3a6957621d89ef973d4e0521f39328e4577745b43eb14eb9dc804"
+      },
+      {
+        "metadata": {
+          "schema": 2,
+          "source": 20,
+          "argument": 0,
+          "width": 0,
+          "height": 0,
+          "stride": 0,
+          "format": 0,
+          "total": 256,
+          "content_crc": 3992809198,
+          "stable": 1,
+          "frame_id": 0,
+          "flags": 2,
+          "surface_id": 0,
+          "generation": 0,
+          "session": 4,
+          "exercised": []
+        },
+        "sha256": "698575ca81c3a6957621d89ef973d4e0521f39328e4577745b43eb14eb9dc804"
+      }
+    ],
+    "serial_released": true,
+    "LOWDMA_attempts": 1,
+    "native_result": 14,
+    "native_flags": 31,
+    "raw_PA": 2548436992,
+    "raw_bytes": 2113536,
+    "image_PA": 2549088256,
+    "metadata_PA": 2550136832,
+    "efi_records": 116,
+    "managed_banks": 0,
+    "NC_mapped": false,
+    "PAS_ready": false
+  },
+  "LOWDMA_attempts": 1,
+  "measured_lowDMA_qualified": false,
+  "NC": "NOT_RUN",
+  "PAS13": "NOT_RUN",
+  "GPU_chain_regression": "NOT_RUN0592",
+  "A650_FIRST_RENDER": "NOT_RUN0592; FAIL0591 retained",
+  "manual_GUI_0592": {
+    "source": "Explicit owner chat reply",
+    "reply": "正常",
+    "SpringBoard": "PASS",
+    "tap_open_application": "PASS",
+    "return_home_gesture": "PASS",
+    "brightness": "DEFERRED"
+  },
+  "source": {
+    "git": "d5c9c62db752f225a288b88959d3754edc94138a",
+    "branch": "gpu/adreno650-20261103",
+    "common": 446,
+    "host": 4,
+    "files": 5456,
+    "patch": "0467"
+  },
+  "native_sha256": "91d4ace690385fde17cd241b696ad629db60152deaeaf5f14fb23eb4aa82fde7",
+  "boot_sha256": "849381d83c3266dabf1f11bbde6dc2743332fd29d274151fc27d979482bf8b33",
+  "serial_released": true,
+  "diagnosis": "Readiness gate checks g_crypto_funcs although the actual SHA256/SHA384 entry points use in-tree built-in providers. Plan actual known-answer selftest prerequisite in0593, retain result14 on true failure and all one-shot/ownership checks.",
+  "host_corrections": [
+    "Waiting raw-before-worker post cancelled before serial. LOWDMA must precede CAP20 measured query.",
+    "Original crypto-regression helper count445 corrected to actual446; original failure retained and whole original safety re-evaluated on same raw log."
+  ],
+  "evidence": {
+    "native-dpu-0592\\normal-baseline-qualified.json": "f980fed543d3643edebe07a4ed5c00a03136ad34c08e5876b5bf2d25ca85ab0c",
+    "native-dpu-0592\\finalize-baseline-v2-output.txt": "713228120f4ad11bbbc015e9f81c57a95e145172e6822cb7062c7f59cf2a8e26",
+    "native-dpu-0592\\finalize-baseline-output.txt.original-host-failure": "17aa7e86a97fbdb8442d8735b78cf20a1deb015ddf5a7e32fe42c94e95fa1281",
+    "native-dpu-0592\\post-lowdma-prerequisite-order-corrected.json": "ca9b843964b16ef0624bf2d0fb4e604cc48e32406ada24d7a8e5077ad83098f4",
+    "native-dpu-0592\\post-baseline-lowdma-once-v2.py": "f34b1bc6d63f7b56a425e1223e98d47af4c00a7beabdc5c71a6103cc5d2515e6",
+    "native-dpu-0592\\post-lowdma-after-baseline-recovery.log": "3a5a86203b3fccfb3d479bb62e9077f0f518ced59d56af8b1f89bc5ddb7f4a59",
+    "native-dpu-0592\\live-measured-lowdma\\result.json": "4d2e952df4612f174f7d0bc78f75f748d1c1f9037e35e7ebb641c82c5a5beb84",
+    "native-dpu-0592\\live-measured-lowdma\\console.log": "2e27e470afb810843dacc3714b09ae077178e17395c7b5d0526153e1dcbb1abe",
+    "native-dpu-0592\\live-measured-lowdma\\wire.private.bin": "e530062d3d41e2f0734abc0cbaa3daf1c01ff6cb023e19d7befb2f26096dfff8",
+    "native-dpu-0592\\live-measured-lowdma\\measured-0.private.bin": "698575ca81c3a6957621d89ef973d4e0521f39328e4577745b43eb14eb9dc804",
+    "native-dpu-0592\\live-lowdma-failure-frozen\\result.json": "bf4b891629aa748f702c7c72ad33dc27058f328ceb6a127a010fbf08554402cb",
+    "native-dpu-0592\\live-lowdma-failure-frozen\\console.log": "19b937ae7cfc76d6cb16a41e99bd31f4325f08653538d7ecb405762b6aed9f83",
+    "native-dpu-0592\\live-lowdma-failure-frozen\\wire.private.bin": "df3fc66ee242448c912abbb0f795e1ef5fa654beaada8bcb77d66453837ff35a",
+    "native-dpu-0592\\live-lowdma-failure-frozen\\lowdma-failed-0.private.bin": "698575ca81c3a6957621d89ef973d4e0521f39328e4577745b43eb14eb9dc804",
+    "native-dpu-0592\\live-lowdma-failure-frozen\\lowdma-failed-1.private.bin": "698575ca81c3a6957621d89ef973d4e0521f39328e4577745b43eb14eb9dc804",
+    "native-dpu-0592\\live-lowdma-failure-frozen\\lowdma-failed-2.private.bin": "698575ca81c3a6957621d89ef973d4e0521f39328e4577745b43eb14eb9dc804",
+    "0592-flash.json": "d3d5f7edc1c5b299643088739b0a792f3f0013fbe1101993e79e5fa4c62db84f",
+    "0592-media-boot.log": "21b576d76333d136216a859f3468f5bc9b5638920360d89883943d72c99d397f",
+    "0592-A-qualified.json": "a444d21b00d0650232a7dd54349947f9e90e4b5ac43ebe91448efcea983b65ad",
+    "0592-systembag-qualified.json": "0527d88773308cfc2d92c7e45b8771365c060dfb3a261818c528a2d4e01119bd",
+    "0592-defaults-qualified.json": "5a89f2b13c2b7935802233f703139646393f8a74ee6c14e2cacf5a59e13d2092"
+  }
+}

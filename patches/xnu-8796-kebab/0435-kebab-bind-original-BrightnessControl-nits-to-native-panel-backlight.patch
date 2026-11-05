@@ -1,0 +1,233 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -115,6 +115,7 @@
+ #include "KebabNativeMdpClockTest.h"
+ #include "KebabNativeAsidSnapshot.h"
+ #include "KebabNativeDsiProbe.h"
++#include "KebabNativeBacklightService.h"
+ extern "C" void kebab_display_dsi_probe(void) { kebab_native_dsi_probe(); }
+ extern "C" void kebab_display_clock_test(void) { kebab_native_mdp_clock_test(); }
+ 
+@@ -223,6 +224,7 @@
+ 
+ 	bool init(OSDictionary *properties = NULL) APPLE_KEXT_OVERRIDE;
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++    IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
+ 	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void free() APPLE_KEXT_OVERRIDE;
+ 	bool available();
+@@ -359,6 +361,13 @@
+ {
+ 	releaseResources();
+ 	IOMobileFramebuffer::free();
++}
++
++IOReturn
++AppleCLCD::setProperties(OSObject *properties)
++{
++    if(kebab_backlight_service_handles(properties))return kebab_backlight_service_set_properties(this,properties);
++    return IOMobileFramebuffer::setProperties(properties);
+ }
+ 
+ bool
+@@ -439,6 +448,7 @@
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+ 	setProperty("external", false);
+ 	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
++    kebab_native_backlight_bind(this); /* Real framebuffer entry; match only after DCS qualification. */
+ 	registerService();
+ 	IOLog("KEBAB FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, "
+ 	    "presented as %ux%u (panel origin %d,%d)\n",
+--- a/iokit/Kernel/arm/KebabNativeDsiProbe.h
++++ b/iokit/Kernel/arm/KebabNativeDsiProbe.h
+@@ -2,6 +2,9 @@
+ #include "KebabDsiPioCore.h"
+ #include "KebabBrightnessRecord.h"
+ #include <kern/thread_call.h>
++static bool kebab_backlight_service_update_locked(uint32_t);
++static void kebab_backlight_service_ready(void);
++static void kebab_backlight_service_status_locked(uint32_t out[3]);
+ struct KebabNativeDsiProbeReceipt {
+  uint32_t magic,schema,bytes,started,finished,error,count,software_delta;
+  KebabDsiPioObservation observation[9];uint32_t user_brightness[16];
+@@ -61,6 +64,20 @@
+ {return kebab_dsi_probe_map(m,0,0x100000,0x10000)&&kebab_dsi_probe_map(m,1,0xaf00000,0x4000)&&kebab_dsi_probe_map(m,2,0xae94000,0x400);}
+ static void kebab_dsi_probe_unmap(KebabNativeDisplayMaps *m)
+ {for(unsigned n=3;n;n--){unsigned i=n-1;if(m->map[i])m->map[i]->release();if(m->memory[i])m->memory[i]->release();}}
++/* Called only in normal thread context with the shared DSI lock held. */
++static int kebab_native_backlight_apply_locked(uint32_t target)
++{
++ if(target>2047)return 22;
++ KebabNativeDisplayMaps m={};KebabDsiPioObservation sent={},read={};kebab_brightness_error=12;kebab_brightness_attempts++;
++ if(!panic_active()&&kebab_dsi_probe_maps(&m)){
++  KebabDsiPioIo io={&m,kebab_dsi_probe_read,kebab_dsi_probe_write,kebab_clock_test_delay};
++  kebab_brightness_error=KebabDsiPioBrightness(&io,target,&sent);
++  if(!kebab_brightness_error)kebab_brightness_error=KebabDsiPioRead(&io,0x52,2,&read);
++  if(!kebab_brightness_error&&read.value!=target)kebab_brightness_error=71;
++  if(!kebab_brightness_error){kebab_brightness_applied=read.value;if(!kebab_backlight_service_update_locked(read.value))kebab_brightness_error=12;}
++ }
++ kebab_dsi_probe_unmap(&m);if(kebab_brightness_error)kebab_brightness_ready=0;return(int)kebab_brightness_error;
++}
+ static int kebab_native_backlight_queue(const void *record,size_t bytes)
+ {
+  KebabBrightnessRecord value;int error=KebabBrightnessRecordDecode(record,bytes,&value);
+@@ -86,15 +103,7 @@
+   if(!(request>>32)||request==kebab_brightness_done)break;
+   if(!kebab_brightness_ready){kebab_brightness_error=95;break;}
+   uint32_t target=(uint32_t)(request&65535),limit=(uint32_t)((request>>16)&65535);if(target>limit)target=limit;
+-  KebabNativeDisplayMaps m={};KebabDsiPioObservation sent={},read={};kebab_brightness_error=12;kebab_brightness_attempts++;
+-  if(!panic_active()&&kebab_dsi_probe_maps(&m)){
+-   KebabDsiPioIo io={&m,kebab_dsi_probe_read,kebab_dsi_probe_write,kebab_clock_test_delay};
+-   kebab_brightness_error=KebabDsiPioBrightness(&io,target,&sent);
+-   if(!kebab_brightness_error)kebab_brightness_error=KebabDsiPioRead(&io,0x52,2,&read);
+-   if(!kebab_brightness_error&&read.value!=target)kebab_brightness_error=71;
+-   if(!kebab_brightness_error)kebab_brightness_applied=read.value;
+-  }
+-  kebab_dsi_probe_unmap(&m);kebab_brightness_done=request;
++  (void)kebab_native_backlight_apply_locked(target);kebab_brightness_done=request;
+   IOLog("KEBAB BRIGHTNESS: request=%u target=%u actual=%u error=%u; native DCS51/52\n",(uint32_t)(request>>32),target,kebab_brightness_applied,kebab_brightness_error);
+   if(kebab_brightness_error){kebab_brightness_ready=0;break;}
+  }
+@@ -141,16 +150,17 @@
+ done:
+  __atomic_store_n(&kebab_dsi_probe_finished,1,__ATOMIC_RELEASE);
+  IOLog("KEBAB DSIPROBE: result error=%u count=%u power=%x brightness=%u/%u/%u id=%x/%x/%x software-delta=%u; PIO panel read and restored DCS51 brightness test\n",r->error,r->count,r->observation[0].value,r->observation[1].value,r->observation[6].value,r->observation[8].value,r->observation[2].value,r->observation[3].value,r->observation[4].value,r->software_delta);
++ kebab_backlight_service_ready();
+  IOLog("KEBAB DSIPROBE: end;\n");
+- if(kebab_brightness_ready)thread_call_enter(kebab_brightness_call);
++ if(kebab_brightness_call)thread_call_enter(kebab_brightness_call);
+ }
+ static void kebab_native_dsi_probe_receipt(KebabNativeDsiProbeReceipt *out)
+ {
+- memset(out,0,sizeof *out);out->magic=0x31525044;out->schema=1;out->bytes=sizeof *out;
++ memset(out,0,sizeof *out);out->magic=0x31525044;out->schema=2;out->bytes=sizeof *out;
+  out->started=__atomic_load_n(&kebab_dsi_probe_started,__ATOMIC_ACQUIRE);out->finished=__atomic_load_n(&kebab_dsi_probe_finished,__ATOMIC_ACQUIRE);
+  if(out->finished){out->error=kebab_dsi_probe_result.error;out->count=kebab_dsi_probe_result.count;out->software_delta=kebab_dsi_probe_result.software_delta;memcpy(out->observation,kebab_dsi_probe_result.observation,sizeof out->observation);}
+  if(kebab_dsi_lock){IOLockLock(kebab_dsi_lock);uint64_t request=__atomic_load_n(&kebab_brightness_request,__ATOMIC_ACQUIRE);
+   out->user_brightness[0]=kebab_brightness_ready;out->user_brightness[1]=(uint32_t)(request>>32);out->user_brightness[2]=(uint32_t)(request&65535);out->user_brightness[3]=(uint32_t)((request>>16)&65535);
+   out->user_brightness[4]=(uint32_t)(kebab_brightness_done>>32);out->user_brightness[5]=kebab_brightness_applied;out->user_brightness[6]=kebab_brightness_error;out->user_brightness[7]=kebab_brightness_attempts;out->user_brightness[8]=__atomic_load_n(&kebab_brightness_invalid,__ATOMIC_RELAXED);
+-  uint64_t raw=__atomic_load_n(&kebab_brightness_raw,__ATOMIC_ACQUIRE),limit=__atomic_load_n(&kebab_brightness_limit_raw,__ATOMIC_ACQUIRE);out->user_brightness[9]=(uint32_t)raw;out->user_brightness[10]=(uint32_t)(raw>>32);out->user_brightness[11]=(uint32_t)limit;out->user_brightness[12]=(uint32_t)(limit>>32);IOLockUnlock(kebab_dsi_lock);}
++  uint64_t raw=__atomic_load_n(&kebab_brightness_raw,__ATOMIC_ACQUIRE),limit=__atomic_load_n(&kebab_brightness_limit_raw,__ATOMIC_ACQUIRE);out->user_brightness[9]=(uint32_t)raw;out->user_brightness[10]=(uint32_t)(raw>>32);out->user_brightness[11]=(uint32_t)limit;out->user_brightness[12]=(uint32_t)(limit>>32);kebab_backlight_service_status_locked(out->user_brightness+13);IOLockUnlock(kebab_dsi_lock);}
+ }
+--- a/iokit/Kernel/arm/KebabBrightnessRecord.h
++++ b/iokit/Kernel/arm/KebabBrightnessRecord.h
+@@ -4,21 +4,14 @@
+ #include <stdint.h>
+ #include <stddef.h>
+ #include <string.h>
++#include "KebabBacklightNits.h"
+ typedef struct {uint32_t brightness_present,limit_present,brightness,limit;} KebabBrightnessRecord;
+ /* Fixed20H392 _kern_SwapSetBrightness writes flag/context+0x2ff and double
+  * context+0x304; SwapEnd passes context+0x18,1132bytes. Limit is flag+0x300,
+  * double+0x30c. Kernel uses integer IEEE754 decoding; no FP state is touched. */
+ static int kebab_brightness_level(uint64_t bits,uint32_t *out)
+ {
+- if(!out||(bits>>63)||bits>0x3ff0000000000000ULL)return 22;
+- unsigned exponent=(unsigned)(bits>>52);uint64_t mantissa=bits&0xfffffffffffffULL;
+- if(exponent)mantissa|=1ULL<<52;
+- unsigned shift=exponent?1075-exponent:1074;
+- uint64_t product=mantissa*2047;
+- if(shift>64)*out=0;
+- else if(shift==64)*out=(uint32_t)(product>>63);
+- else *out=(uint32_t)((product>>shift)+((product&((1ULL<<shift)-1))>=(1ULL<<(shift-1))));
+- return 0;
++ return kebab_backlight_double_nits_level(bits,out);
+ }
+ static int KebabBrightnessRecordDecode(const void *record,size_t bytes,KebabBrightnessRecord *out)
+ {
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabBacklightNits.h
+@@ -0,0 +1,27 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_BACKLIGHT_NITS_H
++#define KEBAB_BACKLIGHT_NITS_H
++#include <stdint.h>
++/* Pinned kebab DTS peak5400000 / Qualcomm binding10000 = nominal540nits.
++ * Linear device-level control profile; not measured photometry, calibration
++ * of the panel's nonlinear response, HBM or HDR enablement. */
++#define KEBAB_BACKLIGHT_LEVEL_MAX 2047u
++#define KEBAB_BACKLIGHT_NITS_MAX 540u
++#define KEBAB_BACKLIGHT_NITS_Q16_MAX (540u*65536u)
++static int kebab_backlight_nits_q16_level(uint64_t nits,uint32_t *level)
++{
++ if(!level||nits>KEBAB_BACKLIGHT_NITS_Q16_MAX)return 22;
++ *level=(uint32_t)((nits*2047+KEBAB_BACKLIGHT_NITS_Q16_MAX/2)/KEBAB_BACKLIGHT_NITS_Q16_MAX);return 0;
++}
++static uint32_t kebab_backlight_level_millinits(uint32_t level)
++{return level<=2047?(uint32_t)(((uint64_t)level*540000+1023)/2047):0;}
++static int kebab_backlight_double_nits_level(uint64_t bits,uint32_t *level)
++{
++ if(!level||(bits>>63)||bits>0x4080e00000000000ULL)return 22; /* positive finite <=540 */
++ unsigned exponent=(unsigned)(bits>>52);uint64_t mantissa=bits&0xfffffffffffffULL;
++ if(exponent)mantissa|=1ULL<<52;
++ unsigned shift=exponent?1059-exponent:1058;
++ uint64_t q16=shift>=64?0:mantissa>>shift; /* Matches original fcvtzs nits,#16. */
++ return kebab_backlight_nits_q16_level(q16,level);
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeBacklightService.h
+@@ -0,0 +1,63 @@
++/* SPDX-License-Identifier: MIT */
++#include <libkern/c++/OSDictionary.h>
++#include <libkern/c++/OSNumber.h>
++#include "KebabBacklightNits.h"
++static IOService *kebab_backlight_service;
++static uint32_t kebab_backlight_published,kebab_backlight_service_requests,kebab_backlight_service_error,kebab_backlight_last_nits;
++static bool kebab_backlight_parameter(OSDictionary *parameters,const char *key,uint32_t maximum,uint32_t actual)
++{
++ OSDictionary *range=OSDictionary::withCapacity(3);OSNumber *minimum=OSNumber::withNumber(0ULL,32),*max=OSNumber::withNumber((uint64_t)maximum,32),*value=OSNumber::withNumber((uint64_t)actual,32);
++ bool ok=range&&minimum&&max&&value;
++ if(ok)ok=range->setObject("min",minimum)&&range->setObject("max",max)&&range->setObject("value",value)&&parameters->setObject(key,range);
++ if(value)value->release();if(max)max->release();if(minimum)minimum->release();if(range)range->release();return ok;
++}
++static bool kebab_backlight_service_update_locked(uint32_t level)
++{
++ if(!kebab_backlight_service)return true;
++ if(level>2047)return false;
++ OSDictionary *parameters=OSDictionary::withCapacity(2);if(!parameters)return false;
++ bool ok=kebab_backlight_parameter(parameters,"brightness",2047,level)&&kebab_backlight_parameter(parameters,"BrightnessMilliNits",540000,kebab_backlight_level_millinits(level));
++ if(ok)ok=kebab_backlight_service->setProperty("IODisplayParameters",parameters);
++ parameters->release();return ok;
++}
++static void kebab_native_backlight_bind(IOService *service)
++{
++ if(!kebab_backlight_service&&service){service->retain();kebab_backlight_service=service;}
++}
++static void kebab_backlight_service_ready(void)
++{
++ if(!kebab_backlight_service||!kebab_dsi_lock)return;
++ bool publish=false;IOLockLock(kebab_dsi_lock);
++ if(kebab_brightness_ready&&!kebab_backlight_published&&kebab_backlight_service_update_locked(kebab_brightness_applied)){
++  bool built=kebab_backlight_service->setProperty("built-in",true);
++  bool control=built&&kebab_backlight_service->setProperty("backlight-control",true);
++  if(control){kebab_backlight_published=1;publish=true;}
++ }
++ IOLockUnlock(kebab_dsi_lock);
++ if(publish){kebab_backlight_service->registerService();IOLog("KEBAB BACKLIGHT: native backlight-control published after real DCS qualification; nominal540nits/2047levels, linear reference profile\n");}
++}
++static bool kebab_backlight_service_handles(OSObject *properties)
++{
++ OSDictionary *dict=OSDynamicCast(OSDictionary,properties);
++ return dict&&(dict->getObject("brightness-nits")||dict->getObject("brightness"));
++}
++static void kebab_backlight_service_status_locked(uint32_t out[3])
++{out[0]=kebab_backlight_service_requests;out[1]=kebab_backlight_last_nits;out[2]=kebab_backlight_service_error;}
++static IOReturn kebab_backlight_service_set_properties(IOService *service,OSObject *properties)
++{
++ OSDictionary *dict=OSDynamicCast(OSDictionary,properties);if(!dict||dict->getCount()!=1)return kIOReturnBadArgument;
++ bool nits=dict->getObject("brightness-nits")!=NULL;OSNumber *number=OSDynamicCast(OSNumber,dict->getObject(nits?"brightness-nits":"brightness"));
++ if(!number)return kIOReturnBadArgument;
++ uint64_t input=number->unsigned64BitValue();uint32_t level=0;
++ if(nits){if(kebab_backlight_nits_q16_level(input,&level))return kIOReturnBadArgument;}
++ else {if(input>2047)return kIOReturnBadArgument;level=(uint32_t)input;}
++ if(!service||service!=kebab_backlight_service||service->isInactive()||!kebab_dsi_lock)return kIOReturnNoDevice;
++ IOLockLock(kebab_dsi_lock);int error=95;
++ if(kebab_brightness_ready&&!panic_active()){
++  kebab_backlight_service_requests++;kebab_backlight_last_nits=nits?(uint32_t)input:(uint32_t)(((uint64_t)level*KEBAB_BACKLIGHT_NITS_Q16_MAX)/2047);
++  error=kebab_native_backlight_apply_locked(level);
++ }
++ kebab_backlight_service_error=(uint32_t)error;IOLockUnlock(kebab_dsi_lock);
++ IOLog("KEBAB BACKLIGHT: service input=%llu unit=%s target=%u error=%u; actual DCS51/52 before success\n",input,nits?"nits-Q16.16":"device-level",level,(unsigned)error);
++ return !error?kIOReturnSuccess:error==95?kIOReturnNotReady:error==12?kIOReturnNoMemory:kIOReturnIOError;
++}

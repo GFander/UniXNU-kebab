@@ -1,0 +1,61 @@
+--- a/osfmk/kern/KebabA650RenderBinding.h
++++ b/osfmk/kern/KebabA650RenderBinding.h
+@@ -4,7 +4,7 @@
+ #include <stdint.h>
+ 
+ enum {KebabA650RenderNativeQualified = 1};
+-static const uint8_t KebabA650RenderSourceContract[32] = {0x1a, 0xb0, 0x29, 0x31, 0x06, 0x50, 0xa9, 0x24, 0xe9, 0xb8, 0xf9, 0x96, 0x1c, 0xca, 0xe9, 0xdf, 0x54, 0x39, 0x35, 0x7d, 0x5b, 0x6a, 0x49, 0x66, 0x05, 0x4a, 0x8c, 0x32, 0x41, 0xb6, 0xdf, 0x2a};
++static const uint8_t KebabA650RenderSourceContract[32] = {0xc2, 0xb6, 0x6f, 0x33, 0x26, 0xb4, 0x5b, 0x15, 0x45, 0x47, 0x47, 0x96, 0x6e, 0xb1, 0x0c, 0xf3, 0x9c, 0x09, 0x37, 0xa3, 0x36, 0x59, 0x53, 0x03, 0xff, 0x9b, 0xd2, 0x86, 0xd1, 0x18, 0x56, 0x04};
+ 
+ static inline int
+ KARSourceBound(void)
+--- a/osfmk/kern/KebabA650RenderCore.h
++++ b/osfmk/kern/KebabA650RenderCore.h
+@@ -15,7 +15,10 @@
+     KAR_TARGET_SPACING = 0x4000,
+     KAR_SENTINEL = 0xa5,
+     KAR_PASSES = 2,
+-    KAR_WORDS = 128,
++    KAR_WORDS = 132,
++    KAR_SCHEMA = 2,
++    KAR_CONTROL_OFFSET = 0x80,
++    KAR_CONTROL_VALUE = 0xa650c001u,
+     KAR_EVENT_OFFSET = 128,
+     KAR_EVENT_SPACING = 64,
+     KAR_EVENT_PASS_SPACING = 256,
+@@ -59,6 +62,13 @@
+         return 22;
+     }
+     uint32_t *p = *commands;
++    /* CP control write into the SAME 4KiB GPU target page, outside pixels.
++     * This is a visibility witness, never pixel generation or a draw result.
++     * Original0591 2D stream below is otherwise byte-for-byte unchanged. */
++    *p++ = KCPType7(0x3d, 3);
++    *p++ = KAR_TARGET_IOVA + KAR_CONTROL_OFFSET + pass * KAR_TARGET_SPACING;
++    *p++ = 0;
++    *p++ = KAR_CONTROL_VALUE + pass;
+     p = KARFlushEvent(p, 0x1d, KAREventOffset(pass, 0)); /* Color clean */
+     p = KARFlushEvent(p, 0x1c, KAREventOffset(pass, 1)); /* Depth clean */
+     *p++ = KCPType7(0x46, 1);
+@@ -120,6 +130,10 @@
+     for (uint32_t offset = 0; offset < KAR_BO_BYTES; ++offset) {
+         uint8_t expected = KAR_SENTINEL;
+         for (unsigned pass = 0; pass < completed; ++pass) {
++            const uint32_t control = offset - (KAR_CONTROL_OFFSET + pass * KAR_TARGET_SPACING);
++            if (control < 4) {
++                expected = (uint8_t)((KAR_CONTROL_VALUE + pass) >> (control * 8));
++            }
+             const uint32_t relative = offset - KARTargetOffset(pass);
+             if (relative < KAR_TARGET_BYTES && relative % KAR_PITCH < KAR_WIDTH * 4) {
+                 const unsigned x = relative % KAR_PITCH / 4;
+--- a/iokit/Kernel/arm/KebabNativeA650Render.h
++++ b/iokit/Kernel/arm/KebabNativeA650Render.h
+@@ -255,7 +255,7 @@
+         auto *record = kar_observation;
+         memset(record, 0, sizeof(*record));
+         record->magic = 0x3152414bu; /* KAR1 */
+-        record->schema = 1;
++        record->schema = KAR_SCHEMA;
+         record->bytes = sizeof(*record);
+         uint32_t touched = 0;
+         error = kebab_rpmh_gpu_cp_first_render(&kcp_native.owner, &touched);

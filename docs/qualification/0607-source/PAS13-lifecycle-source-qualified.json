@@ -1,0 +1,130 @@
+{
+  "source_audit_pass": true,
+  "physical_test": false,
+  "actual_PAS": "NOT_RUN/UNKNOWN",
+  "GPU_FIRST_RENDER": "0605 FAIL retained; no new draw",
+  "git_head": "d5c9c62db752f225a288b88959d3754edc94138a",
+  "linux_commit": "adc218676eef25575469234709c2d87185ca223a",
+  "alioth_commit": "f1883782125c9e4c6f5f3324c85ce980737caded",
+  "vendor_head": "7c2b1aedb5573d140684a9ecc918ce22af5f0817",
+  "vendor": {
+    "drivers/of/platform.c": {
+      "sha256": "bae0b20cb08637ec978cb6d27e6d3e12ef83b7f1bfc6d14a68da85b51e6fcd7b"
+    },
+    "drivers/of/device.c": {
+      "sha256": "277c0f869bd17979fdb600718afacf2895649e2e000fe2483f099f9cd66b4d49"
+    },
+    "drivers/soc/qcom/peripheral-loader.c": {
+      "sha256": "d5d91e370dd0a333ed867a380970bb059c1475f1f5c93be5b89c1da95a8b413d"
+    },
+    "drivers/soc/qcom/subsys-pil-tz.c": {
+      "sha256": "4998615a67a95eb179aac5e4437cd8fbb87124187c383d141636cc0eca76c437"
+    },
+    "drivers/gpu/msm/adreno_a6xx.c": {
+      "sha256": "116762a6097467261156d86c1b43b150558391f538b6cfc617e4635ba7a97bf7"
+    }
+  },
+  "original_PIL_nodes": [
+    {
+      "dtb_sha256": "b2ebdc5ad6ad53b4723ae7cb795df1664dc467b5906df1b416bd70443fdc4dd0",
+      "properties": {
+        "compatible": [
+          "qcom,pil-tz-generic"
+        ],
+        "qcom,pas-id": [
+          "0xd"
+        ],
+        "qcom,firmware-name": [
+          "a650_zap"
+        ],
+        "phandle": [
+          "0x51b"
+        ]
+      }
+    },
+    {
+      "dtb_sha256": "a5d6351aedca5a355cb731a9c1f59c649c98f18ef72c524aff76b1d28dbf3083",
+      "properties": {
+        "compatible": [
+          "qcom,pil-tz-generic"
+        ],
+        "qcom,pas-id": [
+          "0xd"
+        ],
+        "qcom,firmware-name": [
+          "a650_zap"
+        ],
+        "phandle": [
+          "0x51b"
+        ]
+      }
+    },
+    {
+      "dtb_sha256": "e07f8992f3ecbbbdafc5b64ff7ac98c429512c6200bed6b2b11501b7c75349c6",
+      "properties": {
+        "compatible": [
+          "qcom,pil-tz-generic"
+        ],
+        "qcom,pas-id": [
+          "0xd"
+        ],
+        "qcom,firmware-name": [
+          "a650_zap"
+        ],
+        "phandle": [
+          "0x51b"
+        ]
+      }
+    },
+    {
+      "dtb_sha256": "b2ebdc5ad6ad53b4723ae7cb795df1664dc467b5906df1b416bd70443fdc4dd0",
+      "properties": {
+        "compatible": [
+          "qcom,pil-tz-generic"
+        ],
+        "qcom,pas-id": [
+          "0xd"
+        ],
+        "qcom,firmware-name": [
+          "a650_zap"
+        ],
+        "phandle": [
+          "0x51b"
+        ]
+      }
+    }
+  ],
+  "original_DTB_export_sha256": "8669f921e55be3e978780d10dbf7acfec1fddfc2d8cb3ce1f33d0f71f224faa0",
+  "linux_files": {
+    "drivers\\soc\\qcom\\mdt_loader.c": "46e62e778d99f82357c3c76c0b5eaaf3333e25cc6873041251061b70b52265d1",
+    "drivers\\gpu\\drm\\msm\\adreno\\a6xx_gpu.c": "97f987be8d83fe2a3b3e7f14a764d5c586c9e2f31d20ec087536f20f98e767dc",
+    "drivers\\gpu\\drm\\msm\\adreno\\adreno_gpu.c": "f39e9682973e40a7b8d15fa82cdbc428c8942a73427769eeb9944ae2d6251626",
+    "drivers\\firmware\\qcom\\qcom_scm.c": "9acc34c37ab76323d593db972832a05291d053ffc4646ee76a500a5cc24f6bcd",
+    "arch\\arm64\\boot\\dts\\qcom\\sm8250.dtsi": "17481a4c55db7e946120744427c82137e56d932e2f31f62893ce189f8462bc96"
+  },
+  "upstream_files": {
+    "2026-10-31-zap-nondeterminism.md": "f2538aca4c35c90c30cc2ce2e501dd9f5435319a7e8dae2d52b347e2b09c15c5",
+    "github-fetch-exact.json": "74aa1cb1178eb24ecaac4bdd98198a766e7bec30bb002278cf660cace95a904b",
+    "GpuProbe-f188378.cpp": "63829e8c85e665947d1dd223638c32853ab83b21b21faa7c808065584fad8c6b"
+  },
+  "audit_sha256": "fa8b1a3b5fde1f1269d8106dfd1df1aa3fba2811014a37fe64bf442d61684558",
+  "source_profile": {
+    "address_bits": 32,
+    "basis": "Pinned vendor generic PIL device inherits OF 32-bit DMA masks; original PAS13 node has no IOMMU/fixed region override; relocatable loader uses DMA allocation. This is a constrained source profile, not measured secure-world aperture or support-query inference.",
+    "runtime_aperture_qualified": false
+  },
+  "mandatory_native_rules": [
+    "unchanged pre-VM generic PAS gate",
+    "one SCM token and same thread across complete lifecycle",
+    "pre-VM INIT/MEM/image copy; no protected metadata CPU access after INIT attempt",
+    "existing GPU VM/GX/OOB/CP initializers reused; no nested SCM in their call graph",
+    "no support-query retry, TRUST fallback or automatic ownership-changing retry"
+  ],
+  "remaining": [
+    "host/native implementation and machine-code checks",
+    "fresh hardware readiness and ownership checks",
+    "controlled once INIT/MEM/AUTH qualification",
+    "legal secure-exit hardware completion",
+    "unchanged0605 two-image pixel acceptance"
+  ]
+}

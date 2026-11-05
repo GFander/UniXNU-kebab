@@ -1,0 +1,53 @@
+{
+  "passed": true,
+  "qualification": "HOST_SOURCE_AND_CROSS_COMPILE_ONLY",
+  "upstream": "UniXNU/Adreno740",
+  "commit": "1030485546ef7ebb9abbfb7c17fbca93cca40971",
+  "license": "MIT",
+  "sources": {
+    "LICENSE": {
+      "git_blob": "8803ca3258ca670bd45c3ee0d411aa8297932a73",
+      "sha256": "16fbc0170994a48f60938d9f0d992d3bad113383cf90882f75c206e079c2a2dc",
+      "bytes": 1082
+    },
+    "NativeAdrenoABI.h": {
+      "git_blob": "48d72800f231aa887fa35a18801ff6917ec1be6b",
+      "sha256": "d1c8a27d6e61787073c2c56a779ff4d5c43d86f2d23ac0c0fba0368af8dcdeae",
+      "bytes": 9218
+    },
+    "NativeAdrenoClient.h": {
+      "git_blob": "0645c927a866382be840b90a7d23705de36a0a2c",
+      "sha256": "ac6a35c5b2e3080655cdf41870f0d0551d0961b773192f7adf2effe283f5e7aa",
+      "bytes": 2506
+    },
+    "NativeAdrenoClient.cpp": {
+      "git_blob": "db32a75f17b7b98e56abe44c0fa5bbbe90825f05",
+      "sha256": "305812e022fd8b0c113f07d78591c76579b9d0cff23cb3f2f2a5e9c4d9db717d",
+      "bytes": 8200
+    }
+  },
+  "host_production_client_test": "Actual Apple clang15 ASan/UBSan build and terminal exit0 observed by exec. Explicit callback model; no IOKit/device/GPU.",
+  "host_cases": [
+    "v1 refusal",
+    "unknown flags refusal",
+    "31bit output refusal",
+    "unaligned/oversize BO refusal",
+    "0/129 IB refusal with no transport call",
+    "128 IB full3104B record",
+    "timeout propagated with output Fence zero",
+    "closed client refuses transport"
+  ],
+  "cross_target": "arm64-apple-ios16.7",
+  "sdk": "iPhoneOS17.5; explicit macOS14.5 IOKit type framework",
+  "cross_objects": {
+    "client-ios16.o": "7d208ca97abf82458fdf273347a838e805e01138d094363ef5bc0bc72d9d8588",
+    "contract-ios16.o": "589876dfaac88658a6d418027ccdbafab90dac390d75bc8ac3510d4d38c0012f"
+  },
+  "Mac_readback_sha256": "c0213688abac230a8bb5d4394f74b2432e8a9cbaba84ade402c859e4a15f955c",
+  "test_sha256": "348d9981b92b7b4040636ed7b035fa8fdd0c5a44a0bedf4dbcb3e666fc9dbe12",
+  "native20H392_private_ABI": "NOT_QUALIFIED",
+  "GPU_IRQ_delivery": "NOT_RUN",
+  "A650_METAL_FIRST_EXECUTION": "NOT_RUN",
+  "no_device_IO": true,
+  "checkpoint_sha256": "60d469e29cae207e9209ebe17508a50834f03a9518203d2b63e40df7a1c9de90"
+}

@@ -1,0 +1,92 @@
+--- a/osfmk/kern/kebab_low_dma.c
++++ b/osfmk/kern/kebab_low_dma.c
+@@ -6,6 +6,7 @@
+ #include "kldc_native_test_shim.h"
+ #else
+ #include <kern/misc_protos.h>
++#include <kern/kalloc.h>
+ #include <kern/debug.h>
+ #include <arm/machine_routines.h>
+ #include <pexpert/arm64/boot.h>
+@@ -57,6 +58,8 @@
+ static KldcCaptured kldc_late_workspace;
+ struct kldc_hash_context {unsigned bits;union {SHA256_CTX sha256;SHA384_CTX sha384;} ctx;};
+ static struct kldc_hash_context kldc_hash_workspace;
++static uint8_t *kldc_failed_tree;
++static uint32_t kldc_failed_tree_bytes;
+ static int kldc_normal_context(void)
+ {return !panic_active() && !ml_at_interrupt_context() && !get_preemption_level() && ml_get_interrupts_enabled();}
+ static int kldc_native_hash_begin(void *cookie,unsigned bits)
+@@ -131,6 +134,17 @@
+    kldc_late_workspace.observation.flags|=KLDC_F_CURRENT_TREE;
+    KldcHashOps ops={&kldc_hash_workspace,kldc_native_hash_begin,kldc_native_hash_update,kldc_native_hash_finish};
+    (void)KldcFinalize(&kldc_late_workspace,&ops,&complete);
++   /* Preserve failure input for independent host diagnosis. This cache is
++    * never used as measurement authority or as a low-PA mapping capability. */
++   if(complete.result==KLDC_MEASUREMENT_MISMATCH &&
++      kldc_late_workspace.boot.tree_bytes<=KEBAB_LOW_DMA_TREE_DIAGNOSTIC_LIMIT) {
++    uint32_t bytes=kldc_late_workspace.boot.tree_bytes;
++    uint8_t *copy=(uint8_t *)kalloc_data(bytes,Z_WAITOK);
++    if(copy) {
++     __builtin_memcpy(copy,bound,bytes);
++     kldc_failed_tree=copy;kldc_failed_tree_bytes=bytes;
++    }
++   }
+    if(kldc_current_tree(&kldc_late_workspace,&again) || again!=bound) {
+     complete.result=KLDC_BAD_TREE;complete.flags&=~(KLDC_F_CURRENT_TREE|KLDC_F_MEASUREMENT);
+    }
+@@ -157,4 +171,18 @@
+  out->flags&=~(KLDC_F_CURRENT_TREE|KLDC_F_MEASUREMENT|KLDC_F_NC_MAPPED|KLDC_F_PAS_READY);
+  return 0; /* No allocation, CAS, DT lookup, hash, translation or SMC. */
+ }
++/* CAP copies only the complete immutable private failure cache. */
++int kebab_low_dma_tree_snapshot(void *out,uint32_t capacity,uint32_t *bytes)
++{
++ if(!bytes)return 1;
++ *bytes=0;
++ if(!kldc_normal_context())return 2;
++ if(__atomic_load_n(&kldc_final_state,__ATOMIC_ACQUIRE)!=KLDC_DONE ||
++    !kldc_failed_tree_bytes)return 35;
++ *bytes=kldc_failed_tree_bytes;
++ if(!out && !capacity)return 0;
++ if(!out || capacity!=*bytes)return 1;
++ __builtin_memcpy(out,kldc_failed_tree,*bytes);return 0;
++}
++
+ #endif
+--- a/osfmk/kern/kebab_low_dma.h
++++ b/osfmk/kern/kebab_low_dma.h
+@@ -37,6 +37,10 @@
+ int kebab_low_dma_prepare(void);
+ /* Normal-context, fixed-length immutable snapshot. No PA/mapping API. */
+ int kebab_low_dma_snapshot(struct kebab_low_dma_observation *,uint32_t bytes);
++#define KEBAB_LOW_DMA_TREE_DIAGNOSTIC_LIMIT (2u*1024u*1024u)
++/* Bounded failed-input cache only. NULL/zero queries immutable length.
++ * No allocation, current-DT access, translation, hashing, mapping or SMC. */
++int kebab_low_dma_tree_snapshot(void *out,uint32_t capacity,uint32_t *bytes);
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -970,6 +970,20 @@
+         image->total=bytes;image->stable=1;image->flags=2;return 0;
+     }
+ /* END A650_GPUCP37_PROVIDER */
++    if(source==39) {
++        if(argument)return 22;
++        uint32_t bytes=0;
++        int error=kebab_low_dma_tree_snapshot(nullptr,0,&bytes);
++        if(error)return error;
++        if(!bytes || bytes>KEBAB_LOW_DMA_TREE_DIAGNOSTIC_LIMIT)return 22;
++        auto *data=IOMalloc(bytes);
++        if(!data)return 12;
++        uint32_t copied=0;
++        error=kebab_low_dma_tree_snapshot(data,bytes,&copied);
++        if(error || copied!=bytes){IOFree(data,bytes);return error?error:22;}
++        *image=kc_image{};image->handle=data;image->source=39;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
+     if(source==38) {
+         if(argument)return 22;
+         uint32_t bytes=sizeof(KebabA650RenderObservation);

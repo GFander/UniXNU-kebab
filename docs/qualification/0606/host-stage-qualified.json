@@ -1,0 +1,124 @@
+{
+  "passed": true,
+  "physical_test": false,
+  "actual_SMC": false,
+  "scope": "Actual CPU staging production body compiled with recorded host seams; input integrity, old namespace refusal, all260 owned translations, complete copies/zeros/guards, immutable earlier receipts, idempotence and frozen snapshot checked. Native MMIO/cache/PAS remain untested.",
+  "runs": [
+    {
+      "name": "normal",
+      "compiled": true,
+      "exit": 0,
+      "stderr": "PASS checks=1068799 actual staging body CPU model; no native cache/PAS proof\n",
+      "source_sha256": "ffb858b3ef44b4176f054f6cd92e9e6f0a8efd902e97d858edff7f47700fecd6"
+    },
+    {
+      "name": "ASan-UBSan",
+      "compiled": true,
+      "exit": 0,
+      "stderr": "PASS checks=1068799 actual staging body CPU model; no native cache/PAS proof\n",
+      "source_sha256": "ffb858b3ef44b4176f054f6cd92e9e6f0a8efd902e97d858edff7f47700fecd6"
+    },
+    {
+      "name": "ignore-input-hashes",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 74: kzs_observation.result!=0\n",
+      "source_sha256": "8a96798b0b1f5b3268d30dcad0f68f476323c987f85ecb87b75815d002c93520"
+    },
+    {
+      "name": "allow-unsafe-worker",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 81: kebab_zap_stage_prepare()==2&&kzs_state==0\n",
+      "source_sha256": "458f18496559869a82e44110f3958c9d98561a49de3722386dad6502889eb453"
+    },
+    {
+      "name": "ignore-RAM-flags",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 74: kzs_observation.result!=0\n",
+      "source_sha256": "39e3c81ccb35c7c99a771a4a38fabb7023c212ead561f8ab1b1285c2ff577d92"
+    },
+    {
+      "name": "ignore-NC-flags",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 74: kzs_observation.result!=0\n",
+      "source_sha256": "97cecc05f1768f4c6dd6f974892c56f4cc7b13419e8ccca17be13a9c7db0dc99"
+    },
+    {
+      "name": "ignore-physical-page",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 74: kzs_observation.result!=0\n",
+      "source_sha256": "2b40195b441fd747267e8fdbcb942e7b61e616d126b2487e0ddd95d9df8be5ec"
+    },
+    {
+      "name": "ignore-NC-attribute",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 74: kzs_observation.result!=0\n",
+      "source_sha256": "48b5380c9435eb8a31345c35aeb6f7f2d6bae7afcb9eb6c2d0530ebc39cd6aee"
+    },
+    {
+      "name": "ignore-namespace-refusal",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 52: cookie==UINT64_MAX&&outcome==0\n",
+      "source_sha256": "94c3614bd0f8f735ac6c48252061786da8368de14e724040e34e5cb1036da4ba"
+    },
+    {
+      "name": "skip-image-zero",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 85: kzs_observation.result==0&&kzs_observation.flags==63&&kzs_observation.phase==4\n",
+      "source_sha256": "c19b2470d41486d177c694627a700e4a34a76d477d950c2ee38065044e1dab32"
+    },
+    {
+      "name": "ignore-byte-readback",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 99: kzs_observation.result==11&&(kzs_observation.flags&64)&&ends==1\n",
+      "source_sha256": "c68a883e859fa37daa0c93701dba2cc4902b090d91d8247ce978ab99400ea094"
+    },
+    {
+      "name": "wrong-load-source",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 88: image_mem[i]==(i<load.size()?load[i]:0)\n",
+      "source_sha256": "35f5dec577ae959978c18952855363361d69a32012bedf08225b53a7382d4d1c"
+    },
+    {
+      "name": "forget-release-error",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 98: kzs_observation.result==14&&(kzs_observation.flags&64)\n",
+      "source_sha256": "c1478bd55586be15868d212a3eecf9ed0f904a0248b471e10a80c9ddef3e9bd4"
+    },
+    {
+      "name": "wrong-cached-return",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 97: kebab_zap_stage_prepare()==0&&starts==1\n",
+      "source_sha256": "5c2f224aff850acfe6fb071818b42cd5e0afdf2b4a9210eb3f4d5b1120016ad7"
+    },
+    {
+      "name": "wrong-stage-magic",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 93: out.magic==KEBAB_ZAP_STAGE_MAGIC&&out.schema==1&&out.bytes==256&&out.state==2&&out.result==0&&out.elapsed_us>0&&out.elapsed_us<=2000000\n",
+      "source_sha256": "5134852196dc48c36e10b84dfc8546d827386ae71a03576ac37b7c82f98bdf84"
+    }
+  ],
+  "ASan_UBSan": true,
+  "compiled_runtime_mutants": 13,
+  "input_sha256": {
+    "KebabA650ZapCore.h": "74d609c88fb04c15d3d4305713d1940a3c21bc4b42a30056cadbeaa0133dd4ac",
+    "stage-production.inc": "ffb858b3ef44b4176f054f6cd92e9e6f0a8efd902e97d858edff7f47700fecd6",
+    "a650_zap.b02": "a415e5452fa8f597670a6e51010e97bfabca7d20fbce8044caed64d9d5873113",
+    "stage-test": "9570581b7cddbbd8acf90b44e862e9bd73d10850545dfbbab9fc5dff82bf3fa2",
+    "a650_zap.mdt": "e2def9eb448466bdc345573d53112ecf1f22ca245eb8d2a2903ecda78e431b85",
+    "test_stage.cpp": "0d56336b270e42fcadc62dea2091efb214b8be0c469c358be4d34a23aa44611a",
+    "kebab_low_dma.h": "fe6a9ca5faa2a6a64e38ae6159949cafe376459e7442b7040f5688d70b82050b"
+  }
+}

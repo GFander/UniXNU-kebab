@@ -1,0 +1,184 @@
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -319,6 +319,17 @@
+ #define UD_GPU_RENDER 63u
+ extern void kebab_a650_gpu_render_hold_prepare(void);
+ /* END A650_GPURENDER_COMMAND */
++#define UD_LOW_DMA 64u
++#include <kern/kebab_low_dma.h>
++static void
++kebab_low_dma_measure_prepare(void)
++{
++    const int worker = kebab_low_dma_prepare();
++    struct kebab_low_dma_observation observation = {0};
++    const int snapshot = kebab_low_dma_snapshot(&observation, sizeof(observation));
++    printf("KEBAB LOWDMA: end; worker=%d snapshot=%d state=%u result=%u flags=0x%x\n",
++        worker, snapshot, observation.state, observation.result, observation.flags);
++}
+ extern void kebab_gmu_firmware_prepare(void);
+ extern void kebab_gmu_hfi_prepare(void);
+ /* END FUTURE_GMU_COMMAND_IDS */
+@@ -1534,6 +1545,7 @@
+ /* BEGIN A650_GPURENDER_DECODE */
+     if(received==10 && !memcmp(buf,"GPURENDER\n",10))return UD_GPU_RENDER;
+ /* END A650_GPURENDER_DECODE */
++    if(received==7 && !memcmp(buf,"LOWDMA\n",7))return UD_LOW_DMA;
+ /* END FUTURE_GMU_COMMAND_DECODE */
+     if(received==8 && !memcmp(buf,"GPUSMMU\n",8))return UD_GPU_SMMU_OBSERVE;
+     if(received!=9)return 0;
+@@ -1997,6 +2009,8 @@
+ 	} else if (command == UD_GPU_RENDER) {
+ 		kebab_a650_gpu_render_hold_prepare();
+ /* END A650_GPURENDER_DISPATCH */
++	} else if (command == UD_LOW_DMA) {
++		kebab_low_dma_measure_prepare();
+ /* END FUTURE_GMU_COMMAND_DISPATCH */
+ 	} else if (command == UD_GPU_SMMU_OBSERVE) {
+ 		kebab_gpu_smmu_observe();
+--- a/osfmk/kern/kebab_low_dma.c
++++ b/osfmk/kern/kebab_low_dma.c
+@@ -11,6 +11,11 @@
+ #include <pexpert/arm64/boot.h>
+ #include <arm64/kebab_boot_memory.h>
+ #include <libkern/section_keywords.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <arm/pmap.h>
++#include <libkern/crypto/crypto_internal.h>
++#include <libkern/crypto/sha2.h>
+ extern int get_preemption_level(void);
+ #endif
+ #include "KebabLowDmaConsumerCore.h"
+@@ -48,11 +53,82 @@
+    map?kldc_map_workspace:NULL,count,owned?banks:NULL,owned_count);
+  __atomic_store_n(&kldc_capture_published,1,__ATOMIC_RELEASE);
+ }
+-int
+-kebab_low_dma_snapshot(struct kebab_low_dma_observation *out,uint32_t bytes)
++/* One normalworker owns all late scratch through final_state CAS. The
++ * immutable precopy SECURITY_READ_ONLY_LATE record is never modified. */
++static KldcCaptured kldc_late_workspace;
++struct kldc_hash_context {unsigned bits;union {SHA256_CTX sha256;SHA384_CTX sha384;} ctx;};
++static struct kldc_hash_context kldc_hash_workspace;
++static int kldc_normal_context(void)
++{return !panic_active() && !ml_at_interrupt_context() && !get_preemption_level() && ml_get_interrupts_enabled();}
++static int kldc_native_hash_begin(void *cookie,unsigned bits)
++{
++ struct kldc_hash_context *h=(struct kldc_hash_context *)cookie;h->bits=bits;
++ if(bits==256)SHA256_Init(&h->ctx.sha256);else if(bits==384)SHA384_Init(&h->ctx.sha384);else return 1;
++ return 0;
++}
++static int kldc_native_hash_update(void *cookie,const void *p,size_t n)
++{
++ struct kldc_hash_context *h=(struct kldc_hash_context *)cookie;
++ if(h->bits==256)SHA256_Update(&h->ctx.sha256,p,n);else if(h->bits==384)SHA384_Update(&h->ctx.sha384,p,n);else return 1;
++ return 0;
++}
++static int kldc_native_hash_finish(void *cookie,void *p,size_t n)
++{
++ struct kldc_hash_context *h=(struct kldc_hash_context *)cookie;
++ if(h->bits==256 && n==32)SHA256_Final(p,&h->ctx.sha256);else if(h->bits==384 && n==48)SHA384_Final(p,&h->ctx.sha384);else return 1;
++ h->bits=0;return 0;
++}
++static int kldc_current_tree(const KldcCaptured *c,const uint8_t **tree)
++{
++ DTEntry root=NULL;uintptr_t head=(uintptr_t)PE_state.deviceTreeHead;size_t bytes=PE_state.deviceTreeSize;
++ if(!head || !bytes || bytes!=c->boot.tree_bytes || bytes>KLDC_MAX_TREE || head>UINTPTR_MAX-bytes ||
++    SecureDTLookupEntry(NULL,"/",&root)!=kSuccess || (uintptr_t)root!=head)return 1;
++ const KldcBootView *b=&c->boot;
++ if(b->tree_kva<b->virtual_base || b->tree_kva-b->virtual_base>b->memory_bytes ||
++    b->physical_base>UINT64_MAX-(b->tree_kva-b->virtual_base))return 1;
++ uint64_t pa=b->physical_base+(b->tree_kva-b->virtual_base);
++ if(!kldc_used(b,pa,bytes) || pa>UINT64_MAX-bytes)return 1;
++ /* Translate every4KiB boundary (stricter than this16KiB kernel's page
++  * granule) and the final byte before reading the existing current DT.
++  * kvtophys returns0 on missing translation; never use its panic variant.
++  * This does not create a mapping or access any grant/low PA. */
++ for(size_t offset=0;offset<bytes;offset+=4096)
++  if((uint64_t)kvtophys(head+offset)!=pa+offset)return 1;
++ if((uint64_t)kvtophys(head+bytes-1)!=pa+bytes-1)return 1;
++ *tree=(const uint8_t *)head;return 0;
++}
++int kebab_low_dma_prepare(void)
++{
++ if(!kldc_normal_context())return 2;
++ if(!__atomic_load_n(&kldc_capture_published,__ATOMIC_ACQUIRE))return 35;
++ uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kldc_final_state,&expected,KLDC_BUSY,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))
++  return expected==KLDC_DONE?0:16;
++ struct kebab_low_dma_observation complete=kldc_early.observation;
++ kldc_late_workspace=kldc_early;const uint8_t *bound=NULL,*again=NULL;
++ if(complete.result==KLDC_RANGE_UNMEASURED) {
++  if(!(complete.flags&KLDC_F_LOADER_BINDING) || !kldc_late_workspace.identity.bytes)complete.result=KLDC_MEASUREMENT_MISSING;
++  else if(kldc_current_tree(&kldc_late_workspace,&bound))complete.result=KLDC_BAD_TREE;
++  else if(!g_crypto_funcs || !g_crypto_funcs->ccsha256_di || !g_crypto_funcs->ccsha384_di ||
++    !g_crypto_funcs->ccdigest_init_fn || !g_crypto_funcs->ccdigest_update_fn || !g_crypto_funcs->ccdigest_final_fn)complete.result=KLDC_CRYPTO_NOT_READY;
++  else {
++   kldc_late_workspace.tree=bound; /* Never dereference the saved early VA. */
++   kldc_late_workspace.observation.flags|=KLDC_F_CURRENT_TREE;
++   KldcHashOps ops={&kldc_hash_workspace,kldc_native_hash_begin,kldc_native_hash_update,kldc_native_hash_finish};
++   (void)KldcFinalize(&kldc_late_workspace,&ops,&complete);
++   if(kldc_current_tree(&kldc_late_workspace,&again) || again!=bound) {
++    complete.result=KLDC_BAD_TREE;complete.flags&=~(KLDC_F_CURRENT_TREE|KLDC_F_MEASUREMENT);
++   }
++  }
++ }
++ complete.state=KLDC_DONE;complete.flags&=~(KLDC_F_NC_MAPPED|KLDC_F_PAS_READY);
++ kldc_final=complete;__atomic_store_n(&kldc_final_state,KLDC_DONE,__ATOMIC_RELEASE);
++ return 0; /* Transport completed, including a cached failure receipt. */
++}
++int kebab_low_dma_snapshot(struct kebab_low_dma_observation *out,uint32_t bytes)
+ {
+  if(!out || bytes!=sizeof(*out))return 1;
+- if(panic_active() || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled())return 2;
++ if(!kldc_normal_context())return 2;
+  if(!__atomic_load_n(&kldc_capture_published,__ATOMIC_ACQUIRE)) {
+   __builtin_memset(out,0,sizeof(*out));out->magic=KEBAB_LOW_DMA_MAGIC;out->schema=1;
+   out->bytes=sizeof(*out);out->result=KLDC_CAPTURE_NOT_RUN;return 0;
+@@ -60,19 +136,10 @@
+  uint32_t state=__atomic_load_n(&kldc_final_state,__ATOMIC_ACQUIRE);
+  if(state==KLDC_DONE){*out=kldc_final;return 0;}
+  *out=kldc_early.observation;
+- if(state==KLDC_BUSY){out->state=KLDC_BUSY;return 0;}
+- uint32_t expected=0;
+- if(!__atomic_compare_exchange_n(&kldc_final_state,&expected,KLDC_BUSY,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
+-  out->state=KLDC_BUSY;return 0;
+- }
+- /* First staging is an immutable raw/range ledger. PE_slide_devicetree can
+-  * rebase the early DT pointer; never dereference it here. A later measured
+-  * stage needs the current SecureDT root plus same-physical-span validation.
+-  * This version deliberately has no crypto-provider or late-DT dependency. */
+- struct kebab_low_dma_observation complete=kldc_early.observation;
+- complete.state=KLDC_DONE;
+- if(complete.result==KLDC_RANGE_UNMEASURED)complete.result=KLDC_MEASUREMENT_NOT_READY;
+- complete.flags&=~(KLDC_F_MEASUREMENT|KLDC_F_NC_MAPPED|KLDC_F_PAS_READY);
+- kldc_final=complete;__atomic_store_n(&kldc_final_state,KLDC_DONE,__ATOMIC_RELEASE);*out=complete;return 0;
++ if(state==KLDC_BUSY)out->state=KLDC_BUSY;
++ else if(out->result==KLDC_RANGE_UNMEASURED)out->result=KLDC_MEASUREMENT_NOT_READY;
++ else out->state=KLDC_DONE; /* Complete raw terminal receipt, no late work. */
++ out->flags&=~(KLDC_F_CURRENT_TREE|KLDC_F_MEASUREMENT|KLDC_F_NC_MAPPED|KLDC_F_PAS_READY);
++ return 0; /* No allocation, CAS, DT lookup, hash, translation or SMC. */
+ }
+ #endif
+--- a/osfmk/kern/kebab_low_dma.h
++++ b/osfmk/kern/kebab_low_dma.h
+@@ -11,7 +11,7 @@
+  KLDC_RANGE_UNMEASURED, KLDC_CRYPTO_NOT_READY, KLDC_CAPTURE_NOT_RUN, KLDC_MEASUREMENT_NOT_READY };
+ enum { KLDC_F_CAPTURED=1u, KLDC_F_POLICY=2u, KLDC_F_LOADER_BINDING=4u,
+  KLDC_F_RANGE=8u, KLDC_F_RETAINED=16u, KLDC_F_MEASUREMENT=32u,
+- KLDC_F_NC_MAPPED=64u, KLDC_F_PAS_READY=128u };
++ KLDC_F_NC_MAPPED=64u, KLDC_F_PAS_READY=128u, KLDC_F_CURRENT_TREE=256u };
+ /* All fields describe a receipt; neither PA observation nor a matching
+  * development owner measurement is PAS support, NC mapping or DMA proof. */
+ struct kebab_low_dma_observation {
+@@ -31,6 +31,10 @@
+  * the existing validated KBM arrays; no physical address is accepted here. */
+ void kebab_low_dma_capture(const struct boot_args *,const void *map,uint32_t count,
+  const void *owned,uint32_t owned_count,uint32_t kbm_status);
++/* Dedicated normalworker only, after normal boot. One attempt, all terminal
++ * results cached;0=completed/cached,2=unsafe,16=busy,35=capture not run.
++ * Must precede the measured CAP20 query. No USB/bootarg/CAP caller added. */
++int kebab_low_dma_prepare(void);
+ /* Normal-context, fixed-length immutable snapshot. No PA/mapping API. */
+ int kebab_low_dma_snapshot(struct kebab_low_dma_observation *,uint32_t bytes);
+ #ifdef __cplusplus

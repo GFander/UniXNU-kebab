@@ -1,0 +1,914 @@
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -671,5 +671,7 @@
+ bsd/kern/kebab_apfs_probe.c			standard
+ bsd/kern/kebab_scm_probe.c			standard
+ bsd/kern/kebab_qsee_probe.c			standard
++bsd/kern/kebab_scm_transaction.c		standard
++bsd/kern/kebab_scm_pas_worker.c		standard
+ bsd/kern/kebab_file_keys.c			standard
+ bsd/kern/kebab_b_file_lifecycle.c			standard
+--- /dev/null
++++ b/bsd/kern/KebabScmPasWorker.h
+@@ -0,0 +1,28 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_SCM_PAS_WORKER_H
++#define KEBAB_SCM_PAS_WORKER_H
++#include "KebabScmXnuAdapter.h"
++#ifdef __cplusplus
++extern "C" {
++#endif
++typedef struct {
++ uint64_t status,value,type,data,cookie;
++ uint32_t attempts,guard;
++} KebabScmPasRawResult;
++/* Trusted kernel owner only; not a USB/CAP arbitrary frame interface.
++ * INIT/MEM/AUTH/SHUTDOWN callers separately own qualified memory/power and
++ * must hold this same token for their complete domain lifecycle. */
++int kebab_scm_pas13_call(KebabScmTransaction *,const uint64_t[8],KebabScmPasRawResult *);
++typedef struct {
++ uint32_t state,guard; /* 0 NOT_RUN, 1 queued/running, 2 immutable terminal */
++ KebabScmPasRawResult raw;
++} KebabScmPasSupportedReceipt;
++/* Optional future integration only. Queue one fixed PAS_IS_SUPPORTED(13)
++ * job on a sleepable kernel thread_call worker, never on USB's TX pump.
++ * This candidate adds no command/CAP/boot caller of this API. */
++int kebab_scm_pas13_supported_enqueue(void);
++int kebab_scm_pas13_supported_snapshot(KebabScmPasSupportedReceipt *);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/bsd/kern/KebabScmTransactionCore.h
+@@ -0,0 +1,147 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_SCM_TRANSACTION_CORE_H
++#define KEBAB_SCM_TRANSACTION_CORE_H
++#include <stdint.h>
++#include <stddef.h>
++/* No SMC/MMIO, allocation, spinlock, IRQ changes, timeout or busy retry.
++ * One sleepable mutex serializes standard SIP/QSEE transactions. GCC/Clang
++ * acquire/release builtins keep the pre-lock recursion check data-race free.
++ * Initialize once in single-threaded startup, before publishing any client. */
++enum { KST_OK, KST_ARGUMENT, KST_NOT_READY, KST_CONTEXT, KST_LOCK,
++ KST_RECURSIVE_BEGIN, KST_OWNER, KST_TOKEN, KST_DEPTH, KST_INFLIGHT,
++ KST_FUNCTION, KST_PENDING, KST_QUARANTINED, KST_UNRESOLVED };
++enum { KST_QSEE=1, KST_PAS13=2 };
++enum { KST_CLEAR, KST_LISTENER, KST_INTERRUPTED, KST_UNKNOWN };
++typedef struct {
++ void *cookie;
++ int (*safe_context)(void *);
++ uintptr_t (*current_owner)(void *); /* unique current thread, never CPU ID */
++ int (*lock)(void *);               /* blocking, sleepable, no fake EBUSY */
++ void (*unlock)(void *);
++} KebabScmTransactionOps;
++typedef struct {
++ uintptr_t owner;
++ uint64_t sequence;
++ uint32_t active,depth,client,inflight,pending,calls,function;
++} KebabScmTransaction;
++typedef struct {
++ KebabScmTransactionOps ops;
++ uintptr_t owner;
++ KebabScmTransaction *token;
++ uint64_t sequence;
++ uint32_t online,quarantine;
++} KebabScmTransactionDomain;
++/* New PAS adapters preserve all x0 bits here (int64_t is just its signed
++ * representation). Legacy QSEE supplies its existing sign-extended int32
++ * status without changing the legacy transport body. Never truncate PAS x0. */
++typedef struct {int64_t status;uint64_t value,type,data;unsigned attempts;} KebabScmTransportResult;
++static inline int KebabScmDomainOnline(const KebabScmTransactionDomain *d)
++{return d && __atomic_load_n(&d->online,__ATOMIC_ACQUIRE);}
++static inline int KebabScmDomainInit(KebabScmTransactionDomain *d,const KebabScmTransactionOps *ops)
++{
++ if(!d || !ops || !ops->safe_context || !ops->current_owner || !ops->lock || !ops->unlock)return KST_ARGUMENT;
++ if(KebabScmDomainOnline(d))return KST_NOT_READY;
++ d->ops=*ops;d->owner=0;d->token=NULL;d->sequence=0;d->quarantine=0;
++ __atomic_store_n(&d->online,1,__ATOMIC_RELEASE);return KST_OK;
++}
++static inline int KebabScmTransactionBegin(KebabScmTransactionDomain *d,KebabScmTransaction *t,unsigned client)
++{
++ if(!d || !t || t->active || (client!=KST_QSEE && client!=KST_PAS13))return KST_ARGUMENT;
++ if(!KebabScmDomainOnline(d))return KST_NOT_READY;
++ if(!d->ops.safe_context(d->ops.cookie))return KST_CONTEXT;
++ uintptr_t owner=d->ops.current_owner(d->ops.cookie);
++ if(!owner)return KST_CONTEXT;
++ if(__atomic_load_n(&d->owner,__ATOMIC_ACQUIRE)==owner)return KST_RECURSIVE_BEGIN;
++ if(d->ops.lock(d->ops.cookie))return KST_LOCK;
++ if(!d->ops.safe_context(d->ops.cookie) || d->ops.current_owner(d->ops.cookie)!=owner) {
++  d->ops.unlock(d->ops.cookie);return KST_CONTEXT;
++ }
++ if(d->quarantine){d->ops.unlock(d->ops.cookie);return KST_QUARANTINED;}
++ if(d->sequence==UINT64_MAX){d->quarantine=KST_TOKEN;d->ops.unlock(d->ops.cookie);return KST_QUARANTINED;}
++ *t=(KebabScmTransaction){owner,++d->sequence,1,1,client,0,KST_CLEAR,0,0};
++ d->token=t;
++ __atomic_store_n(&d->owner,owner,__ATOMIC_RELEASE);return KST_OK;
++}
++static inline int KebabScmTransactionOwned(KebabScmTransactionDomain *d,KebabScmTransaction *t)
++{
++ if(!d || !t)return KST_ARGUMENT;
++ if(!KebabScmDomainOnline(d))return KST_NOT_READY;
++ if(!d->ops.safe_context(d->ops.cookie))return KST_CONTEXT;
++ uintptr_t owner=d->ops.current_owner(d->ops.cookie);
++ /* Check atomic owner before reading any protected mutable/token fields. */
++ if(!owner || __atomic_load_n(&d->owner,__ATOMIC_ACQUIRE)!=owner)return KST_OWNER;
++ if(d->token!=t || !t->active || t->owner!=owner || t->sequence!=d->sequence)return KST_TOKEN;
++ return KST_OK;
++}
++static inline int KebabScmTransactionJoin(KebabScmTransactionDomain *d,KebabScmTransaction *t)
++{
++ int e=KebabScmTransactionOwned(d,t);if(e)return e;
++ if(t->depth>=16)return KST_DEPTH;
++ ++t->depth;return KST_OK;
++}
++static inline int KebabScmTransactionLeave(KebabScmTransactionDomain *d,KebabScmTransaction *t)
++{
++ int e=KebabScmTransactionOwned(d,t);if(e)return e;
++ if(t->depth<=1)return KST_DEPTH;
++ if(t->inflight)return KST_INFLIGHT;
++ --t->depth;return KST_OK;
++}
++static inline int kst_function_allowed(unsigned client,uint32_t fid)
++{
++ if(client==KST_PAS13)
++  return fid==0x42000201 || fid==0x42000202 || fid==0x42000205 || fid==0x42000206 || fid==0x42000207;
++ if(client==KST_QSEE)
++  return fid==0x42000c1c || fid==0x42000c1d || fid==0x42000c1e || fid==0x42001007 ||
++         fid==0x72000103 || fid==0x72000106 || fid==0x72000201 || fid==0x72000203 || fid==0x70000001;
++ return 0;
++}
++static inline int KebabScmTransactionCallBegin(KebabScmTransactionDomain *d,KebabScmTransaction *t,uint32_t fid)
++{
++ int e=KebabScmTransactionOwned(d,t);if(e)return e;
++ if(t->inflight)return KST_INFLIGHT;
++ if(!kst_function_allowed(t->client,fid))return KST_FUNCTION;
++ /* Only the original same-thread, recognized listener can continue a
++  * pending QSEE request. Generic new SMCs or cleanup are forbidden here. */
++ if(t->pending && !(t->pending==KST_LISTENER && t->client==KST_QSEE && fid==0x72000203))return KST_PENDING;
++ if(t->calls==UINT32_MAX)return KST_TOKEN;
++ t->function=fid;t->inflight=1;++t->calls;return KST_OK;
++}
++static inline int KebabScmTransactionCallFinish(KebabScmTransactionDomain *d,KebabScmTransaction *t,
++ const KebabScmTransportResult *r)
++{
++ int e=KebabScmTransactionOwned(d,t);if(e)return e;
++ if(!r || !t->inflight)return KST_INFLIGHT;
++ t->inflight=0;
++ /* Preserve the transport tuple exactly; status=1 after the legacy 32-step
++  * resume bound is unresolved. Unsupported WAITQ/positive transport results
++  * are not completion. No attempt is made to guess a WAITQ resume ABI. */
++ if(r->status>0)t->pending=r->status==1?KST_INTERRUPTED:KST_UNKNOWN;
++ else if(r->status<0 && t->pending)t->pending=KST_UNKNOWN;
++ /* SIP bridge/derive x1 is a terminal peripheral result, including
++  * bridge-enable value4. QSEE owner48/50 x1 uses incomplete/listener ABI. */
++ else if(t->client==KST_QSEE && (t->function==0x70000001 ||
++  t->function==0x72000103 || t->function==0x72000106 ||
++  t->function==0x72000201 || t->function==0x72000203) &&
++  !r->status && r->value && r->value!=UINT32_MAX)
++  t->pending=(r->value==1 && r->type==0xee02 && r->data==0xb)?KST_LISTENER:KST_UNKNOWN;
++ else t->pending=KST_CLEAR;
++ return KST_OK;
++}
++static inline int KebabScmTransactionCanTouchShared(KebabScmTransactionDomain *d,KebabScmTransaction *t)
++{return !KebabScmTransactionOwned(d,t) && !t->inflight && !t->pending;}
++static inline int KebabScmTransactionEnd(KebabScmTransactionDomain *d,KebabScmTransaction *t)
++{
++ int e=KebabScmTransactionOwned(d,t);if(e)return e;
++ if(t->depth!=1)return KST_DEPTH;
++ if(t->inflight)return KST_INFLIGHT;
++ int unresolved=t->pending!=KST_CLEAR;
++ if(unresolved)d->quarantine=t->pending;
++ t->active=0;d->token=NULL;
++ __atomic_store_n(&d->owner,0,__ATOMIC_RELEASE);
++ d->ops.unlock(d->ops.cookie);
++ /* Release the kernel mutex even for an unresolved returned call, retain
++  * all secure-shared resources, and refuse further standard transactions
++  * until a new boot. Never clear quarantine on a timer or a busy result. */
++ return unresolved?KST_UNRESOLVED:KST_OK;
++}
++#endif
+--- /dev/null
++++ b/bsd/kern/KebabScmXnuAdapter.h
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_SCM_XNU_ADAPTER_H
++#define KEBAB_SCM_XNU_ADAPTER_H
++#include "KebabScmTransactionCore.h"
++#ifdef __cplusplus
++extern "C" {
++#endif
++int kebab_scm_qsee_client_begin(void);
++int kebab_scm_qsee_client_owned(void);
++int kebab_scm_qsee_client_end(void);
++int kebab_scm_transaction_begin(KebabScmTransaction *,unsigned);
++int kebab_scm_transaction_join(KebabScmTransaction *);
++int kebab_scm_transaction_leave(KebabScmTransaction *);
++int kebab_scm_transaction_call_begin(KebabScmTransaction *,uint32_t);
++int kebab_scm_transaction_call_finish(KebabScmTransaction *,const KebabScmTransportResult *);
++int kebab_scm_transaction_shared_safe(KebabScmTransaction *);
++int kebab_scm_transaction_end(KebabScmTransaction *);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- a/bsd/kern/kebab_qsee_probe.c
++++ b/bsd/kern/kebab_qsee_probe.c
+@@ -18,10 +18,11 @@
+ #include <arm/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ extern int get_preemption_level(void);
++#include "KebabScmXnuAdapter.h"
+ extern ppnum_t pmap_find_phys(pmap_t, addr64_t);
+ 
+ struct qsee_regs { uint64_t x[8]; };
+-struct qsee_result { int32_t status; uint64_t value, type, data; unsigned attempts; };
++struct qsee_result { int32_t status; uint64_t value, type, data; unsigned attempts; unsigned guard; };
+ 
+ static void
+ qsee_raw(struct qsee_regs *r)
+@@ -46,7 +47,7 @@
+  * A firmware call that never returns cannot be timed out by this bound.
+  */
+ static struct qsee_result
+-qsee_call(uint32_t function, uint32_t info, uint64_t a, uint64_t b, uint64_t c, uint64_t d)
++qsee_call_unlocked(uint32_t function, uint32_t info, uint64_t a, uint64_t b, uint64_t c, uint64_t d)
+ {
+ 	uint64_t cookie=0;
+ 	struct qsee_result result={};
+@@ -57,6 +58,44 @@
+ 		result.type=r.x[2]; result.data=r.x[3]; result.attempts=i+1;
+ 		if (result.status != 1) break;
+ 		cookie=r.x[6];
++	}
++	return result;
++}
++
++/* Current token is protected by the QSEE client mutex and belongs only to
++ * its owning thread. It is never installed by a PAS worker or a CAP path. */
++static KebabScmTransaction *qsee_transaction;
++static unsigned qsee_guard_error;
++
++static bool
++qsee_shared_safe(void)
++{
++	return !kebab_scm_qsee_client_owned() && qsee_transaction &&
++	    !qsee_guard_error && kebab_scm_transaction_shared_safe(qsee_transaction);
++}
++
++static struct qsee_result
++qsee_call(uint32_t function, uint32_t info, uint64_t a, uint64_t b, uint64_t c, uint64_t d)
++{
++	/* The existing INFO survey remains the original fast transport. */
++	if (function==0xc2000601) return qsee_call_unlocked(function,info,a,b,c,d);
++	struct qsee_result result={};
++	int error=kebab_scm_qsee_client_owned();
++	bool client_owned=error==KST_OK;
++	if (!error && (!qsee_transaction || qsee_guard_error)) error=KST_TOKEN;
++	if (!error) error=kebab_scm_transaction_call_begin(qsee_transaction,function);
++	if (error) {
++		if (client_owned) qsee_guard_error=(unsigned)error;
++		result.guard=(unsigned)error;
++		printf("KEBAB SCM: QSEE call guard=%d fid=0x%x; no firmware call\n",error,function);
++		return result;
++	}
++	result=qsee_call_unlocked(function,info,a,b,c,d);
++	const KebabScmTransportResult receipt={result.status,result.value,result.type,result.data,result.attempts};
++	error=kebab_scm_transaction_call_finish(qsee_transaction,&receipt);
++	if (error) {
++		qsee_guard_error=(unsigned)error;result.guard=(unsigned)error;
++		printf("KEBAB SCM: QSEE finish guard=%d fid=0x%x; original tuple retained\n",error,function);
+ 	}
+ 	return result;
+ }
+@@ -113,12 +152,13 @@
+ 	if (bridged) {
+ 		struct qsee_result r=qsee_call(0x42000c1e,4,pa|6,pa|6,0x8000|0x200,3);
+ 		printf("KEBAB QSEE LOG: bridge-create status=%d result=%llu\n",r.status,r.value);
+-		if (r.status || r.value) return false;
++		if (r.guard || r.status || r.value) return false;
+ 	}
+ 	struct qsee_result r=qsee_call(0x72000106,0x22,pa,0x8000,0,0);
+ 	printf("KEBAB QSEE LOG: register status=%d result=0x%llx; page retained until reset\n",r.status,r.value);
+-	if (r.status || r.value) return false;
+-	qsee_log_page=page; qsee_log_ready=true;
++	if (r.guard || r.status || r.value) return false;
++	__atomic_store_n(&qsee_log_page,page,__ATOMIC_RELAXED);
++	__atomic_store_n(&qsee_log_ready,true,__ATOMIC_RELEASE);
+ 	return true;
+ }
+ 
+@@ -170,15 +210,16 @@
+ static void
+ qsee_log_report(void)
+ {
+-	if (!qsee_log_ready) return;
+-	qsee_cache(qsee_log_page,false); qsee_cache(qsee_log_page+PAGE_SIZE,false);
+-	const volatile uint16_t *position=(const volatile uint16_t *)qsee_log_page;
++	if (!__atomic_load_n(&qsee_log_ready,__ATOMIC_ACQUIRE)) return;
++	vm_offset_t page=__atomic_load_n(&qsee_log_page,__ATOMIC_ACQUIRE);
++	qsee_cache(page,false); qsee_cache(page+PAGE_SIZE,false);
++	const volatile uint16_t *position=(const volatile uint16_t *)page;
+ 	uint16_t wrap=position[0],offset=position[1];
+ 	const unsigned ring_size=0x8000-4;
+ 	printf("KEBAB QSEE LOG: snapshot wrap=%u offset=%u; filtered/redacted diagnostics\n",wrap,offset);
+ 	if (offset>=ring_size) { printf("KEBAB QSEE LOG: rejected ring position\n"); return; }
+ 	unsigned bytes=wrap ? ring_size : offset, start=wrap ? offset : 0;
+-	const volatile uint8_t *ring=(const volatile uint8_t *)(qsee_log_page+4);
++	const volatile uint8_t *ring=(const volatile uint8_t *)(page+4);
+ 	unsigned ascii=0,nuls=0,newlines=0;
+ 	for (unsigned i=0; i<bytes; i++) {
+ 		uint8_t c=ring[(start+i)%ring_size];
+@@ -209,7 +250,7 @@
+ 	if (panic_active() || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()) {
+ 		printf("KEBAB QSEE LOG: refused unsafe context\n"); return;
+ 	}
+-	if (!qsee_log_ready) { printf("KEBAB QSEE LOG: no registered producer\n"); return; }
++	if (!__atomic_load_n(&qsee_log_ready,__ATOMIC_ACQUIRE)) { printf("KEBAB QSEE LOG: no registered producer\n"); return; }
+ 	qsee_log_report();
+ }
+ 
+@@ -247,12 +288,12 @@
+ 	if (bridged) {
+ 		struct qsee_result b=qsee_call(0x42000c1e,4,pa|6,pa|6,0x8000|0x200,3);
+ 		printf("KEBAB QSEE TIME: bridge status=%d result=0x%llx\n",b.status,b.value);
+-		if (b.status || b.value) return false;
++		if (b.guard || b.status || b.value) return false;
+ 	}
+ 	qsee_cache(page,true);qsee_cache(page+PAGE_SIZE,true);
+ 	struct qsee_result b=qsee_call(0x72000201,0x83,0xb,pa,0x8000,0);
+ 	printf("KEBAB QSEE TIME: register status=%d result=0x%llx\n",b.status,b.value);
+-	if (b.status || b.value) return false;
++	if (b.guard || b.status || b.value) return false;
+ 	qsee_time_page=page; qsee_time_epoch=epoch;
+ 	qsee_time_started=mach_absolute_time(); qsee_time_ready=true;
+ 	printf("KEBAB QSEE TIME: HLOS host-calibrated UTC anchor=%llu; producer page/bridge retained\n",epoch);
+@@ -262,7 +303,8 @@
+ static struct qsee_result
+ qsee_time_resume(struct qsee_result r)
+ {
+-	for (unsigned round=0; round<8 && !r.status && r.value==1; round++) {
++	if (r.guard || kebab_scm_qsee_client_owned() || !qsee_transaction) return r;
++	for (unsigned round=0; round<8 && !r.guard && !r.status && r.value==1; round++) {
+ 		/* Never answer an unknown listener, response type or command. */
+ 		if (!qsee_time_ready || r.type!=0xee02 || r.data!=0xb) break;
+ 		uint64_t now=mach_absolute_time(),elapsed=0;
+@@ -300,6 +342,7 @@
+ static void
+ qsee_erase(vm_offset_t page)
+ {
++	if (!qsee_shared_safe()) return;
+ 	volatile uint8_t *p=(volatile uint8_t *)page;
+ 	for (unsigned i=0; i<PAGE_SIZE; i++) p[i]=0;
+ 	qsee_cache(page,true);
+@@ -308,13 +351,14 @@
+ static struct qsee_result
+ qsee_storage_send(vm_offset_t page, uint64_t pa, uint32_t app, unsigned bytes)
+ {
++	if (!qsee_shared_safe()) { struct qsee_result refused={}; refused.guard=KST_PENDING; return refused; }
+ 	uint64_t *extended=(uint64_t *)(page+0x80);
+ 	bzero(extended,7*sizeof(*extended));
+ 	extended[0]=pa+0x2000; extended[1]=0x1800;
+ 	qsee_cache(page,true);
+ 	struct qsee_result r=qsee_call(0x70000001,0x885,app,pa+0x100,bytes,pa+0x80);
+ 	r=qsee_time_resume(r);
+-	if (!qsee_pending(r)) qsee_cache(page,false);
++	if (!r.guard && !qsee_pending(r) && qsee_shared_safe()) qsee_cache(page,false);
+ 	return r;
+ }
+ 
+@@ -450,8 +494,8 @@
+ 	memset(response,0xa5,0x1800);
+ 	struct qsee_result r=qsee_storage_send(page,pa,app,12);
+ 	printf("KEBAB QSEE: date-support transport=%d result=0x%llx\n",r.status,r.value);
+-	if (qsee_pending(r)) return false;
+-	if (r.status || r.value) goto done;
++	if (r.guard || qsee_pending(r) || !qsee_shared_safe()) return false;
++	if (r.guard || r.status || r.value) goto done;
+ 	int32_t date_status=(int32_t)response[0];
+ 	printf("KEBAB QSEE: date-support reply=%d\n",date_status);
+ 	if (date_status!=0 && date_status!=-40) goto done;
+@@ -475,8 +519,8 @@
+ 	memset(response,0xa5,0x1800);
+ 	r=qsee_storage_send(page,pa,app,4+used);
+ 	printf("KEBAB QSEE: HiOS configure transport=%d result=0x%llx\n",r.status,r.value);
+-	if (qsee_pending(r)) return false;
+-	if (r.status || r.value) goto done;
++	if (r.guard || qsee_pending(r) || !qsee_shared_safe()) return false;
++	if (r.guard || r.status || r.value) goto done;
+ 	printf("KEBAB QSEE: HiOS configure reply=%d OS_VERSION=160716 OS_PATCHLEVEL=0 VENDOR_PATCHLEVEL=%u\n",
+ 	    (int32_t)response[0],vendor_patch);
+ 	if (response[0]) goto done;
+@@ -516,8 +560,8 @@
+ 	memset(response,0xa5,0x1800);
+ 	r=qsee_storage_send(page,pa,app,4+used);
+ 	printf("KEBAB QSEE: storage generate CBOR transport=%d result=0x%llx\n",r.status,r.value);
+-	if (qsee_pending(r)) return false;
+-	if (r.status || r.value) goto done;
++	if (r.guard || qsee_pending(r) || !qsee_shared_safe()) return false;
++	if (r.guard || r.status || r.value) goto done;
+ 	printf("KEBAB QSEE: storage generate CBOR reply=%d bytes=%u\n",(int32_t)response[0],response[1]);
+ 	if (response[0] || !qsee_blob_bounds(8,response[1],8,0xc00)) goto done;
+ 	/* New keyblob ABI preserves the complete returned CBOR object. */
+@@ -547,8 +591,8 @@
+ 		memset(response,0xa5,0x1800);
+ 		r=qsee_storage_send(page,pa,app,4+used);
+ 		printf("KEBAB QSEE: storage export CBOR trial=%u transport=%d result=0x%llx\n",trial,r.status,r.value);
+-		if (qsee_pending(r)) return false;
+-		if (r.status || r.value) goto done;
++		if (r.guard || qsee_pending(r) || !qsee_shared_safe()) return false;
++		if (r.guard || r.status || r.value) goto done;
+ 		printf("KEBAB QSEE: storage export CBOR reply=%d bytes=%u\n",(int32_t)response[0],response[1]);
+ 		unsigned offset,wrapped_size;
+ 		if (response[0] || !qsee_blob_bounds(8,response[1],8,0x1700) ||
+@@ -563,9 +607,9 @@
+ 		qsee_cache(page,true);
+ 		r=qsee_call(0x42001007,0x224,wrapped_pa,wrapped_size,pa+0x3800+trial*0x40,32);
+ 		printf("KEBAB QSEE: storage derive trial=%u transport=%d result=0x%llx\n",trial,r.status,r.value);
+-		if (r.status==1) return false;
++		if (r.guard || r.status==1 || !qsee_shared_safe()) return false;
+ 		qsee_cache(page,false);
+-		if (r.status || r.value) goto done;
++		if (r.guard || r.status || r.value) goto done;
+ 		bool changed=false; unsigned nonzero=0;
+ 		for (unsigned i=0; i<32; i++) {
+ 			changed |= ((const uint8_t *)secret)[i]!=0xa5;
+@@ -582,6 +626,7 @@
+ 		if (!difference && qsee_data_mode) qsee_data_ok=qsee_data_witness(page,blob_size);
+ 	}
+ done:
++	if (!qsee_shared_safe()) return false;
+ 	qsee_log_report();
+ 	qsee_erase(page);
+ 	printf("KEBAB QSEE: hardware-wrapped experiment end; volatile key material erased\n");
+@@ -626,9 +671,9 @@
+ 	struct qsee_result r=qsee_call(0x70000001,0x885,app,pa+0x100,4,pa+0x300);
+ 	printf("KEBAB QSEE: keymaster GET_VERSION status=%d result=0x%llx type=0x%llx attempts=%u\n",
+ 	    r.status,r.value,r.type,r.attempts);
+-	if (r.status==1 || (!r.status && r.value!=0 && r.value!=UINT32_MAX)) return false;
++	if (r.guard || !qsee_shared_safe() || r.status==1 || (!r.status && r.value!=0 && r.value!=UINT32_MAX)) return false;
+ 	qsee_cache(page,false);
+-	if (r.status || r.value) return true;
++	if (r.guard || r.status || r.value) return true;
+ 	const uint32_t *reply=(const uint32_t *)(page+0x200);
+ 	printf("KEBAB QSEE: keymaster reply status=%d protocol=%u.%u app=%u.%u\n",
+ 	    (int32_t)reply[0],reply[1],reply[2],reply[3],reply[4]);
+@@ -673,25 +718,9 @@
+ }
+ 
+ void kebab_qsee_probe(void);
+-void
+-kebab_qsee_probe(void)
+-{
+-	int enabled=0;
+-	PE_parse_boot_argn("kebab_qsee_probe",&enabled,sizeof(enabled));
+-	if (enabled!=1) return;
+-	unsigned data_root=0;
+-	PE_parse_boot_argn("kebab_data_root",&data_root,sizeof(data_root));
+-	if (data_root && !qsee_data_record) {
+-		printf("KEBAB DATA ROOT: generic QSEE probe deferred until fixed-file client is ready\n");
+-		return;
+-	}
+-	if (panic_active() || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()) {
+-		printf("KEBAB QSEE: refused unsafe context\n"); return;
+-	}
+-	static bool attempted;
+-	if (attempted) { printf("KEBAB QSEE: already attempted\n"); return; }
+-	attempted=true;
+-	qsee_firmware_readback();
++static void
++qsee_probe_session(void)
++{
+ 	printf("KEBAB QSEE: fixed lookup begin; experimental key commands require a separate flag\n");
+ 	if (PAGE_SIZE!=0x4000 || qsee_available(0x02000601)!=1 || qsee_available(0x32000103)!=1) return;
+ 
+@@ -713,13 +742,13 @@
+ 	if (bridge==1) {
+ 		struct qsee_result r=qsee_call(0x42000c1c,0,0,0,0,0);
+ 		printf("KEBAB QSEE: bridge-enable status=%d result=%llu\n",r.status,r.value);
+-		if (r.status) return;
++		if (r.guard || r.status) return;
+ 		if (r.value==0) {
+ 			if (qsee_available(0x02000c1e)!=1 || qsee_available(0x02000c1d)!=1) return;
+ 			/* Read/write, no execute; one HLOS VMID (3), page-aligned size. */
+ 			r=qsee_call(0x42000c1e,4,pa|6,pa|6,PAGE_SIZE|0x200,3);
+ 			printf("KEBAB QSEE: bridge-create status=%d result=%llu\n",r.status,r.value);
+-			if (r.status || r.value) return;
++			if (r.guard || r.status || r.value) return;
+ 			handle=r.type; bridged=true;
+ 		} else if (r.value!=4) return; /* Documented not-supported result. */
+ 	}
+@@ -735,7 +764,7 @@
+ 		struct qsee_result r=qsee_call(0x72000103,0x22,pa,strlen(names[i]),0,0);
+ 		printf("KEBAB QSEE: app=%s status=%d result=0x%llx type=0x%llx data=0x%llx attempts=%u\n",
+ 		    names[i],r.status,r.value,r.type,r.data,r.attempts);
+-		if (r.status==1 || (!r.status && r.value!=0 && r.value!=UINT32_MAX)) {
++		if (r.guard || !qsee_shared_safe() || r.status==1 || (!r.status && r.value!=0 && r.value!=UINT32_MAX)) {
+ 			outstanding=true; break; /* Incomplete/listener/callback/unknown. */
+ 		}
+ 		qsee_cache(page,false);
+@@ -752,19 +781,61 @@
+ 		qsee_nonce_ok=false; qsee_data_ok=false;
+ 		printf("KEBAB QSEE: incomplete call; page and bridge retained until reset\n"); return;
+ 	}
++	if (!qsee_shared_safe()) { qsee_nonce_ok=false; qsee_data_ok=false; return; }
+ 	bzero((void *)page,PAGE_SIZE); qsee_cache(page,true);
+ 	if (bridged) {
+ 		struct qsee_result r=qsee_call(0x42000c1d,1,handle,0,0,0);
+ 		printf("KEBAB QSEE: bridge-delete status=%d result=%llu; page retained\n",r.status,r.value);
+-		if (r.status || r.value) { qsee_nonce_ok=false; qsee_data_ok=false; }
++		if (r.guard || r.status || r.value) { qsee_nonce_ok=false; qsee_data_ok=false; }
+ 	}
+ 	printf("KEBAB QSEE: fixed lookup end; no hardware key qualification\n");
+ }
+ 
++static void
++qsee_probe_locked(void)
++{
++	if (kebab_scm_qsee_client_owned()) return;
++	int enabled=0;
++	PE_parse_boot_argn("kebab_qsee_probe",&enabled,sizeof(enabled));
++	if (enabled!=1) return;
++	unsigned data_root=0;
++	PE_parse_boot_argn("kebab_data_root",&data_root,sizeof(data_root));
++	if (data_root && !qsee_data_record) {
++		printf("KEBAB DATA ROOT: generic QSEE probe deferred until fixed-file client is ready\n");
++		return;
++	}
++	if (panic_active() || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()) {
++		printf("KEBAB QSEE: refused unsafe context\n"); return;
++	}
++	static bool attempted;
++	if (attempted) { printf("KEBAB QSEE: already attempted\n"); return; }
++	attempted=true;
++	qsee_firmware_readback();
++
++ KebabScmTransaction transaction={};
++ int error=kebab_scm_transaction_begin(&transaction,KST_QSEE);
++ if (error) {qsee_nonce_ok=false;qsee_data_ok=false;printf("KEBAB SCM: QSEE transaction begin guard=%d\n",error);return;}
++ qsee_guard_error=0;qsee_transaction=&transaction;
++ qsee_probe_session();
++ if (!qsee_shared_safe()) {qsee_nonce_ok=false;qsee_data_ok=false;}
++ qsee_transaction=NULL;
++ error=kebab_scm_transaction_end(&transaction);
++ if (error) {qsee_nonce_ok=false;qsee_data_ok=false;printf("KEBAB SCM: QSEE transaction end guard=%d; shared leases retained\n",error);}
++}
++void
++kebab_qsee_probe(void)
++{
++ int error=kebab_scm_qsee_client_begin();
++ if (error) {printf("KEBAB SCM: QSEE client guard=%d\n",error);return;}
++ qsee_probe_locked();
++ error=kebab_scm_qsee_client_end();
++ if (error) printf("KEBAB SCM: QSEE client end guard=%d\n",error);
++}
++
+ 
+ bool kebab_qsee_nonce_record(uint8_t *, unsigned, unsigned);
+-bool
+-kebab_qsee_nonce_record(uint8_t *record, unsigned size, unsigned mode)
++static bool
++kebab_qsee_nonce_record_locked(uint8_t *record, unsigned size, unsigned mode)
+ {
+ 	if (!record || size!=4096 || (mode!=1 && mode!=2) || qsee_nonce_record || qsee_data_record ||
+ 	    panic_active() || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()) return false;
+@@ -772,7 +843,7 @@
+ 		printf("KEBAB NONCE ROOT: rejected record header/binding/length\n");return false;
+ 	}
+ 	qsee_nonce_record=record;qsee_nonce_mode=mode;qsee_nonce_ok=false;
+-	kebab_qsee_probe();
++	qsee_probe_locked();
+ 	bool ok=qsee_nonce_ok;
+ 	unsigned hardware=0;PE_parse_boot_argn("kebab_hardware_nonce",&hardware,sizeof(hardware));
+ 	if (mode==2 && hardware==1) {
+@@ -786,14 +857,14 @@
+ 
+ /* Separate one-shot Data prerequisite; secret stays in the erased QSEE page.
+  * No APFS key callbacks or nonce selector are published by this entry point. */
+-bool
+-kebab_qsee_data_root_record(uint8_t *record, unsigned size, unsigned mode)
++static bool
++kebab_qsee_data_root_record_locked(uint8_t *record, unsigned size, unsigned mode)
+ {
+ 	if (!record || size!=4096 || kdr_policy(mode) || qsee_data_record || qsee_nonce_record ||
+ 	    panic_active() || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()) return false;
+ 	if (mode==2 && !qsee_data_layout(record,size)) return false;
+ 	qsee_data_record=record;qsee_data_mode=mode;qsee_data_ok=false;
+-	kebab_qsee_probe();
++	qsee_probe_locked();
+ 	bool ok=qsee_data_ok;
+ 	qsee_data_record=NULL;qsee_data_mode=0;qsee_data_ok=false;
+ 	return ok;
+@@ -801,8 +872,8 @@
+ /* Read-only restore of both already provisioned roots; no generation route.
+  * Publish nonce AES only after BOTH witnesses and shared-page cleanup pass.
+  * Data callbacks still use their existing separate commit/publish lifecycle. */
+-bool
+-kebab_qsee_live_roots_record(uint8_t *data, uint8_t *nonce, unsigned size)
++static bool
++kebab_qsee_live_roots_record_locked(uint8_t *data, uint8_t *nonce, unsigned size)
+ {
+  if (!data || !nonce || data==nonce || size!=4096 || !kebab_image4_live_nonce_profile() ||
+      qsee_data_record || qsee_nonce_record || qsee_live_roots ||
+@@ -810,7 +881,7 @@
+      panic_active() || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled()) return false;
+  qsee_data_record=data;qsee_data_mode=2;qsee_data_ok=false;
+  qsee_nonce_record=nonce;qsee_nonce_mode=2;qsee_nonce_ok=false;qsee_live_roots=true;
+- kebab_qsee_probe();
++ qsee_probe_locked();
+  bool ok=qsee_nonce_ok && qsee_data_ok;
+  if (ok) ok=kebab_aes_nonce_publish();
+  if (!ok) { kebab_aes_nonce_cancel(); kebab_file_keys_cancel(); }
+@@ -819,4 +890,68 @@
+  printf("KEBAB LIVE ROOTS: existing nonce+Data hardware restore %s; generation disabled\n",ok?"PASS":"FAIL");
+  return ok;
+ }
++bool
++kebab_qsee_nonce_record(uint8_t *record, unsigned size, unsigned mode)
++{
++ int error=kebab_scm_qsee_client_begin();
++ if (error) {printf("KEBAB SCM: Root client guard=%d\n",error);return false;}
++ bool ok=kebab_qsee_nonce_record_locked(record,size,mode);
++ error=kebab_scm_qsee_client_end();
++ if (error) {printf("KEBAB SCM: Root client end guard=%d\n",error);return false;}
++ return ok;
++}
++
++bool
++kebab_qsee_data_root_record(uint8_t *record, unsigned size, unsigned mode)
++{
++ int error=kebab_scm_qsee_client_begin();
++ if (error) {printf("KEBAB SCM: Root client guard=%d\n",error);return false;}
++ bool ok=kebab_qsee_data_root_record_locked(record,size,mode);
++ error=kebab_scm_qsee_client_end();
++ if (error) {printf("KEBAB SCM: Root client end guard=%d\n",error);return false;}
++ return ok;
++}
++
++bool
++kebab_qsee_live_roots_record(uint8_t *data, uint8_t *nonce, unsigned size)
++{
++ int error=kebab_scm_qsee_client_begin();
++ if (error) {printf("KEBAB SCM: Root client guard=%d\n",error);return false;}
++ bool ok=kebab_qsee_live_roots_record_locked(data,nonce,size);
++ error=kebab_scm_qsee_client_end();
++ if (error) {printf("KEBAB SCM: Root client end guard=%d\n",error);return false;}
++ return ok;
++}
++/* Separate full-x0 contract for future PAS; the original QSEE int32 path
++ * above is unchanged. It reuses exactly the original qsee_raw asm. */
++#include "KebabScmPasWorker.h"
++int
++kebab_scm_pas13_call(KebabScmTransaction *token,const uint64_t request[8],KebabScmPasRawResult *out)
++{
++ if(!out)return KST_ARGUMENT;
++ bzero(out,sizeof(*out));
++ if(!token || !request){out->guard=KST_ARGUMENT;return KST_ARGUMENT;}
++ uint64_t fid=request[0];unsigned command=(unsigned)(fid&255);
++ if((fid!=0x42000201 && fid!=0x42000202 && fid!=0x42000205 && fid!=0x42000206 && fid!=0x42000207) ||
++    request[1]!=(command==1?0x82u:command==2?3u:1u) || request[2]!=13 ||
++    request[5] || request[6] || request[7] ||
++    ((command==1 || command==2)?(!request[3] || (request[3]&4095)):request[3]!=0) ||
++    (command==2?(!request[4] || request[4]-1>UINT64_MAX-request[3]):request[4]!=0)) {
++  out->guard=KST_ARGUMENT;return KST_ARGUMENT;
++ }
++ int error=kebab_scm_transaction_call_begin(token,(uint32_t)fid);
++ if(error){out->guard=(uint32_t)error;return error;}
++ uint64_t cookie=0;
++ for(unsigned i=0;i<32;i++) {
++  struct qsee_regs regs;
++  memcpy(regs.x,request,sizeof(regs.x));regs.x[0]=i?1:fid;regs.x[6]=cookie;
++  qsee_raw(&regs);
++  out->status=regs.x[0];out->value=regs.x[1];out->type=regs.x[2];out->data=regs.x[3];out->cookie=regs.x[6];out->attempts=i+1;
++  if(out->status!=1)break;
++  cookie=out->cookie;
++ }
++ const KebabScmTransportResult receipt={(int64_t)out->status,out->value,out->type,out->data,out->attempts};
++ error=kebab_scm_transaction_call_finish(token,&receipt);out->guard=(uint32_t)error;return error;
++}
++
+ #endif /* KEBAB */
+--- /dev/null
++++ b/bsd/kern/kebab_scm_pas_worker.c
+@@ -0,0 +1,53 @@
++/* SPDX-License-Identifier: MIT */
++/* Future API only: not called from this candidate's boot, USB or CAP paths. */
++#if defined(KEBAB)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/thread_call.h>
++#include <kern/debug.h>
++#include <arm/machine_routines.h>
++#include "KebabScmPasWorker.h"
++extern int get_preemption_level(void);
++static uint32_t kebab_pas_supported_state;
++static thread_call_t kebab_pas_supported_work;
++static KebabScmPasSupportedReceipt kebab_pas_supported_receipt;
++static void
++kebab_pas_supported_run(thread_call_param_t p0,thread_call_param_t p1)
++{
++ (void)p0;(void)p1;
++ KebabScmTransaction token={};
++ int error=kebab_scm_transaction_begin(&token,KST_PAS13);
++ if(!error) {
++  const uint64_t request[8]={0x42000207,1,13,0,0,0,0,0};
++  error=kebab_scm_pas13_call(&token,request,&kebab_pas_supported_receipt.raw);
++  int end=kebab_scm_transaction_end(&token);
++  if(!error)error=end;
++ }
++ kebab_pas_supported_receipt.guard=(uint32_t)error;
++ kebab_pas_supported_receipt.state=2;
++ __atomic_store_n(&kebab_pas_supported_state,2,__ATOMIC_RELEASE);
++}
++int
++kebab_scm_pas13_supported_enqueue(void)
++{
++ if(panic_active() || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled())return KST_CONTEXT;
++ uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kebab_pas_supported_state,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return EALREADY;
++ kebab_pas_supported_work=thread_call_allocate(kebab_pas_supported_run,NULL);
++ if(!kebab_pas_supported_work) {
++  kebab_pas_supported_receipt.state=2;kebab_pas_supported_receipt.guard=ENOMEM;
++  __atomic_store_n(&kebab_pas_supported_state,2,__ATOMIC_RELEASE);return ENOMEM;
++ }
++ thread_call_enter(kebab_pas_supported_work);
++ return 0;
++}
++int
++kebab_scm_pas13_supported_snapshot(KebabScmPasSupportedReceipt *out)
++{
++ if(!out)return EINVAL;
++ uint32_t state=__atomic_load_n(&kebab_pas_supported_state,__ATOMIC_ACQUIRE);
++ if(state!=2){bzero(out,sizeof(*out));out->state=state;return EAGAIN;}
++ memcpy(out,&kebab_pas_supported_receipt,sizeof(*out));return 0;
++}
++#endif
+--- /dev/null
++++ b/bsd/kern/kebab_scm_transaction.c
+@@ -0,0 +1,88 @@
++#if defined(KEBAB) || defined(KST_HOST_XNU_SHIM)
++/* SPDX-License-Identifier: MIT */
++/* Independent candidate only: no source list entry, no SMC/device access.
++ * Compile as one BSD core translation unit, never once per client/header. */
++#if defined(KST_HOST_XNU_SHIM)
++#include "scm_xnu_test_shim.h"
++#else
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/locks.h>
++#include <kern/thread.h>
++#include <kern/debug.h>
++#include <kern/startup.h>
++#include <arm/machine_routines.h>
++extern int get_preemption_level(void);
++#endif
++#include "KebabScmXnuAdapter.h"
++static LCK_GRP_DECLARE(kebab_scm_group,"kebab standard SCM");
++static LCK_MTX_DECLARE(kebab_scm_mutex,&kebab_scm_group);
++static LCK_MTX_DECLARE(kebab_qsee_session_mutex,&kebab_scm_group);
++static KebabScmTransactionDomain kebab_scm_domain;
++static uintptr_t kebab_qsee_client_owner;
++static int kst_xnu_context(void *cookie)
++{
++ (void)cookie;
++ return !panic_active() && !ml_at_interrupt_context() && !get_preemption_level() && ml_get_interrupts_enabled();
++}
++static uintptr_t kst_xnu_owner(void *cookie)
++{(void)cookie;return (uintptr_t)current_thread();}
++static int kst_xnu_lock(void *cookie)
++{(void)cookie;lck_mtx_lock(&kebab_scm_mutex);return 0;}
++static void kst_xnu_unlock(void *cookie)
++{(void)cookie;lck_mtx_unlock(&kebab_scm_mutex);}
++static void kebab_scm_gate_startup(void)
++{
++ const KebabScmTransactionOps ops={NULL,kst_xnu_context,kst_xnu_owner,kst_xnu_lock,kst_xnu_unlock};
++ if(KebabScmDomainInit(&kebab_scm_domain,&ops))panic("KEBAB SCM: duplicate/invalid gate initialization");
++}
++/* LCK_GRP/Mtx auto-init runs in LOCKS, before this EARLY_BOOT hook. Being
++ * initialized alone never permits an IRQ/preemption-disabled early caller. */
++STARTUP(EARLY_BOOT,STARTUP_RANK_FIRST,kebab_scm_gate_startup);
++int kebab_scm_qsee_client_begin(void)
++{
++ if(!KebabScmDomainOnline(&kebab_scm_domain))return KST_NOT_READY;
++ if(!kst_xnu_context(NULL))return KST_CONTEXT;
++ uintptr_t owner=kst_xnu_owner(NULL);
++ if(!owner)return KST_CONTEXT;
++ /* Enforce QSEE-session -> SCM, never SCM -> QSEE-session. A callback must
++  * not wait for either mutex recursively on the current thread. */
++ if(__atomic_load_n(&kebab_qsee_client_owner,__ATOMIC_ACQUIRE)==owner ||
++    __atomic_load_n(&kebab_scm_domain.owner,__ATOMIC_ACQUIRE)==owner)return KST_RECURSIVE_BEGIN;
++ lck_mtx_lock(&kebab_qsee_session_mutex);
++ if(!kst_xnu_context(NULL) || kst_xnu_owner(NULL)!=owner){lck_mtx_unlock(&kebab_qsee_session_mutex);return KST_CONTEXT;}
++ __atomic_store_n(&kebab_qsee_client_owner,owner,__ATOMIC_RELEASE);return KST_OK;
++}
++int kebab_scm_qsee_client_owned(void)
++{
++ if(!KebabScmDomainOnline(&kebab_scm_domain))return KST_NOT_READY;
++ if(!kst_xnu_context(NULL))return KST_CONTEXT;
++ uintptr_t owner=kst_xnu_owner(NULL);
++ return owner && __atomic_load_n(&kebab_qsee_client_owner,__ATOMIC_ACQUIRE)==owner?KST_OK:KST_OWNER;
++}
++int kebab_scm_qsee_client_end(void)
++{
++ int e=kebab_scm_qsee_client_owned();if(e)return e;
++ if(__atomic_load_n(&kebab_scm_domain.owner,__ATOMIC_ACQUIRE)==kst_xnu_owner(NULL))return KST_INFLIGHT;
++ __atomic_store_n(&kebab_qsee_client_owner,0,__ATOMIC_RELEASE);
++ lck_mtx_unlock(&kebab_qsee_session_mutex);return KST_OK;
++}
++int kebab_scm_transaction_begin(KebabScmTransaction *t,unsigned client)
++{
++ if(client==KST_QSEE){int e=kebab_scm_qsee_client_owned();if(e)return e;}
++ return KebabScmTransactionBegin(&kebab_scm_domain,t,client);
++}
++int kebab_scm_transaction_join(KebabScmTransaction *t)
++{return KebabScmTransactionJoin(&kebab_scm_domain,t);}
++int kebab_scm_transaction_leave(KebabScmTransaction *t)
++{return KebabScmTransactionLeave(&kebab_scm_domain,t);}
++int kebab_scm_transaction_call_begin(KebabScmTransaction *t,uint32_t fid)
++{return KebabScmTransactionCallBegin(&kebab_scm_domain,t,fid);}
++int kebab_scm_transaction_call_finish(KebabScmTransaction *t,const KebabScmTransportResult *r)
++{return KebabScmTransactionCallFinish(&kebab_scm_domain,t,r);}
++int kebab_scm_transaction_shared_safe(KebabScmTransaction *t)
++{return KebabScmTransactionCanTouchShared(&kebab_scm_domain,t);}
++int kebab_scm_transaction_end(KebabScmTransaction *t)
++{return KebabScmTransactionEnd(&kebab_scm_domain,t);}
++
++#endif
+--- a/osfmk/kern/KebabGpuCcCore.h
++++ b/osfmk/kern/KebabGpuCcCore.h
+@@ -49,7 +49,13 @@
+ static inline uint32_t KebabGpuCcWriteMask(unsigned region,uint32_t offset)
+ {if(region!=1)return 0;if(offset==0x106c)return 0x801;if(offset==0x1078)return 1;return 0;}
+ static inline uint32_t KebabGpuCcControlMask(unsigned slot)
+-{/* CBCR31 CLK_OFF and28..30 NOC_FSM are RO status, not control bits. */
++{/* GDSCR31 is vendor PWR_ON. Actual571 also observed29/30 changing
++  * after SW_COLLAPSE clear (00222001 ->60222000); their meaning is not
++  * defined by the fixed source. Exclude only those observed dynamic bits,
++  * retain conservative invariance of every other unowned bit, including28.
++  * ACK remains HW1540 bit31; no106c high bit is a completion condition.
++  * CBCR31 CLK_OFF and28..30 NOC_FSM are RO status, not controls. */
++ if(slot==2)return 0x1fffffffu;
+  return slot==4 || slot==5?0x0fffffffu:0x7fffffffu;}
+ static inline int KebabGpuCcGmuClockQuiet(uint32_t value)
+ {/* No owned CM3 reset exists: require branch disabled AND reported halted. */
+@@ -92,8 +98,8 @@
+  for(slot=0;slot<6;slot++)if(sample[0][slot]==sample[1][slot])*stable|=1u<<slot;
+  return *stable==63?0:11;
+ }
+-/* Bit writes preserve all other controls (bit31 is hardware status).
+- * The adapter independently enforces the exact writable masks. */
++/* Bit writes preserve unowned controls. The adapter independently enforces
++ * exact writable masks and rebases the request on its fresh register read. */
+ static inline int KebabGpuCcUpdate(KebabGpuCcContext *c,unsigned slot,uint32_t mask,uint32_t bits,uint32_t expected)
+ {
+  unsigned region=0,i;uint32_t offset=0,current,value,control_mask=KebabGpuCcControlMask(slot);uint64_t start;int e;
+@@ -141,7 +147,7 @@
+ {
+  KebabGpuCcLedger *b=c->ledger;KebabGpuCcRecord *r=c->r;int e;
+  b->original_gdscr=r->before[0][2];b->original_ahb=r->before[0][4];b->original_gmu=r->before[0][5];
+- b->gdscr_control=b->original_gdscr&0x7fffffffu;b->ahb_control=b->original_ahb&KebabGpuCcControlMask(4);
++ b->gdscr_control=b->original_gdscr&KebabGpuCcControlMask(2);b->ahb_control=b->original_ahb&KebabGpuCcControlMask(4);
+  e=KebabGpuCcUpdate(c,2,1,0,b->gdscr_control);if(e)return e;b->gdscr_control&=~1u;
+  if((e=KebabGpuCcBarrier(c)) || (e=KebabGpuCcDelay(c,1)) || (e=KebabGpuCcPowerAck(c)))return e;
+  /* Original DT qcom,retain-regs: vendor installs retention after power ACK.
+@@ -153,7 +159,7 @@
+  if((e=KebabGpuCcDelay(c,1)) || (e=KebabGpuCcDelay(c,1)))return e;
+  e=KebabGpuCcUpdate(c,4,1,1,b->ahb_control);if(e)return e;b->ahb_control|=1;
+  if((e=KebabGpuCcDelay(c,10)) || (e=KebabGpuCcSnapshot(c,1)))return e;
+- if((r->after[0][2]&0x7fffffffu)!=b->gdscr_control || !(r->after[0][3]&0x80000000u) ||
++ if((r->after[0][2]&KebabGpuCcControlMask(2))!=b->gdscr_control || !(r->after[0][3]&0x80000000u) ||
+  (r->after[0][4]&KebabGpuCcControlMask(4))!=b->ahb_control || (r->after[0][5]&KebabGpuCcControlMask(5))!=(b->original_gmu&KebabGpuCcControlMask(5)) ||
+  !KebabGpuCcGmuClockQuiet(r->after[0][5]))return 11;
+  r->ahb_request_ack=1;r->ahb_reported_running=(r->after[0][4]&0x80000000u)==0;
+@@ -165,7 +171,7 @@
+  /* No GMU execution/quiesce owner exists in this phase. Do not withdraw
+   * any controller hold while this branch is enabled or not reported halted. */
+  if(!KebabGpuCcGmuClockQuiet(r->before[0][5]))return 95;
+- if((r->before[0][2]&0x7fffffffu)!=b->gdscr_control || (r->before[0][4]&KebabGpuCcControlMask(4))!=b->ahb_control ||
++ if((r->before[0][2]&KebabGpuCcControlMask(2))!=b->gdscr_control || (r->before[0][4]&KebabGpuCcControlMask(4))!=b->ahb_control ||
+  (r->before[0][5]&KebabGpuCcControlMask(5))!=(b->original_gmu&KebabGpuCcControlMask(5)))return 11;
+  e=KebabGpuCcUpdate(c,4,1,b->original_ahb&1,b->ahb_control);if(e)return e;
+  b->ahb_control=(b->ahb_control&~1u)|(b->original_ahb&1);
+@@ -178,7 +184,7 @@
+   if((e=KebabGpuCcBarrier(c)) || (e=KebabGpuCcDelay(c,1)) || (e=KebabGpuCcDelay(c,100)))return e;
+  }
+  if((e=KebabGpuCcSnapshot(c,1)))return e;
+- if((r->after[0][2]&0x7fffffffu)!=b->gdscr_control || (r->after[0][4]&KebabGpuCcControlMask(4))!=b->ahb_control ||
++ if((r->after[0][2]&KebabGpuCcControlMask(2))!=b->gdscr_control || (r->after[0][4]&KebabGpuCcControlMask(4))!=b->ahb_control ||
+  (r->after[0][5]&KebabGpuCcControlMask(5))!=(b->original_gmu&KebabGpuCcControlMask(5)))return 11;
+  r->collapse_and_ahb_restored=1;r->retention_added=b->retention_added;r->full_original_controls_restored=!b->retention_added;b->held=0;return 0;
+ }
+--- a/iokit/Kernel/arm/KebabNativeGpuCc.h
++++ b/iokit/Kernel/arm/KebabNativeGpuCc.h
+@@ -29,6 +29,9 @@
+  if(((current^value)&KebabGpuCcControlMask(offset==0x1078?4:2)&~mask)!=0)return 22;
+  /* This fixed profile never seizes HW control/override or clears retention. */
+  if(offset==0x106c && ((value&6) || ((current&0x800) && !(value&0x800))))return 95;
++ /* Hardware may change status since the core read. Never write stale
++  * unowned bits: only the fixed owned mask is merged into this fresh word. */
++ value=(current&~mask)|(value&mask);
+  *(volatile uint32_t *)(a->cc+offset)=value;
+ #if defined(__aarch64__)
+  __asm__ volatile("dsb sy" ::: "memory");

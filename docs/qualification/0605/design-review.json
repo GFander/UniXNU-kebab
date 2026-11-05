@@ -1,0 +1,48 @@
+{
+  "version": "0605",
+  "parent": "0604",
+  "scope": "Fixed18 source-backed CP_REG_TO_MEM diagnostics to unused owned NC fence scratch; preserve all6042D words, controls, pixels, guards, faults, timeout/quarantine/no retry. No SMC/PAS/TRUST/IRQ/power/SMMU change.",
+  "physical_parent_sha256": "86f8a1342bd7899ede807892170baadcf64bc8a3eccf4a8ee6291b45958b72f5",
+  "primary_source": {
+    "Mesa_commit": "63350a034b2bc4e862115b783493f151da012850",
+    "files": {
+      "adreno_pm4.xml": "081aaa81ff2a76571b33e172478092c7e9c640da62c045627c1090a3db88dcee",
+      "a6xx.xml": "22e5d165847294539c5d23a1b8ab962621a8ebdbb98a006211cf8bf7d895696e",
+      "tu_cmd_buffer.cc": "99d3f966505f96f06fd13314310443b286023d089c5f9ce3370705ca0442fef1"
+    },
+    "registers": [
+      "0x8400",
+      "0x8405",
+      "0x8406",
+      "0x8c00",
+      "0x8c01",
+      "0x8c17",
+      "0x8c18",
+      "0x8c19",
+      "0x8c1a",
+      "0x8c2c",
+      "0x8c2d",
+      "0x8c2e",
+      "0x8c2f",
+      "0xacc0",
+      "0x8e04",
+      "0x8e07",
+      "0x8811",
+      "0x8110"
+    ],
+    "CP_REG_TO_MEM": "opcode3e/count3, CNT1, no64B/ACCUMULATE, 64bit destination",
+    "ordering": "WFI after CCU clean, fixed register copies, CP_WAIT_MEM_WRITES, original final fence"
+  },
+  "words_per_pass": 212,
+  "CAP38_schema": 5,
+  "CAP38_bytes": 136512,
+  "PAS13_query_route": "CLOSED",
+  "ZAP_actual_auth": "NOT_RUN/UNKNOWN",
+  "actual_hardware_root_cause_proven": false,
+  "production": {
+    "osfmk/kern/KebabA650RenderCore.h": "f4a2c7a8a97e80df96ce393a9eb01540773a101644a3a8d45614af78d8c507d1",
+    "iokit/Kernel/arm/KebabA650RenderNative.h": "f23462e84ef3f4a7ba2027c85a06b14f8cf765bc3dfd27e27b5fcef56d41918e",
+    "iokit/Kernel/arm/KebabNativeA650Render.h": "362f072bb2f2eeee06a1416c22db630836384fed13b741b8dc50f194d46b164f"
+  },
+  "native_layout_static_assertions": true
+}

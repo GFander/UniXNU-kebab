@@ -1,0 +1,74 @@
+{
+  "accepted": true,
+  "version": "0573",
+  "native_sha256": "ab897a97e5ebfb0f3c217a1db33bda9d52dbca721794c632a00a7e065d5f9dbe",
+  "native_bytes": 19270544,
+  "common": 427,
+  "host": 4,
+  "source_files": 5341,
+  "watchdog_seconds": 304.443,
+  "scope": "Original serializedSCM/Root/encryptedData/security/watchdog; real CX/MX floor5 ACK and retainedref1 plus real canonical GPUCC CX-domain ACK/retention/AHB request held with parentref2; CAP20 reports expected absence under unchanged0487; PAS INFO/pool/IRQ/thermal regression",
+  "GPUCC_access_qualified": true,
+  "CX_power_ACK": true,
+  "AHB_request_hold": true,
+  "parent_held_refs": 2,
+  "lowDMA_raw_capture_qualified": true,
+  "lowDMA_grant": false,
+  "lowDMA_measurement": false,
+  "lowDMA_NC_mapping": false,
+  "GFX_or_BCM_voted": false,
+  "active_SMMU": false,
+  "physical_DMA": false,
+  "GMU": false,
+  "Metal": false,
+  "all_requested_items_complete": false,
+  "ended_capture_and_observer_pids": [
+    56804,
+    78212,
+    15656
+  ],
+  "thermal_valid_counts": [
+    [
+      16,
+      9
+    ],
+    [
+      16,
+      9
+    ],
+    [
+      16,
+      9
+    ]
+  ],
+  "thermal_throttle_recovery": false,
+  "receipts": {
+    "normal-baseline-qualified.json": "65c052cca50a0bea8c9b42a74df784f610f4696a58618c5a2b1237a1e9b2267e",
+    "post-baseline-dma-complete.json": "96a45f600dd94ddc9f3894e1277237f4cfba9f96095a55a6098afa62c71ff2dc",
+    "paired-build.json": "18b2711d8f40cff3218a27377cd70b91ad03e26758e2b4868257402a654e9c67",
+    "native-cache-poc-qualified.json": "0c1f00a3aecc28b83a4a098b1460c1a7dab0d5ff39ef312140cc1338a5f6c3bc",
+    "native-exported-headers-qualified.json": "d56591ec38c8aa3c1568502e8e02bccbdd2bc091e3ad3b9fd8a5353f46704545",
+    "native-lowdma-linked-qualified.json": "aa6d2f4b964896bda62c69d45a043c3470bbc3d6bdde8e85d27d9f963d75e9af",
+    "host-combined-source-qualified.json": "b18db151e62348b71bed73e36f0a3f3a64e4469a903a382ccade1055d711ed2e",
+    "host-cc-persistent-qualified.json": "7828bcd931052464bd81ce1e1a54cc77ac760f43e8acd60c5ac9a2cfebbfa991",
+    "host-lowdma-provider-qualified.json": "c23c25a88f11236cf8c1f9d9b6cfc42b639eb7aa6feb1542465c95d01756561c",
+    "host-core-tests.json": "ab4a7a97122cad560ffb2482c022475603d2e5b3c654993a946764eb04d99b1d",
+    "host-cxmx-receiver-qualified.json": "b56ab2b9336cafe0eab3d4b362c03f7fc699089d6f024c3434a20142a693cbaf",
+    "host-gpucc-receiver-qualified.json": "478f009b0eae58086afdffb43d8ad2c9be7d387b545f6e455be563b772c59849",
+    "host-lowdma-receiver-qualified.json": "7bee1b9b88763aa69e237acf5bb1c99094a79ad77c2d7b7d0417be382ee3448b",
+    "live-cxmx-hold/result.json": "c0a858c763cdbc7481779b86db1fc7cf1c31310421697945ad97b263a14c4726",
+    "live-gpucc-hold/result.json": "5c6a917cccc774f2be065084c6d1404a0b34f5ab5ce905e43f6e26d15fd5b687",
+    "live-lowdma/result.json": "a365a2d1fe50d46319727df71848f5973481821b8da102cc77f94f0100a6d948",
+    "live-pas/result.json": "bfe27cadea9a6e519a50fc0c53f1e619d3ba1b79b013fcd0ae0c9e5e4012976c",
+    "live-rsc/result.json": "86cfc4983566c6ac60bcb3c3019ce87a561e480a601f9c55073d6d2c8eb2c134",
+    "live-gpu-power/result.json": "4cb996d011d23c91bfc6a0d160a7f33d11f9fd98dddd05e8995f3f70cdba10f2",
+    "live-dma-pool/result.json": "9d2b1a2598d45d750f479a82d71cc2f735d107d915969efe70c43afc5df5abbc",
+    "live-iova/result.json": "77222d3d9dfdf6d23538de62a22c1aeb7fb16d3e7606a769859f07682b6cfa11",
+    "live-platform/result.json": "1a5bd3d7a75460a5b874da942e676a7238a13313069fbd393a996615f0cc6426",
+    "live-thermal/result.json": "9d91a6e153f85375782f8febab14d3ee7f919c965af8bfa041af32d782d62ba8",
+    "live-power-command/result.json": "b213a9e3e4f2a39fcdf0a3fb39dd307dcee72b80162ed3b25253edfbfaf34b9d",
+    "live-cc-command/result.json": "332fbc0a3ec789e8dd74125a138dab7c3eea80eb2e1ed04f8d7a78477cad9249",
+    "live-pas-command/result.json": "6e540c5d28a51f0ad7e7a3ca9fa755b3457d1e0c4050e244790e1a0eb0fa3390",
+    "live-dma-command/result.json": "bb2cffc7e3b9e82a2f0da5f1264b1f5d04c6571dfbd72b3690057ae50ecf7132"
+  }
+}

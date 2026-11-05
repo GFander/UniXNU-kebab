@@ -1,0 +1,11 @@
+--- a/bsd/dev/KebabGmuBootOwner.inc
++++ b/bsd/dev/KebabGmuBootOwner.inc
+@@ -80,7 +80,7 @@
+  if((v[2]&KebabGpuCcControlMask(2))!=kebab_gpu_cc_ledger.gdscr_control ||
+     (v[4]&0x0fffffffu)!=kebab_gpu_cc_ledger.ahb_control || (v[7]&0x800000f3u)!=2 ||
+     (v[8]&0x10371fu)!=0x100602u || !(v[14]&1) || !(v[15]&0x10000) || (v[9]&0xc0000000u)!=0xc0000000u ||
+-    ((v[8]^kebab_gmu_root_ledger.cfg)&0x10371fu) || ((v[7]^kebab_gmu_root_ledger.cmd)&0x800000f3u)){e=11;goto done;}
++    ((v[8]^kebab_gmu_root_ledger.cfg)&0x10371fu) || ((v[7]^kebab_gmu_root_ledger.cmd)&KebabGmuRootInvariantMask(7))){e=11;goto done;}
+  out->root_qualified=1;
+  if(kebab_gmu_root_children==UINT32_MAX){e=75;goto done;}
+  ++kebab_gmu_root_children;kebab_gmu_boot_ledger.pinned=1;kebab_gmu_boot_identity=token;kebab_gmu_boot_ledger.namespace_epoch=epoch;

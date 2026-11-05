@@ -1,0 +1,197 @@
+--- a/osfmk/kern/kebab_low_dma.h
++++ b/osfmk/kern/kebab_low_dma.h
+@@ -41,6 +41,19 @@
+ /* Bounded failed-input cache only. NULL/zero queries immutable length.
+  * No allocation, current-DT access, translation, hashing, mapping or SMC. */
+ int kebab_low_dma_tree_snapshot(void *out,uint32_t capacity,uint32_t *bytes);
++/* Separate immutable receipt. Mapping does not change the CAP20 measurement
++ * or grant PAS authority. No client-supplied PA/VA is accepted. */
++#define KEBAB_LOW_DMA_NC_MAGIC 0x31434e414d444c4bULL
++struct kebab_low_dma_nc_observation {
++ uint64_t magic;
++ uint32_t schema,bytes,state,result,flags,checked_pages;
++ uint64_t image,image_bytes,metadata,metadata_bytes,image_va,metadata_va;
++ uint64_t image_first_par,metadata_first_par,image_last_par,metadata_last_par;
++ uint8_t parent_adt_sha256[32];
++ uint64_t reserved[2];
++};
++int kebab_low_dma_nc_prepare(void);
++int kebab_low_dma_nc_snapshot(struct kebab_low_dma_nc_observation *,uint32_t);
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
++++ b/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
+@@ -90,3 +90,101 @@
+ 
+ #include "KebabNativeA650Cp.h"
+ #include "KebabNativeA650Render.h"
++
++/* BEGIN OWNED_LOW_DMA_NC */
++#include <kern/kebab_low_dma.h>
++#ifndef KLNC_HOST
++#include <kern/debug.h>
++#endif
++static_assert(sizeof(kebab_low_dma_nc_observation)==160,"fixed NC receipt");
++static uint32_t klnc_state;
++static kebab_low_dma_nc_observation klnc_observation;
++static IOMemoryDescriptor *klnc_memory[2];
++static IOMemoryMap *klnc_mapping[2];
++static uint64_t klnc_translate(uintptr_t va)
++{
++#ifdef KLNC_HOST
++ return klnc_host_translate(va);
++#else
++ /* Same short DAIF/AT/ISB/PAR/restore sequence as mmu_kvtop. No low-PA
++  * load/store is performed. Retain full PAR attributes for independent proof. */
++ uint64_t daif,par;
++ __asm__ volatile("mrs %0, DAIF\n\tmsr DAIFSet, #3\n\tat s1e1r, %2\n\tisb sy\n\tmrs %1, PAR_EL1\n\tmsr DAIF, %0"
++  : "=&r"(daif),"=&r"(par):"r"(va):"memory");
++ return par;
++#endif
++}
++static int klnc_check(unsigned index,uint64_t pa,uint64_t bytes)
++{
++ IOMemoryDescriptor *memory=klnc_memory[index];IOMemoryMap *mapping=klnc_mapping[index];
++ if(memory->getLength()!=bytes || mapping->getLength()!=bytes)return 6;
++ uintptr_t va=mapping->getVirtualAddress();
++ if(!va || (va&16383) || va>UINTPTR_MAX-bytes)return 6;
++ if(index && !(va+bytes<=klnc_observation.image_va || klnc_observation.image_va+klnc_observation.image_bytes<=va))return 6;
++ if(index)klnc_observation.metadata_va=va;else klnc_observation.image_va=va;
++ for(uint64_t offset=0;offset<bytes;offset+=4096) {
++  IOByteCount extent=0;
++  if(memory->getPhysicalSegment(offset,&extent,kIOMemoryMapperNone)!=pa+offset || extent<4096)return 6;
++  uint64_t par=klnc_translate(va+offset);
++  if(index){if(!offset)klnc_observation.metadata_first_par=par;klnc_observation.metadata_last_par=par;}
++  else{if(!offset)klnc_observation.image_first_par=par;klnc_observation.image_last_par=par;}
++  if((par&1) || (par&0x0000fffffffff000ULL)!=pa+offset)return 7;
++  /* MAIR_WRITECOMB=0x44: Outer/Inner Normal Non-cacheable, not Device
++   * and not the default pmap_cache_attributes value for unmanaged low RAM. */
++  if((par>>56)!=0x44)return 8;
++  ++klnc_observation.checked_pages;
++ }
++ return 0;
++}
++extern "C" int kebab_low_dma_nc_prepare(void)
++{
++ if(panic_active() || KFNativeWorker(NULL))return 2;
++ uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&klnc_state,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return expected==2?0:16;
++ klnc_observation={};klnc_observation.magic=KEBAB_LOW_DMA_NC_MAGIC;klnc_observation.schema=1;
++ klnc_observation.bytes=sizeof(klnc_observation);klnc_observation.state=2;klnc_observation.result=1;
++ kebab_low_dma_observation parent={};uint64_t cookie=0;int error;
++ if(kebab_low_dma_snapshot(&parent,sizeof parent) || parent.state!=KLDC_DONE || parent.result!=KLDC_MEASURED_RETAINED || parent.flags!=831 ||
++    !parent.raw || (parent.raw&4095) || parent.raw_bytes!=0x204000 || parent.raw>0x100000000ULL-parent.raw_bytes ||
++    parent.image_bytes!=0x100000 || parent.metadata_bytes!=0x4000 || (parent.image&0xfffff) || (parent.metadata&0x3fff) ||
++    parent.image<parent.raw || parent.image>parent.raw+parent.raw_bytes-parent.image_bytes ||
++    parent.metadata<parent.raw || parent.metadata>parent.raw+parent.raw_bytes-parent.metadata_bytes ||
++    !(parent.image+parent.image_bytes<=parent.metadata || parent.metadata+parent.metadata_bytes<=parent.image))goto done;
++ klnc_observation.image=parent.image;klnc_observation.image_bytes=parent.image_bytes;
++ klnc_observation.metadata=parent.metadata;klnc_observation.metadata_bytes=parent.metadata_bytes;
++ memcpy(klnc_observation.parent_adt_sha256,parent.measured_adt_sha256,32);klnc_observation.flags=1;
++ /* Preserve the existing PAS13 namespace exclusion: GPU slot1 must still
++  * be unpublished. This short CPU-only mapping operation releases its gate;
++  * a future PAS lifecycle must acquire and hold its own qualified token. */
++ error=kebab_gpu_namespace_change_begin(KF_OP_PAS13_SEPARATE_IMAGE,&cookie);
++ if(error || cookie!=UINT64_MAX){klnc_observation.result=2;goto done;}
++ for(unsigned i=0;i<2;i++) {
++  uint64_t pa=i?parent.metadata:parent.image,bytes=i?parent.metadata_bytes:parent.image_bytes;
++  klnc_memory[i]=IOMemoryDescriptor::withPhysicalAddress(pa,bytes,kIODirectionInOut);
++  if(!klnc_memory[i]){klnc_observation.result=3;goto release;}
++  if(klnc_memory[i]->prepare(kIODirectionInOut)){klnc_observation.result=4;goto release;}
++  klnc_mapping[i]=klnc_memory[i]->map(kIOMapAnywhere|kIOMapWriteCombineCache);
++  if(!klnc_mapping[i]){klnc_observation.result=5;goto release;}
++  klnc_observation.flags|=2;
++  error=klnc_check(i,pa,bytes);
++  if(error){klnc_observation.result=error;goto release;}
++  klnc_observation.flags|=i?8:4;
++ }
++ {kebab_low_dma_observation again={};
++  if(kebab_low_dma_snapshot(&again,sizeof again) || memcmp(&again,&parent,sizeof parent)){klnc_observation.result=9;goto release;}}
++ klnc_observation.result=0;
++release:
++ error=kebab_gpu_namespace_change_end(cookie,0);
++ if(error)klnc_observation.result=10;
++done:
++ /* Retain both successful and partial descriptors/maps, including any
++  * prepare, mapping or attribute failure. No wipe, free, SMC or retry. */
++ __atomic_store_n(&klnc_state,2,__ATOMIC_RELEASE);return 0;
++}
++extern "C" int kebab_low_dma_nc_snapshot(kebab_low_dma_nc_observation *out,uint32_t bytes)
++{
++ if(!out || bytes!=sizeof(*out))return 22;
++ if(__atomic_load_n(&klnc_state,__ATOMIC_ACQUIRE)!=2)return 35;
++ memcpy(out,&klnc_observation,sizeof(*out));return 0;
++}
++/* END OWNED_LOW_DMA_NC */
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -970,6 +970,15 @@
+         image->total=bytes;image->stable=1;image->flags=2;return 0;
+     }
+ /* END A650_GPUCP37_PROVIDER */
++    if(source==40) {
++        if(argument)return 22;
++        auto *data=(kebab_low_dma_nc_observation *)IOMalloc(sizeof(kebab_low_dma_nc_observation));
++        if(!data)return 12;
++        int error=kebab_low_dma_nc_snapshot(data,sizeof(*data));
++        if(error){IOFree(data,sizeof(*data));return error;}
++        *image=kc_image{};image->handle=data;image->source=40;image->argument=0;
++        image->total=sizeof(*data);image->stable=1;image->flags=2;return 0;
++    }
+     if(source==39) {
+         if(argument)return 22;
+         uint32_t bytes=0;
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -320,6 +320,7 @@
+ extern void kebab_a650_gpu_render_hold_prepare(void);
+ /* END A650_GPURENDER_COMMAND */
+ #define UD_LOW_DMA 64u
++#define UD_LOW_DMA_NC 65u
+ #include <kern/kebab_low_dma.h>
+ static void
+ kebab_low_dma_measure_prepare(void)
+@@ -329,6 +330,14 @@
+     const int snapshot = kebab_low_dma_snapshot(&observation, sizeof(observation));
+     printf("KEBAB LOWDMA: end; worker=%d snapshot=%d state=%u result=%u flags=0x%x\n",
+         worker, snapshot, observation.state, observation.result, observation.flags);
++}
++static void kebab_low_dma_nc_worker(void)
++{
++    int worker=kebab_low_dma_nc_prepare();
++    struct kebab_low_dma_nc_observation observation={0};
++    int snapshot=kebab_low_dma_nc_snapshot(&observation,sizeof observation);
++    printf("KEBAB LOWDMANC: end; worker=%d snapshot=%d state=%u result=%u flags=0x%x pages=%u\n",
++        worker,snapshot,observation.state,observation.result,observation.flags,observation.checked_pages);
+ }
+ extern void kebab_gmu_firmware_prepare(void);
+ extern void kebab_gmu_hfi_prepare(void);
+@@ -1546,6 +1555,7 @@
+     if(received==10 && !memcmp(buf,"GPURENDER\n",10))return UD_GPU_RENDER;
+ /* END A650_GPURENDER_DECODE */
+     if(received==7 && !memcmp(buf,"LOWDMA\n",7))return UD_LOW_DMA;
++    if(received==9 && !memcmp(buf,"LOWDMANC\n",9))return UD_LOW_DMA_NC;
+ /* END FUTURE_GMU_COMMAND_DECODE */
+     if(received==8 && !memcmp(buf,"GPUSMMU\n",8))return UD_GPU_SMMU_OBSERVE;
+     if(received!=9)return 0;
+@@ -2009,6 +2019,8 @@
+ 	} else if (command == UD_GPU_RENDER) {
+ 		kebab_a650_gpu_render_hold_prepare();
+ /* END A650_GPURENDER_DISPATCH */
++	} else if (command == UD_LOW_DMA_NC) {
++		kebab_low_dma_nc_worker();
+ 	} else if (command == UD_LOW_DMA) {
+ 		kebab_low_dma_measure_prepare();
+ /* END FUTURE_GMU_COMMAND_DISPATCH */
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>39)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>40)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;

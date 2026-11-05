@@ -1,0 +1,217 @@
+{
+  "passed": true,
+  "physical_test": false,
+  "scope": "Actual fixed A650 CP register-copy diagnostic builder and full BO byte verifier. Explicit CPU image model only; no native MMIO/cache/owner emulation and no physical rendering claim.",
+  "before_compiled_and_failed": true,
+  "ASan_UBSan": true,
+  "compiled_runtime_mutants": [
+    {
+      "name": "wrong-control-page",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "16e601013850fcace5333234e50f6dc868fad3e37a3a66883123fb08f608b53c",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-control-value",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "3c4da7cf7d2fd0a92b3e0ed54b5a217e1ca160ddd9ac4ed50fd98eb0b44f95cb",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-control-opcode",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-control-pass-stride",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "56093a6f4d9a41f415dd4910876c74decdcb15deb7235f0cc0a46f869ce81068",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "checker-ignores-control",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "8e7dcbf7c1f3b6e8864185e3e2d1f9ba89bdf878fcd5aa2752aba37f657c0145",
+      "stderr_sha256": "9a6d6fae1676c3712cae258330a1b98d3158df82ef436c81bdba7e3b9d094d7a",
+      "diagnostic": "failed line 38\n"
+    },
+    {
+      "name": "accept-no-pixels",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "8e7dcbf7c1f3b6e8864185e3e2d1f9ba89bdf878fcd5aa2752aba37f657c0145",
+      "stderr_sha256": "9a6d6fae1676c3712cae258330a1b98d3158df82ef436c81bdba7e3b9d094d7a",
+      "diagnostic": "failed line 38\n"
+    },
+    {
+      "name": "alter-original-format",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "20ae4949d72b946f17d38f23577bba47992a5b2242476d4f74d152082a80baab",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-final-fence",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "e533092a4fa9b24f78fd72847fed163372c0ac38649282f46ca2d6ef01d013cb",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-initial-ECO-value",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "fc3ec16792f2a8ef651ecd5e4a790e38d40b59221fcd1fa28979dd8c88d83369",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-initial-ECO-register",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "c0ef97b9fe93bcf192f63a49f1c546e27f29a12df11e4869118c603115037df5",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-initial-WFI-count",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "1f160fb283a3f11579b7eae5db8561238a67f91f3030776c78c35940f162fe52",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-RB-mode",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "203998ce0a647908ac089c84678623f7f531f4d189b8cd099626f6bc8a7df6fa",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-GRAS-mode",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "005be2cf199c682c989261e504d65198abc95a70b38a69cf763f562c11aef785",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-RB-mode-register",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "ad8da4f11e2c8003155a09b3333463f32d20fb5fc1ac62f67b3a8a35e85b9cae",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-GRAS-mode-register",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "c681e0e980733c6d422846ca215caf27678f478bfd65b864a63b995f1ac0916d",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-copy-opcode",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "4404ca1fdeeef601c44f3e5332949e690d73b0f075f60ac325d3dd6a3a13c7a8",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-copy-count",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "8a29162a4acd6b37da02b403a0f4cd2c53505a6a53b11d0b801276500a652277",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-copy-destination",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "8973437ec43f8ef477584d05dec3bc1321d84b0574d7f55e29329d475dfdced9",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "missing-write-order",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "768eec22dc8328a255562859d9e42ae58d66c6579f605b18527ad3a92006cd6e",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-diagnostic-register",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "8a29162a4acd6b37da02b403a0f4cd2c53505a6a53b11d0b801276500a652277",
+      "stderr_sha256": "7afb3c028a7155277b5134a48dc8d98b3557f1e3bd2b36c9e61307c10a8a0bfc",
+      "diagnostic": "failed line 36\n"
+    },
+    {
+      "name": "wrong-diagnostic-stride",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "274fa930a3e685a37780bac5dd706c8de2ea98a1c9ab1347ccfa4f96e1982097",
+      "diagnostic": "failed line 27\n"
+    },
+    {
+      "name": "wrong-diagnostic-sentinel",
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "7195916a4e67192daabe2955c175e58bbd25363d706b0436c91871a4f6877fab",
+      "diagnostic": "failed line 28\n"
+    }
+  ],
+  "runs": {
+    "before-red": {
+      "compiled": true,
+      "exit": 42,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "d853bf0d6ac02f3bbeb14353dc40048f267285b91396efe6ceb0fe93849d81ea",
+      "diagnostic": "failed line 24\n"
+    },
+    "normal": {
+      "compiled": true,
+      "exit": 0,
+      "stdout_sha256": "8e7dcbf7c1f3b6e8864185e3e2d1f9ba89bdf878fcd5aa2752aba37f657c0145",
+      "stderr_sha256": "3efd1d4507699fc509bbeff26ca462d4727bf59f492d24edd89ac1e6eca05b87",
+      "diagnostic": "PASS checks=1634 CPU model, not physical pixels\n"
+    },
+    "ASan-UBSan": {
+      "compiled": true,
+      "exit": 0,
+      "stdout_sha256": "8e7dcbf7c1f3b6e8864185e3e2d1f9ba89bdf878fcd5aa2752aba37f657c0145",
+      "stderr_sha256": "3efd1d4507699fc509bbeff26ca462d4727bf59f492d24edd89ac1e6eca05b87",
+      "diagnostic": "PASS checks=1634 CPU model, not physical pixels\n"
+    }
+  },
+  "production": {
+    "KebabA650CpCore.h": "e088fd1aee3d54882004897b08bcd23592bde097e5553744a1d587548cd256c4",
+    "golden605.h": "12f55e5ebe8cb2149f6d9a30afb391c1cf997e79b67125db10fe9919b9194c83",
+    "KebabA650RenderCore.h": "f4a2c7a8a97e80df96ce393a9eb01540773a101644a3a8d45614af78d8c507d1",
+    "KebabA650CpRegisters.h": "1342a51d4c4a216154bca7378a53c7477849adae99f5fc4d0f3ec094b2314217"
+  },
+  "words": 424,
+  "words_sha256": "8e7dcbf7c1f3b6e8864185e3e2d1f9ba89bdf878fcd5aa2752aba37f657c0145",
+  "old602_controls_and_2D_words_unchanged": true
+}

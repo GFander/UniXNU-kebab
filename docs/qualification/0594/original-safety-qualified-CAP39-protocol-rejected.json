@@ -1,0 +1,142 @@
+{
+  "version": "0594",
+  "recorded": "2026-11-04T14:46:25.644498+08:00",
+  "accepted": false,
+  "original_safety_accepted": true,
+  "safety": {
+    "accepted": true,
+    "version": "0594",
+    "normal_primary_bytes": 8587837440,
+    "extra_memory_admitted": 0,
+    "original_crypto_defaults_RTC_NVRAM_watchdog_preserved": true,
+    "watchdog_seconds": 304.474,
+    "capture_closed": true,
+    "frame_transport_physical_not_yet_qualified": true
+  },
+  "LOWDMA_attempts": 1,
+  "full_ADT_measurement": "FAIL12",
+  "CAP39_diagnostic": "FAIL22 protocol source bound38",
+  "diagnostic_capture_complete": false,
+  "GPU_chain_regression": "NOT_RUN0594",
+  "NC": "NOT_RUN",
+  "PAS": "NOT_RUN",
+  "A650_FIRST_RENDER": "NOT_RUN0594; FAIL0591 retained",
+  "manual_GUI_0594": "NOT_RUN",
+  "brightness": "DEFERRED",
+  "source": {
+    "git": "d5c9c62db752f225a288b88959d3754edc94138a",
+    "branch": "gpu/adreno650-20261103",
+    "common": 448,
+    "host": 4,
+    "files": 5456,
+    "patch": "0469"
+  },
+  "native_sha256": "54c3f93b27bf641a9e6c98cb4dc421e03094a99eaa700bb428b34a63d27c09b4",
+  "boot_sha256": "a7c225c16fac200b0d119ad09a388944abc5c1c6f845a262b07de0775c05f5a9",
+  "serial_released": true,
+  "observed": {
+    "accepted": false,
+    "LOWDMA_attempts": 1,
+    "CAP20": [
+      {
+        "metadata": {
+          "schema": 2,
+          "source": 20,
+          "argument": 0,
+          "width": 0,
+          "height": 0,
+          "stride": 0,
+          "format": 0,
+          "total": 256,
+          "content_crc": 4270658236,
+          "stable": 1,
+          "frame_id": 0,
+          "flags": 2,
+          "surface_id": 0,
+          "generation": 0,
+          "session": 1,
+          "exercised": [
+            "input-crc",
+            "out-of-order-get",
+            "wrong-ack-crc",
+            "repeat-get-identical"
+          ]
+        },
+        "sha256": "96293eee4a9087d2845cb40b2a2b22a6af788733bda2f82983ebdd3360f9786f",
+        "state": 3,
+        "result": 12,
+        "flags": 287,
+        "runtime_ADT_sha256": "64577367da594b6d2774f9934a92fc57dc24d2b2f5d9775e4a91f9c6fd21fe5c"
+      },
+      {
+        "metadata": {
+          "schema": 2,
+          "source": 20,
+          "argument": 0,
+          "width": 0,
+          "height": 0,
+          "stride": 0,
+          "format": 0,
+          "total": 256,
+          "content_crc": 4270658236,
+          "stable": 1,
+          "frame_id": 0,
+          "flags": 2,
+          "surface_id": 0,
+          "generation": 0,
+          "session": 2,
+          "exercised": []
+        },
+        "sha256": "96293eee4a9087d2845cb40b2a2b22a6af788733bda2f82983ebdd3360f9786f",
+        "state": 3,
+        "result": 12,
+        "flags": 287,
+        "runtime_ADT_sha256": "64577367da594b6d2774f9934a92fc57dc24d2b2f5d9775e4a91f9c6fd21fe5c"
+      },
+      {
+        "metadata": {
+          "schema": 2,
+          "source": 20,
+          "argument": 0,
+          "width": 0,
+          "height": 0,
+          "stride": 0,
+          "format": 0,
+          "total": 256,
+          "content_crc": 4270658236,
+          "stable": 1,
+          "frame_id": 0,
+          "flags": 2,
+          "surface_id": 0,
+          "generation": 0,
+          "session": 3,
+          "exercised": []
+        },
+        "sha256": "96293eee4a9087d2845cb40b2a2b22a6af788733bda2f82983ebdd3360f9786f",
+        "state": 3,
+        "result": 12,
+        "flags": 287,
+        "runtime_ADT_sha256": "64577367da594b6d2774f9934a92fc57dc24d2b2f5d9775e4a91f9c6fd21fe5c"
+      }
+    ],
+    "CAP39": [],
+    "expected_ADT_sha256": "ae6be6c475c02cea1e645b3875abcd0666063ce3826c30fc4b85dba4c2c66fda",
+    "diagnostic_capture_complete": false,
+    "receiver_sha256": "421a56d2aeb454d0a270d9bf5fb234e3fbfb97a543b4cc5a7a13753ad14f5806",
+    "error": "CaptureError('capture backend error 22')"
+  },
+  "diagnosis": "CAP39 provider exists but kc_execute rejects cmd.a>38 before provider. Fix finite bound39 and test actual normal OPEN/GET/ACK path with source40 still rejected. Measurement mismatch still unresolved.",
+  "evidence": {
+    "native-dpu-0594\\normal-baseline-qualified.json": "49f5db005341942f79d0a0937888093d2c3e8b817c17e3912f020b62c7966da8",
+    "native-dpu-0594\\finalize-baseline-output.txt": "55f192c3c33901667729d44d49bc1758221e1a39b4480f55a148fe0c17688097",
+    "native-dpu-0594\\post-diagnostic-output.log": "1e69c714c606350565104faaf277da6e0c3e43962c6df49ec923c8b94e9987db",
+    "native-dpu-0594\\live-lowdma-ADT-diagnostic\\result.json": "4846c67306602f1d5e806dc96abed6c072813df684abc90273d38183fb5eab90",
+    "native-dpu-0594\\live-lowdma-ADT-diagnostic\\console.log": "4556f57b76290c05db71379557a6b6be0ef136a87bb424e5085440247c9e3b6a",
+    "native-dpu-0594\\live-lowdma-ADT-diagnostic\\wire.private.bin": "b28c4f08a4dfb488855028ce12652b19da3860756f55c1b2a1a8e038ca4802ee",
+    "native-dpu-0594\\live-lowdma-ADT-diagnostic\\CAP20-0.private.bin": "96293eee4a9087d2845cb40b2a2b22a6af788733bda2f82983ebdd3360f9786f",
+    "native-dpu-0594\\live-lowdma-ADT-diagnostic\\CAP20-1.private.bin": "96293eee4a9087d2845cb40b2a2b22a6af788733bda2f82983ebdd3360f9786f",
+    "native-dpu-0594\\live-lowdma-ADT-diagnostic\\CAP20-2.private.bin": "96293eee4a9087d2845cb40b2a2b22a6af788733bda2f82983ebdd3360f9786f",
+    "0594-flash.json": "ea97f27a06f4bcb3cb076fc72a53c7978d03cb87b8b42a9a4f6a129783cbb85e",
+    "0594-media-boot.log": "f0c07b8db2f5ef4ba750bcc4c4c151944677e3065a7c74fd4e3f6e29013860fd"
+  }
+}

@@ -1,0 +1,212 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -95,6 +95,8 @@
+ #include <sys/systm.h>
+ }
+ 
++#include "KebabNativeDisplayObservation.h"
++
+ enum {
+ 	kKebabFBGetLayerDefaultSurface  = 3,
+ 	kKebabFBSwapBegin               = 4,
+@@ -801,6 +803,7 @@
+                 t.surfaces[0],t.surfaces[1],t.surfaces[2],t.surfaces[3],t.formats[0],t.formats[1],t.formats[2],t.formats[3]);
+         }
+     } else IOLog("KEBAB FRAME: service-or-lock unavailable; no frame state read\n");
++    if (fb) kebab_native_display_observe(fb->fPhys);
+     OSSafeReleaseNULL(iterator);
+ }
+ 
+@@ -1357,6 +1360,7 @@
+ 	kebab_publish_canvas(provider, fb->fLogicalW, fb->fLogicalH);
+ 	IOLog("KEBAB FB: started %ux%u, presenting %ux%u\n",
+ 	    (uint32_t)fb->fWidth, (uint32_t)fb->fHeight, fb->fLogicalW, fb->fLogicalH);
++	kebab_native_display_observe(fb->fPhys);
+ 	return 0;
+ }
+ 
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabDisplayObservation.h
+@@ -0,0 +1,36 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_DISPLAY_OBSERVATION_H
++#define KEBAB_DISPLAY_OBSERVATION_H
++#include <stddef.h>
++#include <stdint.h>
++enum { KebabDisplayCc=0, KebabDisplayMdp=1 };
++typedef struct {
++    void *cookie;
++    size_t bytes[2];
++    int (*read32)(void *,unsigned,size_t,uint32_t *);
++} KebabDisplayReadIo;
++typedef struct {
++    uint32_t gdsc,ahb,core;
++    uint32_t mdss_version,mdp_version,irq_enabled,irq_pending;
++    uint32_t intf[2][8];
++    uint32_t source[8][4]; /* size, address0, stride0, format */
++} KebabDisplayObservation;
++typedef struct { unsigned reads,attempts,failed_region;size_t failed_offset; } KebabDisplayReadResult;
++enum { KebabDisplayReadComplete=0,KebabDisplayReadArgument,KebabDisplayReadIoError,
++       KebabDisplayReadPowerUnavailable,KebabDisplayReadUnstable };
++/* Source-bound SM8250 observation, relative to DISP_CC and vendor mdp_phys.
++ * Caller owns mapped, accessible configuration resources and serializes real
++ * power/mode changes. Callback must enforce its native mapping lease. Status
++ * bits do not establish ownership. No MMIO mapping, writes, IRQ enable, waits,
++ * power/clock votes, VBL callbacks or completed-frame claims occur here.
++ * Complete only means two bounded snapshots agree on selected config fields.
++ * Counters are raw and may change naturally. Failure leaves out zeroed.
++ */
++int KebabDisplayObserve(const KebabDisplayReadIo *,KebabDisplayObservation *,KebabDisplayReadResult *);
++/* Source-derived SID/mask membership only; does not allocate or program a CB. */
++int KebabDisplayNonsecureSid(uint32_t sid);
++/* Validate a proposed IOVA in the vendor nonsecure 32-bit pool. This is not
++ * a DMA map. Granule is supplied by an independently qualified SMMU backend,
++ * never inferred from XNU's CPU page size. No mapping or TLB action occurs. */
++int KebabDisplayIovaSpan(uint64_t address,uint64_t bytes,uint64_t granule);
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabDisplayObservation.c
+@@ -0,0 +1,72 @@
++/* SPDX-License-Identifier: MIT */
++#include "KebabDisplayObservation.h"
++#include <string.h>
++/* Facts independently bound to clean local LineageOS 7c2b1aed, kona-sde.dtsi,
++ * dispcc-kona.c, gdsc-regulator.c and sde_hw_{intf,sspp}.c. No vendor bodies. */
++static int read_reg(const KebabDisplayReadIo *io,unsigned region,size_t offset,uint32_t *v,KebabDisplayReadResult *r)
++{
++    ++r->reads;
++    if(region>1 || (offset&3) || offset>io->bytes[region] || io->bytes[region]-offset<4 ||
++       io->read32(io->cookie,region,offset,v)) {
++        r->failed_region=region;r->failed_offset=offset;return 1;
++    }
++    return 0;
++}
++static int gate(const KebabDisplayReadIo *io,KebabDisplayObservation *s,KebabDisplayReadResult *r)
++{
++    if(read_reg(io,0,0x3000,&s->gdsc,r) || read_reg(io,0,0x2080,&s->ahb,r) ||
++       read_reg(io,0,0x200c,&s->core,r))return KebabDisplayReadIoError;
++    if(!(s->gdsc&0x80000000u) || (s->gdsc&1) || (s->ahb&0x80000000u) ||
++       (s->core&0x80000000u))return KebabDisplayReadPowerUnavailable;
++    return 0;
++}
++static int sample(const KebabDisplayReadIo *io,KebabDisplayObservation *s,KebabDisplayReadResult *r)
++{
++    static const size_t intf_base[]={0x6b800,0x6c000};
++    static const size_t intf_offset[]={0x26c,0x000,0x0a8,0x084,0x0ac,0x0b0,0x298,0x2b0};
++    static const size_t source_base[]={0x5000,0x7000,0x9000,0xb000,0x25000,0x27000,0x29000,0x2b000};
++    static const size_t source_offset[]={0,0x14,0x24,0x30};
++    int error=gate(io,s,r);if(error)return error;
++    if(read_reg(io,1,0,&s->mdss_version,r) || read_reg(io,1,0x1000,&s->mdp_version,r) ||
++       read_reg(io,1,0x1010,&s->irq_enabled,r) || read_reg(io,1,0x1014,&s->irq_pending,r))return KebabDisplayReadIoError;
++    for(unsigned i=0;i<2;i++)for(unsigned j=0;j<8;j++)
++        if(read_reg(io,1,intf_base[i]+intf_offset[j],&s->intf[i][j],r))return KebabDisplayReadIoError;
++    for(unsigned i=0;i<8;i++)for(unsigned j=0;j<4;j++)
++        if(read_reg(io,1,source_base[i]+source_offset[j],&s->source[i][j],r))return KebabDisplayReadIoError;
++    KebabDisplayObservation after={0};error=gate(io,&after,r);if(error)return error;
++    if(s->gdsc!=after.gdsc || s->ahb!=after.ahb || s->core!=after.core)return KebabDisplayReadUnstable;
++    return 0;
++}
++static int same(const KebabDisplayObservation *a,const KebabDisplayObservation *b)
++{
++    if(a->gdsc!=b->gdsc || a->ahb!=b->ahb || a->core!=b->core || a->mdss_version!=b->mdss_version ||
++       a->mdp_version!=b->mdp_version || a->irq_enabled!=b->irq_enabled)return 0;
++    for(unsigned i=0;i<2;i++) {
++        if((a->intf[i][0]^b->intf[i][0])&1)return 0;
++        for(unsigned j=1;j<4;j++)if(a->intf[i][j]!=b->intf[i][j])return 0;
++    }
++    return !memcmp(a->source,b->source,sizeof a->source);
++}
++int KebabDisplayObserve(const KebabDisplayReadIo *io,KebabDisplayObservation *out,KebabDisplayReadResult *r)
++{
++    if(out)memset(out,0,sizeof *out);if(r)memset(r,0,sizeof *r);
++    if(!io || !out || !r || !io->read32 || io->bytes[0]<0x3004 || io->bytes[1]<0x6c2b4)return KebabDisplayReadArgument;
++    for(unsigned attempt=1;attempt<=3;attempt++) {
++        r->attempts=attempt;KebabDisplayObservation a={0},b={0};
++        int error=sample(io,&a,r);if(error==KebabDisplayReadUnstable)continue;if(error)return error;
++        error=sample(io,&b,r);if(error==KebabDisplayReadUnstable)continue;if(error)return error;
++        if(!same(&a,&b))continue;
++        *out=b;return KebabDisplayReadComplete;
++    }
++    return KebabDisplayReadUnstable;
++}
++int KebabDisplayNonsecureSid(uint32_t sid)
++{
++    return sid<=0xffffu && (sid&~0x402u)==0x820u;
++}
++int KebabDisplayIovaSpan(uint64_t address,uint64_t bytes,uint64_t granule)
++{
++    if(granule!=4096 && granule!=16384 && granule!=65536)return 0;
++    return bytes && !(address&(granule-1)) && !(bytes&(granule-1)) &&
++           address>=0x20000 && address<0x100000000ULL && bytes<=0x100000000ULL-address;
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeDisplayObservation.h
+@@ -0,0 +1,68 @@
++/* SPDX-License-Identifier: MIT */
++/* KEBAB-only retained-splash observation adapter. No hardware reconfiguration.
++ * This kernel has no DPU/DSI power or mode writer; serialize our own bounded
++ * observations and keep descriptor/map references until the last read. */
++#include <IOKit/IOMemoryDescriptor.h>
++#include "KebabDisplayObservation.c"
++struct KebabNativeDisplayMaps {
++    IOMemoryDescriptor *memory[3];
++    IOMemoryMap *map[3];
++    uintptr_t address[3];
++};
++static bool kebab_display_map(KebabNativeDisplayMaps *m,unsigned index,uint64_t base,uint64_t size)
++{
++    m->memory[index]=IOMemoryDescriptor::withPhysicalAddress(base,size,kIODirectionIn);
++    if (!m->memory[index])return false;
++    m->map[index]=m->memory[index]->map(kIOMapAnywhere|kIOMapInhibitCache|kIOMapReadOnly);
++    if (!m->map[index])return false;
++    m->address[index]=m->map[index]->getVirtualAddress();
++    return m->address[index]!=0 && m->map[index]->getLength()>=size;
++}
++static uint32_t kebab_display_load(uintptr_t base,size_t offset)
++{
++    return *(volatile const uint32_t *)(base+offset);
++}
++static int kebab_display_native_read(void *cookie,unsigned region,size_t offset,uint32_t *out)
++{
++    KebabNativeDisplayMaps *m=(KebabNativeDisplayMaps *)cookie;
++    if (region>1 || !out || !m->address[region+1])return -1;
++    /* GCC DISP_AHB is CLK_IS_CRITICAL in local gcc-kona.c. Refuse access
++     * when the live configuration does not show its enable/not-halted state. */
++    uint32_t gcc=kebab_display_load(m->address[0],0xb00c);
++    if (!(gcc&1) || (gcc&0x80000000u))return -1;
++    *out=kebab_display_load(m->address[region+1],offset);return 0;
++}
++static void kebab_native_display_observe(uint64_t framebuffer)
++{
++    static volatile uint32_t busy=0;
++    if (!__sync_bool_compare_and_swap(&busy,0,1))return;
++    KebabNativeDisplayMaps m={};
++    KebabDisplayObservation s={};KebabDisplayReadResult r={};
++    uint32_t gcc=0;int result=KebabDisplayReadIoError;
++    if (!kebab_display_map(&m,0,0x00100000,0x10000))goto done;
++    gcc=kebab_display_load(m.address[0],0xb00c);
++    if (!(gcc&1) || (gcc&0x80000000u)) { result=KebabDisplayReadPowerUnavailable;goto done; }
++    if (!kebab_display_map(&m,1,0x0af00000,0x4000))goto done;
++    /* Mapping a powered-off MDP is not permission to read it. The C core
++     * checks GDSC/AHB/core status before any MDP access and afterwards. */
++    if (!kebab_display_map(&m,2,0x0ae00000,0x70000))goto done;
++    {
++        KebabDisplayReadIo io={&m,{0x4000,0x70000},kebab_display_native_read};
++        result=KebabDisplayObserve(&io,&s,&r);
++    }
++done:
++    IOLog("KEBAB DPU OBS: result=%d gcc-ahb=0x%x reads=%u attempts=%u failed=%u:0x%llx GOP=0x%llx; readonly, no native scanout claim\n",
++        result,gcc,r.reads,r.attempts,r.failed_region,(uint64_t)r.failed_offset,framebuffer);
++    if (!result) {
++        IOLog("KEBAB DPU OBS: mdss=0x%x mdp=0x%x gdsc=0x%x ahb=0x%x core=0x%x irq-enable=0x%x pending=0x%x\n",
++            s.mdss_version,s.mdp_version,s.gdsc,s.ahb,s.core,s.irq_enabled,s.irq_pending);
++        for(unsigned i=0;i<2;i++)IOLog("KEBAB DPU INTF: index=%u status=%x timing=%x count-enable=%x trigger=%x frame=%u line=%u tear-count=%u tear-line=%u\n",
++            i+1,s.intf[i][0],s.intf[i][1],s.intf[i][2],s.intf[i][3],s.intf[i][4],s.intf[i][5],s.intf[i][6],s.intf[i][7]);
++        for(unsigned i=0;i<8;i++)IOLog("KEBAB DPU SSPP: index=%u size=%x address0=%x stride=%x format=%x\n",i,s.source[i][0],s.source[i][1],s.source[i][2],s.source[i][3]);
++    }
++    for(unsigned i=0;i<3;i++) {
++        if(m.map[i])m.map[i]->release();
++        if(m.memory[i])m.memory[i]->release();
++    }
++    __sync_lock_release(&busy);
++}

@@ -1,0 +1,14 @@
+--- a/iokit/Kernel/arm/KebabDsiPioCore.h
++++ b/iokit/Kernel/arm/KebabDsiPioCore.h
+@@ -57,7 +57,10 @@
+  if(!o->error&&!writing){
+   if((o->readback_control>>16)!=4||kebab_dsi_pio_read(io,o,0x6c,&o->raw_readback))o->error=5;
+   else {o->response_type=(o->raw_readback>>24)&255;o->returned_bytes=o->response_type==0x21?1:o->response_type==0x22?2:0;
+-   if(o->returned_bytes!=requested)o->error=71;
++   /* The command advertises maximum return2. A two-byte short reply is
++    * valid for a one-byte consumer; retain its true wire length and consume
++    * only the requested prefix. Physical557 power reply was0x229c0012. */
++   if(o->returned_bytes<requested)o->error=71;
+    else o->value=(o->raw_readback>>16)&255;if(requested==2)o->value=(o->value<<8)|((o->raw_readback>>8)&255);
+   }
+  }

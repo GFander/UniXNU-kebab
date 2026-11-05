@@ -1,0 +1,39 @@
+{
+  "version": "0606",
+  "parent": "0605",
+  "scope": "CPU-only exact signed ZAP metadata/load staging before GPU VM publication under unchanged old PAS13 namespace gate. No SMC, support query, secure exit, power/MMIO/SMMU changes. Actual authentication remains NOT_RUN/UNKNOWN.",
+  "changes": {
+    "osfmk/kern/kebab_low_dma.h": {
+      "before": "c10c646d1b629b3a06ffc92b676db8de7c68d40918b08662bbf8887f582ce1a4",
+      "after": "fe6a9ca5faa2a6a64e38ae6159949cafe376459e7442b7040f5688d70b82050b"
+    },
+    "iokit/Kernel/arm/KebabFramebuffer.cpp": {
+      "before": "3b13d4e0cbaf85dd8a4d5aa3ed12a6e5d5768f51739fd0ca712d3c7639b5432f",
+      "after": "2cfe62cd58edf3ffe0a115b24cc00aada83986d8097aa955375461d162561b67"
+    },
+    "iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp": {
+      "before": "b56b1b4420f3b18f272ec099dcb2e274ad5f387c1ed5853a1d603f22577274d1",
+      "after": "4bd51c919028622a971e191bc43c1e8ae8024ead59814ba279171a7aadfaddde"
+    },
+    "bsd/dev/kebab_capture_core.h": {
+      "before": "bc476701f5b621cbd60a1072b3153ce7c7b79266cb8b6d36d29bbd3dbb8c8433",
+      "after": "4aa06b45ae469e4a91658b7e06c8736e7c1ec57889816e3471c2fc25c7fda047"
+    },
+    "bsd/dev/kebab_usb.c": {
+      "before": "fdeefcc3e9fa0447a3f15b14c84b1645c7fd0591e303f6c7c31690f5d8696772",
+      "after": "356a22ddde50b150682709ffcb6baa1f07ab99abf9e3b9605a7001081f77583e"
+    },
+    "iokit/Kernel/arm/KebabA650ZapCore.h": {
+      "before": null,
+      "after": "74d609c88fb04c15d3d4305713d1940a3c21bc4b42a30056cadbeaa0133dd4ac"
+    },
+    "iokit/Kernel/arm/KebabNativeA650ZapStage.h": {
+      "before": null,
+      "after": "7c926ed8cd8179b8c27e43a368a6df111e465ccf24a3aeccd5724ac4be59ef6e"
+    }
+  },
+  "added_files": [
+    "iokit/Kernel/arm/KebabA650ZapCore.h",
+    "iokit/Kernel/arm/KebabNativeA650ZapStage.h"
+  ]
+}

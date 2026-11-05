@@ -1,0 +1,36 @@
+{
+  "version": "0605",
+  "recorded": "2026-11-04T22:04:50.174310+08:00",
+  "git": "d5c9c62db752f225a288b88959d3754edc94138a",
+  "branch": "gpu/adreno650-20261103",
+  "common": 459,
+  "host": 4,
+  "files": 5456,
+  "formal_patch": "0480",
+  "source_binding_sha256": "fe2d89824c979e62b3f974beb15c6246f582ad07502ffa6a5d030dff0e7134e5",
+  "native_sha256": "c91c1055aa524728f9bd0c7de9af426c437cf3041184082da83f67e093a402bd",
+  "boot_sha256": "c7fe690514f93fa4def00ca886fdb45dc45741966170c8fd35df01cf9c44af59",
+  "capture_pid": 88424,
+  "jobs": {
+    "collect-awake-window.py": {
+      "pid": 77500,
+      "log": "D:\\LOS\\HiOS\\boot123-20261029\\native-dpu-0605\\collect-awake-window-output.txt",
+      "started": 1793801069.6529021
+    },
+    "finalize-baseline.py": {
+      "pid": 86620,
+      "log": "D:\\LOS\\HiOS\\boot123-20261029\\native-dpu-0605\\finalize-baseline-output.txt",
+      "started": 1793801069.6634805
+    }
+  },
+  "post": {
+    "pid": 87288,
+    "script": "post-baseline-sequential-once.py",
+    "scope": "Wait original safety/capture close, LOWDMA/NC/RAM/fullGPUCP/suffix then one fixed2D-register diagnostic render; no PAS13SUP/PASRANGE/auth/retry"
+  },
+  "safety": "PENDING",
+  "manual_GUI": "NOT_RUN",
+  "FirstRender": "PENDING0605;603 actual pixelsFAIL/CPcontrol true retained",
+  "PAS13_support_route": "CLOSED",
+  "ZAP_actual_auth": "NOT_RUN/UNKNOWN"
+}

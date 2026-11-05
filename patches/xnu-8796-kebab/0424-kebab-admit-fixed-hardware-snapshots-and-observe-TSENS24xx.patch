@@ -1,0 +1,136 @@
+--- a/iokit/Kernel/arm/KebabNativeDisplayObservation.h
++++ b/iokit/Kernel/arm/KebabNativeDisplayObservation.h
+@@ -87,3 +87,36 @@
+     }
+     __sync_lock_release(&busy);return 0;
+ }
++
++#include "KebabThermalObservation.h"
++struct KebabNativeThermalSnapshot {
++    uint32_t magic,schema,bytes,flags,result[2],reserved[2];
++    KebabThermalObservation controller[2];
++};
++static_assert(sizeof(KebabNativeThermalSnapshot)==320,"fixed TSENS24xx schema1");
++struct KebabNativeThermalRead { KebabNativeDisplayMaps *maps;unsigned first; };
++static int kebab_thermal_native_read(void *cookie,unsigned region,size_t offset,uint32_t *out)
++{
++    KebabNativeThermalRead *r=(KebabNativeThermalRead *)cookie;
++    if(region>1 || !out || !r->maps->address[r->first+region])return -1;
++    *out=kebab_display_load(r->maps->address[r->first+region],offset);return 0;
++}
++static int kebab_native_thermal_snapshot(KebabNativeThermalSnapshot *out)
++{
++    if(!out)return 22;
++    memset(out,0,sizeof *out);out->magic=0x314e5354;out->schema=1;out->bytes=sizeof *out;
++    KebabNativeDisplayMaps m={};
++    static const uint64_t control[]={0x0c222000,0x0c223000},tm[]={0x0c263000,0x0c265000};
++    for(unsigned i=0;i<2;i++) {
++        out->result[i]=KebabThermalIoError;
++        if(!kebab_display_map(&m,2*i,control[i],4) || !kebab_display_map(&m,2*i+1,tm[i],0x1ff))continue;
++        KebabNativeThermalRead read={&m,2*i};
++        KebabThermalReadIo io={&read,{4,0x1ff},kebab_thermal_native_read};
++        out->result[i]=KebabThermalObserve(&io,&out->controller[i]);
++        if(!out->result[i])out->flags|=1u<<i;
++    }
++    for(unsigned n=4;n;n--) {
++        unsigned i=n-1;if(m.map[i])m.map[i]->release();if(m.memory[i])m.memory[i]->release();
++    }
++    return 0;
++}
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -813,6 +813,16 @@
+ extern "C" int
+ kebab_capture_open(uint32_t source,uint32_t argument,struct kc_image *image)
+ {
++    if(source==8) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabNativeThermalSnapshot);
++        KebabNativeThermalSnapshot *data=(KebabNativeThermalSnapshot *)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_native_thermal_snapshot(data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=8;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
+     if(source==7) {
+         if(argument)return 22;
+         uint32_t bytes=sizeof(KebabNativeDisplaySnapshot);
+--- a/osfmk/kern/kebab_capture.h
++++ b/osfmk/kern/kebab_capture.h
+@@ -20,6 +20,7 @@
+ /* Sources: 1 deterministic bytes, 2 GOP, 3 IOSurface id, 4 displayed layer,
+  * 5 private known BGRA image, 6 fixed MG cache/backup audit files (raw bytes).
+  * 7 fixed readonly SM8250 display/SMMU snapshot (schema, per-block results).
++ * 8 fixed readonly inherited TSENS24xx snapshot (strict valid-bit readings).
+  * No capture operation writes the panel or filesystem. */
+ struct kc_image {
+     void *handle;
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>6)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>8)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabThermalObservation.h
+@@ -0,0 +1,54 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_THERMAL_OBSERVATION_H
++#define KEBAB_THERMAL_OBSERVATION_H
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++typedef struct {
++    uint32_t control,trdy,sensor_mask,valid_mask;
++    uint32_t status[16];int32_t milli_celsius[16];
++} KebabThermalObservation;
++typedef struct {
++    void *cookie;size_t bytes[2];int (*read32)(void *,unsigned,size_t,uint32_t *);
++} KebabThermalReadIo;
++enum { KebabThermalArgument=1,KebabThermalIoError,KebabThermalDisabled,
++       KebabThermalNotReady,KebabThermalUnstable,KebabThermalNoValidReadings };
++/* Source facts: local clean LineageOS tsens2xxx.c/tsens.h (qcom,tsens24xx).
++ * Read-only inherited configuration. Callback owns mapped SROT/TM resources.
++ * No enabling/reset, SCM call, IRQ acknowledgement, threshold or watchdog
++ * change. Strict valid-bit sampling; stable invalid codes remain unknown.
++ * Disabled/not-ready results retain diagnostic control values. IO failure
++ * or a changed enable state leaves out zero; success is not thermal control.
++ */
++static int kebab_thermal_read(const KebabThermalReadIo *io,unsigned region,size_t off,uint32_t *v)
++{
++    return region>1 || (off&3) || off>io->bytes[region] || io->bytes[region]-off<4 || io->read32(io->cookie,region,off,v);
++}
++static int32_t KebabThermalDecode(uint32_t status)
++{
++    int32_t code=(int32_t)(status&0xfff);if(code&0x800)code-=4096;
++    return code*100;
++}
++static int KebabThermalObserve(const KebabThermalReadIo *io,KebabThermalObservation *out)
++{
++    if(out)memset(out,0,sizeof *out);
++    if(!io || !out || !io->read32 || io->bytes[0]<4 || io->bytes[1]<0xe8)return KebabThermalArgument;
++    KebabThermalObservation s={0};uint32_t after;
++    if(kebab_thermal_read(io,0,0,&s.control))return KebabThermalIoError;
++    s.sensor_mask=(s.control>>3)&0xffff;
++    if(!(s.control&1)){*out=s;return KebabThermalDisabled;}
++    if(kebab_thermal_read(io,1,0xe4,&s.trdy))return KebabThermalIoError;
++    if(!(s.trdy&8)){*out=s;return KebabThermalNotReady;}
++    for(unsigned i=0;i<16;i++)if(s.sensor_mask&(1u<<i)) {
++        if(kebab_thermal_read(io,1,0xa0+4*i,&s.status[i]))return KebabThermalIoError;
++        if(s.status[i]&(1u<<21)) {
++            s.valid_mask|=1u<<i;s.milli_celsius[i]=KebabThermalDecode(s.status[i]);
++        }
++    }
++    if(kebab_thermal_read(io,0,0,&after))return KebabThermalIoError;
++    if(((s.control^after)&0x7fff9u)!=0)return KebabThermalUnstable;
++    if(kebab_thermal_read(io,1,0xe4,&after))return KebabThermalIoError;
++    if(!(after&8))return KebabThermalUnstable;
++    *out=s;return s.valid_mask?0:KebabThermalNoValidReadings;
++}
++#endif

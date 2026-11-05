@@ -1,0 +1,120 @@
+{
+  "version": "0595",
+  "recorded": "2026-11-04T15:12:29.955891+08:00",
+  "accepted": false,
+  "original_safety_accepted": true,
+  "safety": {
+    "accepted": true,
+    "version": "0595",
+    "normal_primary_bytes": 8587837440,
+    "extra_memory_admitted": 0,
+    "original_crypto_defaults_RTC_NVRAM_watchdog_preserved": true,
+    "watchdog_seconds": 304.401,
+    "capture_closed": true,
+    "frame_transport_physical_not_yet_qualified": true
+  },
+  "diagnostic_capture_qualified": true,
+  "LOWDMA_attempts": 1,
+  "measurement_result": 12,
+  "comparison": {
+    "scope": "Independent host interpretation of immutable actual CAP39; no measurement gate changed or hardware claim.",
+    "static_sha256": "1f8f19f3cdd8299ba6a6a78ee9116ded0fc80f6ad2f0aa494986f9c5dd67b035",
+    "runtime_sha256": "55f4a2ad930ca3a3e9d3db0504d36764dfc84ea5dd53faa209ff995f14bab99b",
+    "expected_normalized_sha256": "ae6be6c475c02cea1e645b3875abcd0666063ce3826c30fc4b85dba4c2c66fda",
+    "native_computed_normalized_sha256": "64577367da594b6d2774f9934a92fc57dc24d2b2f5d9775e4a91f9c6fd21fe5c",
+    "independent_runtime_normalized_sha256": "64577367da594b6d2774f9934a92fc57dc24d2b2f5d9775e4a91f9c6fd21fe5c",
+    "independent_equals_expected": false,
+    "independent_equals_native": true,
+    "original_exclusions": [
+      "boot-manifest-hash",
+      "owner-boot-manifest",
+      "owner-boot-measurement"
+    ],
+    "restored_known_producer_spans": [
+      {
+        "path": "/chosen/memory-map",
+        "name": "TrustCache",
+        "PA": 8672280576,
+        "bytes": 68512
+      }
+    ],
+    "differences": [
+      {
+        "path": "/chosen",
+        "index": "0/0",
+        "name": "random-seed",
+        "static": {
+          "bytes": 64,
+          "sha256": "eaf5f3bda25f44ea11ae881bb40db378ec5aab55160a28e2153dde95654cf77a",
+          "length_word": 64,
+          "padding_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "runtime": {
+          "bytes": 64,
+          "sha256": "f5a5fd42d16a20302798ef6ed309979b43003d2320d9f0e8ea9831a92759fb4b",
+          "length_word": 64,
+          "padding_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      {
+        "path": "/chosen/memory-map",
+        "index": "0/0/0",
+        "name": "TrustCache",
+        "static": {
+          "bytes": 16,
+          "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb",
+          "length_word": 16,
+          "padding_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "runtime": {
+          "bytes": 16,
+          "sha256": "840bbadff94efc058642cb082845fe2d91f1b3aa9149c673b23fb180f4d77362",
+          "length_word": 16,
+          "padding_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      }
+    ],
+    "bytes": 273068
+  },
+  "source": {
+    "git": "d5c9c62db752f225a288b88959d3754edc94138a",
+    "branch": "gpu/adreno650-20261103",
+    "common": 449,
+    "host": 4,
+    "files": 5456,
+    "patch": "0470"
+  },
+  "native_sha256": "cf63426a153a65796e332e270966f283a4ae0f393ef3f9949da0a014e2fc684c",
+  "boot_sha256": "864c937a9e6959235de9239ffdb12e11438691f32ed3c43973ddede8b6f85633",
+  "GPU_chain_regression": "NOT_RUN0595",
+  "NC": "NOT_RUN",
+  "PAS": "NOT_RUN",
+  "A650_FIRST_RENDER": "NOT_RUN0595; FAIL0591 retained",
+  "manual_GUI_0595": "Pending owner reply",
+  "serial_released": true,
+  "diagnosis": "Exact actual tree differs only by original PE_get_random_seed clearing64B and producer TrustCache span. Byte-preserving host normalization matches native. Full runtime hash must account for original kernel entropy scrub while preserving original full static measurement and three exclusions.",
+  "provider_source_pins": {
+    "pexpert/gen/pe_gen.c": "10a87bc965a96ee34ff2b346e7873f2dcd29ac42d581e52c6da60f82e5687b1f",
+    "osfmk/arm/arm_init.c": "860fa77d8b13d1df2eec6c75a84c14c90a4edd30ce29c53e19ac9916a415f852"
+  },
+  "evidence": {
+    "native-dpu-0595\\normal-baseline-qualified.json": "4f7bfa68e1a923dd6413fc6f0bdfbac1b3fa93bf51c5f3db93a7fd16baa2ef0e",
+    "native-dpu-0595\\finalize-baseline-output.txt": "74cc08d1f3f4bc01d2a4a93bc457512b92e898df4f6a887b908eaceb64657d8c",
+    "native-dpu-0595\\post-diagnostic-output.log": "07056a3917fec59bf53b872460eec976b64633d21144c5f58078d54cc16fd62e",
+    "native-dpu-0595\\live-lowdma-ADT-diagnostic\\result.json": "c092f081ffa6bfe025a29fce9ea370e1a00d26bd641139e16d0901911712b1bb",
+    "native-dpu-0595\\live-lowdma-ADT-diagnostic\\console.log": "5b3fb4eb28863518e65bdadd716f7c0ea58b551d09a7c2235bf42fd004435319",
+    "native-dpu-0595\\live-lowdma-ADT-diagnostic\\wire.private.bin": "0c0bf1fc3f89e2e19da01bf98bfc26224668cffa2ac39dc0d45e2581992dd549",
+    "native-dpu-0595\\live-lowdma-ADT-diagnostic\\independent-ADT-comparison.json": "d948c657f29c3f297a5671af3ef84a5e62540c3fcb2674ec42139364d1a9442a",
+    "native-dpu-0595\\live-lowdma-ADT-diagnostic\\CAP20-0.private.bin": "96293eee4a9087d2845cb40b2a2b22a6af788733bda2f82983ebdd3360f9786f",
+    "native-dpu-0595\\live-lowdma-ADT-diagnostic\\CAP20-1.private.bin": "96293eee4a9087d2845cb40b2a2b22a6af788733bda2f82983ebdd3360f9786f",
+    "native-dpu-0595\\live-lowdma-ADT-diagnostic\\CAP20-2.private.bin": "96293eee4a9087d2845cb40b2a2b22a6af788733bda2f82983ebdd3360f9786f",
+    "native-dpu-0595\\live-lowdma-ADT-diagnostic\\CAP39-0.private.adt": "55f4a2ad930ca3a3e9d3db0504d36764dfc84ea5dd53faa209ff995f14bab99b",
+    "native-dpu-0595\\live-lowdma-ADT-diagnostic\\CAP39-1.private.adt": "55f4a2ad930ca3a3e9d3db0504d36764dfc84ea5dd53faa209ff995f14bab99b",
+    "native-dpu-0595\\live-lowdma-ADT-diagnostic\\CAP39-2.private.adt": "55f4a2ad930ca3a3e9d3db0504d36764dfc84ea5dd53faa209ff995f14bab99b",
+    "0595-flash.json": "00ed5f9775f836537f383483c52903244cc10098a15408af47b6ca0aad18cf2c",
+    "0595-media-boot.log": "d09ae40ca7ff1948b257d605c4224ebb435b35cb5836722207786e8b3eaf157c",
+    "native-dpu-0595\\native-protocol39-linked-qualified.json": "2d7ccb502d8f6bde4eb3e9ffeaba8768d8febb5e066184f721a611ad6631d24c",
+    "gpu-prereq-20261103\\gpu-zap-0595\\host-core-tests.json": "a269a23f7076b3434a85c82af37040e47955a190a7317e89a3d656ab90785ff2",
+    "gpu-prereq-20261103\\gpu-zap-0595\\analyze_actual_ADT.py": "10a924fc08e1f070e6c9e096f35d9154bf0f917b0740c4a9f56dbd9870bae9ba"
+  }
+}

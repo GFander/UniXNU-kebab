@@ -1,0 +1,231 @@
+--- a/osfmk/kern/kebab_low_dma.h
++++ b/osfmk/kern/kebab_low_dma.h
+@@ -65,6 +65,20 @@
+ };
+ int kebab_scm_pas13_supported_enqueue(void);
+ int kebab_scm_pas13_supported_copy(struct kebab_pas13_supported_observation *,uint32_t);
++/* CPU-only owned-RAM access test before GPUVM/PAS publication. */
++#define KEBAB_LOW_DMA_RAM_MAGIC 0x314d415257444c4bULL
++struct kebab_low_dma_ram_observation {
++ uint64_t magic;
++ uint32_t schema,bytes,state,result,phase,flags,guard,reserved0;
++ uint64_t image,image_bytes,metadata,metadata_bytes;
++ uint64_t pattern_written_words,pattern_read_words,zero_written_words,zero_read_words;
++ uint32_t checked_pages,barriers,failed_region,failed_offset,expected_word,actual_word;
++ uint64_t elapsed_us;
++ uint8_t pattern_sha256[2][32],zero_sha256[2][32];
++ uint64_t reserved[2];
++};
++int kebab_low_dma_ram_prepare(void);
++int kebab_low_dma_ram_snapshot(struct kebab_low_dma_ram_observation *,uint32_t);
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
++++ b/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
+@@ -188,3 +188,134 @@
+  memcpy(out,&klnc_observation,sizeof(*out));return 0;
+ }
+ /* END OWNED_LOW_DMA_NC */
++
++/* BEGIN OWNED_LOW_DMA_CPU_RAM */
++#ifndef KRAM_HOST
++#include <kern/clock.h>
++#include <libkern/crypto/sha2.h>
++#endif
++static_assert(sizeof(kebab_low_dma_ram_observation)==280,"fixed CPU RAM observation");
++static uint32_t kram_state;
++static kebab_low_dma_ram_observation kram_observation;
++static uint32_t kram_pattern(unsigned region,uint32_t offset)
++{return 0xa650beefu ^ (region*0x01020304u) ^ (offset*0x045d9f3bu);}
++static uint64_t kram_elapsed(uint64_t start)
++{uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time()-start,&ns);return ns;}
++static bool kram_budget(uint64_t start)
++{return kram_elapsed(start)<=2000000000ULL;}
++static void kram_write(uintptr_t address,uint32_t value)
++{
++#ifdef KRAM_HOST
++ kram_host_write(address,value);
++#else
++ /* Own Normal-NC RAM only. A real register is retained even for zero, as
++  * in the existing QCOM HYP-safe store adapter. No new MMIO is permitted. */
++ __asm__ volatile("str %w0, [%1]":"+r"(value):"r"(address):"memory");
++#endif
++}
++static uint32_t kram_read(uintptr_t address)
++{
++#ifdef KRAM_HOST
++ return kram_host_read(address);
++#else
++ uint32_t value;__asm__ volatile("ldr %w0, [%1]":"=r"(value):"r"(address):"memory");return value;
++#endif
++}
++static void kram_barrier(void)
++{
++#ifndef KRAM_HOST
++ __asm__ volatile("dsb sy":::"memory");
++#endif
++ ++kram_observation.barriers;
++}
++static unsigned kram_pin(unsigned index,const kebab_low_dma_nc_observation *parent,uint64_t start)
++{
++ IOMemoryDescriptor *memory=klnc_memory[index];IOMemoryMap *map=klnc_mapping[index];
++ const uint64_t pa=index?parent->metadata:parent->image,bytes=index?parent->metadata_bytes:parent->image_bytes;
++ const uintptr_t va=index?parent->metadata_va:parent->image_va;
++ if(!memory || !map || memory->getLength()!=bytes || map->getLength()!=bytes || map->getVirtualAddress()!=va || !va || (va&16383) || va>UINTPTR_MAX-bytes)return 3;
++ for(uint32_t offset=0;offset<bytes;offset+=4096) {
++  kram_observation.failed_region=index;kram_observation.failed_offset=offset;
++  if(!kram_budget(start))return 7;
++  IOByteCount extent=0;
++  if(memory->getPhysicalSegment(offset,&extent,kIOMemoryMapperNone)!=pa+offset || extent<4096)return 4;
++  uint64_t par=klnc_translate(va+offset);
++  if((par&1) || (par&0x00ffffff00000000ULL) || (par&0x0000fffffffff000ULL)!=pa+offset)return 5;
++  if((par>>56)!=0x44)return 6;
++  ++kram_observation.checked_pages;
++ }
++ return 0;
++}
++extern "C" int kebab_low_dma_ram_prepare(void)
++{
++ if(panic_active() || KFNativeWorker(NULL))return 2;
++ uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kram_state,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return expected==2?0:16;
++ kram_observation={};kram_observation.magic=KEBAB_LOW_DMA_RAM_MAGIC;kram_observation.schema=1;
++ kram_observation.bytes=sizeof(kram_observation);kram_observation.state=2;kram_observation.result=1;
++ uint64_t start=mach_absolute_time(),cookie=0;int error;
++ kebab_low_dma_nc_observation parent={},again={};
++ if(kebab_low_dma_nc_snapshot(&parent,sizeof parent) || parent.magic!=KEBAB_LOW_DMA_NC_MAGIC || parent.schema!=1 || parent.bytes!=sizeof parent ||
++    parent.state!=2 || parent.result || parent.flags!=15 || parent.checked_pages!=260 || parent.image_bytes!=0x100000 || parent.metadata_bytes!=0x4000 ||
++    !parent.image || !parent.metadata || (parent.image&0xfffff) || (parent.metadata&0x3fff) ||
++    parent.image>0x100000000ULL-parent.image_bytes || parent.metadata>0x100000000ULL-parent.metadata_bytes ||
++    !(parent.image+parent.image_bytes<=parent.metadata || parent.metadata+parent.metadata_bytes<=parent.image))goto done;
++ kram_observation.image=parent.image;kram_observation.image_bytes=parent.image_bytes;
++ kram_observation.metadata=parent.metadata;kram_observation.metadata_bytes=parent.metadata_bytes;kram_observation.flags=1|64;
++ error=kebab_gpu_namespace_change_begin(KF_OP_PAS13_SEPARATE_IMAGE,&cookie);
++ if(error || cookie!=UINT64_MAX){kram_observation.result=2;kram_observation.guard=error;goto done;}
++ kram_observation.flags|=2;kram_observation.phase=1;
++ for(unsigned index=0;index<2;index++) {
++  error=kram_pin(index,&parent,start);if(error){kram_observation.result=error;goto release;}
++ }
++ kram_observation.flags|=4;
++ for(unsigned index=0;index<2;index++) {
++  const uintptr_t va=index?parent.metadata_va:parent.image_va;
++  const uint32_t bytes=(uint32_t)(index?parent.metadata_bytes:parent.image_bytes);
++  kram_observation.failed_region=index;
++  for(unsigned pass=0;pass<2;pass++) {
++   kram_observation.phase=pass?5:2;
++   for(uint32_t offset=0;offset<bytes;offset+=4) {
++    kram_observation.failed_offset=offset;
++    if(!(offset&4095) && !kram_budget(start)){kram_observation.result=7;goto release;}
++    const uint32_t value=pass?0:kram_pattern(index,offset);
++    kram_observation.flags|=8;kram_write(va+offset,value);
++    if(pass)++kram_observation.zero_written_words;else ++kram_observation.pattern_written_words;
++   }
++   kram_barrier();kram_observation.phase=pass?6:3;
++   for(uint32_t offset=0;offset<bytes;offset+=4) {
++    kram_observation.failed_offset=offset;
++    if(!(offset&4095) && !kram_budget(start)){kram_observation.result=7;goto release;}
++    uint32_t want=pass?0:kram_pattern(index,offset),actual=kram_read(va+offset);
++    if(pass)++kram_observation.zero_read_words;else ++kram_observation.pattern_read_words;
++    if(actual!=want){kram_observation.expected_word=want;kram_observation.actual_word=actual;kram_observation.result=8;goto release;}
++   }
++   kram_observation.phase=pass?7:4;
++   if(!kram_budget(start)){kram_observation.result=7;goto release;}
++   SHA256_CTX hash;SHA256_Init(&hash);SHA256_Update(&hash,(const void *)va,bytes);
++   SHA256_Final(pass?kram_observation.zero_sha256[index]:kram_observation.pattern_sha256[index],&hash);
++   if(!kram_budget(start)){kram_observation.result=7;goto release;}
++  }
++ }
++ if(kebab_low_dma_nc_snapshot(&again,sizeof again) || memcmp(&again,&parent,sizeof parent)){kram_observation.result=9;goto release;}
++ kram_observation.flags|=16|32;kram_observation.phase=8;kram_observation.result=0;
++ kram_observation.failed_region=kram_observation.failed_offset=0;
++release:
++ error=kebab_gpu_namespace_change_end(cookie,0);kram_observation.guard=error;
++ if(error && !kram_observation.result)kram_observation.result=10;
++done:
++ if(kram_observation.result && (kram_observation.flags&8))kram_observation.flags|=128;
++ kram_observation.elapsed_us=kram_elapsed(start)/1000;
++ if(!kram_observation.result && kram_observation.elapsed_us>2000000){kram_observation.result=7;kram_observation.flags|=128;}
++ /* Failure memory remains intact; descriptors, mappings and observations
++  * stay pinned. Only an independently successful test leaves both ranges
++  * verified zero. No PAS call, firmware or GPU execution occurs here. */
++ __atomic_store_n(&kram_state,2,__ATOMIC_RELEASE);return 0;
++}
++extern "C" int kebab_low_dma_ram_snapshot(kebab_low_dma_ram_observation *out,uint32_t bytes)
++{
++ if(!out || bytes!=sizeof(*out))return 22;
++ if(__atomic_load_n(&kram_state,__ATOMIC_ACQUIRE)!=2)return 35;
++ memcpy(out,&kram_observation,sizeof(*out));return 0;
++}
++/* END OWNED_LOW_DMA_CPU_RAM */
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -322,6 +322,7 @@
+ #define UD_LOW_DMA 64u
+ #define UD_LOW_DMA_NC 65u
+ #define UD_PAS13_SUPPORTED 66u
++#define UD_LOW_DMA_RAM 67u
+ #include <kern/kebab_low_dma.h>
+ static void
+ kebab_low_dma_measure_prepare(void)
+@@ -339,6 +340,14 @@
+     int snapshot=kebab_low_dma_nc_snapshot(&observation,sizeof observation);
+     printf("KEBAB LOWDMANC: end; worker=%d snapshot=%d state=%u result=%u flags=0x%x pages=%u\n",
+         worker,snapshot,observation.state,observation.result,observation.flags,observation.checked_pages);
++}
++static void kebab_low_dma_ram_worker(void)
++{
++    int worker=kebab_low_dma_ram_prepare();
++    struct kebab_low_dma_ram_observation observation={0};
++    int snapshot=kebab_low_dma_ram_snapshot(&observation,sizeof observation);
++    printf("KEBAB LOWDMARW: end; worker=%d snapshot=%d state=%u result=%u phase=%u flags=0x%x guard=%u\n",
++        worker,snapshot,observation.state,observation.result,observation.phase,observation.flags,observation.guard);
+ }
+ extern void kebab_gmu_firmware_prepare(void);
+ extern void kebab_gmu_hfi_prepare(void);
+@@ -1558,6 +1567,7 @@
+     if(received==7 && !memcmp(buf,"LOWDMA\n",7))return UD_LOW_DMA;
+     if(received==9 && !memcmp(buf,"LOWDMANC\n",9))return UD_LOW_DMA_NC;
+     if(received==9 && !memcmp(buf,"PAS13SUP\n",9))return UD_PAS13_SUPPORTED;
++    if(received==9 && !memcmp(buf,"LOWDMARW\n",9))return UD_LOW_DMA_RAM;
+ /* END FUTURE_GMU_COMMAND_DECODE */
+     if(received==8 && !memcmp(buf,"GPUSMMU\n",8))return UD_GPU_SMMU_OBSERVE;
+     if(received!=9)return 0;
+@@ -2021,6 +2031,8 @@
+ 	} else if (command == UD_GPU_RENDER) {
+ 		kebab_a650_gpu_render_hold_prepare();
+ /* END A650_GPURENDER_DISPATCH */
++	} else if (command == UD_LOW_DMA_RAM) {
++		kebab_low_dma_ram_worker();
+ 	} else if (command == UD_PAS13_SUPPORTED) {
+ 		int queued=kebab_scm_pas13_supported_enqueue();
+ 		printf("KEBAB PAS13SUP: end; queued=%d; support query only\n",queued);
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>41)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>42)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -970,6 +970,15 @@
+         image->total=bytes;image->stable=1;image->flags=2;return 0;
+     }
+ /* END A650_GPUCP37_PROVIDER */
++    if(source==42) {
++        if(argument)return 22;
++        auto *data=(kebab_low_dma_ram_observation *)IOMalloc(sizeof(kebab_low_dma_ram_observation));
++        if(!data)return 12;
++        int error=kebab_low_dma_ram_snapshot(data,sizeof(*data));
++        if(error){IOFree(data,sizeof(*data));return error;}
++        *image=kc_image{};image->handle=data;image->source=42;image->argument=0;
++        image->total=sizeof(*data);image->stable=1;image->flags=2;return 0;
++    }
+     if(source==41) {
+         if(argument)return 22;
+         auto *data=(kebab_pas13_supported_observation *)IOMalloc(sizeof(kebab_pas13_supported_observation));

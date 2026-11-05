@@ -1,8 +1,19 @@
 # UniXNU-kebab
 
+## 0609 A650_FIRST_RENDER=PASS — 2026-11-05
+
+Actual609 PAS INIT/MEM_SETUP/AUTH returned0/0, independently qualified by3 identicalCAP45 and frozen memory/17ranges/136pairs/260pages/CP parents. One legal CP_SET_SECURE_MODE(0) completed with its dedicatedGPU fence3; HYP protection and raw secure-mode register remain UNKNOWN. Original605424-word drawing unchanged: two32x32 RGBA8 targets in disjoint views of one64KiBBO, pitch256. Hardware RPTR/shadow248→460, Fence3→4, freshCCU timestamps; every pixel/channel and every padding/guard byte matched. Draw35668us. Three identicalCAP38 f98548e9ce9ccf784c96086e8e810a1f5d1dba1af19bb970f483da135949e7ed. Independent scalar verifier and corrupt-pixel/guard rejection passed.605A5FAIL and608prePAS16 refusal preserved.
+
+Original boot security/encryptedData/Root/nonce/bank/systembag/watchdog304.384s PASS; prePAS ownerGUI/tap/home PASS separately archived. Afterrender readonly observation335.275s: originalwatchdog enabled, polls750→1050/beats75→105, no panic/timeout. This extended observer does not rerun old crypto probes. Postrender manualGUI NOT_RUN_OWNER_AWAY: owner explicitly unable to verify; assumed normal is not a manual PASS. Brightness deferred; CPU display path preserved. No new risky hardware operations while owner away.
+
+Private complete checkpoint `native-dpu-0609/0609-first-render-qualified.json`; public digest/measurements [qualification/0609/first-render-qualified.json](docs/qualification/0609/first-render-qualified.json). Native447edd1d920b26d92aba154e830d0f87f560b612f738b345eec37572e6ab22e5; boot06e6b6fc1cb878dd2777152b0c02b12937e2bb9d92cfe0207a63d93d32efde95; sourcebase d5c9c62db752f225a288b88959d3754edc94138a plus463+4/5462.609 allwrite-once commands consumed: NEVER resend auth/exit/render or reclaim frozen PAS memory. All jobs terminal, serial released.
+
+SubsequentIRQ/Metal work reached a source/host/cross-compile checkpoint: officialNativeAdrenoClient10304855… exactv2 layout/bounds/error tests underASan/UBSan PASS; productionclient and layouttest compilearm64-ios16.7/sdk17.5 objects. This is not20H392 privateABI qualification or hardwareMetal. CurrentofficialAdrenoMetal e82788dd… provider explicitlyiOS17; cannot copy its privatevtable to20H392. GPU SPI300/INTID332 andA6xx completionbit20 audited; IRQdelivery stillNOT_RUN/mask0. Full nextentry/boundaries: [GPU-METAL-0609-CHECKPOINT.md](docs/GPU-METAL-0609-CHECKPOINT.md). A650_METAL_FIRST_EXECUTION=NOT_RUN. Next: source/host A650-only IRQ and authorized per-clientNativeAdreno v2 BO/VM/submit/wait, then qualifiednewimage with recovery/freshsafety and independentMetal test; no selector tunnel/mailbox/security bypass, no PAS13support-query route.
+
+
 在 **一加 8T（kebab / Qualcomm SM8250）** 上移植 XNU，运行原版 **iOS 16.7.16（20H392）用户态**。项目采用 Mu-Silicium UEFI、DarwinBoot、自编译的 XNU 8796.141.3 和供体原版组件的 prelink 路线，参考 [UniXNU 移植指南](https://unixnu.com/zh/porting/) 与 [UniXNU-sheng](https://github.com/UniXNU/UniXNU-sheng)。
 
-**截至2026-11-02（0544）：原版SpringBoard已显示，布局与滑动已获用户确认；0544补齐真实触点的边缘起始标记，用户确认返回、回桌面和多任务三项边缘手势均恢复；原Root/bank/systembag、已有密钥和加密Data/安全及原watchdog基础回归304.447秒通过。没有Apple官方激活或联网能力。** 主线分支为 [`ios16`](https://github.com/GFander/UniXNU-kebab/tree/ios16)。
+**截至2026-11-03：实机0587限定验收通过；原Root/既有bank/systembag、加密Data、安全与watchdog304.356秒及原后续回归保持。四次真实HFI初始化ACK、独立27页GPU BO和CB1/ASID2准备通过，单次GPU OOB请求获得ACK并保留，观察到GX电源/时钟开启。CP/SQE执行、GPU工作负载DMA、First Render和Metal仍未验收；目标频率/BW及完整HFI资源效果也未证明，GUI本轮owner-away未测。** 主线分支为 [`ios16`](https://github.com/GFander/UniXNU-kebab/tree/ios16)。
 
 ## 当前基线
 
@@ -11,16 +22,18 @@
 | 实机 | OnePlus 8T，12 GB / 256 GB 机型；实际交给 XNU 的连续内存约 7.998 GiB |
 | CPU / 内核 | 8 核上线；ARM64、16 KiB 页、XNU 8796.141.3 / Darwin 22.6.0 |
 | 用户态来源 | iPhone X / D22AP，iOS 16.7.16，build 20H392；不是对 A11 硬件的完整模拟 |
-| 最近启动 | **0544**：真实触点边缘来源；原Root/bank/systembag、已有密钥和加密Data/安全及原watchdog基础回归304.447秒通过；用户确认返回、回桌面和多任务三项边缘手势均恢复 |
-| 源码核对 | 399个共同补丁 + 4个Mac主机补丁，5,290个源码文件与原生0544构建输入一致 |
+| 最近启动 | **0587**；原基线/GMU/HFI/BO/CB1和有限OOB/GX通过；CP、First Execution/Render、Metal未验收 |
+| 源码核对 | 0587为441共同+4Mac主机补丁/5444源，与完整native一致；parent586，0462共13路径（6修改/7新增） |
 | 交互状态与剩余边界 | 用户确认返回、回桌面和多任务三项边缘手势均恢复；长时稳定性、Wi-Fi、蜂窝、真实Apple激活、口令/SEP未实现或未验收 |
 | 桌面 / 刷新率 | 用户确认布局与滑动正常；用户确认返回、回桌面和多任务三项边缘手势均恢复；长时稳定性及真实120Hz未验证 |
 
-最新边缘起始修正见[0544修正与边界](docs/EDGE-GESTURES-0544.md)。最新触屏事件关联见[0543修正与边界](docs/EDGE-GESTURES-0543.md)。最新边缘触摸修正见[0542修正与边界](docs/EDGE-GESTURES-0542.md)。最新布局见[0541画布修正与边界](docs/LAYOUT-SCALING-0541.md)及[真实锁屏Surface](docs/qualification/0541/lockscreen.png)。历史离线阶段见[离线初始化与桌面现场](docs/OFFLINE-SETUP-0536.md)、[分项验收](docs/qualification/0536/offline-setup-qualified.json)及[实际桌面截图](docs/qualification/0536/springboard-desktop.png)。原版服务的本地开发状态与Apple官方激活分开记录，基础回归与GUI稳定性也分开记录。当前0544原生内核为19,124,224字节，SHA-256：
+本轮原生硬件证据、亮度测试和未完成范围见[连续6/7/8进度](docs/CONTINUOUS-6-7-8.md)。最新边缘起始修正见[0544修正与边界](docs/EDGE-GESTURES-0544.md)。最新触屏事件关联见[0543修正与边界](docs/EDGE-GESTURES-0543.md)。最新边缘触摸修正见[0542修正与边界](docs/EDGE-GESTURES-0542.md)。最新布局见[0541画布修正与边界](docs/LAYOUT-SCALING-0541.md)及[真实锁屏Surface](docs/qualification/0541/lockscreen.png)。历史离线阶段见[离线初始化与桌面现场](docs/OFFLINE-SETUP-0536.md)、[分项验收](docs/qualification/0536/offline-setup-qualified.json)及[实际桌面截图](docs/qualification/0536/springboard-desktop.png)。原版服务的本地开发状态与Apple官方激活分开记录，基础回归与GUI稳定性也分开记录。当前0587已通过有限GMU/HFI、BO/CB1和保留OOB/GX上电验收；完整native为19,481,216字节，SHA-256：
 
 ```text
-f7ccc57bd3be1bd76017b9d1712f58df561489e0815f8bce5ae71d17b7841ae2
+fe6d1680d9a652eed3c1a7a25b70efeb4b4c583f9b411b7c8472ddd64d2a5ce8
 ```
+
+本轮见[0587限定资格](docs/qualification/0587/oob-gx-qualified-GPU-PARTIAL.json)和[同代A650源码审计](docs/A650-PEER-AUDIT-20261103.md)。[0583限定资格](docs/qualification/0583/limited-gmu-fw-version-sn11-qualified.json)保留历史。[0582睡眠BUSY失败](docs/qualification/0582/substrate-cold-irq-qualified-RSC-sleep-BUSY-failed.json)、[0581 hidden回读失败](docs/qualification/0581/substrate-cold-irq-qualified-RSC-readback-failed.json)、[0579初始MASK拒绝](docs/qualification/0579/substrate-cold-qualified-IRQ-initial-mask-failed.json)、[0578 Cold零写拒绝](docs/qualification/0578/substrate-first-qualified-cold-preflight-failed.json)、[0576限定通过](docs/qualification/0576/gpu-first-qualified.json)及0577实际构建失败/未刷历史保留，详见[当前状态](docs/STATUS.md)。
 
 详见[当前状态与下一步](docs/STATUS.md)、[功能与里程碑证据索引](docs/README.md)和[0485 封存实机记录](docs/qualification/0485/0485-shell-frame-qualified.json)。编译、源码回放、实机测试分别记录，互不替代。
 
@@ -156,9 +169,9 @@ git clone https://github.com/apple-oss-distributions/xnu.git ../apple-xnu
 mkdir -p .cache/qualification
 python3 scripts/qualification/replay-xnu.py \
   --repo . --xnu-source ../apple-xnu \
-  --manifest docs/qualification/0544/all-mac-source-0544.json \
-  --receipt .cache/qualification/replay-0544.json \
-  --cache .cache --expected-common 399
+  --manifest docs/qualification/0587/all-mac-source-0587-expected.json \
+  --receipt .cache/qualification/replay-0587.json \
+  --cache .cache --expected-common 441
 ```
 
 校验已公开的真实触摸记录：

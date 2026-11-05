@@ -1,0 +1,33 @@
+{
+  "accepted": true,
+  "version": "0565",
+  "native_sha256": "0978a6e01d0cfeb4e783833d87456be62901398bb1502e7ebfbf6f0de55c227d",
+  "common": 420,
+  "host": 4,
+  "source_files": 5312,
+  "watchdog_seconds": 304.394,
+  "scope": "Native retained two64KiB prepared descriptors and independently validated non-global4KiB table graph; original keys/Data/security/watchdog and real displayIRQ/VSYNC/thermal regression",
+  "physical_active_SMMU": false,
+  "physical_DMA": false,
+  "GMU": false,
+  "Metal": false,
+  "all_requested_items_complete": false,
+  "immutable_receipt_not_live_rescan": true,
+  "receipts": {
+    "normal-baseline-qualified.json": "74f33dc55bc9baec539f25eeba4d85fb331486702e8c6ebbfd1cbcf0a2f4a5d8",
+    "live-dma-command/result.json": "bb2cffc7e3b9e82a2f0da5f1264b1f5d04c6571dfbd72b3690057ae50ecf7132",
+    "live-dma-pool/result.json": "d318c57731fd159b163efb1ed338ab39c7034e0fe15905232b4223e781acd23d",
+    "live-iova/result.json": "a63974be03080e2766811c151330c71941b9c4a6ac570acad3263284bf331f63",
+    "live-platform/result.json": "52ac5a814edd3fdbd434e3a405ed514a82b911fc542e2d7ef1adefc0c3eaa21e",
+    "live-thermal/result.json": "2e71ff074973bcbe5650d6e4b6f5c5f776c204cead2fa5dc2343d6ff4ae1ce5e",
+    "post-baseline-dma-complete.json": "d28330a641534301220795da11e4f0baca1adb1654ebd474e2da3c2ca8aefb35",
+    "native-cache-poc-qualified.json": "3bf98f6427dc2a341c0dfaa281df2b3f89f464ccf33264f3a541149628757b4a",
+    "paired-build.json": "30bd8f16b78b2ab73fa342ad4efb46dfe75fe33811be8f58be1a2fb0e1fc56fc",
+    "host-native-dma-pool-qualified.json": "e67d57aaaf1d96609f3c8304a4c9c02df6cd63354358788ff3a19d7151a80f05",
+    "host-native-iova-raw-qualified.json": "567dabcc2cc80e8dcef82216e7bb73f71309242273cfbaf5efa51eafeed1c18f",
+    "host-4k-qualified.json": "7d14d423ca006483bec31c40b673927b431d4ccd314ee29e4048a27ab838d991",
+    "host-core-tests.json": "44e04678195eb7b396d3c6bcdfb9c1a0d7f5e04a4edbd216235003dc3eef3c1d",
+    "host-source14-provider-qualified.json": "a1b7893cc796714dc6642f98dd9be4f4f1b713617470d842d1fcf133e202dc6f",
+    "host-dma-pool-receiver-qualified.json": "4a1f5e06ca269c901dea2e024f19b1e2a2e892050220684f81c649096bcb732f"
+  }
+}

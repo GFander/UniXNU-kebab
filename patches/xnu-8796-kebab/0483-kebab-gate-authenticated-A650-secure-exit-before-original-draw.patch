@@ -1,0 +1,467 @@
+--- a/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
++++ b/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
+@@ -17,6 +17,7 @@
+ static uint32_t kf_pas13_gate,kf_pas13_busy;
+ static uint32_t kf_pas13_frozen;
+ static int KZANativeVmReservationAllowed(void);
++static int KZANativeSecureExitReady(void);
+ static int kf_namespace_ensure(void)
+ {
+  uint32_t expected=0;
+@@ -449,3 +450,5 @@
+ /* END PAS13_READONLY_RESOURCES */
+ 
+ #include "KebabNativeA650ZapAuth.h"
++
++#include "KebabNativeA650SecureExit.h"
+--- a/iokit/Kernel/arm/KebabNativeA650ZapAuth.h
++++ b/iokit/Kernel/arm/KebabNativeA650ZapAuth.h
+@@ -48,9 +48,9 @@
+ }
+ extern "C" int kebab_a650_zap_render_gate(void)
+ {
+- /* Authentication qualification does not imply secure-exit qualification.
+-  * This version deliberately has no secure-exit or new render entry. */
+- return 95;
++ /* Actual authentication and independently completed hardware secure exit
++  * are both required. The later canonical render gate checks live owners. */
++ return KZANativeSecureExitReady();
+ }
+ static int kza2_ranges(kebab_pas13_resources_observation *o,unsigned count)
+ {
+--- a/iokit/Kernel/arm/KebabNativeA650Render.h
++++ b/iokit/Kernel/arm/KebabNativeA650Render.h
+@@ -83,10 +83,10 @@
+ KARRunPass(KebabA650RenderObservation *record, unsigned pass, uint64_t begin)
+ {
+     KARPass *proof = &record->pass[pass];
+-    const uint32_t start = KCP_FINAL_WPTR + pass * KAR_WORDS;
++    const uint32_t start = KAR_RING_START + pass * KAR_WORDS;
+     const uint32_t end = start + KAR_WORDS;
+     const uint32_t sequence = pass + 3;
+-    static_assert(KCP_FINAL_WPTR + KAR_PASSES * KAR_WORDS < 1024, "no ring wrap");
++    static_assert(KAR_RING_START + KAR_PASSES * KAR_WORDS < 1024, "no ring wrap");
+     KARSample prior = {};
+     int error = KARSampleHardware(&prior, pass);
+     if (error) {
+@@ -212,8 +212,8 @@
+     if (error) {
+         return error;
+     }
+-    if (record->initial.wptr != KCP_FINAL_WPTR || record->initial.rptr != KCP_FINAL_WPTR ||
+-        record->initial.shadow != KCP_FINAL_WPTR || record->initial.fence != 2 ||
++    if (record->initial.wptr != KAR_RING_START || record->initial.rptr != KAR_RING_START ||
++        record->initial.shadow != KAR_RING_START || record->initial.fence != 2 ||
+         (record->initial.status & ~1u)) {
+         return EIO;
+     }
+--- a/osfmk/kern/KebabA650RenderCore.h
++++ b/osfmk/kern/KebabA650RenderCore.h
+@@ -16,7 +16,8 @@
+     KAR_SENTINEL = 0xa5,
+     KAR_PASSES = 2,
+     KAR_WORDS = 212,
+-    KAR_SCHEMA = 5,
++    KAR_SCHEMA = 6,
++    KAR_RING_START = 36,
+     KAR_CONTROL_OFFSET = 0x80,
+     KAR_CONTROL_VALUE = 0xa650c001u,
+     KAR_EVENT_OFFSET = 128,
+--- a/iokit/Kernel/arm/KebabA650RenderNative.h
++++ b/iokit/Kernel/arm/KebabA650RenderNative.h
+@@ -26,12 +26,12 @@
+     uint8_t readback[KAR_PASSES][KAR_BO_BYTES];
+ };
+ 
+-static_assert(sizeof(KARPass) == 1020, "CAP38 schema5 pass1020");
++static_assert(sizeof(KARPass) == 1020, "CAP38 schema6 pass1020");
+ static_assert(offsetof(KebabA650RenderObservation, vm_before) == 2176,
+-    "CAP38 schema5 aligned VM");
++    "CAP38 schema6 aligned VM");
+ static_assert(offsetof(KebabA650RenderObservation, readback) == 5440,
+-    "CAP38 schema5 full target snapshots");
+-static_assert(sizeof(KebabA650RenderObservation) == 136512, "CAP38 schema5 bytes");
++    "CAP38 schema6 full target snapshots");
++static_assert(sizeof(KebabA650RenderObservation) == 136512, "CAP38 schema6 bytes");
+ 
+ extern "C" int kebab_a650_gpu_render_prepare(void);
+ extern "C" int kebab_a650_gpu_render_snapshot(KebabA650RenderObservation *);
+--- a/osfmk/kern/KebabA650RenderBinding.h
++++ b/osfmk/kern/KebabA650RenderBinding.h
+@@ -4,7 +4,7 @@
+ #include <stdint.h>
+ 
+ enum {KebabA650RenderNativeQualified = 1};
+-static const uint8_t KebabA650RenderSourceContract[32] = {0x88, 0x56, 0x5f, 0x25, 0xa9, 0xb8, 0xf5, 0x5c, 0xe4, 0xd3, 0x80, 0x74, 0x32, 0xd0, 0xdc, 0xd5, 0x85, 0xca, 0x01, 0xe3, 0x4d, 0xda, 0xdc, 0xae, 0x97, 0xeb, 0x65, 0x38, 0xfd, 0x5a, 0x20, 0x59};
++static const uint8_t KebabA650RenderSourceContract[32] = {0xc2, 0x54, 0x45, 0xef, 0x60, 0x68, 0x21, 0x33, 0x9b, 0xe3, 0x9e, 0x22, 0x5d, 0x98, 0x59, 0x64, 0x47, 0x03, 0xc3, 0x96, 0xff, 0xe5, 0x97, 0x04, 0x8b, 0x25, 0xa7, 0x47, 0xc2, 0x95, 0x28, 0x2a};
+ 
+ static inline int
+ KARSourceBound(void)
+--- a/bsd/dev/KebabA650CpOwner.inc
++++ b/bsd/dev/KebabA650CpOwner.inc
+@@ -171,3 +171,23 @@
+  }
+  __atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return 0;
+ }
++
++/* Distinct secure-exit submission under the original completed CP owner.
++ * Any mutation failure quarantines the live chain without rewriting CAP37
++ * or CAP45 and without reclaiming protected PAS memory. */
++extern int kebab_a650_gpu_secure_exit_locked(uint32_t *);
++int kebab_rpmh_gpu_cp_secure_exit(KebabA650CpOwnerToken *token,uint32_t *touched)
++{
++ if(!touched || *touched || !KARSourceBound())return 95;
++ if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL))return 16;
++ int error=kebab_rpmh_gpu_cp_check_locked(token);
++ if(!error && (!kebab_gpu_cp_book.complete || !kebab_gpu_cp_record->held ||
++  kebab_gpu_cp_record->phase!=KCP_EXECUTED || kebab_gpu_cp_record->result ||
++  kebab_gpu_cp_record->epoch!=1 || kebab_gpu_cp_record->final_fence!=2 ||
++  kebab_gpu_cp_record->final_rptr!=KCP_FINAL_WPTR || !kebab_gpu_cp_record->GPU_DMA_observed ||
++  !kebab_gpu_cp_record->namespace_unchanged))error=95;
++ if(!error)error=kebab_a650_gpu_secure_exit_locked(touched);
++ if(error && *touched){token->quarantined=1;kebab_gpu_cp_book.quarantined=1;
++  kebab_a650_gpu_cp_quarantine_locked(token->oob);kebab_gmu_boot_quarantine((unsigned)error);}
++ __atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return error;
++}
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -970,6 +970,15 @@
+         image->total=bytes;image->stable=1;image->flags=2;return 0;
+     }
+ /* END A650_GPUCP37_PROVIDER */
++    if(source==46) {
++        if(argument)return 22;
++        auto *data=(kebab_secure_exit_observation *)IOMalloc(sizeof(kebab_secure_exit_observation));
++        if(!data)return 12;
++        int error=kebab_secure_exit_snapshot(data,sizeof(*data));
++        if(error){IOFree(data,sizeof(*data));return error;}
++        *image=kc_image{};image->handle=data;image->source=46;image->argument=0;
++        image->total=sizeof(*data);image->stable=1;image->flags=2;return 0;
++    }
+     if(source==45) {
+         if(argument)return 22;
+         auto *data=(kebab_zap_auth_observation *)IOMalloc(sizeof(kebab_zap_auth_observation));
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -326,6 +326,7 @@
+ #define UD_PAS13_RESOURCES 68u
+ #define UD_ZAP_STAGE 69u
+ #define UD_ZAP_AUTH 70u
++#define UD_ZAP_EXIT 71u
+ #include <kern/kebab_low_dma.h>
+ static void
+ kebab_low_dma_measure_prepare(void)
+@@ -1574,6 +1575,7 @@
+     if(received==9 && !memcmp(buf,"PASRANGE\n",9))return UD_PAS13_RESOURCES;
+     if(received==9 && !memcmp(buf,"ZAPSTAGE\n",9))return UD_ZAP_STAGE;
+     if(received==8 && !memcmp(buf,"ZAPAUTH\n",8))return UD_ZAP_AUTH;
++    if(received==8 && !memcmp(buf,"ZAPEXIT\n",8))return UD_ZAP_EXIT;
+ /* END FUTURE_GMU_COMMAND_DECODE */
+     if(received==8 && !memcmp(buf,"GPUSMMU\n",8))return UD_GPU_SMMU_OBSERVE;
+     if(received!=9)return 0;
+@@ -2037,6 +2039,9 @@
+ 	} else if (command == UD_GPU_RENDER) {
+ 		kebab_a650_gpu_render_hold_prepare();
+ /* END A650_GPURENDER_DISPATCH */
++	} else if (command == UD_ZAP_EXIT) {
++		int result=kebab_secure_exit_prepare();
++		printf("KEBAB ZAPEXIT: end; worker=%d; separate hardware completion receipt\n",result);
+ 	} else if (command == UD_ZAP_AUTH) {
+ 		int result=kebab_zap_auth_prepare();
+ 		printf("KEBAB ZAPAUTH: end; worker=%d; once-only lifecycle, no secure-exit or render\n",result);
+--- a/osfmk/kern/kebab_low_dma.h
++++ b/osfmk/kern/kebab_low_dma.h
+@@ -124,6 +124,16 @@
+ };
+ int kebab_zap_auth_prepare(void);
+ int kebab_zap_auth_snapshot(struct kebab_zap_auth_observation *,uint32_t);
++/* Separate once-only CP_SET_SECURE_MODE(0) packet completion. No SMC,
++ * protected-low-memory access, reset or direct TRUST register operation. */
++#define KEBAB_SECURE_EXIT_MAGIC 0x31544958455a4bULL
++struct kebab_secure_exit_observation {
++ uint64_t magic;
++ uint32_t schema,bytes,state,result;
++ uint8_t payload[4072];
++};
++int kebab_secure_exit_prepare(void);
++int kebab_secure_exit_snapshot(struct kebab_secure_exit_observation *,uint32_t);
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>45)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>46)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650SecureExitCore.h
+@@ -0,0 +1,111 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_SECURE_EXIT_CORE_H
++#define KEBAB_A650_SECURE_EXIT_CORE_H
++#if defined(KERNEL)
++#include <kern/KebabA650CpCore.h>
++#else
++#include "KebabA650CpCore.h"
++#endif
++/* CP_SET_SECURE_MODE(0), followed by the already qualified CP fence packet.
++ * The completion goes to a distinct owned NC slot. The original global
++ * fence stays2, so the original0605 render command words stay identical. */
++enum {KZE_WORDS=9,KZE_START=KCP_FINAL_WPTR,KZE_END=KZE_START+KZE_WORDS,
++ KZE_OFFSET=0x500,KZE_SEQUENCE=3,KZE_SENTINEL=0x13579bdf,
++ KZE_DEADLINE_US=200000,KZE_POLL_LIMIT=2000};
++enum {KZE_EMPTY,KZE_AUTHORIZED,KZE_INITIAL_QUIET,KZE_PREPARING,KZE_PREPARED,
++ KZE_SUBMITTING,KZE_WAITING,KZE_COMPLETE};
++struct KZEAuthProof {
++ uint64_t epoch,gmu_generation,gpu_generation,cp_generation;
++ uint32_t auth_completed,metadata_frozen,image_frozen,CP_baseline_valid;
++};
++struct KZESample {
++ uint32_t wptr,rptr,shadow,fence,secure_fence,marker,status,irq,irq_mask;
++ uint32_t cp_fault,cp_irq,protect,ahb_fence,gfsr,fsr,sqe;
++};
++struct KZERecord {
++ uint32_t phase,result,primary_error,io_error,touched,prepared,submitted,completed;
++ uint32_t gates,polls,samples,reserved;
++ uint64_t elapsed_us;
++ KZEAuthProof parent;
++ uint32_t words[KZE_WORDS];
++ KZESample initial,terminal;
++};
++struct KZEOps {
++ void *cookie;
++ uint64_t (*now_us)(void *);
++ int (*gate)(void *);
++ int (*authority)(void *,KZEAuthProof *);
++ int (*sample)(void *,KZESample *);
++ int (*prepare)(void *,const uint32_t *,uint32_t);
++ int (*publish)(void *,uint32_t);
++ int (*complete_guard)(void *);
++ void (*delay_us)(void *,unsigned);
++};
++static inline void KZEWords(uint32_t out[KZE_WORDS])
++{
++ out[0]=KCPType7(0x66,1);out[1]=0;
++ KCPFenceWords(out+2,KZE_SEQUENCE);
++ out[6]=KCP_FENCE_IOVA+KZE_OFFSET;
++}
++static inline int KZEAuthValid(const KZEAuthProof *p)
++{
++ return !p || p->epoch!=1 || !p->gmu_generation || !p->gpu_generation || !p->cp_generation ||
++  p->auth_completed!=1 || p->metadata_frozen!=1 || p->image_frozen!=1 || p->CP_baseline_valid!=1?95:0;
++}
++static inline int KZEFault(const KZESample *s)
++{
++ const uint32_t irq_faults=(1u<<1)|(1u<<7)|(1u<<9)|(1u<<23)|(1u<<24)|(1u<<25);
++ return s->irq_mask || (s->irq&irq_faults) || s->cp_fault || (s->cp_irq&0xf7) ||
++  s->protect || (s->ahb_fence&1) || s->gfsr || (s->fsr&0xc00001feu) ||
++  s->sqe!=1 || s->marker!=KCP_MARKER?5:0;
++}
++static inline int KZEBudget(const KZEOps *o,uint64_t start,KZERecord *r)
++{
++ uint64_t n=o->now_us(o->cookie);r->elapsed_us=n>=start?n-start:UINT64_MAX;
++ return n<start || n-start>=KZE_DEADLINE_US?110:0;
++}
++static inline int KZEGate(const KZEOps *o,uint64_t start,KZERecord *r)
++{
++ int e=KZEBudget(o,start,r);if(e)return e;++r->gates;
++ e=o->gate(o->cookie);if(e){r->io_error=e;return e;}
++ return KZEBudget(o,start,r);
++}
++static inline int KZERun(const KZEOps *o,KZERecord *r)
++{
++ if(!r)return 22;memset(r,0,sizeof(*r));
++ if(!o || !o->now_us || !o->gate || !o->authority || !o->sample || !o->prepare ||
++  !o->publish || !o->complete_guard || !o->delay_us){r->result=r->primary_error=22;return 22;}
++ const uint64_t start=o->now_us(o->cookie);int e=o->authority(o->cookie,&r->parent);
++ if(!e)e=KZEAuthValid(&r->parent);if(e)goto done;r->phase=KZE_AUTHORIZED;
++ e=KZEGate(o,start,r);if(e)goto done;
++ ++r->samples;e=o->sample(o->cookie,&r->initial);if(e)goto done;
++ e=KZEFault(&r->initial);if(e)goto done;
++ if(r->initial.wptr!=KZE_START || r->initial.rptr!=KZE_START || r->initial.shadow!=KZE_START ||
++  r->initial.fence!=2 || (r->initial.status&~1u)){e=5;goto done;}
++ r->phase=KZE_INITIAL_QUIET;KZEWords(r->words);
++ e=KZEGate(o,start,r);if(e)goto done;
++ r->phase=KZE_PREPARING;r->touched=1;e=o->prepare(o->cookie,r->words,KZE_WORDS);if(e)goto done;
++ r->prepared=1;r->phase=KZE_PREPARED;e=KZEGate(o,start,r);if(e)goto done;
++ r->phase=KZE_SUBMITTING;r->submitted=1;e=o->publish(o->cookie,KZE_END);if(e)goto done;
++ r->phase=KZE_WAITING;
++ for(unsigned i=0;i<KZE_POLL_LIMIT;i++){
++  e=KZEGate(o,start,r);if(e)goto done;++r->polls;++r->samples;
++  e=o->sample(o->cookie,&r->terminal);if(e)goto done;
++  e=KZEFault(&r->terminal);if(e)goto done;
++  {const auto *s=&r->terminal;
++   if(s->wptr!=KZE_END || s->rptr<KZE_START || s->rptr>KZE_END || s->shadow<KZE_START || s->shadow>KZE_END ||
++    s->fence!=2 || (s->secure_fence!=KZE_SENTINEL && s->secure_fence!=KZE_SEQUENCE)){e=5;goto done;}
++   if(s->rptr==KZE_END && s->shadow==KZE_END && s->secure_fence==KZE_SEQUENCE && !(s->status&~1u)){
++    e=o->complete_guard(o->cookie);if(e)goto done;
++    e=KZEGate(o,start,r);if(e)goto done;r->completed=1;r->phase=KZE_COMPLETE;goto done;
++   }
++  }
++  o->delay_us(o->cookie,100);
++ }
++ e=110;
++done:
++ r->primary_error=e;if(!e)e=KZEBudget(o,start,r);r->result=e;
++ if(e)r->completed=0;
++ return e;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeA650SecureExit.h
+@@ -0,0 +1,149 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_A650_SECURE_EXIT_H
++#define KEBAB_NATIVE_A650_SECURE_EXIT_H
++#include "KebabA650SecureExitCore.h"
++/* Same actual namespace/CP owner as the existing render implementation.
++ * No SMC, protected-low-memory access, TRUST write, reset or interrupt change. */
++struct KZEEvidence {
++ KZERecord record;
++ uint32_t nc_verified,kicks,quarantined,snapshot_before_error,snapshot_after_error,reserved;
++ uint32_t guard_before[16],guard_after[16];
++ KGDiscovery vm_before,vm_after;
++};
++static_assert(KAR_RING_START==KZE_END,"render follows real secure-exit cursor");
++static_assert(KZE_OFFSET>=KAR_DIAGNOSTIC_OFFSET+KAR_DIAGNOSTIC_SPACING+KAR_DIAGNOSTIC_COUNT*4,"secure completion separate from render diagnostic slots");
++static_assert(KZE_OFFSET+64<=4096,"whole completion and guard inside existing NC fenceBO");
++static_assert(sizeof(KZEEvidence)<=4072,"CAP46 bounded evidence");
++static_assert(sizeof(kebab_secure_exit_observation)==4096,"CAP46 fixed4KiB");
++static uint32_t kze_state;
++static KZEEvidence *kze_evidence;
++extern "C" int kebab_rpmh_gpu_cp_secure_exit(KebabA650CpOwnerToken *,uint32_t *);
++
++static int KZEAuthReady(void)
++{
++ if(__atomic_load_n(&kza2_state,__ATOMIC_ACQUIRE)!=2 || !kza2_evidence || !kf_pas13_frozen)return 95;
++ const auto *r=&kza2_evidence->receipt;
++ if(r->result || r->primary_error || r->end_error || r->phase!=KZA2_DONE ||
++  !r->completed || !r->authenticated || !r->prepared || !r->cp_ready || !r->final_checked ||
++  !r->metadata_frozen || !r->image_frozen || !kza2_evidence->parent_pinned ||
++  !kza2_evidence->namespace_released || kza2_evidence->quarantine_guard ||
++  r->after.epoch!=1 || r->after.gmu_generation!=kf_native.backing.generation ||
++  r->after.gpu_generation!=kvg_native.bo.generation || r->after.cp_generation!=kcp_native.owner.generation)return 95;
++ for(unsigned i=0;i<3;i++)if(!r->operation[i].attempted || r->operation[i].guard ||
++  !KebabPas13OperationSucceeded(&r->operation[i].raw))return 95;
++ return 0;
++}
++static int KZANativeSecureExitReady(void)
++{
++ if(__atomic_load_n(&kze_state,__ATOMIC_ACQUIRE)!=2 || !kze_evidence || KZEAuthReady())return 95;
++ const auto *e=kze_evidence;
++ return e->record.result || e->record.primary_error || !e->record.completed ||
++  e->record.phase!=KZE_COMPLETE || !e->record.touched || !e->record.prepared || !e->record.submitted ||
++  e->quarantined || e->kicks!=1 || !e->nc_verified || e->snapshot_before_error || e->snapshot_after_error ||
++  e->record.parent.cp_generation!=kcp_native.owner.generation?95:0;
++}
++static int kze_gate(void *)
++{return panic_active() || KFNativeWorker(NULL) || !kze_evidence || KZEAuthReady()?95:KCPNativeGate(&kcp_native);}
++static int kze_authority(void *,KZEAuthProof *out)
++{
++ int error=kze_gate(NULL);if(error)return error;
++ if(out!=&kze_evidence->record.parent || __atomic_load_n(&kcp_native_once,__ATOMIC_ACQUIRE)!=2 ||
++  kcp_native_result || !kcp_native.observation || !kcp_native.observation->receipt.NC_verified)return 95;
++ const auto *p=&kza2_evidence->receipt.after;
++ *out={p->epoch,p->gmu_generation,p->gpu_generation,p->cp_generation,1,1,1,1};return 0;
++}
++static int kze_sample(void *,KZESample *out)
++{
++ int error=kze_gate(NULL);if(error)return error;
++ KARSample s={};error=KARSampleHardware(&s,0);
++ const auto *f=(volatile const uint32_t *)kvg_engine.backing.region[5].cpu;
++ KARAcquireNC();const uint32_t completion=f[KZE_OFFSET/4];
++ *out={s.wptr,s.rptr,s.shadow,s.fence,completion,s.marker,s.status,s.rbbm_irq,s.irq_mask,
++  s.cp_fault,s.cp_irq,s.cp_protect,s.ahb_fence,s.gfsr,s.fsr,s.sqe};
++ return error;
++}
++static uint32_t kze_guard_word(unsigned i)
++{return !i?KZE_SENTINEL:i==1?0:0xa650fe00u+i;}
++static int kze_prepare(void *,const uint32_t *words,uint32_t count)
++{
++ int error=kze_gate(NULL);if(error)return error;
++ uint32_t expected[KZE_WORDS];KZEWords(expected);
++ auto *e=kze_evidence;
++ if(count!=KZE_WORDS || !words || memcmp(words,expected,sizeof expected) ||
++  e->record.phase!=KZE_PREPARING || !e->record.touched || e->record.prepared || e->kicks)return 95;
++ const auto &ring=kvg_engine.backing.region[0],&completion=kvg_engine.backing.region[5];
++ if(ring.iova!=KCP_RING_IOVA || ring.bytes!=4096 || !ring.cpu ||
++  completion.iova!=KCP_FENCE_IOVA || completion.bytes!=4096 || !completion.cpu)return 95;
++ for(uint32_t off=0;off<completion.allocation_bytes;off+=PAGE_SIZE){
++  const auto page=(ppnum_t)((completion.physical+off)>>PAGE_SHIFT);
++  if((pmap_cache_attributes(page)&VM_WIMG_MASK)!=VM_WIMG_WCOMB)return EACCES;
++ }
++ e->nc_verified=1;
++ auto *f=(volatile uint32_t *)(completion.cpu+KZE_OFFSET);
++ KARAcquireNC();for(unsigned i=0;i<16;i++)e->guard_before[i]=f[i];
++ for(unsigned i=0;i<16;i++)f[i]=kze_guard_word(i);
++ KCPNativeBarrier(&kcp_native);
++ for(unsigned i=0;i<16;i++)if(f[i]!=kze_guard_word(i))return EIO;
++ memcpy((void *)(ring.cpu+KZE_START*4),words,sizeof expected);
++ flush_dcache((vm_offset_t)ring.cpu,4096,0);KCPNativeBarrier(&kcp_native);
++ return kze_gate(NULL);
++}
++static int kze_publish(void *,uint32_t end)
++{
++ int error=kze_gate(NULL);if(error)return error;auto *e=kze_evidence;
++ if(end!=KZE_END || e->record.phase!=KZE_SUBMITTING || !e->record.touched ||
++  !e->record.prepared || !e->record.submitted || e->kicks || !e->nc_verified)return 95;
++ /* Sole GPU MMIO store: fixed existing RB_WPTR, after the original owner,
++  * exact9 words, owned CPU copy, cache clean and DSB. No CP reinitialization. */
++ ++e->kicks;*(volatile uint32_t *)(kcp_native.base+KCP_CP_RB_WPTR*4)=KZE_END;
++ KCPNativeBarrier(&kcp_native);return 0;
++}
++static int kze_complete(void *)
++{
++ int error=kze_gate(NULL);if(error)return error;
++ const auto *f=(volatile const uint32_t *)(kvg_engine.backing.region[5].cpu+KZE_OFFSET);
++ KARAcquireNC();for(unsigned i=0;i<16;i++)kze_evidence->guard_after[i]=f[i];
++ for(unsigned i=0;i<16;i++)if(kze_evidence->guard_after[i]!=(i?kze_guard_word(i):KZE_SEQUENCE))return EIO;
++ return 0;
++}
++static void kze_delay(void *,unsigned us){if(us==100)IODelay(100);}
++extern "C" int kebab_a650_gpu_secure_exit_locked(uint32_t *touched)
++{
++ if(!touched || *touched || !kze_evidence || __atomic_load_n(&kze_state,__ATOMIC_ACQUIRE)!=1)return 95;
++ auto *e=kze_evidence;int error=kze_gate(NULL);if(error)return error;
++ e->snapshot_before_error=KHO_VM_Snapshot(&kvg_native.owner,&e->vm_before);
++ if(!e->snapshot_before_error)e->snapshot_before_error=kza2_unfaulted(&kza2_evidence->smmu[5],&e->vm_before);
++ if(e->snapshot_before_error){e->record.result=e->snapshot_before_error;return e->record.result;}
++ const KZEOps ops={NULL,KVGNativeNow,kze_gate,kze_authority,kze_sample,kze_prepare,kze_publish,kze_complete,kze_delay};
++ error=KZERun(&ops,&e->record);*touched=e->record.touched;
++ e->snapshot_after_error=KHO_VM_Snapshot(&kvg_native.owner,&e->vm_after);
++ if(!e->snapshot_after_error)e->snapshot_after_error=kza2_unfaulted(&e->vm_before,&e->vm_after);
++ if(!error && e->snapshot_after_error){error=e->snapshot_after_error;e->record.result=error;e->record.completed=0;}
++ return error;
++}
++extern "C" int kebab_secure_exit_prepare(void)
++{
++ if(panic_active() || KFNativeWorker(NULL))return 2;uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kze_state,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return expected==2?0:16;
++ kze_evidence=(KZEEvidence *)IOMalloc(sizeof(KZEEvidence));
++ if(kze_evidence){
++  memset(kze_evidence,0,sizeof(*kze_evidence));uint32_t touched=0;
++  int error=kebab_rpmh_gpu_cp_secure_exit(&kcp_native.owner,&touched);
++  kze_evidence->record.result=error;kze_evidence->quarantined=error && touched;
++  printf("KEBAB ZAPEXIT: terminal; result=%d phase=%u kicks=%u complete=%u; no SMC, TRUST or retry\n",
++   error,kze_evidence->record.phase,kze_evidence->kicks,kze_evidence->record.completed);
++ }
++ __atomic_store_n(&kze_state,2,__ATOMIC_RELEASE);return 0;
++}
++extern "C" int kebab_secure_exit_snapshot(kebab_secure_exit_observation *out,uint32_t bytes)
++{
++ if(!out || bytes!=sizeof(*out) || (uintptr_t)out>UINTPTR_MAX-bytes)return 22;
++ if(__atomic_load_n(&kze_state,__ATOMIC_ACQUIRE)!=2)return 35;
++ if(kze_evidence && (uintptr_t)out<(uintptr_t)kze_evidence+sizeof(*kze_evidence) &&
++  (uintptr_t)kze_evidence<(uintptr_t)out+bytes)return 22;
++ memset(out,0,sizeof(*out));out->magic=KEBAB_SECURE_EXIT_MAGIC;out->schema=1;out->bytes=sizeof(*out);out->state=2;
++ if(kze_evidence){out->result=kze_evidence->record.result;memcpy(out->payload,kze_evidence,sizeof(*kze_evidence));}
++ else out->result=12;
++ return 0;
++}
++#endif

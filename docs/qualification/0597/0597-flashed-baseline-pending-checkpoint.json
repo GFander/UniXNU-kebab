@@ -1,0 +1,65 @@
+{
+  "version": "0597",
+  "recorded": "2026-11-04T16:19:46.908825+08:00",
+  "accepted": false,
+  "state": "Flashed; original300s safety pending; LOWDMA then LOWDMANC once-only observer waiting; GPU waits both",
+  "source": {
+    "git": "d5c9c62db752f225a288b88959d3754edc94138a",
+    "branch": "gpu/adreno650-20261103",
+    "common": 451,
+    "host": 4,
+    "files": 5456,
+    "patch": "0472"
+  },
+  "native_sha256": "a5b6bd4473fc849f382dccff8ae3a4e9489320c7f8929c84191bcf987f3be888",
+  "boot_sha256": "9622fdffbeac209546ffe5fd1c05590a35e2527f0a2db5c9e6e2c86c13b56ce2",
+  "capture_pid": 50684,
+  "regression_processes": {
+    "collect-awake-window.py": {
+      "pid": 12220,
+      "log": "D:\\LOS\\HiOS\\boot123-20261029\\native-dpu-0597\\collect-awake-window-output.txt",
+      "started": 1793780213.58694
+    },
+    "finalize-baseline.py": {
+      "pid": 70148,
+      "log": "D:\\LOS\\HiOS\\boot123-20261029\\native-dpu-0597\\finalize-baseline-output.txt",
+      "started": 1793780213.5995688
+    }
+  },
+  "post_processes": {
+    "post-baseline-owned-lowdma-once.py": {
+      "pid": 89220,
+      "log": "post-owned-lowdma-output.log",
+      "started": 1793780320.583721
+    },
+    "post-baseline-gpu-regression.py": {
+      "pid": 72252,
+      "log": "post-gpu-regression-output.log",
+      "started": 1793780320.5972755
+    }
+  },
+  "NC": "NOT_RUN",
+  "low_PA_data_access": false,
+  "PAS": "NOT_RUN",
+  "A650_FIRST_RENDER": "NOT_RUN0597; FAIL0591 retained",
+  "manual_GUI": "NOT_RUN0597; 0596 owner normal",
+  "evidence": {
+    "0597-flash.json": "08dc32509b3555e64362e4e07c047781ef0409c8ba55a0b90df7fd8c65c842e8",
+    "native-dpu-0597\\paired-build.json": "997ed70f62c25b6021a872b3c46c19b6b02eda36c7c21d9551767ae5ab4dccb1",
+    "native-dpu-0597\\runtime-source-binding-qualified.json": "c4d960dd403123e3b5800591e5f098218599beb1c62a2511e2636ea4626ba07a",
+    "native-dpu-0597\\native-lowdma-NC-linked-qualified.json": "59e391ec45adc7cd6691f4f6213f7d6aa14df8bda26f213c0a816969fdcb2231",
+    "native-dpu-0597\\native-protocol40-linked-qualified.json": "14f1b6834264bc722ecbce745352529de980a5b3d476eefa3c03dab4e70a1bbf",
+    "native-dpu-0597\\lowdma-adt-package-qualified.json": "25484542dd7ad2da3f1672f7952cefadebbf78e484d138632b23c27b77c6082f",
+    "native-dpu-0597\\lowdma-retime-package-qualified.json": "bdddf0da9e807d0d91344f1d6be4247cbb3e04e02bea11b7ce683b6838e69ab7",
+    "native-dpu-0597\\owned-lowdma-NC-decoder-host-qualified.json": "6ba78d7989efe13d19cc1786f09da2b0a9ef644751faae20e8ed50e661a46f57",
+    "gpu-prereq-20261103\\gpu-zap-0597\\host-nc-qualified.json": "b89db55ae340bcda0d9e6591cacad3c30edd8e6095372f89d05b253aebc2c82d",
+    "gpu-prereq-20261103\\gpu-zap-0597\\host-protocol-qualified.json": "1f5789680c406eaf1179a28ac13259057617daad8af35516b527d7caf006d8df",
+    "gpu-prereq-20261103\\gpu-zap-0597\\flash-preflight-0597-refreshed.log": "012da6f5594d81c614c260eaf108108e37ad5b4184c8e3b73f2a9cfc8e5386f8"
+  },
+  "host_failures_retained": [
+    "protocol v1 changed CRC field offset in synthetic test; v2 targeted substitutions passed",
+    "native audits v1/v2 expected direct calls; v3 checked actual outlined USB worker and inlined existing namespace branch",
+    "decoder v1 incorrectly expected valid PAR flag flips to reject; explicit PA guard and valid flag distinction tested",
+    "initial preflight rejected stale UTC; refreshed package and full gates passed"
+  ]
+}

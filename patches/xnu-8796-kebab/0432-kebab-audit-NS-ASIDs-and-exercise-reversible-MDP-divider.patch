@@ -1,0 +1,325 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -112,6 +112,9 @@
+ #include "KebabPlatformSnapshot.h"
+ #include "KebabNativeIovaProbe.h"
+ #include "KebabDsiPowerSnapshot.h"
++#include "KebabNativeMdpClockTest.h"
++#include "KebabNativeAsidSnapshot.h"
++extern "C" void kebab_display_clock_test(void) { kebab_native_mdp_clock_test(); }
+ 
+ enum {
+ 	kKebabFBGetLayerDefaultSurface  = 3,
+@@ -842,6 +845,17 @@
+ extern "C" int
+ kebab_capture_open(uint32_t source,uint32_t argument,struct kc_image *image)
+ {
++    if(source==12) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabNativeAsidSnapshot);
++        KebabNativeAsidSnapshot *data=(KebabNativeAsidSnapshot *)IOMalloc(bytes);
++        if(!data)return 12;
++        PE_Video video={};PE_current_console(&video);
++        int error=kebab_native_asid_snapshot((uint64_t)video.v_baseAddr,data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=12;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
+     if(source==11) {
+         if(argument)return 22;
+         uint32_t bytes=sizeof(KebabNativeDsiPowerSnapshot);
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>11)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>12)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -283,6 +283,8 @@
+ #define UD_REBOOT_UI_REPORT 41u
+ #define UD_REBOOT_MIG_REPORT 42u
+ #define UD_REBOOT_MIG_STATUS 43u
++#define UD_DISPLAY_CLOCK_TEST 44u
++extern void kebab_display_clock_test(void);
+ extern void kebab_migrator_report(void);
+ extern void kebab_migration_status_report(void);
+ extern void kebab_ui_report(void);
+@@ -1453,9 +1455,18 @@
+  * follow earlier typing in the same transfer, so scan the whole completion
+  * the way the PANIC! probe does.
+  */
++/* Fixed, standalone normal-worker control. No CAP source can invoke writes. */
++static uint32_t
++ud_clock_control_command(const char *buf, uint32_t received, boolean_t panicking)
++{
++    return !panicking && buf && received==9 && !memcmp(buf,"DCLKTEST\n",9) ? UD_DISPLAY_CLOCK_TEST : 0;
++}
++
+ static uint32_t
+ ud_reboot_command(const char *buf, uint32_t received)
+ {
++	uint32_t clock_control=ud_clock_control_command(buf,received,kebab_usb_kdp_enabled());
++	if(clock_control)return clock_control;
+ 	if (!kebab_usb_kdp_enabled()) {
+ 		/*
+ 		 * FASTBOOT2 and FASTBOOT share a prefix; the longer command has
+@@ -1865,6 +1876,8 @@
+ 		kebab_bluetooth_hardware_report();
+ 	} else if (command == UD_REBOOT_BTFW_REPORT) {
+ 		kebab_bluetooth_firmware_report();
++	} else if (command == UD_DISPLAY_CLOCK_TEST) {
++		kebab_display_clock_test();
+ 	} else if (command == UD_REBOOT_DRV_REPORT) {
+ 		kebab_driver_report();
+ 	} else if (command == UD_REBOOT_SPMI_REPORT) {
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabSmmuAsidAudit.h
+@@ -0,0 +1,57 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_SMMU_ASID_AUDIT_H
++#define KEBAB_SMMU_ASID_AUDIT_H
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++/* Arm IHI0062,2.6: IDR1.NUMCB as read through the Non-secure configuration
++ * interface reports only the Non-secure context-bank namespace. Secure banks
++ * hidden by SCR1.NSNUMCBO are not walked. This reader never changes allocation,
++ * tables, fault status, ASIDs or translation enables in any bank. */
++typedef struct {uint32_t id0,id1,cr0,context_banks,active_stage1,active_stage2,chosen_asid,reads,failed_offset,stable,display_cb,display_sctlr,display_cbar,display_cba2r,namespace_contract,reserved,used_asid[8],stage1_banks[4];} KebabSmmuAsidObservation;
++typedef struct {uint32_t bank[128][8];} KebabSmmuAsidWorkspace;
++typedef struct {void *cookie;size_t bytes;int (*read32)(void *,size_t,uint32_t *);} KebabSmmuAsidIo;
++static int kebab_asid_read(const KebabSmmuAsidIo *io,size_t offset,uint32_t *v,KebabSmmuAsidObservation *o)
++{
++ o->reads++;if((offset&3) || offset>io->bytes-4 || io->read32(io->cookie,offset,v)){o->failed_offset=(uint32_t)offset;return 1;}return 0;
++}
++static void kebab_asid_mark(KebabSmmuAsidObservation *o,uint32_t asid)
++{ asid&=255;o->used_asid[asid/32]|=1u<<(asid%32); }
++static int KebabSmmuAsidAudit(const KebabSmmuAsidIo *io,uint32_t display_cb,KebabSmmuAsidWorkspace *workspace,KebabSmmuAsidObservation *o)
++{
++ if(o)memset(o,0,sizeof *o);
++ if(!io || !o || !workspace || !io->read32 || io->bytes!=0x100000)return 1;
++ memset(workspace,0,sizeof *workspace);o->display_cb=display_cb;
++ if(kebab_asid_read(io,0,&o->cr0,o) || kebab_asid_read(io,0x20,&o->id0,o) || kebab_asid_read(io,0x24,&o->id1,o))return 2;
++ o->context_banks=o->id1&255;
++ if(!(o->id0&(1u<<27)) || (o->id1&0x80000000u) || !o->context_banks || o->context_banks>128 || display_cb>=o->context_banks ||
++    (1ULL<<(12+((o->id1>>28)&7)+1))!=io->bytes/2)return 3;
++ kebab_asid_mark(o,0);o->namespace_contract=1;
++ for(unsigned pass=0;pass<2;pass++)for(unsigned cb=0;cb<o->context_banks;cb++) {
++  uint32_t v[8]={0};size_t base=0x80000+((size_t)cb<<12);
++  if(kebab_asid_read(io,base,&v[0],o) || kebab_asid_read(io,0x1000+4*cb,&v[1],o) || kebab_asid_read(io,0x1800+4*cb,&v[2],o))return 2;
++  uint32_t type=(v[1]>>16)&3;int s1=(v[0]&1) && type!=0;
++  if(s1 && (kebab_asid_read(io,base+0x10,&v[3],o) || kebab_asid_read(io,base+0x24,&v[4],o) ||
++            kebab_asid_read(io,base+0x2c,&v[5],o) || kebab_asid_read(io,base+0x34,&v[6],o) || kebab_asid_read(io,base+0x30,&v[7],o)))return 2;
++  if(pass) {if(memcmp(v,workspace->bank[cb],sizeof v))return 4;continue;}
++  memcpy(workspace->bank[cb],v,sizeof v);
++  if(cb==display_cb){o->display_sctlr=v[0];o->display_cbar=v[1];o->display_cba2r=v[2];}
++  if((v[0]&1) && (type==0 || type==3))o->active_stage2++;
++  if(s1) {
++   o->active_stage1++;o->stage1_banks[cb/32]|=1u<<(cb%32);
++   /* Conservatively reserve the low8 bits of both TTBR ASID fields and
++    * CONTEXTIDR. This covers AArch64, AArch32 long/short and ASID16 contexts
++    * without assuming firmware used the Linux CB+1 allocation convention. */
++   kebab_asid_mark(o,v[4]>>16);kebab_asid_mark(o,v[5]>>16);kebab_asid_mark(o,v[6]);
++  }
++ }
++ uint32_t check;
++ if(kebab_asid_read(io,0,&check,o))return 2;if(check!=o->cr0)return 4;
++ if(kebab_asid_read(io,0x24,&check,o))return 2;if(check!=o->id1)return 4;
++ uint32_t preferred=display_cb+1;
++ if(!(o->used_asid[preferred/32]&(1u<<(preferred%32))))o->chosen_asid=preferred;
++ else for(unsigned i=1;i<256;i++)if(!(o->used_asid[i/32]&(1u<<(i%32)))){o->chosen_asid=i;break;}
++ if(!o->chosen_asid)return 5;
++ o->stable=1;return 0;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabMdpClockCore.h
+@@ -0,0 +1,60 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_MDP_CLOCK_CORE_H
++#define KEBAB_MDP_CLOCK_CORE_H
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++typedef struct {void *cookie;int(*read32)(void*,unsigned,size_t,uint32_t*);int(*write_cc)(void*,size_t,uint32_t);void(*delay_us)(void*,unsigned);} KebabMdpClockIo;
++typedef struct {uint32_t error,phase,restored,original_cfg,lower_cfg,final_cfg,original_cmd,final_cmd,frame_begin,frame_lower_begin,frame_lower_end,frame_restored,write_attempts,update_polls;} KebabMdpClockTest;
++/* One fixed inherited profile only. Same PLL parent, divider2->3->2, voltage
++ * and all other roots unchanged. Nominal300/200MHz derives from the pinned
++ * vendor plan, not an independent oscillator measurement. */
++static int kebab_mdp_clock_write(const KebabMdpClockIo *io,KebabMdpClockTest *o,size_t off,uint32_t value)
++{o->write_attempts++;return io->write_cc(io->cookie,off,value);}
++static int kebab_mdp_clock_update(const KebabMdpClockIo *io,KebabMdpClockTest *o)
++{
++ if(kebab_mdp_clock_write(io,o,0x20c8,3))return 1;
++ for(unsigned n=0;n<2000;n++){
++  uint32_t cmd;o->update_polls++;if(io->read32(io->cookie,1,0x20c8,&cmd))return 1;
++  if(!(cmd&1))return 0;io->delay_us(io->cookie,10);
++ }
++ return 1;
++}
++static int KebabMdpClockExercise(const KebabMdpClockIo *io,KebabMdpClockTest *o)
++{
++ if(o)memset(o,0,sizeof *o);
++ if(!io || !o || !io->read32 || !io->write_cc || !io->delay_us)return 22;
++ o->phase=1;uint32_t gcc,gdsc,ahb,core,version,mdp;
++ if(io->read32(io->cookie,0,0xb00c,&gcc) || io->read32(io->cookie,1,0x3000,&gdsc) ||
++    io->read32(io->cookie,1,0x2080,&ahb) || io->read32(io->cookie,1,0x200c,&core))return o->error=5;
++ if(!(gcc&1) || (gcc&0x80000000u) || !(gdsc&0x80000000u) || (gdsc&1) || (ahb&0x80000000u) || (core&0x80000000u))return o->error=6;
++ if(io->read32(io->cookie,2,0,&version) || io->read32(io->cookie,2,0x1000,&mdp) ||
++    io->read32(io->cookie,1,0x20cc,&o->original_cfg) || io->read32(io->cookie,1,0x20c8,&o->original_cmd))return o->error=5;
++ if(version!=0x60000000u || mdp!=version || o->original_cfg!=0x100403 || (o->original_cmd&~0x80000000u))return o->error=95;
++ if(io->read32(io->cookie,2,0x6b8ac,&o->frame_begin))return o->error=5;
++ o->phase=2;o->lower_cfg=(o->original_cfg&~31u)|5;
++ if(kebab_mdp_clock_write(io,o,0x20c8,2) || kebab_mdp_clock_write(io,o,0x20cc,o->lower_cfg) || kebab_mdp_clock_update(io,o)){o->error=5;goto restore;}
++ {
++  uint32_t cfg;if(io->read32(io->cookie,1,0x20cc,&cfg) || cfg!=o->lower_cfg ||
++    io->read32(io->cookie,2,0x6b8ac,&o->frame_lower_begin)){o->error=5;goto restore;}
++ }
++ o->phase=3;io->delay_us(io->cookie,120000);
++ if(io->read32(io->cookie,2,0x6b8ac,&o->frame_lower_end) ||
++    (uint32_t)(o->frame_lower_end-o->frame_lower_begin)<3 || (uint32_t)(o->frame_lower_end-o->frame_lower_begin)>16)o->error=5;
++restore:
++ o->phase=4;
++ /* Always attempt restoration after the first write, including denied/stuck
++  * writes. No broad reset, clock disable or voltage operation is available. */
++ int control_error=kebab_mdp_clock_write(io,o,0x20cc,o->original_cfg);
++ control_error|=kebab_mdp_clock_update(io,o);
++ io->delay_us(io->cookie,20000);
++ int frame_error=io->read32(io->cookie,2,0x6b8ac,&o->frame_restored);
++ control_error|=kebab_mdp_clock_write(io,o,0x20c8,0);
++ control_error|=io->read32(io->cookie,1,0x20cc,&o->final_cfg);
++ control_error|=io->read32(io->cookie,1,0x20c8,&o->final_cmd);
++ if(control_error || frame_error)o->error=5;
++ o->restored=(!control_error && o->final_cfg==o->original_cfg && !(o->final_cmd&3));
++ if(!o->restored || (uint32_t)(o->frame_restored-o->frame_lower_end)<1)o->error=5;
++ o->phase=5;return(int)o->error;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeMdpClockTest.h
+@@ -0,0 +1,87 @@
++/* SPDX-License-Identifier: MIT */
++#include "KebabMdpClockCore.h"
++static volatile uint32_t kebab_clock_test_started,kebab_clock_test_finished;
++static KebabMdpClockTest kebab_clock_test_core;
++static uint32_t kebab_clock_test_error,kebab_clock_test_soft_delta;
++static uint64_t kebab_clock_test_irq_before,kebab_clock_test_irq_released,kebab_clock_test_irq_after;
++static bool kebab_clock_test_map(KebabNativeDisplayMaps *m,unsigned i,uint64_t base,uint64_t size)
++{
++ m->memory[i]=IOMemoryDescriptor::withPhysicalAddress(base,size,i==1?kIODirectionInOut:kIODirectionIn);
++ if(!m->memory[i])return false;
++ m->map[i]=m->memory[i]->map(kIOMapAnywhere|kIOMapInhibitCache|(i==1?0:kIOMapReadOnly));
++ if(!m->map[i])return false;m->address[i]=m->map[i]->getVirtualAddress();
++ return m->address[i] && m->map[i]->getLength()>=size;
++}
++static int kebab_clock_test_read(void *cookie,unsigned region,size_t offset,uint32_t *out)
++{
++ KebabNativeDisplayMaps *m=(KebabNativeDisplayMaps *)cookie;static const size_t size[]={0x10000,0x4000,0x70000};
++ if(region>=3 || !out || (offset&3) || offset>size[region]-4 || !m->address[region])return 5;
++ if(region) {uint32_t gcc=kebab_display_load(m->address[0],0xb00c);if(!(gcc&1) || (gcc&0x80000000u))return 5;}
++ if(region==2) {
++  uint32_t gdsc=kebab_display_load(m->address[1],0x3000);
++  if(!(gdsc&0x80000000u) || (gdsc&1) || (kebab_display_load(m->address[1],0x2080)&0x80000000u) ||
++     (kebab_display_load(m->address[1],0x200c)&0x80000000u))return 5;
++ }
++ *out=kebab_display_load(m->address[region],offset);return 0;
++}
++static int kebab_clock_test_write(void *cookie,size_t offset,uint32_t value)
++{
++ KebabNativeDisplayMaps *m=(KebabNativeDisplayMaps *)cookie;
++ if((offset!=0x20c8 && offset!=0x20cc) || !m->address[0] || !m->address[1])return 22;
++ uint32_t gcc=kebab_display_load(m->address[0],0xb00c);if(!(gcc&1) || (gcc&0x80000000u))return 5;
++ *(volatile uint32_t *)(m->address[1]+offset)=value;
++#if defined(__aarch64__)
++ __asm__ volatile("dsb sy" ::: "memory");
++#else
++ OSMemoryBarrier();
++#endif
++ return 0;
++}
++static void kebab_clock_test_delay(void *cookie,unsigned us)
++{ (void)cookie;if(us>=1000)IOSleep((us+999)/1000);else IODelay(us); }
++static bool kebab_clock_test_irq(uint64_t *events)
++{
++ for(unsigned i=0;i<3;i++){
++  uint32_t irq[16];kebab_display_irq_snapshot(irq);
++  if(irq[0]==2){IODelay(10);continue;}
++  *events=(uint64_t)irq[4]|((uint64_t)irq[5]<<32);return irq[0]==1 && !irq[1] && *events;
++ }
++ return false;
++}
++static void kebab_native_mdp_clock_test(void)
++{
++ if(!__sync_bool_compare_and_swap(&kebab_clock_test_started,0,1)) {
++  IOLog("KEBAB DCLKTEST: rejected error=16 already-attempted; no writes\n");IOLog("KEBAB DCLKTEST: end;\n");return;
++ }
++ KebabNativeDisplayMaps m={};uint32_t before[8]={},after[8]={};uint64_t soft_before=0,soft_after=0;
++ kebab_fb_vblank_snapshot(before);soft_before=(uint64_t)before[3]|((uint64_t)before[4]<<32);
++ kebab_clock_test_error=95;
++ if(panic_active() || before[0]!=1 || !kebab_clock_test_irq(&kebab_clock_test_irq_before))goto done;
++ kebab_clock_test_error=12;
++ if(!kebab_clock_test_map(&m,0,0x100000,0x10000) || !kebab_clock_test_map(&m,1,0xaf00000,0x4000) || !kebab_clock_test_map(&m,2,0xae00000,0x70000))goto done;
++ {
++  KebabMdpClockIo io={&m,kebab_clock_test_read,kebab_clock_test_write,kebab_clock_test_delay};
++  kebab_clock_test_error=(uint32_t)KebabMdpClockExercise(&io,&kebab_clock_test_core);
++ }
++ if(!kebab_clock_test_irq(&kebab_clock_test_irq_released))kebab_clock_test_error=5;
++ IOSleep(30);
++ if(!kebab_clock_test_irq(&kebab_clock_test_irq_after) || kebab_clock_test_irq_after<=kebab_clock_test_irq_released)kebab_clock_test_error=5;
++ kebab_fb_vblank_snapshot(after);soft_after=(uint64_t)after[3]|((uint64_t)after[4]<<32);
++ kebab_clock_test_soft_delta=(uint32_t)(soft_after-soft_before);
++ if(after[0]!=1 || soft_after!=soft_before)kebab_clock_test_error=5;
++done:
++ for(unsigned n=3;n;n--){unsigned i=n-1;if(m.map[i])m.map[i]->release();if(m.memory[i])m.memory[i]->release();}
++ __atomic_store_n(&kebab_clock_test_finished,1,__ATOMIC_RELEASE);
++ IOLog("KEBAB DCLKTEST: result error=%u restored=%u cfg=%x/%x/%x cmd=%x/%x frames=%u/%u/%u/%u writes=%u irq=%llu/%llu/%llu software-delta=%u; nominal divider change, no PLL/voltage writes\n",kebab_clock_test_error,kebab_clock_test_core.restored,kebab_clock_test_core.original_cfg,kebab_clock_test_core.lower_cfg,kebab_clock_test_core.final_cfg,kebab_clock_test_core.original_cmd,kebab_clock_test_core.final_cmd,kebab_clock_test_core.frame_begin,kebab_clock_test_core.frame_lower_begin,kebab_clock_test_core.frame_lower_end,kebab_clock_test_core.frame_restored,kebab_clock_test_core.write_attempts,kebab_clock_test_irq_before,kebab_clock_test_irq_released,kebab_clock_test_irq_after,kebab_clock_test_soft_delta);
++ IOLog("KEBAB DCLKTEST: end;\n");
++}
++static void kebab_native_mdp_clock_receipt(uint32_t out[24])
++{
++ memset(out,0,24*sizeof *out);out[0]=__atomic_load_n(&kebab_clock_test_started,__ATOMIC_ACQUIRE);out[1]=__atomic_load_n(&kebab_clock_test_finished,__ATOMIC_ACQUIRE);
++ if(!out[1])return;
++ static_assert(sizeof(KebabMdpClockTest)==56,"clock-core receipt fields");
++ out[2]=kebab_clock_test_error;out[3]=kebab_clock_test_soft_delta;memcpy(out+4,&kebab_clock_test_core,sizeof kebab_clock_test_core);
++ out[18]=(uint32_t)kebab_clock_test_irq_before;out[19]=(uint32_t)(kebab_clock_test_irq_before>>32);
++ out[20]=(uint32_t)kebab_clock_test_irq_released;out[21]=(uint32_t)(kebab_clock_test_irq_released>>32);
++ out[22]=(uint32_t)kebab_clock_test_irq_after;out[23]=(uint32_t)(kebab_clock_test_irq_after>>32);
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeAsidSnapshot.h
+@@ -0,0 +1,29 @@
++/* SPDX-License-Identifier: MIT */
++#include "KebabSmmuAsidAudit.h"
++struct KebabNativeAsidSnapshot {
++ uint32_t magic,schema,bytes,flags,asid_result,reserved[3];
++ KebabSmmuAsidObservation observation;uint32_t clock_test[24];
++};
++static_assert(sizeof(KebabNativeAsidSnapshot)==240,"fixed NS-ASID/clock-test readonly receipt");
++static int kebab_native_asid_snapshot(uint64_t framebuffer,KebabNativeAsidSnapshot *out)
++{
++ if(!out)return 22;
++ memset(out,0,sizeof *out);out->magic=0x3141534e;out->schema=1;out->bytes=sizeof *out;out->asid_result=2;
++ KebabNativeDisplaySnapshot hardware={};KebabNativeDisplayMaps m={};
++ KebabSmmuAsidWorkspace *workspace=NULL;
++ if(kebab_native_display_snapshot(framebuffer,&hardware) || hardware.smmu_result)goto done;
++ for(unsigned i=0;i<4;i++)if(hardware.smmu.stream[i].matches!=1 || !hardware.smmu.stream[i].context_read ||
++    hardware.smmu.stream[i].shared_or_broad || (hardware.smmu.stream[i].s2cr&255)!=(hardware.smmu.stream[0].s2cr&255)){out->asid_result=95;goto done;}
++ workspace=(KebabSmmuAsidWorkspace *)IOMalloc(sizeof *workspace);if(!workspace){out->asid_result=12;goto done;}
++ if(!kebab_display_map(&m,0,0x100000,0x10000) || !kebab_display_map(&m,1,0xaf00000,0x4000) || !kebab_display_map(&m,3,0x15000000,0x100000))goto done;
++ {
++  KebabSmmuAsidIo io={&m,0x100000,kebab_smmu_native_read};
++  out->asid_result=KebabSmmuAsidAudit(&io,hardware.smmu.stream[0].s2cr&255,workspace,&out->observation);
++  if(!out->asid_result)out->flags|=1;
++ }
++done:
++ for(unsigned n=4;n;n--){unsigned i=n-1;if(m.map[i])m.map[i]->release();if(m.memory[i])m.memory[i]->release();}
++ if(workspace){memset(workspace,0,sizeof *workspace);IOFree(workspace,sizeof *workspace);}
++ kebab_native_mdp_clock_receipt(out->clock_test);if(out->clock_test[1])out->flags|=2;
++ return 0;
++}

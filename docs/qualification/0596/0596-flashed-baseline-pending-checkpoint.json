@@ -1,0 +1,59 @@
+{
+  "version": "0596",
+  "recorded": "2026-11-04T15:39:51.846086+08:00",
+  "state": "Flashed, original safety pending; lowDMA once-only and GPU regression waiting on gates",
+  "accepted": false,
+  "source": {
+    "git": "d5c9c62db752f225a288b88959d3754edc94138a",
+    "branch": "gpu/adreno650-20261103",
+    "common": 450,
+    "host": 4,
+    "files": 5456,
+    "patch": "0471"
+  },
+  "native_sha256": "4280e9bf4f649dd63b8ef15ce5ebc5a9ea0739ec7c91d5948c38e08ad554f4b3",
+  "boot_sha256": "ab3ef6f00c71a0220e308efe6f7d64868c47668ae5467f112e91830c5fe8a03c",
+  "capture_pid": 51984,
+  "regression_processes": {
+    "collect-awake-window.py": {
+      "pid": 61012,
+      "log": "D:\\LOS\\HiOS\\boot123-20261029\\native-dpu-0596\\collect-awake-window-output.txt",
+      "started": 1793777920.494334
+    },
+    "finalize-baseline.py": {
+      "pid": 71204,
+      "log": "D:\\LOS\\HiOS\\boot123-20261029\\native-dpu-0596\\finalize-baseline-output.txt",
+      "started": 1793777920.5027175
+    }
+  },
+  "post_processes": {
+    "post-baseline-lowdma-once.py": {
+      "pid": 87252,
+      "log": "post-lowdma-output.log",
+      "started": 1793777938.4294603
+    },
+    "post-baseline-gpu-regression.py": {
+      "pid": 91072,
+      "log": "post-gpu-regression-output.log",
+      "started": 1793777938.437557
+    }
+  },
+  "manual_GUI": "NOT_RUN0596; owner595 normal",
+  "NC": "NOT_RUN",
+  "PAS": "NOT_RUN",
+  "A650_FIRST_RENDER": "NOT_RUN0596; FAIL0591 retained",
+  "evidence": {
+    "0596-flash.json": "4fbe59095dea2f052b39e9a4a75296aebbc598ba7add34090ca98b6460745496",
+    "native-dpu-0596\\paired-build.json": "60ea6469a44a96cd11842c88404602ef4811858672cf9b5e09811949b0fe578c",
+    "native-dpu-0596\\runtime-source-binding-qualified.json": "2b4606a35da40de36b154a79bca021d40b125f0e0fcf7a083a856901d35ef441",
+    "native-dpu-0596\\lowdma-adt-package-qualified.json": "0fb94ed1f165c856898dead7c9b635300c046e83f4a24e7130fd48907dab338f",
+    "native-dpu-0596\\lowdma-retime-package-qualified.json": "403171b5ddd1f895a2d2a5bfdb4739c751f4c034e6dc90788f9d0acded273f4a",
+    "gpu-prereq-20261103\\gpu-zap-0596\\host-core-tests.json": "c95f029a38b1bf2da0c64c0038d3b4fab02abb03e3a5bd515ca5315847a61494",
+    "gpu-prereq-20261103\\gpu-zap-0596\\runtime-ADT-package-host-qualified.json": "6812d871516fc106802d7e25a38936e054fa971667a35d3cddc3319146e17c77",
+    "gpu-prereq-20261103\\gpu-zap-0596\\flash-preflight-0596-refreshed.log": "4110eae52fd2318da6f50b3bc13bc8b15356ba8d1ae559946430cc40897d9f30"
+  },
+  "host_failures_retained": [
+    "v1 malformed negative fixtures let nonzero-seed mutant survive",
+    "first prelink omitted --hid-roots and rejected before pack; unqualified outputs retained"
+  ]
+}

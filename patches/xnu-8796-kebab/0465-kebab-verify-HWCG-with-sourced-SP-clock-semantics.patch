@@ -1,0 +1,64 @@
+--- a/osfmk/kern/KebabA650CpBinding.h
++++ b/osfmk/kern/KebabA650CpBinding.h
+@@ -1,9 +1,9 @@
+-/* Finite0589 clock-order CP candidate; new native/runtime/boot_b guards required. */
++/* Finite0590 sourced HWCG acceptance and actual CP candidate. */
+ /* SPDX-License-Identifier: MIT */
+ #ifndef KEBAB_A650_CP_BINDING_H
+ #define KEBAB_A650_CP_BINDING_H
+ /* CLOSED: no native CPU-buffer mutation or MMIO until exact finite review,
+  * actual owner/callback tests, SDK/build, measured SQE and runtime gates. */
+ enum {KebabA650CpNativeQualified=1};
+-static const unsigned char KebabA650CpSourceContract[32]={0x94,0xb5,0x9f,0xe4,0x5f,0x7f,0x26,0x36,0x96,0x63,0x4a,0xd8,0x99,0xbc,0xe9,0x85,0xb3,0x7c,0x8f,0xf2,0x6b,0x9c,0xf1,0xcf,0xb7,0x58,0xf5,0xaf,0xf2,0x58,0xc8,0x1d};
++static const unsigned char KebabA650CpSourceContract[32]={0x2b,0xae,0x20,0x2e,0x07,0x97,0x11,0x2e,0x42,0x41,0x94,0x13,0x90,0x67,0xa7,0x39,0x68,0x17,0x75,0x31,0x1b,0x44,0x81,0x34,0x92,0x27,0x56,0x49,0x49,0xde,0x6f,0x16};
+ #endif
+--- a/osfmk/kern/KebabA650CpCore.h
++++ b/osfmk/kern/KebabA650CpCore.h
+@@ -18,7 +18,7 @@
+  uint32_t reads,writes,barriers,polls,failed_region,failed_offset,quarantined,held;
+  uint32_t firmware_bytes,payload_bytes,firmware_version,firmware_verified,split_copy_verified,commands_cleaned,NC_verified,namespace_unchanged;
+  uint32_t SQE_start_requested,CP_ME_INIT_completed,IB_marker_observed,GPU_DMA_observed,init_fence,final_fence,init_rptr,final_rptr;
+- uint32_t initial_marker,final_marker,initial_sqe,irq_mask_before,irq_mask_after,SPT_control_before,SPT_control_after,reserved;
++ uint32_t initial_marker,final_marker,initial_sqe,irq_mask_before,irq_mask_after,SPT_control_before,SPT_control_after,clock_control_after;
+  uint32_t raw_before[22],raw_after[22];
+  uint32_t ring_init[16],ib[4],ring_second[11],padding;
+  uint64_t epoch,elapsed_us;
+@@ -45,7 +45,7 @@
+  uint64_t begin,wait_begin;uint32_t waiting;
+ } KebabA650CpContext;
+ static inline void KebabA650CpInit(KebabA650CpRecord*r)
+-{memset(r,0,sizeof *r);r->magic=0x3150434bu;r->schema=1;r->bytes=sizeof *r;}
++{memset(r,0,sizeof *r);r->magic=0x3150434bu;r->schema=2;r->bytes=sizeof *r;}
+ static inline uint32_t KCPOdd(uint32_t x)
+ {uint32_t bit=1;while(x){bit^=1;x&=x-1;}return bit;}
+ static inline uint32_t KCPType4(uint32_t reg,uint32_t count)
+@@ -164,11 +164,15 @@
+  KCP_TRY(KCPWrite(c,1,0x200,r->SPT_control_before&~1u));
+  KCP_TRY(KCPProgram(c,KCPHwcg,sizeof KCPHwcg/sizeof KCPHwcg[0]));
+  KCP_TRY(KCPWrite(c,1,0x200,r->SPT_control_before|1u));
+- /* Linux/alioth enable top-level HWCG before observing SP control. Keep
+-  * the exact strict readback, power/fault gates and all148 original stores. */
++ /* Linux/vendor RMW bit0 without a sticky-one ACK. Fixed alioth f188
++  * reports successful A650 CP with SP0->0 and CLOCK_CNTL0->8aa8aa82.
++  * Keep raw SP diagnostics/other bits, require actual top-level readback,
++  * fresh GX/power/fault gates and real fences/IB below. All148 stores stay. */
+  KCP_TRY(KCPGpuWrite(c,KCP_RBBM_CLOCK_CNTL,0x8aa8aa82));
++ KCP_TRY(KCPGpuRead(c,KCP_RBBM_CLOCK_CNTL,&r->clock_control_after));
+  KCP_TRY(KCPRead(c,1,0x200,&r->SPT_control_after));
+- if(r->SPT_control_after!=(r->SPT_control_before|1u)){e=5;goto failed;}
++ if(r->clock_control_after!=0x8aa8aa82u){r->failed_offset=KCP_RBBM_CLOCK_CNTL*4;e=5;goto failed;}
++ if((r->SPT_control_after^r->SPT_control_before)&~1u){r->failed_region=1;r->failed_offset=0x200;e=5;goto failed;}
+  KCP_TRY(KCPRead(c,1,0x14340,&v));if(v&0xc0u){e=11;goto failed;}
+  KCP_TRY(KCPProgram(c,KCPHwPostClock,sizeof KCPHwPostClock/sizeof KCPHwPostClock[0]));
+  KCP_TRY(KCPGpuWrite(c,KCP_CP_SQE_INSTR_BASE,KCP_SQE_IOVA));KCP_TRY(KCPGpuWrite(c,KCP_CP_SQE_INSTR_BASE+1,0));
+--- a/iokit/Kernel/arm/KebabNativeA650Cp.h
++++ b/iokit/Kernel/arm/KebabNativeA650Cp.h
+@@ -52,7 +52,7 @@
+  uintptr_t base=0;
+  if(space==1 && (off==0x200 || off==0x14340 || off==0x24c48))base=kho_native.base;
+  if(!space && !(off&3u)){
+-  static const uint32_t words[]={KCP_RBBM_STATUS,KCP_RBBM_STATUS3,KCP_RBBM_INT_0_STATUS,KCP_RBBM_INT_0_MASK,
++  static const uint32_t words[]={KCP_RBBM_STATUS,KCP_RBBM_STATUS3,KCP_RBBM_INT_0_STATUS,KCP_RBBM_INT_0_MASK,KCP_RBBM_CLOCK_CNTL,
+    KCP_CP_SQE_CNTL,KCP_CP_RB_RPTR,KCP_CP_RB_WPTR,KCP_CP_HW_FAULT,KCP_CP_INTERRUPT_STATUS,KCP_CP_PROTECT_STATUS,
+    KCP_CP_SQE_INSTR_BASE,KCP_CP_SQE_INSTR_BASE+1,KCP_CP_APRIV_CNTL,KCP_CP_RB_CNTL,KCP_CP_RB_BASE,KCP_CP_RB_BASE+1,
+    KCP_CP_RB_RPTR_ADDR,KCP_CP_RB_RPTR_ADDR+1,KCP_GBIF_HALT,KCP_RBBM_GBIF_HALT,KCP_RBBM_SECVID_TSB_CNTL,

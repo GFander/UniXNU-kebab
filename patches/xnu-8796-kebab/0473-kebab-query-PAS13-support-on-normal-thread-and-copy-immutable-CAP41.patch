@@ -1,0 +1,123 @@
+--- a/osfmk/kern/kebab_low_dma.h
++++ b/osfmk/kern/kebab_low_dma.h
+@@ -54,6 +54,17 @@
+ };
+ int kebab_low_dma_nc_prepare(void);
+ int kebab_low_dma_nc_snapshot(struct kebab_low_dma_nc_observation *,uint32_t);
++/* Separate fixed PAS13 support query, not an authentication receipt. */
++#define KEBAB_PAS13_SUPPORTED_MAGIC 0x315055533331504bULL
++struct kebab_pas13_supported_observation {
++ uint64_t magic;
++ uint32_t schema,bytes,state,guard;
++ uint64_t status,value,type,data,cookie;
++ uint32_t attempts,raw_guard;
++ uint64_t reserved[2];
++};
++int kebab_scm_pas13_supported_enqueue(void);
++int kebab_scm_pas13_supported_copy(struct kebab_pas13_supported_observation *,uint32_t);
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/bsd/kern/kebab_scm_pas_worker.c
++++ b/bsd/kern/kebab_scm_pas_worker.c
+@@ -1,14 +1,21 @@
+ /* SPDX-License-Identifier: MIT */
+-/* Future API only: not called from this candidate's boot, USB or CAP paths. */
+-#if defined(KEBAB)
++/* One fixed normal-thread PAS13 support query. No INIT/MEM/AUTH path. */
++#if defined(KEBAB) || defined(KPAS_HOST_SHIM)
++#if defined(KPAS_HOST_SHIM)
++#include "pas_supported_host_shim.h"
++#else
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <sys/errno.h>
+ #include <kern/thread_call.h>
+ #include <kern/debug.h>
+ #include <arm/machine_routines.h>
++extern int get_preemption_level(void);
++#endif
+ #include "KebabScmPasWorker.h"
+-extern int get_preemption_level(void);
++#include <kern/kebab_low_dma.h>
++typedef char kebab_pas13_public_record_is_88[(sizeof(struct kebab_pas13_supported_observation)==88)?1:-1];
++
+ static uint32_t kebab_pas_supported_state;
+ static thread_call_t kebab_pas_supported_work;
+ static KebabScmPasSupportedReceipt kebab_pas_supported_receipt;
+@@ -50,4 +57,18 @@
+  if(state!=2){bzero(out,sizeof(*out));out->state=state;return EAGAIN;}
+  memcpy(out,&kebab_pas_supported_receipt,sizeof(*out));return 0;
+ }
++int
++kebab_scm_pas13_supported_copy(struct kebab_pas13_supported_observation *out,uint32_t bytes)
++{
++ if(!out || bytes!=sizeof(*out))return EINVAL;
++ KebabScmPasSupportedReceipt cached={};
++ int error=kebab_scm_pas13_supported_snapshot(&cached);
++ if(error)return error;
++ bzero(out,sizeof(*out));out->magic=KEBAB_PAS13_SUPPORTED_MAGIC;out->schema=1;out->bytes=sizeof(*out);
++ out->state=cached.state;out->guard=cached.guard;
++ out->status=cached.raw.status;out->value=cached.raw.value;out->type=cached.raw.type;
++ out->data=cached.raw.data;out->cookie=cached.raw.cookie;
++ out->attempts=cached.raw.attempts;out->raw_guard=cached.raw.guard;
++ return 0;
++}
+ #endif
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -321,6 +321,7 @@
+ /* END A650_GPURENDER_COMMAND */
+ #define UD_LOW_DMA 64u
+ #define UD_LOW_DMA_NC 65u
++#define UD_PAS13_SUPPORTED 66u
+ #include <kern/kebab_low_dma.h>
+ static void
+ kebab_low_dma_measure_prepare(void)
+@@ -1556,6 +1557,7 @@
+ /* END A650_GPURENDER_DECODE */
+     if(received==7 && !memcmp(buf,"LOWDMA\n",7))return UD_LOW_DMA;
+     if(received==9 && !memcmp(buf,"LOWDMANC\n",9))return UD_LOW_DMA_NC;
++    if(received==9 && !memcmp(buf,"PAS13SUP\n",9))return UD_PAS13_SUPPORTED;
+ /* END FUTURE_GMU_COMMAND_DECODE */
+     if(received==8 && !memcmp(buf,"GPUSMMU\n",8))return UD_GPU_SMMU_OBSERVE;
+     if(received!=9)return 0;
+@@ -2019,6 +2021,9 @@
+ 	} else if (command == UD_GPU_RENDER) {
+ 		kebab_a650_gpu_render_hold_prepare();
+ /* END A650_GPURENDER_DISPATCH */
++	} else if (command == UD_PAS13_SUPPORTED) {
++		int queued=kebab_scm_pas13_supported_enqueue();
++		printf("KEBAB PAS13SUP: end; queued=%d; support query only\n",queued);
+ 	} else if (command == UD_LOW_DMA_NC) {
+ 		kebab_low_dma_nc_worker();
+ 	} else if (command == UD_LOW_DMA) {
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>40)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>41)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -970,6 +970,15 @@
+         image->total=bytes;image->stable=1;image->flags=2;return 0;
+     }
+ /* END A650_GPUCP37_PROVIDER */
++    if(source==41) {
++        if(argument)return 22;
++        auto *data=(kebab_pas13_supported_observation *)IOMalloc(sizeof(kebab_pas13_supported_observation));
++        if(!data)return 12;
++        int error=kebab_scm_pas13_supported_copy(data,sizeof(*data));
++        if(error){IOFree(data,sizeof(*data));return error;}
++        *image=kc_image{};image->handle=data;image->source=41;image->argument=0;
++        image->total=sizeof(*data);image->stable=1;image->flags=2;return 0;
++    }
+     if(source==40) {
+         if(argument)return 22;
+         auto *data=(kebab_low_dma_nc_observation *)IOMalloc(sizeof(kebab_low_dma_nc_observation));

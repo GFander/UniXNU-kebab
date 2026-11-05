@@ -1,0 +1,37 @@
+--- a/osfmk/kern/KebabA650RenderBinding.h
++++ b/osfmk/kern/KebabA650RenderBinding.h
+@@ -4,7 +4,7 @@
+ #include <stdint.h>
+ 
+ enum {KebabA650RenderNativeQualified = 1};
+-static const uint8_t KebabA650RenderSourceContract[32] = {0xba, 0x56, 0xa0, 0xbb, 0x90, 0x30, 0x95, 0xd6, 0x8c, 0x2c, 0xb8, 0x0c, 0x7c, 0xfa, 0xac, 0xdc, 0xff, 0xb4, 0x6b, 0x68, 0x58, 0x04, 0xd7, 0xb8, 0x5b, 0x1a, 0xdc, 0x99, 0xc7, 0xd3, 0x84, 0x6e};
++static const uint8_t KebabA650RenderSourceContract[32] = {0xd8, 0xb0, 0xdb, 0xc9, 0xcb, 0x98, 0xef, 0x09, 0x8a, 0xb9, 0x5d, 0x95, 0xdb, 0x9b, 0x98, 0x1a, 0x6c, 0x33, 0x19, 0x10, 0x97, 0xbe, 0xe7, 0xd4, 0x2a, 0xf6, 0x82, 0x11, 0x02, 0xd6, 0x7a, 0x47};
+ 
+ static inline int
+ KARSourceBound(void)
+--- a/osfmk/kern/KebabA650RenderCore.h
++++ b/osfmk/kern/KebabA650RenderCore.h
+@@ -15,8 +15,8 @@
+     KAR_TARGET_SPACING = 0x4000,
+     KAR_SENTINEL = 0xa5,
+     KAR_PASSES = 2,
+-    KAR_WORDS = 135,
+-    KAR_SCHEMA = 3,
++    KAR_WORDS = 139,
++    KAR_SCHEMA = 4,
+     KAR_CONTROL_OFFSET = 0x80,
+     KAR_CONTROL_VALUE = 0xa650c001u,
+     KAR_EVENT_OFFSET = 128,
+@@ -76,6 +76,12 @@
+     *p++ = KCPType7(0x26, 0);
+     *p++ = KCPType4(0x8e04, 1);
+     *p++ = 0x04100000u;
++    /* Fixed Mesa A6XX static context restore: explicit RB/GRAS modes,
++     * both command-level state, not inherited reset values. No power vote. */
++    *p++ = KCPType4(0x8811, 1);
++    *p++ = 0x10;
++    *p++ = KCPType4(0x8110, 1);
++    *p++ = 2;
+     p = KARFlushEvent(p, 0x1d, KAREventOffset(pass, 0)); /* Color clean */
+     p = KARFlushEvent(p, 0x1c, KAREventOffset(pass, 1)); /* Depth clean */
+     *p++ = KCPType7(0x46, 1);

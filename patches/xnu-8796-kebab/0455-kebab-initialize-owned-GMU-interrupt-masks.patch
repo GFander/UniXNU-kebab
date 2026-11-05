@@ -1,0 +1,130 @@
+--- a/pexpert/arm/KebabGmuIrqNative.inc
++++ b/pexpert/arm/KebabGmuIrqNative.inc
+@@ -44,7 +44,7 @@
+    off==0x6a80 || off==0x6a84 || off==0x6a88 || off==0x6a8c){if(!gicd_base)return 95;*p=gicd_base+off;return 0;}
+  }else if(region==1){
+   if(kebab_gmu_irq_power(NULL))return 95;
+-  if(off==0x14644 || off==0x14648 || off==0x1464c){if(!kebab_gmu_irq_hfi)return 95;*p=kebab_gmu_irq_hfi+off-0x12000;return 0;}
++  if(off==0x14000 || off==0x14644 || off==0x14648 || off==0x1464c){if(!kebab_gmu_irq_hfi)return 95;*p=kebab_gmu_irq_hfi+off-0x12000;return 0;}
+   if(off==0x24c10 || off==0x24c14 || off==0x24c18){if(!kebab_gmu_irq_ao)return 95;*p=kebab_gmu_irq_ao+off-0x24000;return 0;}
+  }
+  return 22;
+@@ -58,7 +58,20 @@
+  else if(off==0x14644){if(!value || (value&~KGI_HFI_OWNED))return 22;}
+  else if(off==0x24c10){if(!value || (value&~KGI_AO_OWNED))return 22;}
+  else if(off==0x1464c || off==0x24c18){uint32_t mask=off==0x1464c?KGI_HFI_OWNED:KGI_AO_OWNED;
+-  uint32_t fresh=kebab_gmu_irq_raw(p);if((fresh^value)&~mask)return 13;}
++  uint32_t fresh;
++  if(__atomic_load_n(&kebab_gmu_irq_state.initial_mask_step,__ATOMIC_ACQUIRE)){
++   /* This extra permission exists only during the one normal-worker
++    * PREPARING initial set-mask. ISR/later writers cannot claim it. */
++   if(__atomic_load_n(&kebab_gmu_irq_state.phase,__ATOMIC_ACQUIRE)!=KGI_PREPARING || kebab_gmu_irq_worker() ||
++    !kebab_gmu_irq_hfi || !kebab_gmu_irq_ao || kebab_gmu_irq_private())return 95;
++   if(!(kebab_gmu_irq_raw(kebab_gmu_irq_hfi+0x2000)&1))return 95;
++   uint32_t h=kebab_gmu_irq_raw(kebab_gmu_irq_hfi+0x2648),a=kebab_gmu_irq_raw(kebab_gmu_irq_ao+0xc14);
++   __atomic_store_n(&kebab_gmu_irq_state.last_hfi,h,__ATOMIC_RELEASE);__atomic_store_n(&kebab_gmu_irq_state.last_ao,a,__ATOMIC_RELEASE);
++   __atomic_store_n(&kebab_gmu_irq_state.arm_status_valid,1,__ATOMIC_RELEASE);if(h || a)return 13;
++   mask=off==0x1464c?KGI_HFI_KNOWN:KGI_AO_KNOWN;
++   fresh=kebab_gmu_irq_raw(p); /* last read after prepare/reset/status gates */
++   if((fresh^value)&~mask || (fresh|value)!=value || (value&mask)!=mask)return 13;
++  }else {fresh=kebab_gmu_irq_raw(p);if((fresh^value)&~mask)return 13;}}
+  else return 22;
+  __atomic_add_fetch(&kebab_gmu_irq_mmio_writes,1,__ATOMIC_RELAXED);_gic_write32(p,value);return 0;
+ }
+@@ -148,6 +161,7 @@
+  if(identity && kebab_gmu_irq_hfi && kebab_gmu_irq_ao && !kebab_gmu_irq_power(NULL)){
+   r->hfi_mask=kebab_gmu_irq_raw(kebab_gmu_irq_hfi+0x264c);r->ao_mask=kebab_gmu_irq_raw(kebab_gmu_irq_ao+0xc18);r->valid_mask|=2;}
+  if(r->handler_observed)r->valid_mask|=4;
++ if(__atomic_load_n(&kebab_gmu_irq_state.arm_status_valid,__ATOMIC_ACQUIRE))r->valid_mask|=8;
+  r->mmio_reads=__atomic_load_n(&kebab_gmu_irq_mmio_reads,__ATOMIC_RELAXED);r->mmio_writes=__atomic_load_n(&kebab_gmu_irq_mmio_writes,__ATOMIC_RELAXED);
+  if(busy || __atomic_load_n(&kebab_gmu_irq_state.irq_busy,__ATOMIC_ACQUIRE) || start!=__atomic_load_n(&kebab_gmu_irq_state.dispatches,__ATOMIC_ACQUIRE) ||
+   r->phase!=__atomic_load_n(&kebab_gmu_irq_state.phase,__ATOMIC_ACQUIRE)){r->result=16;r->armed=0;return 16;}
+--- a/osfmk/kern/KebabGmuIrqCore.h
++++ b/osfmk/kern/KebabGmuIrqCore.h
+@@ -10,6 +10,7 @@
+ enum {KGI_EMPTY=0,KGI_PREPARING=1,KGI_ARMED=2,KGI_MASKED=3,KGI_QUARANTINED=4};
+ enum {KGI_BAD=22,KGI_BUSY=16,KGI_CLOSED=95,KGI_IO=5,KGI_FOREIGN=13,KGI_FAULT=14,KGI_OVERFLOW=75};
+ enum {KGI_HFI_OWNED=0x8006,KGI_HFI_FATAL=0x8000,KGI_AO_OWNED=0x29,KGI_AO_KNOWN=0x3b,KGI_RING=8};
++#define KGI_HFI_KNOWN UINT32_C(0xffff8007)
+ typedef struct {
+  void *cookie;
+  int (*read32)(void *,unsigned,uint32_t,uint32_t *);
+@@ -23,7 +24,7 @@
+ typedef struct {uint32_t intid,hfi,ao,reason;uint64_t sequence,time;} KebabGmuIrqEvent;
+ typedef struct {
+  uint32_t phase,reason,irq_busy,consumer_busy,pending_head,pending_tail,overflow;
+- uint32_t owned,touched,reads,writes,dispatches,spurious,hfi_async,async_waiting,containment_ack;
++ uint32_t owned,touched,reads,writes,dispatches,spurious,hfi_async,async_waiting,containment_ack,initial_mask_step,arm_status_valid;
+  uint32_t last_hfi,last_ao,hfi_mask_other,ao_mask_other,initial_priority;
+  uint32_t initial_route_low[2],initial_route_high[2],initial_config,initial_enable;
+  uint64_t route,epoch,events;
+@@ -40,6 +41,33 @@
+ #define KGI_TRY(x) do {int kgi_e=(x);if(kgi_e)return kgi_e;} while(0)
+ static int KGIPollRwp(const KebabGmuIrqIo *i,KebabGmuIrqState *s)
+ {uint32_t v;for(unsigned n=0;n<64;n++){KGI_TRY(KGIR(i,s,0,0,&v));if(!(v&0x80000000u))return 0;}return KGI_IO;}
++static int KGIPrepareObserve(const KebabGmuIrqIo *i,KebabGmuIrqState *s)
++{
++ uint32_t reset,h,a;if(i->fast(i->cookie))return KGI_CLOSED;
++ KGI_TRY(KGIR(i,s,1,0x14000,&reset));if(!(reset&1))return KGI_FOREIGN;
++ KGI_TRY(KGIR(i,s,1,0x14648,&h));KGI_TRY(KGIR(i,s,1,0x24c14,&a));
++ __atomic_store_n(&s->last_hfi,h,__ATOMIC_RELEASE);__atomic_store_n(&s->last_ao,a,__ATOMIC_RELEASE);
++ __atomic_store_n(&s->arm_status_valid,1,__ATOMIC_RELEASE);
++ return h || a?KGI_FAULT:0; /* Never clear inherited/unknown/fault pending. */
++}
++static int KGIInitialMasksBody(const KebabGmuIrqIo *i,KebabGmuIrqState *s,uint32_t h,uint32_t a)
++{
++ uint32_t x,y;KGI_TRY(KGIPrepareObserve(i,s));
++ KGI_TRY(KGIW(i,s,1,0x1464c,h|KGI_HFI_KNOWN));i->barrier(i->cookie);
++ KGI_TRY(KGIPrepareObserve(i,s));
++ KGI_TRY(KGIW(i,s,1,0x24c18,a|KGI_AO_KNOWN));i->barrier(i->cookie);
++ KGI_TRY(KGIR(i,s,1,0x1464c,&x));KGI_TRY(KGIR(i,s,1,0x24c18,&y));
++ if(x!=(h|KGI_HFI_KNOWN) || y!=(a|KGI_AO_KNOWN))return KGI_IO;
++ /* After initial known-source masking, later writers own only 8006/29.
++  * Unknown bits and MSGQ/OOB/RSCC/DBD mask floors are retained. */
++ s->hfi_mask_other=x&~KGI_HFI_OWNED;s->ao_mask_other=y&~KGI_AO_OWNED;
++ return KGIPrepareObserve(i,s);
++}
++static int KGIInitialMasks(const KebabGmuIrqIo *i,KebabGmuIrqState *s,uint32_t h,uint32_t a)
++{
++ __atomic_store_n(&s->initial_mask_step,1,__ATOMIC_RELEASE);
++ int e=KGIInitialMasksBody(i,s,h,a);__atomic_store_n(&s->initial_mask_step,0,__ATOMIC_RELEASE);return e;
++}
+ static int KGIMasks(const KebabGmuIrqIo *i,KebabGmuIrqState *s,uint32_t active)
+ {
+  uint32_t h,a;KGI_TRY(KGIR(i,s,1,0x1464c,&h));KGI_TRY(KGIR(i,s,1,0x24c18,&a));
+@@ -87,26 +115,29 @@
+   * IGROUPR/IGRPMODR are Secure-only/RAZ, so never infer group from zero. */
+  if((en|pend|act)&0x30000u || (cf&0xau) || !(pri&0xff) || !(pri&0xff00))return KGI_FOREIGN;
+  for(unsigned n=0;n<2;n++){KGI_TRY(KGIR(i,s,0,0x6a80+8*n,&lo[n]));KGI_TRY(KGIR(i,s,0,0x6a84+8*n,&hi[n]));}
+- KGI_TRY(KGIR(i,s,1,0x14648,&h));KGI_TRY(KGIR(i,s,1,0x24c14,&a));
++ KGI_TRY(KGIPrepareObserve(i,s));h=__atomic_load_n(&s->last_hfi,__ATOMIC_ACQUIRE);a=__atomic_load_n(&s->last_ao,__ATOMIC_ACQUIRE);
+  KGI_TRY(KGIR(i,s,1,0x1464c,&hm));KGI_TRY(KGIR(i,s,1,0x24c18,&am));
+- /* No inherited pending/fatal/foreign arm is adopted. All known delivery
+-  * sources must be masked before ownership. Unknown register bits preserved. */
+- if(h || a || (hm&0xffff8007u)!=0xffff8007u || (am&KGI_AO_KNOWN)!=KGI_AO_KNOWN)return KGI_FOREIGN;
++ /* Actual579 resets these masks to zero. Under real RESET_HELD and empty
++  * pending, initialize known sources rather than assuming firmware masked.
++  * The Native adapter allows this wider set-only step only in normal worker. */
++ if(h || a)return KGI_FOREIGN;
+  if(i->fast(i->cookie))return KGI_CLOSED;
+  s->epoch=epoch;s->route=route;s->initial_priority=pri;s->initial_config=cf;s->initial_enable=en;
+  for(unsigned n=0;n<2;n++){s->initial_route_low[n]=lo[n];s->initial_route_high[n]=hi[n];}
+  s->hfi_mask_other=hm&~KGI_HFI_OWNED;s->ao_mask_other=am&~KGI_AO_OWNED;
+  __atomic_store_n(&s->owned,1,__ATOMIC_RELEASE);__atomic_store_n(&s->phase,KGI_PREPARING,__ATOMIC_RELEASE);
+- int e=0;for(unsigned n=0;n<2 && !e;n++){e=KGIW64(i,s,0x6a80+8*n,route);if(!e)e=KGIW8(i,s,0x550+n,0xa0);}
++ int e=KGIInitialMasks(i,s,hm,am);if(!e)e=KGIPrepareObserve(i,s);
++ for(unsigned n=0;n<2 && !e;n++){e=KGIW64(i,s,0x6a80+8*n,route);if(!e)e=KGIW8(i,s,0x550+n,0xa0);}
+  i->barrier(i->cookie);
+  for(unsigned n=0;n<2 && !e;n++){e=KGIR(i,s,0,0x6a80+8*n,&lo[n]);if(!e)e=KGIR(i,s,0,0x6a84+8*n,&hi[n]);
+   if(!e && ((lo[n]!=(uint32_t)route) || (hi[n]!=(uint32_t)(route>>32))))e=KGI_IO;}
+  if(!e)e=KGIR(i,s,0,0x550,&pri);if(!e && (pri&0xffff)!=0xa0a0)e=KGI_IO;
+- if(!e)e=KGIMasks(i,s,KGI_HFI_FATAL);if(!e && i->fast(i->cookie))e=KGI_CLOSED;
++ if(!e)e=KGIPrepareObserve(i,s);if(!e)e=KGIMasks(i,s,KGI_HFI_FATAL);if(!e)e=KGIPrepareObserve(i,s);
+  if(e){KGIQuarantine(i,s,(uint32_t)e,i->fast(i->cookie)==0);return e;}
+  __atomic_store_n(&s->phase,KGI_ARMED,__ATOMIC_RELEASE);
+  e=KGIW(i,s,0,0x128,0x30000);i->barrier(i->cookie);if(!e)e=KGIPollRwp(i,s);
+  if(!e)e=KGIR(i,s,0,0x128,&en);if(!e && (en&0x30000)!=0x30000)e=KGI_IO;
++ if(!e && __atomic_load_n(&s->phase,__ATOMIC_ACQUIRE)!=KGI_ARMED)e=KGI_FAULT;
+  if(e)KGIQuarantine(i,s,(uint32_t)e,i->fast(i->cookie)==0);return e;
+ }
+ /* Handler is bounded, no allocation, worker calls, SCM, GIC EOI or busy-spin.
