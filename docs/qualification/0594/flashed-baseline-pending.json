@@ -1,0 +1,56 @@
+{
+  "version": "0594",
+  "recorded": "2026-11-04T14:37:14.261705+08:00",
+  "state": "Flashed boot_b and entered XNU. Original300s safety pending, exactly one LOWDMA diagnostic post waits.",
+  "git_head": "d5c9c62db752f225a288b88959d3754edc94138a",
+  "branch": "gpu/adreno650-20261103",
+  "common": 448,
+  "host": 4,
+  "source_files": 5456,
+  "patch": "0469",
+  "flash": {
+    "version": "0594",
+    "capture_pid": 11492,
+    "boot_sha256": "a7c225c16fac200b0d119ad09a388944abc5c1c6f845a262b07de0775c05f5a9",
+    "kernel_sha256": "54c3f93b27bf641a9e6c98cb4dc421e03094a99eaa700bb428b34a63d27c09b4"
+  },
+  "jobs": {
+    "collect-awake-window.py": {
+      "pid": 55952,
+      "log": "D:\\LOS\\HiOS\\boot123-20261029\\native-dpu-0594\\collect-awake-window-output.txt",
+      "started": 1793774031.0021207
+    },
+    "finalize-baseline.py": {
+      "pid": 43984,
+      "log": "D:\\LOS\\HiOS\\boot123-20261029\\native-dpu-0594\\finalize-baseline-output.txt",
+      "started": 1793774031.0112615
+    }
+  },
+  "diagnostic_post": "post-baseline-diagnostic-once.py",
+  "diagnostic_exec_session": 15655,
+  "last_actual_render": "0591 FAIL",
+  "NC": "NOT_RUN",
+  "PAS": "NOT_RUN",
+  "Metal": "NOT_RUN",
+  "manual_GUI_0593": "Owner reports normal display, app tap and home gesture",
+  "manual_GUI_0594": "NOT_RUN",
+  "scope": "Failure-only bounded immutable2MiB current ADT copy. CAP39 copies cache only; no measurement/exclusion changes or GPU writer.",
+  "analysis_entry": "D:\\LOS\\HiOS\\boot123-20261029\\gpu-prereq-20261103\\gpu-zap-0594\\analyze_actual_ADT.py",
+  "evidence": {
+    "0594-flash.json": "ea97f27a06f4bcb3cb076fc72a53c7978d03cb87b8b42a9a4f6a129783cbb85e",
+    "flash-stage-0594.py": "791b5d88a87f0092a999b8bcb3ad2d37882ab76582d39a5e8f8e844025068dea",
+    "native-dpu-0594\\flash-regression-output.log": "627357f510bb683d1a3c0a458811f64c2e1778ee14c17252467b6d6adb5f57b3",
+    "native-dpu-0594\\paired-build.json": "84533a0626ee10f1de88d9cdbb2f6ee715c2ed44e389eab69a699a72a5956d55",
+    "native-dpu-0594\\native-gpu-linked-qualified.json": "527f313f21e6e3ac642d7337456a7dccc1af39a483a87c82a853c5bf64fc0a92",
+    "native-dpu-0594\\runtime-source-binding-qualified.json": "19c25589e21b91f5a9510397055d10db038d99e0e3ec6d0b7cb0d7eaee19c315",
+    "native-dpu-0594\\guard-ca.py": "bf2a0f3b2413285d096a3e551772063df5fd142599ce91d06e0906d4a1db31e2",
+    "native-dpu-0594\\lowdma-adt-package-qualified.json": "7dd7c9021f030ed0a618929398367c2ae12580c873a0c68c0436074decbc857f",
+    "native-dpu-0594\\lowdma-retime-package-qualified.json": "64c44956b581f93526379539db7fb6cf2c74b3be630198a6d2defadb0114f064",
+    "native-dpu-0594\\post-baseline-diagnostic-once.py": "421a56d2aeb454d0a270d9bf5fb234e3fbfb97a543b4cc5a7a13753ad14f5806",
+    "gpu-prereq-20261103\\gpu-zap-0594\\analyze_actual_ADT.py": "54a750374bf5f14b484857564952fc222f6e41e2fa041f7fb2cd52e7db90f4ac",
+    "gpu-prereq-20261103\\gpu-zap-0594\\late-qualified.json": "5b3497e37b52c2e6dfb56b635eb49318e977e05144cd651983a1b8093a156d55",
+    "gpu-prereq-20261103\\gpu-zap-0594\\flash-preflight-0594-refreshed.log": "da17448d31b0fabebaa7c3d00f095a050666a1f9e7de10bdd9af221095b35ebc",
+    "gpu-prereq-20261103\\combined-0594-stage\\public-all-source-replay-0594.json": "9cd045b7a55ebcb172323db34d0bd63374e8c3f67b641ce2b93c3d6c6aa15bf9",
+    "native-dpu-0593\\0593-original-safety-qualified-lowDMA-hash-failed.json": "b3bf64ae477254c68010e9fdda1b84b80d6ca0347a089dd2b36b59e9cd249954"
+  }
+}

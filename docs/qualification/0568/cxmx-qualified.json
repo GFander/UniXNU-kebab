@@ -1,0 +1,65 @@
+{
+  "accepted": true,
+  "version": "0568",
+  "native_sha256": "45a52f1d600947630fdb4035d9cbac7b2c4d0eb77210afb1957a0a615948e878",
+  "native_bytes": 19184888,
+  "common": 423,
+  "host": 4,
+  "source_files": 5327,
+  "watchdog_seconds": 304.467,
+  "scope": "Actual native same-owner MX selector5 then CX selector5 polled WRITE_ACK, retained ref1/lease3 and full RSC cleanup/foreign-word preservation; original keys/encryptedData/security/watchdog plus PAS INFO/pools/IRQ/VSYNC/thermal regression",
+  "power_owned": true,
+  "power_scope": "CX_MX_FIXED_FLOOR5_ONLY",
+  "GFX_or_BCM_voted": false,
+  "GPUCC_access_qualified": false,
+  "active_SMMU": false,
+  "physical_DMA": false,
+  "GMU": false,
+  "Metal": false,
+  "all_requested_items_complete": false,
+  "ended_capture_and_observer_pids": [
+    3492,
+    64248,
+    15244
+  ],
+  "receipts": {
+    "normal-baseline-qualified.json": "8e316b5014675438780b90b14789b684427ad678cc8e93e220c0422614912557",
+    "post-baseline-dma-complete.json": "d28330a641534301220795da11e4f0baca1adb1654ebd474e2da3c2ca8aefb35",
+    "paired-build.json": "90a7c3ee74196e3f1ca1ae3cdcce40bfdd11af1413120218177775001a5e02ca",
+    "native-cache-poc-qualified.json": "76107c0b4427278cdee3153cc9c30c0ea2058bce8bae3a4d51991532821b9c8f",
+    "native-exported-headers-qualified.json": "5b042502ee703775bca7647737a2a1c4869e7feff7f1bfe1740e7d3a2f41a20f",
+    "host-native-bindings-qualified.json": "c5f54231d988fb2243ca18e135079915cd4224cf9098b7a24722f80d498ee98a",
+    "native-owner-audit.json": "201943bd04e373c8c421928de9de9bba25a26f8494316cde9922faa626f0dcd7",
+    "binding-manifest.json": "191bd896102374b91370b420432707fde6ef569ae3e9dc48ed873e81543d28af",
+    "host-cxmx-sender-qualified.json": "fd3ae5133b565db75497ff3e8ce4d94de3dadfcc34e3fc54e3412222af4b7364",
+    "host-real-bound567-qualified.json": "a247b316f7a477dc9e01081b178f6fe629c0ed61ee144e865b29b49122986525",
+    "host-power-hold-qualified.json": "8ff99fa6fa5675fd18ff5aea86b511718e63a11f429ad9413e462a88b02a3d9c",
+    "host-cxmx-receiver-qualified.json": "3ef76b59f5db3fd1ee8f6d3521ebcac4f6b2cad948335f539d96ce7e03ff498b",
+    "live-cxmx-hold/result.json": "c0a858c763cdbc7481779b86db1fc7cf1c31310421697945ad97b263a14c4726",
+    "live-pas/result.json": "1290974fa2d2a232b9a321bf516f95b3c81f105fd1702075fce26861641ec6ab",
+    "live-rsc/result.json": "aff25755956e16bbcdfa5e04a404211b3a082dbffbb88fd364d6fecd072b3ea7",
+    "live-gpu-power/result.json": "e0d2941118bb0461a1ec2c73ae24d26e966dc43fe6ba0bde530db1ea1b2b6839",
+    "live-dma-pool/result.json": "56c78a359a407a0f61231522bfe84fe1ffcb33035070ec1991243133e30d2575",
+    "live-iova/result.json": "cc3df72a98978e50e12ff2485027ae0ab5c50c71421687d6db3694d155a09f5f",
+    "live-platform/result.json": "0e0a5c492c402719e6a885bdb247e7f2c5cb366989bb486cecc00edce42aa2d9",
+    "live-thermal/result.json": "5ca942e6cd24d3057fbc2da0f0827e4f37c11e992225cd3e2aabfb93a5f0ccc1",
+    "live-power-command/result.json": "b213a9e3e4f2a39fcdf0a3fb39dd307dcee72b80162ed3b25253edfbfaf34b9d",
+    "live-pas-command/result.json": "6e540c5d28a51f0ad7e7a3ca9fa755b3457d1e0c4050e244790e1a0eb0fa3390",
+    "live-dma-command/result.json": "bb2cffc7e3b9e82a2f0da5f1264b1f5d04c6571dfbd72b3690057ae50ecf7132"
+  },
+  "thermal_valid_counts": [
+    [
+      16,
+      9
+    ],
+    [
+      16,
+      9
+    ],
+    [
+      15,
+      9
+    ]
+  ],
+  "thermal_scope": "25 configured sensor channels read; first two samples16+9 valid, third15+9 because controller0/sensor12 hardware VALID=0. Invalid sample preserved and excluded, no synthesized temperature; no thermal throttling/recovery qualification."
+}

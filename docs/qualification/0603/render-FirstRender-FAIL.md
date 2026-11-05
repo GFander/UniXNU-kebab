@@ -1,0 +1,8 @@
+## 0603同页CP写入诊断完成：FirstRender=FAIL
+
+原安全304.434秒和原GPU/CP/后缀回归通过。只有一次GPURENDER，三份CAP38一致SHA-256 d9832262dac8b4626ce1ffbbf4d1163b8b1b65343a599a007ddcfa9831f3c557。第一目标同页CP控制可见=True；实际图像摘要及逐像素状态：[{"pass_index": 0, "submitted": true, "captured": true, "BO_sha256": "c698b0cead6b55a34759a3a06a19e24b21a81629626f984175c353d5d2b6cc39", "same_page_CP_control": true, "observed_control_word": "0xa650c001", "image_bytes": 4096, "image_sha256": "f600eca824e84a43f0691b267bd620e462c50da165c5b80e17aecb7a924f1fa8", "all_pixels_A5": true, "terminal": {"wptr": 162, "rptr": 162, "shadow": 162, "fence": 3, "marker": 2790263821, "status": 1, "rbbm_irq": 0, "irq_mask": 0, "cp_fault": 0, "cp_irq": 0, "cp_protect": 0, "ahb_fence": 0, "gfsr": 0, "fsr": 1024, "sqe": 1, "timestamps": [1157873376, 1157873381, 1157873484]}, "first_mismatch": 256}, {"pass_index": 1, "submitted": false, "captured": false, "same_page_CP_control": null}]。CP写入标记不是绘制像素，不扩大为RB/CCU执行成功。原Fault/超时/隔离保留，不重试writer、不清现场。人工602状态见独立收据（若未存在则NOT_RUN），亮度暂缓。
+
+严格记录native-dpu-0603/0603-render-witness-physical-qualified.json SHA-256 05f9cfd8bb3145b17f977237a32f54e37636940242f58afa64e34a669a140f69，90个raw样本hash重核；native 7f828fc6de9413dceb0bb596e31265c78692592106bd140ba62a93ddd0dcdcdd，boot 534f56058e776e4797cd9de3d25728dd7681fdf07d25d4d9ff92db36058e03fa，457+4/5456，Git d5c9c62db752f225a288b88959d3754edc94138a。所有原始CAP38、wire/log、BO和截取像素均保存，0591历史不改。PAS13重复支持查询路线已关闭，本轮未查询，ZAP实际认证NOT_RUN/UNKNOWN。
+
+下一根据本轮实际结果推进：Initial A650 RB ECO submitted; if pixels still fail, inspect remaining2D restore/mode/cache state and raw BO. Keep CP control separate, preserve fault isolation; no repeated PAS query or unsupported ZAP inference.。603已包含source-backed初始RB ECO写；若仍失败，不重复相同修复，继续核对剩余2D restore/模式/cache与原始BO，不得无证据转回ZAP或盲写TRUST。
+

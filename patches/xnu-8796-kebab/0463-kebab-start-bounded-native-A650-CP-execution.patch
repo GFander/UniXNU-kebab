@@ -1,0 +1,837 @@
+--- /dev/null
++++ b/osfmk/kern/KebabA650CpBinding.h
+@@ -0,0 +1,9 @@
++/* Finite0588 CP execution only; native/runtime/boot_b guards still required. */
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_CP_BINDING_H
++#define KEBAB_A650_CP_BINDING_H
++/* CLOSED: no native CPU-buffer mutation or MMIO until exact finite review,
++ * actual owner/callback tests, SDK/build, measured SQE and runtime gates. */
++enum {KebabA650CpNativeQualified=1};
++static const unsigned char KebabA650CpSourceContract[32]={0x52,0x51,0x8e,0xaa,0x3e,0x39,0xea,0x27,0x7d,0x50,0xd7,0x6f,0x95,0x58,0xda,0x75,0x6f,0xe1,0x1f,0xad,0xbc,0x7d,0x0d,0x64,0x1a,0x27,0xcb,0xb3,0xbe,0x35,0x8d,0x34};
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabA650CpCore.h
+@@ -0,0 +1,199 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_CP_CORE_H
++#define KEBAB_A650_CP_CORE_H
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++#include "KebabA650CpRegisters.h"
++/* Kernel-owned first execution only: one private ring, one immutable IB,
++ * fixed NC fence/scratch offsets. No user packets, context switch, IRQ
++ * unmask/ACK, reset, TSB/TRUST_CNTL or SMMU write; no guessed recovery.
++ * PM4 parity/header and A6xx fence facts follow AdrenoPM4/NativeAdreno (MIT).
++ * A separately reviewed actual owner must retain the existing OOB/VM/BOs. */
++enum {KCP_EMPTY=0,KCP_FAILED=1,KCP_CPU_READY=2,KCP_HW_INIT=3,KCP_SQE_READY=4,KCP_INIT_DONE=5,KCP_EXECUTED=6,KCP_QUARANTINED=7};
++enum {KCP_RING_IOVA=0x90000000u,KCP_IB_IOVA=0x90004000u,KCP_SQE_IOVA=0x90008000u,KCP_FENCE_IOVA=0x90020000u,
++ KCP_MARKER=0xa6500c0du,KCP_SENTINEL=0x13579bdfu,KCP_INIT_WPTR=16,KCP_FINAL_WPTR=27};
++typedef struct {
++ uint32_t magic,schema,bytes,result,phase,primary_error,io_error,touched;
++ uint32_t reads,writes,barriers,polls,failed_region,failed_offset,quarantined,held;
++ uint32_t firmware_bytes,payload_bytes,firmware_version,firmware_verified,split_copy_verified,commands_cleaned,NC_verified,namespace_unchanged;
++ uint32_t SQE_start_requested,CP_ME_INIT_completed,IB_marker_observed,GPU_DMA_observed,init_fence,final_fence,init_rptr,final_rptr;
++ uint32_t initial_marker,final_marker,initial_sqe,irq_mask_before,irq_mask_after,SPT_control_before,SPT_control_after,reserved;
++ uint32_t raw_before[22],raw_after[22];
++ uint32_t ring_init[16],ib[4],ring_second[11],padding;
++ uint64_t epoch,elapsed_us;
++} KebabA650CpRecord;
++#ifdef __cplusplus
++static_assert(sizeof(KebabA650CpRecord)==480,"CP event record480");
++#endif
++typedef struct {uint32_t attempted,quarantined,complete;} KebabA650CpBook;
++typedef struct {
++ void *cookie;
++ int (*gate)(void*),(*read32)(void*,unsigned,uint32_t,uint32_t*),(*write32)(void*,unsigned,uint32_t,uint32_t);
++ void (*barrier)(void*),(*delay_us)(void*,unsigned);
++ uint64_t (*now_us)(void*);
++ /* prepare_cpu validates exact measured firmware and existing private CPU
++  * views, loads both RX segments, cleans them, and primes NC memory only.
++  * copy_words accepts only ring/IB bounded offsets; publish cleans both.
++  * read_nc accepts offsets0(RPTR),4(fence),64(scratch), never table memory. */
++ int (*prepare_cpu)(void*,KebabA650CpRecord*);
++ int (*copy_words)(void*,unsigned,uint32_t,const uint32_t*,uint32_t);
++ int (*publish_commands)(void*),(*read_nc)(void*,uint32_t,uint32_t*);
++} KebabA650CpIo;
++typedef struct {
++ const KebabA650CpIo *io;KebabA650CpBook *book;KebabA650CpRecord *r;
++ uint64_t begin,wait_begin;uint32_t waiting;
++} KebabA650CpContext;
++static inline void KebabA650CpInit(KebabA650CpRecord*r)
++{memset(r,0,sizeof *r);r->magic=0x3150434bu;r->schema=1;r->bytes=sizeof *r;}
++static inline uint32_t KCPOdd(uint32_t x)
++{uint32_t bit=1;while(x){bit^=1;x&=x-1;}return bit;}
++static inline uint32_t KCPType4(uint32_t reg,uint32_t count)
++{return 0x40000000u|count|(KCPOdd(count)<<7)|(reg<<8)|(KCPOdd(reg)<<27);}
++static inline uint32_t KCPType7(uint32_t op,uint32_t count)
++{return 0x70000000u|count|(KCPOdd(count)<<15)|(op<<16)|(KCPOdd(op)<<23);}
++static inline int KCPClock(KebabA650CpContext*c)
++{
++ uint64_t now=c->io->now_us(c->io->cookie);
++ return now<c->begin || now-c->begin>=500000 || (c->waiting && (now<c->wait_begin || now-c->wait_begin>=100000))?110:0;
++}
++static inline int KCPGate(KebabA650CpContext*c)
++{int e=KCPClock(c);if(e)return e;e=c->io->gate(c->io->cookie);if(e)c->r->io_error=(uint32_t)e;return e?e:KCPClock(c);}
++static inline int KCPRead(KebabA650CpContext*c,unsigned space,uint32_t off,uint32_t*out)
++{
++ int e=KCPGate(c);if(e)return e;c->r->reads++;
++ e=c->io->read32(c->io->cookie,space,off,out);
++ if(e){c->r->io_error=(uint32_t)e;c->r->failed_region=space;c->r->failed_offset=off;return 5;}return KCPClock(c);
++}
++static inline int KCPGpuRead(KebabA650CpContext*c,uint32_t word,uint32_t*out)
++{return KCPRead(c,0,word*4,out);}
++static inline int KCPWrite(KebabA650CpContext*c,unsigned space,uint32_t off,uint32_t value)
++{
++ int e=KCPGate(c);if(e)return e;c->r->touched=1;c->r->writes++;
++ e=c->io->write32(c->io->cookie,space,off,value);
++ /* Every attempted store is ordered, even a late gate/IO error. */
++ c->r->barriers++;c->io->barrier(c->io->cookie);
++ if(e){c->r->io_error=(uint32_t)e;c->r->failed_region=space;c->r->failed_offset=off;return 5;}return KCPGate(c);
++}
++static inline int KCPGpuWrite(KebabA650CpContext*c,uint32_t word,uint32_t value)
++{return KCPWrite(c,0,word*4,value);}
++static inline int KCPReadNc(KebabA650CpContext*c,uint32_t off,uint32_t*out)
++{
++ int e=KCPGate(c);if(e)return e;e=c->io->read_nc(c->io->cookie,off,out);
++ if(e){c->r->io_error=(uint32_t)e;return e;}return KCPClock(c);
++}
++static inline int KCPSnapshot(KebabA650CpContext*c,uint32_t*out)
++{
++ static const uint32_t words[22]={KCP_RBBM_STATUS,KCP_RBBM_STATUS3,KCP_RBBM_INT_0_STATUS,KCP_RBBM_INT_0_MASK,
++ KCP_CP_SQE_CNTL,KCP_CP_RB_RPTR,KCP_CP_RB_WPTR,KCP_CP_HW_FAULT,KCP_CP_INTERRUPT_STATUS,KCP_CP_PROTECT_STATUS,
++ KCP_CP_SQE_INSTR_BASE,KCP_CP_SQE_INSTR_BASE+1,KCP_CP_APRIV_CNTL,KCP_CP_RB_CNTL,
++ KCP_CP_RB_BASE,KCP_CP_RB_BASE+1,KCP_CP_RB_RPTR_ADDR,KCP_CP_RB_RPTR_ADDR+1,
++ KCP_GBIF_HALT,KCP_RBBM_GBIF_HALT,KCP_RBBM_SECVID_TSB_CNTL,KCP_RBBM_SECVID_TSB_TRUSTED_SIZE};
++ for(unsigned n=0;n<22;n++){int e=KCPGpuRead(c,words[n],out+n);if(e)return e;}return 0;
++}
++static inline int KCPProgram(KebabA650CpContext*c,const KCPReg*program,size_t count)
++{for(size_t n=0;n<count;n++){int e=KCPGpuWrite(c,program[n].word,program[n].value);if(e)return e;}return 0;}
++static inline void KCPFenceWords(uint32_t*out,uint32_t sequence)
++{
++ out[0]=KCPType4(KCP_CP_SCRATCH2,1);out[1]=sequence;
++ out[2]=KCPType7(0x46,4);out[3]=0x80000004u;
++ out[4]=KCP_FENCE_IOVA+4;out[5]=0;out[6]=sequence;
++}
++static inline void KCPMakeCommands(KebabA650CpRecord*r)
++{
++ r->ring_init[0]=KCPType7(0x48,8);r->ring_init[1]=0x2f;r->ring_init[2]=3;r->ring_init[3]=0x20000000u;
++ for(unsigned i=4;i<9;i++)r->ring_init[i]=0;KCPFenceWords(r->ring_init+9,1);
++ r->ib[0]=KCPType7(0x3d,3);r->ib[1]=KCP_FENCE_IOVA+64;r->ib[2]=0;r->ib[3]=KCP_MARKER;
++ r->ring_second[0]=KCPType7(0x3f,3);r->ring_second[1]=KCP_IB_IOVA;r->ring_second[2]=0;r->ring_second[3]=4;
++ KCPFenceWords(r->ring_second+4,2);
++}
++static inline int KCPPublish(KebabA650CpContext*c)
++{int e=KCPGate(c);if(e)return e;e=c->io->publish_commands(c->io->cookie);if(e){c->r->io_error=(uint32_t)e;return e;}c->r->commands_cleaned++;return KCPGate(c);}
++static inline int KCPCopy(KebabA650CpContext*c,unsigned region,uint32_t offset,const uint32_t*data,uint32_t words)
++{int e=KCPGate(c);if(e)return e;e=c->io->copy_words(c->io->cookie,region,offset,data,words);if(e)c->r->io_error=(uint32_t)e;return e?e:KCPGate(c);}
++static inline int KCPWptr(KebabA650CpContext*c,uint32_t value)
++{
++ int e=KCPGpuWrite(c,KCP_CP_RB_WPTR,value);uint32_t fence=0;if(e)return e;
++ /* Never replay a possibly dropped write or clear an unknown fence error. */
++ e=KCPRead(c,1,0x24c48,&fence);return e?e:((fence&1u)?5:0);
++}
++static inline int KCPWait(KebabA650CpContext*c,uint32_t sequence,uint32_t wptr,uint32_t*fence,uint32_t*rptr)
++{
++ c->wait_begin=c->io->now_us(c->io->cookie);c->waiting=1;int e=110;
++ for(unsigned n=0;n<1000;n++){
++  uint32_t fault=0,irq=0,status=0;c->r->polls++;
++  if((e=KCPReadNc(c,4,fence)) || (e=KCPReadNc(c,0,rptr)) ||
++     (e=KCPGpuRead(c,KCP_CP_HW_FAULT,&fault)) || (e=KCPGpuRead(c,KCP_CP_INTERRUPT_STATUS,&irq)))break;
++  if(fault || (irq&0xf7u) || *fence>sequence || *rptr>=1024){e=5;break;}
++  if(*fence==sequence && *rptr==wptr){
++   e=KCPGpuRead(c,KCP_RBBM_STATUS,&status);if(e)break;
++   if(!(status&~1u)){e=0;break;}
++  }
++  c->io->delay_us(c->io->cookie,100);e=KCPClock(c);if(e)break;
++  e=110;
++ }
++ c->waiting=0;return e;
++}
++#define KCP_TRY(x) do{e=(x);if(e)goto failed;}while(0)
++static inline int KebabA650CpFirstExecution(KebabA650CpContext*c,uint32_t qualified,uint64_t epoch)
++{
++ if(!c || !c->r)return 22;KebabA650CpInit(c->r);KebabA650CpRecord*r=c->r;
++ if(!c->book || !c->io || !c->io->gate || !c->io->read32 || !c->io->write32 || !c->io->barrier ||
++ !c->io->delay_us || !c->io->now_us || !c->io->prepare_cpu || !c->io->copy_words || !c->io->publish_commands || !c->io->read_nc){r->result=22;r->phase=KCP_FAILED;return 22;}
++ if(qualified!=1 || epoch!=1){r->result=95;r->phase=KCP_FAILED;return 95;}
++ if(c->book->attempted || c->book->quarantined || c->book->complete){r->result=16;r->phase=KCP_FAILED;return 16;}
++ c->book->attempted=1;c->begin=c->io->now_us(c->io->cookie);c->waiting=0;r->epoch=epoch;
++ int e=0;uint32_t v=0,high=0,shadow=0,initial_fence=0;
++ KCP_TRY(KCPSnapshot(c,r->raw_before));r->initial_sqe=r->raw_before[4];r->irq_mask_before=r->raw_before[3];
++ if((r->raw_before[0]&~1u) || r->irq_mask_before || (r->initial_sqe!=0 && r->initial_sqe!=3) ||
++ r->raw_before[5] || r->raw_before[6] || r->raw_before[7] || (r->raw_before[8]&0xf7u) ||
++ r->raw_before[18] || r->raw_before[19] || r->raw_before[20] || r->raw_before[21]){e=13;goto failed;}
++ KCP_TRY(KCPGpuRead(c,KCP_RBBM_SECVID_TSB_TRUSTED_BASE,&v));KCP_TRY(KCPGpuRead(c,KCP_RBBM_SECVID_TSB_TRUSTED_BASE+1,&high));
++ if(v || high){e=13;goto failed;}
++ KCP_TRY(KCPRead(c,1,0x14340,&v));if(v&0xc0u){e=11;goto failed;}
++ KCP_TRY(KCPRead(c,1,0x24c48,&v));if(v&1u){e=5;goto failed;}
++ KCP_TRY(KCPGate(c));KCP_TRY(c->io->prepare_cpu(c->io->cookie,r));KCP_TRY(KCPGate(c));
++ if(r->firmware_bytes!=31964 || r->payload_bytes!=31960 || r->firmware_version!=0x112 ||
++ r->firmware_verified!=1 || r->split_copy_verified!=1 || r->NC_verified!=1){e=13;goto failed;}
++ KCP_TRY(KCPReadNc(c,0,&shadow));KCP_TRY(KCPReadNc(c,4,&initial_fence));KCP_TRY(KCPReadNc(c,64,&r->initial_marker));
++ if(shadow || initial_fence || r->initial_marker!=KCP_SENTINEL){e=13;goto failed;}
++ r->phase=KCP_CPU_READY;KCPMakeCommands(r);
++ KCP_TRY(KCPCopy(c,1,0,r->ib,4));KCP_TRY(KCPCopy(c,0,0,r->ring_init,16));KCP_TRY(KCPPublish(c));
++ r->phase=KCP_HW_INIT;KCP_TRY(KCPProgram(c,KCPHwPrefix,sizeof KCPHwPrefix/sizeof KCPHwPrefix[0]));
++ KCP_TRY(KCPRead(c,1,0x200,&r->SPT_control_before));
++ KCP_TRY(KCPWrite(c,1,0x200,r->SPT_control_before&~1u));
++ KCP_TRY(KCPProgram(c,KCPHwcg,sizeof KCPHwcg/sizeof KCPHwcg[0]));
++ KCP_TRY(KCPWrite(c,1,0x200,r->SPT_control_before|1u));KCP_TRY(KCPRead(c,1,0x200,&r->SPT_control_after));
++ if(r->SPT_control_after!=(r->SPT_control_before|1u)){e=5;goto failed;}
++ KCP_TRY(KCPGpuWrite(c,KCP_RBBM_CLOCK_CNTL,0x8aa8aa82));
++ KCP_TRY(KCPRead(c,1,0x14340,&v));if(v&0xc0u){e=11;goto failed;}
++ KCP_TRY(KCPProgram(c,KCPHwPostClock,sizeof KCPHwPostClock/sizeof KCPHwPostClock[0]));
++ KCP_TRY(KCPGpuWrite(c,KCP_CP_SQE_INSTR_BASE,KCP_SQE_IOVA));KCP_TRY(KCPGpuWrite(c,KCP_CP_SQE_INSTR_BASE+1,0));
++ KCP_TRY(KCPGpuRead(c,KCP_CP_SQE_INSTR_BASE,&v));KCP_TRY(KCPGpuRead(c,KCP_CP_SQE_INSTR_BASE+1,&high));
++ if(v!=KCP_SQE_IOVA || high){e=5;goto failed;}
++ KCP_TRY(KCPGpuWrite(c,KCP_CP_RB_BASE,KCP_RING_IOVA));KCP_TRY(KCPGpuWrite(c,KCP_CP_RB_BASE+1,0));
++ KCP_TRY(KCPGpuWrite(c,KCP_CP_RB_CNTL,0x209));
++ KCP_TRY(KCPGpuWrite(c,KCP_CP_RB_RPTR_ADDR,KCP_FENCE_IOVA));KCP_TRY(KCPGpuWrite(c,KCP_CP_RB_RPTR_ADDR+1,0));
++ KCP_TRY(KCPGpuWrite(c,KCP_CP_SCRATCH2,0));
++ KCP_TRY(KCPGpuRead(c,KCP_CP_RB_CNTL,&v));if(v!=0x209){e=5;goto failed;}
++ KCP_TRY(KCPGpuWrite(c,KCP_CP_SQE_CNTL,1));r->SQE_start_requested=1;
++ KCP_TRY(KCPGpuRead(c,KCP_CP_SQE_CNTL,&v));if((v&3)!=1){e=5;goto failed;}
++ r->phase=KCP_SQE_READY;KCP_TRY(KCPWptr(c,KCP_INIT_WPTR));
++ KCP_TRY(KCPWait(c,1,KCP_INIT_WPTR,&r->init_fence,&r->init_rptr));r->CP_ME_INIT_completed=1;r->phase=KCP_INIT_DONE;
++ KCP_TRY(KCPReadNc(c,64,&v));if(v!=KCP_SENTINEL){e=13;goto failed;}
++ KCP_TRY(KCPCopy(c,0,16,r->ring_second,11));KCP_TRY(KCPPublish(c));
++ KCP_TRY(KCPWptr(c,KCP_FINAL_WPTR));KCP_TRY(KCPWait(c,2,KCP_FINAL_WPTR,&r->final_fence,&r->final_rptr));
++ KCP_TRY(KCPReadNc(c,64,&r->final_marker));if(r->final_marker!=KCP_MARKER){e=5;goto failed;}
++ KCP_TRY(KCPSnapshot(c,r->raw_after));r->irq_mask_after=r->raw_after[3];if(r->irq_mask_after!=r->irq_mask_before){e=13;goto failed;}
++ KCP_TRY(KCPGate(c));
++ {uint64_t end=c->io->now_us(c->io->cookie);r->elapsed_us=end>=c->begin?end-c->begin:UINT64_MAX;if(r->elapsed_us>=500000){e=110;goto failed;}}
++ r->IB_marker_observed=1;r->GPU_DMA_observed=1;r->held=1;r->phase=KCP_EXECUTED;c->book->complete=1;
++ return 0;
++failed:
++ r->result=r->primary_error=(uint32_t)e;r->phase=r->touched?KCP_QUARANTINED:KCP_FAILED;
++ if(r->touched){r->quarantined=1;c->book->quarantined=1;}
++ {uint64_t end=c->io->now_us(c->io->cookie);r->elapsed_us=end>=c->begin?end-c->begin:UINT64_MAX;}
++ return e;
++}
++#undef KCP_TRY
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabA650CpOwner.h
+@@ -0,0 +1,26 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_CP_OWNER_H
++#define KEBAB_A650_CP_OWNER_H
++#include "KebabA650GpuOobOwner.h"
++#include "KebabA650CpCore.h"
++typedef struct {
++ const KebabA650GpuOobOwnerToken *oob;
++ uint64_t generation;
++ uint32_t pinned,quarantined;
++} KebabA650CpOwnerToken;
++typedef struct {
++ KebabA650CpIo core;
++ int (*snapshot_vm)(void*,unsigned after);
++} KebabA650CpOwnerIo;
++#ifdef __cplusplus
++extern "C" {
++#endif
++int kebab_rpmh_gpu_cp_first_execution(KebabA650CpOwnerToken*,const KebabA650GpuOobOwnerToken*,const KebabA650CpOwnerIo*,KebabA650CpRecord*);
++int kebab_rpmh_gpu_cp_check_locked(const KebabA650CpOwnerToken*);
++int kebab_a650_gpu_cp_context_ready_locked(const KebabA650GpuOobOwnerToken*);
++int kebab_a650_gpu_cp_power_ready_locked(const KebabA650GpuOobOwnerToken*,uint32_t phase);
++void kebab_a650_gpu_cp_quarantine_locked(const KebabA650GpuOobOwnerToken*);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabA650CpRegisters.h
+@@ -0,0 +1,172 @@
++/* SPDX-License-Identifier: MIT */
++/* A650 hardware facts cross-checked against torvalds/linux v6.12 XML/catalog.
++ * Hwcg/protect facts also from NativeAdreno contributors (MIT), A650 branch
++ * 258abf77954ffff45b1b70fc485da8d21b17f42e. See source-derivation.json and
++ * NativeAdreno-MIT-LICENSE.txt. Dword GPU offsets; no native binding here. */
++#ifndef KEBAB_A650_CP_REGISTERS_H
++#define KEBAB_A650_CP_REGISTERS_H
++#include <stdint.h>
++typedef struct {uint32_t word,value;} KCPReg;
++#define KCP_RBBM_STATUS 0x0210u
++#define KCP_RBBM_STATUS3 0x0213u
++#define KCP_RBBM_INT_0_STATUS 0x0201u
++#define KCP_RBBM_INT_0_MASK 0x0038u
++#define KCP_CP_SQE_CNTL 0x0808u
++#define KCP_CP_RB_RPTR 0x0806u
++#define KCP_CP_RB_WPTR 0x0807u
++#define KCP_CP_HW_FAULT 0x0821u
++#define KCP_CP_INTERRUPT_STATUS 0x0823u
++#define KCP_CP_PROTECT_STATUS 0x0824u
++#define KCP_CP_SQE_INSTR_BASE 0x0830u
++#define KCP_CP_RB_CNTL 0x0802u
++#define KCP_CP_RB_BASE 0x0800u
++#define KCP_CP_RB_RPTR_ADDR 0x0804u
++#define KCP_CP_APRIV_CNTL 0x0844u
++#define KCP_RBBM_CLOCK_CNTL 0x00aeu
++#define KCP_GBIF_HALT 0x3c45u
++#define KCP_RBBM_GBIF_HALT 0x0016u
++#define KCP_RBBM_SECVID_TSB_CNTL 0xf803u
++#define KCP_RBBM_SECVID_TSB_TRUSTED_BASE 0xf800u
++#define KCP_RBBM_SECVID_TSB_TRUSTED_SIZE 0xf802u
++#define KCP_CP_SCRATCH2 0x0885u
++static const KCPReg KCPHwPrefix[]={
++ {0x0842u,0x00000001u},
++ {0x0c01u,0x00000001u},
++ {0x8601u,0x00000001u},
++ {0x8e05u,0x00000001u},
++ {0x9e01u,0x00000001u},
++ {0xbe05u,0x00000001u},
++ {0xa601u,0x00000001u},
++ {0x9601u,0x00000001u},
++ {0x0e00u,0x00000001u},
++ {0xae01u,0x00000001u},
++ {0xb601u,0x00000001u},
++};
++static const KCPReg KCPHwcg[]={
++ {0x00b0u,0x02222222u},
++ {0x00b4u,0x02222220u},
++ {0x00b8u,0x00000080u},
++ {0x00bcu,0x0000f3cfu},
++ {0x00c0u,0x02222222u},
++ {0x00c4u,0x22222222u},
++ {0x00c8u,0x22222222u},
++ {0x00ccu,0x00022222u},
++ {0x00d0u,0x11111111u},
++ {0x00d4u,0x11111111u},
++ {0x00d8u,0x11111111u},
++ {0x00dcu,0x00011111u},
++ {0x00e0u,0x77777777u},
++ {0x00e4u,0x77777777u},
++ {0x00e8u,0x77777777u},
++ {0x00ecu,0x00077777u},
++ {0x00f0u,0x22222222u},
++ {0x00f4u,0x01002222u},
++ {0x00f8u,0x00002220u},
++ {0x0100u,0x00040f00u},
++ {0x0104u,0x25222022u},
++ {0x0105u,0x00005555u},
++ {0x0106u,0x00000011u},
++ {0x0107u,0x00445044u},
++ {0x0108u,0x04222222u},
++ {0x0111u,0x00002222u},
++ {0x0114u,0x00222222u},
++ {0x0117u,0x00000002u},
++ {0x011bu,0x00002222u},
++ {0x0109u,0x00004000u},
++ {0x0112u,0x00002222u},
++ {0x0115u,0x00000200u},
++ {0x011cu,0x00000000u},
++ {0x010au,0x00000000u},
++ {0x0113u,0x00000000u},
++ {0x0116u,0x04104004u},
++ {0x011du,0x00000000u},
++ {0x0120u,0x00000222u},
++ {0x0121u,0x00000111u},
++ {0x0122u,0x00000777u},
++ {0x010bu,0x22222222u},
++ {0x0110u,0x00000004u},
++ {0x010fu,0x00000002u},
++ {0x0533u,0x00000182u},
++ {0x0044u,0x00000000u},
++ {0x0042u,0x00000000u},
++ {0x0118u,0x00000222u},
++ {0x0119u,0x00000111u},
++ {0x011au,0x00000555u},
++};
++static const KCPReg KCPHwPostClock[]={
++ {0x3c03u,0x00071620u},
++ {0x3c04u,0x00071620u},
++ {0x3c05u,0x00071620u},
++ {0x3c06u,0x00071620u},
++ {0x0011u,0x00000003u},
++ {0x050bu,0xffffffffu},
++ {0x0e05u,0xffffffc0u},
++ {0x0e06u,0x0001ffffu},
++ {0x0e09u,0xfffff000u},
++ {0x0e0au,0x0001ffffu},
++ {0x0e07u,0xfffff000u},
++ {0x0e08u,0x0001ffffu},
++ {0x0e18u,0x00000804u},
++ {0x0e17u,0x00000004u},
++ {0x08c2u,0x02000140u},
++ {0x08c1u,0x8040362cu},
++ {0x08c3u,0x00000080u},
++ {0x9e00u,0x00300200u},
++ {0x098du,0x00000001u},
++ {0x0500u,0x00000001u},
++ {0x08d0u,0x00000000u},
++ {0x8e08u,0x00000816u},
++ {0xb604u,0x00000006u},
++ {0xae02u,0x00000026u},
++ {0x0e01u,0x00600000u},
++ {0x0534u,0x00000001u},
++ {0x001fu,0x401fffffu},
++ {0x0e19u,0x00000081u},
++ {0xb608u,0x00000000u},
++ {0xb609u,0x3fe05ff4u},
++ {0xb60au,0x3fa0ebeeu},
++ {0xb60bu,0x3f5193edu},
++ {0xb60cu,0x3f0243f0u},
++ {0x084fu,0x0000000bu},
++ {0x0850u,0x13fc0000u},
++ {0x0851u,0x00140501u},
++ {0x0852u,0x0bd0050bu},
++ {0x0853u,0x8000050eu},
++ {0x0854u,0x80000510u},
++ {0x0855u,0x80000534u},
++ {0x0856u,0x82080800u},
++ {0x0857u,0x802008a0u},
++ {0x0858u,0x809008abu},
++ {0x0859u,0x02b808deu},
++ {0x085au,0x81340900u},
++ {0x085bu,0x89c8098du},
++ {0x085cu,0x80040e00u},
++ {0x085du,0x80300e03u},
++ {0x085eu,0x830c3c00u},
++ {0x085fu,0x7ffc3cc4u},
++ {0x0860u,0x873c8630u},
++ {0x0861u,0x80008e00u},
++ {0x0862u,0x80008e08u},
++ {0x0863u,0x807c8e50u},
++ {0x0864u,0x89fc8e80u},
++ {0x0865u,0x876c9624u},
++ {0x0866u,0x80449e60u},
++ {0x0867u,0x861c9e78u},
++ {0x0868u,0x873ca630u},
++ {0x0869u,0x8000ae02u},
++ {0x086au,0x8cbcae50u},
++ {0x086bu,0x8000b604u},
++ {0x086cu,0x801cb608u},
++ {0x086du,0x8004be02u},
++ {0x086eu,0xdf7cbe20u},
++ {0x086fu,0xaffcf000u},
++ {0x0870u,0x7ffcfc00u},
++ {0x0871u,0xfffd8400u},
++ {0x0872u,0xfffda800u},
++ {0x0873u,0x910df400u},
++ {0x0874u,0x01edf844u},
++ {0x0875u,0x806df887u},
++ {0x087fu,0x8001f8c0u},
++ {0x0844u,0x0000006eu},
++};
++#endif
+--- a/osfmk/kern/Makefile
++++ b/osfmk/kern/Makefile
+@@ -39,6 +39,7 @@
+ 	KebabGmuResourceObserve.h \
+ 	KebabGmuResourceObserveOwner.h KebabA650GpuVmOwner.h KebabA650GpuVmBinding.h \
+ 	KebabA650GpuOobCore.h KebabA650GpuOobOwner.h KebabA650GpuOobBinding.h \
++	KebabA650CpCore.h KebabA650CpRegisters.h KebabA650CpOwner.h KebabA650CpBinding.h \
+ 	KebabGmuHfiInitBinding.h \
+ 	KebabGmuHfiInitCore.h \
+ 	KebabGmuHfiInitOwner.h \
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650CpNative.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_CP_NATIVE_API_H
++#define KEBAB_A650_CP_NATIVE_API_H
++#include <sys/errno.h>
++#include "KebabA650GpuOobNative.h"
++#if defined(KERNEL)
++#include <kern/KebabA650CpCore.h>
++#else
++#include "KebabA650CpCore.h"
++#endif
++typedef struct {
++ KebabA650CpRecord receipt;
++ KGDiscovery vm_before,vm_after;
++} KebabA650CpObservation;
++static_assert(sizeof(KebabA650CpObservation)==3744,"CP observation3744");
++extern "C" int kebab_a650_gpu_cp_prepare(void);
++extern "C" int kebab_a650_gpu_cp_snapshot(KebabA650CpObservation*);
++#endif
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -139,6 +139,9 @@
+ /* BEGIN A650_GPUOOB_INCLUDE */
+ #include "KebabNativeA650GpuOobHold.h"
+ /* END A650_GPUOOB_INCLUDE */
++/* BEGIN A650_GPUCP_INCLUDE */
++#include "KebabNativeA650CpHold.h"
++/* END A650_GPUCP_INCLUDE */
+ /* END FUTURE_GMU_HOLD_INCLUDE */
+ #include "KebabNativeGpuFirstAttachHold.h"
+ #include <kern/kebab_low_dma.h>
+@@ -948,6 +951,18 @@
+         image->total=bytes;image->stable=1;image->flags=2;return 0;
+     }
+ /* END A650_GPUOOB36_PROVIDER */
++/* BEGIN A650_GPUCP37_PROVIDER */
++    if(source==37) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabA650CpObservation);
++        auto *data=(KebabA650CpObservation*)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_a650_gpu_cp_snapshot(data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=37;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
++/* END A650_GPUCP37_PROVIDER */
+     if(source==31) {
+         if(argument)return 22;
+         uint32_t bytes=sizeof(KebabGpuSn11Record);
+--- a/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
++++ b/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
+@@ -87,3 +87,5 @@
+ #include "KebabNativeA650GpuVm.h"
+ 
+ #include "KebabNativeA650GpuOob.h"
++
++#include "KebabNativeA650Cp.h"
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeA650Cp.h
+@@ -0,0 +1,211 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_A650_CP_H
++#define KEBAB_NATIVE_A650_CP_H
++/* Include once at end of FirstAttach, after the actual OOB adapter. These
++ * are the existing private BO/VM/OOB objects, never a CAP-derived lease. */
++#include "KebabA650CpNative.h"
++#include "KebabA650GmuPmapCache.h"
++#include <pexpert/device_tree.h>
++#include <libkern/crypto/sha2.h>
++#if defined(KERNEL)
++#include <kern/KebabA650CpOwner.h>
++#include <kern/KebabA650CpBinding.h>
++#else
++#include "KebabA650CpOwner.h"
++#include "KebabA650CpBinding.h"
++#endif
++struct KCPAccess {
++ KebabA650CpOwnerToken owner;IOMemoryDescriptor *memory;IOMemoryMap *mapping;uintptr_t base;
++ KebabA650CpObservation *observation;uint8_t *firmware;
++ uint32_t firmware_verified,cpu_ready,write_index,copy_index,publish_index;
++};
++static KCPAccess kcp_native;
++static uint32_t kcp_native_once;
++static int kcp_native_result=EAGAIN;
++static int KCPNativeBound(void)
++{unsigned any=0;for(unsigned n=0;n<32;n++)any|=KebabA650CpSourceContract[n];return KebabA650CpNativeQualified==1&&any;}
++extern "C" int kebab_a650_gpu_cp_context_ready_locked(const KebabA650GpuOobOwnerToken*oob)
++{
++ if(oob!=&kho_native.owner || __atomic_load_n(&kho_native_once,__ATOMIC_ACQUIRE)!=2 || kho_native_result ||
++ !kho_native.base || !kho_native.observation || !kho_native.observation->receipt.held ||
++ !oob->pinned || oob->quarantined || KVGBackingValid(&kvg_engine.backing) ||
++ !kvg_native.bo.held || kvg_native.bo.generation!=kvg_engine.backing.generation)return 95;
++ int e=kebab_a650_gpu_oob_vm_ready_locked(&kvg_native.owner);if(e)return e;
++ return kebab_a650_gpu_backing_check(&kvg_native.bo);
++}
++extern "C" int kebab_a650_gpu_cp_power_ready_locked(const KebabA650GpuOobOwnerToken*oob,uint32_t phase)
++{
++ if(oob!=&kho_native.owner || !kho_native.base || !kvg_native.clock[3])return 95;
++ uintptr_t g=kho_native.base,c=kvg_native.clock[3];
++ uint32_t sp=*(volatile const uint32_t*)(g+0x14340),ao=*(volatile const uint32_t*)(g+0x24c14);
++ uint32_t info=*(volatile const uint32_t*)(g+0x14648),cfg=*(volatile const uint32_t*)(c+0x1010),cx=*(volatile const uint32_t*)(c+0x106c);
++ if((sp&0x40u) || ((sp&0x80u)&&phase!=KCP_HW_INIT) || (ao&0x29u) || info || !(cfg&0x10000u) || !(cx&0x80000000u))return 11;
++ return 0;
++}
++extern "C" void kebab_a650_gpu_cp_quarantine_locked(const KebabA650GpuOobOwnerToken*oob)
++{if(oob==&kho_native.owner)kebab_a650_gpu_oob_vm_quarantine_locked(&kvg_native.owner);}
++static int KCPNativeGate(void*cookie)
++{auto*n=(KCPAccess*)cookie;if(n!=&kcp_native || KFNativeWorker(NULL))return 95;return kebab_rpmh_gpu_cp_check_locked(&n->owner);}
++static int KCPNativeRead(void*cookie,unsigned space,uint32_t off,uint32_t*out)
++{
++ auto*n=(KCPAccess*)cookie;if(n!=&kcp_native || !out)return 22;int e=KCPNativeGate(n);if(e)return e;
++ uintptr_t base=0;
++ if(space==1 && (off==0x200 || off==0x14340 || off==0x24c48))base=kho_native.base;
++ if(!space && !(off&3u)){
++  static const uint32_t words[]={KCP_RBBM_STATUS,KCP_RBBM_STATUS3,KCP_RBBM_INT_0_STATUS,KCP_RBBM_INT_0_MASK,
++   KCP_CP_SQE_CNTL,KCP_CP_RB_RPTR,KCP_CP_RB_WPTR,KCP_CP_HW_FAULT,KCP_CP_INTERRUPT_STATUS,KCP_CP_PROTECT_STATUS,
++   KCP_CP_SQE_INSTR_BASE,KCP_CP_SQE_INSTR_BASE+1,KCP_CP_APRIV_CNTL,KCP_CP_RB_CNTL,KCP_CP_RB_BASE,KCP_CP_RB_BASE+1,
++   KCP_CP_RB_RPTR_ADDR,KCP_CP_RB_RPTR_ADDR+1,KCP_GBIF_HALT,KCP_RBBM_GBIF_HALT,KCP_RBBM_SECVID_TSB_CNTL,
++   KCP_RBBM_SECVID_TSB_TRUSTED_SIZE,KCP_RBBM_SECVID_TSB_TRUSTED_BASE,KCP_RBBM_SECVID_TSB_TRUSTED_BASE+1};
++  for(unsigned i=0;i<sizeof words/sizeof words[0];i++)if(off==words[i]*4)base=n->base;
++ }
++ if(!base)return 22;*out=*(volatile const uint32_t*)(base+off);return 0;
++}
++static void KCPNativeBarrier(void*)
++{
++#if defined(__aarch64__)
++ __asm__ volatile("dsb sy":::"memory");
++#else
++ OSMemoryBarrier();
++#endif
++}
++/* This sequence is independently bounded in the adapter as well as the core:
++ * exactly148 stores, including two distinct WPTR values, never WPTR0/retry. */
++static int KCPNativeExpectedWrite(KCPAccess*n,unsigned*space,uint32_t*off,uint32_t*value)
++{
++ unsigned i=n->write_index;*space=0;
++ if(i<11){*off=KCPHwPrefix[i].word*4;*value=KCPHwPrefix[i].value;return 0;}i-=11;
++ if(!i){*space=1;*off=0x200;*value=n->observation->receipt.SPT_control_before&~1u;return 0;}--i;
++ if(i<49){*off=KCPHwcg[i].word*4;*value=KCPHwcg[i].value;return 0;}i-=49;
++ if(!i){*space=1;*off=0x200;*value=n->observation->receipt.SPT_control_before|1u;return 0;}--i;
++ if(!i){*off=KCP_RBBM_CLOCK_CNTL*4;*value=0x8aa8aa82;return 0;}--i;
++ if(i<74){*off=KCPHwPostClock[i].word*4;*value=KCPHwPostClock[i].value;return 0;}i-=74;
++ static const KCPReg tail[]={
++  {KCP_CP_SQE_INSTR_BASE,KCP_SQE_IOVA},{KCP_CP_SQE_INSTR_BASE+1,0},
++  {KCP_CP_RB_BASE,KCP_RING_IOVA},{KCP_CP_RB_BASE+1,0},{KCP_CP_RB_CNTL,0x209},
++  {KCP_CP_RB_RPTR_ADDR,KCP_FENCE_IOVA},{KCP_CP_RB_RPTR_ADDR+1,0},{KCP_CP_SCRATCH2,0},
++  {KCP_CP_SQE_CNTL,1},{KCP_CP_RB_WPTR,KCP_INIT_WPTR},{KCP_CP_RB_WPTR,KCP_FINAL_WPTR}};
++ if(i>=sizeof tail/sizeof tail[0])return 95;*off=tail[i].word*4;*value=tail[i].value;return 0;
++}
++static int KCPNativeWrite(void*cookie,unsigned space,uint32_t off,uint32_t value)
++{
++ auto*n=(KCPAccess*)cookie;
++ if(n!=&kcp_native || !KCPNativeBound() || !n->base || !n->cpu_ready || !n->observation)return 95;
++ int e=KCPNativeGate(n);if(e)return e;unsigned s=0;uint32_t o=0,v=0;
++ e=KCPNativeExpectedWrite(n,&s,&o,&v);if(e || s!=space || o!=off || v!=value)return 95;
++ if(n->write_index==147 && (n->copy_index!=3 || n->publish_index!=2 || !n->observation->receipt.CP_ME_INIT_completed))return 95;
++ uintptr_t address=(space?kho_native.base:n->base)+off;++n->write_index;
++#if defined(__aarch64__)
++ __asm__ volatile("str %w0, [%1]":"+r"(value):"r"(address):"memory");
++#else
++ *(volatile uint32_t*)address=value;
++#endif
++ return 0;
++}
++static int KCPNativeFirmware(KCPAccess*n)
++{
++ DTEntry entry=NULL;const void *property=NULL;unsigned int bytes=0;
++ if(SecureDTLookupEntry(NULL,"/chosen",&entry)!=kSuccess || !entry ||
++ SecureDTGetProperty(entry,"kebab-gpu-sqe-firmware",&property,&bytes)!=kSuccess || !property || bytes!=31964)return 95;
++ n->firmware=(uint8_t*)IOMalloc(31964);if(!n->firmware)return ENOMEM;
++ /* One copy, then hash and consume only the private copy. No pointer lease
++  * on SecureDT; full original ADT owner measurement includes this property. */
++ memcpy(n->firmware,property,31964);uint8_t digest[32];SHA256_CTX context;
++ SHA256_Init(&context);SHA256_Update(&context,n->firmware,31964);SHA256_Final(digest,&context);
++ static const uint8_t expected[32]={0xc8,0x63,0xce,0xac,0x3a,0x82,0x3a,0xf2,0x15,0x20,0x5d,0x78,0x03,0x77,0x6b,0xfd,
++  0xc6,0x80,0x98,0xc2,0xc2,0xa5,0xd2,0xfd,0x05,0xb4,0xaa,0x77,0xcd,0x33,0x6b,0x4b};
++ uint32_t header=1,version=0;memcpy(&header,n->firmware,4);memcpy(&version,n->firmware+4,4);
++ if(memcmp(digest,expected,32) || header || (version&0xfffu)!=0x112)return 13;
++ n->firmware_verified=1;return 0;
++}
++static int KCPNativePrepareCpu(void*cookie,KebabA650CpRecord*r)
++{
++ auto*n=(KCPAccess*)cookie;if(n!=&kcp_native || !r || !n->observation || r!=&n->observation->receipt ||
++ !n->firmware || n->firmware_verified!=1 || n->cpu_ready || r->phase!=KCP_EMPTY)return 95;
++ int e=KCPNativeGate(n);if(e)return e;auto*d=&kvg_engine.backing;
++ /* Revalidate private descriptors and all existing native physical pages,
++  * including NC attributes, before opening this finite CPU-data update. */
++ for(unsigned i=0;i<6;i++){
++  const auto*p=&d->region[i];if(!p->cpu || p->cpu>UINTPTR_MAX-p->allocation_bytes)return 13;
++  for(unsigned j=0;j<i;j++){const auto*q=&d->region[j];if(p->cpu<q->cpu+q->allocation_bytes && q->cpu<p->cpu+p->allocation_bytes)return 13;}
++  if(i>=4)for(uint32_t off=0;off<p->allocation_bytes;off+=PAGE_SIZE)
++   if((pmap_cache_attributes((ppnum_t)((p->physical+off)>>PAGE_SHIFT))&VM_WIMG_MASK)!=VM_WIMG_WCOMB)return 13;
++ }
++ uint32_t sqe=*(volatile const uint32_t*)(n->base+KCP_CP_SQE_CNTL*4);
++ if((sqe!=0 && sqe!=3) || *(volatile const uint32_t*)(n->base+KCP_CP_RB_WPTR*4) ||
++ *(volatile const uint32_t*)(n->base+KCP_CP_RB_RPTR*4) || (*(volatile const uint32_t*)(n->base+KCP_RBBM_STATUS*4)&~1u))return 13;
++ memcpy((void*)d->region[2].cpu,n->firmware+4,16384);
++ memcpy((void*)d->region[3].cpu,n->firmware+4+16384,31960-16384);
++ if(memcmp((const void*)d->region[2].cpu,n->firmware+4,16384) ||
++ memcmp((const void*)d->region[3].cpu,n->firmware+4+16384,31960-16384))return 5;
++ flush_dcache((vm_offset_t)d->region[2].cpu,16384,0);flush_dcache((vm_offset_t)d->region[3].cpu,16384,0);
++ KCPNativeBarrier(n);
++ volatile uint32_t*f=(volatile uint32_t*)d->region[5].cpu;f[0]=0;f[1]=0;f[16]=KCP_SENTINEL;KCPNativeBarrier(n);
++ r->firmware_bytes=31964;r->payload_bytes=31960;r->firmware_version=0x112;r->firmware_verified=1;
++ r->split_copy_verified=1;r->NC_verified=1;n->cpu_ready=1;return KCPNativeGate(n);
++}
++static int KCPNativeCopy(void*cookie,unsigned region,uint32_t offset,const uint32_t*words,uint32_t count)
++{
++ auto*n=(KCPAccess*)cookie;if(n!=&kcp_native || !n->cpu_ready || !n->observation || !words)return 95;
++ int e=KCPNativeGate(n);if(e)return e;auto*r=&n->observation->receipt;
++ const uint32_t*expected=NULL;unsigned want_region=0,want_offset=0,want_count=0;
++ if(n->copy_index==0){expected=r->ib;want_region=1;want_count=4;}
++ if(n->copy_index==1){expected=r->ring_init;want_count=16;}
++ if(n->copy_index==2 && r->CP_ME_INIT_completed){expected=r->ring_second;want_offset=16;want_count=11;}
++ if(!expected || region!=want_region || offset!=want_offset || count!=want_count || memcmp(words,expected,count*4))return 95;
++ memcpy((void*)(kvg_engine.backing.region[region].cpu+offset*4),words,count*4);++n->copy_index;return KCPNativeGate(n);
++}
++static int KCPNativePublish(void*cookie)
++{
++ auto*n=(KCPAccess*)cookie;if(n!=&kcp_native || !n->cpu_ready || n->publish_index>=2 || n->copy_index!=n->publish_index+2)return 95;
++ int e=KCPNativeGate(n);if(e)return e;
++ for(unsigned i=0;i<2;i++)flush_dcache((vm_offset_t)kvg_engine.backing.region[i].cpu,4096,0);
++ KCPNativeBarrier(n);++n->publish_index;return KCPNativeGate(n);
++}
++static int KCPNativeReadNc(void*cookie,uint32_t offset,uint32_t*out)
++{
++ auto*n=(KCPAccess*)cookie;if(n!=&kcp_native || !n->cpu_ready || !out || (offset!=0 && offset!=4 && offset!=64))return 95;
++ int e=KCPNativeGate(n);if(e)return e;
++ *out=*(volatile const uint32_t*)(kvg_engine.backing.region[5].cpu+offset);
++#if defined(__aarch64__)
++ __asm__ volatile("dmb oshld":::"memory");
++#else
++ OSMemoryBarrier();
++#endif
++ return KCPNativeGate(n);
++}
++static int KCPNativeSnapshot(void*cookie,unsigned after)
++{
++ auto*n=(KCPAccess*)cookie;if(n!=&kcp_native || !n->observation || after>1 || KFNativeWorker(NULL))return 95;
++ return KHO_VM_Snapshot(&kvg_native.owner,after?&n->observation->vm_after:&n->observation->vm_before);
++}
++static void KCPNativeDelay(void*,unsigned us){if(us==100)IODelay(100);}
++extern "C" int kebab_a650_gpu_cp_prepare(void)
++{
++ int e=KFNativeWorker(NULL);if(e)return e;uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kcp_native_once,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return expected==2?kcp_native_result:EBUSY;
++ auto*n=&kcp_native;n->observation=(KebabA650CpObservation*)IOMalloc(sizeof *n->observation);
++ if(!n->observation){e=ENOMEM;goto done;}memset(n->observation,0,sizeof *n->observation);KebabA650CpInit(&n->observation->receipt);
++ if(!KCPNativeBound()){e=95;goto done;}
++ e=kebab_a650_gpu_cp_context_ready_locked(&kho_native.owner);if(e)goto done;
++ e=KCPNativeFirmware(n);if(e)goto done;
++ n->memory=IOMemoryDescriptor::withPhysicalAddress(0x03d00000,0x40000,kIODirectionInOut);if(!n->memory){e=ENOMEM;goto done;}
++ n->mapping=n->memory->map(kIOMapAnywhere|kIOMapInhibitCache);
++ if(!n->mapping || n->mapping->getLength()!=0x40000 || !(n->base=n->mapping->getVirtualAddress())){e=ENOMEM;goto done;}
++ {KebabA650CpOwnerIo io={{n,KCPNativeGate,KCPNativeRead,KCPNativeWrite,KCPNativeBarrier,KCPNativeDelay,KVGNativeNow,
++    KCPNativePrepareCpu,KCPNativeCopy,KCPNativePublish,KCPNativeReadNc},KCPNativeSnapshot};
++  e=kebab_rpmh_gpu_cp_first_execution(&n->owner,&kho_native.owner,&io,&n->observation->receipt);}
++done:
++ if(!n->owner.pinned){n->base=0;if(n->mapping){n->mapping->release();n->mapping=NULL;}if(n->memory){n->memory->release();n->memory=NULL;}
++  if(n->firmware){IOFree(n->firmware,31964);n->firmware=NULL;}}
++ if(n->observation){auto*r=&n->observation->receipt;r->result=(uint32_t)e;if(e&&!r->phase)r->phase=KCP_FAILED;}
++ kcp_native_result=e;__atomic_store_n(&kcp_native_once,2,__ATOMIC_RELEASE);return e;
++}
++extern "C" int kebab_a650_gpu_cp_snapshot(KebabA650CpObservation*out)
++{
++ if(!out)return EINVAL;if(__atomic_load_n(&kcp_native_once,__ATOMIC_ACQUIRE)!=2)return EAGAIN;
++ if(kcp_native.observation)memcpy(out,kcp_native.observation,sizeof *out);
++ else{memset(out,0,sizeof *out);KebabA650CpInit(&out->receipt);out->receipt.result=(uint32_t)kcp_native_result;out->receipt.phase=KCP_FAILED;}
++ return 0;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeA650CpHold.h
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_A650_CP_HOLD_H
++#define KEBAB_NATIVE_A650_CP_HOLD_H
++#include "KebabA650CpNative.h"
++static uint32_t kebab_gpu_cp_hold_state;
++static int kebab_gpu_cp_hold_result=EAGAIN;
++extern "C" void kebab_a650_gpu_cp_hold_prepare(void)
++{
++ uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kebab_gpu_cp_hold_state,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
++  printf("KEBAB GPUCP: end; result=%d; cached=1\n",expected==2?kebab_gpu_cp_hold_result:EBUSY);return;
++ }
++ int e=kebab_a650_gpu_cp_prepare();kebab_gpu_cp_hold_result=e;
++ __atomic_store_n(&kebab_gpu_cp_hold_state,2,__ATOMIC_RELEASE);
++ printf("KEBAB GPUCP: end; result=%d; cached=0\n",e);
++}
++#endif
+--- /dev/null
++++ b/bsd/dev/KebabA650CpOwner.inc
+@@ -0,0 +1,59 @@
++/* SPDX-License-Identifier: MIT */
++/* Append after actual587 OOB owner in the ONE canonical VRM unit. */
++#if defined(KERNEL) || defined(KEBAB_RPMH_KERNEL)
++#include <kern/KebabA650CpOwner.h>
++#include <kern/KebabA650CpBinding.h>
++#else
++#include "KebabA650CpOwner.h"
++#include "KebabA650CpBinding.h"
++#endif
++static KebabA650CpOwnerToken *kebab_gpu_cp_identity;
++static uint64_t kebab_gpu_cp_generation;
++static uint32_t kebab_gpu_cp_called;
++static KebabA650CpBook kebab_gpu_cp_book;
++static KebabA650CpRecord *kebab_gpu_cp_record;
++static int kebab_gpu_cp_source_bound(void)
++{unsigned any=0;for(unsigned n=0;n<32;n++)any|=KebabA650CpSourceContract[n];return KebabA650CpNativeQualified==1&&any;}
++int kebab_rpmh_gpu_cp_check_locked(const KebabA650CpOwnerToken*t)
++{
++ if(!kebab_gpu_cp_source_bound() || !__atomic_load_n(&kebab_rpmh_global_lock.busy,__ATOMIC_ACQUIRE) ||
++ !t || t!=kebab_gpu_cp_identity || !t->pinned || t->quarantined || !t->generation || t->generation!=kebab_gpu_cp_generation ||
++ t->oob!=kebab_gpu_oob_identity || kebab_gmu_root_children<5 || kebab_gpu_cp_book.quarantined || !kebab_gpu_cp_record)return 95;
++ int e=kebab_rpmh_gpu_oob_check_locked(t->oob);if(e)return e;
++ e=kebab_a650_gpu_cp_context_ready_locked(t->oob);if(e)return e;
++ return kebab_a650_gpu_cp_power_ready_locked(t->oob,kebab_gpu_cp_record->phase);
++}
++int kebab_rpmh_gpu_cp_first_execution(KebabA650CpOwnerToken*t,const KebabA650GpuOobOwnerToken*oob,
++ const KebabA650CpOwnerIo*io,KebabA650CpRecord*out)
++{
++ int e=95,pinned=0;uint64_t begin=0,end=0;
++ if(!out)return 22;KebabA650CpInit(out);
++ if(!kebab_gpu_cp_source_bound()){out->result=95;out->phase=KCP_FAILED;return 95;}
++ if(!t || !oob || !io || !io->core.gate || !io->core.read32 || !io->core.write32 || !io->core.barrier ||
++ !io->core.delay_us || !io->core.now_us || !io->core.prepare_cpu || !io->core.copy_words || !io->core.publish_commands || !io->core.read_nc || !io->snapshot_vm){out->result=22;out->phase=KCP_FAILED;return 22;}
++ if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL)){out->result=16;out->phase=KCP_FAILED;return 16;}
++ if(t->pinned || t->generation || kebab_gpu_cp_identity || kebab_gpu_cp_called || kebab_gpu_cp_generation==UINT64_MAX){e=16;goto done;}
++ if(oob!=kebab_gpu_oob_identity || !oob->pinned || oob->quarantined){e=95;goto done;}
++ e=kebab_rpmh_gpu_oob_check_locked(oob);if(e)goto done;
++ e=kebab_a650_gpu_cp_context_ready_locked(oob);if(e)goto done;
++ e=kebab_a650_gpu_cp_power_ready_locked(oob,KCP_EMPTY);if(e)goto done;
++ if(kebab_gmu_root_children==UINT32_MAX){e=75;goto done;}
++ /* Fifth actual Root child pins the existing OOB/VM/BO chain. No new BO
++  * holder, namespace or table change; GMU bytes remain unchanged.
++  * The new finite contract opens only command/SQE data CPU writes while
++  * the CP is freshly quiet, then cleans before first fetch. */
++ t->oob=oob;t->generation=++kebab_gpu_cp_generation;t->pinned=1;t->quarantined=0;
++ kebab_gpu_cp_identity=t;kebab_gpu_cp_record=out;kebab_gpu_cp_called=1;++kebab_gmu_root_children;pinned=1;
++ begin=io->core.now_us(io->core.cookie);
++ e=io->snapshot_vm(io->core.cookie,0);
++ if(!e){KebabA650CpContext context={&io->core,&kebab_gpu_cp_book,out,0,0,0};e=KebabA650CpFirstExecution(&context,1,oob->vm->epoch);}
++ {int observed=io->snapshot_vm(io->core.cookie,1);if(!e&&observed)e=observed;if(!e)out->namespace_unchanged=1;}
++ if(!e)e=kebab_rpmh_gpu_cp_check_locked(t);
++ end=io->core.now_us(io->core.cookie);out->elapsed_us=end>=begin?end-begin:UINT64_MAX;
++ if(!e&&out->elapsed_us>=500000)e=110;
++done:
++ if(e){out->primary_error=(uint32_t)e;out->phase=pinned?KCP_QUARANTINED:KCP_FAILED;
++  if(pinned){t->quarantined=1;kebab_gpu_cp_book.quarantined=1;out->quarantined=1;out->held=0;
++   kebab_a650_gpu_cp_quarantine_locked(oob);kebab_gmu_boot_quarantine((unsigned)e);}}
++ out->result=(uint32_t)e;__atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return e;
++}
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>36)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>37)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- a/bsd/dev/kebab_rpmh_vrm.c
++++ b/bsd/dev/kebab_rpmh_vrm.c
+@@ -703,3 +703,5 @@
+ #include "KebabA650GpuVmOwner.inc"
+ 
+ #include "KebabA650GpuOobOwner.inc"
++
++#include "KebabA650CpOwner.inc"
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -311,6 +311,10 @@
+ #define UD_GPU_OOB 61u
+ extern void kebab_a650_gpu_oob_hold_prepare(void);
+ /* END A650_GPUOOB_COMMAND */
++/* BEGIN A650_GPUCP_COMMAND */
++#define UD_GPU_CP 62u
++extern void kebab_a650_gpu_cp_hold_prepare(void);
++/* END A650_GPUCP_COMMAND */
+ extern void kebab_gmu_firmware_prepare(void);
+ extern void kebab_gmu_hfi_prepare(void);
+ /* END FUTURE_GMU_COMMAND_IDS */
+@@ -1520,6 +1524,9 @@
+ /* BEGIN A650_GPUOOB_DECODE */
+     if(received==7 && !memcmp(buf,"GPUOOB\n",7))return UD_GPU_OOB;
+ /* END A650_GPUOOB_DECODE */
++/* BEGIN A650_GPUCP_DECODE */
++    if(received==6 && !memcmp(buf,"GPUCP\n",6))return UD_GPU_CP;
++/* END A650_GPUCP_DECODE */
+ /* END FUTURE_GMU_COMMAND_DECODE */
+     if(received==8 && !memcmp(buf,"GPUSMMU\n",8))return UD_GPU_SMMU_OBSERVE;
+     if(received!=9)return 0;
+@@ -1975,6 +1982,10 @@
+ 	} else if (command == UD_GPU_OOB) {
+ 		kebab_a650_gpu_oob_hold_prepare();
+ /* END A650_GPUOOB_DISPATCH */
++/* BEGIN A650_GPUCP_DISPATCH */
++	} else if (command == UD_GPU_CP) {
++		kebab_a650_gpu_cp_hold_prepare();
++/* END A650_GPUCP_DISPATCH */
+ /* END FUTURE_GMU_COMMAND_DISPATCH */
+ 	} else if (command == UD_GPU_SMMU_OBSERVE) {
+ 		kebab_gpu_smmu_observe();

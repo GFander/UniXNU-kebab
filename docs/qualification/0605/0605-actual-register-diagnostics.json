@@ -1,0 +1,369 @@
+{
+  "version": "0605",
+  "physical": true,
+  "CAP38_sha256": "8558766d5dadfed7961da071ea41ff800c33805bb0add722a28c6c2cd72aa479",
+  "A650_FIRST_RENDER": "FAIL",
+  "diagnostics": [
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "GRAS_2D_BLIT_CNTL",
+      "word": "0x8400",
+      "observed": "0xf03080",
+      "requested_last_value": "0xf03080",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "GRAS_2D_DST_TL",
+      "word": "0x8405",
+      "observed": "0x100010",
+      "requested_last_value": "0x100010",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "GRAS_2D_DST_BR",
+      "word": "0x8406",
+      "observed": "0x1f001f",
+      "requested_last_value": "0x1f001f",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "RB_2D_BLIT_CNTL",
+      "word": "0x8c00",
+      "observed": "0xf03080",
+      "requested_last_value": "0xf03080",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "RB_2D_PIXEL_CNTL",
+      "word": "0x8c01",
+      "observed": "0x0",
+      "requested_last_value": "0x0",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "RB_2D_DST_INFO",
+      "word": "0x8c17",
+      "observed": "0x30",
+      "requested_last_value": "0x30",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "RB_2D_DST_BASE_LO",
+      "word": "0x8c18",
+      "observed": "0x90010100",
+      "requested_last_value": "0x90010100",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "RB_2D_DST_BASE_HI",
+      "word": "0x8c19",
+      "observed": "0x0",
+      "requested_last_value": "0x0",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "RB_2D_DST_PITCH",
+      "word": "0x8c1a",
+      "observed": "0x4",
+      "requested_last_value": "0x4",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "RB_2D_CLEAR_COLOR_R",
+      "word": "0x8c2c",
+      "observed": "0xff",
+      "requested_last_value": "0xff",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "RB_2D_CLEAR_COLOR_G",
+      "word": "0x8c2d",
+      "observed": "0xff",
+      "requested_last_value": "0xff",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "RB_2D_CLEAR_COLOR_B",
+      "word": "0x8c2e",
+      "observed": "0x0",
+      "requested_last_value": "0x0",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "RB_2D_CLEAR_COLOR_A",
+      "word": "0x8c2f",
+      "observed": "0x0",
+      "requested_last_value": "0x0",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "SP_2D_DST_FORMAT",
+      "word": "0xacc0",
+      "observed": "0xf180",
+      "requested_last_value": "0xf180",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "RB_DBG_ECO_CNTL",
+      "word": "0x8e04",
+      "observed": "0x4100000",
+      "requested_last_value": "0x4100000",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "RB_CCU_CNTL",
+      "word": "0x8e07",
+      "observed": "0x18000000",
+      "requested_last_value": "0x18000000",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "RB_MODE_CNTL",
+      "word": "0x8811",
+      "observed": "0x10",
+      "requested_last_value": "0x10",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 0,
+      "captured": true,
+      "register": "GRAS_MODE_CNTL",
+      "word": "0x8110",
+      "observed": "0x2",
+      "requested_last_value": "0x2",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "GRAS_2D_BLIT_CNTL",
+      "word": "0x8400",
+      "observed": "0x0",
+      "requested_last_value": "0xf03080",
+      "equal_to_requested": false,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "GRAS_2D_DST_TL",
+      "word": "0x8405",
+      "observed": "0x0",
+      "requested_last_value": "0x100010",
+      "equal_to_requested": false,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "GRAS_2D_DST_BR",
+      "word": "0x8406",
+      "observed": "0x0",
+      "requested_last_value": "0x1f001f",
+      "equal_to_requested": false,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "RB_2D_BLIT_CNTL",
+      "word": "0x8c00",
+      "observed": "0x0",
+      "requested_last_value": "0xf03080",
+      "equal_to_requested": false,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "RB_2D_PIXEL_CNTL",
+      "word": "0x8c01",
+      "observed": "0x0",
+      "requested_last_value": "0x0",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "RB_2D_DST_INFO",
+      "word": "0x8c17",
+      "observed": "0x0",
+      "requested_last_value": "0x30",
+      "equal_to_requested": false,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "RB_2D_DST_BASE_LO",
+      "word": "0x8c18",
+      "observed": "0x0",
+      "requested_last_value": "0x90014100",
+      "equal_to_requested": false,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "RB_2D_DST_BASE_HI",
+      "word": "0x8c19",
+      "observed": "0x0",
+      "requested_last_value": "0x0",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "RB_2D_DST_PITCH",
+      "word": "0x8c1a",
+      "observed": "0x0",
+      "requested_last_value": "0x4",
+      "equal_to_requested": false,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "RB_2D_CLEAR_COLOR_R",
+      "word": "0x8c2c",
+      "observed": "0x0",
+      "requested_last_value": "0xff",
+      "equal_to_requested": false,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "RB_2D_CLEAR_COLOR_G",
+      "word": "0x8c2d",
+      "observed": "0x0",
+      "requested_last_value": "0xff",
+      "equal_to_requested": false,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "RB_2D_CLEAR_COLOR_B",
+      "word": "0x8c2e",
+      "observed": "0x0",
+      "requested_last_value": "0x0",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "RB_2D_CLEAR_COLOR_A",
+      "word": "0x8c2f",
+      "observed": "0x0",
+      "requested_last_value": "0x0",
+      "equal_to_requested": true,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "SP_2D_DST_FORMAT",
+      "word": "0xacc0",
+      "observed": "0x0",
+      "requested_last_value": "0xf180",
+      "equal_to_requested": false,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "RB_DBG_ECO_CNTL",
+      "word": "0x8e04",
+      "observed": "0x0",
+      "requested_last_value": "0x4100000",
+      "equal_to_requested": false,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "RB_CCU_CNTL",
+      "word": "0x8e07",
+      "observed": "0x0",
+      "requested_last_value": "0x18000000",
+      "equal_to_requested": false,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "RB_MODE_CNTL",
+      "word": "0x8811",
+      "observed": "0x0",
+      "requested_last_value": "0x10",
+      "equal_to_requested": false,
+      "unchanged_CPU_sentinel": false
+    },
+    {
+      "pass_index": 1,
+      "captured": false,
+      "register": "GRAS_MODE_CNTL",
+      "word": "0x8110",
+      "observed": "0x0",
+      "requested_last_value": "0x2",
+      "equal_to_requested": false,
+      "unchanged_CPU_sentinel": false
+    }
+  ],
+  "scope": "Actual standard CP_REG_TO_MEM copied values. Equality only describes requested command words, not an unconditional whole-register hardware validity gate. Unsubmitted pass values are not hardware measurements."
+}

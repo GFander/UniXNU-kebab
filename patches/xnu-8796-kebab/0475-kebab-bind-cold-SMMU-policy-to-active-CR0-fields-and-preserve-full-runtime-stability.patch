@@ -1,0 +1,57 @@
+--- a/osfmk/kern/KebabGpuFirstAttachCore.h
++++ b/osfmk/kern/KebabGpuFirstAttachCore.h
+@@ -164,6 +164,15 @@
+  return e?e:KFCheck(a,KF_ACCESS|KF_COLD|KF_DRAINED);
+ }
+ #define KF_TRY(x) do{int kf_e=(x);if(kf_e)return kf_e;}while(0)
++/* Arm IHI0062D.c9.6.3: MemAttr[19:16] resets UNKNOWN and is inactive
++ * while MTCFG[20]==0. Only that inactive cold-profile field may vary.
++ * Every other bit, active MemAttr and complete same-boot stability stay
++ * exact. This function neither writes CR0 nor authorizes bypass. */
++static int KFColdCR0Matches(uint32_t actual,uint32_t expected)
++{
++ if((actual|expected)&0x00100000u)return actual==expected;
++ return !((actual^expected)&~0x000f0000u);
++}
+ static int KFSnapshot(KFFirstAttach *a,KGDiscovery *s)
+ {
+  memset(s,0,sizeof *s);KF_TRY(KFR32(a,0x20,&s->id0));KF_TRY(KFR32(a,0x24,&s->id1));KF_TRY(KFR32(a,0x28,&s->id2));
+@@ -176,7 +185,7 @@
+  s->stride=4096;s->cb_base=0x8000;s->pa_bits=widths[(s->id2>>4)&15];s->ipa_bits=widths[s->id2&15];
+  uint32_t ubs=(s->id2>>8)&15;s->va_bits=ubs<6?widths[ubs]:0;if(s->va_bits<32)return KG_UNSUPPORTED;
+  s->read_mask=((1u<<s->num_cb)-1)&31u;
+- KF_TRY(KFR32(a,0,&s->cr0));if(s->cr0!=a->policy.cr0 || (s->cr0&9))return KG_OWNERSHIP;
++ KF_TRY(KFR32(a,0,&s->cr0));if(!KFColdCR0Matches(s->cr0,a->policy.cr0) || (s->cr0&9))return KG_OWNERSHIP;
+  KF_TRY(KFR32(a,0x48,&s->gfsr));for(unsigned j=0;j<3;j++)KF_TRY(KFR32(a,0x50+4*j,&s->gfsynr[j]));
+  for(unsigned i=0;i<s->num_streams;i++){KF_TRY(KFR32(a,0x800+4*i,&s->stream[i].smr));KF_TRY(KFR32(a,0xc00+4*i,&s->stream[i].s2cr));}
+  for(unsigned i=0;i<5;i++)if(s->read_mask&(1u<<i)){
+@@ -400,7 +409,7 @@
+  e=o->map(o->cookie);if(e)return KFFinish(a,e);a->mapped=1;e=KFSnapshot(a,&a->before);if(e)return KFFinish(a,e);
+  e=KFValidateSnapshot(a,&a->before);if(e)return KFFinish(a,e);a->saved=1;
+  e=KFSnapshot(a,&a->work);if(e)return KFFinish(a,e);e=KFValidateSnapshot(a,&a->work);if(e)return KFFinish(a,e);
+- if(!p->initialize && memcmp(&a->before,&a->work,sizeof a->before))return KFFinish(a,KG_OWNERSHIP);
++ if(a->before.cr0!=a->work.cr0 || (!p->initialize && memcmp(&a->before,&a->work,sizeof a->before)))return KFFinish(a,KG_OWNERSHIP);
+  /* Publish is permanent pin in the current real backing implementation.
+   * Mark uncertainty before calling: failure cannot trigger unpublish/free. */
+  a->publish_attempted=1;e=o->backing_publish(o->cookie);if(e)return KFFinish(a,e);a->published=1;
+--- a/iokit/Kernel/arm/KebabA650GpuVmCore.h
++++ b/iokit/Kernel/arm/KebabA650GpuVmCore.h
+@@ -43,7 +43,7 @@
+  p->policy.kernel_smr || p->policy.user_smr!=1 || p->token.kernel_smr || p->token.user_smr!=1 ||
+  !p->published || !p->backing_held || !p->held || !p->receipt.tlb_polls || !p->saved ||
+  p->before.num_cb!=5 || p->before.num_s2 || p->before.gfsr || p->before.num_streams!=6 ||
+- p->before.cr0!=0x260406 || p->before.id0!=0x4c017e06 || p->before.id1!=0x20000005 || p->before.id2!=0x5511 ||
++ !KFColdCR0Matches(p->before.cr0,0x260406) || p->before.id0!=0x4c017e06 || p->before.id1!=0x20000005 || p->before.id2!=0x5511 ||
+  KFFirstRunCheckPrivate(p,p->token.epoch))return KG_OWNERSHIP;
+  /* Historical globals were retired by the original cold VMID-wide ALL.
+   * All later owned table providers use nG; external mutations are blocked
+@@ -108,8 +108,8 @@
+ {return a->cbar==b->cbar&&a->cba2r==b->cba2r&&a->sctlr==b->sctlr&&a->actlr==b->actlr&&a->tcr==b->tcr&&a->tcr2==b->tcr2&&a->ttbr0==b->ttbr0&&a->ttbr1==b->ttbr1&&a->mair0==b->mair0&&a->mair1==b->mair1;}
+ static int KVGValidate(KVGEngine*a,const KGDiscovery*s,unsigned after)
+ {
+- if(s->cr0!=0x260406 || s->gfsr || s->num_cb!=5 || s->num_streams!=6)return KG_OWNERSHIP;
+  const auto*p=a->parent;
++ if(s->cr0!=p->before.cr0 || s->gfsr || s->num_cb!=5 || s->num_streams!=6)return KG_OWNERSHIP;
+  if(!KVGConfigEqual(&s->cb[0],&p->work.cb[0]) || s->stream[0].smr!=0x84000005 || (s->stream[0].s2cr&0x030300ffu) ||
+  s->stream[1].smr!=0x84000004 || (s->stream[1].s2cr&0x030300ffu)!=0x20000)return KG_OWNERSHIP;
+  for(unsigned i=0;i<5;i++)if(KFContextFaultBits(s->cb[i].fsr))return KG_FAULT;

@@ -1,0 +1,47 @@
+{
+  "passed": true,
+  "physical_test": false,
+  "source_payload_version": "0605",
+  "source_payload_sha256": "69c65f29f1cd89dd793f9bc61ec70ef1b48d496fa85d7900e30c15a2219c9ce5",
+  "transformed_payload_sha256": "3e5d5e512ce78aa302f08d02dfc71d4d59ca844184f32be6cb73f0c6c43ebfc6",
+  "final_payload_sha256": "7a461f88a1750491af8bb0fd3b4c915a679307858897fbf81db2c0b9a4739bf0",
+  "negative_refusals": 4,
+  "unrelated_FAT_and_ADT_exact": true,
+  "full_static_and_runtime_ADT_hash_changed": true,
+  "proof": {
+    "passed": true,
+    "firmware_prefix_sha256": "f2933aa0173184a1cdbc9af6187416678b9a212e0e141217b08554660ba67bd2",
+    "policy_sha256": "08837bfb078a0fded8cbdd484c54fa5cfb85e432d1c6a9de9a4caefd8f6d20e0",
+    "loader_sha256": "83cb2b16a4df59f9168455d5f8dc4d96a66af3d14009350d02166af408367421",
+    "exclusions": [
+      "owner-boot-manifest",
+      "boot-manifest-hash",
+      "owner-boot-measurement"
+    ],
+    "new_exclusions": [],
+    "final_payload_sha256": "7a461f88a1750491af8bb0fd3b4c915a679307858897fbf81db2c0b9a4739bf0",
+    "final_ADT_sha256": "6ac67fe3ea5e423877ab9a7a36e6715ae6e25540e080fe077478253836b7f20f",
+    "stable_identity": true,
+    "full_ADT_measured": true,
+    "physical_test": false,
+    "original_static_ADT_sha256": "cb83c51c5332a1cb60cd5f530cb8fc6d9ab4d0710bf851e39a7f38b50a717eaf",
+    "kernel_runtime_ADT_sha256": "efb1c7de8b6421d19fc563a3f3fbae85a94a663fd7865638e757a418df233a51",
+    "retained_original_seed_sha256": "eaf5f3bda25f44ea11ae881bb40db378ec5aab55160a28e2153dde95654cf77a",
+    "original_seed_bytes_preserved": true,
+    "runtime_component": "adt-after-kernel-random-seed-wipe",
+    "runtime_contract": "Exact64B PE_get_random_seed zeroing, complete current tree remains measured",
+    "ZAP_inputs": {
+      "kebab-gpu-zap-metadata": {
+        "bytes": 6860,
+        "sha256": "e2def9eb448466bdc345573d53112ecf1f22ca245eb8d2a2903ecda78e431b85"
+      },
+      "kebab-gpu-zap-load": {
+        "bytes": 1676,
+        "sha256": "a415e5452fa8f597670a6e51010e97bfabca7d20fbce8044caed64d9d5873113"
+      }
+    },
+    "ZAP_inputs_full_static_and_runtime_owner_measured": true,
+    "ZAP_authentication": "NOT_RUN/UNKNOWN"
+  },
+  "module_sha256": "8d3eb131f82611247ddf6cec90ed76141598fcfd866b467133721e057d021876"
+}

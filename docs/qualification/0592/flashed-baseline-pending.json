@@ -1,0 +1,56 @@
+{
+  "version": "0592",
+  "recorded": "2026-11-04T13:41:41.373386+08:00",
+  "state": "Flashed boot_b and entered XNU; original300s safety pending; one post waits for real capture termination.",
+  "git_head": "d5c9c62db752f225a288b88959d3754edc94138a",
+  "branch": "gpu/adreno650-20261103",
+  "common": 446,
+  "host": 4,
+  "source_files": 5456,
+  "flash": {
+    "version": "0592",
+    "capture_pid": 85380,
+    "boot_sha256": "849381d83c3266dabf1f11bbde6dc2743332fd29d274151fc27d979482bf8b33",
+    "kernel_sha256": "91d4ace690385fde17cd241b696ad629db60152deaeaf5f14fb23eb4aa82fde7"
+  },
+  "jobs": {
+    "collect-awake-window.py": {
+      "pid": 11836,
+      "log": "D:\\LOS\\HiOS\\boot123-20261029\\native-dpu-0592\\collect-awake-window-output.txt",
+      "started": 1793770697.386445
+    },
+    "finalize-baseline.py": {
+      "pid": 85456,
+      "log": "D:\\LOS\\HiOS\\boot123-20261029\\native-dpu-0592\\finalize-baseline-output.txt",
+      "started": 1793770697.3945417
+    }
+  },
+  "lowdma_post": "post-baseline-lowdma-once.py",
+  "post_exec_session": 46871,
+  "old_current_exec_session": 34249,
+  "physical_lowDMA": "NOT_RUN",
+  "physical_PAS": "NOT_RUN",
+  "A650_FIRST_RENDER": "FAIL0591; new0592 render NOT_RUN",
+  "owner_present": true,
+  "owner_manual_0591": "PASS display, tap open app, return-home gesture",
+  "scope": "Host/newEFI boot prerequisite. LowDMA ownership/measurement needs actual CAP20; no NC/PAS/secure-exit or render claim.",
+  "evidence": {
+    "flash-stage-0592.py": "f0125d51eeaa2f48bc5c8933adaec0e560b57ccbaf856bb85d5258df445f66f8",
+    "flash-preflight-0592-v2.py": "b02a0e65235351b44122ddc25d53e89b047477a0df83cb6e76e75b408845f984",
+    "0592-flash.json": "d3d5f7edc1c5b299643088739b0a792f3f0013fbe1101993e79e5fa4c62db84f",
+    "native-dpu-0592\\flash-regression-output.log": "8d9f6790c7b35dd8c2d2999abccc7292dcc74dc1df9b45f6b0358274684c55d3",
+    "native-dpu-0592\\guard-ca.py": "bb0c3288ed2b1a1480ec8acae3f42506038afee9bfc13c81af78b195d8169c50",
+    "native-dpu-0592\\post-baseline-lowdma-once.py": "768d4734f64e16395e454ab155afa6b5363f5e79a80e8a001e9e896d4018115a",
+    "native-dpu-0592\\decode-measured-lowdma.py": "0bb698ea5b4702429970b051a96c5ebc5e8fd1694b8abb032d4cf8f4f0fe3cca",
+    "native-dpu-0592\\measured-lowdma-decoder-host-qualified.json": "bf8800af69f0a11754904c0ac27c2582a8e07c535b8997dacf52bad155badd1b",
+    "native-dpu-0592\\runtime-source-binding-qualified.json": "f0b7dd90b5c035648ad33c5b2cf968c206d92d12430e6c041196fe341e52fab8",
+    "native-dpu-0592\\lowdma-adt-package-qualified.json": "ec9cc7065a12b2a4236457446bec13d18fe1eca9d0f71c7738bcf542ee31b19b",
+    "native-dpu-0592\\lowdma-retime-package-qualified.json": "b03114895bfd3ee1dc27cc21023a36ea12d682fce7beb2ac03a85acddbac25cf",
+    "native-dpu-0592\\owner-returned-manual-0591.json": "87f389f5737654f45dbd79778be23357d60b628fe055b8a2511a082b5d3a1522",
+    "gpu-prereq-20261103\\gpu-zap-0592\\lowdma-adt-host-qualified.json": "d6566c567843e47c7e496d84d030ed7893633df6aa4a0e0689bdb85f67e39af6",
+    "gpu-prereq-20261103\\gpu-zap-0592\\lowdma_adt.py": "8464fa9dd39b25ec5131a6e876ce2b70022091fbfe47717859965db79d21d7b9",
+    "gpu-prereq-20261103\\gpu-zap-0592\\flash-preflight-0592-v5.log": "f946d1307257891c3600767f8cc1e995432e156230728dcad5fba9fef355c3fa",
+    "gpu-prereq-20261103\\gpu-zap-0592\\flash-regression-started-0592.json": "b0aa4fbb47d36fde37f3bf370dc221b11bd53e3a31ba9f491ba815b27eccc4cc",
+    "gpu-prereq-20261103\\gpu-zap-0592\\flash-regression-terminal-0592.json": "7c0d620d3198dcf09b6ea46876729b16586e1ed36e5c695594f8a4d71efe70c0"
+  }
+}

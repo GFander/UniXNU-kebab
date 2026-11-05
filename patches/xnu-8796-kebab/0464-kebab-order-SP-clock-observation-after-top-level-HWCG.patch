@@ -1,0 +1,31 @@
+--- a/osfmk/kern/KebabA650CpBinding.h
++++ b/osfmk/kern/KebabA650CpBinding.h
+@@ -1,9 +1,9 @@
+-/* Finite0588 CP execution only; native/runtime/boot_b guards still required. */
++/* Finite0589 clock-order CP candidate; new native/runtime/boot_b guards required. */
+ /* SPDX-License-Identifier: MIT */
+ #ifndef KEBAB_A650_CP_BINDING_H
+ #define KEBAB_A650_CP_BINDING_H
+ /* CLOSED: no native CPU-buffer mutation or MMIO until exact finite review,
+  * actual owner/callback tests, SDK/build, measured SQE and runtime gates. */
+ enum {KebabA650CpNativeQualified=1};
+-static const unsigned char KebabA650CpSourceContract[32]={0x52,0x51,0x8e,0xaa,0x3e,0x39,0xea,0x27,0x7d,0x50,0xd7,0x6f,0x95,0x58,0xda,0x75,0x6f,0xe1,0x1f,0xad,0xbc,0x7d,0x0d,0x64,0x1a,0x27,0xcb,0xb3,0xbe,0x35,0x8d,0x34};
++static const unsigned char KebabA650CpSourceContract[32]={0x94,0xb5,0x9f,0xe4,0x5f,0x7f,0x26,0x36,0x96,0x63,0x4a,0xd8,0x99,0xbc,0xe9,0x85,0xb3,0x7c,0x8f,0xf2,0x6b,0x9c,0xf1,0xcf,0xb7,0x58,0xf5,0xaf,0xf2,0x58,0xc8,0x1d};
+ #endif
+--- a/osfmk/kern/KebabA650CpCore.h
++++ b/osfmk/kern/KebabA650CpCore.h
+@@ -163,9 +163,12 @@
+  KCP_TRY(KCPRead(c,1,0x200,&r->SPT_control_before));
+  KCP_TRY(KCPWrite(c,1,0x200,r->SPT_control_before&~1u));
+  KCP_TRY(KCPProgram(c,KCPHwcg,sizeof KCPHwcg/sizeof KCPHwcg[0]));
+- KCP_TRY(KCPWrite(c,1,0x200,r->SPT_control_before|1u));KCP_TRY(KCPRead(c,1,0x200,&r->SPT_control_after));
++ KCP_TRY(KCPWrite(c,1,0x200,r->SPT_control_before|1u));
++ /* Linux/alioth enable top-level HWCG before observing SP control. Keep
++  * the exact strict readback, power/fault gates and all148 original stores. */
++ KCP_TRY(KCPGpuWrite(c,KCP_RBBM_CLOCK_CNTL,0x8aa8aa82));
++ KCP_TRY(KCPRead(c,1,0x200,&r->SPT_control_after));
+  if(r->SPT_control_after!=(r->SPT_control_before|1u)){e=5;goto failed;}
+- KCP_TRY(KCPGpuWrite(c,KCP_RBBM_CLOCK_CNTL,0x8aa8aa82));
+  KCP_TRY(KCPRead(c,1,0x14340,&v));if(v&0xc0u){e=11;goto failed;}
+  KCP_TRY(KCPProgram(c,KCPHwPostClock,sizeof KCPHwPostClock/sizeof KCPHwPostClock[0]));
+  KCP_TRY(KCPGpuWrite(c,KCP_CP_SQE_INSTR_BASE,KCP_SQE_IOVA));KCP_TRY(KCPGpuWrite(c,KCP_CP_SQE_INSTR_BASE+1,0));

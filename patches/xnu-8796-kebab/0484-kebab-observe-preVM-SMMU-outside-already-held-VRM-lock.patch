@@ -1,0 +1,63 @@
+--- a/iokit/Kernel/arm/KebabNativeA650ZapAuth.h
++++ b/iokit/Kernel/arm/KebabNativeA650ZapAuth.h
+@@ -96,6 +96,25 @@
+  if(kza2_ranges(&inventory,10))return 95;
+  const uint64_t start=mach_absolute_time();
+  int error=kpr_low_pages(&kza2_nc,&inventory,start);if(error)return error;
++ if(inventory.checked_pages!=260 || inventory.checked_pairs!=45 || !kf_native.backing.generation)return 95;
++ *p={kza2_nc.image,kza2_nc.metadata,kza2_nc.image_bytes,kza2_nc.metadata_bytes,1,kf_native.backing.generation,0,0,10,45,260,0,32,0x1ff};
++ if(e->prevm_checks && memcmp(ranges,kza2_gmu_ranges,sizeof ranges))return 95;
++ memcpy(kza2_gmu_ranges,ranges,sizeof ranges);
++ kzs_hash(inventory.range,10*sizeof(inventory.range[0]),e->ranges_sha256[0]);
++ e->checked_pages=inventory.checked_pages;
++ return 0;
++}
++/* KFSnapshot checks the real cold owner on every read. Its original
++ * check acquires VRM globalbusy, so call it only AFTER the outer canonical
++ * wrapper has released that lock. The retained parent pin and separate PAS
++ * namespace exclusion stay held throughout both complete snapshots. */
++static int kza2_prevm_snapshots(void)
++{
++ if(kza2_worker() || !kza2_evidence || !kza2_evidence->parent_pinned ||
++  kf_pas13_frozen || !kf_pas13_busy || kza2_namespace_cookie!=UINT64_MAX ||
++  __atomic_load_n(&kf_namespace.slot[1],__ATOMIC_ACQUIRE) ||
++  KFNamespaceCheckPrivate(&kf_namespace,&kf_attachment.token))return 95;
++ auto *e=kza2_evidence;int error=0;
+  error=KFSnapshot(&kf_attachment,&e->smmu[0]);if(error)return error;
+  error=KFSnapshot(&kf_attachment,&e->smmu[1]);if(error)return error;
+  error=kza2_unfaulted(&e->smmu[0],&e->smmu[1]);if(error)return error;
+@@ -105,13 +124,9 @@
+     memcmp(s->stream,kf_attachment.work.stream,6*sizeof(KGStream)))return 95;
+   for(unsigned i=0;i<5;i++)if(!KVGConfigEqual(&s->cb[i],&kf_attachment.work.cb[i]))return 95;
+  }
+- if(inventory.checked_pages!=260 || inventory.checked_pairs!=45 || !kf_native.backing.generation)return 95;
+- *p={kza2_nc.image,kza2_nc.metadata,kza2_nc.image_bytes,kza2_nc.metadata_bytes,1,kf_native.backing.generation,0,0,10,45,260,2,32,0x1ff};
+- if(e->prevm_checks && memcmp(ranges,kza2_gmu_ranges,sizeof ranges))return 95;
+- memcpy(kza2_gmu_ranges,ranges,sizeof ranges);
+- kzs_hash(inventory.range,10*sizeof(inventory.range[0]),e->ranges_sha256[0]);
+- ++e->prevm_checks;e->checked_pages=inventory.checked_pages;
+- return 0;
++ if(kza2_worker() || !kf_pas13_busy || kza2_namespace_cookie!=UINT64_MAX ||
++  KFNamespaceCheckPrivate(&kf_namespace,&kf_attachment.token))return 95;
++ e->receipt.before.quiet_samples=2;++e->prevm_checks;return 0;
+ }
+ extern "C" int kebab_a650_zap_postcp_locked(unsigned final)
+ {
+@@ -179,6 +194,7 @@
+  if(cold!=&kf_native.cold || kza2_epoch!=1)return 95;
+  error=kebab_rpmh_gpu_zap_prevm(cold,kza2_epoch,1);if(error)return error;
+  kza2_evidence->parent_pinned=1;
++ error=kza2_prevm_snapshots();if(error)return error;
+  kzs_hash((const void *)kza2_nc.metadata_va,0x4000,kza2_evidence->metadata_before_sha256);
+  kzs_hash((const void *)kza2_nc.image_va,0x100000,kza2_evidence->image_before_sha256);
+  return memcmp(kza2_evidence->metadata_before_sha256,stage.staged_metadata_sha256,32) ||
+@@ -189,7 +205,8 @@
+ {
+  if(kza2_worker() || proof!=&kza2_evidence->receipt.before ||
+   !kebab_scm_transaction_shared_safe(&kza2_scm))return 95;
+- return kebab_rpmh_gpu_zap_prevm(&kf_native.cold,kza2_epoch,0);
++ int error=kebab_rpmh_gpu_zap_prevm(&kf_native.cold,kza2_epoch,0);
++ return error?error:kza2_prevm_snapshots();
+ }
+ static int kza2_invoke(void *,unsigned index,const KebabPasRegs *request,KebabPasResult *out,uint32_t *guard)
+ {

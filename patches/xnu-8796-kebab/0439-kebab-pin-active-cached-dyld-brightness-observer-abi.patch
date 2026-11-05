@@ -1,0 +1,23 @@
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -656,6 +656,8 @@
+     printf("KEBAB BACKLIGHT DLERROR: tid=%llu unconsumed=%u text=%s; original retained TLS text, readonly two-read agreement\n", tid, valid, text);
+     return 1;
+ }
++/* The active dyld is the original cache image at1a4610000. Its UUID
++ * load command is at688; the disk bootstrap image has it at698. */
+ static void
+ kebab_brightness_dyld_report(task_t task, vm_map_t map)
+ {
+@@ -665,9 +667,9 @@
+     if (!kebab_plugin_user_copy(map, 0x180000058ULL, uuid, sizeof(uuid)) || memcmp(uuid, cache_uuid, 16) ||
+         !kebab_ca_u64(map, 0x1e1d345c8ULL, &api) || !api || api > UINT64_MAX - 0x330 ||
+         !kebab_ca_u64(map, api, &vtable) || !vtable || vtable > UINT64_MAX - 0x88 ||
+-        !kebab_ca_u64(map, vtable + 0x80, &method) || method < 0x3c698 ||
++        !kebab_ca_u64(map, vtable + 0x80, &method) || method != 0x1a464c698ULL ||
+         ((base = method - 0x3c698) & 0x3fff) ||
+-        !kebab_plugin_user_copy(map, base + 0x698, uuid, sizeof(uuid)) || memcmp(uuid, dyld_uuid, 16) ||
++        !kebab_plugin_user_copy(map, base + 0x688, uuid, sizeof(uuid)) || memcmp(uuid, dyld_uuid, 16) ||
+         !kebab_ca_u64(map, method, &code) || code != 0xa9014ff4d100c3ffULL ||
+         !kebab_ca_u64(map, method + 0x10, &code) || code != 0xb4000441f9419401ULL ||
+         !kebab_ca_u64(map, api + 0x328, &key) || !key || key >= 512 ||

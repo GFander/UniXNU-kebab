@@ -1,0 +1,622 @@
+--- a/bsd/dev/KebabA650CpOwner.inc
++++ b/bsd/dev/KebabA650CpOwner.inc
+@@ -57,3 +57,43 @@
+    kebab_a650_gpu_cp_quarantine_locked(oob);kebab_gmu_boot_quarantine((unsigned)e);}}
+  out->result=(uint32_t)e;__atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return e;
+ }
++
++/* The completed CP observation is immutable. A render failure after the
++ * first owned mutation quarantines the live chain without editing CAP37. */
++#if defined(KERNEL) || defined(KEBAB_RPMH_KERNEL)
++#include <kern/KebabA650RenderBinding.h>
++#else
++#include "KebabA650RenderBinding.h"
++#endif
++
++extern int kebab_a650_gpu_render_locked(uint32_t *);
++
++int
++kebab_rpmh_gpu_cp_first_render(KebabA650CpOwnerToken *token, uint32_t *touched)
++{
++    if (!touched || *touched || !KARSourceBound()) {
++        return 95;
++    }
++    if (__atomic_exchange_n(&kebab_rpmh_global_lock.busy, 1, __ATOMIC_ACQ_REL)) {
++        return 16;
++    }
++    int error = kebab_rpmh_gpu_cp_check_locked(token);
++    if (!error && (!kebab_gpu_cp_book.complete || !kebab_gpu_cp_record->held ||
++        kebab_gpu_cp_record->phase != KCP_EXECUTED || kebab_gpu_cp_record->result ||
++        kebab_gpu_cp_record->epoch != 1 || kebab_gpu_cp_record->final_fence != 2 ||
++        kebab_gpu_cp_record->final_rptr != KCP_FINAL_WPTR ||
++        !kebab_gpu_cp_record->GPU_DMA_observed || !kebab_gpu_cp_record->namespace_unchanged)) {
++        error = 95;
++    }
++    if (!error) {
++        error = kebab_a650_gpu_render_locked(touched);
++    }
++    if (error && *touched) {
++        token->quarantined = 1;
++        kebab_gpu_cp_book.quarantined = 1;
++        kebab_a650_gpu_cp_quarantine_locked(token->oob);
++        kebab_gmu_boot_quarantine((unsigned)error);
++    }
++    __atomic_store_n(&kebab_rpmh_global_lock.busy, 0, __ATOMIC_RELEASE);
++    return error;
++}
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>37)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>38)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -315,6 +315,10 @@
+ #define UD_GPU_CP 62u
+ extern void kebab_a650_gpu_cp_hold_prepare(void);
+ /* END A650_GPUCP_COMMAND */
++/* BEGIN A650_GPURENDER_COMMAND */
++#define UD_GPU_RENDER 63u
++extern void kebab_a650_gpu_render_hold_prepare(void);
++/* END A650_GPURENDER_COMMAND */
+ extern void kebab_gmu_firmware_prepare(void);
+ extern void kebab_gmu_hfi_prepare(void);
+ /* END FUTURE_GMU_COMMAND_IDS */
+@@ -1527,6 +1531,9 @@
+ /* BEGIN A650_GPUCP_DECODE */
+     if(received==6 && !memcmp(buf,"GPUCP\n",6))return UD_GPU_CP;
+ /* END A650_GPUCP_DECODE */
++/* BEGIN A650_GPURENDER_DECODE */
++    if(received==10 && !memcmp(buf,"GPURENDER\n",10))return UD_GPU_RENDER;
++/* END A650_GPURENDER_DECODE */
+ /* END FUTURE_GMU_COMMAND_DECODE */
+     if(received==8 && !memcmp(buf,"GPUSMMU\n",8))return UD_GPU_SMMU_OBSERVE;
+     if(received!=9)return 0;
+@@ -1986,6 +1993,10 @@
+ 	} else if (command == UD_GPU_CP) {
+ 		kebab_a650_gpu_cp_hold_prepare();
+ /* END A650_GPUCP_DISPATCH */
++/* BEGIN A650_GPURENDER_DISPATCH */
++	} else if (command == UD_GPU_RENDER) {
++		kebab_a650_gpu_render_hold_prepare();
++/* END A650_GPURENDER_DISPATCH */
+ /* END FUTURE_GMU_COMMAND_DISPATCH */
+ 	} else if (command == UD_GPU_SMMU_OBSERVE) {
+ 		kebab_gpu_smmu_observe();
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650RenderNative.h
+@@ -0,0 +1,30 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_RENDER_NATIVE_H
++#define KEBAB_A650_RENDER_NATIVE_H
++#include "KebabA650CpNative.h"
++#include <kern/KebabA650RenderCore.h>
++
++struct KARSample {
++    uint32_t wptr, rptr, shadow, fence, marker;
++    uint32_t status, rbbm_irq, irq_mask, cp_fault, cp_irq, cp_protect;
++    uint32_t ahb_fence, gfsr, fsr, sqe, timestamp[3][2];
++};
++
++struct KARPass {
++    uint32_t commands[KAR_WORDS];
++    KARSample terminal;
++    uint32_t submitted, polls, captured, mismatch;
++};
++
++struct KebabA650RenderObservation {
++    uint32_t magic, schema, bytes, result, touched, quarantined, completed, nc_verified;
++    uint64_t epoch, elapsed_us;
++    KARSample initial;
++    KARPass pass[KAR_PASSES];
++    KGDiscovery vm_before, vm_after;
++    uint8_t readback[KAR_PASSES][KAR_BO_BYTES];
++};
++
++extern "C" int kebab_a650_gpu_render_prepare(void);
++extern "C" int kebab_a650_gpu_render_snapshot(KebabA650RenderObservation *);
++#endif
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -142,6 +142,13 @@
+ /* BEGIN A650_GPUCP_INCLUDE */
+ #include "KebabNativeA650CpHold.h"
+ /* END A650_GPUCP_INCLUDE */
++#include "KebabA650RenderNative.h"
++extern "C" void
++kebab_a650_gpu_render_hold_prepare(void)
++{
++    const int result = kebab_a650_gpu_render_prepare();
++    printf("KEBAB GPURENDER: end; result=%d\n", result);
++}
+ /* END FUTURE_GMU_HOLD_INCLUDE */
+ #include "KebabNativeGpuFirstAttachHold.h"
+ #include <kern/kebab_low_dma.h>
+@@ -963,6 +970,16 @@
+         image->total=bytes;image->stable=1;image->flags=2;return 0;
+     }
+ /* END A650_GPUCP37_PROVIDER */
++    if(source==38) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabA650RenderObservation);
++        auto *data=(KebabA650RenderObservation*)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_a650_gpu_render_snapshot(data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=38;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
+     if(source==31) {
+         if(argument)return 22;
+         uint32_t bytes=sizeof(KebabGpuSn11Record);
+--- a/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
++++ b/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
+@@ -89,3 +89,4 @@
+ #include "KebabNativeA650GpuOob.h"
+ 
+ #include "KebabNativeA650Cp.h"
++#include "KebabNativeA650Render.h"
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeA650Render.h
+@@ -0,0 +1,285 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_A650_RENDER_H
++#define KEBAB_NATIVE_A650_RENDER_H
++
++#include "KebabA650RenderNative.h"
++#include <kern/KebabA650RenderBinding.h>
++
++static KebabA650RenderObservation *kar_observation;
++static uint32_t kar_once;
++static int kar_result = EAGAIN;
++extern "C" int kebab_rpmh_gpu_cp_first_render(KebabA650CpOwnerToken *, uint32_t *);
++
++static uint32_t
++KARReadGpu(uint32_t word)
++{
++    return *(volatile const uint32_t *)(kcp_native.base + word * 4);
++}
++
++static void
++KARAcquireNC()
++{
++#if defined(__aarch64__)
++    __asm__ volatile("dmb oshld" ::: "memory");
++#else
++    OSMemoryBarrier();
++#endif
++}
++
++/* Read only the proven CP registers, owned CB1/global fault status and the
++ * fixed NC fence/scratch slots. All GPU reads follow the same-owner gate. */
++static int
++KARSampleHardware(KARSample *sample, unsigned pass)
++{
++    int error = KCPNativeGate(&kcp_native);
++    if (error) {
++        return error;
++    }
++    const auto *fence = (volatile const uint32_t *)kvg_engine.backing.region[5].cpu;
++    sample->fence = fence[1];
++    KARAcquireNC();
++    sample->shadow = fence[0];
++    sample->marker = fence[16];
++    for (unsigned event = 0; event < 3; ++event) {
++        unsigned index = KAREventOffset(pass, event) / sizeof(*fence);
++        sample->timestamp[event][0] = fence[index];
++        sample->timestamp[event][1] = fence[index + 1];
++    }
++
++    sample->wptr = KARReadGpu(KCP_CP_RB_WPTR);
++    sample->rptr = KARReadGpu(KCP_CP_RB_RPTR);
++    sample->status = KARReadGpu(KCP_RBBM_STATUS);
++    sample->rbbm_irq = KARReadGpu(KCP_RBBM_INT_0_STATUS);
++    sample->irq_mask = KARReadGpu(KCP_RBBM_INT_0_MASK);
++    sample->cp_fault = KARReadGpu(KCP_CP_HW_FAULT);
++    sample->cp_irq = KARReadGpu(KCP_CP_INTERRUPT_STATUS);
++    sample->cp_protect = KARReadGpu(KCP_CP_PROTECT_STATUS);
++    sample->sqe = KARReadGpu(KCP_CP_SQE_CNTL);
++    error = KCPNativeRead(&kcp_native, 1, 0x24c48, &sample->ahb_fence);
++    if (!error) {
++        error = KHO_VM_R32(&kvg_native.owner, 0x48, &sample->gfsr);
++    }
++    if (!error) {
++        error = KHO_VM_R32(&kvg_native.owner, 0x9058, &sample->fsr);
++    }
++    if (error) {
++        return error;
++    }
++
++    /* A6XX RBBM AHB/GPC/CP errors, hang and UCHE OOB/trap. Retain the
++     * complete raw status, including non-fault CCU and CACHE_FLUSH_TS bits. */
++    constexpr uint32_t rbbm_faults = (1u << 1) | (1u << 7) | (1u << 9) |
++        (1u << 23) | (1u << 24) | (1u << 25);
++    if ((sample->rbbm_irq & rbbm_faults) || sample->cp_fault ||
++        (sample->cp_irq & 0xf7u) || sample->cp_protect || (sample->ahb_fence & 1u) ||
++        sample->gfsr || KFContextFaultBits(sample->fsr) ||
++        sample->marker != KCP_MARKER || sample->irq_mask || sample->sqe != 1) {
++        return EIO;
++    }
++    return 0;
++}
++
++static int
++KARRunPass(KebabA650RenderObservation *record, unsigned pass, uint64_t begin)
++{
++    KARPass *proof = &record->pass[pass];
++    const uint32_t start = KCP_FINAL_WPTR + pass * KAR_WORDS;
++    const uint32_t end = start + KAR_WORDS;
++    const uint32_t sequence = pass + 3;
++    static_assert(KCP_FINAL_WPTR + KAR_PASSES * KAR_WORDS < 1024, "no ring wrap");
++    KARSample prior = {};
++    int error = KARSampleHardware(&prior, pass);
++    if (error) {
++        return error;
++    }
++    if (prior.wptr != start || prior.rptr != start || prior.shadow != start ||
++        prior.fence != sequence - 1 || (prior.status & ~1u)) {
++        return EIO;
++    }
++    for (const auto &timestamp : prior.timestamp) {
++        if (timestamp[0] || timestamp[1]) {
++            return EIO;
++        }
++    }
++
++    const uintptr_t ring = kvg_engine.backing.region[0].cpu;
++    error = KARBuildWords(pass, &proof->commands);
++    if (error) {
++        return error;
++    }
++    memcpy((void *)(ring + start * 4), proof->commands, sizeof proof->commands);
++    flush_dcache((vm_offset_t)ring, 4096, 0);
++    KCPNativeBarrier(&kcp_native);
++    error = KCPNativeGate(&kcp_native);
++    if (error) {
++        return error;
++    }
++
++    /* The sole GPU MMIO store in a render pass. The existing 148-store CP
++     * contract stays intact, and there is no retry or reset on failure. */
++    proof->submitted = end;
++    *(volatile uint32_t *)(kcp_native.base + KCP_CP_RB_WPTR * 4) = end;
++    KCPNativeBarrier(&kcp_native);
++    const uint64_t submitted_at = KVGNativeNow(NULL);
++    for (unsigned poll = 0; poll < 1000; ++poll) {
++        const uint64_t now = KVGNativeNow(NULL);
++        if (now < submitted_at || now - submitted_at >= 100000 ||
++            now < begin || now - begin >= 500000) {
++            return ETIMEDOUT;
++        }
++        ++proof->polls;
++        auto *sample = &proof->terminal;
++        error = KARSampleHardware(sample, pass);
++        if (error) {
++            return error;
++        }
++        if (sample->wptr != end || sample->rptr < start || sample->rptr > end ||
++            sample->shadow < start || sample->shadow > end ||
++            sample->fence < sequence - 1 || sample->fence > sequence) {
++            return EIO;
++        }
++        if (sample->fence == sequence && sample->rptr == end && sample->shadow == end &&
++            !(sample->status & ~1u) && (sample->timestamp[2][0] || sample->timestamp[2][1])) {
++            /* The terminal color CCU timestamp and the CP fence must both
++             * be observed before CPU reads from the noncacheable target. */
++            KARAcquireNC();
++            const auto *target = (volatile const uint8_t *)kvg_engine.backing.region[4].cpu;
++            for (uint32_t i = 0; i < KAR_BO_BYTES; ++i) {
++                record->readback[pass][i] = target[i];
++            }
++            KARAcquireNC();
++            proof->captured = KAR_BO_BYTES;
++            proof->mismatch = KARFirstMismatch(&record->readback[pass], pass + 1);
++            if (proof->mismatch != KAR_BO_BYTES) {
++                return EIO;
++            }
++            record->completed = pass + 1;
++            return KCPNativeGate(&kcp_native);
++        }
++        IODelay(100);
++    }
++    return ETIMEDOUT;
++}
++
++extern "C" int
++kebab_a650_gpu_render_locked(uint32_t *touched)
++{
++    auto *record = kar_observation;
++    if (!touched || !record || *touched || !KARSourceBound() ||
++        __atomic_load_n(&kar_once, __ATOMIC_ACQUIRE) != 1 ||
++        __atomic_load_n(&kcp_native_once, __ATOMIC_ACQUIRE) != 2 || kcp_native_result ||
++        !kcp_native.observation || !kcp_native.observation->receipt.NC_verified) {
++        return ENOTSUP;
++    }
++    int error = KCPNativeGate(&kcp_native);
++    if (error) {
++        return error;
++    }
++    const auto &backing = kvg_engine.backing;
++    for (unsigned region = 4; region <= 5; ++region) {
++        const auto &descriptor = backing.region[region];
++        for (uint32_t off = 0; off < descriptor.allocation_bytes; off += PAGE_SIZE) {
++            const auto pp = (ppnum_t)((descriptor.physical + off) >> PAGE_SHIFT);
++            if ((pmap_cache_attributes(pp) & VM_WIMG_MASK) != VM_WIMG_WCOMB) {
++                return EACCES;
++            }
++        }
++    }
++    record->nc_verified = 1;
++    record->epoch = kcp_native.observation->receipt.epoch;
++    error = KHO_VM_Snapshot(&kvg_native.owner, &record->vm_before);
++    if (!error) {
++        error = KARSampleHardware(&record->initial, 0);
++    }
++    if (error) {
++        return error;
++    }
++    if (record->initial.wptr != KCP_FINAL_WPTR || record->initial.rptr != KCP_FINAL_WPTR ||
++        record->initial.shadow != KCP_FINAL_WPTR || record->initial.fence != 2 ||
++        (record->initial.status & ~1u)) {
++        return EIO;
++    }
++    auto *target = (volatile uint8_t *)backing.region[4].cpu;
++    auto *fence = (volatile uint32_t *)backing.region[5].cpu;
++    const uint64_t begin = KVGNativeNow(NULL);
++    *touched = record->touched = 1;
++    for (uint32_t i = 0; i < KAR_BO_BYTES; ++i) {
++        target[i] = KAR_SENTINEL;
++    }
++    for (unsigned pass = 0; pass < KAR_PASSES; ++pass) {
++        for (unsigned event = 0; event < 3; ++event) {
++            unsigned index = KAREventOffset(pass, event) / sizeof(*fence);
++            fence[index] = 0;
++            fence[index + 1] = 0;
++        }
++    }
++    KCPNativeBarrier(&kcp_native);
++    for (uint32_t i = 0; i < KAR_BO_BYTES; ++i) {
++        if (target[i] != KAR_SENTINEL) {
++            return EIO;
++        }
++    }
++
++    for (unsigned pass = 0; pass < KAR_PASSES && !error; ++pass) {
++        error = KARRunPass(record, pass, begin);
++    }
++    const int snapshot = KHO_VM_Snapshot(&kvg_native.owner, &record->vm_after);
++    const uint64_t end = KVGNativeNow(NULL);
++    record->elapsed_us = end >= begin ? end - begin : UINT64_MAX;
++    if (error) {
++        return error;
++    }
++    if (snapshot) {
++        return snapshot;
++    }
++    return record->elapsed_us < 500000 ? KCPNativeGate(&kcp_native) : ETIMEDOUT;
++}
++
++extern "C" int
++kebab_a650_gpu_render_prepare(void)
++{
++    int error = KFNativeWorker(NULL);
++    if (error) {
++        return error;
++    }
++    uint32_t expected = 0;
++    if (!__atomic_compare_exchange_n(&kar_once, &expected, 1, 0,
++        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
++        return expected == 2 ? kar_result : EBUSY;
++    }
++
++    kar_observation = (KebabA650RenderObservation *)IOMalloc(sizeof(*kar_observation));
++    if (!kar_observation) {
++        error = ENOMEM;
++    } else {
++        auto *record = kar_observation;
++        memset(record, 0, sizeof(*record));
++        record->magic = 0x3152414bu; /* KAR1 */
++        record->schema = 1;
++        record->bytes = sizeof(*record);
++        uint32_t touched = 0;
++        error = kebab_rpmh_gpu_cp_first_render(&kcp_native.owner, &touched);
++        record->quarantined = error && touched;
++        record->result = error;
++    }
++    kar_result = error;
++    __atomic_store_n(&kar_once, 2, __ATOMIC_RELEASE);
++    return error;
++}
++
++extern "C" int
++kebab_a650_gpu_render_snapshot(KebabA650RenderObservation *out)
++{
++    if (!out) {
++        return EINVAL;
++    }
++    if (__atomic_load_n(&kar_once, __ATOMIC_ACQUIRE) != 2) {
++        return EAGAIN;
++    }
++    if (!kar_observation) {
++        return kar_result;
++    }
++    memcpy(out, kar_observation, sizeof(*out));
++    return 0;
++}
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabA650RenderBinding.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_RENDER_BINDING_H
++#define KEBAB_A650_RENDER_BINDING_H
++#include <stdint.h>
++
++enum {KebabA650RenderNativeQualified = 1};
++static const uint8_t KebabA650RenderSourceContract[32] = {0x1a, 0xb0, 0x29, 0x31, 0x06, 0x50, 0xa9, 0x24, 0xe9, 0xb8, 0xf9, 0x96, 0x1c, 0xca, 0xe9, 0xdf, 0x54, 0x39, 0x35, 0x7d, 0x5b, 0x6a, 0x49, 0x66, 0x05, 0x4a, 0x8c, 0x32, 0x41, 0xb6, 0xdf, 0x2a};
++
++static inline int
++KARSourceBound(void)
++{
++    unsigned any = 0;
++    for (unsigned i = 0; i < sizeof KebabA650RenderSourceContract; ++i) {
++        any |= KebabA650RenderSourceContract[i];
++    }
++    return KebabA650RenderNativeQualified == 1 && any;
++}
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabA650RenderCore.h
+@@ -0,0 +1,136 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_RENDER_CORE_H
++#define KEBAB_A650_RENDER_CORE_H
++
++#include "KebabA650CpCore.h"
++
++enum {
++    KAR_WIDTH = 32,
++    KAR_HEIGHT = 32,
++    KAR_PITCH = 256,
++    KAR_TARGET_BYTES = KAR_PITCH * KAR_HEIGHT,
++    KAR_BO_BYTES = 0x10000,
++    KAR_TARGET_IOVA = 0x90010000u,
++    KAR_TARGET_OFFSET = 0x100,
++    KAR_TARGET_SPACING = 0x4000,
++    KAR_SENTINEL = 0xa5,
++    KAR_PASSES = 2,
++    KAR_WORDS = 128,
++    KAR_EVENT_OFFSET = 128,
++    KAR_EVENT_SPACING = 64,
++    KAR_EVENT_PASS_SPACING = 256,
++};
++
++static const uint8_t KARColors[4][4] = {
++    {255, 0, 0, 255}, {0, 255, 0, 0},
++    {0, 0, 255, 255}, {255, 255, 0, 0},
++};
++
++static inline uint32_t
++KARTargetOffset(unsigned pass)
++{
++    return KAR_TARGET_OFFSET + pass * KAR_TARGET_SPACING;
++}
++
++static inline uint32_t
++KAREventOffset(unsigned pass, unsigned event)
++{
++    return KAR_EVENT_OFFSET + pass * KAR_EVENT_PASS_SPACING + event * KAR_EVENT_SPACING;
++}
++
++static inline uint32_t *
++KARFlushEvent(uint32_t *p, unsigned event, uint32_t offset)
++{
++    *p++ = KCPType7(0x46, 4);
++    *p++ = 0x40000000u | event;
++    *p++ = KCP_FENCE_IOVA + offset;
++    *p++ = 0;
++    *p++ = 0;
++    return p;
++}
++
++/* Mesa 63350a034b2b A6XX solid-color setup, clear_surface and emit_blit_fini.
++ * Each pass owns one fixed linear RGBA8 target and three CCU timestamp slots.
++ * The A650 normal/blit ECO settings are identical, so Mesa skips ECO writes. */
++static inline int
++KARBuildWords(unsigned pass, uint32_t (*commands)[KAR_WORDS])
++{
++    if (pass >= KAR_PASSES || !commands) {
++        return 22;
++    }
++    uint32_t *p = *commands;
++    p = KARFlushEvent(p, 0x1d, KAREventOffset(pass, 0)); /* Color clean */
++    p = KARFlushEvent(p, 0x1c, KAREventOffset(pass, 1)); /* Depth clean */
++    *p++ = KCPType7(0x46, 1);
++    *p++ = 0x19; /* Color invalidate */
++    *p++ = KCPType7(0x46, 1);
++    *p++ = 0x18; /* Depth invalidate */
++    *p++ = KCPType7(0x65, 1);
++    *p++ = 12; /* RM6_BLIT2DSCALE */
++    *p++ = KCPType7(0x26, 0);
++    *p++ = KCPType4(0x8e07, 1);
++    /* Sysmem CCU color offset = 3 CCUs * 64 KiB depth, shifted by 12
++     * and encoded in bits 23..31. Both cache fractions are FULL. */
++    *p++ = 0x18000000u;
++
++    for (unsigned quadrant = 0; quadrant < 4; ++quadrant) {
++        const unsigned x = (quadrant % 2) * 16;
++        const unsigned y = (quadrant / 2) * 16;
++        *p++ = KCPType4(0x8405, 2);
++        *p++ = (y << 16) | x;
++        *p++ = ((y + 15) << 16) | (x + 15);
++        *p++ = KCPType4(0x8c2c, 4);
++        for (unsigned channel = 0; channel < 4; ++channel) {
++            *p++ = KARColors[quadrant][channel];
++        }
++        *p++ = KCPType4(0x8c00, 2);
++        *p++ = 0x00f03080u; /* Mask RGBA, FMT6_8_8_8_8_UNORM, solid color */
++        *p++ = 0; /* RB_A2D_PIXEL_CNTL: blending disabled */
++        *p++ = KCPType4(0x8400, 1);
++        *p++ = 0x00f03080u;
++        *p++ = KCPType4(0xacc0, 1);
++        *p++ = 0x0000f180u; /* SP output: float IFMT, same format, RGBA mask */
++        *p++ = KCPType4(0x8c17, 4);
++        *p++ = 0x30; /* RGBA8, TILE6_LINEAR, WZYX, no UBWC */
++        *p++ = KAR_TARGET_IOVA + KARTargetOffset(pass);
++        *p++ = 0;
++        *p++ = KAR_PITCH >> 6;
++        *p++ = KCPType7(0x46, 1);
++        *p++ = 0x3f; /* DEBUG_LABEL */
++        *p++ = KCPType7(0x2c, 1);
++        *p++ = 3; /* BLIT_OP_SCALE */
++    }
++
++    /* CP_BLIT writes through the color CCU. Preserve its independent
++     * hardware timestamp as well as the qualified CP completion fence. */
++    p = KARFlushEvent(p, 0x1d, KAREventOffset(pass, 2));
++    *p++ = KCPType7(0x26, 0);
++    KCPFenceWords(p, pass + 3);
++    return 0;
++}
++
++/* Validate the complete private BO after each pass. The second target must
++ * still be untouched after the first pass, and both must match after pass 2. */
++static inline uint32_t
++KARFirstMismatch(const uint8_t (*bo)[KAR_BO_BYTES], unsigned completed)
++{
++    if (!bo || completed > KAR_PASSES) {
++        return 0;
++    }
++    for (uint32_t offset = 0; offset < KAR_BO_BYTES; ++offset) {
++        uint8_t expected = KAR_SENTINEL;
++        for (unsigned pass = 0; pass < completed; ++pass) {
++            const uint32_t relative = offset - KARTargetOffset(pass);
++            if (relative < KAR_TARGET_BYTES && relative % KAR_PITCH < KAR_WIDTH * 4) {
++                const unsigned x = relative % KAR_PITCH / 4;
++                const unsigned y = relative / KAR_PITCH;
++                expected = KARColors[(y / 16) * 2 + x / 16][relative % 4];
++            }
++        }
++        if ((*bo)[offset] != expected) {
++            return offset;
++        }
++    }
++    return KAR_BO_BYTES;
++}
++#endif
+--- a/osfmk/kern/Makefile
++++ b/osfmk/kern/Makefile
+@@ -40,6 +40,7 @@
+ 	KebabGmuResourceObserveOwner.h KebabA650GpuVmOwner.h KebabA650GpuVmBinding.h \
+ 	KebabA650GpuOobCore.h KebabA650GpuOobOwner.h KebabA650GpuOobBinding.h \
+ 	KebabA650CpCore.h KebabA650CpRegisters.h KebabA650CpOwner.h KebabA650CpBinding.h \
++	KebabA650RenderCore.h KebabA650RenderBinding.h \
+ 	KebabGmuHfiInitBinding.h \
+ 	KebabGmuHfiInitCore.h \
+ 	KebabGmuHfiInitOwner.h \

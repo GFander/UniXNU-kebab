@@ -1,0 +1,47 @@
+--- a/osfmk/kern/KebabA650RenderBinding.h
++++ b/osfmk/kern/KebabA650RenderBinding.h
+@@ -4,7 +4,7 @@
+ #include <stdint.h>
+ 
+ enum {KebabA650RenderNativeQualified = 1};
+-static const uint8_t KebabA650RenderSourceContract[32] = {0xc2, 0xb6, 0x6f, 0x33, 0x26, 0xb4, 0x5b, 0x15, 0x45, 0x47, 0x47, 0x96, 0x6e, 0xb1, 0x0c, 0xf3, 0x9c, 0x09, 0x37, 0xa3, 0x36, 0x59, 0x53, 0x03, 0xff, 0x9b, 0xd2, 0x86, 0xd1, 0x18, 0x56, 0x04};
++static const uint8_t KebabA650RenderSourceContract[32] = {0xba, 0x56, 0xa0, 0xbb, 0x90, 0x30, 0x95, 0xd6, 0x8c, 0x2c, 0xb8, 0x0c, 0x7c, 0xfa, 0xac, 0xdc, 0xff, 0xb4, 0x6b, 0x68, 0x58, 0x04, 0xd7, 0xb8, 0x5b, 0x1a, 0xdc, 0x99, 0xc7, 0xd3, 0x84, 0x6e};
+ 
+ static inline int
+ KARSourceBound(void)
+--- a/osfmk/kern/KebabA650RenderCore.h
++++ b/osfmk/kern/KebabA650RenderCore.h
+@@ -15,8 +15,8 @@
+     KAR_TARGET_SPACING = 0x4000,
+     KAR_SENTINEL = 0xa5,
+     KAR_PASSES = 2,
+-    KAR_WORDS = 132,
+-    KAR_SCHEMA = 2,
++    KAR_WORDS = 135,
++    KAR_SCHEMA = 3,
+     KAR_CONTROL_OFFSET = 0x80,
+     KAR_CONTROL_VALUE = 0xa650c001u,
+     KAR_EVENT_OFFSET = 128,
+@@ -54,7 +54,8 @@
+ 
+ /* Mesa 63350a034b2b A6XX solid-color setup, clear_surface and emit_blit_fini.
+  * Each pass owns one fixed linear RGBA8 target and three CCU timestamp slots.
+- * The A650 normal/blit ECO settings are identical, so Mesa skips ECO writes. */
++ * A650 normal/blit ECO values are equal, so mode switches are skipped;
++ * initial restore still programs RB_DBG_ECO_CNTL=0x04100000. */
+ static inline int
+ KARBuildWords(unsigned pass, uint32_t (*commands)[KAR_WORDS])
+ {
+@@ -69,6 +70,12 @@
+     *p++ = KAR_TARGET_IOVA + KAR_CONTROL_OFFSET + pass * KAR_TARGET_SPACING;
+     *p++ = 0;
+     *p++ = KAR_CONTROL_VALUE + pass;
++    /* Fixed Mesa63350a A650 initial non-context restore. Equality of normal
++     * and blit ECO values only suppresses mode switching, not this init.
++     * All original0591 2D and602 control words otherwise remain unchanged. */
++    *p++ = KCPType7(0x26, 0);
++    *p++ = KCPType4(0x8e04, 1);
++    *p++ = 0x04100000u;
+     p = KARFlushEvent(p, 0x1d, KAREventOffset(pass, 0)); /* Color clean */
+     p = KARFlushEvent(p, 0x1c, KAREventOffset(pass, 1)); /* Depth clean */
+     *p++ = KCPType7(0x46, 1);

@@ -1,0 +1,24 @@
+{
+  "passed": true,
+  "scope": "Fixed primary Mesa A650 source omission audit only; not hardware root cause or authorization to skip any gate",
+  "Mesa_commit": "63350a034b2bc4e862115b783493f151da012850",
+  "source_sha256": {
+    "freedreno_devices.py": "16951b37b44c66b1069b3c6f02a671b37cc459a35b9d3fcc73bdb1c81b85ac19",
+    "fd6_emit.cc": "ea807574d2ef56b11e70aa186a46e52c8c576bf54a3366c957ba6a6490a5b792",
+    "fd6_emit.h": "a55e371babdd8a14d1bcc078c2947e24d40a2fe01883d95974fbf04dd2a2ceef",
+    "a6xx.xml": "22e5d165847294539c5d23a1b8ab962621a8ebdbb98a006211cf8bf7d895696e"
+  },
+  "A650_only": {
+    "word_register": "0x8e04",
+    "byte_offset": "0x23810",
+    "normal_value": "0x04100000",
+    "blit_value": "0x04100000",
+    "initial_restore_writes_normal_value": true,
+    "blit_helper_skips_only_equal_mode_transition": true
+  },
+  "current_candidate_CP_and_render_omit_explicit_write": true,
+  "root_cause_proven": false,
+  "prospective_focused_change": "After602 real same-target-page CP witness result, consider WFI + one source-backed initial RB_DBG_ECO_CNTL=0x04100000 PM4 write; keep original2D/controls/fault/timeout/quarantine and pixel comparisons. No implemented603 candidate yet.",
+  "PAS13_query_route": "CLOSED",
+  "ZAP_actual_auth": "NOT_RUN/UNKNOWN"
+}

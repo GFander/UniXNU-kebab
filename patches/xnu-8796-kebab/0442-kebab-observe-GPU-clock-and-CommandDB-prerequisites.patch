@@ -1,0 +1,463 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -112,6 +112,7 @@
+ #include "KebabPlatformSnapshot.h"
+ #include "KebabNativeIovaProbe.h"
+ #include "KebabNativeDmaPool.h"
++#include "KebabNativeGpuPowerSnapshot.h"
+ extern "C" void kebab_dma_pool_prepare(void) { PE_Video video={};PE_current_console(&video);kebab_native_dma_prepare((uint64_t)video.v_baseAddr); }
+ #include "KebabDsiPowerSnapshot.h"
+ #include "KebabNativeMdpClockTest.h"
+@@ -852,6 +853,16 @@
+ extern "C" int
+ kebab_capture_open(uint32_t source,uint32_t argument,struct kc_image *image)
+ {
++    if(source==15) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabNativeGpuPowerSnapshot);
++        KebabNativeGpuPowerSnapshot *data=(KebabNativeGpuPowerSnapshot *)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_native_gpu_power_snapshot(data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=15;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
+     if(source==14) {
+         if(argument)return 22;
+         uint32_t bytes=sizeof(KebabNativeDmaPoolReceipt);
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>14)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>15)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabGpuReadOnlyCore.h
+@@ -0,0 +1,226 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GPU_READ_ONLY_CORE_H
++#define KEBAB_GPU_READ_ONLY_CORE_H
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++/* SM8250 only. Offsets are BYTE offsets from GCC=0x00100000 and
++ * GPUCC=0x03d90000. This observer contains NO GX/GMU/SMMU read path.
++ * read32 returning an error cannot recover from a physical bus fault.
++ * The caller must hold independently qualified access/power lifetimes.
++ * A successful mapping or a sampled clock bit is NOT that qualification.
++ * access_check must validate that the held qualification remains in force;
++ * it must not enable clocks/rails or probe a possibly unpowered register.
++ * Calls, output and callback storage must be exclusive and disjoint. */
++enum { KebabGpuRoGcc=0, KebabGpuRoGpucc=1 };
++enum {
++    KebabGpuRoAccessGcc=1u, KebabGpuRoAccessGpucc=2u,
++    KebabGpuRoAccessCxParent=4u, KebabGpuRoAccessGfxParent=8u
++};
++enum {
++    KebabGpuRoGccCfgAhb=0, KebabGpuRoGccMemnoc,
++    KebabGpuRoGccSnocDvm, KebabGpuRoGccDdrss, KebabGpuRoGccReset,
++    KebabGpuRoGpuccAhb, KebabGpuRoCxGmuClock, KebabGpuRoCxoClock,
++    KebabGpuRoGxGmuClock, KebabGpuRoCxGdsc, KebabGpuRoCxHwControl,
++    KebabGpuRoGxGdsc, KebabGpuRoGxDomainMisc, KebabGpuRoCxReset,
++    KebabGpuRoGmuReset, KebabGpuRoGxReset, KebabGpuRoXoReset,
++    KebabGpuRoAcdReset, KebabGpuRoGfxAonReset,
++    KebabGpuRoGmuRcgCommand, KebabGpuRoGmuRcgConfig,
++    KebabGpuRoSlotCount
++};
++enum {
++    KebabGpuRoControlSnapshot=0, KebabGpuRoGccOnly=1,
++    KebabGpuRoPartialControl=2, KebabGpuRoGateClosed=3,
++    KebabGpuRoUnstable=4, KebabGpuRoAccessUnavailable=5,
++    KebabGpuRoIoError=6, KebabGpuRoBarrierError=7,
++    KebabGpuRoGateChanged=8, KebabGpuRoInvalid=22
++};
++enum {
++    KebabGpuRoNoGpuccLease=1u, KebabGpuRoNoCxParentLease=2u,
++    KebabGpuRoNoGfxParentLease=4u,
++    KebabGpuRoNotRunGmu=1u, KebabGpuRoNotRunGx=2u,
++    KebabGpuRoNotRunSmmu=4u
++};
++typedef struct {
++    void *cookie;
++    uint32_t access_flags;
++    int (*access_check)(void *,uint32_t required_flags);
++    int (*read32)(void *,unsigned region,size_t byte_offset,uint32_t *);
++    int (*barrier)(void *);
++} KebabGpuRoIo;
++/* Per-pass valid means that exact sample was successfully read. Stable means
++ * both valid samples agree; zero raw data without valid never means OFF.
++ * not_run_slots means no data read was attempted on either pass. Gate reads
++ * are counted in attempts/reads but do not manufacture data validity.
++ * not_run_subsystems is always 7: no downstream accessibility is inferred. */
++typedef struct {
++    uint32_t magic,schema,bytes,status;
++    uint32_t access_flags,not_run_subsystems,not_run_slots,blocked_reason;
++    uint32_t valid[2],stable,attempted[2],attempts,reads;
++    uint32_t failed_slot,failed_region,failed_offset,io_error;
++    uint32_t sample[2][KebabGpuRoSlotCount];
++} KebabGpuRoRecord;
++
++static inline int KebabGpuRoDescribe(unsigned slot,unsigned *region,
++    uint32_t *offset,uint32_t *required)
++{
++    static const uint32_t offsets[KebabGpuRoSlotCount]={
++        0x71004,0x7100c,0x71018,0x71154,0x71000,
++        0x1078,0x1098,0x109c,0x1064,0x106c,0x1540,
++        0x100c,0x1508,0x1068,0x111c,0x1008,0x1000,
++        0x1160,0x10a0,0x1120,0x1124
++    };
++    if(slot>=KebabGpuRoSlotCount || !region || !offset || !required)return 0;
++    *region=slot<KebabGpuRoGpuccAhb?KebabGpuRoGcc:KebabGpuRoGpucc;
++    *offset=offsets[slot];
++    *required=KebabGpuRoAccessGcc;
++    if(*region==KebabGpuRoGpucc)*required|=KebabGpuRoAccessGpucc;
++    if(slot==KebabGpuRoCxGdsc || slot==KebabGpuRoCxHwControl)
++        *required|=KebabGpuRoAccessCxParent;
++    if(slot==KebabGpuRoGxGdsc || slot==KebabGpuRoGxDomainMisc)
++        *required|=KebabGpuRoAccessGfxParent;
++    return 1;
++}
++static inline int KebabGpuRoOffsetAllowed(unsigned region,size_t offset)
++{
++    unsigned slot;
++    for(slot=0;slot<KebabGpuRoSlotCount;++slot) {
++        unsigned actual=0;uint32_t at=0,required=0;
++        (void)KebabGpuRoDescribe(slot,&actual,&at,&required);
++        if(region==actual && offset==at)return 1;
++    }
++    return 0;
++}
++static inline int KebabGpuRoClockReportedOn(uint32_t value)
++{ return (value&1u)!=0 && (value&0x80000000u)==0; }
++static inline int KebabGpuRoFail(KebabGpuRoRecord *r,unsigned status,
++    unsigned slot,unsigned region,uint32_t offset,int error)
++{
++    r->status=status;r->failed_slot=slot;r->failed_region=region;
++    r->failed_offset=offset;r->io_error=(uint32_t)error;return (int)status;
++}
++static inline int KebabGpuRoRaw(const KebabGpuRoIo *io,KebabGpuRoRecord *r,
++    unsigned slot,uint32_t *value)
++{
++    unsigned region=0;uint32_t offset=0,required=0,result=0;int error;
++    if(!KebabGpuRoDescribe(slot,&region,&offset,&required))return KebabGpuRoInvalid;
++    if((io->access_flags&required)!=required ||
++        io->access_check(io->cookie,required)!=0)
++        return KebabGpuRoFail(r,KebabGpuRoAccessUnavailable,slot,region,offset,0);
++    ++r->attempts;
++    error=io->read32(io->cookie,region,offset,&result);
++    if(error)return KebabGpuRoFail(r,KebabGpuRoIoError,slot,region,offset,error);
++    ++r->reads;*value=result;return 0;
++}
++static inline int KebabGpuRoControlGate(const KebabGpuRoIo *io,
++    KebabGpuRoRecord *r,int require_internal_ahb)
++{
++    uint32_t cfg=0,reset=0,ahb=0;int result;
++    result=KebabGpuRoRaw(io,r,KebabGpuRoGccCfgAhb,&cfg);if(result)return result;
++    if(cfg!=r->sample[0][KebabGpuRoGccCfgAhb] || !KebabGpuRoClockReportedOn(cfg))
++        return KebabGpuRoFail(r,KebabGpuRoGateChanged,KebabGpuRoGccCfgAhb,
++            KebabGpuRoGcc,0x71004,0);
++    result=KebabGpuRoRaw(io,r,KebabGpuRoGccReset,&reset);if(result)return result;
++    if(reset!=r->sample[0][KebabGpuRoGccReset] || (reset&1u))
++        return KebabGpuRoFail(r,KebabGpuRoGateChanged,KebabGpuRoGccReset,
++            KebabGpuRoGcc,0x71000,0);
++    if(require_internal_ahb) {
++        result=KebabGpuRoRaw(io,r,KebabGpuRoGpuccAhb,&ahb);if(result)return result;
++        if(ahb!=r->sample[0][KebabGpuRoGpuccAhb] || !KebabGpuRoClockReportedOn(ahb))
++            return KebabGpuRoFail(r,KebabGpuRoGateChanged,KebabGpuRoGpuccAhb,
++                KebabGpuRoGpucc,0x1078,0);
++    }
++    return 0;
++}
++static inline int KebabGpuRoSample(const KebabGpuRoIo *io,KebabGpuRoRecord *r,
++    unsigned pass,unsigned slot)
++{
++    uint32_t value=0,before=0;int result;
++    if(slot>=KebabGpuRoGpuccAhb) {
++        result=KebabGpuRoControlGate(io,r,slot!=KebabGpuRoGpuccAhb);
++        if(result)return result;
++    }
++    before=r->attempts;
++    result=KebabGpuRoRaw(io,r,slot,&value);
++    if(r->attempts!=before)r->attempted[pass]|=1u<<slot;
++    if(result)return result;
++    r->sample[pass][slot]=value;r->valid[pass]|=1u<<slot;
++    return 0;
++}
++static inline int KebabGpuRoBarrier(const KebabGpuRoIo *io,KebabGpuRoRecord *r)
++{
++    int error=io->barrier(io->cookie);
++    if(error)return KebabGpuRoFail(r,KebabGpuRoBarrierError,UINT32_MAX,
++        UINT32_MAX,0,error);
++    return 0;
++}
++static inline int KebabGpuRoSame(KebabGpuRoRecord *r,unsigned first,unsigned end)
++{
++    unsigned slot;int same=1;
++    for(slot=first;slot<end;++slot) {
++        uint32_t bit=1u<<slot;
++        if((r->valid[0]&r->valid[1]&bit)!=0) {
++            if(r->sample[0][slot]==r->sample[1][slot])r->stable|=bit;
++            else same=0;
++        }
++    }
++    return same;
++}
++static inline int KebabGpuRoObserve(const KebabGpuRoIo *io,KebabGpuRoRecord *r)
++{
++    unsigned pass,slot;int result=0;
++    const uint32_t all=(1u<<KebabGpuRoSlotCount)-1u;
++    if(!r)return KebabGpuRoInvalid;
++    memset(r,0,sizeof(*r));
++    r->magic=0x4f525047u;r->schema=1;r->bytes=(uint32_t)sizeof(*r);
++    r->failed_slot=UINT32_MAX;r->failed_region=UINT32_MAX;
++    r->not_run_subsystems=KebabGpuRoNotRunGmu|KebabGpuRoNotRunGx|KebabGpuRoNotRunSmmu;
++    r->not_run_slots=all;r->status=KebabGpuRoInvalid;
++    if(!io || !io->read32 || !io->access_check || !io->barrier ||
++        (io->access_flags&~15u)!=0)return KebabGpuRoInvalid;
++    r->access_flags=io->access_flags;
++    for(pass=0;pass<2;++pass) {
++        for(slot=0;slot<KebabGpuRoGpuccAhb;++slot) {
++            result=KebabGpuRoSample(io,r,pass,slot);if(result)goto done;
++        }
++        result=KebabGpuRoBarrier(io,r);if(result)goto done;
++    }
++    if(!KebabGpuRoSame(r,0,KebabGpuRoGpuccAhb)) {result=KebabGpuRoUnstable;goto done;}
++    if(!KebabGpuRoClockReportedOn(r->sample[0][KebabGpuRoGccCfgAhb]) ||
++        (r->sample[0][KebabGpuRoGccReset]&1u)) {result=KebabGpuRoGateClosed;goto done;}
++    if((io->access_flags&KebabGpuRoAccessGpucc)==0) {
++        r->blocked_reason|=KebabGpuRoNoGpuccLease;result=KebabGpuRoGccOnly;goto done;
++    }
++    for(pass=0;pass<2;++pass) {
++        result=KebabGpuRoSample(io,r,pass,KebabGpuRoGpuccAhb);if(result)goto done;
++        result=KebabGpuRoBarrier(io,r);if(result)goto done;
++    }
++    if(!KebabGpuRoSame(r,KebabGpuRoGpuccAhb,KebabGpuRoGpuccAhb+1)) {
++        result=KebabGpuRoUnstable;goto done;
++    }
++    if(!KebabGpuRoClockReportedOn(r->sample[0][KebabGpuRoGpuccAhb])) {
++        result=KebabGpuRoGateClosed;goto done;
++    }
++    for(pass=0;pass<2;++pass) {
++        for(slot=KebabGpuRoGpuccAhb+1;slot<KebabGpuRoSlotCount;++slot) {
++            unsigned region=0;uint32_t offset=0,required=0;
++            (void)KebabGpuRoDescribe(slot,&region,&offset,&required);
++            if((io->access_flags&required)!=required) {
++                if(required&KebabGpuRoAccessCxParent)r->blocked_reason|=KebabGpuRoNoCxParentLease;
++                if(required&KebabGpuRoAccessGfxParent)r->blocked_reason|=KebabGpuRoNoGfxParentLease;
++                continue;
++            }
++            result=KebabGpuRoSample(io,r,pass,slot);if(result)goto done;
++        }
++        result=KebabGpuRoBarrier(io,r);if(result)goto done;
++    }
++    if(!KebabGpuRoSame(r,KebabGpuRoGpuccAhb+1,KebabGpuRoSlotCount)) {
++        result=KebabGpuRoUnstable;goto done;
++    }
++    result=r->blocked_reason?KebabGpuRoPartialControl:KebabGpuRoControlSnapshot;
++done:
++    r->not_run_slots=all&~(r->attempted[0]|r->attempted[1]);
++    r->status=(uint32_t)result;return result;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeGpuReadOnly.h
+@@ -0,0 +1,78 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_GPU_READ_ONLY_H
++#define KEBAB_NATIVE_GPU_READ_ONLY_H
++#include <IOKit/IOLib.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include "KebabGpuReadOnlyCore.h"
++
++/* Candidate only; include once from a normal worker after the existing
++ * KEBAB/SM8250 board qualification. The caller's check must establish that
++ * the ALWAYS-ON GCC path remains accessible for the whole snapshot, and
++ * reject panic/teardown or concurrent resource reconfiguration. It must
++ * never read GPUCC/GDSCR/GMU/GX/SMMU to prove that assertion.
++ * No GPUCC qualification can be supplied to this initial native adapter.
++ * It maps only a 16KiB-aligned slice of GCC containing the five registers.
++ * No try/catch or callback error can recover from a physical MMIO fault. */
++struct KebabNativeGpuRoAccess {
++    uintptr_t address;
++    void *owner_cookie;
++    int (*gcc_access_check)(void *);
++};
++static int kebab_gpu_ro_native_access(void *cookie,uint32_t flags)
++{
++    KebabNativeGpuRoAccess *access=(KebabNativeGpuRoAccess *)cookie;
++    if(!access || !access->address || flags!=KebabGpuRoAccessGcc ||
++        !access->gcc_access_check)return 95;
++    return access->gcc_access_check(access->owner_cookie);
++}
++static int kebab_gpu_ro_native_read(void *cookie,unsigned region,size_t offset,uint32_t *out)
++{
++    KebabNativeGpuRoAccess *access=(KebabNativeGpuRoAccess *)cookie;
++    if(region!=KebabGpuRoGcc || !out ||
++        !KebabGpuRoOffsetAllowed(region,offset) ||
++        offset<0x70000 || offset-0x70000>0x4000-4)return 22;
++    if(kebab_gpu_ro_native_access(cookie,KebabGpuRoAccessGcc))return 5;
++    *out=*(volatile const uint32_t *)(access->address+(offset-0x70000));
++    return 0;
++}
++static int kebab_gpu_ro_native_barrier(void *cookie)
++{
++    if(kebab_gpu_ro_native_access(cookie,KebabGpuRoAccessGcc))return 5;
++#if defined(__aarch64__)
++    __asm__ volatile("dsb sy" ::: "memory");
++#else
++    OSMemoryBarrier();
++#endif
++    return 0;
++}
++static int kebab_native_gpu_ro_snapshot(void *owner_cookie,
++    int (*gcc_access_check)(void *),KebabGpuRoRecord *out)
++{
++    IOMemoryDescriptor *memory=0;IOMemoryMap *map=0;
++    KebabNativeGpuRoAccess access={0,owner_cookie,gcc_access_check};
++    int status=KebabGpuRoInvalid;
++    if(!out)return status;
++    (void)KebabGpuRoObserve(0,out);
++    if(!gcc_access_check || gcc_access_check(owner_cookie)) {
++        out->status=KebabGpuRoAccessUnavailable;return KebabGpuRoAccessUnavailable;
++    }
++    memory=IOMemoryDescriptor::withPhysicalAddress(0x00170000,0x4000,kIODirectionIn);
++    if(!memory)goto no_memory;
++    map=memory->map(kIOMapAnywhere|kIOMapInhibitCache|kIOMapReadOnly);
++    if(!map || map->getLength()<0x4000)goto no_memory;
++    access.address=map->getVirtualAddress();
++    if(!access.address)goto no_memory;
++    {
++        KebabGpuRoIo io={&access,KebabGpuRoAccessGcc,kebab_gpu_ro_native_access,
++            kebab_gpu_ro_native_read,kebab_gpu_ro_native_barrier};
++        status=KebabGpuRoObserve(&io,out);
++    }
++    goto done;
++no_memory:
++    out->status=KebabGpuRoIoError;out->io_error=12;status=KebabGpuRoIoError;
++done:
++    if(map)map->release();
++    if(memory)memory->release();
++    return status;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabGpuCmdDb.h
+@@ -0,0 +1,72 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GPU_CMD_DB_H
++#define KEBAB_GPU_CMD_DB_H
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++/* Board firmware Command DB metadata only. Address fields name RPMh
++ * commands, never CPU MMIO. No voltage/frequency/vote is issued here.
++ * Header layout is144 bytes, eight16-byte slave headers,24-byte entries.
++ * ARC=3, BCM=5. Names/limits are fixed for SM8250 GPU bring-up. */
++typedef struct {
++ uint32_t matches,result,slave,address,version,priority[2],aux_bytes,aux[8];
++} KebabGpuCmdDbResource;
++typedef struct {
++ uint32_t magic,schema,bytes,result,db_version,valid,absent,reserved;
++ KebabGpuCmdDbResource resource[7];
++} KebabGpuCmdDbRecord;
++static_assert(sizeof(KebabGpuCmdDbRecord)==480,"GPU command DB record schema1");
++static uint32_t kebab_gpu_db_u32(const volatile uint8_t *p,size_t at)
++{return(uint32_t)p[at]|((uint32_t)p[at+1]<<8)|((uint32_t)p[at+2]<<16)|((uint32_t)p[at+3]<<24);}
++static int kebab_gpu_cmd_db_pass(const volatile uint8_t *p,size_t bytes,KebabGpuCmdDbRecord *out)
++{
++ memset(out,0,sizeof *out);out->magic=0x31424447;out->schema=1;out->bytes=sizeof *out;out->result=22;
++ if(!p || bytes!=0x20000)return 22;
++ if(kebab_gpu_db_u32(p,4)!=0x0c0330db){out->result=2;return 2;}
++ out->db_version=kebab_gpu_db_u32(p,0);
++ static const uint8_t names[7][8]={{'g','f','x','.','l','v','l',0},{'c','x','.','l','v','l',0,0},{'m','x','.','l','v','l',0,0},{'M','C','0',0,0,0,0,0},{'S','H','0',0,0,0,0,0},{'A','C','V',0,0,0,0,0},{'C','N','0',0,0,0,0,0}};
++ for(unsigned i=0;i<8;i++) {
++  size_t h=8+16*i;uint32_t a=kebab_gpu_db_u32(p,h),b=kebab_gpu_db_u32(p,h+4);
++  uint32_t slave=a&0xffff,headers=a>>16,data=b&0xffff,count=b>>16;
++  if(count>1024 || 144+headers+(size_t)count*24>bytes){out->result=3;return 3;}
++  for(unsigned j=0;j<count;j++) {
++   size_t e=144+headers+(size_t)j*24;
++   for(unsigned n=0;n<7;n++) {
++    unsigned match=1;for(unsigned k=0;k<8;k++)if(p[e+k]!=names[n][k])match=0;
++    if(!match)continue;
++    KebabGpuCmdDbResource *v=&out->resource[n];v->matches++;
++    v->slave=slave;v->address=kebab_gpu_db_u32(p,e+16);v->version=kebab_gpu_db_u32(p,h+8)&0xffff;
++    v->priority[0]=kebab_gpu_db_u32(p,e+8);v->priority[1]=kebab_gpu_db_u32(p,e+12);
++    uint32_t tail=kebab_gpu_db_u32(p,e+20);v->aux_bytes=tail&0xffff;
++    size_t aux=144+(size_t)data+(tail>>16);v->result=3;
++    if(v->aux_bytes>32 || aux>bytes || v->aux_bytes>bytes-aux)continue;
++    v->result=4;
++    if(slave!=(n<3?3u:5u) || !v->address || ((v->address>>16)&7)!=slave)continue;
++    /* ARC tables are16-bit level encodings. BCM aux is retained raw until
++     * the matching BCM layout/version is independently decoded. */
++    if(n<3 && (!v->aux_bytes || (v->aux_bytes&1)))continue;
++    for(unsigned k=0;k<v->aux_bytes;k++)v->aux[k/4]|=(uint32_t)p[aux+k]<<((k%4)*8);
++    v->result=0;
++   }
++  }
++ }
++ out->result=0;
++ for(unsigned n=0;n<7;n++) {
++  KebabGpuCmdDbResource *v=&out->resource[n];
++  if(!v->matches){out->absent|=1u<<n;v->result=2;out->result=95;}
++  else if(v->matches!=1){v->result=5;out->result=95;}
++  else if(v->result)out->result=95;
++  else out->valid|=1u<<n;
++ }
++ return (int)out->result;
++}
++static int KebabGpuCmdDbObserve(const volatile uint8_t *p,size_t bytes,KebabGpuCmdDbRecord *out)
++{
++ if(!out)return 22;
++ KebabGpuCmdDbRecord again={};
++ int result=kebab_gpu_cmd_db_pass(p,bytes,out);
++ int second=kebab_gpu_cmd_db_pass(p,bytes,&again);
++ if(result!=second || memcmp(out,&again,sizeof again)) {out->result=6;out->valid=0;return 6;}
++ return result;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeGpuPowerSnapshot.h
+@@ -0,0 +1,37 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_GPU_POWER_SNAPSHOT_H
++#define KEBAB_NATIVE_GPU_POWER_SNAPSHOT_H
++#include "KebabNativeGpuReadOnly.h"
++#include "KebabGpuCmdDb.h"
++struct KebabNativeGpuPowerSnapshot {
++ uint32_t magic,schema,bytes,flags,clock_result,db_result,reserved[2];
++ KebabGpuRoRecord clocks;KebabGpuCmdDbRecord command_db;
++};
++static_assert(sizeof(KebabNativeGpuPowerSnapshot)==756,"fixed GPU prerequisites snapshot schema1");
++/* This port's GCC control bus stays in the CPU always-on domain. The only
++ * caller is the normal USB snapshot worker, serialized against reset and
++ * other diagnostic commands; no GPU power/clock writer exists yet. Existing
++ * boot/UFS/display use the same controller. No GPUCC/rail qualification is
++ * granted here, and no downstream GPU register can be read by this adapter. */
++static int kebab_gpu_gcc_worker_access(void *)
++{return panic_active()?95:0;}
++static int kebab_native_gpu_power_snapshot(KebabNativeGpuPowerSnapshot *out)
++{
++ if(!out)return 22;
++ memset(out,0,sizeof *out);out->magic=0x3150474b;out->schema=1;out->bytes=sizeof *out;out->db_result=12;
++ if(panic_active()){out->clock_result=95;out->db_result=95;return 0;}
++ out->clock_result=kebab_native_gpu_ro_snapshot(NULL,kebab_gpu_gcc_worker_access,&out->clocks);
++ if(out->clock_result==KebabGpuRoGccOnly && out->clocks.stable==31)out->flags|=1;
++ /* Same immutable board Command DB aperture already qualified by source11.
++  * Read exact GPU resource metadata twice; addresses are never dereferenced
++  * as MMIO and no RSC/rail/clock vote is generated. */
++ KebabNativeDisplayMaps maps={};
++ if(kebab_display_map(&maps,0,0x80860000,0x20000)) {
++  out->db_result=KebabGpuCmdDbObserve((const volatile uint8_t *)maps.address[0],0x20000,&out->command_db);
++  if(!out->db_result && out->command_db.valid==127)out->flags|=2;
++ }
++ if(maps.map[0])maps.map[0]->release();
++ if(maps.memory[0])maps.memory[0]->release();
++ return 0;
++}
++#endif

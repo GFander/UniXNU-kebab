@@ -1,0 +1,2 @@
+0603人工GUI补充：用户明确确认显示/点击打开应用/返回主屏全部正常，亮度暂缓。独立收据native-dpu-0603/0603-manual-GUI-owner-confirmed.json SHA-256 54824c8adba437a00d98966fa4995676ada3283f07c8a5d75ab320d0193f7522。严格记录中的等待字段保持历史原样，实际像素FAIL及隔离状态不变，不将人工GUI或CP标记当GPU绘制。
+

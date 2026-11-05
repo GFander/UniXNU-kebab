@@ -1,0 +1,61 @@
+{
+  "version": "0593",
+  "recorded": "2026-11-04T14:07:37.495026+08:00",
+  "state": "Flashed boot_b and entered XNU; original300s safety and once-only lowDMA measurement pending. GPU regression waits for both.",
+  "git_head": "d5c9c62db752f225a288b88959d3754edc94138a",
+  "branch": "gpu/adreno650-20261103",
+  "common": 447,
+  "host": 4,
+  "source_files": 5456,
+  "patch": "0468",
+  "production_C_sha256": "b4f03cb71d633d5e550577853a83d41bcd9cf6af6100ca535eeb39bb13bfbf84",
+  "flash": {
+    "version": "0593",
+    "capture_pid": 65612,
+    "boot_sha256": "bd62250e039d3d9151804cd08dcaefc74ca2dc63f75d87e712f827bb79bb0e7a",
+    "kernel_sha256": "ff3ec44f1ec443e0b8bd7a98452f7f99d38a1e0c54f779ea52c341cc54c5f10d"
+  },
+  "jobs": {
+    "collect-awake-window.py": {
+      "pid": 88200,
+      "log": "D:\\LOS\\HiOS\\boot123-20261029\\native-dpu-0593\\collect-awake-window-output.txt",
+      "started": 1793772257.7532065
+    },
+    "finalize-baseline.py": {
+      "pid": 89356,
+      "log": "D:\\LOS\\HiOS\\boot123-20261029\\native-dpu-0593\\finalize-baseline-output.txt",
+      "started": 1793772257.761373
+    }
+  },
+  "lowdma_exec_session": 34500,
+  "GPU_regression_exec_session": 83164,
+  "lowdma_post": "post-baseline-lowdma-once.py",
+  "GPU_regression": "post-baseline-gpu-regression.py",
+  "last_actual_render": "0591 FAIL",
+  "NC": "NOT_RUN",
+  "PAS": "NOT_RUN",
+  "GPU_IRQ": "NOT_RUN",
+  "Metal": "NOT_RUN",
+  "manual_GUI_0592": "Owner reports normal display, app tap and home gesture",
+  "manual_GUI_0593": "NOT_RUN",
+  "unqualified_CRLF_attempt": "/Users/albertlee/kebab-build/native-dpu-0593/unqualified-CRLF-build",
+  "scope": "Actual native447+4/5456 LF source, two built-in SHA known answers, full current owner/firmware guards. Parent592 result14 retained.",
+  "evidence": {
+    "0593-flash.json": "f70e77744a2e0b59885adc392028d728bca8cd5b356f41873f4a910c619dd355",
+    "flash-stage-0593.py": "58609a5f375ef1b1a800bf8767b6fd50be521117ee57ad8bac7bf5ccf3d42aeb",
+    "native-dpu-0593\\flash-regression-output.log": "452dd594880d8c13568da2d4e1439c5ec8d3daa1c14e3128a37c42c12571f34f",
+    "native-dpu-0593\\paired-build.json": "0287a5f02cd7a47522b5019f0961f10ba127a2258ffbd01485637025c3a7b1a5",
+    "native-dpu-0593\\native-gpu-linked-qualified.json": "9387a1d26256d9e322a622e4c6afd7e09f4c01540572b044b4d91ca9a49784ef",
+    "native-dpu-0593\\runtime-source-binding-qualified.json": "ff45a92c8baf7e1c41021fe5678e7e638f34d4f4744ed15749c855bcbd9b8e55",
+    "native-dpu-0593\\guard-ca.py": "3779ca38f85048c8d0aba456836b2c1c0c8ef56c865d5690f65e476ba0b55132",
+    "native-dpu-0593\\lowdma-adt-package-qualified.json": "5d537bb80804211b92d20150185cda169ba9dfc7e4b09847094f365a35c8d086",
+    "native-dpu-0593\\lowdma-retime-package-qualified.json": "3ea816942384d8afb0c16befbdbe4c5834ca0ae017b8d561e94cb78cef341ea8",
+    "native-dpu-0593\\post-baseline-lowdma-once.py": "9bc538ba904abd0fde468bc58d8c70266b1b0a346f6c47f033dfb2450dfc17ae",
+    "native-dpu-0593\\post-baseline-gpu-regression.py": "d4d1081f6334f32a8bacd2119597c07694082d44f9af90913f3dea6b2cf7af4f",
+    "gpu-prereq-20261103\\gpu-zap-0593\\late-qualified-lf.json": "a4056db911c13671858b5f51ded8634282b08e75344976c8c3a5bc702d707d3c",
+    "gpu-prereq-20261103\\gpu-zap-0593\\red-regression-qualified.json": "03819466a3b9fe7b229ba51ff8995058c7aeb1637b9ce31f6f3acd82f88fe8ec",
+    "gpu-prereq-20261103\\gpu-zap-0593\\flash-preflight-0593-refreshed.log": "abfc8284399cc1cf36ad7bad8f974f5f512ca743e321f0b316c655e7eebfebd2",
+    "gpu-prereq-20261103\\combined-0593-lf-stage\\public-all-source-replay-0593.json": "0b8f55a28ef02d09e1fee46273dc654365418935501c8bccc9bad665339e974d",
+    "native-dpu-0592\\0592-original-safety-qualified-lowDMA-failed.json": "61453178eda23945a8850fb8f3d293f88eae5c7317deabc6310adbfa9db4ec9d"
+  }
+}

@@ -1,0 +1,82 @@
+--- a/osfmk/kern/kebab_bootdiag.c
++++ b/osfmk/kern/kebab_bootdiag.c
+@@ -630,6 +630,71 @@
+         type, !!port, (unsigned)((first[1] >> 8) & 255), first[2], first[3], first[4], !!first[8]);
+ }
+ 
++/* Read the original dyld's existing thread-local dlerror storage. The fixed
++ * original backboardd wrapper owns the task/map; no user function is called. */
++static unsigned
++kebab_brightness_error_buffer(vm_map_t map, uint64_t tsd, uint64_t key, uint64_t tid)
++{
++    uint64_t buffer = 0, again_buffer = 0, capacity = 0;
++    uint8_t valid = 0, again_valid = 0;
++    char text[512] = {}, again[512] = {};
++    if (!tsd || (tsd & 7) || !key || key >= 512 || tsd > UINT64_MAX - key * 8 ||
++        !kebab_ca_u64(map, tsd + key * 8, &buffer) || !buffer || (buffer & 7) ||
++        buffer > UINT64_MAX - 65536 || !kebab_ca_u64(map, buffer, &capacity) || capacity < 10 || capacity > 65536 ||
++        !kebab_plugin_user_copy(map, buffer + 8, &valid, 1) || valid > 1) return 0;
++    size_t bytes = capacity - 9 < sizeof(text) ? (size_t)(capacity - 9) : sizeof(text);
++    if (!kebab_plugin_user_copy(map, buffer + 9, text, bytes)) return 0;
++    size_t length = 0;bool relevant = false;
++    while (length < bytes && text[length]) length++;
++    if (length == bytes) return 0;
++    for (size_t i = 0; i + sizeof("BrightnessControl") - 1 <= length; i++)
++        if (!memcmp(text + i, "BrightnessControl", sizeof("BrightnessControl") - 1)) relevant = true;
++    if (!relevant || !kebab_plugin_user_copy(map, buffer + 9, again, bytes) || memcmp(text, again, bytes) ||
++        !kebab_plugin_user_copy(map, buffer + 8, &again_valid, 1) || valid != again_valid ||
++        !kebab_ca_u64(map, tsd + key * 8, &again_buffer) || buffer != again_buffer) return 0;
++    for (size_t i = 0; text[i]; i++) if ((unsigned char)text[i] < 32 || (unsigned char)text[i] > 126) text[i] = '?';
++    printf("KEBAB BACKLIGHT DLERROR: tid=%llu unconsumed=%u text=%s; original retained TLS text, readonly two-read agreement\n", tid, valid, text);
++    return 1;
++}
++static void
++kebab_brightness_dyld_report(task_t task, vm_map_t map)
++{
++    static const uint8_t cache_uuid[16] = {0x8f,0x97,0x04,0x52,0xc9,0xe3,0x3e,0x88,0xb1,0x14,0xfe,0xb1,0x86,0x4b,0xc9,0xe0};
++    static const uint8_t dyld_uuid[16] = {0x19,0x99,0x41,0xa5,0x95,0xee,0x30,0x54,0x8e,0x54,0xae,0x63,0x87,0xa9,0xfa,0x9a};
++    uint8_t uuid[16];uint64_t api = 0, vtable = 0, method = 0, base = 0, code = 0, key = 0, again_key = 0;
++    if (!kebab_plugin_user_copy(map, 0x180000058ULL, uuid, sizeof(uuid)) || memcmp(uuid, cache_uuid, 16) ||
++        !kebab_ca_u64(map, 0x1e1d345c8ULL, &api) || !api || api > UINT64_MAX - 0x330 ||
++        !kebab_ca_u64(map, api, &vtable) || !vtable || vtable > UINT64_MAX - 0x88 ||
++        !kebab_ca_u64(map, vtable + 0x80, &method) || method < 0x3c698 ||
++        ((base = method - 0x3c698) & 0x3fff) ||
++        !kebab_plugin_user_copy(map, base + 0x698, uuid, sizeof(uuid)) || memcmp(uuid, dyld_uuid, 16) ||
++        !kebab_ca_u64(map, method, &code) || code != 0xa9014ff4d100c3ffULL ||
++        !kebab_ca_u64(map, method + 0x10, &code) || code != 0xb4000441f9419401ULL ||
++        !kebab_ca_u64(map, api + 0x328, &key) || !key || key >= 512 ||
++        !kebab_ca_u64(map, api + 0x328, &again_key) || key != again_key) {
++        printf("KEBAB BACKLIGHT DLERROR: original cache/dyld ABI or key unavailable; no inferred cause\n"); return;
++    }
++    thread_t observed[32], thread;unsigned count = 0, total = 0, found = 0;
++    task_lock(task);
++    if (task->active) {
++        total = task->thread_count;
++        queue_iterate(&task->threads, thread, thread_t, task_threads) {
++            if (count == 32) break;
++            thread_reference(thread);observed[count++] = thread;
++        }
++    }
++    task_unlock(task);
++    for (unsigned i = 0; i < count; i++) {
++        thread = observed[i];spl_t priority = splsched();thread_lock(thread);
++        uint64_t tsd = thread->machine.cthread_self, tid = thread_tid(thread);
++        thread_unlock(thread);splx(priority);
++        if (found < 4) found += kebab_brightness_error_buffer(map, tsd, key, tid);
++        thread_deallocate(thread);
++        kebab_observer_drain();
++    }
++    printf("KEBAB BACKLIGHT DLERROR: inspected=%u total=%u matches=%u key=%llu; cap32threads/4texts/512bytes, target may resume\n", count, total, found, key);
++}
++
+ void kebab_ca_task_report(task_t task);
+ void
+ kebab_ca_task_report(task_t task)
+@@ -640,6 +705,7 @@
+     vm_map_t map = get_task_map_reference(task);
+     if (map != VM_MAP_NULL && vm_map_pmap(map) != pmap_kernel()) kebab_identity_user_report(map);
+     if (map != VM_MAP_NULL && vm_map_pmap(map) != pmap_kernel()) kebab_brightness_loader_report(map);
++    if (map != VM_MAP_NULL && vm_map_pmap(map) != pmap_kernel()) kebab_brightness_dyld_report(task, map);
+     for (unsigned index = 0, count = 1; index < count; index++) {
+         struct kebab_ca_state state = {};
+         int result = map == VM_MAP_NULL || vm_map_pmap(map) == pmap_kernel() ? 11 : kebab_ca_snapshot(map, &state, index);

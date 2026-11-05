@@ -658,3 +658,36 @@ post_fail:
 	__atomic_store_n(&lock->busy, 0, __ATOMIC_RELEASE);
 	return KEBAB_RPMH_ERR_TIMEOUT;
 }
+
+#include "KebabRscOwnerQuery.inc"
+
+#include "KebabGpuCxMxOwner.inc"
+
+#include "KebabGpuCcOwner.inc"
+
+#include "KebabGmuRootOwner.inc"
+
+#include "KebabGpuBusOwner.inc"
+
+#include "KebabGpuColdOwner.inc"
+
+#include "KebabGmuBootOwner.inc"
+#include "KebabGmuIrqParent.inc"
+/* BEGIN FUTURE_GMU_CANONICAL_OWNERS */
+#include "KebabGpuLaunchResourceOwner.inc"
+#include "KebabGmuFirmwareOwner.inc"
+#include "KebabGpuLaunchResourceAfterFw.inc"
+#include "KebabGmuHfiOwner.inc"
+/* BEGIN GMU_INIT32_CANONICAL */
+#include "KebabGmuHfiInitOwner.inc"
+/* END GMU_INIT32_CANONICAL */
+/* BEGIN GMU_RESOURCE33_CANONICAL */
+#include "KebabGmuResourceObserveOwner.inc"
+/* END GMU_RESOURCE33_CANONICAL */
+/* END FUTURE_GMU_CANONICAL_OWNERS */
+
+#include "KebabA650GpuVmOwner.inc"
+
+#include "KebabA650GpuOobOwner.inc"
+
+#include "KebabA650CpOwner.inc"

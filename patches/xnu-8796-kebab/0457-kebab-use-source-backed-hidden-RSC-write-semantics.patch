@@ -1,0 +1,82 @@
+--- a/osfmk/kern/KebabGpuLaunchResourceCore.h
++++ b/osfmk/kern/KebabGpuLaunchResourceCore.h
+@@ -41,6 +41,18 @@
+  {0x48,0x80000000},{0x44,0},{0x400,0},{0x20,0x4520},{0x24,0x4510},{0x28,0x4514},
+  {0x600,0xeaaae5a0},{0x604,0xe1a1ebab},{0x608,0xa2e0a581},{0x60c,0xecac82e2},{0x610,0x0020edad}
+ };
++/* The vendor and v6.12 write these six hidden-TCS fields without requiring
++ * an echo readback. No source here specifies their access type/field masks.
++ * In particular actual581 ADDR0 read82204514 after write0; do not invent a
++ * whole-word software ACK or interpret that raw value as a named field.
++ * Index follows the exact vendor DATA0/ADDR0/DATA1/ADDR1/DATA2/ADDR2 order. */
++static inline int KLRHiddenCommandIndex(uint32_t off)
++{
++ const uint32_t offsets[6]={0x38,0x34,0x40,0x3c,0x48,0x44};
++ for(unsigned i=0;i<6;i++)if(off==offsets[i])return (int)i;return -1;
++}
++static inline uint32_t KLRHiddenCommandExpected(unsigned index)
++{return index==4?0x80000000u:0;}
+ static inline void KLRInit(KebabGpuLaunchResourceRecord *r)
+ {memset(r,0,sizeof *r);r->magic=0x31524c4b;r->schema=1;r->bytes=sizeof *r;r->result=95;r->failed_region=r->failed_offset=UINT32_MAX;r->bootstrap_vote_result=INT32_MIN;}
+ static inline int KLRReadAllowed(unsigned region,uint32_t off)
+@@ -109,7 +121,12 @@
+  if((e=KLRRead(c,KLR_RSC,0x404,&v)))return e;c->r->busy=v;if(v)return 16;
+  for(unsigned i=0;i<sizeof(KLRRscSetup)/sizeof(KLRRscSetup[0]);i++){
+   const KLRSetting *w=&KLRRscSetup[i];uint32_t mask=w->offset==0x10?0x01000000u:UINT32_MAX;
+-  if((e=KLRSync(c,KLR_RSC,w->offset,w->value,mask)))return e;
++  if(KLRHiddenCommandIndex(w->offset)>=0){
++   if((e=KLRWrite(c,KLR_RSC,w->offset,w->value)))return e;
++   /* Single diagnostic sample, never a completion predicate. Native keeps
++    * these raw words separately; last_read may change at the next step. */
++   if((e=KLRRead(c,KLR_RSC,w->offset,&v)))return e;
++  }else if((e=KLRSync(c,KLR_RSC,w->offset,w->value,mask)))return e;
+  }c->r->sequence_verified=1;
+  /* A650 pdc_in_aop=true: only these two config registers. The AOP owns
+   * sequence/TCS scripts. Never map or write the PDC sequence resource. */
+--- a/iokit/Kernel/arm/KebabNativeGpuLaunchResources.h
++++ b/iokit/Kernel/arm/KebabNativeGpuLaunchResources.h
+@@ -14,6 +14,7 @@
+ struct KLRNative {
+  IOMemoryDescriptor *memory[5];IOMemoryMap *mapping[5];uintptr_t address[5];
+  void *worker_cookie;int (*worker_check)(void *);
++ uint32_t hidden_raw[6],hidden_valid,hidden_non_echo;
+ };
+ static KLRNative *klr_native;
+ static uint32_t klr_native_once;
+@@ -39,6 +40,10 @@
+ #else
+  *out=*(volatile const uint32_t *)address;
+ #endif
++ if(region==KLR_RSC){int i=KLRHiddenCommandIndex(off);if(i>=0){
++  KLRNative *a=(KLRNative *)cookie;a->hidden_raw[i]=*out;a->hidden_valid|=1u<<(unsigned)i;
++  if(*out!=KLRHiddenCommandExpected((unsigned)i))a->hidden_non_echo|=1u<<(unsigned)i;
++ }}
+  return 0;
+ }
+ static int KLRNativeWrite(void *cookie,unsigned region,uint32_t off,uint32_t value)
+@@ -61,6 +66,16 @@
+ {int e=KLRNativeWorker((KLRNative *)cookie);if(e)return e;if(us!=100)return 22;IODelay(us);return 0;}
+ static uint64_t KLRNativeNow(void *)
+ {uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000;}
++static void KLRNativeHiddenDiagnostic(const KLRNative *a)
++{
++ /* CPU-only record publication after the canonical transaction returns.
++  * No MMIO, callback, IRQ/RSC lock, implicit retry or success claim. */
++ if(!a || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled())return;
++ const uint32_t offsets[6]={0x38,0x34,0x40,0x3c,0x48,0x44};
++ for(unsigned i=0;i<6;i++)if(a->hidden_valid&(1u<<i))
++  printf("KEBAB GMURSC: hidden-diagnostic; offset=0x%02x; raw=0x%08x; written=0x%08x; non-echo=%u; not-ACK\n",
++   offsets[i],a->hidden_raw[i],KLRHiddenCommandExpected(i),(a->hidden_non_echo>>i)&1);
++}
+ /* Kernel worker only. Map allocations happen BEFORE canonical busy. Every
+  * successful/uncertain access and all RootChild refs stay pinned for the boot;
+  * no release/restore/reset/standalone userspace/CAP trigger is exposed. */
+@@ -91,6 +106,7 @@
+   e=kebab_rpmh_gpu_launch_resources_prepare(cold,epoch,token,&io,out);
+  }
+ done:
+- out->result=e;klr_native_result=*out;__atomic_store_n(&klr_native_once,2,__ATOMIC_RELEASE);return e;
++ out->result=e;klr_native_result=*out;__atomic_store_n(&klr_native_once,2,__ATOMIC_RELEASE);
++ KLRNativeHiddenDiagnostic(klr_native);return e;
+ }
+ #endif

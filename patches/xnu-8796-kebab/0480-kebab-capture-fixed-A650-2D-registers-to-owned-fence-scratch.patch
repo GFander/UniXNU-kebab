@@ -1,0 +1,140 @@
+--- a/osfmk/kern/KebabA650RenderBinding.h
++++ b/osfmk/kern/KebabA650RenderBinding.h
+@@ -4,7 +4,7 @@
+ #include <stdint.h>
+ 
+ enum {KebabA650RenderNativeQualified = 1};
+-static const uint8_t KebabA650RenderSourceContract[32] = {0xd8, 0xb0, 0xdb, 0xc9, 0xcb, 0x98, 0xef, 0x09, 0x8a, 0xb9, 0x5d, 0x95, 0xdb, 0x9b, 0x98, 0x1a, 0x6c, 0x33, 0x19, 0x10, 0x97, 0xbe, 0xe7, 0xd4, 0x2a, 0xf6, 0x82, 0x11, 0x02, 0xd6, 0x7a, 0x47};
++static const uint8_t KebabA650RenderSourceContract[32] = {0x88, 0x56, 0x5f, 0x25, 0xa9, 0xb8, 0xf5, 0x5c, 0xe4, 0xd3, 0x80, 0x74, 0x32, 0xd0, 0xdc, 0xd5, 0x85, 0xca, 0x01, 0xe3, 0x4d, 0xda, 0xdc, 0xae, 0x97, 0xeb, 0x65, 0x38, 0xfd, 0x5a, 0x20, 0x59};
+ 
+ static inline int
+ KARSourceBound(void)
+--- a/osfmk/kern/KebabA650RenderCore.h
++++ b/osfmk/kern/KebabA650RenderCore.h
+@@ -15,14 +15,38 @@
+     KAR_TARGET_SPACING = 0x4000,
+     KAR_SENTINEL = 0xa5,
+     KAR_PASSES = 2,
+-    KAR_WORDS = 139,
+-    KAR_SCHEMA = 4,
++    KAR_WORDS = 212,
++    KAR_SCHEMA = 5,
+     KAR_CONTROL_OFFSET = 0x80,
+     KAR_CONTROL_VALUE = 0xa650c001u,
+     KAR_EVENT_OFFSET = 128,
+     KAR_EVENT_SPACING = 64,
+     KAR_EVENT_PASS_SPACING = 256,
++    KAR_DIAGNOSTIC_COUNT = 18,
++    KAR_DIAGNOSTIC_OFFSET = 0x300,
++    KAR_DIAGNOSTIC_SPACING = 0x100,
++    KAR_DIAGNOSTIC_SENTINEL = 0xa65e0000u,
+ };
++
++/* Fixed nonsecure A6XX 2D command state, Mesa63350a a6xx.xml.
++ * Never accept a caller-supplied register or destination address. */
++static const uint32_t KARDiagnosticRegisters[KAR_DIAGNOSTIC_COUNT] = {
++    0x8400, 0x8405, 0x8406, 0x8c00, 0x8c01, 0x8c17,
++    0x8c18, 0x8c19, 0x8c1a, 0x8c2c, 0x8c2d, 0x8c2e,
++    0x8c2f, 0xacc0, 0x8e04, 0x8e07, 0x8811, 0x8110,
++};
++
++static inline uint32_t
++KARDiagnosticOffset(unsigned pass, unsigned index)
++{
++    return KAR_DIAGNOSTIC_OFFSET + pass * KAR_DIAGNOSTIC_SPACING + index * 4;
++}
++
++static inline uint32_t
++KARDiagnosticSentinel(unsigned pass, unsigned index)
++{
++    return KAR_DIAGNOSTIC_SENTINEL + pass * KAR_DIAGNOSTIC_COUNT + index;
++}
+ 
+ static const uint8_t KARColors[4][4] = {
+     {255, 0, 0, 255}, {0, 255, 0, 0},
+@@ -128,6 +152,16 @@
+      * hardware timestamp as well as the qualified CP completion fence. */
+     p = KARFlushEvent(p, 0x1d, KAREventOffset(pass, 2));
+     *p++ = KCPType7(0x26, 0);
++    /* Standard CP_REG_TO_MEM, one dword, no ACCUMULATE/64B. Copy to
++     * unused private NC fence slots only, after the terminal color clean.
++     * Raw diagnostics are not pixels and do not relax any render check. */
++    for (unsigned index = 0; index < KAR_DIAGNOSTIC_COUNT; ++index) {
++        *p++ = KCPType7(0x3e, 3);
++        *p++ = KARDiagnosticRegisters[index] | (1u << 18);
++        *p++ = KCP_FENCE_IOVA + KARDiagnosticOffset(pass, index);
++        *p++ = 0;
++    }
++    *p++ = KCPType7(0x12, 0); /* CP_WAIT_MEM_WRITES before completion fence */
+     KCPFenceWords(p, pass + 3);
+     return 0;
+ }
+--- a/iokit/Kernel/arm/KebabA650RenderNative.h
++++ b/iokit/Kernel/arm/KebabA650RenderNative.h
+@@ -14,6 +14,7 @@
+     uint32_t commands[KAR_WORDS];
+     KARSample terminal;
+     uint32_t submitted, polls, captured, mismatch;
++    uint32_t diagnostics[KAR_DIAGNOSTIC_COUNT];
+ };
+ 
+ struct KebabA650RenderObservation {
+@@ -25,6 +26,13 @@
+     uint8_t readback[KAR_PASSES][KAR_BO_BYTES];
+ };
+ 
++static_assert(sizeof(KARPass) == 1020, "CAP38 schema5 pass1020");
++static_assert(offsetof(KebabA650RenderObservation, vm_before) == 2176,
++    "CAP38 schema5 aligned VM");
++static_assert(offsetof(KebabA650RenderObservation, readback) == 5440,
++    "CAP38 schema5 full target snapshots");
++static_assert(sizeof(KebabA650RenderObservation) == 136512, "CAP38 schema5 bytes");
++
+ extern "C" int kebab_a650_gpu_render_prepare(void);
+ extern "C" int kebab_a650_gpu_render_snapshot(KebabA650RenderObservation *);
+ #endif
+--- a/iokit/Kernel/arm/KebabNativeA650Render.h
++++ b/iokit/Kernel/arm/KebabNativeA650Render.h
+@@ -101,6 +101,18 @@
+             return EIO;
+         }
+     }
++    const auto *fence = (volatile const uint32_t *)kvg_engine.backing.region[5].cpu;
++    static_assert(KAR_DIAGNOSTIC_OFFSET >
++        KAR_EVENT_OFFSET + KAR_EVENT_PASS_SPACING + 2 * KAR_EVENT_SPACING + 8,
++        "diagnostics do not overlap CP or CCU slots");
++    static_assert(KAR_DIAGNOSTIC_OFFSET + KAR_DIAGNOSTIC_SPACING +
++        KAR_DIAGNOSTIC_COUNT * 4 <= 4096, "diagnostics fit owned fence BO");
++    for (unsigned index = 0; index < KAR_DIAGNOSTIC_COUNT; ++index) {
++        if (fence[KARDiagnosticOffset(pass, index) / sizeof(*fence)] !=
++            KARDiagnosticSentinel(pass, index)) {
++            return EIO;
++        }
++    }
+ 
+     const uintptr_t ring = kvg_engine.backing.region[0].cpu;
+     error = KARBuildWords(pass, &proof->commands);
+@@ -143,6 +155,12 @@
+             /* The terminal color CCU timestamp and the CP fence must both
+              * be observed before CPU reads from the noncacheable target. */
+             KARAcquireNC();
++            /* Preserve actual state even if the first pixel fails below.
++             * No whole-word register equality gate or synthesized readback. */
++            for (unsigned index = 0; index < KAR_DIAGNOSTIC_COUNT; ++index) {
++                proof->diagnostics[index] =
++                    fence[KARDiagnosticOffset(pass, index) / sizeof(*fence)];
++            }
+             const auto *target = (volatile const uint8_t *)kvg_engine.backing.region[4].cpu;
+             for (uint32_t i = 0; i < KAR_BO_BYTES; ++i) {
+                 record->readback[pass][i] = target[i];
+@@ -207,6 +225,10 @@
+         target[i] = KAR_SENTINEL;
+     }
+     for (unsigned pass = 0; pass < KAR_PASSES; ++pass) {
++        for (unsigned index = 0; index < KAR_DIAGNOSTIC_COUNT; ++index) {
++            fence[KARDiagnosticOffset(pass, index) / sizeof(*fence)] =
++                KARDiagnosticSentinel(pass, index);
++        }
+         for (unsigned event = 0; event < 3; ++event) {
+             unsigned index = KAREventOffset(pass, event) / sizeof(*fence);
+             fence[index] = 0;

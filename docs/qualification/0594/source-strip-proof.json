@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "scope": "Actual Ubuntu git reverse of exactly current0469 in isolated RAM directory. The three modified whole units recover0593. There are no added files. This proves source inversion only.",
+  "patch_sha256": "e29261a1b79d14d90dcab775e172b5d4f2d6342ca3c2162a27a3d5d613edc560",
+  "manifest_sha256": "749f7c5101fa5e9c34e35a4bf906f408daedab626cb55b31dbee030f77a312b4",
+  "whole_units_restored591": {
+    "osfmk/kern/kebab_low_dma.c": "b4f03cb71d633d5e550577853a83d41bcd9cf6af6100ca535eeb39bb13bfbf84",
+    "osfmk/kern/kebab_low_dma.h": "df26da071ee466a19e2e0099748e0c0ac1bdf1e9c22731805c3c91c30f00b2d9",
+    "iokit/Kernel/arm/KebabFramebuffer.cpp": "a271561c56aa2c6fb94c74e46f62ee2f34a620670f68e9bf9f6341cdf2b61e84"
+  },
+  "new_files_removed": [],
+  "physical_test": false
+}

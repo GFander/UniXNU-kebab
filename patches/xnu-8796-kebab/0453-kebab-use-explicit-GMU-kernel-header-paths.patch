@@ -1,0 +1,20 @@
+--- a/iokit/Kernel/arm/KebabNativeGmuBoot.h
++++ b/iokit/Kernel/arm/KebabNativeGmuBoot.h
+@@ -5,10 +5,17 @@
+ #include <IOKit/IOMemoryDescriptor.h>
+ #include <arm/machine_routines.h>
+ #include <kern/clock.h>
++#if defined(KERNEL)
++#include <kern/KebabGmuBootOwner.h>
++#include <kern/KebabGmuRootCore.h>
++#include <kern/KebabGmuBootBinding.h>
++#include <kern/KebabGpuFirstAttachNative.h>
++#else
+ #include "KebabGmuBootOwner.h"
+ #include "KebabGmuRootCore.h"
+ #include "KebabGmuBootBinding.h"
+ #include "KebabGpuFirstAttachNative.h"
++#endif
+ extern "C" int get_preemption_level(void);
+ struct KebabNativeGmuBootAccess {
+  IOMemoryDescriptor *memory[6];IOMemoryMap *mapping[6];uintptr_t address[6];

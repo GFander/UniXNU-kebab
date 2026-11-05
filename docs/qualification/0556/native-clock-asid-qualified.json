@@ -1,0 +1,67 @@
+{
+  "accepted": true,
+  "version": "0556",
+  "native_sha256": "5497a4cdb4af9b2c215c77f8e9f55ec5e945ed5718dc17279c9dea42172e0be5",
+  "source": {
+    "common": 411,
+    "host": 4,
+    "files": 5306
+  },
+  "baseline_seconds": 304.473,
+  "nonsecure_asid_audit": {
+    "id0": 1275166295,
+    "id1": 1610612810,
+    "cr0": 2360326,
+    "context_banks": 74,
+    "active_stage1": 0,
+    "active_stage2": 0,
+    "chosen_asid": 6,
+    "reads": 449,
+    "failed_offset": 0,
+    "stable": 1,
+    "display_cb": 5,
+    "display_sctlr": 224,
+    "display_cbar": 126976,
+    "display_cba2r": 1,
+    "namespace_contract": 1,
+    "reserved": 0,
+    "active_stage1_banks": [],
+    "conservatively_reserved_asids": [
+      0
+    ]
+  },
+  "clock": {
+    "started": 1,
+    "finished": 1,
+    "error": 0,
+    "software_delta": 0,
+    "core": {
+      "error": 0,
+      "phase": 5,
+      "restored": 1,
+      "original_cfg": 1049603,
+      "lower_cfg": 1049605,
+      "final_cfg": 1049603,
+      "original_cmd": 0,
+      "final_cmd": 0,
+      "frame_begin": 20479,
+      "frame_lower_begin": 20479,
+      "frame_lower_end": 20486,
+      "frame_restored": 20487,
+      "write_attempts": 6,
+      "update_polls": 2
+    },
+    "irq_before": 19387,
+    "irq_released": 19395,
+    "irq_after": 19397
+  },
+  "fixed_attempts": 1,
+  "all_serial_sessions_closed": true,
+  "scope": "Physical bounded NS-ASID audit and reversible MDP divider2->3->2; real IRQ/frame progress and zero software-vblank delta. Nominal300/200MHz derived from inherited vendor plan, no independent Hz measurement. No SMMU DMA mappings, PLL/voltage votes, DSI packet/brightness or PCIe enable yet.",
+  "evidence": {
+    "live-asid-before": "f093f5e683d12669cb7ae4d823e173bf6c27c64e70932a4ca4c99e6f9b2976cb",
+    "live-asid-after": "80ba7ab131210d318a66fe7c52f3cd1fb09a8f7672eaffd046a62d2f0fe1dd51",
+    "live-platform": "df41f7f6f7668e77feca5629f39b7d58148047849759b0ae3aa1b1eb31fcf619",
+    "live-thermal": "b1cfa91927e0e24bc74e94b3ae71506cf9919d2811ddb89a9ab70189b1b1a79c"
+  }
+}

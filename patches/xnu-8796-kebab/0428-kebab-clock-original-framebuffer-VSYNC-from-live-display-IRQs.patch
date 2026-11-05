@@ -1,0 +1,133 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -47,7 +47,10 @@
+  *      surface, or not found]
+  *
+  * Swap lifecycle: SwapEnd copies the 0x46c record into a one-deep queue and
+- * returns. The 60 Hz vsync timer presents the latest queued frame with the
++ * returns. New live display IRQs clock VSYNC and presentation, with an explicit
++ * software-clock fallback when hardware stops. A normal-context poll consumes
++ * the real IRQ mailbox; repeated polls produce no hardware notifications. The
++ * backend presents the latest queued frame with the
+  * CPU copy (the current backend), records its id as completed and wakes
+  * SwapWait waiters. A later DPU backend replaces AppleCLCD::present() and
+  * the completion point; the user client ABI does not change.
+@@ -98,6 +101,14 @@
+ #include "KebabNativeDisplayObservation.h"
+ extern "C" int kebab_display_irq_start(void);
+ extern "C" void kebab_display_irq_snapshot(uint32_t out[16]);
++#include "KebabVblankClock.h"
++static uint64_t kebab_fb_hw_notifications,kebab_fb_sw_notifications,kebab_fb_last_irq;
++static uint32_t kebab_fb_clock_mode,kebab_fb_hardware_copies;
++static void kebab_fb_vblank_snapshot(uint32_t out[8])
++{
++ uint64_t hw=__atomic_load_n(&kebab_fb_hw_notifications,__ATOMIC_ACQUIRE),sw=__atomic_load_n(&kebab_fb_sw_notifications,__ATOMIC_ACQUIRE),event=__atomic_load_n(&kebab_fb_last_irq,__ATOMIC_ACQUIRE);
++ out[0]=__atomic_load_n(&kebab_fb_clock_mode,__ATOMIC_ACQUIRE);out[1]=(uint32_t)hw;out[2]=(uint32_t)(hw>>32);out[3]=(uint32_t)sw;out[4]=(uint32_t)(sw>>32);out[5]=(uint32_t)event;out[6]=(uint32_t)(event>>32);out[7]=__atomic_load_n(&kebab_fb_hardware_copies,__ATOMIC_ACQUIRE);
++}
+ #include "KebabPlatformSnapshot.h"
+ 
+ enum {
+@@ -158,6 +169,7 @@
+ 	IOWorkLoop         *fWorkLoop;
+ 	IOTimerEventSource *fVsync;
+ 	uint64_t            fVsyncCount;
++	KebabVblankClock     fVblankClock;
+ 	bool                fVsyncAdded;
+ 	bool                fStopping;
+ 
+@@ -352,6 +364,7 @@
+ 		return false;
+ 	}
+ 	fVsyncCount = 0;
++	memset(&fVblankClock,0,sizeof fVblankClock);
+ 	fTraceQueued = fTracePresented = 0;
+ 	bzero(&fTraceFirst, sizeof(fTraceFirst));bzero(&fTraceLast, sizeof(fTraceLast));
+ 	fSwapID = 0;
+@@ -434,7 +447,16 @@
+ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ {
+ 	AppleCLCD *fb = (AppleCLCD *)owner;
+-	uint64_t now = mach_absolute_time();
++    uint32_t irq[16];kebab_display_irq_snapshot(irq);
++    uint64_t now=mach_absolute_time(),max_age;nanoseconds_to_absolutetime(100000000,&max_age);
++    uint64_t events=(uint64_t)irq[4]|((uint64_t)irq[5]<<32),last_irq=(uint64_t)irq[6]|((uint64_t)irq[7]<<32);
++    KebabVblankDecision decision=KebabVblankStep(&fb->fVblankClock,irq[0],events,last_irq,now,max_age);
++    __atomic_store_n(&kebab_fb_clock_mode,fb->fVblankClock.mode,__ATOMIC_RELEASE);
++    __atomic_store_n(&kebab_fb_hw_notifications,fb->fVblankClock.hardware,__ATOMIC_RELEASE);
++    __atomic_store_n(&kebab_fb_sw_notifications,fb->fVblankClock.software,__ATOMIC_RELEASE);
++    __atomic_store_n(&kebab_fb_last_irq,fb->fVblankClock.seen,__ATOMIC_RELEASE);
++    if(!decision.notify){sender->setTimeoutUS(decision.next_us);return;}
++    now=decision.timestamp; /* Hardware mode reports the actual IRQ timestamp. */
+ 	uint64_t values[6] = {
+ 		(uint32_t)now, (uint32_t)(now >> 32),
+ 		(uint32_t)now, (uint32_t)(now >> 32),
+@@ -478,6 +500,7 @@
+ 		}
+ 	} else if (present) {
+ 		fb->present(rec, id);
++        if(decision.hardware)(void)__atomic_add_fetch(&kebab_fb_hardware_copies,1,__ATOMIC_RELEASE);
+ 		IOLockLock(fb->fLock);
+ 		if (id > fb->fCompletedID) {
+ 			fb->fCompletedID = id;
+@@ -486,7 +509,7 @@
+ 		IOLockWakeup(fb->fLock, &fb->fCompletedID, false);
+ 		IOLockUnlock(fb->fLock);
+ 	}
+-	sender->setTimeoutUS(KEBAB_FB_VSYNC_US);
++	sender->setTimeoutUS(decision.next_us);
+ }
+ 
+ /* Apply power changes on the same gate as the present timer. In particular,
+--- a/iokit/Kernel/arm/KebabPlatformSnapshot.h
++++ b/iokit/Kernel/arm/KebabPlatformSnapshot.h
+@@ -3,9 +3,9 @@
+  * flags do not grant ownership, IRQ readiness, scanout or DMA completion. */
+ struct KebabNativePlatformSnapshot {
+     uint32_t magic,schema,bytes,flags,result,reads,reserved[2];
+-    uint32_t clocks[8],gic[12],ctl[6][3],pingpong[2][6],dsc[4][3],context[4],irq[16];
++    uint32_t clocks[8],gic[12],ctl[6][3],pingpong[2][6],dsc[4][3],context[4],irq[16],vblank[8];
+ };
+-static_assert(sizeof(KebabNativePlatformSnapshot)==360,"platform snapshot schema2");
++static_assert(sizeof(KebabNativePlatformSnapshot)==392,"platform snapshot schema3");
+ struct KebabPlatformRead {
+     KebabNativeDisplayMaps *maps;KebabNativePlatformSnapshot *out;
+ };
+@@ -31,7 +31,7 @@
+ static int kebab_native_platform_snapshot(KebabNativePlatformSnapshot *out)
+ {
+     if(!out)return 22;
+-    memset(out,0,sizeof *out);out->magic=0x3153504b;out->schema=2;out->bytes=sizeof *out;out->result=2;
++    memset(out,0,sizeof *out);out->magic=0x3153504b;out->schema=3;out->bytes=sizeof *out;out->result=2;
+     KebabNativeDisplayMaps m={};KebabPlatformRead r={&m,out};
+     KebabSmmuObservation smmu={};uint32_t version=0,check=0;
+     if(!kebab_display_map(&m,0,0x00100000,0x10000))goto done;
+@@ -90,5 +90,6 @@
+ done:
+     for(unsigned n=5;n;n--) {unsigned i=n-1;if(m.map[i])m.map[i]->release();if(m.memory[i])m.memory[i]->release();}
+     kebab_display_irq_snapshot(out->irq);
++    kebab_fb_vblank_snapshot(out->vblank);
+     return 0;
+ }
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabVblankClock.h
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_VBLANK_CLOCK_H
++#define KEBAB_VBLANK_CLOCK_H
++#include <stdint.h>
++/* A timer may poll this mailbox, but only a new live hardware IRQ event may
++ * produce a hardware notification. CPU-copy completion remains separate from
++ * physical scanout/atomic page-flip completion. All state is work-loop owned. */
++typedef struct {uint64_t seen,hardware,software;uint32_t mode;} KebabVblankClock;
++typedef struct {uint64_t timestamp;uint32_t notify,hardware,next_us;} KebabVblankDecision;
++static KebabVblankDecision KebabVblankStep(KebabVblankClock *s,uint32_t irq_state,uint64_t events,uint64_t last_irq,uint64_t now,uint64_t max_age)
++{
++ KebabVblankDecision d={0,0,0,1000};
++ if(irq_state==1 && events && last_irq && now>=last_irq && now-last_irq<=max_age && events>=s->seen) {
++  s->mode=1;
++  if(events==s->seen)return d;
++  s->seen=events;s->hardware++;d.timestamp=last_irq;d.notify=1;d.hardware=1;return d;
++ }
++ s->mode=0;s->software++;d.timestamp=now;d.notify=1;d.next_us=16667;return d;
++}
++#endif

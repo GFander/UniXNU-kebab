@@ -1,0 +1,514 @@
+--- /dev/null
++++ b/osfmk/kern/KebabA650GpuOobBinding.h
+@@ -0,0 +1,8 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GPU_OOB_BINDING_H
++#define KEBAB_A650_GPU_OOB_BINDING_H
++/* Finite0587 retained GPU OOB only. Review digest below; actual native,
++ * runtime and boot_b gates still required. No CP/DMA/render authority. */
++enum {KebabA650GpuOobNativeQualified=1};
++static const unsigned char KebabA650GpuOobSourceContract[32]={0x14,0xf4,0x0f,0xfb,0x77,0xf4,0x27,0xdf,0xa3,0xbe,0xcb,0x36,0x98,0x63,0xba,0xca,0x4b,0x06,0xf7,0xc0,0x2e,0x7b,0x8f,0x56,0x6d,0xf9,0x80,0x62,0x9b,0xd0,0x38,0x04};
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabA650GpuOobCore.h
+@@ -0,0 +1,116 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GPU_OOB_CORE_H
++#define KEBAB_A650_GPU_OOB_CORE_H
++#include <stdint.h>
++#include <string.h>
++/* A650 nonlegacy GPU OOB only. Never programs GX/CP/SMMU or a performance
++ * vote. Space0 is GMU 03d6a000, space1 GPUCC03d90000. A separately reviewed
++ * native canonical owner must supply live Root/VM/IRQ/HFI checks and pins.
++ * The only writes are GPU request bit30 and ACK W1C bit31. Success retains
++ * the OOB request; uncertain failure never clears it or releases any pins. */
++enum {KHO_EMPTY=0,KHO_FAILED=1,KHO_HELD=2,KHO_QUARANTINED=3};
++typedef struct {
++ void *cookie;
++ int (*gate)(void*);
++ int (*read32)(void*,unsigned,uint32_t,uint32_t*);
++ int (*write32)(void*,unsigned,uint32_t,uint32_t);
++ void (*barrier)(void*),(*delay_us)(void*,unsigned);
++ uint64_t (*now_us)(void*);
++} KebabA650GpuOobIo;
++typedef struct {uint32_t attempted,quarantined,held;} KebabA650GpuOobBook;
++typedef struct {
++ uint32_t magic,schema,bytes,result,phase,primary_error,io_error,touched;
++ uint32_t request_written,ACK_observed,ACK_cleared,held,quarantined,reads,writes,barriers,polls;
++ uint32_t failed_region,failed_offset,reserved;
++ /* INFO, MASK, AO, SPTPRAC, GX_GDSCR, GX_CFG_GDSCR, CX_GDSCR, RPMH_STATE.
++  * Snapshot arrays are raw observations, never a live lease or CP proof. */
++ uint32_t before[8],after[8];
++ uint64_t epoch,elapsed_us;
++} KebabA650GpuOobRecord;
++typedef struct {
++ const KebabA650GpuOobIo *io;KebabA650GpuOobBook *book;
++ KebabA650GpuOobRecord *r;uint64_t begin,ack_begin;uint32_t ack_active;
++} KebabA650GpuOobContext;
++static inline void KebabA650GpuOobInit(KebabA650GpuOobRecord*r)
++{memset(r,0,sizeof *r);r->magic=0x314f5847;r->schema=1;r->bytes=sizeof *r;}
++static inline int KHOClock(KebabA650GpuOobContext*c)
++{
++ uint64_t n=c->io->now_us(c->io->cookie);
++ if(n<c->begin || n-c->begin>=100000 || (c->ack_active && (n<c->ack_begin || n-c->ack_begin>=10000)))return 110;
++ return 0;
++}
++static inline int KHORawRead(KebabA650GpuOobContext*c,unsigned region,uint32_t off,uint32_t*v)
++{
++ c->r->reads++;int e=c->io->read32(c->io->cookie,region,off,v);
++ if(e){c->r->io_error=(uint32_t)e;c->r->failed_region=region;c->r->failed_offset=off;return 5;}
++ return KHOClock(c);
++}
++static inline int KHOGate(KebabA650GpuOobContext*c)
++{
++ int e=KHOClock(c);if(e)return e;e=c->io->gate(c->io->cookie);
++ if(e){c->r->io_error=(uint32_t)e;return e;}
++ if((e=KHOClock(c)))return e;
++ uint32_t info,ao;if((e=KHORawRead(c,0,0x14648,&info)))return e;
++ if((e=KHORawRead(c,0,0x24c14,&ao)))return e;
++ if((ao&0x29) || (info&0x8000))return 5;
++ /* No other OOB, pending queue, debug/error consumer or pre-existing ACK is
++  * adopted. IRQ masks stay unchanged; high OOB bits remain IRQ-masked. */
++ if((info&0x7fffffffu) || (!c->r->touched && (info&0x80000000u)))return 16;
++ return KHOClock(c);
++}
++static inline int KHORead(KebabA650GpuOobContext*c,unsigned region,uint32_t off,uint32_t*v)
++{int e=KHOGate(c);return e?e:KHORawRead(c,region,off,v);}
++static inline int KHOWrite(KebabA650GpuOobContext*c,uint32_t off,uint32_t value)
++{
++ if(!((off==0x14650 && value==0x40000000u) || (off==0x14644 && value==0x80000000u)))return 22;
++ int e=KHOGate(c);if(e)return e;c->r->touched=1;c->r->writes++;
++ e=c->io->write32(c->io->cookie,0,off,value);
++ /* This ordering is unconditional after a store attempt. A late gate or
++  * fallible callback cannot silently suppress the architectural barrier. */
++ c->r->barriers++;c->io->barrier(c->io->cookie);
++ if(e){c->r->io_error=(uint32_t)e;c->r->failed_region=0;c->r->failed_offset=off;return 5;}
++ if(off==0x14650)c->r->request_written=1;
++ return KHOGate(c);
++}
++static inline int KHOSnapshot(KebabA650GpuOobContext*c,uint32_t*out)
++{
++ static const uint32_t off[8]={0x14648,0x1464c,0x24c14,0x14340,0x100c,0x1010,0x106c,0x143b0};
++ for(unsigned n=0;n<8;n++){int e=KHORead(c,n>=4&&n<=6?1u:0u,off[n],out+n);if(e)return e;}
++ return 0;
++}
++static inline int KebabA650GpuOobHold(KebabA650GpuOobContext*c,uint32_t qualified,uint64_t epoch)
++{
++ if(!c || !c->r)return 22;KebabA650GpuOobInit(c->r);KebabA650GpuOobRecord*r=c->r;
++ if(!c->book || !c->io || !c->io->gate || !c->io->read32 || !c->io->write32 || !c->io->barrier || !c->io->delay_us || !c->io->now_us){r->result=22;r->phase=KHO_FAILED;return 22;}
++ if(qualified!=1 || epoch!=1){r->result=95;r->phase=KHO_FAILED;return 95;}
++ if(c->book->attempted || c->book->quarantined || c->book->held){r->result=16;r->phase=KHO_FAILED;return 16;}
++ c->book->attempted=1;c->ack_active=0;r->epoch=epoch;c->begin=c->io->now_us(c->io->cookie);int e=KHOSnapshot(c,r->before);
++ /* A first bounded activation must not adopt an already-powered GX. The
++  * private isolated VM is published, and fresh independent indicators must
++  * still report GX power/clock off before the sole request is attempted. */
++ if(!e && (!(r->before[1]&0x80000000u) || !(r->before[6]&0x80000000u) ||
++            (r->before[3]&0xc0u)!=0xc0u || !(r->before[5]&0x8000u)))e=13;
++ if(!e){c->ack_begin=c->io->now_us(c->io->cookie);c->ack_active=1;e=KHOWrite(c,0x14650,0x40000000u);}
++ if(!e){
++  uint32_t info=0;for(unsigned n=0;n<101;n++){
++   r->polls++;e=KHORead(c,0,0x14648,&info);if(e)break;
++   if(info&0x80000000u){r->ACK_observed=1;break;}
++   c->io->delay_us(c->io->cookie,100);e=KHOClock(c);if(e)break;
++  }
++  if(!e&&!r->ACK_observed)e=110;
++ }
++ if(!e){e=KHOWrite(c,0x14644,0x80000000u);if(!e){uint32_t info=0;e=KHORead(c,0,0x14648,&info);if(!e&&(info&0x80000000u))e=5;if(!e)r->ACK_cleared=1;}}
++ c->ack_active=0;
++ if(!e)e=KHOSnapshot(c,r->after);
++ /* GX_CFG_GDSCR bit16 is positive power-up completion. Do not invent an
++  * inverse contract for its separate bit15 power-down diagnostic. SPTPRAC
++  * bits6/7 must both report on while the retained GPU OOB is held. */
++ if(!e && (r->after[0] || r->after[1]!=r->before[1] || (r->after[3]&0xc0u) || !(r->after[5]&0x10000u) || !(r->after[6]&0x80000000u)))e=11;
++ if(!e)e=KHOGate(c);
++ uint64_t end=c->io->now_us(c->io->cookie);r->elapsed_us=end>=c->begin?end-c->begin:UINT64_MAX;
++ if(!e && r->elapsed_us>=100000)e=110;
++ if(e){r->result=r->primary_error=(uint32_t)e;r->phase=r->touched?KHO_QUARANTINED:KHO_FAILED;
++  if(r->touched){r->quarantined=1;c->book->quarantined=1;}return e;}
++ c->book->held=1;r->held=1;r->phase=KHO_HELD;return 0;
++}
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabA650GpuOobOwner.h
+@@ -0,0 +1,29 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GPU_OOB_OWNER_H
++#define KEBAB_A650_GPU_OOB_OWNER_H
++#include "KebabA650GpuVmOwner.h"
++#include "KebabA650GpuOobCore.h"
++typedef struct {
++ const KebabA650GpuVmOwnerToken *vm;
++ uint64_t generation;
++ uint32_t pinned,quarantined;
++} KebabA650GpuOobOwnerToken;
++typedef struct {
++ KebabA650GpuOobIo core;
++ /* Actual retained namespace register observations, never CAP caches. */
++ int (*snapshot_vm)(void*,unsigned after);
++} KebabA650GpuOobOwnerIo;
++#ifdef __cplusplus
++extern "C" {
++#endif
++int kebab_rpmh_gpu_oob_hold(KebabA650GpuOobOwnerToken*,const KebabA650GpuVmOwnerToken*,const KebabA650GpuOobOwnerIo*,KebabA650GpuOobRecord*);
++int kebab_rpmh_gpu_oob_check_locked(const KebabA650GpuOobOwnerToken*);
++/* FirstAttach TU: exact existing private namespace/BO identity only, then
++ * fresh owned route/context + all ordinary fault CSRs without another lock. */
++int kebab_a650_gpu_oob_vm_ready_locked(const KebabA650GpuVmOwnerToken*);
++int kebab_a650_gpu_oob_vm_live_check_locked(const KebabA650GpuVmOwnerToken*);
++void kebab_a650_gpu_oob_vm_quarantine_locked(const KebabA650GpuVmOwnerToken*);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- a/osfmk/kern/Makefile
++++ b/osfmk/kern/Makefile
+@@ -38,6 +38,7 @@
+ EXPORT_FILES = \
+ 	KebabGmuResourceObserve.h \
+ 	KebabGmuResourceObserveOwner.h KebabA650GpuVmOwner.h KebabA650GpuVmBinding.h \
++	KebabA650GpuOobCore.h KebabA650GpuOobOwner.h KebabA650GpuOobBinding.h \
+ 	KebabGmuHfiInitBinding.h \
+ 	KebabGmuHfiInitCore.h \
+ 	KebabGmuHfiInitOwner.h \
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabA650GpuOobNative.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_A650_GPU_OOB_NATIVE_API_H
++#define KEBAB_A650_GPU_OOB_NATIVE_API_H
++#include <sys/errno.h>
++#include "KebabA650GpuVmNative.h"
++#if defined(KERNEL)
++#include <kern/KebabA650GpuOobCore.h>
++#else
++#include "KebabA650GpuOobCore.h"
++#endif
++typedef struct {
++ KebabA650GpuOobRecord receipt;
++ KGDiscovery vm_before,vm_after;
++} KebabA650GpuOobObservation;
++static_assert(sizeof(KebabA650GpuOobObservation)==3424,"GPU OOB observation v1");
++extern "C" int kebab_a650_gpu_oob_prepare(void);
++extern "C" int kebab_a650_gpu_oob_snapshot(KebabA650GpuOobObservation*);
++#endif
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -136,6 +136,9 @@
+ /* BEGIN A650_GPUVM_INCLUDE */
+ #include "KebabNativeA650GpuVmHold.h"
+ /* END A650_GPUVM_INCLUDE */
++/* BEGIN A650_GPUOOB_INCLUDE */
++#include "KebabNativeA650GpuOobHold.h"
++/* END A650_GPUOOB_INCLUDE */
+ /* END FUTURE_GMU_HOLD_INCLUDE */
+ #include "KebabNativeGpuFirstAttachHold.h"
+ #include <kern/kebab_low_dma.h>
+@@ -933,6 +936,18 @@
+         image->total=bytes;image->stable=1;image->flags=2;return 0;
+     }
+ /* END A650_GPUVM34_35_PROVIDER */
++/* BEGIN A650_GPUOOB36_PROVIDER */
++    if(source==36) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabA650GpuOobObservation);
++        auto *data=(KebabA650GpuOobObservation*)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_a650_gpu_oob_snapshot(data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=36;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
++/* END A650_GPUOOB36_PROVIDER */
+     if(source==31) {
+         if(argument)return 22;
+         uint32_t bytes=sizeof(KebabGpuSn11Record);
+--- a/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
++++ b/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
+@@ -85,3 +85,5 @@
+  * success entry. The compiled production binding above remains CLOSED. */
+ 
+ #include "KebabNativeA650GpuVm.h"
++
++#include "KebabNativeA650GpuOob.h"
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeA650GpuOob.h
+@@ -0,0 +1,142 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_A650_GPU_OOB_H
++#define KEBAB_NATIVE_A650_GPU_OOB_H
++/* End of FirstAttach TU, after actual586 NativeVM. Reuses its exact private
++ * namespace/owner/BO/maps; no synthesized lease or second SMMU namespace. */
++#include "KebabA650GpuOobNative.h"
++#if defined(KERNEL)
++#include <kern/KebabA650GpuOobOwner.h>
++#include <kern/KebabA650GpuOobBinding.h>
++#else
++#include "KebabA650GpuOobOwner.h"
++#include "KebabA650GpuOobBinding.h"
++#endif
++extern "C" int kebab_a650_gpu_oob_vm_ready_locked(const KebabA650GpuVmOwnerToken*vm)
++{
++ if(vm!=&kvg_native.owner || kebab_a650_gpu_vm_ready_locked(vm) ||
++ __atomic_load_n(&kvg_engine.busy,__ATOMIC_ACQUIRE) || kvg_engine.record.result || kvg_engine.record.phase!=KVG_ATTACHED ||
++ !kvg_engine.published || !kvg_engine.publish_attempted || !kvg_engine.held || !kvg_engine.backing_held ||
++ !vm->published || !vm->held || !kvg_native.bo.held || !kvg_native.bo.generation ||
++ kvg_native.bo.generation!=kvg_engine.backing.generation || !kvg_native.base || !kvg_native.clock[3])return 95;
++ return 0;
++}
++static int KHO_VM_R32(const KebabA650GpuVmOwnerToken*vm,uint32_t off,uint32_t*out)
++{int e=kebab_a650_gpu_oob_vm_ready_locked(vm);return e?e:KVGNativeRead32(&kvg_native,off,out);}
++static int KHO_VM_R64(const KebabA650GpuVmOwnerToken*vm,uint32_t off,uint64_t*out)
++{int e=kebab_a650_gpu_oob_vm_ready_locked(vm);return e?e:KVGNativeRead64(&kvg_native,off,out);}
++extern "C" int kebab_a650_gpu_oob_vm_live_check_locked(const KebabA650GpuVmOwnerToken*vm)
++{
++ int e=kebab_a650_gpu_oob_vm_ready_locked(vm);if(e)return e;uint32_t v=0;uint64_t wide=0;
++ if((e=KHO_VM_R32(vm,0x48,&v)))return e;if(v)return 5;
++ for(unsigned n=0;n<5;n++){if((e=KHO_VM_R32(vm,0x8058+4096*n,&v)))return e;if(KFContextFaultBits(v))return 5;}
++ for(unsigned n=0;n<3;n++){
++  if((e=KHO_VM_R32(vm,0x800+4*n,&v)))return e;
++  if((v^kvg_engine.after.stream[n].smr)&(n==2?0xffff7fffu:UINT32_MAX))return 13;
++  if((e=KHO_VM_R32(vm,0xc00+4*n,&v)))return e;
++  if((v^kvg_engine.after.stream[n].s2cr)&0x030300ffu)return 13;
++ }
++ for(unsigned n=0;n<2;n++){
++  if((e=KHO_VM_R32(vm,0x8000+4096*n,&v)))return e;
++  if((v^kvg_engine.after.cb[n].sctlr)&0x0fdf11f7u)return 13;
++  if((e=KHO_VM_R64(vm,0x8020+4096*n,&wide)))return e;
++  if((wide^kvg_engine.after.cb[n].ttbr0)&(KG_PTE_PA|0xffff000000000000ULL))return 13;
++ }
++ return 0;
++}
++extern "C" void kebab_a650_gpu_oob_vm_quarantine_locked(const KebabA650GpuVmOwnerToken*vm)
++{if(vm==&kvg_native.owner && kvg_engine.space==&kf_namespace && kvg_engine.published)KFNamespaceRevoke(&kf_namespace);}
++#define KHO_VM_TRY(x) do{int kho_e=(x);if(kho_e)return kho_e;}while(0)
++static int KHO_VM_Snapshot(const KebabA650GpuVmOwnerToken*vm,KGDiscovery*s)
++{
++ memset(s,0,sizeof *s);KHO_VM_TRY(KHO_VM_R32(vm,0x20,&s->id0));KHO_VM_TRY(KHO_VM_R32(vm,0x24,&s->id1));KHO_VM_TRY(KHO_VM_R32(vm,0x28,&s->id2));
++ if(s->id0!=0x4c017e06 || s->id1!=0x20000005 || s->id2!=0x5511)return 95;
++ s->num_streams=6;s->num_cb=5;s->stride=4096;s->cb_base=0x8000;s->read_mask=31;s->pa_bits=s->ipa_bits=36;s->va_bits=48;
++ KHO_VM_TRY(KHO_VM_R32(vm,0,&s->cr0));KHO_VM_TRY(KHO_VM_R32(vm,0x48,&s->gfsr));
++ for(unsigned n=0;n<3;n++)KHO_VM_TRY(KHO_VM_R32(vm,0x50+4*n,&s->gfsynr[n]));
++ for(unsigned n=0;n<6;n++){KHO_VM_TRY(KHO_VM_R32(vm,0x800+4*n,&s->stream[n].smr));KHO_VM_TRY(KHO_VM_R32(vm,0xc00+4*n,&s->stream[n].s2cr));}
++ for(unsigned n=0;n<5;n++){
++  auto*c=&s->cb[n];unsigned b=0x8000+4096*n;c->present=1;
++  KHO_VM_TRY(KHO_VM_R32(vm,0x1000+4*n,&c->cbar));KHO_VM_TRY(KHO_VM_R32(vm,0x1800+4*n,&c->cba2r));
++  c->type=(c->cbar>>16)&3;c->hypc=(c->cbar>>10)&1;c->monc=(c->cba2r>>1)&1;c->vmid=(s->cr0&0x80000000u)?c->cba2r>>16:c->cbar&255;
++  KHO_VM_TRY(KHO_VM_R32(vm,b,&c->sctlr));KHO_VM_TRY(KHO_VM_R32(vm,b+4,&c->actlr));KHO_VM_TRY(KHO_VM_R32(vm,b+0x10,&c->tcr2));KHO_VM_TRY(KHO_VM_R32(vm,b+0x30,&c->tcr));
++  KHO_VM_TRY(KHO_VM_R64(vm,b+0x20,&c->ttbr0));KHO_VM_TRY(KHO_VM_R64(vm,b+0x28,&c->ttbr1));KHO_VM_TRY(KHO_VM_R32(vm,b+0x38,&c->mair0));KHO_VM_TRY(KHO_VM_R32(vm,b+0x3c,&c->mair1));
++  KHO_VM_TRY(KHO_VM_R32(vm,b+0x58,&c->fsr));KHO_VM_TRY(KHO_VM_R64(vm,b+0x60,&c->far));
++  KHO_VM_TRY(KHO_VM_R32(vm,b+0x68,&c->fsynr0));KHO_VM_TRY(KHO_VM_R32(vm,b+0x6c,&c->fsynr1));KHO_VM_TRY(KHO_VM_R32(vm,0x1400+4*n,&c->frsynra));
++ }
++ int e=KVGValidate(&kvg_engine,s,1);if(e)return e;
++ return KVGConfigEqual(&s->cb[1],&kvg_engine.after.cb[1])?0:13;
++}
++#undef KHO_VM_TRY
++struct KHOAccess {
++ KebabA650GpuOobOwnerToken owner;IOMemoryDescriptor *memory;IOMemoryMap *mapping;uintptr_t base;
++ KebabA650GpuOobObservation *observation;
++};
++static KHOAccess kho_native;
++static uint32_t kho_native_once;
++static int kho_native_result=EAGAIN;
++static int KHONativeBound(void)
++{unsigned any=0;for(unsigned n=0;n<32;n++)any|=KebabA650GpuOobSourceContract[n];return KebabA650GpuOobNativeQualified==1&&any;}
++static int KHONativeGate(void*cookie)
++{auto*n=(KHOAccess*)cookie;if(n!=&kho_native || KFNativeWorker(NULL))return 95;return kebab_rpmh_gpu_oob_check_locked(&n->owner);}
++static int KHONativeRead(void*cookie,unsigned region,uint32_t off,uint32_t*out)
++{
++ auto*n=(KHOAccess*)cookie;if(n!=&kho_native || !out || KFNativeWorker(NULL) || kebab_a650_gpu_oob_vm_ready_locked(&kvg_native.owner))return 95;
++ uintptr_t base=0;
++ if(!region && (off==0x14648 || off==0x1464c || off==0x24c14 || off==0x14340 || off==0x143b0))base=n->base;
++ else if(region==1 && (off==0x100c || off==0x1010 || off==0x106c))base=kvg_native.clock[3];
++ else return 22;
++ if(!base)return 95;*out=*(volatile const uint32_t*)(base+off);return 0;
++}
++static int KHONativeWrite(void*cookie,unsigned region,uint32_t off,uint32_t value)
++{
++ auto*n=(KHOAccess*)cookie;
++ if(n!=&kho_native || !KHONativeBound() || !n->base || region ||
++ !((off==0x14650&&value==0x40000000u)||(off==0x14644&&value==0x80000000u)))return 95;
++ int e=KHONativeGate(n);if(e)return e;uintptr_t address=n->base+off;
++#if defined(__aarch64__)
++ __asm__ volatile("str %w0, [%1]":"+r"(value):"r"(address):"memory");
++#else
++ *(volatile uint32_t*)address=value;
++#endif
++ return 0;
++}
++static void KHONativeBarrier(void*)
++{
++#if defined(__aarch64__)
++ __asm__ volatile("dsb sy":::"memory");
++#else
++ OSMemoryBarrier();
++#endif
++}
++static void KHONativeDelay(void*,unsigned us){if(us==100)IODelay(100);}
++static int KHONativeSnapshot(void*cookie,unsigned after)
++{
++ auto*n=(KHOAccess*)cookie;if(n!=&kho_native || !n->observation || after>1 || KFNativeWorker(NULL))return 95;
++ return KHO_VM_Snapshot(&kvg_native.owner,after?&n->observation->vm_after:&n->observation->vm_before);
++}
++extern "C" int kebab_a650_gpu_oob_prepare(void)
++{
++ int e=KFNativeWorker(NULL);if(e)return e;uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kho_native_once,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return expected==2?kho_native_result:EBUSY;
++ auto*n=&kho_native;n->observation=(KebabA650GpuOobObservation*)IOMalloc(sizeof *n->observation);
++ if(!n->observation){e=ENOMEM;goto done;}memset(n->observation,0,sizeof *n->observation);KebabA650GpuOobInit(&n->observation->receipt);
++ if(!KHONativeBound()){e=95;goto done;}
++ e=kebab_a650_gpu_oob_vm_ready_locked(&kvg_native.owner);if(e)goto done;
++ n->memory=IOMemoryDescriptor::withPhysicalAddress(0x03d6a000,0x26000,kIODirectionInOut);if(!n->memory){e=ENOMEM;goto done;}
++ n->mapping=n->memory->map(kIOMapAnywhere|kIOMapInhibitCache);
++ if(!n->mapping || n->mapping->getLength()!=0x26000 || !(n->base=n->mapping->getVirtualAddress())){e=ENOMEM;goto done;}
++ {KebabA650GpuOobOwnerIo io={{n,KHONativeGate,KHONativeRead,KHONativeWrite,KHONativeBarrier,KHONativeDelay,KVGNativeNow},KHONativeSnapshot};
++  e=kebab_rpmh_gpu_oob_hold(&n->owner,&kvg_native.owner,&io,&n->observation->receipt);}
++done:
++ if(!n->owner.pinned){n->base=0;if(n->mapping){n->mapping->release();n->mapping=NULL;}if(n->memory){n->memory->release();n->memory=NULL;}}
++ if(n->observation){auto*r=&n->observation->receipt;r->result=(uint32_t)e;if(e&&!r->phase)r->phase=KHO_FAILED;}
++ kho_native_result=e;__atomic_store_n(&kho_native_once,2,__ATOMIC_RELEASE);return e;
++}
++extern "C" int kebab_a650_gpu_oob_snapshot(KebabA650GpuOobObservation*out)
++{
++ if(!out)return EINVAL;if(__atomic_load_n(&kho_native_once,__ATOMIC_ACQUIRE)!=2)return EAGAIN;
++ if(kho_native.observation)memcpy(out,kho_native.observation,sizeof *out);
++ else{memset(out,0,sizeof *out);KebabA650GpuOobInit(&out->receipt);out->receipt.result=(uint32_t)kho_native_result;out->receipt.phase=KHO_FAILED;}
++ return 0;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeA650GpuOobHold.h
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_A650_GPU_OOB_HOLD_H
++#define KEBAB_NATIVE_A650_GPU_OOB_HOLD_H
++#include "KebabA650GpuOobNative.h"
++static uint32_t kebab_gpu_oob_hold_state;
++static int kebab_gpu_oob_hold_result=EAGAIN;
++extern "C" void kebab_a650_gpu_oob_hold_prepare(void)
++{
++ uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kebab_gpu_oob_hold_state,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
++  printf("KEBAB GPUOOB: end; result=%d; cached=1\n",expected==2?kebab_gpu_oob_hold_result:EBUSY);return;
++ }
++ int e=kebab_a650_gpu_oob_prepare();kebab_gpu_oob_hold_result=e;
++ __atomic_store_n(&kebab_gpu_oob_hold_state,2,__ATOMIC_RELEASE);
++ printf("KEBAB GPUOOB: end; result=%d; cached=0\n",e);
++}
++#endif
+--- /dev/null
++++ b/bsd/dev/KebabA650GpuOobOwner.inc
+@@ -0,0 +1,61 @@
++/* SPDX-License-Identifier: MIT */
++/* Append after actual586 VM owner in the one canonical VRM translation unit. */
++#if defined(KERNEL) || defined(KEBAB_RPMH_KERNEL)
++#include <kern/KebabA650GpuOobOwner.h>
++#include <kern/KebabA650GpuOobBinding.h>
++#else
++#include "KebabA650GpuOobOwner.h"
++#include "KebabA650GpuOobBinding.h"
++#endif
++static KebabA650GpuOobOwnerToken *kebab_gpu_oob_identity;
++static uint64_t kebab_gpu_oob_generation;
++static uint32_t kebab_gpu_oob_called;
++static KebabA650GpuOobBook kebab_gpu_oob_book;
++static int kebab_gpu_oob_source_bound(void)
++{unsigned any=0;for(unsigned n=0;n<32;n++)any|=KebabA650GpuOobSourceContract[n];return KebabA650GpuOobNativeQualified==1&&any;}
++int kebab_rpmh_gpu_oob_check_locked(const KebabA650GpuOobOwnerToken*t)
++{
++ if(!kebab_gpu_oob_source_bound() || !__atomic_load_n(&kebab_rpmh_global_lock.busy,__ATOMIC_ACQUIRE) ||
++ !t || t!=kebab_gpu_oob_identity || !t->pinned || t->quarantined || !t->generation || t->generation!=kebab_gpu_oob_generation ||
++ t->vm!=kebab_gpu_vm_identity || !t->vm->published || kebab_gmu_root_children<4 || kebab_gpu_oob_book.quarantined)return 95;
++ int e=kebab_gpu_vm_token_locked(t->vm);if(e)return e;
++ e=KebabGmuBootClockGates(&kebab_gpu_vm_clocks,1);if(e)return e;
++ return kebab_a650_gpu_oob_vm_live_check_locked(t->vm);
++}
++int kebab_rpmh_gpu_oob_hold(KebabA650GpuOobOwnerToken*t,const KebabA650GpuVmOwnerToken*vm,
++ const KebabA650GpuOobOwnerIo*io,KebabA650GpuOobRecord*out)
++{
++ int e=95,pinned=0;uint64_t begin=0,end=0;
++ if(!out)return 22;KebabA650GpuOobInit(out);
++ if(!kebab_gpu_oob_source_bound()){out->result=95;out->phase=KHO_FAILED;return 95;}
++ if(!t || !vm || !io || !io->core.gate || !io->core.read32 || !io->core.write32 || !io->core.barrier || !io->core.delay_us || !io->core.now_us || !io->snapshot_vm){out->result=22;out->phase=KHO_FAILED;return 22;}
++ if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL)){out->result=16;out->phase=KHO_FAILED;return 16;}
++ if(t->pinned || t->generation || kebab_gpu_oob_identity || kebab_gpu_oob_called || kebab_gpu_oob_generation==UINT64_MAX){e=16;goto done;}
++ if(vm!=kebab_gpu_vm_identity || !vm->published){e=95;goto done;}
++ e=kebab_gpu_vm_token_locked(vm);if(e)goto done;
++ e=KebabGmuBootClockGates(&kebab_gpu_vm_clocks,1);if(e)goto done;
++ e=kebab_a650_gpu_oob_vm_ready_locked(vm);if(e)goto done;
++ if(kebab_gmu_root_children==UINT32_MAX){e=75;goto done;}
++ /* Reserve the real fourth Root child before any new physical observation.
++  * Once reserved, every failure retains all Root/BO/VM/map pins. There is no
++  * guessed OOB release, producer drain, reset or namespace restoration. */
++ t->vm=vm;t->generation=++kebab_gpu_oob_generation;t->pinned=1;t->quarantined=0;
++ kebab_gpu_oob_identity=t;++kebab_gmu_root_children;kebab_gpu_oob_called=1;pinned=1;
++ begin=io->core.now_us(io->core.cookie);out->epoch=vm->epoch;
++ e=io->snapshot_vm(io->core.cookie,0);
++ if(!e){KebabA650GpuOobContext c={&io->core,&kebab_gpu_oob_book,out,0,0,0};e=KebabA650GpuOobHold(&c,1,vm->epoch);}
++ /* Preserve a fresh namespace diagnostic even when the OOB attempt failed.
++  * This is readonly and cannot replace the original result or retry writes. */
++ {int observed=io->snapshot_vm(io->core.cookie,1);if(!e&&observed)e=observed;}
++ end=io->core.now_us(io->core.cookie);out->elapsed_us=end>=begin?end-begin:UINT64_MAX;
++ if(!e&&out->elapsed_us>=100000)e=110;
++ if(!e)e=kebab_rpmh_gpu_oob_check_locked(t);
++ /* Include the final real Root/clock/SMMU gate in the same wall-clock bound. */
++ end=io->core.now_us(io->core.cookie);out->elapsed_us=end>=begin?end-begin:UINT64_MAX;
++ if(!e&&out->elapsed_us>=100000)e=110;
++done:
++ if(e){out->primary_error=(uint32_t)e;out->phase=pinned?KHO_QUARANTINED:KHO_FAILED;
++  if(pinned){t->quarantined=1;kebab_gpu_oob_book.quarantined=1;out->quarantined=1;out->held=0;
++   kebab_a650_gpu_oob_vm_quarantine_locked(vm);kebab_gmu_boot_quarantine((unsigned)e);}}
++ out->result=(uint32_t)e;__atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return e;
++}
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>35)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>36)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- a/bsd/dev/kebab_rpmh_vrm.c
++++ b/bsd/dev/kebab_rpmh_vrm.c
+@@ -701,3 +701,5 @@
+ /* END FUTURE_GMU_CANONICAL_OWNERS */
+ 
+ #include "KebabA650GpuVmOwner.inc"
++
++#include "KebabA650GpuOobOwner.inc"
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -307,6 +307,10 @@
+ #define UD_GPU_VM 60u
+ extern void kebab_a650_gpu_vm_prepare(void);
+ /* END A650_GPUVM_COMMAND */
++/* BEGIN A650_GPUOOB_COMMAND */
++#define UD_GPU_OOB 61u
++extern void kebab_a650_gpu_oob_hold_prepare(void);
++/* END A650_GPUOOB_COMMAND */
+ extern void kebab_gmu_firmware_prepare(void);
+ extern void kebab_gmu_hfi_prepare(void);
+ /* END FUTURE_GMU_COMMAND_IDS */
+@@ -1513,6 +1517,9 @@
+ /* BEGIN A650_GPUVM_DECODE */
+     if(received==6 && !memcmp(buf,"GPUVM\n",6))return UD_GPU_VM;
+ /* END A650_GPUVM_DECODE */
++/* BEGIN A650_GPUOOB_DECODE */
++    if(received==7 && !memcmp(buf,"GPUOOB\n",7))return UD_GPU_OOB;
++/* END A650_GPUOOB_DECODE */
+ /* END FUTURE_GMU_COMMAND_DECODE */
+     if(received==8 && !memcmp(buf,"GPUSMMU\n",8))return UD_GPU_SMMU_OBSERVE;
+     if(received!=9)return 0;
+@@ -1964,6 +1971,10 @@
+ 	} else if (command == UD_GPU_VM) {
+ 		kebab_a650_gpu_vm_prepare();
+ /* END A650_GPUVM_DISPATCH */
++/* BEGIN A650_GPUOOB_DISPATCH */
++	} else if (command == UD_GPU_OOB) {
++		kebab_a650_gpu_oob_hold_prepare();
++/* END A650_GPUOOB_DISPATCH */
+ /* END FUTURE_GMU_COMMAND_DISPATCH */
+ 	} else if (command == UD_GPU_SMMU_OBSERVE) {
+ 		kebab_gpu_smmu_observe();

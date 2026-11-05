@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "production_source": {
+    "osfmk/kern/kebab_capture.h": "755e873d7a1498b95628326d018a6863a7d44d005b6cc346ba030ea16202bb59",
+    "bsd/dev/kebab_capture_core.h": "4aa06b45ae469e4a91658b7e06c8736e7c1ec57889816e3471c2fc25c7fda047",
+    "bsd/dev/kebab_usb.c": "356a22ddde50b150682709ffcb6baa1f07ab99abf9e3b9605a7001081f77583e"
+  },
+  "ASan_UBSan": true,
+  "compiled_behavioral_mutants": 6,
+  "host_provider_adapters": true,
+  "actual_test_provider_and_protocol": true,
+  "physical_test": false
+}

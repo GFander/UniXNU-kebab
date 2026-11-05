@@ -1,0 +1,145 @@
+--- a/iokit/Kernel/arm/KebabNativeDisplayObservation.h
++++ b/iokit/Kernel/arm/KebabNativeDisplayObservation.h
+@@ -15,7 +15,7 @@
+ };
+ static_assert(sizeof(KebabNativeDisplaySnapshot)==496,"fixed readonly snapshot schema1");
+ struct KebabNativeDisplayMaps {
+-    IOMemoryDescriptor *memory[4];IOMemoryMap *map[4];uintptr_t address[4];
++    IOMemoryDescriptor *memory[5];IOMemoryMap *map[5];uintptr_t address[5];
+ };
+ static bool kebab_display_map(KebabNativeDisplayMaps *m,unsigned i,uint64_t base,uint64_t size)
+ {
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -96,6 +96,7 @@
+ }
+ 
+ #include "KebabNativeDisplayObservation.h"
++#include "KebabPlatformSnapshot.h"
+ 
+ enum {
+ 	kKebabFBGetLayerDefaultSurface  = 3,
+@@ -813,6 +814,16 @@
+ extern "C" int
+ kebab_capture_open(uint32_t source,uint32_t argument,struct kc_image *image)
+ {
++    if(source==9) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabNativePlatformSnapshot);
++        KebabNativePlatformSnapshot *data=(KebabNativePlatformSnapshot *)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_native_platform_snapshot(data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=9;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
+     if(source==8) {
+         if(argument)return 22;
+         uint32_t bytes=sizeof(KebabNativeThermalSnapshot);
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>8)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>9)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabPlatformSnapshot.h
+@@ -0,0 +1,93 @@
++/* SPDX-License-Identifier: MIT */
++/* Fixed SM8250 read-only resources. All fields are raw register observations;
++ * flags do not grant ownership, IRQ readiness, scanout or DMA completion. */
++struct KebabNativePlatformSnapshot {
++    uint32_t magic,schema,bytes,flags,result,reads,reserved[2];
++    uint32_t clocks[8],gic[12],ctl[6][3],pingpong[2][6],dsc[4][3],context[4];
++};
++static_assert(sizeof(KebabNativePlatformSnapshot)==296,"platform snapshot schema1");
++struct KebabPlatformRead {
++    KebabNativeDisplayMaps *maps;KebabNativePlatformSnapshot *out;
++};
++static int kebab_platform_read(void *cookie,unsigned region,size_t offset,uint32_t *value)
++{
++    KebabPlatformRead *r=(KebabPlatformRead *)cookie;
++    static const size_t spans[]={0x10000,0x4000,0x84208,0x100000,0x10000};
++    if(region>=5 || !value || (offset&3) || offset>spans[region]-4 || !r->maps->address[region])return -1;
++    if(region==1 || region==2 || region==3) {
++        uint32_t gcc=kebab_display_load(r->maps->address[0],0xb00c);
++        if(!(gcc&1) || (gcc&0x80000000u))return -1;
++    }
++    if(region==2 || region==3) {
++        uint32_t gdsc=kebab_display_load(r->maps->address[1],0x3000);
++        if(!(gdsc&0x80000000u) || (gdsc&1) ||
++           (kebab_display_load(r->maps->address[1],0x2080)&0x80000000u) ||
++           (kebab_display_load(r->maps->address[1],0x200c)&0x80000000u))return -1;
++    }
++    *value=kebab_display_load(r->maps->address[region],offset);r->out->reads++;return 0;
++}
++static int kebab_platform_smmu_read(void *cookie,size_t offset,uint32_t *value)
++{ return kebab_platform_read(cookie,3,offset,value); }
++static int kebab_native_platform_snapshot(KebabNativePlatformSnapshot *out)
++{
++    if(!out)return 22;
++    memset(out,0,sizeof *out);out->magic=0x3153504b;out->schema=1;out->bytes=sizeof *out;out->result=2;
++    KebabNativeDisplayMaps m={};KebabPlatformRead r={&m,out};
++    KebabSmmuObservation smmu={};uint32_t version=0,check=0;
++    if(!kebab_display_map(&m,0,0x00100000,0x10000))goto done;
++    if(kebab_platform_read(&r,0,0xb00c,&out->clocks[0]))goto done;
++    if(!(out->clocks[0]&1) || (out->clocks[0]&0x80000000u)){out->result=3;goto done;}
++    if(!kebab_display_map(&m,1,0x0af00000,0x4000) ||
++       !kebab_display_map(&m,2,0x0ae00000,0x84208))goto done;
++    {
++        static const size_t cc[]={0x3000,0x2080,0x200c,0x20c8,0x20cc,0x20f8,0x20fc};
++        for(unsigned i=0;i<7;i++)if(kebab_platform_read(&r,1,cc[i],&out->clocks[i+1]))goto done;
++    }
++    if(kebab_platform_read(&r,2,0,&version))goto done;
++    if(version!=0x60000000u){out->result=4;goto done;}
++    if(kebab_platform_read(&r,2,0x1000,&version))goto done;
++    if(version!=0x60000000u){out->result=4;goto done;}
++    for(unsigned i=0;i<6;i++) {
++        static const size_t off[]={0x14,0x64,0xf4};
++        for(unsigned j=0;j<3;j++)if(kebab_platform_read(&r,2,0x2000+0x200*i+off[j],&out->ctl[i][j]))goto done;
++    }
++    for(unsigned i=0;i<2;i++) {
++        static const size_t off[]={0,4,0x14,0x2c,0x30,0xa0};
++        for(unsigned j=0;j<6;j++)if(kebab_platform_read(&r,2,0x71000+0x800*i+off[j],&out->pingpong[i][j]))goto done;
++    }
++    for(unsigned i=0;i<4;i++)for(unsigned j=0;j<3;j++)
++        if(kebab_platform_read(&r,2,0x81000+0x400*i+4*j,&out->dsc[i][j]))goto done;
++    out->flags|=1;
++    if(!kebab_display_map(&m,4,0x17a00000,0x10000))goto done;
++    {
++        /* SPI83 is architectural INTID115. Group words contain other IRQs;
++         * retain raw values without writes or claims about their ownership. */
++        static const size_t off[]={0,4,0x8c,0xd0c,0x10c,0x20c,0x30c,0x470,0xc1c,0x6398,0x639c};
++        for(unsigned i=0;i<11;i++)if(kebab_platform_read(&r,4,off[i],&out->gic[i]))goto done;
++        if(32*((out->gic[1]&31)+1)<=115){out->result=4;goto done;}
++        out->gic[11]=115;out->flags|=2;
++    }
++    if(!kebab_display_map(&m,3,0x15000000,0x100000))goto done;
++    {
++        KebabSmmuReadIo io={&r,0x100000,kebab_platform_smmu_read};
++        if(KebabSmmuObserve(&io,&smmu)){out->result=5;goto done;}
++        const KebabSmmuStreamObservation *v=&smmu.stream[0];
++        if(v->matches!=1 || !v->context_read || v->shared_or_broad){out->result=5;goto done;}
++        uint32_t cb=v->s2cr&0xff;
++        for(unsigned i=1;i<4;i++)if(smmu.stream[i].matches!=1 || !smmu.stream[i].context_read ||
++           smmu.stream[i].shared_or_broad || (smmu.stream[i].s2cr&0xff)!=cb){out->result=5;goto done;}
++        out->context[3]=cb;
++        size_t gr1=(size_t)1<<smmu.page_shift,base=0x80000+((size_t)cb<<smmu.page_shift);
++        if(kebab_platform_read(&r,3,gr1+4*cb,&out->context[0]) ||
++           kebab_platform_read(&r,3,gr1+0x800+4*cb,&out->context[1]) ||
++           kebab_platform_read(&r,3,base+0x34,&out->context[2]))goto done;
++        if(kebab_platform_read(&r,3,0x800+4*v->index,&check) || check!=v->smr ||
++           kebab_platform_read(&r,3,0xc00+4*v->index,&check) || check!=v->s2cr){out->result=6;goto done;}
++        out->flags|=4;
++    }
++    if(kebab_platform_read(&r,1,0x3000,&check) || check!=out->clocks[1]){out->result=6;goto done;}
++    out->result=0;
++done:
++    for(unsigned n=5;n;n--) {unsigned i=n-1;if(m.map[i])m.map[i]->release();if(m.memory[i])m.memory[i]->release();}
++    return 0;
++}

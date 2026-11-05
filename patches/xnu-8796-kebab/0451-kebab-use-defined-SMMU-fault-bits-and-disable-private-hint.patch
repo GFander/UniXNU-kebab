@@ -1,0 +1,95 @@
+--- a/osfmk/kern/KebabGpuFirstAttachCore.h
++++ b/osfmk/kern/KebabGpuFirstAttachCore.h
+@@ -191,6 +191,11 @@
+  }
+  return 0;
+ }
++/* ARM IHI0062D.c 16.5.9: FSR[10:9] is read-only Format, not fault
++ * status (0x400 means AArch64). Exact pinned vendor FSR_FAULT bitmap:
++ * MULTI31 | SS30 | UUT8 | ASF7 | TLBLKF6 | TLBMCF5 | EF4 | PF3 | AFF2 | TF1.
++ * Preserve every raw bit in snapshots; never ACK/RESUME here. */
++static uint32_t KFContextFaultBits(uint32_t raw){return raw&0xc00001feu;}
+ static int KFIntersects(uint32_t smr,uint32_t sid)
+ {return (smr&0x80000000u) && !(((smr&0x7fff)^sid)&~(((smr>>16)&0x7fff)|0x400u)&0x7fff);}
+ static int KFValidateSnapshot(KFFirstAttach *a,const KGDiscovery *s)
+@@ -204,11 +209,11 @@
+   for(unsigned i=0;i<s->num_streams;i++)if(s->stream[i].smr&0x80000000u)return KG_ROUTE;
+   for(unsigned cb=0;cb<s->num_cb;cb++){
+    const KGContext *o=&s->cb[cb];if(!o->present || o->type || o->hypc || o->monc || (o->cba2r&1) ||
+-   o->vmid || (o->sctlr&1) || o->fsr)return KG_OWNERSHIP;
++   o->vmid || (o->sctlr&1) || KFContextFaultBits(o->fsr))return KG_OWNERSHIP;
+   }
+   return c->actlr==3?0:KG_OWNERSHIP;
+  }
+- if(p->cb>=s->num_cb || p->cb<s->num_s2 || !c->present || s->gfsr || c->fsr || (c->sctlr&1) ||
++ if(p->cb>=s->num_cb || p->cb<s->num_s2 || !c->present || s->gfsr || KFContextFaultBits(c->fsr) || (c->sctlr&1) ||
+  c->type!=1 || c->hypc || c->monc || (c->cba2r&3)!=1 || c->actlr!=0x32b || c->vmid!=p->vmid ||
+  p->kernel_smr>=s->num_streams || p->user_smr>=s->num_streams)return KG_OWNERSHIP;
+  if(p->namespace_mode==KF_NS_VISIBLE_COMPAT && s->num_cb>5)return KG_OWNERSHIP;
+@@ -242,11 +247,11 @@
+  const KGContext *c=&s->cb[a->policy.cb],*b=&o->cb[a->policy.cb];
+  if(a->policy.initialize){
+   for(unsigned cb=0;cb<s->num_cb;cb++)if(cb!=a->policy.cb){const KGContext *u=&s->cb[cb];
+-   if(u->type || u->hypc || u->monc || u->vmid || (u->cba2r&1) || (u->sctlr&1) || u->fsr)return 0;
++   if(u->type || u->hypc || u->monc || u->vmid || (u->cba2r&1) || (u->sctlr&1) || KFContextFaultBits(u->fsr))return 0;
+   }
+-  return !c->hypc && !c->monc && !c->vmid && c->type<=1 && !c->fsr && !s->gfsr;
+- }
+- return c->cbar==b->cbar && c->cba2r==b->cba2r && c->actlr==b->actlr && !c->fsr && !s->gfsr;
++  return !c->hypc && !c->monc && !c->vmid && c->type<=1 && !KFContextFaultBits(c->fsr) && !s->gfsr;
++ }
++ return c->cbar==b->cbar && c->cba2r==b->cba2r && c->actlr==b->actlr && !KFContextFaultBits(c->fsr) && !s->gfsr;
+ }
+ static int KFRouteWrite(KFFirstAttach *a,unsigned which,uint32_t smr,uint32_t s2cr)
+ {
+@@ -306,7 +311,9 @@
+  KF_TRY(KFInitializeRegime(a));KF_TRY(KFTlb(a));
+  KGContext parked;memset(&parked,0,sizeof parked);parked.tcr=0x00802020;parked.tcr2=0x38011;
+  parked.ttbr0=parked.ttbr1=(uint64_t)(a->policy.cb+1)<<48;parked.mair0=0x44;
+- parked.sctlr=(1u<<12)|(3u<<22)|(1u<<5)|(1u<<2)|(1u<<1);
++ /* No private-broadcast ASIDPNE hint is requested. The defined mask
++  * still verifies bit12==0; explicit local VMID maintenance remains used. */
++ parked.sctlr=(3u<<22)|(1u<<5)|(1u<<2)|(1u<<1);
+  KF_TRY(KFContext(a,&parked));KF_TRY(KFW(a,0x8000+4096*a->policy.cb,parked.sctlr,0));
+  a->ops.barrier(a->ops.cookie);KF_TRY(KFContextVerify(a,&parked,parked.sctlr));KF_TRY(KFTlb(a));
+  KF_TRY(KFSnapshot(a,&a->work));if(!KFSameUnowned(a,&a->work))return KG_OWNERSHIP;
+@@ -407,7 +414,7 @@
+  e=KFTlb(a);if(e)return KFFinish(a,e);
+  next.tcr=0x00802020;next.tcr2=0x00038011;next.ttbr0=a->backing.root_pa|((uint64_t)(p->cb+1)<<48);
+  next.ttbr1=(uint64_t)(p->cb+1)<<48;next.mair0=0x44;next.mair1=0;
+- next.sctlr=(1u<<12)|(3u<<22)|(1u<<5)|(1u<<2)|(1u<<1);a->programmed=next;
++ next.sctlr=(3u<<22)|(1u<<5)|(1u<<2)|(1u<<1);a->programmed=next;
+  e=KFContext(a,&next);if(e)return KFFinish(a,e);e=KFW(a,b,next.sctlr,0);if(e)return KFFinish(a,e);a->ops.barrier(o->cookie);
+  e=KFContextVerify(a,&next,next.sctlr);if(e)return KFFinish(a,e);
+  /* Enable translation before routing the stream to this bank. Producer is
+@@ -455,7 +462,7 @@
+  if(!e)e=KFR64(a,b+0x60,&a->receipt.fault_far);if(!e)e=KFR32(a,b+0x68,&a->receipt.fsynr0);
+  if(!e)e=KFR32(a,b+0x6c,&a->receipt.fsynr1);if(!e)e=KFR32(a,0x1400+4*a->policy.cb,&a->receipt.frsynra);
+  if(!e)e=KFR32(a,b+0x58,&a->receipt.fault_last);
+- if(!e && (a->receipt.fault || a->receipt.fault_last))e=KG_FAULT;
++ if(!e && (KFContextFaultBits(a->receipt.fault) || KFContextFaultBits(a->receipt.fault_last)))e=KG_FAULT;
+  if(e){__atomic_store_n(&a->run_permitted,0,__ATOMIC_RELEASE);a->receipt.state=KF_QUARANTINED;KFNamespaceRevoke(a->space);}
+  a->receipt.result=e;KFUnlock(&a->busy);return e;
+ }
+--- a/osfmk/kern/KebabGpuFirstNativeBinding.h
++++ b/osfmk/kern/KebabGpuFirstNativeBinding.h
+@@ -2,13 +2,13 @@
+ #ifndef KEBAB_GPU_FIRST_NATIVE_BINDING_H
+ #define KEBAB_GPU_FIRST_NATIVE_BINDING_H
+ #include "KebabGpuFirstAttachCore.h"
+-/* Actual574 has NS_NUMCB5, six invalid SMRs, M0/type0/VA32/ACTLR3 and no
+- * faults. This unbound source keeps ready0; review-binding.py validates that
+- * exact finite virgin profile and emits a separate reviewed ready1 policy.
+- * Protected banks remain outside every register allowlist. */
+-static const KFPolicy KebabGpuFirstNativePolicy={1,1,0x4c017e06,0x20000005,0x5511,0x260406,0,0,1,0,KF_NS_VISIBLE_COMPAT,31,0,1,1,{0xb2,0xeb,0xdc,0x5a,0xd6,0xad,0x53,0xb4,0x72,0x3a,0xe7,0xcb,0x79,0x5d,0xf1,0x66,0x4d,0xc4,0x67,0xb5,0x90,0x6d,0xf1,0xb4,0x16,0xbd,0x70,0x44,0x3f,0xdc,0x4d,0xd0},{0x59,0x9f,0x0e,0xde,0x62,0x11,0x5e,0xdb,0x8b,0x16,0x2a,0x29,0x96,0x1f,0xf7,0x7e,0x2e,0x4a,0x70,0x81,0xe0,0xbf,0x0d,0xef,0x13,0x79,0x4e,0xa8,0x5a,0x47,0xa7,0x17},{0xd8,0xb1,0xa6,0x60,0xb1,0x78,0xb8,0xd6,0x4c,0xca,0x67,0xaa,0xee,0x86,0xfc,0x3b,0x08,0xca,0x0f,0x0d,0xa0,0x57,0xf2,0x36,0xd3,0x05,0x60,0xee,0x33,0x07,0xee,0x5f}};
++/* Reviewed576 against actual575 PRE-ATTACH virgin NS5/SMR6 and staged WC
++ * backing. A new source scope binds ASIDPNE0 and the defined FSR fault mask.
++ * Fresh live virgin/cold-parent gates remain mandatory; failed575 inherited
++ * mappings are not authorized. Protected banks remain outside the allowlist. */
++static const KFPolicy KebabGpuFirstNativePolicy={1,1,0x4c017e06,0x20000005,0x5511,0x260406,0,0,1,0,KF_NS_VISIBLE_COMPAT,31,0,1,1,{0xb2,0xeb,0xdc,0x5a,0xd6,0xad,0x53,0xb4,0x72,0x3a,0xe7,0xcb,0x79,0x5d,0xf1,0x66,0x4d,0xc4,0x67,0xb5,0x90,0x6d,0xf1,0xb4,0x16,0xbd,0x70,0x44,0x3f,0xdc,0x4d,0xd0},{0x2b,0x6e,0xa1,0xa1,0x99,0x8f,0xff,0x07,0xd3,0xec,0xaf,0xef,0x44,0xfe,0x65,0x05,0x28,0xa7,0xa0,0xe3,0x65,0xba,0x88,0x5a,0xe3,0x17,0xc2,0x21,0x75,0x5f,0x7f,0xdd},{0x7d,0xf5,0xb3,0x79,0x18,0x55,0x17,0x79,0x0f,0xa8,0x06,0x2d,0xd9,0xea,0xdb,0xaf,0x30,0xea,0x39,0xe3,0x93,0xea,0x36,0x63,0x9c,0x15,0x25,0x7d,0x2e,0x17,0x9f,0x7c}};
+ /* This is a fixed-board cold lifecycle contract, separately reviewed against
+  * current loader/OS producer inventory. It does not follow merely from M0,
+- * CLK_OFF, a CAP record or successful bus hold. Default CLOSED. */
++ * CLK_OFF, a CAP record or successful bus hold. Reviewed finite cold profile. */
+ static const uint32_t KebabGpuFirstColdBootContract=1;
+ #endif

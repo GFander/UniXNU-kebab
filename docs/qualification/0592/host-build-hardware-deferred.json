@@ -1,0 +1,142 @@
+{
+  "version": "0592",
+  "created": "2026-11-04T10:52:22.441165+08:00",
+  "scope": "Host and native build checkpoint only; physical device remains0591 with failed pixels.",
+  "git": {
+    "head": "d5c9c62db752f225a288b88959d3754edc94138a",
+    "branch": "gpu/adreno650-20261103",
+    "new_commit": false,
+    "source_identity_requires_patch_and_manifests": true
+  },
+  "source": {
+    "formal_patch": "0467",
+    "common": 446,
+    "host": 4,
+    "files": 5456,
+    "changed_paths": [
+      "osfmk/kern/kebab_low_dma.c",
+      "osfmk/kern/kebab_low_dma.h",
+      "bsd/dev/kebab_usb.c"
+    ],
+    "unchanged_paths": 5453,
+    "full_replay": true,
+    "whole_inverse": true
+  },
+  "native": {
+    "paired-kernel.private.macho": {
+      "bytes": 19501056,
+      "sha256": "91d4ace690385fde17cd241b696ad629db60152deaeaf5f14fb23eb4aa82fde7"
+    },
+    "paired-HID.private.o": {
+      "bytes": 309608,
+      "sha256": "fc55436750875b2fb156b4dbbed5702616e6de0d4c74779ade8544cf7094f014"
+    }
+  },
+  "host": {
+    "checks": 3472,
+    "ASan_UBSan": true,
+    "runtime_mutations": 10,
+    "SDK_units": 4,
+    "applied_units": 4,
+    "actual_exported_headers": 54,
+    "linked_worker_edges": true
+  },
+  "physical_device": {
+    "device": "c073a488",
+    "slot": "b",
+    "active_version": "0591",
+    "safety_seconds": 304.406,
+    "A650_FIRST_EXECUTION": "PASS",
+    "A650_FIRST_RENDER": "FAIL",
+    "fence": 3,
+    "wptr": 155,
+    "rptr": 155,
+    "CCU_timestamps": [
+      2623757408,
+      2623757413,
+      2623757515
+    ],
+    "BO_bytes": 65536,
+    "BO_all_bytes": "0xa5",
+    "first_mismatch": 256,
+    "second_draw_submitted": false,
+    "namespace_quarantined": true
+  },
+  "hardware_deferred": {
+    "required": true,
+    "reason": "User explicitly cannot operate phone. First low-DMA DarwinBoot can refuse before XNU USB/watchdog, and automatic fastboot recovery is unverified.",
+    "user_reply": "现在无法操作手机",
+    "candidate_flashed": false,
+    "EFI_grant": "NOT_RUN",
+    "low_PA_mapping": "NOT_RUN",
+    "PAS13": "NOT_RUN",
+    "GPU_IRQ_delivery": "NOT_RUN",
+    "Metal": "NOT_RUN",
+    "manual_UI_touch_gestures": "NOT_RUN_OWNER_AWAY"
+  },
+  "firmware_base": {
+    "path": "D:\\LOS\\HiOS\\boot123-20261029\\gpu-prereq-20261103\\gpu-zap-0592\\firmware-base-0592-lowdma.private.img",
+    "bytes": 100663296,
+    "sha256": "5e76d0053d8d8b08e6fdf6adf94652791ae584ea2b4b8797b750ee2fa2696caa",
+    "prefix_sha256": "f2933aa0173184a1cdbc9af6187416678b9a212e0e141217b08554660ba67bd2",
+    "loader_sha256": "83cb2b16a4df59f9168455d5f8dc4d96a66af3d14009350d02166af408367421",
+    "policy_sha256": "08837bfb078a0fded8cbdd484c54fa5cfb85e432d1c6a9de9a4caefd8f6d20e0",
+    "host_inventory_checks_only": true,
+    "global_firmware_gate_changed": false
+  },
+  "metal_20H392": {
+    "cache_uuid": "8f970452c9e33e88b114feb1864bc9e0",
+    "MTLDevice_bytes": 528,
+    "official_plugin_expected_bytes": 536,
+    "direct_size_check_matches": false,
+    "runtime_executed": false
+  },
+  "diagnosis": {
+    "missing_authenticated_ZAP_and_secure_exit": "Source-confirmed missing prerequisite in0591. Not proven sole cause of unchanged pixels.",
+    "static_context_restore": "Review pinned Mesa complete restore after secure prerequisites; no guessed MMIO or security bypass."
+  },
+  "pending": [
+    "Complete full packaging, firmware-prefix and measured ADT ownership gates for new EFI. No registration/package/flash yet.",
+    "Require an attended verified fastboot recovery path before first new DarwinBoot hardware boot.",
+    "First test EFI owned low-DMA grant and current-SecureDT measurements with original safety regression, before mapping or PAS.",
+    "Design early bounded PAS13/SCM ownership and genuine authenticated ZAP before GPU namespace publication. Preserve no-retry and failure quarantine.",
+    "Then secure-mode exit, exact sourced static restore, one controlled two-image pixel validation. IRQ and Metal remain separate qualifications."
+  ],
+  "host_corrections": [
+    "0591 CAP34/35 six-sample gate repaired before the unique actual GPURENDER. Historical failure retained.",
+    "0592 linked-audit GPU-only graph excluded low-DMA names. Replaced new assertions with exact actual direct edges; historical GPU checks retained.",
+    "0592 inverse receipt inherited six/four prose. Preserved it, reran same three-file inverse into v2 with accurate scope."
+  ],
+  "evidence": {
+    "gpu-prereq-20261103/combined-0592-stage/candidate-manifest.json": "e1551a12935be434f1d17c5ce722a5d6b46a9ed039dda35696aa9cc5f18c536f",
+    "gpu-prereq-20261103/combined-0592-stage/binding-review.json": "7b02376d9db3b5de6596f08961a98692b68d0530427aaa5da5159124755647e7",
+    "gpu-prereq-20261103/combined-0592-stage/0467-kebab-measure-owned-low-DMA-from-current-SecureDT.patch": "4ee4e70347cc170d00938c661c1f9bb25f4f1d1e91d40ebe5564f75b6cfe8aa7",
+    "gpu-prereq-20261103/combined-0592-stage/published-source.json": "c29bac50229f4bbfb8f8b598eb534f9b5501cd6baa87f4e4752cc63c75449270",
+    "gpu-prereq-20261103/combined-0592-stage/public-all-source-replay-0592.json": "47a071650b38358b69140329dc9627f5095f45c902333896eda6ef2c6cdbcd5c",
+    "gpu-prereq-20261103/combined-0592-stage/all-replayed-source-0592.json": "db595226363db886e95a24776caf4d33d079fe00251d9029e477d68f9e8d1dcc",
+    "gpu-prereq-20261103/combined-0592-stage/source-strip-proof.json": "ac9841d473e3fa37eced337ae9aba66bb50a36590a50e0111020e920ed970302",
+    "gpu-prereq-20261103/combined-0592-stage/source-strip-proof-v2.json": "c9679f2681f241a95c42367c7b02718554089227f131ff0efb4c9b3c91a1c0f1",
+    "gpu-prereq-20261103/combined-0592-stage/verify-0592-inverse-ubuntu-v2.py": "6fc1a8c87993350eab69f11ccbaea6a00f97205d7c9c92e8d9575923b15184ed",
+    "gpu-prereq-20261103/combined-0592-stage/all-mac-source-0592-expected.json": "f40a01706c216dfcec5250a81cbd183f0df3ce550fa5553642b01ebe6ffbed64",
+    "native-dpu-0592/paired-build.json": "72b3620287ef9de23df392058f9f191a59145a33f3146be2d7d4612a5f6bd9fc",
+    "native-dpu-0592/paired-kernel.private.macho": "91d4ace690385fde17cd241b696ad629db60152deaeaf5f14fb23eb4aa82fde7",
+    "native-dpu-0592/paired-HID.private.o": "fc55436750875b2fb156b4dbbed5702616e6de0d4c74779ade8544cf7094f014",
+    "native-dpu-0592/all-mac-source-0592.json": "d554e592d2f04bd2b14a422f0ef65aaa276d1c1e2d5bf1e4a13daf6392e2c9de",
+    "native-dpu-0592/all-mac-source-0592-postbuild.json": "d554e592d2f04bd2b14a422f0ef65aaa276d1c1e2d5bf1e4a13daf6392e2c9de",
+    "native-dpu-0592/applied-once.json": "5244aaec0e7c4b7858d7911fd651b242129f35f561dadf60c44c774da28f1b35",
+    "native-dpu-0592/build-started.json": "3d9fa3ccc0d5b1630b051d125540d387607b92c807bd508b5d2e32a511923266",
+    "native-dpu-0592/build-0592-full.log": "5c0938ce34136b6c6e4836b28b3e0dc5bc467f694a892b15ebf5bb59fc03dcb7",
+    "native-dpu-0592/actual-compiler-preflight-applied/native-translation-units-0592.json": "ff9f53d550ffe3ab2c11ed9402258439980671f944393a686aa2adfc1557148b",
+    "native-dpu-0592/native-exported-headers-qualified.json": "051fada40a9b4f2f9af1cbabc2bbc90f92e47dcf31958d26f8ba91c137bfd131",
+    "native-dpu-0592/native-gpu-linked-qualified.json": "75e933121826be801bc7bd673f16193fabde333082dc7a72e0877b2a5b1200b9",
+    "gpu-prereq-20261103/gpu-zap-0592/late-qualified.json": "60d6dc3c9bef058bf4a1e26d2afd93069c1968162985e1060ce2276cad294cd9",
+    "gpu-prereq-20261103/gpu-zap-0592/native-lowdma-sdk-qualified.json": "074e6b2d3686ab5d34803e672a0a82daae4b1a00e5333b86b37a56c543bd004b",
+    "gpu-prereq-20261103/gpu-zap-0592/firmware-base-qualified.json": "671c926bb9e237c5e67086fff3e7cfeb4a222c57d88a06cee1115cd6153c805c",
+    "gpu-prereq-20261103/gpu-zap-0592/20H392-metal-device-metadata.private.json": "2c97eed130a45105c68fd7a202c35f094972314c2d8f8c955c9e221babd1e224",
+    "gpu-prereq-20261103/gpu-zap-0592/qualify-0592-gpu-native-before-lowdma-edge-fix.py": "97f392d4af664741a04a329adba4fb590d51c3fcf6c001b583c59842df38920d",
+    "gpu-prereq-20261103/gpu-zap-0592/audit_20h392_metal_metadata.py": "d7225d34c2113aa9c0f6d196679b63c6c22cf4602f1008d1aaccd840fd0fb76b",
+    "gpu-prereq-20261103/qualify-0592-gpu-native.py": "f1a49222dac936046692fd5e10c90303ef3427f19d61adccb190e90c00203d6f",
+    "native-dpu-0591/0591-FirstRender-unqualified.json": "125f49575a9af628860502d3af89b89e5db0641cb3333b1c14d61c5cfef94d8e",
+    "native-dpu-0591/0591-physical-render-failure-checkpoint.json": "1a8d33019e088567f87ed713ffe29848c47dba67c2436414ecc8f4e7b1911450"
+  }
+}

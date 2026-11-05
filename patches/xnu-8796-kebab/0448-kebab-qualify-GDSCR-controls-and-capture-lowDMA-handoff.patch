@@ -1,0 +1,1114 @@
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -58,6 +58,9 @@
+ #include <arm64/proc_reg.h>
+ #include <arm64/kebab_early.h>
+ #include <arm64/kebab_boot_memory.h>
++#if defined(KEBAB)
++#include <kern/kebab_low_dma.h>
++#endif
+ #include <vm/vm_page.h>
+ #include <arm/pmap.h>
+ #include <arm/caches_internal.h>
+@@ -537,6 +540,10 @@
+ 
+ 	/* If kernel integrity is supported, use a constant copy of the boot args. */
+ 	kebab_boot_memory_capture(args);
++#if defined(KEBAB)
++	kebab_low_dma_capture(args, kebab_boot_memory, kebab_boot_memory_count,
++	    kebab_owned_memory, kebab_owned_memory_count, kebab_boot_memory_status);
++#endif
+ 	const_boot_args = *args;
+ 	BootArgs = args = &const_boot_args;
+ 
+--- a/osfmk/conf/files
++++ b/osfmk/conf/files
+@@ -363,3 +363,4 @@
+ osfmk/prng/entropy.c   standard
+ 
+ osfmk/kern/kebab_bootdiag.c			standard
++osfmk/kern/kebab_low_dma.c			standard
+--- a/osfmk/kern/Makefile
++++ b/osfmk/kern/Makefile
+@@ -120,6 +120,7 @@
+ 	ipc_kobject.h \
+ 	kebab_capture.h \
+ 	kebab_gpu_pas.h \
++	kebab_low_dma.h \
+ 	KebabRscOwnershipQuery.h \
+ 	KebabRscOwnerQuery.h \
+ 	KebabGpuCxMxReassert.h \
+--- /dev/null
++++ b/osfmk/kern/KebabLowDmaConsumerCore.h
+@@ -0,0 +1,343 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_LOW_DMA_CONSUMER_CORE_H
++#define KEBAB_LOW_DMA_CONSUMER_CORE_H
++#include "kebab_low_dma.h"
++#include <stddef.h>
++/* Reuse the exact sealed producer header, with only its memory primitive
++ * seam bound to compiler builtins. No EFI APIs are linked into XNU. */
++#define KLD_UEFI_ENV 1
++#define ZeroMem(p,n) __builtin_memset((p),0,(n))
++#define CompareMem(a,b,n) __builtin_memcmp((a),(b),(n))
++#include "KebabLowDmaProducerCore.h"
++#undef ZeroMem
++#undef CompareMem
++#undef KLD_UEFI_ENV
++#define KLDC_MAX_TREE (16u*1024u*1024u)
++static const uint8_t kldc_loader_sha256[32]={
++ 0x83,0xcb,0x2b,0x16,0xa4,0xdf,0x59,0xf9,0x16,0x84,0x55,0xd5,0xf8,0xdc,0x4d,0x96,
++ 0xa6,0x6a,0xf3,0xd1,0x40,0x09,0x35,0x0d,0x02,0x16,0x6a,0xf4,0x08,0x36,0x74,0x21};
++static const uint8_t kldc_owner_identity_sha256[32]={
++ 0x48,0x32,0xd2,0xdd,0x79,0x64,0x0c,0x57,0xe0,0x3c,0x46,0x67,0x7d,0xad,0xf4,0x06,
++ 0x82,0x07,0x99,0x4e,0xea,0x40,0x57,0x19,0x40,0x95,0x68,0x5d,0x3b,0x3e,0xa5,0x81};
++typedef struct {uint32_t offset,bytes;} KldcSlice;
++typedef struct {
++ uint64_t virtual_base,physical_base,memory_bytes,used_end,args_kva,tree_kva;
++ uint32_t tree_bytes,kbm_status;
++ uint64_t video_base,video_row_bytes,video_height;
++ /* Exact existing KEBAB start.s NC framebuffer bootstrap block, not all low RAM. */
++ uint64_t bootstrap_nc_base,bootstrap_nc_bytes;
++} KldcBootView;
++typedef struct {
++ KebabLowDmaClaim claim;
++ KebabLowDmaMap map[KLD_MAX_RECORDS];
++ KebabLowDmaRange managed[20];
++ uint32_t map_count,managed_count;
++ KldcBootView boot;
++ const uint8_t *tree;
++ uint8_t policy[72],binding[32];
++ KldcSlice manifest,measurement,boot_hash,identity,mix_status;
++ uint8_t manifest_saved[16384],measurement_saved[48],boot_hash_saved[48],identity_saved[4096],mix_saved[4];
++ struct kebab_low_dma_observation observation;
++} KldcCaptured;
++typedef struct {
++ void *cookie;
++ int (*begin)(void *,unsigned bits);
++ int (*update)(void *,const void *,size_t);
++ int (*finish)(void *,void *,size_t);
++} KldcHashOps;
++static inline uint32_t kldc_u32(const uint8_t *p)
++{return (uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;}
++static inline uint64_t kldc_u64(const uint8_t *p)
++{return (uint64_t)kldc_u32(p)|(uint64_t)kldc_u32(p+4)<<32;}
++static inline int kldc_equal(const void *a,const void *b,size_t n)
++{return !__builtin_memcmp(a,b,n);}
++static inline int kldc_key(const uint8_t *p,const char *key)
++{
++ size_t n=0;while(key[n])++n;
++ if(n>=32 || __builtin_memcmp(p,key,n) || p[n])return 0;
++ for(size_t i=n+1;i<32;i++)if(p[i])return 0;
++ return 1;
++}
++static inline int kldc_used(const KldcBootView *b,uint64_t pa,uint64_t n)
++{return n && pa>=b->physical_base && pa<=b->used_end && n<=b->used_end-pa;}
++static inline int kldc_slice_set(KldcSlice *s,uint32_t at,uint32_t bytes)
++{if(s->bytes)return 0;s->offset=at;s->bytes=bytes;return 1;}
++typedef struct {
++ KldcCaptured *capture;
++ const KldcHashOps *hash;
++ uint32_t nodes,properties,chosen,policy_count,binding_count;
++} KldcTreeWalk;
++static inline int kldc_feed(KldcTreeWalk *w,const void *p,size_t n)
++{return !w->hash || !w->hash->update(w->hash->cookie,p,n);}
++static inline int kldc_tree_node(KldcTreeWalk *w,uint32_t *cursor,unsigned depth,unsigned parent,
++ uint32_t *child_count,unsigned *node_path)
++{
++ KldcCaptured *c=w->capture;const uint8_t *d=c->tree;uint32_t size=c->boot.tree_bytes;
++ if(depth>64 || ++w->nodes>4096 || *cursor>size || size-*cursor<8)return 0;
++ uint32_t props=kldc_u32(d+*cursor),children=kldc_u32(d+*cursor+4),at=*cursor+8;
++ if(props>(size-at)/36 || props>16384-w->properties)return 0;
++ w->properties+=props;
++ uint32_t start=at,name_at=0,name_len=0,removed=0;
++ for(uint32_t i=0;i<props;i++) {
++  if(at>size || size-at<36)return 0;
++  unsigned terminator=0;while(terminator<32 && d[at+terminator])++terminator;
++  if(!terminator || terminator==32)return 0;
++  for(unsigned j=terminator+1;j<32;j++)if(d[at+j])return 0;
++  uint32_t n=kldc_u32(d+at+32);if(n>size-at-36)return 0;
++  uint32_t padded=(n+3u)&~3u;if(padded<n || padded>size-at-36)return 0;
++  if(kldc_key(d+at,"name")){if(name_len || !n)return 0;name_at=at+36;name_len=n;}
++  for(uint32_t j=n;j<padded;j++)if(d[at+36+j])return 0;
++  at+=36+padded;
++ }
++ unsigned path=3;
++ if(!depth)path=0;
++ if(depth==1 && parent==0 && name_len==7 && kldc_equal(d+name_at,"chosen",7))path=1;
++ if(depth==2 && parent==1 && name_len==11 && kldc_equal(d+name_at,"memory-map",11))path=2;
++ if(path==1 && ++w->chosen!=1)return 0;
++ if(path==1)for(uint32_t i=0,p=start;i<props;i++) {
++  uint32_t n=kldc_u32(d+p+32);
++  if(kldc_key(d+p,"owner-boot-manifest") || kldc_key(d+p,"boot-manifest-hash") || kldc_key(d+p,"owner-boot-measurement"))++removed;
++  p+=36+((n+3u)&~3u);
++ }
++ uint32_t header[2]={props-removed,children};
++ if(!kldc_feed(w,header,sizeof header))return 0;
++ for(uint32_t i=0,p=start;i<props;i++) {
++  uint32_t n=kldc_u32(d+p+32),value=p+36,padded=(n+3u)&~3u;int skip=0,zero=0;
++  if(kldc_key(d+p,"kebab-pas-dma-policy")) {
++   if(path!=1 || n!=72 || ++w->policy_count!=1)return 0;
++   if(!w->hash)__builtin_memcpy(c->policy,d+value,72);
++   else if(!kldc_equal(c->policy,d+value,72))return 0;
++  }
++  if(kldc_key(d+p,"kebab-pas-dma-loader-sha256")) {
++   if(path!=1 || n!=32 || ++w->binding_count!=1)return 0;
++   if(!w->hash)__builtin_memcpy(c->binding,d+value,32);
++   else if(!kldc_equal(c->binding,d+value,32))return 0;
++  }
++  if(path==1) {
++   KldcSlice *s=NULL;
++   if(kldc_key(d+p,"owner-boot-manifest")){s=&c->manifest;skip=1;if(n>16384)return 0;}
++   if(kldc_key(d+p,"owner-boot-measurement")){s=&c->measurement;skip=1;if(n!=48)return 0;}
++   if(kldc_key(d+p,"boot-manifest-hash")){s=&c->boot_hash;skip=1;if(n!=48)return 0;}
++   if(kldc_key(d+p,"owner-os-identity")){s=&c->identity;if(n>4096)return 0;}
++   if(kldc_key(d+p,"mix-n-match-prevention-status")){s=&c->mix_status;if(n!=4)return 0;}
++   if(s) {
++    if(!n)return 0;
++    if(!w->hash){if(!kldc_slice_set(s,value,n))return 0;}
++    else {
++     const uint8_t *saved=s==&c->manifest?c->manifest_saved:s==&c->measurement?c->measurement_saved:
++       s==&c->boot_hash?c->boot_hash_saved:s==&c->identity?c->identity_saved:c->mix_saved;
++     if(s->offset!=value || s->bytes!=n || !kldc_equal(saved,d+value,n))return 0;
++    }
++   }
++  }
++  if(path==2 && (kldc_key(d+p,"RAMDisk") || kldc_key(d+p,"PackedRAMDisk") ||
++      kldc_key(d+p,"TrustCache") || kldc_key(d+p,"GpuAddon"))) {
++   /* 83cb loader requires these static inputs to be 16 zero bytes, then
++    * writes the actual primary-window payload spans. Restore only that
++    * exact producer transform when verifying the original static ADT hash. */
++   if(n!=16 || !kldc_used(&c->boot,kldc_u64(d+value),kldc_u64(d+value+8)))return 0;
++   zero=1;
++  }
++  if(!skip) {
++   static const uint8_t zeros[16]={0};
++   if(!kldc_feed(w,d+p,36) || !kldc_feed(w,zero?zeros:d+value,padded))return 0;
++  }
++  p+=36+padded;
++ }
++ *cursor=at;
++ if(children>(size-at)/8)return 0;
++ *child_count=children;*node_path=path;
++ return 1;
++}
++static inline int kldc_tree(KldcCaptured *c,const KldcHashOps *hash,unsigned *policy_count,unsigned *binding_count)
++{
++ KldcTreeWalk w={c,hash,0,0,0,0,0};uint32_t at=0;
++ struct {uint32_t remaining,path;} stack[65];unsigned depth=0;
++ if(!c->tree || !c->boot.tree_bytes || c->boot.tree_bytes>KLDC_MAX_TREE)return 0;
++ for(;;) {
++  uint32_t children;unsigned path;
++  if(!kldc_tree_node(&w,&at,depth,depth?stack[depth-1].path:3,&children,&path))return 0;
++  if(children) {
++   if(depth==64)return 0;
++   stack[depth].remaining=children;stack[depth].path=path;++depth;continue;
++  }
++  while(depth){if(--stack[depth-1].remaining)break;--depth;}
++  if(!depth)break;
++ }
++ if(at!=c->boot.tree_bytes)return 0;
++ *policy_count=w.policy_count;*binding_count=w.binding_count;return 1;
++}
++static inline unsigned KldcCapture(KldcCaptured *c,const KldcBootView *b,const void *args_page,
++ const uint8_t *tree,const KebabLowDmaMap *map,uint32_t count,
++ const KebabLowDmaRange *owned,uint32_t owned_count)
++{
++ if(!c || !b)return KLDC_BAD_ARGS;
++ __builtin_memset(c,0,sizeof(*c));c->boot=*b;c->tree=tree;
++ struct kebab_low_dma_observation *o=&c->observation;
++ o->magic=KEBAB_LOW_DMA_MAGIC;o->schema=1;o->bytes=sizeof(*o);o->state=KLDC_CAPTURED;o->result=KLDC_BAD_ARGS;
++ __builtin_memcpy(o->loader_sha256,kldc_loader_sha256,32);
++ if(!args_page || !b->memory_bytes || b->physical_base>UINT64_MAX-b->memory_bytes ||
++    b->used_end<b->physical_base || b->used_end-b->physical_base>b->memory_bytes ||
++    b->virtual_base>UINT64_MAX-b->memory_bytes || b->args_kva<b->virtual_base ||
++    (b->args_kva&4095) || b->args_kva-b->virtual_base>b->memory_bytes ||
++    !kldc_used(b,b->physical_base+(b->args_kva-b->virtual_base),4096) ||
++    b->tree_kva!=b->args_kva+4096 ||
++    b->tree_kva<b->virtual_base || b->tree_kva-b->virtual_base>b->memory_bytes ||
++    !kldc_used(b,b->physical_base+(b->tree_kva-b->virtual_base),b->tree_bytes))return o->result;
++ __builtin_memcpy(&c->claim,(const uint8_t *)args_page+KLD_CLAIM_BOOTARGS_OFFSET,sizeof(c->claim));
++ o->flags=KLDC_F_CAPTURED;o->raw=c->claim.raw;o->raw_bytes=c->claim.raw_bytes;
++ o->image=c->claim.image;o->image_bytes=c->claim.image_bytes;o->metadata=c->claim.metadata;o->metadata_bytes=c->claim.metadata_bytes;
++ o->allocate_status=c->claim.allocate_status;o->free_status=c->claim.free_status;
++ o->loader_claim_state=c->claim.state;o->loader_claim_error=c->claim.error;
++ unsigned policies=0,bindings=0;
++ if(!kldc_tree(c,NULL,&policies,&bindings)){o->result=KLDC_BAD_TREE;return o->result;}
++ static const uint8_t zero_claim[sizeof(KebabLowDmaClaim)]={0};
++ if(!policies){o->result=kldc_equal(&c->claim,zero_claim,sizeof(zero_claim))?KLDC_ABSENT:KLDC_BAD_POLICY;return o->result;}
++ unsigned enabled=0;
++ if(!KebabLowDmaPolicyValid(c->policy,72,&enabled)){o->result=KLDC_BAD_POLICY;return o->result;}
++ o->flags|=KLDC_F_POLICY;
++ if(!enabled){o->result=kldc_equal(&c->claim,zero_claim,sizeof(zero_claim))?KLDC_DISABLED:KLDC_BAD_CLAIM;return o->result;}
++ int bad_binding=bindings && !kldc_equal(c->binding,kldc_loader_sha256,32);
++ if(bindings==1 && !bad_binding)o->flags|=KLDC_F_LOADER_BINDING;
++ if(c->manifest.bytes)__builtin_memcpy(c->manifest_saved,c->tree+c->manifest.offset,c->manifest.bytes);
++ if(c->measurement.bytes)__builtin_memcpy(c->measurement_saved,c->tree+c->measurement.offset,48);
++ if(c->boot_hash.bytes)__builtin_memcpy(c->boot_hash_saved,c->tree+c->boot_hash.offset,48);
++ if(c->identity.bytes)__builtin_memcpy(c->identity_saved,c->tree+c->identity.offset,c->identity.bytes);
++ if(c->mix_status.bytes)__builtin_memcpy(c->mix_saved,c->tree+c->mix_status.offset,4);
++ if(c->claim.state==KLD_FAILED && !c->claim.raw){o->result=KLDC_ALLOC_FAILED;return o->result;}
++ if(b->kbm_status!=3 || !map || !count || count>512 || owned_count>16 || (owned_count && !owned)) {
++  o->result=KLDC_BAD_MAP;return o->result;
++ }
++ c->map_count=count;o->efi_records=count;o->managed_banks=owned_count;
++ __builtin_memcpy(c->map,map,count*sizeof(*map));
++ c->managed[c->managed_count++]=(KebabLowDmaRange){b->physical_base,b->memory_bytes};
++ for(uint32_t i=0;i<owned_count;i++)c->managed[c->managed_count++]=owned[i];
++ if(b->video_height && b->video_row_bytes) {
++  if(b->video_height>UINT64_MAX/b->video_row_bytes){o->result=KLDC_OVERLAP;return o->result;}
++  c->managed[c->managed_count++]=(KebabLowDmaRange){b->video_base,b->video_height*b->video_row_bytes};
++ }
++ if(b->bootstrap_nc_bytes)c->managed[c->managed_count++]=(KebabLowDmaRange){b->bootstrap_nc_base,b->bootstrap_nc_bytes};
++ if(!KebabLowDmaConsumerValid(&c->claim,c->map,count,c->managed,c->managed_count)) {
++  o->result=KLDC_BAD_CLAIM;return o->result;
++ }
++ o->flags|=KLDC_F_RANGE|KLDC_F_RETAINED;o->result=bad_binding?KLDC_BAD_BINDING:KLDC_RANGE_UNMEASURED;return o->result;
++}
++typedef struct {uint8_t adt[32],firmware[32],identity[32];unsigned seen;} KldcManifestHashes;
++typedef struct {const uint8_t *p;size_t bytes,at;unsigned tokens;KldcManifestHashes hashes;} KldcJson;
++static inline int kldc_hex(uint8_t c)
++{return c>='0'&&c<='9'?c-'0':c>='a'&&c<='f'?c-'a'+10:-1;}
++static inline void kldc_space(KldcJson *j)
++{while(j->at<j->bytes && (j->p[j->at]==' ' || j->p[j->at]=='\t' || j->p[j->at]=='\r' || j->p[j->at]=='\n'))++j->at;}
++static inline int kldc_string(KldcJson *j,size_t *start,size_t *len,int *escaped)
++{
++ kldc_space(j);if(j->at>=j->bytes || j->p[j->at++]!='"')return 0;
++ *start=j->at;*escaped=0;
++ while(j->at<j->bytes) {
++  uint8_t c=j->p[j->at++];if(c=='"'){*len=j->at-*start-1;return 1;}
++  if(c<32)return 0;
++  if(c=='\\') {
++   *escaped=1;if(j->at==j->bytes)return 0;c=j->p[j->at++];
++   if(c=='u'){for(unsigned k=0;k<4;k++){if(j->at==j->bytes)return 0;uint8_t h=j->p[j->at++];if(kldc_hex(h)<0 && !(h>='A' && h<='F'))return 0;}}
++   else if(c!='"' && c!='\\' && c!='/' && c!='b' && c!='f' && c!='n' && c!='r' && c!='t')return 0;
++  }
++ }
++ return 0;
++}
++static inline int kldc_text(const KldcJson *j,size_t at,size_t n,const char *s)
++{size_t k=0;while(s[k])++k;return n==k && kldc_equal(j->p+at,s,n);}
++static inline int kldc_json_value(KldcJson *j,unsigned depth,unsigned context);
++static inline int kldc_json_object(KldcJson *j,unsigned depth,unsigned context)
++{
++ if(depth>24 || j->at>=j->bytes || j->p[j->at++]!='{')return 0;
++ unsigned count=0;int components_seen=0;kldc_space(j);
++ if(j->at<j->bytes && j->p[j->at]=='}'){++j->at;return 1;}
++ for(;;) {
++  size_t key,n;int escaped;
++  if(++count>256 || !kldc_string(j,&key,&n,&escaped))return 0;
++  kldc_space(j);if(j->at>=j->bytes || j->p[j->at++]!=':')return 0;kldc_space(j);
++  if(context==1 && !escaped && kldc_text(j,key,n,"components")) {
++   if(components_seen++ || !kldc_json_object(j,depth+1,2))return 0;
++  } else {
++   unsigned bit=0;uint8_t *out=NULL;
++   if(context==2 && !escaped) {
++    if(kldc_text(j,key,n,"adt-without-owner-manifest")){bit=1;out=j->hashes.adt;}
++    if(kldc_text(j,key,n,"firmware-prefix")){bit=2;out=j->hashes.firmware;}
++    if(kldc_text(j,key,n,"owner-os-identity")){bit=4;out=j->hashes.identity;}
++   }
++   if(bit) {
++    size_t value,bytes;int quoted;
++    if(j->hashes.seen&bit || !kldc_string(j,&value,&bytes,&quoted) || quoted || bytes!=64)return 0;
++    for(unsigned i=0;i<32;i++){int a=kldc_hex(j->p[value+2*i]),b=kldc_hex(j->p[value+2*i+1]);if(a<0 || b<0)return 0;out[i]=(uint8_t)((a<<4)|b);}
++    j->hashes.seen|=bit;
++   } else if(!kldc_json_value(j,depth+1,0))return 0;
++  }
++  kldc_space(j);if(j->at>=j->bytes)return 0;
++  uint8_t ch=j->p[j->at++];if(ch=='}')return 1;if(ch!=',')return 0;
++ }
++}
++static inline int kldc_json_value(KldcJson *j,unsigned depth,unsigned context)
++{
++ if(depth>24 || ++j->tokens>8192)return 0;
++ kldc_space(j);if(j->at>=j->bytes)return 0;
++ uint8_t ch=j->p[j->at];
++ if(ch=='{')return kldc_json_object(j,depth,context);
++ if(ch=='"'){size_t at,n;int escaped;return kldc_string(j,&at,&n,&escaped);}
++ if(ch=='[') {
++  ++j->at;kldc_space(j);if(j->at<j->bytes && j->p[j->at]==']'){++j->at;return 1;}
++  for(;;){if(!kldc_json_value(j,depth+1,0))return 0;kldc_space(j);if(j->at>=j->bytes)return 0;ch=j->p[j->at++];if(ch==']')return 1;if(ch!=',')return 0;}
++ }
++ for(unsigned k=0;k<3;k++){const char *v=k==0?"true":k==1?"false":"null";size_t n=k==1?5:4;
++  if(j->bytes-j->at>=n && kldc_equal(j->p+j->at,v,n)){j->at+=n;return 1;}}
++ if(ch=='-'){if(++j->at>=j->bytes)return 0;ch=j->p[j->at];}
++ if(ch=='0')++j->at;
++ else {if(ch<'1'||ch>'9')return 0;do{++j->at;}while(j->at<j->bytes && j->p[j->at]>='0' && j->p[j->at]<='9');}
++ if(j->at<j->bytes && j->p[j->at]=='.'){size_t at=++j->at;while(j->at<j->bytes && j->p[j->at]>='0' && j->p[j->at]<='9')++j->at;if(at==j->at)return 0;}
++ if(j->at<j->bytes && (j->p[j->at]=='e'||j->p[j->at]=='E')){++j->at;if(j->at<j->bytes && (j->p[j->at]=='+'||j->p[j->at]=='-'))++j->at;size_t at=j->at;while(j->at<j->bytes && j->p[j->at]>='0' && j->p[j->at]<='9')++j->at;if(at==j->at)return 0;}
++ return 1;
++}
++static inline int kldc_manifest(const KldcCaptured *c,KldcManifestHashes *out)
++{
++ KldcJson j={c->manifest_saved,c->manifest.bytes,0,0,{{0},{0},{0},0}};
++ if(!kldc_json_value(&j,0,1))return 0;
++ kldc_space(&j);
++ if(j.at!=j.bytes || (j.hashes.seen&3)!=3)return 0;
++ *out=j.hashes;return 1;
++}
++static inline int kldc_digest(const KldcHashOps *h,unsigned bits,const void *p,size_t n,void *out,size_t bytes)
++{return !h->begin(h->cookie,bits) && !h->update(h->cookie,p,n) && !h->finish(h->cookie,out,bytes);}
++static inline unsigned KldcFinalize(KldcCaptured *c,const KldcHashOps *hash,struct kebab_low_dma_observation *out)
++{
++ *out=c->observation;out->state=KLDC_DONE;
++ if(out->result!=KLDC_RANGE_UNMEASURED)return out->result;
++ if(!(out->flags&KLDC_F_LOADER_BINDING)){out->result=KLDC_MEASUREMENT_MISSING;return out->result;}
++ if(!hash || !hash->begin || !hash->update || !hash->finish){out->state=KLDC_CAPTURED;out->result=KLDC_CRYPTO_NOT_READY;return out->result;}
++ if(!c->manifest.bytes || c->boot_hash.bytes!=48 || (c->identity.bytes && (c->measurement.bytes!=48 || c->mix_status.bytes!=4))) {
++  out->result=KLDC_MEASUREMENT_MISSING;return out->result;
++ }
++ KldcManifestHashes expected;uint8_t digest[48];
++ if(!kldc_manifest(c,&expected)){out->result=KLDC_MEASUREMENT_MISMATCH;return out->result;}
++ if(!kldc_digest(hash,384,c->manifest_saved,c->manifest.bytes,digest,48))goto crypto;
++ if(!kldc_equal(digest,c->identity.bytes?c->measurement_saved:c->boot_hash_saved,48))goto mismatch;
++ if(c->identity.bytes) {
++  static const uint8_t zero[4]={0};
++  if((expected.seen&4)!=4 || !kldc_equal(c->mix_saved,zero,4) ||
++     !kldc_equal(expected.identity,kldc_owner_identity_sha256,32))goto mismatch;
++  if(!kldc_digest(hash,384,c->identity_saved,c->identity.bytes,digest,48))goto crypto;
++  if(!kldc_equal(digest,c->boot_hash_saved,48))goto mismatch;
++  if(!kldc_digest(hash,256,c->identity_saved,c->identity.bytes,digest,32))goto crypto;
++  if(!kldc_equal(digest,expected.identity,32))goto mismatch;
++ } else if(c->measurement.bytes)goto mismatch;
++ if(!kldc_digest(hash,256,c->policy,72,out->policy_sha256,32))goto crypto;
++ if(hash->begin(hash->cookie,256))goto crypto;
++ unsigned policies,bindings;
++ if(!kldc_tree(c,hash,&policies,&bindings) || policies!=1 || bindings!=1)goto mismatch;
++ if(hash->finish(hash->cookie,out->measured_adt_sha256,32))goto crypto;
++ if(!kldc_equal(out->measured_adt_sha256,expected.adt,32))goto mismatch;
++ __builtin_memcpy(out->firmware_prefix_sha256,expected.firmware,32);
++ out->flags|=KLDC_F_MEASUREMENT;out->result=KLDC_MEASURED_RETAINED;return out->result;
++crypto:
++ out->state=KLDC_CAPTURED;out->result=KLDC_CRYPTO_NOT_READY;return out->result;
++mismatch:
++ out->result=KLDC_MEASUREMENT_MISMATCH;return out->result;
++}
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabLowDmaProducerCore.h
+@@ -0,0 +1,175 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_LOW_DMA_CORE_H
++#define KEBAB_LOW_DMA_CORE_H
++#include <stdint.h>
++#include <stddef.h>
++#if defined(KLD_UEFI_ENV)
++#define KLD_ZERO(p,n) ZeroMem((p),(n))
++#define KLD_COMPARE(a,b,n) CompareMem((a),(b),(n))
++#else
++#include <string.h>
++#define KLD_ZERO(p,n) memset((p),0,(n))
++#define KLD_COMPARE(a,b,n) memcmp((a),(b),(n))
++#endif
++/* UEFI OS loaders must NOT request EfiReservedMemoryType. This candidate
++ * requests EfiLoaderData and passes a separate dedicated-owner record to XNU.
++ * No guessed PA, AllocateAddress fallback, SMC, page admission or MMIO. */
++#define KLD_MAX_RECORDS 512u
++#define KLD_RAW_PAGES 516u
++#define KLD_RAW_BYTES ((uint64_t)KLD_RAW_PAGES*4096)
++#define KLD_IMAGE_BYTES 0x100000ULL
++#define KLD_METADATA_BYTES 0x4000ULL
++enum { KLD_EMPTY, KLD_HELD, KLD_VALID, KLD_FAILED, KLD_QUARANTINED, KLD_HANDED };
++enum { KLD_OK, KLD_ARGUMENT, KLD_STATE, KLD_MAP, KLD_ALLOCATE, KLD_BAD_GRANT,
++       KLD_BEFORE, KLD_AFTER, KLD_OVERLAP, KLD_FREE, KLD_DISABLED, KLD_CACHE };
++typedef struct {uint64_t physical,bytes,attributes;uint32_t type,reserved;} KebabLowDmaMap;
++typedef struct {uint64_t physical,bytes;} KebabLowDmaRange;
++typedef struct {
++ uint64_t magic;
++ uint32_t schema,bytes,state,error,purpose,efi_type;
++ uint64_t raw,raw_bytes,image,image_bytes,metadata,metadata_bytes;
++ uint64_t allocate_status,free_status;
++ uint32_t before_count,after_count,reserved[4];
++} KebabLowDmaClaim;
++typedef struct {KebabLowDmaMap before[KLD_MAX_RECORDS],after[KLD_MAX_RECORDS];} KebabLowDmaWorkspace;
++typedef struct {
++ void *cookie;
++ int (*map)(void *,KebabLowDmaMap *,uint32_t capacity,uint32_t *count);
++ uint64_t (*allocate_max)(void *,uint32_t type,uint64_t maximum,uint64_t pages,uint64_t *base);
++ uint64_t (*free_pages)(void *,uint64_t base,uint64_t pages);
++} KebabLowDmaOps;
++#define KLD_MAGIC 0x31414d444c42454bULL /* KEBLDMA1 */
++#define KLD_POLICY_BYTES 72u
++#define KLD_CLAIM_BOOTARGS_OFFSET 0x380u
++/* Canonical immutable ADT policy. Dynamic PA values never enter this property
++ * or an owner-manifest measurement exclusion. Flags: optional, current loader
++ * does not call EBS, exclude from general RAM, no SMC/DMA publication. */
++static inline void KebabLowDmaPolicyEncode(uint8_t out[KLD_POLICY_BYTES],unsigned enabled)
++{
++ static const uint32_t word[18]={0x4c42454b,0x31504d44,1,72,0,13,2,0x380,
++  0xffffffffu,0,516,0x100000,0x4000,0x100000,15,0,0,0};
++ for(unsigned i=0;i<18;i++)for(unsigned b=0;b<4;b++)out[i*4+b]=(uint8_t)(word[i]>>(8*b));
++ out[16]=(uint8_t)enabled;
++}
++static inline int KebabLowDmaPolicyValid(const void *policy,size_t bytes,unsigned *enabled)
++{
++ if(!policy || !enabled || bytes!=KLD_POLICY_BYTES)return 0;
++ const uint8_t *p=(const uint8_t *)policy;uint8_t expected[KLD_POLICY_BYTES];
++ if(p[16]>1)return 0;
++ KebabLowDmaPolicyEncode(expected,p[16]);
++ if(KLD_COMPARE(policy,expected,sizeof expected))return 0;
++ *enabled=p[16];return 1;
++}
++static inline int kld_map_valid(const KebabLowDmaMap *m,uint32_t n)
++{
++ if(!m || !n || n>KLD_MAX_RECORDS)return 0;
++ for(uint32_t i=0;i<n;i++) {
++  if(!m[i].bytes || (m[i].physical&4095) || (m[i].bytes&4095) ||
++     m[i].physical>UINT64_MAX-m[i].bytes || m[i].reserved)return 0;
++  for(uint32_t j=0;j<i;j++)
++   if(m[i].physical<m[j].physical+m[j].bytes &&
++      m[j].physical<m[i].physical+m[i].bytes)return 0;
++ }
++ return 1;
++}
++/* Entire range must be covered, including across adjacent descriptors. */
++static inline int kld_covered(const KebabLowDmaMap *m,uint32_t n,uint64_t pa,uint64_t bytes,uint32_t type)
++{
++ uint64_t cursor=pa,end=pa+bytes;
++ if(!bytes || end<pa)return 0;
++ while(cursor<end) {
++  uint64_t next=cursor;
++  for(uint32_t i=0;i<n;i++) {
++   const KebabLowDmaMap *d=&m[i];
++   if(d->physical<=cursor && cursor<d->physical+d->bytes &&
++      d->type==type && (d->attributes&8) &&
++      !(d->attributes&(0x8000000000000000ULL|0x23000ULL)))
++    next=d->physical+d->bytes;
++  }
++  if(next==cursor)return 0;
++  cursor=next;
++ }
++ return 1;
++}
++static inline int kld_forbidden(uint64_t pa,uint64_t bytes,const KebabLowDmaRange *r,uint32_t n)
++{
++ if(n>32 || (n && !r))return 1;
++ for(uint32_t i=0;i<n;i++) {
++  if(!r[i].bytes || r[i].physical>UINT64_MAX-r[i].bytes)return 1;
++  if(pa<r[i].physical+r[i].bytes && r[i].physical<pa+bytes)return 1;
++ }
++ return 0;
++}
++static inline int KebabLowDmaAbort(KebabLowDmaClaim *c,const KebabLowDmaOps *o)
++{
++ if(!c || !o || !o->free_pages)return KLD_ARGUMENT;
++ if(c->state!=KLD_HELD && c->state!=KLD_VALID)return KLD_STATE;
++ /* Only the exact successfully granted EFI allocation may be freed. */
++ c->free_status=o->free_pages(o->cookie,c->raw,KLD_RAW_PAGES);
++ if(c->free_status){c->state=KLD_QUARANTINED;return KLD_FREE;}
++ c->raw=c->image=c->metadata=0;c->state=KLD_FAILED;return 0;
++}
++static inline int kld_fail(KebabLowDmaClaim *c,const KebabLowDmaOps *o,unsigned e)
++{c->error=e;(void)KebabLowDmaAbort(c,o);return (int)e;}
++static inline int KebabLowDmaReserve(KebabLowDmaClaim *c,const KebabLowDmaOps *o,
++ KebabLowDmaWorkspace *w,const KebabLowDmaRange *forbidden,uint32_t forbidden_count)
++{
++ if(!c || !o || !w || !o->map || !o->allocate_max || !o->free_pages)return KLD_ARGUMENT;
++ if(c->state!=KLD_EMPTY)return KLD_STATE;
++ KLD_ZERO(c,sizeof *c);c->magic=KLD_MAGIC;c->schema=1;c->bytes=sizeof *c;
++ c->purpose=13;c->efi_type=2;c->raw_bytes=KLD_RAW_BYTES;
++ c->image_bytes=KLD_IMAGE_BYTES;c->metadata_bytes=KLD_METADATA_BYTES;
++ if(o->map(o->cookie,w->before,KLD_MAX_RECORDS,&c->before_count) ||
++    !kld_map_valid(w->before,c->before_count)) {
++  c->state=KLD_FAILED;c->error=KLD_MAP;return KLD_MAP;
++ }
++ c->allocate_status=o->allocate_max(o->cookie,2,0xffffffffULL,KLD_RAW_PAGES,&c->raw);
++ if(c->allocate_status){c->raw=0;c->state=KLD_FAILED;c->error=KLD_ALLOCATE;return KLD_ALLOCATE;}
++ c->state=KLD_HELD;
++ if((c->raw&4095) || c->raw>UINT64_MAX-KLD_RAW_BYTES) {
++  /* Firmware violated the allocation ABI: not a legal FreePages tuple. */
++  c->state=KLD_QUARANTINED;c->error=KLD_BAD_GRANT;return KLD_BAD_GRANT;
++ }
++ if(c->raw<0x20000 || c->raw+KLD_RAW_BYTES>0x100000000ULL)
++  return kld_fail(c,o,KLD_BAD_GRANT);
++ c->image=(c->raw+0xfffff)&~0xfffffULL;c->metadata=c->image+KLD_IMAGE_BYTES;
++ if(c->metadata+KLD_METADATA_BYTES>c->raw+KLD_RAW_BYTES)
++  return kld_fail(c,o,KLD_BAD_GRANT);
++ /* A real grant can still overlap a known legacy input which firmware did
++  * not register correctly. Return only this exact grant, without touching it. */
++ if(kld_forbidden(c->raw,KLD_RAW_BYTES,forbidden,forbidden_count))
++  return kld_fail(c,o,KLD_OVERLAP);
++ if(!kld_covered(w->before,c->before_count,c->raw,KLD_RAW_BYTES,7)) {
++  /* Conflicting ownership is not a safe tuple to free or zero. */
++  c->state=KLD_QUARANTINED;c->error=KLD_BEFORE;return KLD_BEFORE;
++ }
++ if(o->map(o->cookie,w->after,KLD_MAX_RECORDS,&c->after_count) ||
++    !kld_map_valid(w->after,c->after_count))return kld_fail(c,o,KLD_MAP);
++ if(!kld_covered(w->after,c->after_count,c->raw,KLD_RAW_BYTES,2)) {
++  c->state=KLD_QUARANTINED;c->error=KLD_AFTER;return KLD_AFTER;
++ }
++ c->state=KLD_VALID;return 0;
++}
++/* The consumer still authenticates the static ADT policy/loader and checks
++ * this claim against its captured EFI map and ALL admitted RAM banks. No call
++ * adds these pages to vm_page/pmap's free-memory lists. */
++static inline int KebabLowDmaConsumerValid(const KebabLowDmaClaim *c,
++ const KebabLowDmaMap *map,uint32_t count,const KebabLowDmaRange *managed,uint32_t managed_count)
++{
++ if(!c || c->magic!=KLD_MAGIC || c->schema!=1 || c->bytes!=sizeof *c ||
++    c->state!=KLD_VALID || c->error || c->purpose!=13 || c->efi_type!=2 ||
++    c->allocate_status || c->free_status || c->raw_bytes!=KLD_RAW_BYTES ||
++    c->image_bytes!=KLD_IMAGE_BYTES || c->metadata_bytes!=KLD_METADATA_BYTES ||
++    !c->before_count || c->before_count>KLD_MAX_RECORDS ||
++    !c->after_count || c->after_count>KLD_MAX_RECORDS ||
++    c->raw<0x20000 || (c->raw&4095) || c->raw>0x100000000ULL-KLD_RAW_BYTES ||
++    c->image!=((c->raw+0xfffff)&~0xfffffULL) ||
++    c->metadata!=c->image+KLD_IMAGE_BYTES ||
++    c->metadata+KLD_METADATA_BYTES>c->raw+KLD_RAW_BYTES)return 0;
++ for(unsigned i=0;i<4;i++)if(c->reserved[i])return 0;
++ return kld_map_valid(map,count) && kld_covered(map,count,c->raw,c->raw_bytes,2) &&
++        !kld_forbidden(c->raw,c->raw_bytes,managed,managed_count);
++}
++#undef KLD_ZERO
++#undef KLD_COMPARE
++#endif
+--- /dev/null
++++ b/osfmk/kern/kebab_low_dma.c
+@@ -0,0 +1,78 @@
++/* SPDX-License-Identifier: MIT */
++/* Read-only capture/measurement consumer. No low-PA load/store, mapping,
++ * page admission/wiring, FreePages, SMC, DMA or PAS capability operation. */
++#if defined(KEBAB) || defined(KLDC_HOST_NATIVE_SHIM)
++#if defined(KLDC_HOST_NATIVE_SHIM)
++#include "kldc_native_test_shim.h"
++#else
++#include <kern/misc_protos.h>
++#include <kern/debug.h>
++#include <arm/machine_routines.h>
++#include <pexpert/arm64/boot.h>
++#include <arm64/kebab_boot_memory.h>
++#include <libkern/section_keywords.h>
++extern int get_preemption_level(void);
++#endif
++#include "KebabLowDmaConsumerCore.h"
++typedef char kldc_observation_size[(sizeof(struct kebab_low_dma_observation)==256)?1:-1];
++typedef char kldc_official_args_size[(sizeof(boot_args)==0x2e0)?1:-1];
++typedef char kldc_producer_claim_size[(sizeof(KebabLowDmaClaim)==120)?1:-1];
++typedef char kldc_args_record_bounds[(KLD_CLAIM_BOOTARGS_OFFSET>=KBM_OFFSET+sizeof(kebab_memory_handoff) && KLD_CLAIM_BOOTARGS_OFFSET+120<=4096)?1:-1];
++SECURITY_READ_ONLY_LATE(static KldcCaptured) kldc_early;
++static KebabLowDmaMap kldc_map_workspace[512]; /* boot CPU scratch, no heap/stack bulk allocation */
++static struct kebab_low_dma_observation kldc_final;
++static uint32_t kldc_capture_published,kldc_final_state;
++void
++kebab_low_dma_capture(const boot_args *args,const void *map_pointer,uint32_t count,
++ const void *owned_pointer,uint32_t owned_count,uint32_t kbm_status)
++{
++ if(__atomic_load_n(&kldc_capture_published,__ATOMIC_RELAXED))return;
++ if(!args) {
++  __builtin_memset(&kldc_early,0,sizeof(kldc_early));
++  kldc_early.observation.magic=KEBAB_LOW_DMA_MAGIC;kldc_early.observation.schema=1;
++  kldc_early.observation.bytes=sizeof(struct kebab_low_dma_observation);
++  kldc_early.observation.state=KLDC_CAPTURED;kldc_early.observation.result=KLDC_BAD_ARGS;
++  __atomic_store_n(&kldc_capture_published,1,__ATOMIC_RELEASE);return;
++ }
++ const kebab_memory_record *map=(const kebab_memory_record *)map_pointer,*owned=(const kebab_memory_record *)owned_pointer;
++ KebabLowDmaRange banks[16];
++ if(map && count<=512)for(uint32_t i=0;i<count;i++)
++  kldc_map_workspace[i]=(KebabLowDmaMap){map[i].physical,map[i].bytes,map[i].attributes,map[i].type,map[i].reserved};
++ if(owned && owned_count<=16)for(uint32_t i=0;i<owned_count;i++)
++  banks[i]=(KebabLowDmaRange){owned[i].physical,owned[i].bytes};
++ KldcBootView view={args->virtBase,args->physBase,args->memSize,args->topOfKernelData,
++  (uintptr_t)args,(uintptr_t)args->deviceTreeP,args->deviceTreeLength,kbm_status,
++  args->Video.v_baseAddr,args->Video.v_rowBytes,args->Video.v_height,
++  0x9c000000ULL,0x2000000ULL}; /* exact current KEBAB start.s bootstrap NC block */
++ (void)KldcCapture(&kldc_early,&view,args,(const uint8_t *)args->deviceTreeP,
++   map?kldc_map_workspace:NULL,count,owned?banks:NULL,owned_count);
++ __atomic_store_n(&kldc_capture_published,1,__ATOMIC_RELEASE);
++}
++int
++kebab_low_dma_snapshot(struct kebab_low_dma_observation *out,uint32_t bytes)
++{
++ if(!out || bytes!=sizeof(*out))return 1;
++ if(panic_active() || ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled())return 2;
++ if(!__atomic_load_n(&kldc_capture_published,__ATOMIC_ACQUIRE)) {
++  __builtin_memset(out,0,sizeof(*out));out->magic=KEBAB_LOW_DMA_MAGIC;out->schema=1;
++  out->bytes=sizeof(*out);out->result=KLDC_CAPTURE_NOT_RUN;return 0;
++ }
++ uint32_t state=__atomic_load_n(&kldc_final_state,__ATOMIC_ACQUIRE);
++ if(state==KLDC_DONE){*out=kldc_final;return 0;}
++ *out=kldc_early.observation;
++ if(state==KLDC_BUSY){out->state=KLDC_BUSY;return 0;}
++ uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kldc_final_state,&expected,KLDC_BUSY,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
++  out->state=KLDC_BUSY;return 0;
++ }
++ /* First staging is an immutable raw/range ledger. PE_slide_devicetree can
++  * rebase the early DT pointer; never dereference it here. A later measured
++  * stage needs the current SecureDT root plus same-physical-span validation.
++  * This version deliberately has no crypto-provider or late-DT dependency. */
++ struct kebab_low_dma_observation complete=kldc_early.observation;
++ complete.state=KLDC_DONE;
++ if(complete.result==KLDC_RANGE_UNMEASURED)complete.result=KLDC_MEASUREMENT_NOT_READY;
++ complete.flags&=~(KLDC_F_MEASUREMENT|KLDC_F_NC_MAPPED|KLDC_F_PAS_READY);
++ kldc_final=complete;__atomic_store_n(&kldc_final_state,KLDC_DONE,__ATOMIC_RELEASE);*out=complete;return 0;
++}
++#endif
+--- /dev/null
++++ b/osfmk/kern/kebab_low_dma.h
+@@ -0,0 +1,39 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_LOW_DMA_OBSERVATION_H
++#define KEBAB_LOW_DMA_OBSERVATION_H
++#include <stdint.h>
++#define KEBAB_LOW_DMA_MAGIC 0x3142534f444c424bULL /* KBLDOSB1 */
++#define KEBAB_LOW_DMA_SCHEMA 1u
++enum { KLDC_NOT_RUN, KLDC_CAPTURED, KLDC_BUSY, KLDC_DONE };
++enum { KLDC_MEASURED_RETAINED, KLDC_ABSENT, KLDC_DISABLED, KLDC_ALLOC_FAILED,
++ KLDC_BAD_ARGS, KLDC_BAD_TREE, KLDC_BAD_POLICY, KLDC_BAD_BINDING, KLDC_BAD_CLAIM,
++ KLDC_BAD_MAP, KLDC_OVERLAP, KLDC_MEASUREMENT_MISSING, KLDC_MEASUREMENT_MISMATCH,
++ KLDC_RANGE_UNMEASURED, KLDC_CRYPTO_NOT_READY, KLDC_CAPTURE_NOT_RUN, KLDC_MEASUREMENT_NOT_READY };
++enum { KLDC_F_CAPTURED=1u, KLDC_F_POLICY=2u, KLDC_F_LOADER_BINDING=4u,
++ KLDC_F_RANGE=8u, KLDC_F_RETAINED=16u, KLDC_F_MEASUREMENT=32u,
++ KLDC_F_NC_MAPPED=64u, KLDC_F_PAS_READY=128u };
++/* All fields describe a receipt; neither PA observation nor a matching
++ * development owner measurement is PAS support, NC mapping or DMA proof. */
++struct kebab_low_dma_observation {
++ uint64_t magic;
++ uint32_t schema,bytes,state,result,flags,reserved0;
++ uint64_t raw,raw_bytes,image,image_bytes,metadata,metadata_bytes;
++ uint64_t allocate_status,free_status;
++ uint32_t loader_claim_state,loader_claim_error,efi_records,managed_banks;
++ uint8_t loader_sha256[32],policy_sha256[32],measured_adt_sha256[32],firmware_prefix_sha256[32];
++ uint64_t reserved[2];
++};
++#ifdef __cplusplus
++extern "C" {
++#endif
++struct boot_args;
++/* Boot CPU only, before const_boot_args copy. Map/owned pointers reference
++ * the existing validated KBM arrays; no physical address is accepted here. */
++void kebab_low_dma_capture(const struct boot_args *,const void *map,uint32_t count,
++ const void *owned,uint32_t owned_count,uint32_t kbm_status);
++/* Normal-context, fixed-length immutable snapshot. No PA/mapping API. */
++int kebab_low_dma_snapshot(struct kebab_low_dma_observation *,uint32_t bytes);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -116,6 +116,8 @@
+ #include "KebabNativeRscQuery.h"
+ #include "KebabNativeGpuPowerHold.h"
+ #include "KebabNativeGpuCcHold.h"
++#include <kern/kebab_low_dma.h>
++static_assert(sizeof(struct kebab_low_dma_observation)==256,"fixed lowDMA observation");
+ static_assert(sizeof(KebabGpuCxMxRecord)==11100,"fixed held CX/MX receipt");
+ extern "C" {
+ #include <kern/kebab_gpu_pas.h>
+@@ -861,6 +863,17 @@
+ extern "C" int
+ kebab_capture_open(uint32_t source,uint32_t argument,struct kc_image *image)
+ {
++    if(source==20) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(struct kebab_low_dma_observation);
++        struct kebab_low_dma_observation *data=(struct kebab_low_dma_observation *)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_low_dma_snapshot(data,bytes);
++        if(error){IOFree(data,bytes);return error==2?95:22;}
++        if(data->state!=KLDC_DONE){IOFree(data,bytes);return 35;}
++        *image=kc_image{};image->handle=data;image->source=20;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
+     if(source==19) {
+         if(argument)return 22;
+         uint32_t bytes=sizeof(KebabGpuCcRecord);
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>19)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>20)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- a/osfmk/kern/KebabGpuCcCore.h
++++ b/osfmk/kern/KebabGpuCcCore.h
+@@ -1,191 +1,193 @@
+-/* SPDX-License-Identifier: MIT */
+-#ifndef KEBAB_GPU_CC_CORE_H
+-#define KEBAB_GPU_CC_CORE_H
+-#include <stdint.h>
+-#include <stddef.h>
+-#include <string.h>
+-/* SM8250 controller only. No GPU/GMU/GX/SMMU access or arbitrary offsets.
+- * Existing native RPMh owner must hold real CX+MX refs across this core.
+- * Internal AHB/PWR_ON are observations, not CC-register access gates. */
+-enum {KebabGpuCcObserve=0,KebabGpuCcEnableHold=1,KebabGpuCcRestore=2,KebabGpuCcInspect=3};
+-enum {KebabGpuCcGcc=0,KebabGpuCcControl=1,KebabGpuCcSlots=6};
+-typedef struct {
+- void *cookie;
+- int (*read32)(void *,unsigned,uint32_t,uint32_t *);
+- int (*write32)(void *,unsigned,uint32_t,uint32_t);
+- int (*barrier)(void *);
+- int (*delay_us)(void *,uint32_t);
+- uint64_t (*now_us)(void *);
+-} KebabGpuCcIo;
+-typedef struct {
+- uint32_t held,pinned_parent,attempted,quarantined,retention_added;
+- uint32_t original_gdscr,original_ahb,original_gmu,gdscr_control,ahb_control;
+-} KebabGpuCcLedger;
+-typedef struct {
+- uint32_t magic,schema,bytes,action,result,same_native_owner,parent_qualified,parent_refs,parent_ack_mask;
+- uint32_t owner_dead,quarantined,held,pinned_parent,evidence_replayed,failure_result;
+- uint32_t reads,write_attempts,barriers,delay_calls,delay_total_us,polls,failed_region,failed_offset,failed_op,io_error;
+- uint32_t valid_before[2],valid_after[2],stable_before,stable_after,last_valid,last[6];
+- uint32_t before[2][6],after[2][6];
+- uint32_t cx_power_ack,ahb_request_ack,ahb_reported_running,retention_added,collapse_and_ahb_restored,full_original_controls_restored;
+- uint32_t downstream_qualified,not_run_subsystems;
+-} KebabGpuCcRecord;
+-typedef struct {const KebabGpuCcIo *io;KebabGpuCcRecord *r;KebabGpuCcLedger *ledger;uint32_t cfg,reset;} KebabGpuCcContext;
+-static inline void KebabGpuCcInit(KebabGpuCcRecord *r,unsigned action)
+-{
+- memset(r,0,sizeof *r);r->magic=0x4343474b;r->schema=1;r->bytes=sizeof *r;r->action=action;r->result=22;
+- r->failed_region=r->failed_offset=UINT32_MAX;r->not_run_subsystems=7;
+-}
+-static inline int KebabGpuCcOffset(unsigned slot,unsigned *region,uint32_t *offset)
+-{
+- static const uint32_t offsets[6]={0x71004,0x71000,0x106c,0x1540,0x1078,0x1098};
+- if(slot>=6 || !region || !offset)return 0;*region=slot<2?0:1;*offset=offsets[slot];return 1;
+-}
+-static inline int KebabGpuCcAllowed(unsigned region,uint32_t offset)
+-{
+- unsigned i,actual;uint32_t off;
+- for(i=0;i<6;i++){(void)KebabGpuCcOffset(i,&actual,&off);if(region==actual && offset==off)return 1;}return 0;
+-}
+-static inline uint32_t KebabGpuCcWriteMask(unsigned region,uint32_t offset)
+-{if(region!=1)return 0;if(offset==0x106c)return 0x801;if(offset==0x1078)return 1;return 0;}
+-static inline uint32_t KebabGpuCcControlMask(unsigned slot)
+-{/* GDSCR31 is vendor PWR_ON. Actual571 also observed29/30 changing
+-  * after SW_COLLAPSE clear (00222001 ->60222000); their meaning is not
+-  * defined by the fixed source. Exclude only those observed dynamic bits,
+-  * retain conservative invariance of every other unowned bit, including28.
+-  * ACK remains HW1540 bit31; no106c high bit is a completion condition.
+-  * CBCR31 CLK_OFF and28..30 NOC_FSM are RO status, not controls. */
+- if(slot==2)return 0x1fffffffu;
+- return slot==4 || slot==5?0x0fffffffu:0x7fffffffu;}
+-static inline int KebabGpuCcGmuClockQuiet(uint32_t value)
+-{/* No owned CM3 reset exists: require branch disabled AND reported halted. */
+- return (value&0x80000001u)==0x80000000u;}
+-static inline int KebabGpuCcRaw(KebabGpuCcContext *c,unsigned slot,uint32_t *out)
+-{
+- unsigned region=0;uint32_t offset=0,value=0;int e;if(!out || !KebabGpuCcOffset(slot,&region,&offset))return 22;
+- ++c->r->reads;e=c->io->read32(c->io->cookie,region,offset,&value);
+- if(e){c->r->failed_region=region;c->r->failed_offset=offset;c->r->failed_op=1;c->r->io_error=(uint32_t)e;return 5;}
+- *out=value;c->r->last[slot]=value;c->r->last_valid|=1u<<slot;return 0;
+-}
+-static inline int KebabGpuCcBarrier(KebabGpuCcContext *c)
+-{int e;++c->r->barriers;e=c->io->barrier(c->io->cookie);if(e){c->r->failed_op=3;c->r->io_error=(uint32_t)e;return 5;}return 0;}
+-static inline int KebabGpuCcDelay(KebabGpuCcContext *c,uint32_t us)
+-{
+- int e;if(us!=1 && us!=10 && us!=100)return 22;++c->r->delay_calls;c->r->delay_total_us+=us;
+- e=c->io->delay_us(c->io->cookie,us);if(e){c->r->failed_op=4;c->r->io_error=(uint32_t)e;return 5;}return 0;
+-}
+-static inline int KebabGpuCcGates(KebabGpuCcContext *c)
+-{
+- uint32_t cfg,reset;int e;
+- if((e=KebabGpuCcRaw(c,0,&cfg)) || (e=KebabGpuCcRaw(c,1,&reset)))return e;
+- if(cfg!=c->cfg || reset!=c->reset || !(cfg&1) || (cfg&0x80000000u) || (reset&1))return 11;
+- return KebabGpuCcBarrier(c);
+-}
+-static inline int KebabGpuCcRead(KebabGpuCcContext *c,unsigned slot,uint32_t *out)
+-{int e;if(slot<2)return KebabGpuCcRaw(c,slot,out);e=KebabGpuCcGates(c);return e?e:KebabGpuCcRaw(c,slot,out);}
+-static inline int KebabGpuCcSnapshot(KebabGpuCcContext *c,int after)
+-{
+- unsigned pass,slot;int e;uint32_t (*sample)[6]=after?c->r->after:c->r->before;
+- uint32_t *valid=after?c->r->valid_after:c->r->valid_before,*stable=after?&c->r->stable_after:&c->r->stable_before;
+- for(pass=0;pass<2;pass++) {
+-  for(slot=0;slot<2;slot++){e=KebabGpuCcRaw(c,slot,&sample[pass][slot]);if(e)return e;valid[pass]|=1u<<slot;}
+-  if(!(sample[pass][0]&1) || (sample[pass][0]&0x80000000u) || (sample[pass][1]&1))return 95;
+-  if(!after && pass==0){c->cfg=sample[0][0];c->reset=sample[0][1];}
+-  if(sample[pass][0]!=c->cfg || sample[pass][1]!=c->reset)return 11;
+-  for(slot=2;slot<6;slot++){e=KebabGpuCcRead(c,slot,&sample[pass][slot]);if(e)return e;valid[pass]|=1u<<slot;}
+-  if((e=KebabGpuCcBarrier(c)))return e;
+- }
+- for(slot=0;slot<6;slot++)if(sample[0][slot]==sample[1][slot])*stable|=1u<<slot;
+- return *stable==63?0:11;
+-}
+-/* Bit writes preserve unowned controls. The adapter independently enforces
+- * exact writable masks and rebases the request on its fresh register read. */
+-static inline int KebabGpuCcUpdate(KebabGpuCcContext *c,unsigned slot,uint32_t mask,uint32_t bits,uint32_t expected)
+-{
+- unsigned region=0,i;uint32_t offset=0,current,value,control_mask=KebabGpuCcControlMask(slot);uint64_t start;int e;
+- if(!KebabGpuCcOffset(slot,&region,&offset) || !mask || (mask&~KebabGpuCcWriteMask(region,offset)))return 22;
+- if((e=KebabGpuCcRead(c,slot,&current)))return e;
+- if((current&control_mask)!=expected)return 11;
+- value=(current&~mask)|(bits&mask);if((current&mask)==(value&mask))return 0;
+- if((e=KebabGpuCcGates(c)))return e;
+- c->ledger->attempted=1;++c->r->write_attempts;
+- e=c->io->write32(c->io->cookie,region,offset,value);
+- if(e){c->r->failed_region=region;c->r->failed_offset=offset;c->r->failed_op=2;c->r->io_error=(uint32_t)e;return 5;}
+- if((e=KebabGpuCcBarrier(c)))return e;
+- start=c->io->now_us(c->io->cookie);
+- for(i=0;i<1000;i++) {
+-  if((e=KebabGpuCcRead(c,slot,&current)))return e;
+-  if((current&control_mask&~mask)!=(expected&~mask))return 11;
+-  if((current&mask)==(value&mask))return 0;
+-  if(c->io->now_us(c->io->cookie)-start>=10000)break;
+- }
+- c->r->failed_region=region;c->r->failed_offset=offset;c->r->failed_op=5;return 110;
+-}
+-static inline int KebabGpuCcPowerAck(KebabGpuCcContext *c)
+-{
+- unsigned retry,i;uint32_t hw;uint64_t start;int e;
+- /* DT gds-timeout500us; vendor retries once using hw_ctrl1540. */
+- for(retry=0;retry<2;retry++) {
+-  start=c->io->now_us(c->io->cookie);
+-  for(i=0;i<500;i++) {
+-   ++c->r->polls;if((e=KebabGpuCcRead(c,3,&hw)))return e;
+-   if(hw&0x80000000u){c->r->cx_power_ack=1;return 0;}
+-   if((e=KebabGpuCcDelay(c,1)))return e;
+-   if(c->io->now_us(c->io->cookie)-start>=500)break;
+-  }
+- }
+- return 110;
+-}
+-static inline int KebabGpuCcPrepare(KebabGpuCcContext *c)
+-{
+- int e=KebabGpuCcSnapshot(c,0);if(e)return e;
+- /* Probe normally clears HW_CONTROL/SW_OVERRIDE; native must not seize it. */
+- if(c->r->action==KebabGpuCcEnableHold && ((c->r->before[0][2]&6) || !KebabGpuCcGmuClockQuiet(c->r->before[0][5])))return 95;
+- return 0;
+-}
+-static inline int KebabGpuCcEnable(KebabGpuCcContext *c)
+-{
+- KebabGpuCcLedger *b=c->ledger;KebabGpuCcRecord *r=c->r;int e;
+- b->original_gdscr=r->before[0][2];b->original_ahb=r->before[0][4];b->original_gmu=r->before[0][5];
+- b->gdscr_control=b->original_gdscr&KebabGpuCcControlMask(2);b->ahb_control=b->original_ahb&KebabGpuCcControlMask(4);
+- e=KebabGpuCcUpdate(c,2,1,0,b->gdscr_control);if(e)return e;b->gdscr_control&=~1u;
+- if((e=KebabGpuCcBarrier(c)) || (e=KebabGpuCcDelay(c,1)) || (e=KebabGpuCcPowerAck(c)))return e;
+- /* Original DT qcom,retain-regs: vendor installs retention after power ACK.
+-  * It never clears this policy bit on disable; neither does restore here. */
+- if(!(b->gdscr_control&0x800)) {
+-  e=KebabGpuCcUpdate(c,2,0x800,0x800,b->gdscr_control);if(e)return e;
+-  b->gdscr_control|=0x800;b->retention_added=1;
+- }
+- if((e=KebabGpuCcDelay(c,1)) || (e=KebabGpuCcDelay(c,1)))return e;
+- e=KebabGpuCcUpdate(c,4,1,1,b->ahb_control);if(e)return e;b->ahb_control|=1;
+- if((e=KebabGpuCcDelay(c,10)) || (e=KebabGpuCcSnapshot(c,1)))return e;
+- if((r->after[0][2]&KebabGpuCcControlMask(2))!=b->gdscr_control || !(r->after[0][3]&0x80000000u) ||
+- (r->after[0][4]&KebabGpuCcControlMask(4))!=b->ahb_control || (r->after[0][5]&KebabGpuCcControlMask(5))!=(b->original_gmu&KebabGpuCcControlMask(5)) ||
+- !KebabGpuCcGmuClockQuiet(r->after[0][5]))return 11;
+- r->ahb_request_ack=1;r->ahb_reported_running=(r->after[0][4]&0x80000000u)==0;
+- b->held=1;r->retention_added=b->retention_added;return 0;
+-}
+-static inline int KebabGpuCcRestoreSaved(KebabGpuCcContext *c)
+-{
+- KebabGpuCcLedger *b=c->ledger;KebabGpuCcRecord *r=c->r;int e;
+- /* No GMU execution/quiesce owner exists in this phase. Do not withdraw
+-  * any controller hold while this branch is enabled or not reported halted. */
+- if(!KebabGpuCcGmuClockQuiet(r->before[0][5]))return 95;
+- if((r->before[0][2]&KebabGpuCcControlMask(2))!=b->gdscr_control || (r->before[0][4]&KebabGpuCcControlMask(4))!=b->ahb_control ||
+- (r->before[0][5]&KebabGpuCcControlMask(5))!=(b->original_gmu&KebabGpuCcControlMask(5)))return 11;
+- e=KebabGpuCcUpdate(c,4,1,b->original_ahb&1,b->ahb_control);if(e)return e;
+- b->ahb_control=(b->ahb_control&~1u)|(b->original_ahb&1);
+- if((e=KebabGpuCcDelay(c,10)))return e;
+- e=KebabGpuCcUpdate(c,2,1,b->original_gdscr&1,b->gdscr_control);if(e)return e;
+- b->gdscr_control=(b->gdscr_control&~1u)|(b->original_gdscr&1);
+- if(b->original_gdscr&1) {
+-  /* DT no-status-check-on-disable: write/readback request +1us+100us.
+-   * Other TZ/HYP votes may keep PWR_ON1; never invent a power-off ACK. */
+-  if((e=KebabGpuCcBarrier(c)) || (e=KebabGpuCcDelay(c,1)) || (e=KebabGpuCcDelay(c,100)))return e;
+- }
+- if((e=KebabGpuCcSnapshot(c,1)))return e;
+- if((r->after[0][2]&KebabGpuCcControlMask(2))!=b->gdscr_control || (r->after[0][4]&KebabGpuCcControlMask(4))!=b->ahb_control ||
+- (r->after[0][5]&KebabGpuCcControlMask(5))!=(b->original_gmu&KebabGpuCcControlMask(5)))return 11;
+- r->collapse_and_ahb_restored=1;r->retention_added=b->retention_added;r->full_original_controls_restored=!b->retention_added;b->held=0;return 0;
+-}
+-#endif
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GPU_CC_CORE_H
++#define KEBAB_GPU_CC_CORE_H
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++/* SM8250 controller only. No GPU/GMU/GX/SMMU access or arbitrary offsets.
++ * Existing native RPMh owner must hold real CX+MX refs across this core.
++ * Internal AHB/PWR_ON are observations, not CC-register access gates. */
++enum {KebabGpuCcObserve=0,KebabGpuCcEnableHold=1,KebabGpuCcRestore=2,KebabGpuCcInspect=3};
++enum {KebabGpuCcGcc=0,KebabGpuCcControl=1,KebabGpuCcSlots=6};
++typedef struct {
++ void *cookie;
++ int (*read32)(void *,unsigned,uint32_t,uint32_t *);
++ int (*write32)(void *,unsigned,uint32_t,uint32_t);
++ int (*barrier)(void *);
++ int (*delay_us)(void *,uint32_t);
++ uint64_t (*now_us)(void *);
++} KebabGpuCcIo;
++typedef struct {
++ uint32_t held,pinned_parent,attempted,quarantined,retention_added;
++ uint32_t original_gdscr,original_ahb,original_gmu,gdscr_control,ahb_control;
++} KebabGpuCcLedger;
++typedef struct {
++ uint32_t magic,schema,bytes,action,result,same_native_owner,parent_qualified,parent_refs,parent_ack_mask;
++ uint32_t owner_dead,quarantined,held,pinned_parent,evidence_replayed,failure_result;
++ uint32_t reads,write_attempts,barriers,delay_calls,delay_total_us,polls,failed_region,failed_offset,failed_op,io_error;
++ uint32_t valid_before[2],valid_after[2],stable_before,stable_after,last_valid,last[6];
++ uint32_t before[2][6],after[2][6];
++ uint32_t cx_power_ack,ahb_request_ack,ahb_reported_running,retention_added,collapse_and_ahb_restored,full_original_controls_restored;
++ uint32_t downstream_qualified,not_run_subsystems;
++} KebabGpuCcRecord;
++typedef struct {const KebabGpuCcIo *io;KebabGpuCcRecord *r;KebabGpuCcLedger *ledger;uint32_t cfg,reset;} KebabGpuCcContext;
++static inline void KebabGpuCcInit(KebabGpuCcRecord *r,unsigned action)
++{
++ memset(r,0,sizeof *r);r->magic=0x4343474b;r->schema=1;r->bytes=sizeof *r;r->action=action;r->result=22;
++ r->failed_region=r->failed_offset=UINT32_MAX;r->not_run_subsystems=7;
++}
++static inline int KebabGpuCcOffset(unsigned slot,unsigned *region,uint32_t *offset)
++{
++ static const uint32_t offsets[6]={0x71004,0x71000,0x106c,0x1540,0x1078,0x1098};
++ if(slot>=6 || !region || !offset)return 0;*region=slot<2?0:1;*offset=offsets[slot];return 1;
++}
++static inline int KebabGpuCcAllowed(unsigned region,uint32_t offset)
++{
++ unsigned i,actual;uint32_t off;
++ for(i=0;i<6;i++){(void)KebabGpuCcOffset(i,&actual,&off);if(region==actual && offset==off)return 1;}return 0;
++}
++static inline uint32_t KebabGpuCcWriteMask(unsigned region,uint32_t offset)
++{if(region!=1)return 0;if(offset==0x106c)return 0x801;if(offset==0x1078)return 1;return 0;}
++static inline uint32_t KebabGpuCcControlMask(unsigned slot)
++{/* Persistent software-control fields, not a complement of observed status.
++  * Fixed gdsc.c: SW_COLLAPSE0/HW_CONTROL1/SW_OVERRIDE2,
++  * CLK_DIS_WAIT15:12/EN_FEW_WAIT19:16/EN_REST_WAIT23:20.
++  * Fixed Kona gdsc-regulator.c also owns RETAIN_FF11.
++  * Every other GDSCR bit remains raw evidence and is preserved by native
++  * fresh RMW. Unclassified/reserved bits are NOT presumed stable control
++  * or assigned invented status meanings. Only HW1540 bit31 supplies ACK.
++  * CBCR31 CLK_OFF and28..30 NOC_FSM are RO status, not controls. */
++ if(slot==2)return 0x00fff807u;
++ return slot==4 || slot==5?0x0fffffffu:0x7fffffffu;}
++static inline int KebabGpuCcGmuClockQuiet(uint32_t value)
++{/* No owned CM3 reset exists: require branch disabled AND reported halted. */
++ return (value&0x80000001u)==0x80000000u;}
++static inline int KebabGpuCcRaw(KebabGpuCcContext *c,unsigned slot,uint32_t *out)
++{
++ unsigned region=0;uint32_t offset=0,value=0;int e;if(!out || !KebabGpuCcOffset(slot,&region,&offset))return 22;
++ ++c->r->reads;e=c->io->read32(c->io->cookie,region,offset,&value);
++ if(e){c->r->failed_region=region;c->r->failed_offset=offset;c->r->failed_op=1;c->r->io_error=(uint32_t)e;return 5;}
++ *out=value;c->r->last[slot]=value;c->r->last_valid|=1u<<slot;return 0;
++}
++static inline int KebabGpuCcBarrier(KebabGpuCcContext *c)
++{int e;++c->r->barriers;e=c->io->barrier(c->io->cookie);if(e){c->r->failed_op=3;c->r->io_error=(uint32_t)e;return 5;}return 0;}
++static inline int KebabGpuCcDelay(KebabGpuCcContext *c,uint32_t us)
++{
++ int e;if(us!=1 && us!=10 && us!=100)return 22;++c->r->delay_calls;c->r->delay_total_us+=us;
++ e=c->io->delay_us(c->io->cookie,us);if(e){c->r->failed_op=4;c->r->io_error=(uint32_t)e;return 5;}return 0;
++}
++static inline int KebabGpuCcGates(KebabGpuCcContext *c)
++{
++ uint32_t cfg,reset;int e;
++ if((e=KebabGpuCcRaw(c,0,&cfg)) || (e=KebabGpuCcRaw(c,1,&reset)))return e;
++ if(cfg!=c->cfg || reset!=c->reset || !(cfg&1) || (cfg&0x80000000u) || (reset&1))return 11;
++ return KebabGpuCcBarrier(c);
++}
++static inline int KebabGpuCcRead(KebabGpuCcContext *c,unsigned slot,uint32_t *out)
++{int e;if(slot<2)return KebabGpuCcRaw(c,slot,out);e=KebabGpuCcGates(c);return e?e:KebabGpuCcRaw(c,slot,out);}
++static inline int KebabGpuCcSnapshot(KebabGpuCcContext *c,int after)
++{
++ unsigned pass,slot;int e;uint32_t (*sample)[6]=after?c->r->after:c->r->before;
++ uint32_t *valid=after?c->r->valid_after:c->r->valid_before,*stable=after?&c->r->stable_after:&c->r->stable_before;
++ for(pass=0;pass<2;pass++) {
++  for(slot=0;slot<2;slot++){e=KebabGpuCcRaw(c,slot,&sample[pass][slot]);if(e)return e;valid[pass]|=1u<<slot;}
++  if(!(sample[pass][0]&1) || (sample[pass][0]&0x80000000u) || (sample[pass][1]&1))return 95;
++  if(!after && pass==0){c->cfg=sample[0][0];c->reset=sample[0][1];}
++  if(sample[pass][0]!=c->cfg || sample[pass][1]!=c->reset)return 11;
++  for(slot=2;slot<6;slot++){e=KebabGpuCcRead(c,slot,&sample[pass][slot]);if(e)return e;valid[pass]|=1u<<slot;}
++  if((e=KebabGpuCcBarrier(c)))return e;
++ }
++ for(slot=0;slot<6;slot++)if(sample[0][slot]==sample[1][slot])*stable|=1u<<slot;
++ return *stable==63?0:11;
++}
++/* Bit writes preserve unowned controls. The adapter independently enforces
++ * exact writable masks and rebases the request on its fresh register read. */
++static inline int KebabGpuCcUpdate(KebabGpuCcContext *c,unsigned slot,uint32_t mask,uint32_t bits,uint32_t expected)
++{
++ unsigned region=0,i;uint32_t offset=0,current,value,control_mask=KebabGpuCcControlMask(slot);uint64_t start;int e;
++ if(!KebabGpuCcOffset(slot,&region,&offset) || !mask || (mask&~KebabGpuCcWriteMask(region,offset)))return 22;
++ if((e=KebabGpuCcRead(c,slot,&current)))return e;
++ if((current&control_mask)!=expected)return 11;
++ value=(current&~mask)|(bits&mask);if((current&mask)==(value&mask))return 0;
++ if((e=KebabGpuCcGates(c)))return e;
++ c->ledger->attempted=1;++c->r->write_attempts;
++ e=c->io->write32(c->io->cookie,region,offset,value);
++ if(e){c->r->failed_region=region;c->r->failed_offset=offset;c->r->failed_op=2;c->r->io_error=(uint32_t)e;return 5;}
++ if((e=KebabGpuCcBarrier(c)))return e;
++ start=c->io->now_us(c->io->cookie);
++ for(i=0;i<1000;i++) {
++  if((e=KebabGpuCcRead(c,slot,&current)))return e;
++  if((current&control_mask&~mask)!=(expected&~mask))return 11;
++  if((current&mask)==(value&mask))return 0;
++  if(c->io->now_us(c->io->cookie)-start>=10000)break;
++ }
++ c->r->failed_region=region;c->r->failed_offset=offset;c->r->failed_op=5;return 110;
++}
++static inline int KebabGpuCcPowerAck(KebabGpuCcContext *c)
++{
++ unsigned retry,i;uint32_t hw;uint64_t start;int e;
++ /* DT gds-timeout500us; vendor retries once using hw_ctrl1540. */
++ for(retry=0;retry<2;retry++) {
++  start=c->io->now_us(c->io->cookie);
++  for(i=0;i<500;i++) {
++   ++c->r->polls;if((e=KebabGpuCcRead(c,3,&hw)))return e;
++   if(hw&0x80000000u){c->r->cx_power_ack=1;return 0;}
++   if((e=KebabGpuCcDelay(c,1)))return e;
++   if(c->io->now_us(c->io->cookie)-start>=500)break;
++  }
++ }
++ return 110;
++}
++static inline int KebabGpuCcPrepare(KebabGpuCcContext *c)
++{
++ int e=KebabGpuCcSnapshot(c,0);if(e)return e;
++ /* Probe normally clears HW_CONTROL/SW_OVERRIDE; native must not seize it. */
++ if(c->r->action==KebabGpuCcEnableHold && ((c->r->before[0][2]&6) || !KebabGpuCcGmuClockQuiet(c->r->before[0][5])))return 95;
++ return 0;
++}
++static inline int KebabGpuCcEnable(KebabGpuCcContext *c)
++{
++ KebabGpuCcLedger *b=c->ledger;KebabGpuCcRecord *r=c->r;int e;
++ b->original_gdscr=r->before[0][2];b->original_ahb=r->before[0][4];b->original_gmu=r->before[0][5];
++ b->gdscr_control=b->original_gdscr&KebabGpuCcControlMask(2);b->ahb_control=b->original_ahb&KebabGpuCcControlMask(4);
++ e=KebabGpuCcUpdate(c,2,1,0,b->gdscr_control);if(e)return e;b->gdscr_control&=~1u;
++ if((e=KebabGpuCcBarrier(c)) || (e=KebabGpuCcDelay(c,1)) || (e=KebabGpuCcPowerAck(c)))return e;
++ /* Original DT qcom,retain-regs: vendor installs retention after power ACK.
++  * It never clears this policy bit on disable; neither does restore here. */
++ if(!(b->gdscr_control&0x800)) {
++  e=KebabGpuCcUpdate(c,2,0x800,0x800,b->gdscr_control);if(e)return e;
++  b->gdscr_control|=0x800;b->retention_added=1;
++ }
++ if((e=KebabGpuCcDelay(c,1)) || (e=KebabGpuCcDelay(c,1)))return e;
++ e=KebabGpuCcUpdate(c,4,1,1,b->ahb_control);if(e)return e;b->ahb_control|=1;
++ if((e=KebabGpuCcDelay(c,10)) || (e=KebabGpuCcSnapshot(c,1)))return e;
++ if((r->after[0][2]&KebabGpuCcControlMask(2))!=b->gdscr_control || !(r->after[0][3]&0x80000000u) ||
++ (r->after[0][4]&KebabGpuCcControlMask(4))!=b->ahb_control || (r->after[0][5]&KebabGpuCcControlMask(5))!=(b->original_gmu&KebabGpuCcControlMask(5)) ||
++ !KebabGpuCcGmuClockQuiet(r->after[0][5]))return 11;
++ r->ahb_request_ack=1;r->ahb_reported_running=(r->after[0][4]&0x80000000u)==0;
++ b->held=1;r->retention_added=b->retention_added;return 0;
++}
++static inline int KebabGpuCcRestoreSaved(KebabGpuCcContext *c)
++{
++ KebabGpuCcLedger *b=c->ledger;KebabGpuCcRecord *r=c->r;int e;
++ /* No GMU execution/quiesce owner exists in this phase. Do not withdraw
++  * any controller hold while this branch is enabled or not reported halted. */
++ if(!KebabGpuCcGmuClockQuiet(r->before[0][5]))return 95;
++ if((r->before[0][2]&KebabGpuCcControlMask(2))!=b->gdscr_control || (r->before[0][4]&KebabGpuCcControlMask(4))!=b->ahb_control ||
++ (r->before[0][5]&KebabGpuCcControlMask(5))!=(b->original_gmu&KebabGpuCcControlMask(5)))return 11;
++ e=KebabGpuCcUpdate(c,4,1,b->original_ahb&1,b->ahb_control);if(e)return e;
++ b->ahb_control=(b->ahb_control&~1u)|(b->original_ahb&1);
++ if((e=KebabGpuCcDelay(c,10)))return e;
++ e=KebabGpuCcUpdate(c,2,1,b->original_gdscr&1,b->gdscr_control);if(e)return e;
++ b->gdscr_control=(b->gdscr_control&~1u)|(b->original_gdscr&1);
++ if(b->original_gdscr&1) {
++  /* DT no-status-check-on-disable: write/readback request +1us+100us.
++   * Other TZ/HYP votes may keep PWR_ON1; never invent a power-off ACK. */
++  if((e=KebabGpuCcBarrier(c)) || (e=KebabGpuCcDelay(c,1)) || (e=KebabGpuCcDelay(c,100)))return e;
++ }
++ if((e=KebabGpuCcSnapshot(c,1)))return e;
++ if((r->after[0][2]&KebabGpuCcControlMask(2))!=b->gdscr_control || (r->after[0][4]&KebabGpuCcControlMask(4))!=b->ahb_control ||
++ (r->after[0][5]&KebabGpuCcControlMask(5))!=(b->original_gmu&KebabGpuCcControlMask(5)))return 11;
++ r->collapse_and_ahb_restored=1;r->retention_added=b->retention_added;r->full_original_controls_restored=!b->retention_added;b->held=0;return 0;
++}
++#endif

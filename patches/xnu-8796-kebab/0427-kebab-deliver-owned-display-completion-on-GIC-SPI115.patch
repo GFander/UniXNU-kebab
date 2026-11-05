@@ -1,0 +1,237 @@
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -53,6 +53,87 @@
+ #define gicr_read32(offset) (_gic_read32(gicr_pe_base + (offset)))
+ #define gicr_write32(offset, data) (_gic_write32(gicr_pe_base + (offset), (data)))
+ #define gicr_read64(offset) (_gic_read64(gicr_pe_base + (offset)))
++
++#if defined(KEBAB)
++#include "KebabDisplayIrqCore.h"
++static KebabDisplayIrqState kebab_display_irq_state;
++static vm_offset_t kebab_display_irq_base[3]; /* GCC, DISP_CC, MDP; permanent kernel mappings */
++static uint32_t kebab_display_irq_attempted;
++static uint32_t
++kebab_display_irq_read(void *cookie,unsigned region,uint32_t offset)
++{ (void)cookie;return _gic_read32((region? kebab_display_irq_base[2]:gicd_base)+offset); }
++static void
++kebab_display_irq_write(void *cookie,unsigned region,uint32_t offset,uint32_t value)
++{ (void)cookie;_gic_write32((region? kebab_display_irq_base[2]:gicd_base)+offset,value); }
++static void
++kebab_display_irq_write64(void *cookie,unsigned region,uint32_t offset,uint64_t value)
++{ (void)cookie;(void)region;*(volatile uint64_t *)(gicd_base+offset)=value; }
++static void
++kebab_display_irq_write8(void *cookie,unsigned region,uint32_t offset,uint8_t value)
++{ (void)cookie;(void)region;*(volatile uint8_t *)(gicd_base+offset)=value; }
++static void kebab_display_irq_barrier(void *cookie)
++{ (void)cookie;__builtin_arm_dsb(DSB_SY); }
++static const KebabDisplayIrqIo kebab_display_irq_io={NULL,kebab_display_irq_read,kebab_display_irq_write,kebab_display_irq_write64,kebab_display_irq_write8,kebab_display_irq_barrier};
++static bool
++kebab_display_irq_powered(void)
++{
++ if(!kebab_display_irq_base[0] || !kebab_display_irq_base[1] || !kebab_display_irq_base[2])return false;
++ uint32_t gcc=_gic_read32(kebab_display_irq_base[0]+0xb00c);
++ if(!(gcc&1) || (gcc&0x80000000u))return false;
++ uint32_t gdsc=_gic_read32(kebab_display_irq_base[1]+0x3000);
++ return (gdsc&0x80000000u) && !(gdsc&1) &&
++  !(_gic_read32(kebab_display_irq_base[1]+0x2080)&0x80000000u) &&
++  !(_gic_read32(kebab_display_irq_base[1]+0x200c)&0x80000000u);
++}
++int kebab_display_irq_start(void);
++int
++kebab_display_irq_start(void)
++{
++ if(!__sync_bool_compare_and_swap(&kebab_display_irq_attempted,0,1))return 16;
++ if(!gicd_base)return 6;
++ kebab_display_irq_base[0]=ml_io_map(0x00100000,0x10000);
++ if(!kebab_display_irq_base[0])return 12;
++ uint32_t gcc=_gic_read32(kebab_display_irq_base[0]+0xb00c);
++ if(!(gcc&1) || (gcc&0x80000000u))return 6;
++ kebab_display_irq_base[1]=ml_io_map(0x0af00000,0x4000);
++ kebab_display_irq_base[2]=ml_io_map(0x0ae00000,0x70000);
++ if(!kebab_display_irq_powered())return 6;
++ uint64_t mpidr=__builtin_arm_rsr64("MPIDR_EL1");
++ uint64_t route=(mpidr&0xffffffULL)|(mpidr&0xff00000000ULL);
++ uint64_t min_period;nanoseconds_to_absolutetime(1000000,&min_period);
++ int error=KebabDisplayIrqArm(&kebab_display_irq_io,&kebab_display_irq_state,route,min_period);
++ if(error && !__atomic_load_n(&kebab_display_irq_state.state,__ATOMIC_ACQUIRE)) {
++  __atomic_store_n(&kebab_display_irq_state.reason,32+(uint32_t)error,__ATOMIC_RELEASE);
++  __atomic_store_n(&kebab_display_irq_state.state,3,__ATOMIC_RELEASE);
++ }
++ kprintf("KEBAB DISPLAY IRQ: INTID115 PP0_DONE arm=%d state=%u; timer presentation retained\n",error,kebab_display_irq_state.state);
++ return error;
++}
++bool kebab_display_irq_dispatch(uint32_t intid);
++bool
++kebab_display_irq_dispatch(uint32_t intid)
++{
++ if(intid!=115 || __atomic_load_n(&kebab_display_irq_state.state,__ATOMIC_ACQUIRE)!=1)return false;
++ if(!kebab_display_irq_powered()) {
++  gicd_write32(0x18c,1u<<19);__builtin_arm_dsb(DSB_SY);
++  __atomic_store_n(&kebab_display_irq_state.reason,10,__ATOMIC_RELEASE);
++  __atomic_store_n(&kebab_display_irq_state.state,3,__ATOMIC_RELEASE);return true;
++ }
++ return KebabDisplayIrqHandle(&kebab_display_irq_io,&kebab_display_irq_state,mach_absolute_time())!=0;
++}
++void kebab_display_irq_snapshot(uint32_t out[16]);
++void
++kebab_display_irq_snapshot(uint32_t out[16])
++{
++ KebabDisplayIrqState *s=&kebab_display_irq_state;
++ uint64_t events=__atomic_load_n(&s->events,__ATOMIC_ACQUIRE),last=__atomic_load_n(&s->last_time,__ATOMIC_ACQUIRE);
++ out[0]=__atomic_load_n(&s->state,__ATOMIC_ACQUIRE);out[1]=__atomic_load_n(&s->reason,__ATOMIC_ACQUIRE);out[2]=115;out[3]=0x100;
++ out[4]=(uint32_t)events;out[5]=(uint32_t)(events>>32);out[6]=(uint32_t)last;out[7]=(uint32_t)(last>>32);
++ out[8]=__atomic_load_n(&s->frame,__ATOMIC_RELAXED);out[9]=__atomic_load_n(&s->last_pending,__ATOMIC_RELAXED);out[10]=__atomic_load_n(&s->mdss_status,__ATOMIC_RELAXED);
++ out[11]=s->initial_enable;out[12]=s->priority;out[13]=s->route_low;out[14]=s->route_high;out[15]=__atomic_load_n(&kebab_display_irq_attempted,__ATOMIC_ACQUIRE);
++}
++#endif
++
+ 
+ static vm_offset_t
+ find_gicr_pe_base()
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -2009,6 +2009,7 @@
+ 
+ #if defined(KEBAB)
+ extern int kebab_irq_trace;
++extern bool kebab_display_irq_dispatch(uint32_t intid);
+ /* One cache line per PE avoids a contended global counter on every IRQ.
+  * Only that PE writes; normal startup observes with acquire loads. */
+ static struct {
+@@ -2084,7 +2085,9 @@
+ 		cpu_signal_handler();
+ 	} else {
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
+-		if (cdp->interrupt_handler) {
++		if (kebab_display_irq_dispatch(intid)) {
++			/* Owned display status acknowledged before architectural EOI. */
++		} else if (cdp->interrupt_handler) {
+ 			cdp->interrupt_handler(cdp->interrupt_target,
+ 			    cdp->interrupt_refCon,
+ 			    cdp->interrupt_nub,
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -96,6 +96,8 @@
+ }
+ 
+ #include "KebabNativeDisplayObservation.h"
++extern "C" int kebab_display_irq_start(void);
++extern "C" void kebab_display_irq_snapshot(uint32_t out[16]);
+ #include "KebabPlatformSnapshot.h"
+ 
+ enum {
+@@ -411,6 +413,7 @@
+ 	fVsyncAdded = true;
+ 	fStopping = false;
+ 	fVsync->setTimeoutUS(KEBAB_FB_VSYNC_US);
++	(void)kebab_display_irq_start(); /* Real IRQ observation; software presentation unchanged. */
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+ 	setProperty("external", false);
+--- a/iokit/Kernel/arm/KebabPlatformSnapshot.h
++++ b/iokit/Kernel/arm/KebabPlatformSnapshot.h
+@@ -3,9 +3,9 @@
+  * flags do not grant ownership, IRQ readiness, scanout or DMA completion. */
+ struct KebabNativePlatformSnapshot {
+     uint32_t magic,schema,bytes,flags,result,reads,reserved[2];
+-    uint32_t clocks[8],gic[12],ctl[6][3],pingpong[2][6],dsc[4][3],context[4];
++    uint32_t clocks[8],gic[12],ctl[6][3],pingpong[2][6],dsc[4][3],context[4],irq[16];
+ };
+-static_assert(sizeof(KebabNativePlatformSnapshot)==296,"platform snapshot schema1");
++static_assert(sizeof(KebabNativePlatformSnapshot)==360,"platform snapshot schema2");
+ struct KebabPlatformRead {
+     KebabNativeDisplayMaps *maps;KebabNativePlatformSnapshot *out;
+ };
+@@ -31,7 +31,7 @@
+ static int kebab_native_platform_snapshot(KebabNativePlatformSnapshot *out)
+ {
+     if(!out)return 22;
+-    memset(out,0,sizeof *out);out->magic=0x3153504b;out->schema=1;out->bytes=sizeof *out;out->result=2;
++    memset(out,0,sizeof *out);out->magic=0x3153504b;out->schema=2;out->bytes=sizeof *out;out->result=2;
+     KebabNativeDisplayMaps m={};KebabPlatformRead r={&m,out};
+     KebabSmmuObservation smmu={};uint32_t version=0,check=0;
+     if(!kebab_display_map(&m,0,0x00100000,0x10000))goto done;
+@@ -89,5 +89,6 @@
+     out->result=0;
+ done:
+     for(unsigned n=5;n;n--) {unsigned i=n-1;if(m.map[i])m.map[i]->release();if(m.memory[i])m.memory[i]->release();}
++    kebab_display_irq_snapshot(out->irq);
+     return 0;
+ }
+--- /dev/null
++++ b/pexpert/arm/KebabDisplayIrqCore.h
+@@ -0,0 +1,74 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_DISPLAY_IRQ_CORE_H
++#define KEBAB_DISPLAY_IRQ_CORE_H
++#include <stdint.h>
++#include <string.h>
++/* Only INTID115 and MDP pingpong0 DONE(bit8). Group assignment, timers, SGIs,
++ * unrelated masks and fault status are never programmed. MMIO peers provide
++ * retained mappings and live display resources before arm/dispatch. */
++typedef struct {
++ void *cookie;
++ uint32_t (*read32)(void *,unsigned,uint32_t);
++ void (*write32)(void *,unsigned,uint32_t,uint32_t);
++ void (*write64)(void *,unsigned,uint32_t,uint64_t);
++ void (*write8)(void *,unsigned,uint32_t,uint8_t);
++ void (*barrier)(void *);
++} KebabDisplayIrqIo;
++typedef struct {
++ uint32_t state,reason,initial_enable,priority,route_low,route_high,last_pending,mdss_status;
++ uint64_t events,last_time,min_period;
++ uint32_t frame;
++} KebabDisplayIrqState;
++static void KebabDisplayIrqDisable(const KebabDisplayIrqIo *io,KebabDisplayIrqState *s,uint32_t reason)
++{
++ io->write32(io->cookie,0,0x18c,1u<<19);
++ io->barrier(io->cookie);
++ uint32_t en=io->read32(io->cookie,1,0x1010);
++ io->write32(io->cookie,1,0x1010,en&~0x100u);
++ io->barrier(io->cookie);
++ __atomic_store_n(&s->reason,reason,__ATOMIC_RELEASE);
++ __atomic_store_n(&s->state,3,__ATOMIC_RELEASE);
++}
++static int KebabDisplayIrqArm(const KebabDisplayIrqIo *io,KebabDisplayIrqState *s,uint64_t route,uint64_t min_period)
++{
++ if(!io || !s || !io->read32 || !io->write32 || !io->write64 || !io->write8 || !io->barrier || !min_period)return 1;
++ if(__atomic_load_n(&s->state,__ATOMIC_ACQUIRE))return 2;
++ s->min_period=min_period;
++ if((io->read32(io->cookie,0,0)&0x80000012u)!=0x12u)return 3;
++ if(32*((io->read32(io->cookie,0,4)&31)+1)<=115)return 3;
++ s->initial_enable=io->read32(io->cookie,0,0x10c);
++ if((s->initial_enable&(1u<<19)) || (io->read32(io->cookie,0,0x30c)&(1u<<19)) ||
++    ((io->read32(io->cookie,0,0xc1c)>>6)&3) || io->read32(io->cookie,1,0x1010))return 3;
++ if(io->read32(io->cookie,1,0)!=0x60000000u || io->read32(io->cookie,1,0x1000)!=0x60000000u)return 4;
++ s->priority=io->read32(io->cookie,0,0x470)>>24;
++ s->route_low=io->read32(io->cookie,0,0x6398);s->route_high=io->read32(io->cookie,0,0x639c);
++ io->write64(io->cookie,0,0x6398,route);io->write8(io->cookie,0,0x473,0xa0);io->barrier(io->cookie);
++ int error=5;
++ if(io->read32(io->cookie,0,0x6398)!=(uint32_t)route || io->read32(io->cookie,0,0x639c)!=(uint32_t)(route>>32) ||
++    (io->read32(io->cookie,0,0x470)>>24)!=0xa0)goto rollback;
++ io->write32(io->cookie,1,0x1018,0x100);io->write32(io->cookie,1,0x1010,0x100);io->barrier(io->cookie);
++ error=6;if(io->read32(io->cookie,1,0x1010)!=0x100)goto rollback;
++ __atomic_store_n(&s->state,1,__ATOMIC_RELEASE);
++ io->write32(io->cookie,0,0x10c,1u<<19);io->barrier(io->cookie);
++ error=7;if(!(io->read32(io->cookie,0,0x10c)&(1u<<19)))goto rollback;
++ return 0;
++rollback:
++ KebabDisplayIrqDisable(io,s,(uint32_t)error);
++ io->write64(io->cookie,0,0x6398,(uint64_t)s->route_low|((uint64_t)s->route_high<<32));
++ io->write8(io->cookie,0,0x473,(uint8_t)s->priority);io->barrier(io->cookie);return error;
++}
++static int KebabDisplayIrqHandle(const KebabDisplayIrqIo *io,KebabDisplayIrqState *s,uint64_t now)
++{
++ if(__atomic_load_n(&s->state,__ATOMIC_ACQUIRE)!=1)return 0;
++ uint32_t top=io->read32(io->cookie,1,0x10),pending=io->read32(io->cookie,1,0x1014);
++ __atomic_store_n(&s->mdss_status,top,__ATOMIC_RELAXED);__atomic_store_n(&s->last_pending,pending,__ATOMIC_RELAXED);
++ uint32_t en=io->read32(io->cookie,1,0x1010);
++ if(top&~1u || en!=0x100 || !(pending&0x100)) {KebabDisplayIrqDisable(io,s,8);return 1;}
++ uint64_t last=__atomic_load_n(&s->last_time,__ATOMIC_RELAXED);
++ if(last && (now<=last || now-last<s->min_period)){KebabDisplayIrqDisable(io,s,9);return 1;}
++ io->write32(io->cookie,1,0x1018,0x100);io->barrier(io->cookie);
++ __atomic_store_n(&s->frame,io->read32(io->cookie,1,0x6b8ac),__ATOMIC_RELAXED);
++ __atomic_store_n(&s->last_time,now,__ATOMIC_RELEASE);
++ (void)__atomic_add_fetch(&s->events,1,__ATOMIC_RELEASE);return 1;
++}
++#endif

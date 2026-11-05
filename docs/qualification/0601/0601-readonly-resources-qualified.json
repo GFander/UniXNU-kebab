@@ -1,0 +1,146 @@
+{
+  "version": "0601",
+  "qualified": true,
+  "scope": "Read-only canonical completed-CP resource inventory; no global alias or secure ownership transfer claim",
+  "ranges": 17,
+  "nonoverlap_pairs": 136,
+  "translated_pages": 260,
+  "CP_idle_snapshots": 2,
+  "raw": {
+    "magic": 3553994613145678155,
+    "schema": 1,
+    "bytes": 568,
+    "state": 2,
+    "result": 0,
+    "phase": 3,
+    "flags": 1023,
+    "guard": 0,
+    "reserved0": 0,
+    "epoch": 1,
+    "gmu_generation": 1,
+    "gpu_generation": 1,
+    "cp_generation": 1,
+    "image": 2549088256,
+    "metadata": 2550136832,
+    "range_count": 17,
+    "checked_pages": 260,
+    "checked_pairs": 136,
+    "rptr": 27,
+    "wptr": 27,
+    "fence": 2,
+    "status": 1,
+    "irq_mask": 0,
+    "elapsed_us": 3027,
+    "private_ranges_sha256": "ba332f2a8b8b840207e05f6f0ee8d638a52f1c7c7f43a362606421bfb6e43c63",
+    "ranges": [
+      {
+        "physical": 2549088256,
+        "bytes": 1048576,
+        "domain": 1,
+        "index": 0
+      },
+      {
+        "physical": 2550136832,
+        "bytes": 16384,
+        "domain": 1,
+        "index": 1
+      },
+      {
+        "physical": 0,
+        "bytes": 65536,
+        "domain": 2,
+        "index": 0
+      },
+      {
+        "physical": 0,
+        "bytes": 32768,
+        "domain": 2,
+        "index": 1
+      },
+      {
+        "physical": 0,
+        "bytes": 81920,
+        "domain": 2,
+        "index": 2
+      },
+      {
+        "physical": 0,
+        "bytes": 49152,
+        "domain": 2,
+        "index": 3
+      },
+      {
+        "physical": 0,
+        "bytes": 16384,
+        "domain": 2,
+        "index": 4
+      },
+      {
+        "physical": 0,
+        "bytes": 32768,
+        "domain": 2,
+        "index": 5
+      },
+      {
+        "physical": 0,
+        "bytes": 16384,
+        "domain": 2,
+        "index": 6
+      },
+      {
+        "physical": 0,
+        "bytes": 65536,
+        "domain": 2,
+        "index": 7
+      },
+      {
+        "physical": 0,
+        "bytes": 65536,
+        "domain": 3,
+        "index": 0
+      },
+      {
+        "physical": 0,
+        "bytes": 16384,
+        "domain": 3,
+        "index": 1
+      },
+      {
+        "physical": 0,
+        "bytes": 16384,
+        "domain": 3,
+        "index": 2
+      },
+      {
+        "physical": 0,
+        "bytes": 16384,
+        "domain": 3,
+        "index": 3
+      },
+      {
+        "physical": 0,
+        "bytes": 16384,
+        "domain": 3,
+        "index": 4
+      },
+      {
+        "physical": 0,
+        "bytes": 65536,
+        "domain": 3,
+        "index": 5
+      },
+      {
+        "physical": 0,
+        "bytes": 16384,
+        "domain": 3,
+        "index": 6
+      }
+    ]
+  },
+  "samples": 3,
+  "sample_sha256": "5f31340696c97002e8ac138730c9b0b444a9e954dbf9cc8b3d3619e1748a6196",
+  "elapsed_us": 3027,
+  "authentication_authority": false,
+  "private_digest_recomputed": false,
+  "source_result_sha256": "c457afc38c809f77dde7901577e897ecbb40ae331c15f58ea6e82a278e4b42ed"
+}

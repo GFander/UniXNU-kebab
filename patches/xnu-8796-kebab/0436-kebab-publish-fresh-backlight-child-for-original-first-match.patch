@@ -1,0 +1,66 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -224,7 +224,6 @@
+ 
+ 	bool init(OSDictionary *properties = NULL) APPLE_KEXT_OVERRIDE;
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+-    IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
+ 	void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	void free() APPLE_KEXT_OVERRIDE;
+ 	bool available();
+@@ -361,13 +360,6 @@
+ {
+ 	releaseResources();
+ 	IOMobileFramebuffer::free();
+-}
+-
+-IOReturn
+-AppleCLCD::setProperties(OSObject *properties)
+-{
+-    if(kebab_backlight_service_handles(properties))return kebab_backlight_service_set_properties(this,properties);
+-    return IOMobileFramebuffer::setProperties(properties);
+ }
+ 
+ bool
+--- a/iokit/Kernel/arm/KebabNativeBacklightService.h
++++ b/iokit/Kernel/arm/KebabNativeBacklightService.h
+@@ -2,6 +2,12 @@
+ #include <libkern/c++/OSDictionary.h>
+ #include <libkern/c++/OSNumber.h>
+ #include "KebabBacklightNits.h"
++class KebabBacklightControl : public IOService {
++ OSDeclareDefaultStructors(KebabBacklightControl);
++public:
++ IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
++};
++OSDefineMetaClassAndStructors(KebabBacklightControl,IOService);
+ static IOService *kebab_backlight_service;
+ static uint32_t kebab_backlight_published,kebab_backlight_service_requests,kebab_backlight_service_error,kebab_backlight_last_nits;
+ static bool kebab_backlight_parameter(OSDictionary *parameters,const char *key,uint32_t maximum,uint32_t actual)
+@@ -22,7 +28,16 @@
+ }
+ static void kebab_native_backlight_bind(IOService *service)
+ {
+- if(!kebab_backlight_service&&service){service->retain();kebab_backlight_service=service;}
++ if(kebab_backlight_service||!service)return;
++ KebabBacklightControl *backlight=new KebabBacklightControl;
++ if(!backlight){IOLog("KEBAB BACKLIGHT: child allocation failed\n");return;}
++ if(!backlight->init()){backlight->release();IOLog("KEBAB BACKLIGHT: child init failed\n");return;}
++ if(!backlight->attach(service)){backlight->release();IOLog("KEBAB BACKLIGHT: child attach failed\n");return;}
++ if(!backlight->start(service)){backlight->detach(service);backlight->release();IOLog("KEBAB BACKLIGHT: child start failed\n");return;}
++ backlight->setName("KebabBacklightControl");kebab_backlight_service=backlight;
++ /* A fresh child remains unregistered until the panel has passed its real
++  * command/readback qualification. Re-registering an already matched FB
++  * cannot deliver a new IOServiceFirstMatch notification (IOService.cpp). */
+ }
+ static void kebab_backlight_service_ready(void)
+ {
+@@ -61,3 +76,8 @@
+  IOLog("KEBAB BACKLIGHT: service input=%llu unit=%s target=%u error=%u; actual DCS51/52 before success\n",input,nits?"nits-Q16.16":"device-level",level,(unsigned)error);
+  return !error?kIOReturnSuccess:error==95?kIOReturnNotReady:error==12?kIOReturnNoMemory:kIOReturnIOError;
+ }
++IOReturn KebabBacklightControl::setProperties(OSObject *properties)
++{
++ if(kebab_backlight_service_handles(properties))return kebab_backlight_service_set_properties(this,properties);
++ return IOService::setProperties(properties);
++}

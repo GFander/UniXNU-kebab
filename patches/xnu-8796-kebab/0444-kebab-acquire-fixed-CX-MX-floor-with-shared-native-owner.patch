@@ -1,0 +1,591 @@
+--- a/bsd/dev/kebab_rpmh_vrm.c
++++ b/bsd/dev/kebab_rpmh_vrm.c
+@@ -674,3 +674,5 @@
+ }
+ 
+ #include "KebabRscOwnerQuery.inc"
++
++#include "KebabGpuCxMxOwner.inc"
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -287,6 +287,8 @@
+ #define UD_DISPLAY_DSI_PROBE 45u
+ #define UD_DMA_POOL_PREPARE 46u
+ #define UD_GPU_PAS_QUERY 47u
++#define UD_GPU_POWER_PREPARE 48u
++extern void kebab_gpu_power_prepare(void);
+ extern int kebab_gpu_pas_query(void);
+ extern void kebab_dma_pool_prepare(void);
+ extern void kebab_display_dsi_probe(void);
+@@ -1470,6 +1472,7 @@
+     if(!memcmp(buf,"DSIPROBE\n",9))return UD_DISPLAY_DSI_PROBE;
+     if(!memcmp(buf,"IOVAPREP\n",9))return UD_DMA_POOL_PREPARE;
+     if(!memcmp(buf,"PASQUERY\n",9))return UD_GPU_PAS_QUERY;
++    if(!memcmp(buf,"GPUPOWER\n",9))return UD_GPU_POWER_PREPARE;
+     return 0;
+ }
+ 
+@@ -1887,6 +1890,8 @@
+ 		kebab_bluetooth_hardware_report();
+ 	} else if (command == UD_REBOOT_BTFW_REPORT) {
+ 		kebab_bluetooth_firmware_report();
++	} else if (command == UD_GPU_POWER_PREPARE) {
++		kebab_gpu_power_prepare();
+ 	} else if (command == UD_GPU_PAS_QUERY) {
+ 		int result = kebab_gpu_pas_query();
+ 		printf("KEBAB PASQUERY: end; result=%d; INFO-only, no PIL call\n", result);
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>17)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>18)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -114,6 +114,8 @@
+ #include "KebabNativeDmaPool.h"
+ #include "KebabNativeGpuPowerSnapshot.h"
+ #include "KebabNativeRscQuery.h"
++#include "KebabNativeGpuPowerHold.h"
++static_assert(sizeof(KebabGpuCxMxRecord)==11100,"fixed held CX/MX receipt");
+ extern "C" {
+ #include <kern/kebab_gpu_pas.h>
+ }
+@@ -858,6 +860,16 @@
+ extern "C" int
+ kebab_capture_open(uint32_t source,uint32_t argument,struct kc_image *image)
+ {
++    if(source==18) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabGpuCxMxRecord);
++        KebabGpuCxMxRecord *data=(KebabGpuCxMxRecord *)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_native_gpu_power_hold_snapshot(data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=18;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
+     if(source==17) {
+         if(argument)return 22;
+         uint32_t bytes=sizeof(KebabRscOwnerQueryRecord);
+--- a/osfmk/kern/Makefile
++++ b/osfmk/kern/Makefile
+@@ -122,6 +122,9 @@
+ 	kebab_gpu_pas.h \
+ 	KebabRscOwnershipQuery.h \
+ 	KebabRscOwnerQuery.h \
++	KebabGpuCxMxReassert.h \
++	KebabGpuCxMxOwner.h \
++	KebabGpuCxMxNativeBinding.h \
+ 	lock_ptr.h \
+ 	perfmon.h \
+ 	recount.h \
+--- /dev/null
++++ b/osfmk/kern/KebabGpuCxMxReassert.h
+@@ -0,0 +1,196 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GPU_CXMX_REASSERT_H
++#define KEBAB_GPU_CXMX_REASSERT_H
++#include "KebabRscOwnershipQuery.h"
++/* Strict SM8250 boot-floor reassertion, not a general RPMh sender.
++ * All offsets are relative to APPS DRV2, never CommandDB resource MMIO.
++ * Caller holds the existing native RPMh global busy across the whole run.
++ * Binding is compiled, reviewed evidence; never accept it from user input. */
++enum {KebabCxMxMx=1,KebabCxMxCx=2,KebabCxMxPollLimit=10000,KebabCxMxReadbackLimit=1000};
++typedef struct {
++ uint32_t schema,ready,ownership_audit_bound,polling_only,expected_used_mask;
++ uint32_t expected[KebabRscQueryWords];
++ uint8_t query_receipt_sha256[32],native_owner_audit_sha256[32];
++} KebabGpuCxMxBinding;
++typedef struct {
++ void *cookie;
++ int (*read32)(void *,uint32_t,uint32_t *);
++ int (*write32)(void *,uint32_t,uint32_t);
++ int (*barrier)(void *);
++ uint64_t (*now_us)(void *);
++} KebabGpuCxMxIo;
++typedef struct {uint32_t attempted,complete,refs,ack_mask,uncertain_mask,quarantined;} KebabGpuCxMxLedger;
++typedef struct {
++ uint32_t magic,schema,bytes,result,same_native_owner,owner_dead,owner_used_mask;
++ uint32_t refs_before,refs_after,ack_mask,uncertain_mask,lease_mask,quarantined;
++ uint32_t read_attempts,write_attempts,failed_offset,failed_op,io_error;
++ uint32_t last_command_status,last_irq_status,last_rsc_status,last_write_offset,last_write_value;
++ uint32_t failure_result,evidence_replayed,last_valid;
++ uint32_t poll_count[2],command_status[2],irq_status[2],response[2],gate_reason;
++ KebabRscQueryRecord before,after;
++} KebabGpuCxMxRecord;
++typedef struct {const KebabGpuCxMxIo *io;KebabGpuCxMxRecord *record;KebabGpuCxMxLedger *ledger;} KebabGpuCxMxContext;
++enum {KebabCxMxIrqEnable=0xd00,KebabCxMxIrqStatus=0xd04,KebabCxMxIrqClear=0xd08,
++ KebabCxMxWait=0xfb0,KebabCxMxControl=0xfb4,KebabCxMxStatus=0xfb8,KebabCxMxEnable=0xfbc,
++ KebabCxMxMsg=0xfd0,KebabCxMxAddress=0xfd4,KebabCxMxData=0xfd8,KebabCxMxCommandStatus=0xfdc};
++static inline int KebabGpuCxMxWriteAllowed(uint32_t offset)
++{
++ return offset==KebabCxMxIrqClear || offset==KebabCxMxWait ||
++ offset==KebabCxMxControl || offset==KebabCxMxEnable || offset==KebabCxMxMsg ||
++ offset==KebabCxMxAddress || offset==KebabCxMxData;
++}
++static inline void KebabGpuCxMxInitRecord(KebabGpuCxMxRecord *r)
++{memset(r,0,sizeof *r);r->magic=0x4d584347;r->schema=1;r->bytes=sizeof *r;r->result=22;r->failed_offset=UINT32_MAX;r->last_write_offset=UINT32_MAX;}
++static inline int KebabGpuCxMxBound(const KebabGpuCxMxBinding *b)
++{
++ unsigned i;uint8_t q=0,a=0;if(!b || b->schema!=1 || b->ready!=1 || b->ownership_audit_bound!=1 || b->polling_only!=1 || b->expected_used_mask!=5)return 0;
++ for(i=0;i<32;i++){q|=b->query_receipt_sha256[i];a|=b->native_owner_audit_sha256[i];}return q && a;
++}
++static inline int KebabGpuCxMxRead(void *cookie,uint32_t offset,uint32_t *out)
++{
++ KebabGpuCxMxContext *c=(KebabGpuCxMxContext *)cookie;int e;
++ if(!KebabRscQueryAllowed(offset) || !out)return 22;
++ ++c->record->read_attempts;e=c->io->read32(c->io->cookie,offset,out);
++ if(!e) {
++  if(offset==KebabCxMxCommandStatus){c->record->last_command_status=*out;c->record->last_valid|=1;}
++  if(offset==KebabCxMxIrqStatus){c->record->last_irq_status=*out;c->record->last_valid|=2;}
++  if(offset==KebabCxMxStatus){c->record->last_rsc_status=*out;c->record->last_valid|=4;}
++ }
++ if(e){c->record->failed_offset=offset;c->record->failed_op=1;c->record->io_error=(uint32_t)e;}return e;
++}
++static inline int KebabGpuCxMxBarrier(void *cookie)
++{
++ KebabGpuCxMxContext *c=(KebabGpuCxMxContext *)cookie;int e=c->io->barrier(c->io->cookie);
++ if(e){c->record->failed_op=3;c->record->io_error=(uint32_t)e;}return e;
++}
++static inline int KebabGpuCxMxWrite(KebabGpuCxMxContext *c,uint32_t offset,uint32_t value)
++{
++ int e;if(!KebabGpuCxMxWriteAllowed(offset))return 22;
++ c->ledger->attempted=1;++c->record->write_attempts;
++ c->record->last_write_offset=offset;c->record->last_write_value=value;c->record->last_valid|=8;
++ e=c->io->write32(c->io->cookie,offset,value);
++ if(e){c->record->failed_offset=offset;c->record->failed_op=2;c->record->io_error=(uint32_t)e;return 5;}
++ return KebabGpuCxMxBarrier(c)?5:0;
++}
++static inline int KebabGpuCxMxSync(KebabGpuCxMxContext *c,uint32_t offset,uint32_t value)
++{
++ unsigned i;uint32_t got;uint64_t start=c->io->now_us(c->io->cookie);
++ if(KebabGpuCxMxWrite(c,offset,value))return 5;
++ for(i=0;i<KebabCxMxReadbackLimit;i++) {
++  if(KebabGpuCxMxRead(c,offset,&got))return 5;
++  if(got==value)return 0;
++  if(c->io->now_us(c->io->cookie)-start>=10000)break;
++ }
++ c->record->failed_offset=offset;c->record->failed_op=5;return 110;
++}
++/* Fixed reviewed boot shape. Exact 676-word binding adds the remaining
++ * register/configuration checks; absence of an enabled slot is not ownership. */
++static inline int KebabGpuCxMxBaseline(const KebabRscQueryRecord *q,uint32_t used)
++{
++ unsigned t,s;const uint32_t *p;
++ if(q->result || q->valid_words[0]!=676 || q->valid_words[1]!=676 || q->stable_words!=676 ||
++ q->num_tcs!=8 || q->num_commands!=16 || q->irq_status || (q->irq_enable&2) || used!=5)return 0;
++ p=&q->sample[0][4];
++ if(p[0] || p[1]!=0x1010000 || p[2]!=1 || p[3]!=3)return 0;
++ for(s=0;s<2;s++)if(p[4+s*5]!=0x10108 || p[5+s*5]!=(s?0x30010u:0x30000u) || p[6+s*5]!=5 || p[7+s*5]!=0x10101)return 0;
++ for(t=0;t<8;t++) {
++  p=&q->sample[0][4+t*84];
++  if(t && (p[0] || p[2]!=1 || p[3] || (p[1]!=0 && p[1]!=0x10000)))return 0;
++  for(s=0;s<16;s++) {
++   uint32_t address=p[5+s*5],status=p[7+s*5];
++   /* No GFX or unidentified ARC residue anywhere, even disabled. */
++   if(((address>>16)&15)==3 && !(t==0 && s<2))return 0;
++   if(t==0 && s<2)continue;
++   if(t==1 && s==0) {
++    if(p[4]!=0x10108 || address!=0x42f04 || p[6]!=1 || (status!=0 && status!=0x10101))return 0;
++   } else if(status)return 0;
++  }
++ }
++ return 1;
++}
++static inline int KebabGpuCxMxFresh(KebabGpuCxMxContext *c)
++{
++ uint32_t status,irq,idle;
++ if(KebabGpuCxMxRead(c,KebabCxMxCommandStatus,&status) || KebabGpuCxMxRead(c,KebabCxMxIrqStatus,&irq) || KebabGpuCxMxRead(c,KebabCxMxStatus,&idle))return 5;
++ return status==0 && irq==0 && idle==1?0:95;
++}
++static inline int KebabGpuCxMxClearOwnIrq(KebabGpuCxMxContext *c)
++{
++ uint32_t irq;unsigned i;uint64_t start=c->io->now_us(c->io->cookie);
++ if(KebabGpuCxMxRead(c,KebabCxMxIrqStatus,&irq))return 5;
++ if(irq&~2u)return 95;if(!(irq&2))return 0;
++ /* Baseline IRQ_STATUS was zero, bit1 belongs to this fresh trigger only.
++  * IRQ_ENABLE stays unchanged/off for bit1; no interrupt delivery is used. */
++ if(KebabGpuCxMxWrite(c,KebabCxMxIrqClear,2))return 5;
++ for(i=0;i<KebabCxMxReadbackLimit;i++) {
++  if(KebabGpuCxMxRead(c,KebabCxMxIrqStatus,&irq))return 5;
++  if(irq&~2u)return 95;if(!(irq&2))return 0;
++  if(c->io->now_us(c->io->cookie)-start>=10000)break;
++ }
++ return 110;
++}
++static inline int KebabGpuCxMxSendOne(KebabGpuCxMxContext *c,unsigned command,uint32_t address)
++{
++ uint32_t status=0,irq=0,idle=0,response=0,bit=1u<<command;unsigned i;uint64_t start;int result;
++ if(KebabGpuCxMxSync(c,KebabCxMxControl,0) || KebabGpuCxMxSync(c,KebabCxMxEnable,0) || KebabGpuCxMxSync(c,KebabCxMxWait,0))return 5;
++ if((result=KebabGpuCxMxFresh(c))!=0)return result;
++ if(KebabGpuCxMxSync(c,KebabCxMxMsg,0x10108) || KebabGpuCxMxSync(c,KebabCxMxAddress,address) || KebabGpuCxMxSync(c,KebabCxMxData,5) ||
++ KebabGpuCxMxSync(c,KebabCxMxWait,1) || KebabGpuCxMxSync(c,KebabCxMxEnable,1) || KebabGpuCxMxSync(c,KebabCxMxControl,0x10000))return 5;
++ if((result=KebabGpuCxMxFresh(c))!=0)return result;
++ /* Set before attempting trigger: an error return cannot prove no acceptance. */
++ c->ledger->uncertain_mask|=bit;
++ if(KebabGpuCxMxWrite(c,KebabCxMxControl,0x1010000))return 5;
++ start=c->io->now_us(c->io->cookie);
++ for(i=0;i<KebabCxMxPollLimit;i++) {
++  ++c->record->poll_count[command];
++  if(KebabGpuCxMxRead(c,KebabCxMxCommandStatus,&status) || KebabGpuCxMxRead(c,KebabCxMxIrqStatus,&irq) || KebabGpuCxMxRead(c,KebabCxMxStatus,&idle) || KebabGpuCxMxRead(c,0xfe0,&response))return 5;
++  c->record->command_status[command]=status;c->record->irq_status[command]=irq;c->record->response[command]=response;
++  if((irq&~2u) || (status&~0x10101u))return 95;
++  if((status&0x10100)==0x10100 && idle==1)break;
++  if(c->io->now_us(c->io->cookie)-start>=100000)break;
++ }
++ if((status&0x10100)!=0x10100 || idle!=1)return 110;
++ c->ledger->ack_mask|=bit;c->ledger->uncertain_mask&=~bit;
++ /* A real ACK immediately installs an owner-held protection reference.
++  * Partial failure keeps it; only complete pair+restore grants lease_mask3. */
++ if(!c->ledger->refs)c->ledger->refs=1;
++ if(KebabGpuCxMxSync(c,KebabCxMxControl,0) || KebabGpuCxMxSync(c,KebabCxMxEnable,0) || KebabGpuCxMxSync(c,KebabCxMxWait,0))return 5;
++ return KebabGpuCxMxClearOwnIrq(c);
++}
++static inline int KebabGpuCxMxRun(const KebabGpuCxMxIo *io,const KebabGpuCxMxBinding *binding,
++ uint32_t owner_used,uint32_t used_mask,KebabGpuCxMxLedger *ledger,KebabGpuCxMxRecord *r)
++{
++ KebabGpuCxMxContext c;KebabRscQueryIo query;unsigned i;int result=22;
++ if(!r)return 22;KebabGpuCxMxInitRecord(r);
++ if(!io || !io->read32 || !io->write32 || !io->barrier || !io->now_us || !ledger)return 22;
++ if(!KebabGpuCxMxBound(binding)){r->gate_reason=1;r->result=95;return 95;}
++ if(ledger->quarantined || ledger->attempted){r->gate_reason=2;r->result=5;return 5;}
++ c.io=io;c.record=r;c.ledger=ledger;query.cookie=&c;query.read32=KebabGpuCxMxRead;query.barrier=KebabGpuCxMxBarrier;
++ result=KebabRscQuery(&query,&r->before);if(result) {r->gate_reason=4;goto done;}
++ if(owner_used!=1 || used_mask!=binding->expected_used_mask || !KebabGpuCxMxBaseline(&r->before,used_mask)) {r->gate_reason=5;result=95;goto done;}
++ if(memcmp(binding->expected,r->before.sample[0],sizeof binding->expected)) {r->gate_reason=6;result=11;goto done;}
++ /* IRQ_ENABLE is never written. IRQ completion is not required: fresh
++  * WRITE_ACK ISSUED+COMPL and RSC idle prove the polled transaction. */
++ result=KebabGpuCxMxSendOne(&c,0,0x30010);if(result)goto done;
++ result=KebabGpuCxMxSendOne(&c,1,0x30000);if(result)goto done;
++ /* Only slot0's three configuration words changed. All other 15 slots
++  * stay untouched and are verified against the complete original snapshot. */
++ for(i=0;i<3;i++)if((result=KebabGpuCxMxSync(&c,KebabCxMxMsg+i*4,r->before.sample[0][4+84+4+i]))!=0)goto done;
++ if((result=KebabGpuCxMxSync(&c,KebabCxMxControl,r->before.sample[0][4+84+1]))!=0)goto done;
++ result=KebabRscQuery(&query,&r->after);if(result)goto done;
++ for(i=0;i<676;i++) {
++  /* Read-only own slot STATUS/RESP cannot be restored. Completion zero
++   * before the next command is mandatory; no foreign word may change. */
++  if(i==4+84+7 || i==4+84+8)continue;
++  if(r->before.sample[0][i]!=r->after.sample[0][i]){result=11;goto done;}
++ }
++ if(r->after.sample[0][4+84+7]!=0 || ledger->ack_mask!=3 || ledger->uncertain_mask){result=5;goto done;}
++ ledger->complete=1;ledger->refs=1;result=0;
++done:
++ if(result && ledger->attempted)ledger->quarantined=1;
++ if(result==5 && r->gate_reason==4)ledger->quarantined=1;
++ if(result && ledger->quarantined)r->failure_result=(uint32_t)result;
++ r->result=(uint32_t)result;r->refs_after=ledger->refs;r->ack_mask=ledger->ack_mask;r->uncertain_mask=ledger->uncertain_mask;
++ r->quarantined=ledger->quarantined;r->lease_mask=ledger->complete && ledger->refs?3:0;return result;
++}
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabGpuCxMxOwner.h
+@@ -0,0 +1,13 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GPU_CXMX_OWNER_H
++#define KEBAB_GPU_CXMX_OWNER_H
++#include "KebabGpuCxMxReassert.h"
++enum {KebabGpuCxMxRelease=0,KebabGpuCxMxAcquire=1,KebabGpuCxMxInspect=2};
++#ifdef __cplusplus
++extern "C" {
++#endif
++int kebab_rpmh_gpu_cxmx(unsigned,const KebabGpuCxMxIo *,const KebabGpuCxMxBinding *,KebabGpuCxMxRecord *);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabGpuCxMxNativeBinding.h
+@@ -0,0 +1,94 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GPU_CXMX_NATIVE_BINDING_H
++#define KEBAB_GPU_CXMX_NATIVE_BINDING_H
++#include "KebabGpuCxMxReassert.h"
++/* Fixed actual0567 receipt + reviewed native APPS DRV2 owner contract.
++ * Not bootargs/user input; every676word is freshly compared under same lock. */
++static const KebabGpuCxMxBinding KebabGpuCxMxNativeBinding={1,1,1,1,5,{
++ 0x00020000u,0x800c8104u,0x00000001u,0x00000000u,0x00000000u,0x01010000u,0x00000001u,0x00000003u,
++ 0x00010108u,0x00030000u,0x00000005u,0x00010101u,0x00000000u,0x00010108u,0x00030010u,0x00000005u,
++ 0x00010101u,0x00000000u,0x00010108u,0x00050004u,0x613690c7u,0x00000000u,0x00000000u,0x00010008u,
++ 0x000500a4u,0x200002f3u,0x00000000u,0x00000000u,0x00010008u,0x00050044u,0x213c44f1u,0x00000000u,
++ 0x00000000u,0x00010108u,0x00050028u,0x613c44f1u,0x00000000u,0x00000000u,0x00010108u,0x00050074u,
++ 0x60003fffu,0x00000000u,0x00000000u,0x00010108u,0x0005007cu,0x60000008u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00010000u,0x00000001u,0x00000000u,0x00010108u,0x00042f04u,0x00000001u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000001u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000001u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000001u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000001u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000001u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000001u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++ 0x00000000u,0x00000000u,0x00000000u,0x00000000u,
++},{0x60,0x41,0x9a,0x2d,0xe1,0x21,0x69,0x2f,0xe0,0xf0,0xa7,0xd0,0x79,0x82,0x54,0xa7,0x3e,0x56,0xb1,0x5d,0x14,0x51,0xdf,0x62,0x75,0x0d,0xed,0x7b,0xde,0x64,0x0e,0x5f},{0x20,0x19,0x43,0xbd,0x04,0xe3,0x73,0xc8,0xc4,0x21,0x92,0x8d,0xe9,0xde,0x9b,0xba,0x25,0xa2,0x6f,0x84,0x94,0x31,0x6c,0xde,0x99,0x22,0xfa,0xa6,0x26,0xf0,0xdc,0xd7}};
++#endif
+--- /dev/null
++++ b/bsd/dev/KebabGpuCxMxOwner.inc
+@@ -0,0 +1,38 @@
++/* SPDX-License-Identifier: MIT */
++/* Include once inside the SAME canonical VRM translation unit, after its
++ * existing static global lock. Never expose a caller-supplied lock. */
++#if defined(KEBAB_RPMH_KERNEL)
++#include <kern/KebabGpuCxMxOwner.h>
++#else
++#include "KebabGpuCxMxOwner.h"
++#endif
++static KebabGpuCxMxLedger kebab_gpu_cxmx_ledger;
++static KebabGpuCxMxRecord kebab_gpu_cxmx_last_failure;
++static uint32_t kebab_gpu_cxmx_has_failure;
++int kebab_rpmh_gpu_cxmx(unsigned action,const KebabGpuCxMxIo *io,const KebabGpuCxMxBinding *binding,KebabGpuCxMxRecord *out)
++{
++ uint32_t before,dead,used_mask;int result=22;
++ if(!out)return 22;KebabGpuCxMxInitRecord(out);
++ if(action>2)return 22;
++ if(action==KebabGpuCxMxAcquire && !KebabGpuCxMxBound(binding)){out->result=95;out->gate_reason=1;return 95;}
++ if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL)!=0){out->result=16;return 16;}
++ dead=(uint32_t)__atomic_load_n(&kebab_rpmh_global_lock.dead,__ATOMIC_ACQUIRE);
++ used_mask=__atomic_load_n(&kebab_rpmh_global_lock.used_mask,__ATOMIC_ACQUIRE);before=kebab_gpu_cxmx_ledger.refs;
++ if((dead || kebab_gpu_cxmx_ledger.quarantined) && kebab_gpu_cxmx_has_failure) {*out=kebab_gpu_cxmx_last_failure;out->evidence_replayed=1;}
++ if(action==KebabGpuCxMxInspect)result=0;
++ else if(dead || kebab_gpu_cxmx_ledger.quarantined)result=5;
++ else if(action==KebabGpuCxMxRelease) {
++  if(!kebab_gpu_cxmx_ledger.complete || !before)result=22;
++  else {--kebab_gpu_cxmx_ledger.refs;result=0;}
++ } else if(kebab_gpu_cxmx_ledger.complete) {
++  if(before==UINT32_MAX)result=75;else {++kebab_gpu_cxmx_ledger.refs;result=0;}
++ } else {
++  result=KebabGpuCxMxRun(io,binding,(uint32_t)__atomic_load_n(&kebab_rpmh_global_lock.used,__ATOMIC_ACQUIRE),used_mask,&kebab_gpu_cxmx_ledger,out);
++ }
++ if(kebab_gpu_cxmx_ledger.quarantined)__atomic_store_n(&kebab_rpmh_global_lock.dead,1,__ATOMIC_RELEASE);
++ out->same_native_owner=1;out->owner_dead=(uint32_t)__atomic_load_n(&kebab_rpmh_global_lock.dead,__ATOMIC_ACQUIRE);out->owner_used_mask=used_mask;
++ out->refs_before=before;out->refs_after=kebab_gpu_cxmx_ledger.refs;out->ack_mask=kebab_gpu_cxmx_ledger.ack_mask;out->uncertain_mask=kebab_gpu_cxmx_ledger.uncertain_mask;
++ out->quarantined=kebab_gpu_cxmx_ledger.quarantined;out->lease_mask=!out->owner_dead && !out->quarantined && kebab_gpu_cxmx_ledger.complete && kebab_gpu_cxmx_ledger.refs?3:0;out->result=(uint32_t)result;
++ if(out->quarantined && !out->evidence_replayed) {kebab_gpu_cxmx_last_failure=*out;kebab_gpu_cxmx_has_failure=1;}
++ __atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return result;
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeGpuCxMx.h
+@@ -0,0 +1,77 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_GPU_CXMX_H
++#define KEBAB_NATIVE_GPU_CXMX_H
++#include <IOKit/IOLib.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <kern/clock.h>
++#include <kern/KebabGpuCxMxOwner.h>
++#include <kern/KebabGpuCxMxNativeBinding.h>
++/* Actual finite MMIO adapter candidate. No hardware call is made while the
++ * compiled binding is unqualified. Board/normal-worker check is mandatory;
++ * it must exclude panic and teardown throughout this normal worker call.
++ * RSC CPU always-on aperture comes from original SM8250 DTB.
++ * There is no GPUCC/GMU/GX/SMMU, ARC-address MMIO or bus-fault recovery. */
++struct KebabNativeCxMxAccess {uintptr_t rsc;void *cookie;int (*check)(void *);};
++static int kebab_native_cxmx_read(void *cookie,uint32_t offset,uint32_t *out)
++{
++ KebabNativeCxMxAccess *a=(KebabNativeCxMxAccess *)cookie;
++ if(!a || !a->rsc || !out || !KebabRscQueryAllowed(offset) || offset>0x10000-4)return 22;
++ if(!a->check || a->check(a->cookie))return 95;
++ *out=*(volatile const uint32_t *)(a->rsc+offset);return 0;
++}
++static int kebab_native_cxmx_write(void *cookie,uint32_t offset,uint32_t value)
++{
++ KebabNativeCxMxAccess *a=(KebabNativeCxMxAccess *)cookie;
++ if(!a || !a->rsc || !KebabGpuCxMxWriteAllowed(offset) || !a->check || a->check(a->cookie))return 95;
++ if(offset==KebabCxMxIrqClear && value!=2)return 22;
++ if(offset==KebabCxMxControl && value!=0 && value!=0x10000 && value!=0x1010000)return 22;
++ if((offset==KebabCxMxWait || offset==KebabCxMxEnable) && value>1)return 22;
++ if(offset==KebabCxMxMsg && value!=0x10108)return 22;
++ if(offset==KebabCxMxAddress && value!=0x30010 && value!=0x30000 && value!=0x42f04)return 22;
++ if(offset==KebabCxMxData && value!=5 && value!=1)return 22;
++ *(volatile uint32_t *)(a->rsc+offset)=value;
++ /* Drain this actual store even if teardown is noticed by the next
++  * callback. The existing native VRM writer also uses unconditional dsb. */
++#if defined(__aarch64__)
++ __asm__ volatile("dsb sy" ::: "memory");
++#else
++ OSMemoryBarrier();
++#endif
++ return 0;
++}
++static int kebab_native_cxmx_barrier(void *cookie)
++{
++ KebabNativeCxMxAccess *a=(KebabNativeCxMxAccess *)cookie;
++ if(!a || !a->check || a->check(a->cookie))return 95;
++#if defined(__aarch64__)
++ __asm__ volatile("dsb sy" ::: "memory");
++#else
++ OSMemoryBarrier();
++#endif
++ return 0;
++}
++static uint64_t kebab_native_cxmx_now_us(void *)
++{uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time(),&ns);return ns/1000;}
++static int kebab_native_gpu_cxmx(unsigned action,void *cookie,int (*check)(void *),KebabGpuCxMxRecord *out)
++{
++ IOMemoryDescriptor *rsc_memory=0;IOMemoryMap *rsc_map=0;int result=22;
++ KebabNativeCxMxAccess access={0,cookie,check};
++ if(!out)return 22;KebabGpuCxMxInitRecord(out);
++ if(action>2)return 22;if(!check || check(cookie)){out->result=95;return 95;}
++ if(action!=KebabGpuCxMxAcquire)return kebab_rpmh_gpu_cxmx(action,0,0,out);
++ if(!KebabGpuCxMxBound(&KebabGpuCxMxNativeBinding)){out->gate_reason=1;out->result=95;return 95;}
++ rsc_memory=IOMemoryDescriptor::withPhysicalAddress(0x18220000,0x10000,kIODirectionInOut);
++ if(!rsc_memory)goto no_memory;
++ rsc_map=rsc_memory->map(kIOMapAnywhere|kIOMapInhibitCache);
++ if(!rsc_map || rsc_map->getLength()<0x10000)goto no_memory;
++ access.rsc=rsc_map->getVirtualAddress();if(!access.rsc)goto no_memory;
++ {
++  KebabGpuCxMxIo io={&access,kebab_native_cxmx_read,kebab_native_cxmx_write,kebab_native_cxmx_barrier,kebab_native_cxmx_now_us};
++  result=kebab_rpmh_gpu_cxmx(action,&io,&KebabGpuCxMxNativeBinding,out);
++ }
++ goto done;
++no_memory:out->result=12;result=12;
++done:
++ if(rsc_map)rsc_map->release();if(rsc_memory)rsc_memory->release();return result;
++}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeGpuPowerHold.h
+@@ -0,0 +1,68 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_GPU_POWER_HOLD_H
++#define KEBAB_NATIVE_GPU_POWER_HOLD_H
++#include <sys/errno.h>
++#include <arm/machine_routines.h>
++#include "KebabNativeGpuCxMx.h"
++/* Include once in the normal framebuffer diagnostic TU, after the existing
++ * kebab_gpu_gcc_worker_access definition. No user-supplied action/binding.
++ * The one acquired reference, partial/quarantined reference and receipt
++ * remain owned for this boot. There is deliberately no release/reset API. */
++extern "C" int get_preemption_level(void);
++static_assert(sizeof(KebabGpuCxMxRecord)==11100,"fixed GPU power hold receipt");
++enum {KebabGpuPowerHoldNotRun=0,KebabGpuPowerHoldBusy=1,KebabGpuPowerHoldDone=2};
++static uint32_t kebab_gpu_power_hold_state;
++static int kebab_gpu_power_hold_result=EAGAIN;
++static KebabGpuCxMxRecord *kebab_gpu_power_hold_record;
++
++static int kebab_gpu_power_worker_check(void *cookie)
++{
++ int error=kebab_gpu_gcc_worker_access(cookie);
++ if(error)return error;
++ if(ml_at_interrupt_context() || get_preemption_level() || !ml_get_interrupts_enabled())return 95;
++ return 0;
++}
++
++/* GPUPOWER only: claiming even a refused/ENOMEM attempt prevents retries.
++ * Only pointers/scalars are on the kernel stack, never the 11100B record. */
++extern "C" void kebab_gpu_power_prepare(void)
++{
++ uint32_t expected=KebabGpuPowerHoldNotRun;
++ if(!__atomic_compare_exchange_n(&kebab_gpu_power_hold_state,&expected,
++    KebabGpuPowerHoldBusy,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
++  int result=expected==KebabGpuPowerHoldDone?kebab_gpu_power_hold_result:EBUSY;
++  printf("KEBAB GPUPOWER: end; result=%d; state=%u; cached=1\n",result,expected);
++  return;
++ }
++ int result=kebab_gpu_power_worker_check(NULL);
++ KebabGpuCxMxRecord *record=NULL;
++ if(!result) {
++  record=(KebabGpuCxMxRecord *)IOMalloc(sizeof(*record));
++  if(!record)result=ENOMEM;
++  else {
++   KebabGpuCxMxInitRecord(record);
++   result=kebab_native_gpu_cxmx(KebabGpuCxMxAcquire,NULL,kebab_gpu_power_worker_check,record);
++  }
++ }
++ /* Publish only after native Acquire has returned. Never free on error:
++  * a partial ACK/quarantine may still own a reference or uncertain vote. */
++ kebab_gpu_power_hold_record=record;
++ kebab_gpu_power_hold_result=result;
++ __atomic_store_n(&kebab_gpu_power_hold_state,KebabGpuPowerHoldDone,__ATOMIC_RELEASE);
++ printf("KEBAB GPUPOWER: end; result=%d; state=%u; cached=0\n",result,(unsigned)KebabGpuPowerHoldDone);
++}
++
++/* CAP18 copy only. Return 0 means a complete immutable receipt was copied,
++ * including native failures; out->result is never converted to success.
++ * Before completion return EAGAIN without touching out. If context/heap
++ * failed before any native call, reconstruct the fixed zero/error receipt
++ * from the immutable scalar terminal result, without allocating or IO. */
++static int kebab_native_gpu_power_hold_snapshot(KebabGpuCxMxRecord *out)
++{
++ if(!out)return EINVAL;
++ if(__atomic_load_n(&kebab_gpu_power_hold_state,__ATOMIC_ACQUIRE)!=KebabGpuPowerHoldDone)return EAGAIN;
++ if(kebab_gpu_power_hold_record)memcpy(out,kebab_gpu_power_hold_record,sizeof(*out));
++ else {KebabGpuCxMxInitRecord(out);out->result=(uint32_t)kebab_gpu_power_hold_result;}
++ return 0;
++}
++#endif

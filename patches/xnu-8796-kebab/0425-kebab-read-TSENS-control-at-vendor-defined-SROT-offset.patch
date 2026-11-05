@@ -1,0 +1,47 @@
+--- a/iokit/Kernel/arm/KebabThermalObservation.h
++++ b/iokit/Kernel/arm/KebabThermalObservation.h
+@@ -14,6 +14,9 @@
+ enum { KebabThermalArgument=1,KebabThermalIoError,KebabThermalDisabled,
+        KebabThermalNotReady,KebabThermalUnstable,KebabThermalNoValidReadings };
+ /* Source facts: local clean LineageOS tsens2xxx.c/tsens.h (qcom,tsens24xx).
++ * SROT+0 is VERSION; CTRL is +4, explicitly used by vendor hw_init and
++ * sensor_en. The supplied SROT span includes both words (8 bytes), despite
++ * the old vendor DT describing only the base word. No writes or probing.
+  * Read-only inherited configuration. Callback owns mapped SROT/TM resources.
+  * No enabling/reset, SCM call, IRQ acknowledgement, threshold or watchdog
+  * change. Strict valid-bit sampling; stable invalid codes remain unknown.
+@@ -32,9 +35,9 @@
+ static int KebabThermalObserve(const KebabThermalReadIo *io,KebabThermalObservation *out)
+ {
+     if(out)memset(out,0,sizeof *out);
+-    if(!io || !out || !io->read32 || io->bytes[0]<4 || io->bytes[1]<0xe8)return KebabThermalArgument;
++    if(!io || !out || !io->read32 || io->bytes[0]<8 || io->bytes[1]<0xe8)return KebabThermalArgument;
+     KebabThermalObservation s={0};uint32_t after;
+-    if(kebab_thermal_read(io,0,0,&s.control))return KebabThermalIoError;
++    if(kebab_thermal_read(io,0,4,&s.control))return KebabThermalIoError;
+     s.sensor_mask=(s.control>>3)&0xffff;
+     if(!(s.control&1)){*out=s;return KebabThermalDisabled;}
+     if(kebab_thermal_read(io,1,0xe4,&s.trdy))return KebabThermalIoError;
+@@ -45,7 +48,7 @@
+             s.valid_mask|=1u<<i;s.milli_celsius[i]=KebabThermalDecode(s.status[i]);
+         }
+     }
+-    if(kebab_thermal_read(io,0,0,&after))return KebabThermalIoError;
++    if(kebab_thermal_read(io,0,4,&after))return KebabThermalIoError;
+     if(((s.control^after)&0x7fff9u)!=0)return KebabThermalUnstable;
+     if(kebab_thermal_read(io,1,0xe4,&after))return KebabThermalIoError;
+     if(!(after&8))return KebabThermalUnstable;
+--- a/iokit/Kernel/arm/KebabNativeDisplayObservation.h
++++ b/iokit/Kernel/arm/KebabNativeDisplayObservation.h
+@@ -109,9 +109,9 @@
+     static const uint64_t control[]={0x0c222000,0x0c223000},tm[]={0x0c263000,0x0c265000};
+     for(unsigned i=0;i<2;i++) {
+         out->result[i]=KebabThermalIoError;
+-        if(!kebab_display_map(&m,2*i,control[i],4) || !kebab_display_map(&m,2*i+1,tm[i],0x1ff))continue;
++        if(!kebab_display_map(&m,2*i,control[i],8) || !kebab_display_map(&m,2*i+1,tm[i],0x1ff))continue;
+         KebabNativeThermalRead read={&m,2*i};
+-        KebabThermalReadIo io={&read,{4,0x1ff},kebab_thermal_native_read};
++        KebabThermalReadIo io={&read,{8,0x1ff},kebab_thermal_native_read};
+         out->result[i]=KebabThermalObserve(&io,&out->controller[i]);
+         if(!out->result[i])out->flags|=1u<<i;
+     }

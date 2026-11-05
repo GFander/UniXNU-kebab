@@ -1,0 +1,186 @@
+{
+  "passed": true,
+  "physical_test": false,
+  "actual_SMC": false,
+  "native_permission": false,
+  "ASan_UBSan": true,
+  "compiled_runtime_mutants": 22,
+  "old_postCP_proposal_preVM_red_exit": 42,
+  "sources": {
+    "KebabA650ZapAuthCore.h": "9cedd03dbc6de7fd8096401ff60969838fb0f87a7c09530092c4194d0e1dbaa5",
+    "KebabA650ZapCore.h": "74d609c88fb04c15d3d4305713d1940a3c21bc4b42a30056cadbeaa0133dd4ac",
+    "test_auth.cpp": "503107bba8a86e3a6937eaec4e6f7035da97c4e16746cfddac3496a5cc3a9636",
+    "test_prevm_red.cpp": "043c12c293b7843fa10e6146634b0ac109a3b510c1843f358aac50ccb8fd1f6f"
+  },
+  "runs": [
+    {
+      "name": "normal",
+      "compiled": true,
+      "exit": 0,
+      "stderr": "PASS checks=2307 receipt=448 preVM/one-token/originalCP/auth synthetic lifecycle only\n",
+      "header_sha256": "9cedd03dbc6de7fd8096401ff60969838fb0f87a7c09530092c4194d0e1dbaa5"
+    },
+    {
+      "name": "ASan-UBSan",
+      "compiled": true,
+      "exit": 0,
+      "stderr": "PASS checks=2307 receipt=448 preVM/one-token/originalCP/auth synthetic lifecycle only\n",
+      "header_sha256": "9cedd03dbc6de7fd8096401ff60969838fb0f87a7c09530092c4194d0e1dbaa5"
+    },
+    {
+      "name": "omit-preVM-proof",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 61: run(f,r)==KZA2_UNQUALIFIED&&!f.invokes&&!f.ends&&!r.metadata_frozen\n",
+      "header_sha256": "3ec9cc84d205f912500fc5f3c0007c706b2270d22b3f6fd228a98804e545bfea"
+    },
+    {
+      "name": "omit-postCP-proof",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 62: run(g,r)==KZA2_UNQUALIFIED&&g.invokes==2&&g.loads==1&&g.chains==1&&g.ends==1&&r.prepared&&r.image_frozen&&!r.cp_ready&&!r.authenticated\n",
+      "header_sha256": "1ed070044bd94cfcea74c6aa668794e07920fcbda280f27ed6a800e93dfd5bc1"
+    },
+    {
+      "name": "allow-64-aperture",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 59: run(f,r)==0\n",
+      "header_sha256": "77e01f3f4f0c6b59eb2ff45868862a7c850f20462dcc68643154e6ce656fb32e"
+    },
+    {
+      "name": "skip-fresh-owner",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 59: f.trace==std::vector<std::string>({\"pre\",\"begin\",\"fresh\",\"init\",\"mem\",\"load\",\"chain\",\"auth\",\"final\",\"end\"})\n",
+      "header_sha256": "98562be13d1737a600f7cbe193fcfab1633c12fac1d62a2761d8bbe6f97bc1b6"
+    },
+    {
+      "name": "omit-metadata-freeze",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 26: f.r->transaction_started&&f.r->metadata_frozen&&f.r->operation[i].attempted\n",
+      "header_sha256": "f9e9807ee3325efca228eb24aee4abff40ba07b0c0f31674735695a83d45ce0a"
+    },
+    {
+      "name": "omit-preVM-image-freeze",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 49: f.invokes==2&&f.loads==1&&f.r->prepared&&f.r->image_frozen&&f.r->phase==KZA2_LOADED\n",
+      "header_sha256": "6b69f32c5c864a0bd6921d585ae879653325381dba3c565e06d9628b31093591"
+    },
+    {
+      "name": "copy-before-MEM",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 48: f.invokes==2&&f.r->phase==KZA2_MEM_RETURNED&&f.r->metadata_frozen&&!f.r->image_frozen&&!f.r->prepared\n",
+      "header_sha256": "f23646159596994c2f302c01dd75b1e85c6edc84739c48b1a58fa0eedd8939cf"
+    },
+    {
+      "name": "omit-image-copy",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 49: f.invokes==2&&f.loads==1&&f.r->prepared&&f.r->image_frozen&&f.r->phase==KZA2_LOADED\n",
+      "header_sha256": "1ec490e8481cdafc5d0c9fdead16bffdc63af73cba679542f0af2f494778eb01"
+    },
+    {
+      "name": "omit-original-CP-chain",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 59: run(f,r)==0\n",
+      "header_sha256": "107624ff7478e2c56eef0302af7c8e5ab1af92f5cb305807915fb7dbdbe82f30"
+    },
+    {
+      "name": "allocation-instead-of-logical-span",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 32: request->x[4]==(i==1?4096u:0u)\n",
+      "header_sha256": "8359359ce015b9413cdf5cc174af7767fc335eca1aa281ed51ec9bfe8b5b8055"
+    },
+    {
+      "name": "wrong-metadata-address",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 32: request->x[3]==(i==0?f.before.metadata:i==1?f.before.image:0)\n",
+      "header_sha256": "f69f5d7acbb9e9f7f84a1e473111d4fcab3d7fc92e3afdc5b4cd68f4cca2d324"
+    },
+    {
+      "name": "accept-peripheral-error",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 69: run(f,r)!=0\n",
+      "header_sha256": "38a0d10ee81849d43a979700dcfd676a266c0ab5cf18ca8f9b2d8804d3ed7d15"
+    },
+    {
+      "name": "truncate-positive-status",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 72: r.primary_error==KZA2_UNRESOLVED\n",
+      "header_sha256": "cc1caae31ac90db6bf47eeceae1d2ee0e7a21de0de9da4f5c0220bea4a265d1f"
+    },
+    {
+      "name": "ignore-resume-bound",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 69: run(f,r)!=0\n",
+      "header_sha256": "23eee1ceddd3a7a6e50a058fc1ff77c48f3f8e6d0b8da007cbe4de05c0666866"
+    },
+    {
+      "name": "allow-zero-attempts",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 69: run(f,r)!=0\n",
+      "header_sha256": "d86bb208dde122d657dff2641e4a80953add786a39eba74ea6ccd810b4738743"
+    },
+    {
+      "name": "ignore-image-load-error",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 81: run(f,r)==5&&f.invokes==2&&f.loads==1&&!f.chains&&f.ends==1&&!r.image_frozen&&!r.prepared\n",
+      "header_sha256": "52491bb5a0a32678f9e4d7b656494ba350e03d3f3e4082c4e79b73aa04271186"
+    },
+    {
+      "name": "ignore-CP-chain-error",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 82: run(f,r)==5&&f.invokes==2&&f.chains==1&&f.ends==1&&r.prepared&&r.image_frozen&&!r.cp_ready\n",
+      "header_sha256": "aa44663a8da6599ec8adfe09ccc9efd752c5b09c85a0eb7bf003b8da0bbda282"
+    },
+    {
+      "name": "accept-different-GMU-generation",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 66: run(f,r)==KZA2_UNQUALIFIED&&f.invokes==2&&f.ends==1&&!r.authenticated\n",
+      "header_sha256": "9952d2eaa439669a0d29acb4229f7bc435eb21a74f29ebe3840deb02086892df"
+    },
+    {
+      "name": "skip-final-CP-check",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 59: f.trace==std::vector<std::string>({\"pre\",\"begin\",\"fresh\",\"init\",\"mem\",\"load\",\"chain\",\"auth\",\"final\",\"end\"})\n",
+      "header_sha256": "d287bc9a48f88ecbbda50039ac2191dc53700ff798bc71d5eb9df0953b67544b"
+    },
+    {
+      "name": "ignore-transaction-end",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 84: run(f,r)==13&&r.authenticated&&!r.completed&&r.end_error==13&&r.primary_error==0\n",
+      "header_sha256": "a0db22f0b7e58f4a484ae599e4ed005452129f296d8d23e70618a5c2d4c26eb2"
+    },
+    {
+      "name": "erase-primary-error",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 85: run(f,r)==KZA2_PERIPHERAL&&r.primary_error==KZA2_PERIPHERAL&&r.end_error==13\n",
+      "header_sha256": "46afde19cca7654f2dd3c1a9d66fde921d07e8858bb5d0e651964561bd9af9e6"
+    },
+    {
+      "name": "accept-clock-rollback",
+      "compiled": true,
+      "exit": 42,
+      "stderr": "FAIL 76: run(g,r)==KZA2_DEADLINE&&g.invokes==phase+1&&g.ends==1&&r.elapsed_us==UINT64_MAX\n",
+      "header_sha256": "c7f38cb68d096af3da1b3cf995e49b2b53c45835a94a886c305ac216ca6fc77b"
+    }
+  ],
+  "scope": "Pure finite protocol, synthetic native owner/memory/SCM peers. No native ABI, fresh hardware lease, power, secure-world ownership, authentication or pixel acceptance."
+}

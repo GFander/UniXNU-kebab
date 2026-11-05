@@ -1,0 +1,238 @@
+--- /dev/null
++++ b/osfmk/kern/KebabGmuResourceObserve.h
+@@ -0,0 +1,48 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GMU_RESOURCE_OBSERVE_H
++#define KEBAB_GMU_RESOURCE_OBSERVE_H
++#include <stdint.h>
++#include <string.h>
++/* Status observations only. Neither idle TCS, request registers, nor a GDSCR
++ * sample proves an ARC/BCM target, an executed command, or sustained clocks. */
++enum {KGRO_RSCC=0,KGRO_DCVS=1,KGRO_HFI=2,KGRO_CC=3,KGRO_AO=4,KGRO_WORDS=14};
++typedef struct {
++ uint32_t magic,schema,bytes,result,reads,passes,failed_region,failed_offset;
++ uint32_t raw[2][KGRO_WORDS];
++ uint64_t elapsed_us;
++} KebabGmuResourceObserveRecord;
++typedef struct {
++ void *cookie;int(*gate)(void *);int(*read32)(void *,uint32_t,uint32_t,uint32_t *);
++ uint64_t(*now_us)(void *);
++} KebabGmuResourceObserveIo;
++static inline void KebabGmuResourceObserveInit(KebabGmuResourceObserveRecord *r)
++{memset(r,0,sizeof *r);r->magic=0x31565247;r->schema=1;r->bytes=sizeof *r;r->result=95;r->failed_region=r->failed_offset=~0u;}
++static inline int KebabGmuResourceObserve(KebabGmuResourceObserveRecord *r,const KebabGmuResourceObserveIo *io)
++{
++ static const uint32_t region[KGRO_WORDS]={0,0,0,0,1,1,1,2,3,3,3,3,2,4};
++ static const uint32_t offset[KGRO_WORDS]={0xd18,0xfb8,0x1258,0x14f8,0xff4,0xff8,0xffc,0x23b0,0x100c,0x1010,0x106c,0x1508,0x2648,0xc14};
++ uint64_t begin,now;int e=22;
++ if(!r)return 22;KebabGmuResourceObserveInit(r);
++ if(!io || !io->gate || !io->read32 || !io->now_us){r->result=22;return 22;}
++ begin=io->now_us(io->cookie);
++ for(unsigned pass=0;pass<2;pass++){
++  for(unsigned n=0;n<KGRO_WORDS;n++){
++   e=io->gate(io->cookie);if(e)goto done;
++   now=io->now_us(io->cookie);if(now<begin || now-begin>=100000){e=110;goto done;}
++   r->failed_region=region[n];r->failed_offset=offset[n];
++   e=io->read32(io->cookie,region[n],offset[n],&r->raw[pass][n]);if(e)goto done;r->reads++;
++   e=io->gate(io->cookie);if(e)goto done;
++  }
++  /* Same defined fault masks as the qualified OTA HFI channel. Never W1C,
++   * drain a message, or interpret a default zero as a successful vote. */
++  if((r->raw[pass][12]&0x8006u) || (r->raw[pass][13]&0x29u)){e=5;goto done;}
++  r->passes++;
++ }
++ e=0;
++done:
++ now=io->now_us(io->cookie);r->elapsed_us=now>=begin?now-begin:0;
++ if(!e && (now<begin || now-begin>=100000))e=110;
++ if(!e){r->failed_region=r->failed_offset=~0u;}
++ r->result=(uint32_t)e;return e;
++}
++#endif
+--- /dev/null
++++ b/osfmk/kern/KebabGmuResourceObserveOwner.h
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_GMU_RESOURCE_OBSERVE_OWNER_H
++#define KEBAB_GMU_RESOURCE_OBSERVE_OWNER_H
++#include "KebabGmuHfiInitOwner.h"
++#include "KebabGmuResourceObserve.h"
++#ifdef __cplusplus
++extern "C" {
++#endif
++int kebab_rpmh_gpu_gmu_resource_observe(const KebabGpuColdToken *,uint64_t,
++ const KebabGpuLaunchResourceToken *,const KebabGmuIrqToken *,
++ const KebabGmuBootIo *,const KebabGmuResourceObserveIo *,KebabGmuResourceObserveRecord *);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- /dev/null
++++ b/bsd/dev/KebabGmuResourceObserveOwner.inc
+@@ -0,0 +1,37 @@
++/* SPDX-License-Identifier: MIT */
++/* Same canonical TU, after InitOwner. A fresh read scope, never CAP authority. */
++#if defined(KERNEL) || defined(KEBAB_RPMH_KERNEL)
++#include <kern/KebabGmuResourceObserveOwner.h>
++#else
++#include "KebabGmuResourceObserveOwner.h"
++#endif
++int kebab_rpmh_gpu_gmu_resource_observe(const KebabGpuColdToken *cold,uint64_t epoch,
++ const KebabGpuLaunchResourceToken *resources,const KebabGmuIrqToken *irq,
++ const KebabGmuBootIo *clock_io,const KebabGmuResourceObserveIo *io,KebabGmuResourceObserveRecord *out)
++{
++ KebabGmuRootContext root;KebabGmuRootRecord rr;KebabGmuRootIo rio;const uint32_t *v=NULL;int e=95,active_owned=0;
++ if(!out)return 22;KebabGmuResourceObserveInit(out);
++ if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL)){out->result=16;return 16;}
++ if(cold!=kebab_gmu_boot_identity || epoch!=kebab_gmu_boot_ledger.namespace_epoch || resources!=kebab_gmu_firmware_resources || irq!=kebab_gmu_firmware_irq)goto done;
++ if(kebab_gmu_hfi_active || !kebab_gmu_hfi_init_book.complete || kebab_gmu_hfi_init_book.quarantined || kebab_gmu_hfi_session.quarantined || kebab_gmu_hfi_session.sequence!=5 || !kebab_gmu_hfi_session.version_verified)goto done;
++ if(!clock_io || !clock_io->read32 || !clock_io->barrier || !clock_io->now_us || !io){e=22;goto done;}
++ e=kebab_gpu_gmu_boot_gate_locked(cold,epoch);if(e)goto done;
++ if(kebab_gmu_boot_ledger.phase!=KGB_HFI_QUEUES_READY){e=95;goto done;}
++ e=kebab_gpu_launch_resources_verify_after_fw_locked(resources,cold,epoch,KLR_NEED_RSC);if(e)goto done;
++ e=kebab_gpu_gmu_irq_verify_locked(irq,cold,epoch);if(e)goto done;
++ rio.cookie=clock_io->cookie;rio.read32=clock_io->read32;rio.write32=NULL;rio.barrier=clock_io->barrier;rio.delay_us=NULL;rio.now_us=clock_io->now_us;
++ memset(&root,0,sizeof root);KebabGmuRootInit(&rr,KebabGmuRootObserve);root.io=&rio;root.ledger=&kebab_gmu_root_ledger;root.r=&rr;
++ e=KebabGmuRootSnapshot(&root,0);if(e)goto done;v=rr.before[0];e=KebabGmuRootPllShape(v);if(e)goto done;
++ if((v[7]&0x800000f3u)!=2 || (v[8]&0x10371fu)!=0x100602u || ((v[7]^kebab_gmu_root_ledger.cmd)&KebabGmuRootInvariantMask(7)) || ((v[8]^kebab_gmu_root_ledger.cfg)&0x10371fu) || !(v[14]&1) || !(v[15]&0x10000) || (v[9]&0xc0000000u)!=0xc0000000u){e=11;goto done;}
++ memset(&kebab_gmu_hfi_clocks,0,sizeof kebab_gmu_hfi_clocks);KebabGmuBootInit(&kebab_gmu_hfi_clock_evidence,2);kebab_gmu_hfi_clock_evidence.firmware_start_requested=1;
++ kebab_gmu_hfi_clocks.io=clock_io;kebab_gmu_hfi_clocks.ledger=&kebab_gmu_boot_ledger;kebab_gmu_hfi_clocks.r=&kebab_gmu_hfi_clock_evidence;
++ kebab_gmu_hfi_clocks.gcc_cfg=v[0];kebab_gmu_hfi_clocks.gcc_reset=v[1];kebab_gmu_hfi_clocks.gdscr=kebab_gpu_cc_ledger.gdscr_control;
++ kebab_gmu_hfi_clocks.ahb=kebab_gpu_cc_ledger.ahb_control;kebab_gmu_hfi_clocks.gx_gmu=v[6]&0x0fffffffu;
++ e=clock_io->read32(clock_io->cookie,KGB_GCC,0x7100c,&kebab_gmu_hfi_clocks.memnoc);if(e){kebab_gmu_hfi_clocks.io=NULL;goto done;}
++ kebab_gmu_hfi_clocks.memnoc&=0x0fffffffu;__atomic_store_n(&kebab_gmu_hfi_active,1,__ATOMIC_RELEASE);active_owned=1;
++ e=KebabGmuResourceObserve(out,io);
++ if(e==5){kebab_gmu_hfi_session.quarantined=1;kebab_gmu_hfi_init_book.quarantined=1;kebab_gmu_boot_quarantine((unsigned)e);}
++done:
++ if(active_owned){__atomic_store_n(&kebab_gmu_hfi_active,0,__ATOMIC_RELEASE);kebab_gmu_hfi_clocks.io=NULL;}
++ out->result=(uint32_t)e;__atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return e;
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeGmuResourceSnapshot.h
+@@ -0,0 +1,63 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_NATIVE_GMU_RESOURCE_SNAPSHOT_H
++#define KEBAB_NATIVE_GMU_RESOURCE_SNAPSHOT_H
++#include "KebabNativeGmuHfiInitHold.h"
++#if defined(KERNEL) || defined(KEBAB_RPMH_KERNEL)
++#include <kern/KebabGmuResourceObserveOwner.h>
++#else
++#include "KebabGmuResourceObserveOwner.h"
++#endif
++struct KebabNativeGmuResourceAccess {
++ KebabNativeGmuBootAccess clock;
++ IOMemoryDescriptor *memory[4];IOMemoryMap *mapping[4];uintptr_t address[4];
++};
++static int kebab_native_gmu_resource_gate(void *cookie)
++{
++ auto *a=(KebabNativeGmuResourceAccess *)cookie;if(!a)return 22;
++ int e=kebab_native_gmu_boot_worker(&a->clock);return e?e:kebab_gpu_gmu_hfi_gate_locked(a->clock.cold,a->clock.epoch);
++}
++static int kebab_native_gmu_resource_read(void *cookie,uint32_t region,uint32_t off,uint32_t *out)
++{
++ auto *a=(KebabNativeGmuResourceAccess *)cookie;if(!out)return 22;unsigned index=0;bool allowed=false;
++ switch(region){
++ case KGRO_RSCC:index=0;allowed=off==0xd18||off==0xfb8||off==0x1258||off==0x14f8;break;
++ case KGRO_DCVS:index=1;allowed=off==0xff4||off==0xff8||off==0xffc;break;
++ case KGRO_HFI:index=2;allowed=off==0x23b0||off==0x2648;break;
++ case KGRO_CC:allowed=off==0x100c||off==0x1010||off==0x106c||off==0x1508;break;
++ case KGRO_AO:index=3;allowed=off==0xc14;break;
++ default:return 22;
++ }
++ if(!allowed)return 22;int e=kebab_native_gmu_resource_gate(a);if(e)return e;
++ uintptr_t base=region==KGRO_CC?a->clock.address[3]:a->address[index];if(!base)return 95;
++ *out=*(volatile const uint32_t *)(base+off);return kebab_native_gmu_resource_gate(a);
++}
++/* Each OPEN obtains two new readonly status passes. No channel queue access,
++ * command, IRQ acquire, register store, retained mapping or copied token. */
++static int kebab_native_gmu_resource_snapshot(KebabGmuResourceObserveRecord *out)
++{
++ if(!out)return 22;KebabGmuResourceObserveInit(out);KebabNativeGmuResourceAccess a={};int e=95;
++ auto *f=&kebab_native_gmu_firmware;
++ if(kebab_gmu_fw_hold_worker(NULL) || __atomic_load_n(&kebab_native_gmu_hfi_init_once,__ATOMIC_ACQUIRE)!=2 || kebab_native_gmu_hfi_init_result.io.result || !f->boot || !f->irq)goto done;
++ a.clock.cold=f->boot->cold;a.clock.epoch=f->boot->epoch;a.clock.bus_check=kebab_gmu_fw_hold_worker;
++ {
++  const uint64_t pa[8]={0x00170000,0x00100000,0x00152000,0x03d90000,0x03de0000,0x03d72000,0x03d7c000,0x03d8e000};
++  const uint32_t bytes[8]={0x4000,0x1000,0x1000,0x4000,0x10000,0x1000,0x4000,0x1000};
++  for(unsigned n=0;n<8;n++){
++   if(kebab_gmu_fw_hold_worker(NULL)){e=95;goto done;}
++   auto **memory=n<4?&a.clock.memory[n]:&a.memory[n-4];auto **mapping=n<4?&a.clock.mapping[n]:&a.mapping[n-4];auto *address=n<4?&a.clock.address[n]:&a.address[n-4];
++   *memory=IOMemoryDescriptor::withPhysicalAddress(pa[n],bytes[n],kIODirectionIn);if(!*memory){e=12;goto done;}
++   if(kebab_gmu_fw_hold_worker(NULL)){e=95;goto done;}
++   *mapping=(*memory)->map(kIOMapAnywhere|kIOMapInhibitCache|kIOMapReadOnly);
++   if(!*mapping || (*mapping)->getLength()!=bytes[n] || !(*address=(*mapping)->getVirtualAddress())){e=12;goto done;}
++  }
++  KebabGmuBootIo clocks={&a.clock,kebab_native_gmu_boot_read,NULL,kebab_native_gmu_boot_barrier,NULL,kebab_native_gmu_boot_now,NULL,NULL,NULL,NULL};
++  KebabGmuResourceObserveIo io={&a,kebab_native_gmu_resource_gate,kebab_native_gmu_resource_read,kebab_native_gmu_boot_now};
++  e=kebab_rpmh_gpu_gmu_resource_observe(a.clock.cold,a.clock.epoch,&f->resources,f->irq,&clocks,&io,out);
++ }
++done:
++ for(unsigned n=4;n;){--n;if(a.mapping[n])a.mapping[n]->release();if(a.memory[n])a.memory[n]->release();}
++ kebab_native_gmu_boot_unmap(&a.clock);
++ if(kebab_gmu_fw_hold_worker(NULL))e=95;out->result=(uint32_t)e;return 0;
++}
++static_assert(sizeof(KebabGmuResourceObserveRecord)==152,"CAP33 fixed ABI");
++#endif
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -130,6 +130,9 @@
+ /* BEGIN GMU_INIT32_INCLUDE */
+ #include "KebabNativeGmuHfiInitHold.h"
+ /* END GMU_INIT32_INCLUDE */
++/* BEGIN GMU_RESOURCE33_INCLUDE */
++#include "KebabNativeGmuResourceSnapshot.h"
++/* END GMU_RESOURCE33_INCLUDE */
+ /* END FUTURE_GMU_HOLD_INCLUDE */
+ #include "KebabNativeGpuFirstAttachHold.h"
+ #include <kern/kebab_low_dma.h>
+@@ -893,6 +896,18 @@
+     }
+ /* END GMU_INIT32_PROVIDER */
+ /* BEGIN SN11_RO_CAP31 */
++/* BEGIN GMU_RESOURCE33_PROVIDER */
++    if(source==33) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabGmuResourceObserveRecord);
++        KebabGmuResourceObserveRecord *data=(KebabGmuResourceObserveRecord *)IOMalloc(bytes);
++        if(!data)return 12;
++        int error=kebab_native_gmu_resource_snapshot(data);
++        if(error){IOFree(data,bytes);return error;}
++        *image=kc_image{};image->handle=data;image->source=33;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
++/* END GMU_RESOURCE33_PROVIDER */
+     if(source==31) {
+         if(argument)return 22;
+         uint32_t bytes=sizeof(KebabGpuSn11Record);
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>32)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>33)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- a/bsd/dev/kebab_rpmh_vrm.c
++++ b/bsd/dev/kebab_rpmh_vrm.c
+@@ -695,4 +695,7 @@
+ /* BEGIN GMU_INIT32_CANONICAL */
+ #include "KebabGmuHfiInitOwner.inc"
+ /* END GMU_INIT32_CANONICAL */
++/* BEGIN GMU_RESOURCE33_CANONICAL */
++#include "KebabGmuResourceObserveOwner.inc"
++/* END GMU_RESOURCE33_CANONICAL */
+ /* END FUTURE_GMU_CANONICAL_OWNERS */
+--- a/osfmk/kern/Makefile
++++ b/osfmk/kern/Makefile
+@@ -36,6 +36,8 @@
+ 	kern_private.modulemap
+ 
+ EXPORT_FILES = \
++	KebabGmuResourceObserve.h \
++	KebabGmuResourceObserveOwner.h \
+ 	KebabGmuHfiInitBinding.h \
+ 	KebabGmuHfiInitCore.h \
+ 	KebabGmuHfiInitOwner.h \

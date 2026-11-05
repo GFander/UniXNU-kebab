@@ -1,0 +1,285 @@
+--- a/osfmk/kern/KebabA650GmuNativeBacking.h
++++ b/osfmk/kern/KebabA650GmuNativeBacking.h
+@@ -32,6 +32,8 @@
+ int kebab_a650_gmu_backing_release_unpublished(void);
+ int kebab_a650_gmu_backing_acquire(KebabA650GmuBackingToken *,KebabA650GmuBackingDescription *);
+ int kebab_a650_gmu_backing_check(const KebabA650GmuBackingToken *);
++/* Trusted fixed-count RO snapshot, only with the actual published token. */
++int kebab_a650_gmu_backing_owned_ranges(const KebabA650GmuBackingToken *,uint64_t (*)[2],uint32_t);
+ /* Call before the first hardware publication. This first version pins for
+  * the boot lifetime; no generic boolean/callback "drained" can undo it. */
+ int kebab_a650_gmu_backing_publish(KebabA650GmuBackingToken *);
+--- a/osfmk/kern/kebab_low_dma.h
++++ b/osfmk/kern/kebab_low_dma.h
+@@ -79,6 +79,25 @@
+ };
+ int kebab_low_dma_ram_prepare(void);
+ int kebab_low_dma_ram_snapshot(struct kebab_low_dma_ram_observation *,uint32_t);
++/* Read-only post-CP resource observation. Never an ownership transfer,
++ * PAS authentication authority or replacement for the old namespace gate. */
++#define KEBAB_PAS13_RESOURCES_MAGIC 0x315253455233314bULL
++struct kebab_pas13_resource_range {uint64_t physical,bytes;uint32_t domain,index;};
++struct kebab_pas13_resources_observation {
++ uint64_t magic;
++ uint32_t schema,bytes,state,result,phase,flags,guard,reserved0;
++ uint64_t epoch,gmu_generation,gpu_generation,cp_generation,image,metadata;
++ uint32_t range_count,checked_pages,checked_pairs,rptr,wptr,fence,status,irq_mask;
++ uint64_t elapsed_us;
++ uint8_t private_ranges_sha256[32];
++ /* Physical addresses for private GMU/GPU ranges2..16 are redacted to0.
++  * The digest binds all17 native24B little-endian interval records. */
++ struct kebab_pas13_resource_range range[17];
++};
++/* Fixed17 intervals include ALL eight GMU pools, including scratch pool7.
++ * No user address, token, count or callback is accepted by the native probe. */
++int kebab_pas13_resources_prepare(void);
++int kebab_pas13_resources_snapshot(struct kebab_pas13_resources_observation *,uint32_t);
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/iokit/Kernel/arm/KebabA650GmuNativeBacking.cpp
++++ b/iokit/Kernel/arm/KebabA650GmuNativeBacking.cpp
+@@ -183,3 +183,16 @@
+ #include "KebabA650GmuTcm.inc"
+ 
+ #include "KebabA650GmuShared.inc"
++
++/* Complete physical pool inventory, including the unexported table scratch.
++ * This neither acquires/releases a holder nor exposes a CPU accessor. */
++extern "C" int kebab_a650_gmu_backing_owned_ranges(const KebabA650GmuBackingToken *t,uint64_t (*out)[2],uint32_t count)
++{
++ int e=KGNativeWorker(NULL);if(e)return e;if(!out || count!=8)return KG_INVALID;
++ if(!KGTry(&kagb_domain))return KG_BUSY;
++ e=kagb_token_locked(t);
++ if(!e && !kagb_holder[t->slot].published)e=KG_OWNERSHIP;
++ if(!e)e=kagb_pins_locked();
++ if(!e)for(unsigned i=0;i<8;i++){out[i][0]=kagb_domain.pool[i].pa;out[i][1]=kagb_domain.pool[i].bytes;}
++ KGUnlock(&kagb_domain);return e;
++}
+--- a/iokit/Kernel/arm/KebabA650GmuNativeBacking.h
++++ b/iokit/Kernel/arm/KebabA650GmuNativeBacking.h
+@@ -32,6 +32,8 @@
+ int kebab_a650_gmu_backing_release_unpublished(void);
+ int kebab_a650_gmu_backing_acquire(KebabA650GmuBackingToken *,KebabA650GmuBackingDescription *);
+ int kebab_a650_gmu_backing_check(const KebabA650GmuBackingToken *);
++/* Trusted fixed-count RO snapshot, only with the actual published token. */
++int kebab_a650_gmu_backing_owned_ranges(const KebabA650GmuBackingToken *,uint64_t (*)[2],uint32_t);
+ /* Call before the first hardware publication. This first version pins for
+  * the boot lifetime; no generic boolean/callback "drained" can undo it. */
+ int kebab_a650_gmu_backing_publish(KebabA650GmuBackingToken *);
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -970,6 +970,15 @@
+         image->total=bytes;image->stable=1;image->flags=2;return 0;
+     }
+ /* END A650_GPUCP37_PROVIDER */
++    if(source==43) {
++        if(argument)return 22;
++        auto *data=(kebab_pas13_resources_observation *)IOMalloc(sizeof(kebab_pas13_resources_observation));
++        if(!data)return 12;
++        int error=kebab_pas13_resources_snapshot(data,sizeof(*data));
++        if(error){IOFree(data,sizeof(*data));return error;}
++        *image=kc_image{};image->handle=data;image->source=43;image->argument=0;
++        image->total=sizeof(*data);image->stable=1;image->flags=2;return 0;
++    }
+     if(source==42) {
+         if(argument)return 22;
+         auto *data=(kebab_low_dma_ram_observation *)IOMalloc(sizeof(kebab_low_dma_ram_observation));
+--- a/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
++++ b/iokit/Kernel/arm/KebabGpuFirstAttachNative.cpp
+@@ -319,3 +319,127 @@
+  memcpy(out,&kram_observation,sizeof(*out));return 0;
+ }
+ /* END OWNED_LOW_DMA_CPU_RAM */
++
++/* BEGIN PAS13_READONLY_RESOURCES */
++/* Existing private objects and real completed CP are checked under the
++ * canonical VRM owner. Observation only: never a secure-memory lease. */
++static_assert(sizeof(kebab_pas13_resources_observation)==568,"fixed CAP43");
++static uint32_t kpr_state;
++static kebab_pas13_resources_observation kpr_observation;
++extern "C" int kebab_rpmh_gpu_cp_pas13_resources(KebabA650CpOwnerToken *,kebab_pas13_resources_observation *);
++static int kpr_ranges(kebab_pas13_resources_observation *out)
++{
++ static const uint32_t sizes[17]={0x100000,0x4000,0x10000,0x8000,0x14000,0xc000,0x4000,0x8000,0x4000,0x10000,0x10000,0x4000,0x4000,0x4000,0x4000,0x10000,0x4000};
++ if(out->range_count!=17)return 1;
++ for(unsigned i=0;i<17;i++){
++  const auto *p=&out->range[i];unsigned domain=i<2?1:i<10?2:3,index=i<2?i:i<10?i-2:i-10;
++  if(p->domain!=domain || p->index!=index || p->bytes!=sizes[i] || !p->physical ||
++     (p->physical&16383) || (i==0 && (p->physical&0xfffff)) || p->physical>UINT64_MAX-p->bytes)return 2;
++  if(i<2 ? p->physical+p->bytes>0x100000000ULL :
++     (p->physical<0x200000000ULL || p->physical+p->bytes>0x1000000000ULL))return 3;
++  for(unsigned j=0;j<i;j++){
++   const auto *q=&out->range[j];if(p->physical<q->physical+q->bytes && q->physical<p->physical+p->bytes)return 4;
++   ++out->checked_pairs;
++  }
++ }
++ return 0;
++}
++static uint64_t kpr_elapsed(uint64_t start)
++{uint64_t ns=0;absolutetime_to_nanoseconds(mach_absolute_time()-start,&ns);return ns/1000;}
++static int kpr_low_pages(const kebab_low_dma_nc_observation *nc,kebab_pas13_resources_observation *out,uint64_t start)
++{
++ for(unsigned i=0;i<2;i++){
++  const uint64_t pa=i?nc->metadata:nc->image,bytes=i?nc->metadata_bytes:nc->image_bytes;
++  const uintptr_t va=i?nc->metadata_va:nc->image_va;
++  IOMemoryDescriptor *memory=klnc_memory[i];IOMemoryMap *map=klnc_mapping[i];
++  if(!memory || !map || !va || (va&16383) || va>UINTPTR_MAX-bytes ||
++     map->getVirtualAddress()!=va || map->getLength()!=bytes || memory->getLength()!=bytes)return 5;
++  for(uint32_t offset=0;offset<bytes;offset+=4096){
++   if(kpr_elapsed(start)>500000)return 6;
++   IOByteCount span=0;if(memory->getPhysicalSegment(offset,&span,kIOMemoryMapperNone)!=pa+offset || span<4096)return 7;
++   const uint64_t par=klnc_translate(va+offset);
++   if((par&1) || (par&0x00ffffff00000000ULL) || (par&0x0000fffffffff000ULL)!=pa+offset || (par>>56)!=0x44)return 8;
++   ++out->checked_pages;
++  }
++ }
++ return 0;
++}
++static int kpr_idle(kebab_pas13_resources_observation *out)
++{
++ const auto *n=&kcp_native;uint32_t rptr=0,wptr=0,status=0,irq=0,mask=0,fault=0,protect=0,sqe=0,fence=0;
++ struct {uint32_t word;uint32_t *value;} reads[]={{KCP_CP_RB_RPTR,&rptr},{KCP_CP_RB_WPTR,&wptr},{KCP_RBBM_STATUS,&status},
++  {KCP_RBBM_INT_0_STATUS,&irq},{KCP_RBBM_INT_0_MASK,&mask},{KCP_CP_HW_FAULT,&fault},{KCP_CP_PROTECT_STATUS,&protect},{KCP_CP_SQE_CNTL,&sqe}};
++ for(unsigned i=0;i<sizeof(reads)/sizeof(reads[0]);i++){int e=KCPNativeRead((void*)n,0,reads[i].word*4,reads[i].value);if(e)return e;}
++ int e=KCPNativeReadNc((void*)n,4,&fence);if(e)return e;
++ out->rptr=rptr;out->wptr=wptr;out->fence=fence;out->status=status;out->irq_mask=mask;
++ return rptr!=27 || wptr!=27 || fence!=2 || (status&~1u) || (irq&~(1u<<20)) || mask || fault || protect || (sqe&3)!=1?9:0;
++}
++extern "C" int kebab_a650_pas13_resources_locked(kebab_pas13_resources_observation *out)
++{
++ if(out!=&kpr_observation || KFNativeWorker(NULL))return 95;
++ int guard=kebab_rpmh_gpu_cp_check_locked(&kcp_native.owner);if(guard)return guard;
++ uint64_t start=mach_absolute_time();int e=0;uint64_t gmu[8][2]={};KGDiscovery before={},after={};
++ kebab_low_dma_observation low={};kebab_low_dma_nc_observation nc={};kebab_low_dma_ram_observation ram={};
++ if(!KFTry(&kf_pas13_gate))return 16;
++ if(kf_pas13_busy){e=16;goto done;}
++ if(__atomic_load_n(&kcp_native_once,__ATOMIC_ACQUIRE)!=2 || kcp_native_result || !kcp_native.observation ||
++  !kcp_native.owner.pinned || kcp_native.owner.quarantined || kf_attachment.token.slot || kvg_engine.token.slot!=1 ||
++  KFNamespaceCheckPrivate(&kf_namespace,&kf_attachment.token) || KFNamespaceCheckPrivate(&kf_namespace,&kvg_engine.token)){e=10;goto done;}
++ out->phase=1;out->flags|=1;out->epoch=kcp_native.observation->receipt.epoch;
++ out->gmu_generation=kf_native.backing.generation;out->gpu_generation=kvg_native.bo.generation;out->cp_generation=kcp_native.owner.generation;
++ if(out->epoch!=1 || !out->gmu_generation || !out->gpu_generation || !out->cp_generation){e=10;goto done;}
++ if(kebab_low_dma_snapshot(&low,sizeof(low)) || low.magic!=KEBAB_LOW_DMA_MAGIC || low.schema!=1 || low.bytes!=sizeof(low) ||
++  low.state!=KLDC_DONE || low.result!=KLDC_MEASURED_RETAINED || low.flags!=831){e=11;goto done;}
++ out->flags|=2;
++ if(kebab_low_dma_nc_snapshot(&nc,sizeof(nc)) || nc.magic!=KEBAB_LOW_DMA_NC_MAGIC || nc.schema!=1 || nc.bytes!=sizeof(nc) ||
++  nc.state!=2 || nc.result || nc.flags!=15 || nc.checked_pages!=260 ||
++  nc.image!=low.image || nc.image_bytes!=low.image_bytes || nc.metadata!=low.metadata || nc.metadata_bytes!=low.metadata_bytes){e=12;goto done;}
++ out->flags|=4;
++ if(kebab_low_dma_ram_snapshot(&ram,sizeof(ram)) || ram.magic!=KEBAB_LOW_DMA_RAM_MAGIC || ram.schema!=1 || ram.bytes!=sizeof(ram) ||
++  ram.state!=2 || ram.result || ram.phase!=8 || ram.flags!=127 || ram.guard || ram.checked_pages!=260 || ram.barriers!=4 ||
++  ram.pattern_written_words!=266240 || ram.pattern_read_words!=266240 || ram.zero_written_words!=266240 || ram.zero_read_words!=266240 ||
++  ram.image!=nc.image || ram.image_bytes!=nc.image_bytes || ram.metadata!=nc.metadata || ram.metadata_bytes!=nc.metadata_bytes){e=13;goto done;}
++ out->flags|=8;out->image=low.image;out->metadata=low.metadata;
++ e=kebab_a650_gmu_backing_owned_ranges(&kf_native.backing,gmu,8);if(e)goto done;
++ e=KFNativeBackingCheck(&kf_native,&kf_attachment.backing);if(e)goto done;out->flags|=16;
++ e=kebab_a650_gpu_backing_check(&kvg_native.bo);if(e)goto done;e=KVGBackingValid(&kvg_engine.backing);if(e)goto done;out->flags|=32;
++ out->range[0]={nc.image,nc.image_bytes,1,0};out->range[1]={nc.metadata,nc.metadata_bytes,1,1};
++ for(unsigned i=0;i<8;i++)out->range[i+2]={gmu[i][0],gmu[i][1],2,i};
++ out->range[10]={kvg_engine.backing.root_physical,kvg_engine.backing.table_bytes,3,0};
++ for(unsigned i=0;i<6;i++){const auto *p=&kvg_engine.backing.region[i];out->range[i+11]={p->physical,p->allocation_bytes,3,i+1};}
++ out->range_count=17;out->phase=2;e=kpr_ranges(out);if(e)goto done;out->flags|=64;
++ e=kpr_low_pages(&nc,out,start);if(e)goto done;out->flags|=128;
++ e=KHO_VM_Snapshot(&kvg_native.owner,&before);if(e)goto done;e=kpr_idle(out);if(e)goto done;
++ e=KHO_VM_Snapshot(&kvg_native.owner,&after);if(e)goto done;
++ if(before.cr0!=after.cr0 || memcmp(before.stream,after.stream,6*sizeof(KGStream))){e=14;goto done;}
++ for(unsigned i=0;i<5;i++)if(!KVGConfigEqual(&before.cb[i],&after.cb[i])){e=14;goto done;}
++ e=kpr_idle(out);if(e)goto done;out->flags|=256;
++ e=kebab_rpmh_gpu_cp_check_locked(&kcp_native.owner);if(e)goto done;
++ e=kebab_a650_gmu_backing_owned_ranges(&kf_native.backing,gmu,8);if(e)goto done;
++ for(unsigned i=0;i<8;i++)if(gmu[i][0]!=out->range[i+2].physical || gmu[i][1]!=out->range[i+2].bytes){e=15;goto done;}
++ {SHA256_CTX context;SHA256_Init(&context);SHA256_Update(&context,out->range,sizeof(out->range));SHA256_Final(out->private_ranges_sha256,&context);}
++ out->flags|=512;out->phase=3;
++done:
++ out->elapsed_us=kpr_elapsed(start);if(!e && out->elapsed_us>500000)e=6;
++ KFUnlock(&kf_pas13_gate);return e;
++}
++extern "C" int kebab_pas13_resources_prepare(void)
++{
++ if(panic_active() || KFNativeWorker(NULL))return 2;uint32_t expected=0;
++ if(!__atomic_compare_exchange_n(&kpr_state,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return expected==2?0:16;
++ kpr_observation={};kpr_observation.magic=KEBAB_PAS13_RESOURCES_MAGIC;kpr_observation.schema=1;
++ kpr_observation.bytes=sizeof(kpr_observation);kpr_observation.state=2;
++ int e=kebab_rpmh_gpu_cp_pas13_resources(&kcp_native.owner,&kpr_observation);
++ kpr_observation.result=(uint32_t)e;__atomic_store_n(&kpr_state,2,__ATOMIC_RELEASE);return 0;
++}
++extern "C" int kebab_pas13_resources_snapshot(kebab_pas13_resources_observation *out,uint32_t bytes)
++{
++ if(!out || bytes!=sizeof(*out) || (uintptr_t)out>UINTPTR_MAX-sizeof(*out))return 22;
++ const uintptr_t destination=(uintptr_t)out,source=(uintptr_t)&kpr_observation;
++ if(destination<source+sizeof(kpr_observation) && source<destination+sizeof(*out))return 22;
++ if(__atomic_load_n(&kpr_state,__ATOMIC_ACQUIRE)!=2)return 35;
++ memcpy(out,&kpr_observation,sizeof(*out));
++ for(unsigned i=2;i<17;i++)out->range[i].physical=0;
++ return 0;
++}
++/* END PAS13_READONLY_RESOURCES */
+--- a/bsd/dev/KebabA650CpOwner.inc
++++ b/bsd/dev/KebabA650CpOwner.inc
+@@ -97,3 +97,26 @@
+     __atomic_store_n(&kebab_rpmh_global_lock.busy, 0, __ATOMIC_RELEASE);
+     return error;
+ }
++
++/* Read-only, bounded normal-context inventory. This does not open the
++ * existing PAS13 namespace mutation gate and cannot issue a secure call. */
++#if defined(KERNEL) || defined(KEBAB_RPMH_KERNEL)
++#include <kern/kebab_low_dma.h>
++#else
++#include "kebab_low_dma.h"
++#endif
++extern int kebab_a650_pas13_resources_locked(struct kebab_pas13_resources_observation *);
++int kebab_rpmh_gpu_cp_pas13_resources(KebabA650CpOwnerToken *token,struct kebab_pas13_resources_observation *out)
++{
++ if(!out)return 22;
++ if(__atomic_exchange_n(&kebab_rpmh_global_lock.busy,1,__ATOMIC_ACQ_REL))return 16;
++ int error=kebab_rpmh_gpu_cp_check_locked(token);
++ if(!error && (!kebab_gpu_cp_book.complete || !kebab_gpu_cp_record->held ||
++  kebab_gpu_cp_record->phase!=KCP_EXECUTED || kebab_gpu_cp_record->result ||
++  kebab_gpu_cp_record->epoch!=1 || kebab_gpu_cp_record->final_fence!=2 ||
++  kebab_gpu_cp_record->final_rptr!=KCP_FINAL_WPTR || !kebab_gpu_cp_record->GPU_DMA_observed ||
++  !kebab_gpu_cp_record->namespace_unchanged))error=95;
++ if(!error)error=kebab_a650_pas13_resources_locked(out);
++ /* No write occurred. A refusal does not revoke or free the live GPU chain. */
++ __atomic_store_n(&kebab_rpmh_global_lock.busy,0,__ATOMIC_RELEASE);return error;
++}
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>42)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>43)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -323,6 +323,7 @@
+ #define UD_LOW_DMA_NC 65u
+ #define UD_PAS13_SUPPORTED 66u
+ #define UD_LOW_DMA_RAM 67u
++#define UD_PAS13_RESOURCES 68u
+ #include <kern/kebab_low_dma.h>
+ static void
+ kebab_low_dma_measure_prepare(void)
+@@ -1568,6 +1569,7 @@
+     if(received==9 && !memcmp(buf,"LOWDMANC\n",9))return UD_LOW_DMA_NC;
+     if(received==9 && !memcmp(buf,"PAS13SUP\n",9))return UD_PAS13_SUPPORTED;
+     if(received==9 && !memcmp(buf,"LOWDMARW\n",9))return UD_LOW_DMA_RAM;
++    if(received==9 && !memcmp(buf,"PASRANGE\n",9))return UD_PAS13_RESOURCES;
+ /* END FUTURE_GMU_COMMAND_DECODE */
+     if(received==8 && !memcmp(buf,"GPUSMMU\n",8))return UD_GPU_SMMU_OBSERVE;
+     if(received!=9)return 0;
+@@ -2031,6 +2033,9 @@
+ 	} else if (command == UD_GPU_RENDER) {
+ 		kebab_a650_gpu_render_hold_prepare();
+ /* END A650_GPURENDER_DISPATCH */
++	} else if (command == UD_PAS13_RESOURCES) {
++		int result=kebab_pas13_resources_prepare();
++		printf("KEBAB PASRANGE: end; result=%d; read-only resource probe\n",result);
+ 	} else if (command == UD_LOW_DMA_RAM) {
+ 		kebab_low_dma_ram_worker();
+ 	} else if (command == UD_PAS13_SUPPORTED) {

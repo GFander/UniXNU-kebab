@@ -1,0 +1,374 @@
+--- a/iokit/Kernel/arm/KebabFramebuffer.cpp
++++ b/iokit/Kernel/arm/KebabFramebuffer.cpp
+@@ -114,6 +114,8 @@
+ #include "KebabDsiPowerSnapshot.h"
+ #include "KebabNativeMdpClockTest.h"
+ #include "KebabNativeAsidSnapshot.h"
++#include "KebabNativeDsiProbe.h"
++extern "C" void kebab_display_dsi_probe(void) { kebab_native_dsi_probe(); }
+ extern "C" void kebab_display_clock_test(void) { kebab_native_mdp_clock_test(); }
+ 
+ enum {
+@@ -368,6 +370,7 @@
+ 	if (!IOService::start(provider)) {
+ 		return false;
+ 	}
++    if(!kebab_native_backlight_start())IOLog("KEBAB BRIGHTNESS: worker allocation failed; hardware brightness unavailable\n");
+ 	fVsyncCount = 0;
+ 	memset(&fVblankClock,0,sizeof fVblankClock);
+ 	fTraceQueued = fTracePresented = 0;
+@@ -845,6 +848,15 @@
+ extern "C" int
+ kebab_capture_open(uint32_t source,uint32_t argument,struct kc_image *image)
+ {
++    if(source==13) {
++        if(argument)return 22;
++        uint32_t bytes=sizeof(KebabNativeDsiProbeReceipt);
++        KebabNativeDsiProbeReceipt *data=(KebabNativeDsiProbeReceipt *)IOMalloc(bytes);
++        if(!data)return 12;
++        kebab_native_dsi_probe_receipt(data);
++        *image=kc_image{};image->handle=data;image->source=13;image->argument=0;
++        image->total=bytes;image->stable=1;image->flags=2;return 0;
++    }
+     if(source==12) {
+         if(argument)return 22;
+         uint32_t bytes=sizeof(KebabNativeAsidSnapshot);
+@@ -1230,6 +1242,10 @@
+ 			ret = kIOReturnBadArgument;
+ 			break;
+ 		}
++        int brightness=kebab_native_backlight_queue(rec,sizeof rec);
++        /* Unsupported optional brightness units never drop a valid pixel swap. */
++        (void)brightness;
++        if(brightness==95)IOLog("KEBAB BRIGHTNESS: request not queued; worker unavailable\n");
+ 		fFB->swap(rec);
+ 		break;
+ 	}
+--- a/bsd/dev/kebab_capture_core.h
++++ b/bsd/dev/kebab_capture_core.h
+@@ -60,7 +60,7 @@
+     uint32_t result=0;
+     if(cmd.op==KC_OPEN) {
+         kc_cancel(s,ops);
+-        if(cmd.c || cmd.a<1 || cmd.a>12)err=22;
++        if(cmd.c || cmd.a<1 || cmd.a>13)err=22;
+         else err=ops->open(cmd.a,cmd.b,&s->image);
+         if(!err && (!s->image.total || s->image.total>KC_LIMIT)) {
+             ops->close(&s->image);memset(&s->image,0,sizeof(s->image));err=27;
+--- a/bsd/dev/kebab_usb.c
++++ b/bsd/dev/kebab_usb.c
+@@ -284,6 +284,8 @@
+ #define UD_REBOOT_MIG_REPORT 42u
+ #define UD_REBOOT_MIG_STATUS 43u
+ #define UD_DISPLAY_CLOCK_TEST 44u
++#define UD_DISPLAY_DSI_PROBE 45u
++extern void kebab_display_dsi_probe(void);
+ extern void kebab_display_clock_test(void);
+ extern void kebab_migrator_report(void);
+ extern void kebab_migration_status_report(void);
+@@ -1459,7 +1461,10 @@
+ static uint32_t
+ ud_clock_control_command(const char *buf, uint32_t received, boolean_t panicking)
+ {
+-    return !panicking && buf && received==9 && !memcmp(buf,"DCLKTEST\n",9) ? UD_DISPLAY_CLOCK_TEST : 0;
++    if(panicking || !buf || received!=9)return 0;
++    if(!memcmp(buf,"DCLKTEST\n",9))return UD_DISPLAY_CLOCK_TEST;
++    if(!memcmp(buf,"DSIPROBE\n",9))return UD_DISPLAY_DSI_PROBE;
++    return 0;
+ }
+ 
+ static uint32_t
+@@ -1876,6 +1881,8 @@
+ 		kebab_bluetooth_hardware_report();
+ 	} else if (command == UD_REBOOT_BTFW_REPORT) {
+ 		kebab_bluetooth_firmware_report();
++	} else if (command == UD_DISPLAY_DSI_PROBE) {
++		kebab_display_dsi_probe();
+ 	} else if (command == UD_DISPLAY_CLOCK_TEST) {
+ 		kebab_display_clock_test();
+ 	} else if (command == UD_REBOOT_DRV_REPORT) {
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabDsiPioCore.h
+@@ -0,0 +1,86 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_DSI_PIO_CORE_H
++#define KEBAB_DSI_PIO_CORE_H
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++typedef struct {void *cookie;int(*read32)(void*,unsigned,size_t,uint32_t*);int(*write_dsi)(void*,size_t,uint32_t);void(*delay_us)(void*,unsigned);} KebabDsiPioIo;
++typedef struct {
++ uint32_t error,phase,restored,writes,polls,command,requested;
++ uint32_t hardware_version,control_before,status_before,int_before,dma_before,length_before,tpg_before;
++ uint32_t int_done,readback_control,raw_readback,response_type,value,returned_bytes;
++ uint32_t dma_after,length_after,tpg_after,int_after,status_after,reserved[3];
++} KebabDsiPioObservation;
++/* Pinned Qualcomm2.4 inherited CMD profile only. Two embedded short headers:
++ * maximum return2, then a last/read/BTA DCS header; brightness uses one
++ * last/long header and three payload bytes. No memory DMA, PLL, panel reset,
++ * other panel commands or interrupt enables are available here. */
++static int kebab_dsi_pio_write(const KebabDsiPioIo *io,KebabDsiPioObservation *o,size_t off,uint32_t v)
++{o->writes++;return io->write_dsi(io->cookie,off,v);}
++static int kebab_dsi_pio_read(const KebabDsiPioIo *io,KebabDsiPioObservation *o,size_t off,uint32_t *v)
++{(void)o;return io->read32(io->cookie,2,off,v);}
++static int kebab_dsi_pio_transfer(const KebabDsiPioIo *io,unsigned command,unsigned requested,unsigned brightness,int writing,KebabDsiPioObservation *o)
++{
++ if(o)memset(o,0,sizeof *o);
++ if(!io||!o||!io->read32||!io->write_dsi||!io->delay_us)return 22;
++ o->command=command;o->requested=requested;o->phase=1;
++ if(writing){if(command!=0x51||requested||brightness>2047)return o->error=22;o->value=brightness;}
++ else if(!((command==0x52&&requested==2)||((command==0x0a||command==0xda||command==0xdb||command==0xdc)&&requested==1)))return o->error=22;
++ uint32_t gcc,gdsc,ahb;static const size_t clocks[]={0x2028,0x202c,0x2004,0x2038};
++ if(io->read32(io->cookie,0,0xb00c,&gcc)||io->read32(io->cookie,1,0x3000,&gdsc)||io->read32(io->cookie,1,0x2080,&ahb))return o->error=5;
++ if(!(gcc&1)||(gcc&0x80000000u)||!(gdsc&0x80000000u)||(gdsc&1)||!(ahb&1)||(ahb&0x80000000u))return o->error=6;
++ for(unsigned n=0;n<4;n++){uint32_t v;if(io->read32(io->cookie,1,clocks[n],&v))return o->error=5;if(!(v&1)||(v&0x80000000u))return o->error=6;}
++ if(kebab_dsi_pio_read(io,o,0,&o->hardware_version)||kebab_dsi_pio_read(io,o,4,&o->control_before)||
++    kebab_dsi_pio_read(io,o,0x110,&o->int_before)||kebab_dsi_pio_read(io,o,0x3c,&o->dma_before)||
++    kebab_dsi_pio_read(io,o,0x4c,&o->length_before)||kebab_dsi_pio_read(io,o,0x15c,&o->tpg_before))return o->error=5;
++ /* All IRQ enables zero; preserve unrelated frame statuses (0x500). No stale
++  * command/BTA/error status or pre-existing pattern producer may be adopted. */
++ if(o->hardware_version!=0x20040000u||(o->control_before&0x1f7)!=0x1f5||o->dma_before!=0x14000000||o->length_before!=8||o->tpg_before||
++    (o->int_before&~0x15500u))return o->error=95;
++ for(unsigned n=0;n<2000;n++){
++  o->polls++;if(kebab_dsi_pio_read(io,o,8,&o->status_before))return o->error=5;
++  if(!(o->status_before&7))break;if(n==1999)return o->error=60;io->delay_us(io->cookie,10);
++ }
++ o->phase=2;
++ if(kebab_dsi_pio_write(io,o,0x1d4,1)||kebab_dsi_pio_write(io,o,0x1d4,0)||
++    kebab_dsi_pio_write(io,o,0x15c,0x30006)||
++    kebab_dsi_pio_write(io,o,0x17c,writing?0xc0390003u:0x00370002u)||
++    kebab_dsi_pio_write(io,o,0x17c,writing?(0xff000051u|((brightness>>8)<<8)|((brightness&255)<<16)):(0xa0060000u|command))){o->error=5;goto restore;}
++ o->phase=3;
++ if(kebab_dsi_pio_write(io,o,0x90,1)){o->error=5;goto restore;}
++ for(unsigned n=0;n<10000;n++){
++  o->polls++;if(kebab_dsi_pio_read(io,o,0x110,&o->int_done)||kebab_dsi_pio_read(io,o,0x1d4,&o->readback_control)){o->error=5;break;}
++  if(o->int_done&0x1000000){o->error=5;break;}
++  if((o->int_done&1)&&(writing||(o->readback_control>>16)))break;
++  if(n==9999){o->error=60;break;}io->delay_us(io->cookie,10);
++ }
++ if(!o->error&&!writing){
++  if((o->readback_control>>16)!=4||kebab_dsi_pio_read(io,o,0x6c,&o->raw_readback))o->error=5;
++  else {o->response_type=(o->raw_readback>>24)&255;o->returned_bytes=o->response_type==0x21?1:o->response_type==0x22?2:0;
++   if(o->returned_bytes!=requested)o->error=71;
++   else o->value=(o->raw_readback>>16)&255;if(requested==2)o->value=(o->value<<8)|((o->raw_readback>>8)&255);
++  }
++ }
++restore:
++ o->phase=4;
++ /* Only this command's FIFO is reset. No engine/global reset; only owned
++  * DMA/BTA status W1C bits are acknowledged, never inherited frame statuses. */
++ {
++  uint32_t status=7;int failed=kebab_dsi_pio_read(io,o,8,&status);
++  if(failed||(status&3)){o->error=5;return(int)o->error;}
++  failed=kebab_dsi_pio_write(io,o,0x15c,0);
++  failed|=kebab_dsi_pio_write(io,o,0x1ec,1);io->delay_us(io->cookie,1);failed|=kebab_dsi_pio_write(io,o,0x1ec,0);
++  uint32_t irq=0;int irq_error=kebab_dsi_pio_read(io,o,0x110,&irq);failed|=irq_error;
++  if(!irq_error)failed|=kebab_dsi_pio_write(io,o,0x110,(irq&0xa222aa02u)|(irq&0x100001u));
++  failed|=kebab_dsi_pio_read(io,o,0x3c,&o->dma_after);failed|=kebab_dsi_pio_read(io,o,0x4c,&o->length_after);
++  failed|=kebab_dsi_pio_read(io,o,0x15c,&o->tpg_after);failed|=kebab_dsi_pio_read(io,o,0x110,&o->int_after);failed|=kebab_dsi_pio_read(io,o,8,&o->status_after);
++  o->restored=!failed&&o->dma_after==o->dma_before&&o->length_after==o->length_before&&o->tpg_after==0&&!(o->int_after&0xa222aa02u)&&!(o->status_after&3);
++  if(!o->restored)o->error=5;
++ }
++ o->phase=5;return(int)o->error;
++}
++static int KebabDsiPioRead(const KebabDsiPioIo *io,unsigned command,unsigned requested,KebabDsiPioObservation *o)
++{return kebab_dsi_pio_transfer(io,command,requested,0,0,o);}
++static int KebabDsiPioBrightness(const KebabDsiPioIo *io,unsigned value,KebabDsiPioObservation *o)
++{return kebab_dsi_pio_transfer(io,0x51,0,value,1,o);}
++#endif
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabNativeDsiProbe.h
+@@ -0,0 +1,156 @@
++/* SPDX-License-Identifier: MIT */
++#include "KebabDsiPioCore.h"
++#include "KebabBrightnessRecord.h"
++#include <kern/thread_call.h>
++struct KebabNativeDsiProbeReceipt {
++ uint32_t magic,schema,bytes,started,finished,error,count,software_delta;
++ KebabDsiPioObservation observation[9];uint32_t user_brightness[16];
++};
++static_assert(sizeof(KebabNativeDsiProbeReceipt)==1104,"fixed native DSI PIO/brightness receipt");
++static volatile uint32_t kebab_dsi_probe_started,kebab_dsi_probe_finished;
++static KebabNativeDsiProbeReceipt kebab_dsi_probe_result;
++static IOLock *kebab_dsi_lock;
++static thread_call_t kebab_brightness_call;
++/* One atomic request: sequence32, limit16, desired16. UI never waits for MMIO. */
++static uint64_t kebab_brightness_request=(2047ULL<<16)|65535,kebab_brightness_done;
++static uint32_t kebab_brightness_ready,kebab_brightness_applied,kebab_brightness_error,kebab_brightness_attempts,kebab_brightness_invalid;
++static uint64_t kebab_brightness_raw,kebab_brightness_limit_raw;
++static void kebab_brightness_worker(thread_call_param_t,thread_call_param_t);
++static bool kebab_native_backlight_start(void)
++{
++ if(kebab_dsi_lock)return kebab_brightness_call!=NULL;
++ kebab_dsi_lock=IOLockAlloc();if(!kebab_dsi_lock)return false;
++ kebab_brightness_call=thread_call_allocate(kebab_brightness_worker,NULL);
++ if(!kebab_brightness_call){IOLockFree(kebab_dsi_lock);kebab_dsi_lock=NULL;return false;}
++ return true; /* Fixed built-in board service; these have kernel lifetime. */
++}
++static bool kebab_dsi_probe_map(KebabNativeDisplayMaps *m,unsigned i,uint64_t base,uint64_t size)
++{
++ m->memory[i]=IOMemoryDescriptor::withPhysicalAddress(base,size,i==2?kIODirectionInOut:kIODirectionIn);
++ if(!m->memory[i])return false;
++ m->map[i]=m->memory[i]->map(kIOMapAnywhere|kIOMapInhibitCache|(i==2?0:kIOMapReadOnly));
++ if(!m->map[i])return false;m->address[i]=m->map[i]->getVirtualAddress();return m->address[i]&&m->map[i]->getLength()>=size;
++}
++static int kebab_dsi_probe_read(void *cookie,unsigned region,size_t off,uint32_t *v)
++{
++ KebabNativeDisplayMaps *m=(KebabNativeDisplayMaps *)cookie;static const size_t size[]={0x10000,0x4000,0x400};
++ if(region>=3||!v||(off&3)||off>size[region]-4||!m->address[region])return 5;
++ if(region){uint32_t gcc=kebab_display_load(m->address[0],0xb00c);if(!(gcc&1)||(gcc&0x80000000u))return 5;}
++ if(region==2){uint32_t gdsc=kebab_display_load(m->address[1],0x3000),ahb=kebab_display_load(m->address[1],0x2080);if(!(gdsc&0x80000000u)||(gdsc&1)||!(ahb&1)||(ahb&0x80000000u))return 5;}
++ *v=kebab_display_load(m->address[region],off);return 0;
++}
++static int kebab_dsi_probe_write(void *cookie,size_t off,uint32_t value)
++{
++ KebabNativeDisplayMaps *m=(KebabNativeDisplayMaps *)cookie;bool allowed=false;
++ if(off==0x1d4||off==0x1ec)allowed=value<=1;
++ if(off==0x15c)allowed=value==0||value==0x30006;
++ if(off==0x17c)allowed=value==0x00370002||value==0xa006000a||value==0xa0060052||value==0xa00600da||value==0xa00600db||value==0xa00600dc||value==0xc0390003||((value&0xff00f8ffu)==0xff000051u);
++ if(off==0x90)allowed=value==1;
++ if(off==0x110)allowed=!(value&~0x100001u); /* No IRQ enable bits. */
++ if(!allowed||!m->address[2])return 22;
++ uint32_t live;if(kebab_dsi_probe_read(cookie,2,0,&live)||live!=0x20040000u)return 5;
++ *(volatile uint32_t *)(m->address[2]+off)=value;
++#if defined(__aarch64__)
++ __asm__ volatile("dsb sy" ::: "memory");
++#else
++ OSMemoryBarrier();
++#endif
++ return 0;
++}
++static bool kebab_dsi_probe_maps(KebabNativeDisplayMaps *m)
++{return kebab_dsi_probe_map(m,0,0x100000,0x10000)&&kebab_dsi_probe_map(m,1,0xaf00000,0x4000)&&kebab_dsi_probe_map(m,2,0xae94000,0x400);}
++static void kebab_dsi_probe_unmap(KebabNativeDisplayMaps *m)
++{for(unsigned n=3;n;n--){unsigned i=n-1;if(m->map[i])m->map[i]->release();if(m->memory[i])m->memory[i]->release();}}
++static int kebab_native_backlight_queue(const void *record,size_t bytes)
++{
++ KebabBrightnessRecord value;int error=KebabBrightnessRecordDecode(record,bytes,&value);
++ if(record&&bytes==0x46c){const uint8_t *p=(const uint8_t *)record;uint64_t raw;
++  if(p[0x2e7]){memcpy(&raw,p+0x2ec,8);__atomic_store_n(&kebab_brightness_raw,raw,__ATOMIC_RELEASE);}
++  if(p[0x2e8]){memcpy(&raw,p+0x2f4,8);__atomic_store_n(&kebab_brightness_limit_raw,raw,__ATOMIC_RELEASE);}
++ }
++ if(error){__atomic_add_fetch(&kebab_brightness_invalid,1,__ATOMIC_RELAXED);return error;}
++ if(!value.brightness_present&&!value.limit_present)return 0;
++ if(!kebab_brightness_call)return 95;
++ uint64_t old=__atomic_load_n(&kebab_brightness_request,__ATOMIC_ACQUIRE),next;
++ do{uint32_t brightness=value.brightness_present?value.brightness:(uint32_t)(old&65535);
++    uint32_t limit=value.limit_present?value.limit:(uint32_t)((old>>16)&65535);
++    next=(((old>>32)+1)<<32)|((uint64_t)limit<<16)|brightness;
++ }while(!__atomic_compare_exchange_n(&kebab_brightness_request,&old,next,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE));
++ thread_call_enter(kebab_brightness_call);return 0;
++}
++static void kebab_brightness_worker(thread_call_param_t,thread_call_param_t)
++{
++ IOLockLock(kebab_dsi_lock);
++ for(unsigned retry=0;retry<8;retry++){
++  uint64_t request=__atomic_load_n(&kebab_brightness_request,__ATOMIC_ACQUIRE);
++  if(!(request>>32)||request==kebab_brightness_done)break;
++  if(!kebab_brightness_ready){kebab_brightness_error=95;break;}
++  uint32_t target=(uint32_t)(request&65535),limit=(uint32_t)((request>>16)&65535);if(target>limit)target=limit;
++  KebabNativeDisplayMaps m={};KebabDsiPioObservation sent={},read={};kebab_brightness_error=12;kebab_brightness_attempts++;
++  if(!panic_active()&&kebab_dsi_probe_maps(&m)){
++   KebabDsiPioIo io={&m,kebab_dsi_probe_read,kebab_dsi_probe_write,kebab_clock_test_delay};
++   kebab_brightness_error=KebabDsiPioBrightness(&io,target,&sent);
++   if(!kebab_brightness_error)kebab_brightness_error=KebabDsiPioRead(&io,0x52,2,&read);
++   if(!kebab_brightness_error&&read.value!=target)kebab_brightness_error=71;
++   if(!kebab_brightness_error)kebab_brightness_applied=read.value;
++  }
++  kebab_dsi_probe_unmap(&m);kebab_brightness_done=request;
++  IOLog("KEBAB BRIGHTNESS: request=%u target=%u actual=%u error=%u; native DCS51/52\n",(uint32_t)(request>>32),target,kebab_brightness_applied,kebab_brightness_error);
++  if(kebab_brightness_error){kebab_brightness_ready=0;break;}
++ }
++ IOLockUnlock(kebab_dsi_lock);
++}
++static void kebab_native_dsi_probe(void)
++{
++ if(!__sync_bool_compare_and_swap(&kebab_dsi_probe_started,0,1)){IOLog("KEBAB DSIPROBE: rejected error=16 already-attempted; no writes\n");IOLog("KEBAB DSIPROBE: end;\n");return;}
++ KebabNativeDsiProbeReceipt *r=&kebab_dsi_probe_result;KebabNativeDisplayMaps m={};uint32_t before[8]={},after[8]={};uint64_t irq=0;
++ r->error=95;kebab_fb_vblank_snapshot(before);
++ if(!kebab_dsi_lock)goto done;
++ IOLockLock(kebab_dsi_lock);
++ if(panic_active()||before[0]!=1||!kebab_clock_test_irq(&irq))goto unlock;
++ r->error=12;
++ if(!kebab_dsi_probe_maps(&m))goto unlock;
++ {
++  static const unsigned command[]={0x0a,0x52,0xda,0xdb,0xdc};KebabDsiPioIo io={&m,kebab_dsi_probe_read,kebab_dsi_probe_write,kebab_clock_test_delay};
++  for(unsigned i=0;i<5;i++){r->count++;r->error=KebabDsiPioRead(&io,command[i],i==1?2:1,&r->observation[i]);if(r->error)break;}
++  if(!r->error){
++   unsigned original=r->observation[1].value;
++   if(original>2047||!original)r->error=95;
++   else {
++    unsigned target=original>1?original-original/8-1:0;r->count=6;
++    r->error=KebabDsiPioBrightness(&io,target,&r->observation[5]);
++    if(!r->error){r->count=7;r->error=KebabDsiPioRead(&io,0x52,2,&r->observation[6]);if(!r->error&&r->observation[6].value!=target)r->error=71;}
++    IOSleep(120);
++    /* A failed lowering/readback still restores the exact original level. */
++    r->count=8;int restore_error=KebabDsiPioBrightness(&io,original,&r->observation[7]);
++    r->count=9;int verify_error=KebabDsiPioRead(&io,0x52,2,&r->observation[8]);
++    if(restore_error||verify_error||r->observation[8].value!=original)r->error=5;
++    if(!r->error){kebab_brightness_ready=1;kebab_brightness_applied=original;
++     uint64_t pending=__atomic_load_n(&kebab_brightness_request,__ATOMIC_ACQUIRE);
++     while((pending&65535)==65535&&!__atomic_compare_exchange_n(&kebab_brightness_request,&pending,(pending&~65535ULL)|original,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){}
++    }
++   }
++  }
++ }
++ IOSleep(30);kebab_fb_vblank_snapshot(after);
++ r->software_delta=after[3]-before[3];
++ {uint64_t end=0;if(!kebab_clock_test_irq(&end)||end<=irq||after[0]!=1||after[3]!=before[3]||after[4]!=before[4])r->error=5;}
++unlock:
++ if(r->error)kebab_brightness_ready=0;
++ kebab_dsi_probe_unmap(&m);IOLockUnlock(kebab_dsi_lock);
++done:
++ __atomic_store_n(&kebab_dsi_probe_finished,1,__ATOMIC_RELEASE);
++ IOLog("KEBAB DSIPROBE: result error=%u count=%u power=%x brightness=%u/%u/%u id=%x/%x/%x software-delta=%u; PIO panel read and restored DCS51 brightness test\n",r->error,r->count,r->observation[0].value,r->observation[1].value,r->observation[6].value,r->observation[8].value,r->observation[2].value,r->observation[3].value,r->observation[4].value,r->software_delta);
++ IOLog("KEBAB DSIPROBE: end;\n");
++ if(kebab_brightness_ready)thread_call_enter(kebab_brightness_call);
++}
++static void kebab_native_dsi_probe_receipt(KebabNativeDsiProbeReceipt *out)
++{
++ memset(out,0,sizeof *out);out->magic=0x31525044;out->schema=1;out->bytes=sizeof *out;
++ out->started=__atomic_load_n(&kebab_dsi_probe_started,__ATOMIC_ACQUIRE);out->finished=__atomic_load_n(&kebab_dsi_probe_finished,__ATOMIC_ACQUIRE);
++ if(out->finished){out->error=kebab_dsi_probe_result.error;out->count=kebab_dsi_probe_result.count;out->software_delta=kebab_dsi_probe_result.software_delta;memcpy(out->observation,kebab_dsi_probe_result.observation,sizeof out->observation);}
++ if(kebab_dsi_lock){IOLockLock(kebab_dsi_lock);uint64_t request=__atomic_load_n(&kebab_brightness_request,__ATOMIC_ACQUIRE);
++  out->user_brightness[0]=kebab_brightness_ready;out->user_brightness[1]=(uint32_t)(request>>32);out->user_brightness[2]=(uint32_t)(request&65535);out->user_brightness[3]=(uint32_t)((request>>16)&65535);
++  out->user_brightness[4]=(uint32_t)(kebab_brightness_done>>32);out->user_brightness[5]=kebab_brightness_applied;out->user_brightness[6]=kebab_brightness_error;out->user_brightness[7]=kebab_brightness_attempts;out->user_brightness[8]=__atomic_load_n(&kebab_brightness_invalid,__ATOMIC_RELAXED);
++  uint64_t raw=__atomic_load_n(&kebab_brightness_raw,__ATOMIC_ACQUIRE),limit=__atomic_load_n(&kebab_brightness_limit_raw,__ATOMIC_ACQUIRE);out->user_brightness[9]=(uint32_t)raw;out->user_brightness[10]=(uint32_t)(raw>>32);out->user_brightness[11]=(uint32_t)limit;out->user_brightness[12]=(uint32_t)(limit>>32);IOLockUnlock(kebab_dsi_lock);}
++}
+--- /dev/null
++++ b/iokit/Kernel/arm/KebabBrightnessRecord.h
+@@ -0,0 +1,34 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef KEBAB_BRIGHTNESS_RECORD_H
++#define KEBAB_BRIGHTNESS_RECORD_H
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++typedef struct {uint32_t brightness_present,limit_present,brightness,limit;} KebabBrightnessRecord;
++/* Fixed20H392 _kern_SwapSetBrightness writes flag/context+0x2ff and double
++ * context+0x304; SwapEnd passes context+0x18,1132bytes. Limit is flag+0x300,
++ * double+0x30c. Kernel uses integer IEEE754 decoding; no FP state is touched. */
++static int kebab_brightness_level(uint64_t bits,uint32_t *out)
++{
++ if(!out||(bits>>63)||bits>0x3ff0000000000000ULL)return 22;
++ unsigned exponent=(unsigned)(bits>>52);uint64_t mantissa=bits&0xfffffffffffffULL;
++ if(exponent)mantissa|=1ULL<<52;
++ unsigned shift=exponent?1075-exponent:1074;
++ uint64_t product=mantissa*2047;
++ if(shift>64)*out=0;
++ else if(shift==64)*out=(uint32_t)(product>>63);
++ else *out=(uint32_t)((product>>shift)+((product&((1ULL<<shift)-1))>=(1ULL<<(shift-1))));
++ return 0;
++}
++static int KebabBrightnessRecordDecode(const void *record,size_t bytes,KebabBrightnessRecord *out)
++{
++ if(out)memset(out,0,sizeof *out);
++ if(!record||bytes!=0x46c||!out)return 22;
++ const uint8_t *p=(const uint8_t *)record;
++ if(p[0x2e7]>1||p[0x2e8]>1)return 22;
++ out->brightness_present=p[0x2e7];out->limit_present=p[0x2e8];uint64_t value;
++ if(out->brightness_present){memcpy(&value,p+0x2ec,8);if(kebab_brightness_level(value,&out->brightness))return 22;}
++ if(out->limit_present){memcpy(&value,p+0x2f4,8);if(kebab_brightness_level(value,&out->limit))return 22;}
++ return 0;
++}
++#endif
