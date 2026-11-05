@@ -1,10 +1,12 @@
-# UniXNU-kebab
+# UniXNU-kebab / HiOS
 
-在 **OnePlus 8T（一加 8T，kebab / Qualcomm SM8250）** 上移植原生 XNU，运行原版 **iOS 16.7.16（20H392）用户态**。
+**HiOS** 是面向 **OnePlus 8T（一加 8T，kebab / Qualcomm SM8250）** 的原生 XNU / iOS 移植项目，设备仓库名为 **UniXNU-kebab**。目标是在该硬件上运行原版 **iOS 16.7.16（20H392）用户态**。
 
 项目使用 Mu-Silicium UEFI 和 DarwinBoot 引导自编译 XNU 8796.141.3，通过板级驱动、设备树和固定供体 ABI 接入硬件，再启动原版 launchd、UIKit 与 SpringBoard。用户态来自 iPhone X / D22AP；硬件适配面向 SM8250，不代表完整模拟 Apple A11。
 
 **当前 GPU 里程碑：0609 已完成 A650 真实命令执行、ZAP 认证和确定性离屏绘制。SpringBoard 继续使用 CPU 显示路径，完整 Metal 加速仍在开发。** 当前主线为 `main`。
+
+[当前状态](#当前开发状态) · [0609 GPU 里程碑](#最新-gpu-里程碑0609) · [架构](#项目架构) · [功能与限制](#已实现功能与已知限制) · [构建与开发](#构建与开发) · [路线图](#开发路线图) · [资格证据](#文档与资格证据)
 
 ## 当前开发状态
 
@@ -20,8 +22,9 @@
 | 显示 / 触摸 / HID | 部分实机验收 | CPU 显示、布局、真实触摸和边缘手势已有证据；完整 DPU/DSI 接管、物理 120 Hz 未验收；亮度滑块任务暂缓 |
 | GMU / HFI | 限定实机验收 | 固件启动、版本通信、主要初始化消息与 ACK；不将 ACK 扩大为全部频率、带宽和资源效果验收 |
 | GPU VM / GX / SQE / CP | 限定实机验收 | 已归属 BO / 地址空间、OOB/GX、SQE/CP、Ringbuffer/IB 和硬件 Fence 路径通过 |
-| GPU First Execution | **PASS** | `A650_FIRST_EXECUTION=PASS`；真实 GPU 命令执行及硬件完成结果 |
-| GPU First Render | **PASS（0609）** | `A650_FIRST_RENDER=PASS`；两个离屏目标的完整像素、行填充与保护区检查通过 |
+| GPU First Execution | **实机 PASS** | `A650_FIRST_EXECUTION=PASS`；0590 首次验收，0609 执行链回归通过 |
+| ZAP / GPU 安全模式退出 | **限定实机 PASS（0609）** | 实际 PAS 认证及退出命令完成通过；HYP 保护状态与原始安全模式寄存器仍为 UNKNOWN |
+| GPU First Render | **实机 PASS（0609）** | `A650_FIRST_RENDER=PASS`；同一 BO 内两个离屏目标的完整像素、行填充与保护区检查通过 |
 | GPU IRQ | **NOT_RUN** | 真实中断投递尚未验收；0609 使用轮询完成路径，GPU IRQ mask 为 0 |
 | NativeAdreno v2 | 主机 / 交叉编译通过 | 客户端契约测试通过；真实用户态 GPU UserClient 尚未发布，客户端 BO/Submit/Fence 实机链路未验收 |
 | Metal / Turnip | 适配中，实机执行未验收 | `A650_METAL_FIRST_EXECUTION=NOT_RUN`；20H392 私有 ABI 与前后端执行链仍待完成 |
@@ -35,10 +38,10 @@
 
 [0609 资格记录](docs/qualification/0609/first-render-qualified.json)确认以下实机结果：
 
-- **First Execution：PASS。** SQE/CP、IB 与硬件 Fence 提供真实执行和完成证据。
+- **`A650_FIRST_EXECUTION=PASS`。** SQE/CP、IB 与硬件 Fence 提供真实执行和完成证据。
 - **ZAP 实际认证：PASS。** PAS INIT、MEM_SETUP、AUTH 返回成功，认证和资源父链独立核验；不以 PAS13 支持查询代替实际认证。
 - **安全模式退出：限定 PASS。** 已验证 `CP_SET_SECURE_MODE(0)` 命令及独立 GPU 完成结果；HYP 保护状态和原始安全模式寄存器仍为 UNKNOWN。
-- **First Render：PASS。** 两个 **32×32 RGBA8** 离屏目标位于**同一块 64 KiB BO 内的两个不重叠区域**，不是两块独立分配的 BO。硬件 Fence、Ringbuffer 读指针、颜色缓存写回时间戳和缓存语义正确的 CPU 读回均有证据；全部像素四通道、行填充和保护区检查通过，三份 CAP38 一致。
+- **`A650_FIRST_RENDER=PASS`。** 两个 **32×32 RGBA8** 离屏目标位于**同一块 64 KiB BO 内的两个不重叠区域**，不是两块独立分配的 BO。硬件 Fence、Ringbuffer 读指针、颜色缓存写回时间戳和缓存语义正确的 CPU 读回均有证据；全部像素四通道、行填充和保护区检查通过。三份 CAP38 是同一次执行的不可变记录副本，不代表三次独立绘制。
 - **安全回归：通过。** 启动时原版安全、加密 Data 与 watchdog 回归覆盖 **304.384 秒**；绘制后另有 **335.275 秒**只读系统/watchdog 观察。后者不等于重新执行全部加密测试。
 
 0609 在 PAS 操作前的 SpringBoard 显示、点击打开应用和返回手势获人工确认；绘制后的人工复验因用户离开保持 **NOT_RUN**。此前的人工 PASS 不转移为绘制后验收。
@@ -84,6 +87,8 @@ cd UniXNU-kebab
 ```
 
 实际路线使用 Apple OSS XNU 8796.141.3、ARM64/16 KiB 页和 `KEBAB` 板级配置；按序应用共同补丁与四个 Mac 主机补丁，经固定 Xcode/SDK/KDK 环境原生构建，再结合合法取得的 20H392 供体输入执行 ABI 核验、prelink、封包和镜像回读。0609 对应 463 个共同补丁、4 个主机补丁与 5,462 项源码清单；这不覆盖外部工具链和私有输入。
+
+构建依赖包括 Git、Python 3、Apple OSS XNU 源码、固定的 Xcode/SDK/KDK，以及合法取得且身份匹配的供体输入；具体版本与流程以对应构建资格和开发文档为准。
 
 **公开仓库尚不能保证从全新环境独立复现完整可刷镜像。** `board.toml` 等历史入口不描述当前完整实机流程，统一配方和仓库标准化仍有缺口；不提供未经复验的一键构建或刷机命令。
 
